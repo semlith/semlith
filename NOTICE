@@ -1,0 +1,29 @@
+semlith
+Copyright 2026 The semlith Authors
+
+This product includes software developed by the semlith Authors, licensed
+under the Apache License, Version 2.0. A copy of the license is included in
+the LICENSE file at the root of this repository.
+
+semlith links against third-party Rust crates, each distributed under its own
+license (predominantly MIT and Apache-2.0). The authoritative list for any
+given build is Cargo.lock; `cargo tree` will show it, and `cargo license` or
+`cargo about` will render the full license texts.
+
+Components with a direct bearing on this notice:
+
+  turbovec — MIT License
+  https://github.com/RyanCodrai/turbovec
+  Implements the TurboQuant quantization scheme described by Google Research.
+
+  fastembed-rs — Apache License 2.0
+  https://github.com/Anush008/fastembed-rs
+
+  ONNX Runtime — MIT License
+  https://github.com/microsoft/onnxruntime
+  Downloaded as a prebuilt binary at build time.
+
+At runtime, semlith downloads embedding model weights from the Hugging Face
+Hub. Those weights are covered by their own licenses, granted by their
+respective publishers, and are not distributed as part of this repository. The
+default model is BAAI/bge-small-en-v1.5 (MIT License).
