@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest something semlith should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A few things are deliberately out of scope — a network server mode,
+        hosted embedding APIs, and config files. See the "Things we are
+        deliberately not doing" section in
+        [CONTRIBUTING.md](https://github.com/semlith/semlith/blob/main/CONTRIBUTING.md).
+        Proposing one anyway is fine; just make the case.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you running into?
+      description: >
+        Describe the situation, not the solution. What were you trying to do,
+        and where did semlith get in the way?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to do?
+      description: If you have a specific shape in mind — a flag, a command, an output format — sketch it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Existing flags, other tools, workarounds. Helps rule out things that already work.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you be willing to implement this?
+      options:
+        - "Yes, if someone points me in the right direction"
+        - "Yes, I have a patch ready"
+        - "No, just suggesting"
+    validations:
+      required: false
