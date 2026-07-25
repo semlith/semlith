@@ -26,12 +26,27 @@ Think of it as a semantic cache for everything your agent needs to know.
 
 Requires a 64-bit machine and a Rust toolchain (1.85+).
 
+**On Linux, install OpenBLAS first.** turbovec links against a system BLAS;
+macOS uses Apple's Accelerate framework, which ships with the OS, and Windows
+falls back to a pure-Rust implementation, so this step is Linux-only.
+
+```sh
+sudo apt-get install libopenblas-dev     # Debian/Ubuntu
+sudo dnf install openblas-devel          # Fedora/RHEL
+sudo pacman -S openblas                  # Arch
+```
+
+Then:
+
 ```sh
 git clone https://github.com/semlith/semlith
 cd semlith
 cargo build --release
 # binary at ./target/release/semlith
 ```
+
+If the build fails with `unable to find library -lopenblas`, that is the step
+you missed.
 
 ## Quick start
 
