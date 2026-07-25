@@ -1,0 +1,497 @@
+//! semlith — a local semantic cache for AI agents.
+//!
+//! Point it at files, get back a store that answers "what part of my corpus is
+//! relevant to this question?" in milliseconds, without shipping anything off
+//! the machine and without an agent burning tokens reading whole files.
+//!
+//! Two pieces of state live side by side in the store directory:
+//!
+//! - `index.tv` — a [`turbovec`] TurboQuant index holding only quantized
+//!   vectors keyed by chunk id.
+//! - `store.db` — SQLite holding the chunk text, its file, and its line span.
+//!
+//! A search quantizes the query, gets ids back from the index, then resolves
+//! them to text with one SQLite lookup each.
+
+pub mod chunk;
+pub mod mcp;
+pub mod store;
+
+use anyhow::{Context, Result, bail};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
+use rusqlite::Connection;
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+use turbovec::IdMapIndex;
+
+/// Bits per coordinate kept by TurboQuant. 4 is the top of the supported range
+/// — the memory saving from going lower is not worth the recall on a store
+/// that is meant to be the source of truth for an agent's context.
+const BIT_WIDTH: usize = 4;
+
+/// Texts handed to ONNX Runtime in one go.
+///
+/// Keep this small. The transformer pads every text in a batch to the longest
+/// one, and attention memory grows with `batch * seq_len^2` — at a batch of
+/// 256 and the model's 512-token window that is several gigabytes of
+/// intermediate tensors, which on most machines means swapping, not speed.
+const EMBED_BATCH: usize = 32;
+
+/// Default model: 384-dim, ~130 MB on disk, good retrieval quality for its size.
+pub const DEFAULT_MODEL: EmbeddingModel = EmbeddingModel::BGESmallENV15;
+
+/// Sentinel hash meaning "chunks are in SQLite but their vectors are not
+/// durable yet". Any file left in this state is re-indexed on the next run.
+const PENDING: &str = "";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Hit {
+    pub score: f32,
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct IndexReport {
+    pub scanned: usize,
+    pub indexed: usize,
+    pub unchanged: usize,
+    pub skipped: usize,
+    pub removed: usize,
+    pub chunks: usize,
+}
+
+pub struct Semlith {
+    dir: PathBuf,
+    db: Connection,
+    index: IdMapIndex,
+    model: EmbeddingModel,
+    dim: usize,
+    embedder: Option<TextEmbedding>,
+    /// Print model-download progress to stderr. Off for the MCP server, where
+    /// stdout/stderr are a protocol channel.
+    pub quiet: bool,
+}
+
+impl Semlith {
+    /// Open (or create) a store in `dir`.
+    ///
+    /// `model` is only honoured when the store is new; an existing store keeps
+    /// the model it was built with, since vectors from two models are not
+    /// comparable.
+    pub fn open(dir: impl AsRef<Path>, model: Option<EmbeddingModel>) -> Result<Self> {
+        let dir = dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating store directory {}", dir.display()))?;
+
+        let db = store::open(&dir.join("store.db"))?;
+
+        let model = match store::get_meta(&db, "model")? {
+            Some(existing) => {
+                let existing: EmbeddingModel = existing.parse().map_err(anyhow::Error::msg)?;
+                if let Some(want) = model
+                    && want != existing
+                {
+                    bail!(
+                        "store was built with {existing}, not {want}; \
+                         delete {} to rebuild with a different model",
+                        dir.display()
+                    );
+                }
+                existing
+            }
+            None => {
+                let m = model.unwrap_or(DEFAULT_MODEL);
+                store::set_meta(&db, "model", &m.to_string())?;
+                m
+            }
+        };
+
+        let dim = TextEmbedding::get_model_info(&model)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .dim;
+
+        let index_path = dir.join("index.tv");
+        let index = if index_path.exists() {
+            let idx = IdMapIndex::load(&index_path)
+                .with_context(|| format!("loading {}", index_path.display()))?;
+            if let Some(d) = idx.dim_opt()
+                && d != dim
+            {
+                bail!("index is {d}-dimensional but {model} produces {dim}; store is corrupt");
+            }
+            idx
+        } else {
+            IdMapIndex::new(dim, BIT_WIDTH).map_err(|e| anyhow::anyhow!("{e:?}"))?
+        };
+
+        Ok(Self {
+            dir,
+            db,
+            index,
+            model,
+            dim,
+            embedder: None,
+            quiet: false,
+        })
+    }
+
+    pub fn model(&self) -> &EmbeddingModel {
+        &self.model
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    pub fn db(&self) -> &Connection {
+        &self.db
+    }
+
+    /// Loading the ONNX model costs a second or so, so it is deferred until a
+    /// command actually needs to embed something.
+    fn embedder(&mut self) -> Result<&mut TextEmbedding> {
+        if self.embedder.is_none() {
+            // Cap the sequence length to what a chunk can actually produce.
+            // The default 512-token window would let a pathologically dense
+            // chunk (base64, minified JS) blow up attention memory for no
+            // retrieval benefit; two characters per token is a safe floor for
+            // real text and code.
+            let opts = TextInitOptions::new(self.model.clone())
+                .with_show_download_progress(!self.quiet)
+                .with_max_length(chunk::MAX_CHARS / 2)
+                .with_cache_dir(model_cache_dir());
+            self.embedder = Some(TextEmbedding::try_new(opts).map_err(|e| anyhow::anyhow!("{e}"))?);
+        }
+        Ok(self.embedder.as_mut().unwrap())
+    }
+
+    /// Pay the model-load and index-warmup cost up front, so the first query
+    /// is not slower than the rest.
+    pub fn warm(&mut self) -> Result<()> {
+        self.embedder()?;
+        self.index.prepare();
+        Ok(())
+    }
+
+    fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        let mut out = self
+            .embedder()?
+            .embed(texts, Some(EMBED_BATCH))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        for v in &mut out {
+            normalize(v);
+        }
+        Ok(out)
+    }
+
+    /// Walk `roots`, embed anything new or changed, and drop anything that has
+    /// disappeared from disk.
+    pub fn index_paths(
+        &mut self,
+        roots: &[PathBuf],
+        mut on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        let mut report = IndexReport::default();
+        let mut pending = Batch::default();
+        // Files whose vectors are embedded but not yet durable. Their hash is
+        // written only after `index.tv` lands, so a crash re-indexes them.
+        let mut completed: Vec<(i64, String)> = Vec::new();
+
+        for path in walk(roots) {
+            report.scanned += 1;
+            let key = path.to_string_lossy().into_owned();
+
+            // Size check before the read, so a multi-gigabyte blob is never
+            // pulled into memory just to be rejected.
+            match std::fs::metadata(&path) {
+                Ok(m) if m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
+                _ => {
+                    report.skipped += 1;
+                    continue;
+                }
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                report.skipped += 1;
+                continue;
+            };
+
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            if store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
+                report.unchanged += 1;
+                continue;
+            }
+
+            let Some(text) = chunk::extract(&path, &bytes) else {
+                report.skipped += 1;
+                continue;
+            };
+            let chunks = chunk::chunk_text(&text);
+            if chunks.is_empty() {
+                report.skipped += 1;
+                continue;
+            }
+
+            on_file(&path);
+
+            // Replacing a file: evict its old vectors before adding new ones.
+            for id in store::delete_file(&self.db, &key)? {
+                self.index.remove(id);
+            }
+
+            let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+            for (ord, c) in chunks.iter().enumerate() {
+                let id =
+                    store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
+                pending.ids.push(id as u64);
+                pending.texts.push(c.text.clone());
+            }
+
+            completed.push((file_id, hash));
+            report.indexed += 1;
+            report.chunks += chunks.len();
+
+            if pending.ids.len() >= EMBED_BATCH {
+                self.flush(&mut pending)?;
+            }
+        }
+
+        self.flush(&mut pending)?;
+
+        // Anything recorded but no longer on disk is dead weight.
+        for key in store::all_paths(&self.db)? {
+            if !Path::new(&key).exists() {
+                for id in store::delete_file(&self.db, &key)? {
+                    self.index.remove(id);
+                }
+                report.removed += 1;
+            }
+        }
+
+        self.save()?;
+
+        // ponytail: hashes are committed in one shot after the index is
+        // durable. A crash mid-run re-indexes the whole batch; add periodic
+        // checkpointing when someone indexes a corpus big enough to care.
+        let tx = self.db.unchecked_transaction()?;
+        for (file_id, hash) in &completed {
+            tx.execute(
+                "UPDATE files SET hash = ?1 WHERE id = ?2",
+                rusqlite::params![hash, file_id],
+            )?;
+        }
+        tx.commit()?;
+
+        Ok(report)
+    }
+
+    fn flush(&mut self, batch: &mut Batch) -> Result<()> {
+        if batch.ids.is_empty() {
+            return Ok(());
+        }
+        let ids = std::mem::take(&mut batch.ids);
+        let texts = std::mem::take(&mut batch.texts);
+
+        let vectors = self.embed(texts)?;
+        let flat: Vec<f32> = vectors.into_iter().flatten().collect();
+        self.index
+            .add_with_ids(&flat, &ids)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(())
+    }
+
+    /// Remove a single file from the store.
+    pub fn forget(&mut self, path: &Path) -> Result<usize> {
+        let key = canonical(path).to_string_lossy().into_owned();
+        let ids = store::delete_file(&self.db, &key)?;
+        for id in &ids {
+            self.index.remove(*id);
+        }
+        if !ids.is_empty() {
+            self.save()?;
+        }
+        Ok(ids.len())
+    }
+
+    /// Top-`k` chunks for `query`, best first.
+    pub fn search(&mut self, query: &str, k: usize) -> Result<Vec<Hit>> {
+        if self.index.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        let vector = self.embed(vec![self.query_text(query)])?.remove(0);
+        let (scores, ids) = self.index.search(&vector, k);
+
+        let mut hits = Vec::with_capacity(ids.len());
+        for (score, id) in scores.into_iter().zip(ids) {
+            // A dangling id means SQLite and the index drifted apart; skip it
+            // rather than fail the whole query.
+            if let Some(row) = store::chunk(&self.db, id)? {
+                hits.push(Hit {
+                    score,
+                    path: row.path,
+                    start_line: row.start_line,
+                    end_line: row.end_line,
+                    text: row.text,
+                });
+            }
+        }
+        Ok(hits)
+    }
+
+    /// BGE English models were trained with an asymmetric query instruction;
+    /// omitting it measurably costs recall. Other models take the raw query.
+    fn query_text(&self, query: &str) -> String {
+        let name = self.model.to_string();
+        if name.starts_with("BGE") && name.contains("EN") {
+            format!("Represent this sentence for searching relevant passages: {query}")
+        } else {
+            query.to_string()
+        }
+    }
+
+    /// `(files, chunks, indexed bytes)`
+    pub fn stats(&self) -> Result<(i64, i64, i64)> {
+        store::stats(&self.db)
+    }
+
+    /// Write the index out via a temp file + rename, so an interrupted save
+    /// cannot leave a half-written `index.tv` behind.
+    pub fn save(&self) -> Result<()> {
+        let final_path = self.dir.join("index.tv");
+        let tmp = self.dir.join("index.tv.tmp");
+        self.index
+            .write(&tmp)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &final_path)?;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Batch {
+    ids: Vec<u64>,
+    texts: Vec<String>,
+}
+
+fn normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v {
+            *x /= norm;
+        }
+    }
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+pub fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Where ONNX model weights are cached. Shared across stores — the weights are
+/// large and identical for a given model.
+pub fn model_cache_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("SEMLITH_MODEL_CACHE") {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    base.join(".cache").join("semlith").join("models")
+}
+
+/// Default store location: `.semlith` beside whatever you are indexing.
+pub fn default_store_dir() -> PathBuf {
+    std::env::var("SEMLITH_STORE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(".semlith"))
+}
+
+/// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
+/// canonical paths so the same file reached two ways is one entry.
+fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for root in roots {
+        let mut builder = ignore::WalkBuilder::new(root);
+        builder
+            .hidden(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .parents(true)
+            // Honour `.gitignore` even outside a git repo. A notes or docs
+            // folder is a perfectly normal thing to index, and a `.gitignore`
+            // sitting in it still means "not this".
+            .require_git(false)
+            .filter_entry(|e| e.file_name() != ".semlith");
+
+        for result in builder.build() {
+            // Unreadable directories should not abort the run, but silently
+            // indexing nothing is worse than a noisy line on stderr.
+            let entry = match result {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("semlith: skipping unreadable path: {e}");
+                    continue;
+                }
+            };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let path = canonical(entry.path());
+            if seen.insert(path.clone()) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_gives_unit_length() {
+        let mut v = vec![3.0, 4.0];
+        normalize(&mut v);
+        assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-6);
+
+        // A zero vector must survive rather than become NaN.
+        let mut z = vec![0.0, 0.0];
+        normalize(&mut z);
+        assert_eq!(z, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn bge_queries_get_the_instruction_prefix() {
+        let dir = tempdir();
+        let s = Semlith::open(&dir, None).unwrap();
+        assert!(s.query_text("hello").starts_with("Represent this sentence"));
+        assert!(s.query_text("hello").ends_with("hello"));
+    }
+
+    fn tempdir() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("semlith-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+}
