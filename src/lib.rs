@@ -400,6 +400,20 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Byte counts sized to the unit that actually shows a digit — a small corpus
+/// reported as "0.0 MB" reads like a bug rather than a small corpus.
+pub fn human_bytes(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= KB * KB {
+        format!("{:.1} MB", b / (KB * KB))
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 pub fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
