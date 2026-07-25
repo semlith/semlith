@@ -22,7 +22,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
+          # Intel macOS. The old `macos-13` label has been retired.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -89,13 +90,21 @@ jobs:
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
 
+      # Release titles drop the tag's leading "v": "Semlith 0.1.0".
+      - name: Version
+        id: version
+        run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
       - uses: softprops/action-gh-release@v3
         with:
+          name: Semlith ${{ steps.version.outputs.number }}
           files: dist/*
           generate_release_notes: true
-          draft: true
           body: |
             See [CHANGELOG.md](https://github.com/semlith/semlith/blob/main/CHANGELOG.md)
             for what changed.
+
+            Linux builds need OpenBLAS at runtime: `apt-get install libopenblas-dev`
+            or your distribution's equivalent.
 
             Verify a download against `SHA256SUMS` before running it.
