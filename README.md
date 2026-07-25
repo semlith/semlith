@@ -1,5 +1,8 @@
 # semlith
 
+[![ci](https://github.com/semlith/semlith/actions/workflows/ci.yml/badge.svg)](https://github.com/semlith/semlith/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A fast local vector store for AI agents.
 
 Point it at your docs, PDFs, notes and code. semlith chunks them, embeds them,
@@ -162,13 +165,25 @@ trade some retrieval quality for throughput, `--model AllMiniLML6V2` is about
 `BGESmallENV15Q` were *not* faster in testing on ARM, though they do use less
 memory.
 
-## Development
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) — it
+covers the checks CI runs, how the code is laid out, and what is deliberately
+out of scope.
 
 ```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
 cargo test                  # unit tests, offline
-cargo test -- --ignored     # round-trip test; downloads the embedding model
-cargo clippy --all-targets
+cargo test -- --ignored     # end-to-end round trip; downloads the model
 ```
+
+For how the pieces fit together and why, see
+[docs/architecture.md](docs/architecture.md).
+
+Everyone participating is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md). Found a security problem? Please read
+[SECURITY.md](SECURITY.md) rather than opening an issue.
 
 ## Known limits
 
@@ -183,4 +198,7 @@ cargo clippy --all-targets
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Note that semlith downloads embedding model weights at runtime; those are
+covered by their own licenses. The default, BAAI/bge-small-en-v1.5, is MIT.
