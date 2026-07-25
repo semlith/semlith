@@ -108,8 +108,8 @@ Everything under the given paths, except:
 - anything under a `.semlith` directory
 
 PDFs are extracted to text automatically. Everything else is read as UTF-8.
-Files are split into line-aligned chunks of up to ~1200 characters with two
-lines of overlap, so a chunk boundary rarely cuts a match in half.
+Files are split into line-aligned chunks of up to 800 characters with two lines
+of overlap, so a chunk boundary rarely cuts a match in half.
 
 ## How it works
 
@@ -138,6 +138,30 @@ ONNX Runtime. Pick another with `semlith index --model <NAME>`; see
 `semlith models`. The model is fixed when the store is created, since vectors
 from two models are not comparable — to switch, delete the store and re-index.
 
+## Performance
+
+Measured on an 8-core Apple Silicon laptop with 8 GB of RAM, indexing 79 Rust
+source files (1.5 MB, 2375 chunks):
+
+| | |
+|---|---|
+| Query, warm | **~6 ms** — embed the query, scan the index, read the rows |
+| Query, cold CLI start | ~250 ms, almost all of it loading the ONNX model |
+| Indexing | ~13 chunks/sec, ~1.7 GB peak RSS |
+| Re-index, nothing changed | 17 ms — hashes match, the model is never loaded |
+
+The numbers that matter for an agent are the first and the last. `semlith mcp`
+loads the model once at startup, so every tool call costs the warm figure; and
+keeping a store current is nearly free, because unchanged files are skipped
+before anything is embedded.
+
+Indexing is the slow half, and that cost is the embedding model, not the index
+— a transformer on CPU is simply not fast. If you have a large corpus and can
+trade some retrieval quality for throughput, `--model AllMiniLML6V2` is about
+1.8x faster (6 transformer layers instead of 12). Quantized variants such as
+`BGESmallENV15Q` were *not* faster in testing on ARM, though they do use less
+memory.
+
 ## Development
 
 ```sh
@@ -152,8 +176,10 @@ cargo clippy --all-targets
   better served by `grep`; hybrid keyword + vector search is not implemented.
 - One process at a time per store. Concurrent `index` runs will fight over
   `index.tv`.
-- Indexing is single-threaded through the embedding model. Large corpora take
-  a while on first run; subsequent runs only touch what changed.
+- First-time indexing of a large corpus takes a while — see
+  [Performance](#performance). Subsequent runs only touch what changed.
+- Peak memory during indexing is around 1.7 GB. On a memory-tight machine,
+  that is the number to watch.
 
 ## License
 
