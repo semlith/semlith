@@ -121,8 +121,8 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
         }
         "semlith_stats" => match store.stats() {
             Ok((files, chunks, bytes)) => format!(
-                "{files} files, {chunks} chunks, {:.1} MB indexed, model {} ({} dim)",
-                bytes as f64 / 1_048_576.0,
+                "{files} files, {chunks} chunks, {} indexed, model {} ({} dim)",
+                crate::human_bytes(bytes),
                 store.model(),
                 store.dim(),
             ),

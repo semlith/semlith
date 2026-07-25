@@ -112,8 +112,8 @@ fn main() -> Result<()> {
                 report.removed,
             );
             eprintln!(
-                "store: {files} files, {chunks} chunks, {:.1} MB at {}",
-                bytes as f64 / 1_048_576.0,
+                "store: {files} files, {chunks} chunks, {} at {}",
+                semlith::human_bytes(bytes),
                 dir.display()
             );
         }
@@ -161,7 +161,7 @@ fn main() -> Result<()> {
             println!("files    {files}");
             println!("chunks   {chunks}");
             println!("vectors  {}", store.len());
-            println!("indexed  {:.1} MB", bytes as f64 / 1_048_576.0);
+            println!("indexed  {}", semlith::human_bytes(bytes));
         }
 
         Command::Files => {
