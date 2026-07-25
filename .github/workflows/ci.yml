@@ -16,7 +16,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # turbovec links against a system BLAS: OpenBLAS on Linux, Accelerate on
       # macOS. Accelerate ships with the OS; OpenBLAS has to be installed.
