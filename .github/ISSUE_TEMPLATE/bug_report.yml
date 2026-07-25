@@ -1,0 +1,74 @@
+name: Bug report
+description: Something does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing this. If it is a **security** issue, please do not
+        use this form — see [SECURITY.md](https://github.com/semlith/semlith/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The exact commands you ran, in order.
+      placeholder: |
+        semlith index ~/notes
+        semlith search "something"
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: stats
+    attributes:
+      label: Output of `semlith stats`
+      description: >
+        This is usually the single most useful thing you can include — it shows
+        the model, dimensions, and whether the index and database agree.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `semlith --version`, or the commit you built from.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15.2 arm64 / Ubuntu 24.04 x86_64
+    validations:
+      required: true
+
+  - type: textarea
+    id: corpus
+    attributes:
+      label: What you were indexing
+      description: >
+        Roughly how many files, what kinds (code, markdown, PDFs), and anything
+        unusual about them. If one specific file triggers it, say which type.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Error output, logs, or context that might matter.
+    validations:
+      required: false
