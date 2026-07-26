@@ -22,9 +22,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          # Intel macOS. The old `macos-13` label has been retired.
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
+          # No Intel macOS build: ONNX Runtime stopped publishing osx-x86_64
+          # binaries, so `ort` cannot link on x86_64-apple-darwin.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
 
