@@ -24,7 +24,10 @@ Think of it as a semantic cache for everything your agent needs to know.
 
 ## Install
 
-Requires a 64-bit machine and a Rust toolchain (1.85+).
+Requires a 64-bit machine and a Rust toolchain (1.85+). Prebuilt binaries cover
+Linux (x86_64, aarch64), Apple silicon macOS and Windows x86_64. Intel macOS is
+not supported: ONNX Runtime no longer publishes x86_64 macOS builds, so the
+embedding backend cannot link there.
 
 **On Linux, install OpenBLAS first.** turbovec links against a system BLAS;
 macOS uses Apple's Accelerate framework, which ships with the OS, and Windows
