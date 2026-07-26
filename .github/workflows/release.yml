@@ -94,16 +94,31 @@ jobs:
         id: version
         run: echo "number=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # The release body is this version's CHANGELOG section verbatim, so the
+      # notes say what changed instead of linking to it.
+      - name: Notes
+        run: |
+          awk -v v="${{ steps.version.outputs.number }}" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && !/^\[[^]]*\]:/ { print }
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ### Install
+
+          Download the archive for your platform, unpack it, and put `semlith` on
+          your `PATH`. Linux builds need OpenBLAS at runtime
+          (`apt-get install libopenblas-dev` or your distribution's equivalent).
+          Intel macOS has no prebuilt binary: ONNX Runtime no longer publishes
+          x86_64 macOS builds.
+
+          Verify a download against `SHA256SUMS` before running it.
+          EOF
+          cat notes.md
+
       - uses: softprops/action-gh-release@v3
         with:
           name: Semlith ${{ steps.version.outputs.number }}
           files: dist/*
-          generate_release_notes: true
-          body: |
-            See [CHANGELOG.md](https://github.com/semlith/semlith/blob/main/CHANGELOG.md)
-            for what changed.
-
-            Linux builds need OpenBLAS at runtime: `apt-get install libopenblas-dev`
-            or your distribution's equivalent.
-
-            Verify a download against `SHA256SUMS` before running it.
+          body_path: notes.md
