@@ -24,14 +24,14 @@ Think of it as a semantic cache for everything your agent needs to know.
 
 ## Install
 
-Requires a 64-bit machine and a Rust toolchain (1.85+). Prebuilt binaries cover
-Linux (x86_64, aarch64), Apple silicon macOS and Windows x86_64. Intel macOS is
-not supported: ONNX Runtime no longer publishes x86_64 macOS builds, so the
-embedding backend cannot link there.
+Requires a 64-bit machine. Prebuilt binaries cover Linux (x86_64, aarch64),
+Apple silicon macOS and Windows x86_64. Intel macOS is not supported: ONNX
+Runtime no longer publishes x86_64 macOS builds, so the embedding backend cannot
+link there.
 
-**On Linux, install OpenBLAS first.** turbovec links against a system BLAS;
-macOS uses Apple's Accelerate framework, which ships with the OS, and Windows
-falls back to a pure-Rust implementation, so this step is Linux-only.
+**On Linux, install OpenBLAS.** turbovec links against a system BLAS; macOS uses
+Apple's Accelerate framework, which ships with the OS, and Windows falls back to
+a pure-Rust implementation, so this step is Linux-only.
 
 ```sh
 sudo apt-get install libopenblas-dev     # Debian/Ubuntu
@@ -39,17 +39,35 @@ sudo dnf install openblas-devel          # Fedora/RHEL
 sudo pacman -S openblas                  # Arch
 ```
 
-Then:
+### From a release
+
+Grab the archive for your platform from the
+[latest release](https://github.com/semlith/semlith/releases/latest) and put the
+binary on your `PATH`:
 
 ```sh
-git clone https://github.com/semlith/semlith
-cd semlith
-cargo build --release
-# binary at ./target/release/semlith
+VERSION=v0.1.0
+TARGET=aarch64-apple-darwin        # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+curl -LO "https://github.com/semlith/semlith/releases/download/$VERSION/semlith-$VERSION-$TARGET.tar.gz"
+tar xzf "semlith-$VERSION-$TARGET.tar.gz"
+sudo install "semlith-$VERSION-$TARGET/semlith" /usr/local/bin/
+semlith --version
 ```
 
-If the build fails with `unable to find library -lopenblas`, that is the step
-you missed.
+Each release ships a `SHA256SUMS` file; check your download against it before
+running it. On Windows, unpack the `.zip` and move `semlith.exe` somewhere on
+your `PATH`.
+
+### From source
+
+Needs a Rust toolchain (1.85+):
+
+```sh
+cargo install --git https://github.com/semlith/semlith
+```
+
+If the build fails with `unable to find library -lopenblas`, that is the
+OpenBLAS step above you missed.
 
 ## Quick start
 
