@@ -197,7 +197,7 @@ tasks:
       ends. If the ordinary exit path can corrupt a store or strand a file at
       the PENDING sentinel, the release makes stores less trustworthy than not
       running it at all.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T04]
     acceptance_criteria:
       - >
@@ -208,7 +208,24 @@ tasks:
     files:
       - src/watch.rs
       - tests/watch.rs
-    evidence: []
+    evidence:
+      - "SIGINT and SIGTERM set the same stop flag the loop already polls, so
+         the signal handler does nothing but a store and a restore — the exit
+         happens between batches, where index.tv is whole. A second signal
+         restores the default disposition, so a stuck embed can still be
+         escaped. No new dependency: libc has been in the tree since 0.2.0."
+      - "index.tv.tmp left by a hard kill is removed at the start of an
+         indexing run rather than on open, because the caller holds the store
+         lock there — removing it on open would let a reader delete a live
+         writer's half-written index out from under its rename."
+      - "cargo test --test watch -- --ignored — 10 passed, 0 failed. The
+         shutdown test signals a real `semlith watch` process twice: once idle,
+         once 700 ms into embedding a 200 KB file. Both exited 0, neither left
+         an index.tv.tmp, and after the next indexing run the store's chunk
+         count equalled its vector count — nothing stranded half-present."
+      - "Not covered: Windows, whose console handlers are a different
+         mechanism. Ctrl-C there terminates mid-write exactly as `semlith
+         index` already does; carried to the release's known limitations."
 
   - id: US-SEMLITH-0.4.0-T06
     summary: >

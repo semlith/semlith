@@ -318,6 +318,11 @@ impl Semlith {
         sweep: bool,
         mut on_file: impl FnMut(&Path),
     ) -> Result<IndexReport> {
+        // A run killed mid-save leaves index.tv.tmp behind. Removing it here
+        // and not on open is deliberate: the caller holds the store lock, so
+        // there is no live writer whose half-written index this could be.
+        let _ = std::fs::remove_file(self.dir.join("index.tv.tmp"));
+
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
         // Files whose vectors are embedded but not yet durable. Their hash is

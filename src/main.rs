@@ -171,6 +171,10 @@ fn main() -> Result<()> {
             let mut store = Semlith::open(&dir, None)?;
             store.quiet = quiet;
 
+            // Installed before the first event: Ctrl-C is how this command
+            // ends, so it has to leave the store whole.
+            semlith::watch::stop_on_signal();
+
             let shown: Vec<String> = roots.iter().map(|r| display(r)).collect();
             semlith::watch::run(
                 &mut store,

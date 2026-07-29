@@ -28,6 +28,37 @@ use std::time::{Duration, Instant};
 /// Set by the signal handler; the loop leaves at the next safe point.
 pub static STOP: AtomicBool = AtomicBool::new(false);
 
+/// Ask Ctrl-C and SIGTERM to stop the watcher rather than kill it.
+///
+/// A watcher is ended by a signal every single day — that is how a foreground
+/// process finishes — so the ordinary exit has to be the safe one. The handler
+/// only sets a flag; the loop notices it between batches, which means an
+/// in-flight re-embed finishes and `index.tv` is written whole or not at all.
+///
+/// A second signal restores the default and kills the process, so a stuck
+/// embed can still be escaped.
+///
+/// Windows is not covered: its console handlers are a different mechanism, and
+/// leaving it on the default means Ctrl-C there terminates mid-write, exactly
+/// as `semlith index` already does.
+#[cfg(unix)]
+pub fn stop_on_signal() {
+    extern "C" fn handler(sig: libc::c_int) {
+        STOP.store(true, Ordering::SeqCst);
+        // Restoring the default is async-signal-safe, and is what keeps a
+        // second Ctrl-C meaningful during a long embed.
+        unsafe { libc::signal(sig, libc::SIG_DFL) };
+    }
+
+    unsafe {
+        libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn stop_on_signal() {}
+
 /// Default quiet period after the last event before a batch is indexed. One
 /// editor save is several events — write, chmod, rename — and a formatter on
 /// save is several more.

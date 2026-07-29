@@ -440,6 +440,79 @@ fn rpc(
     line
 }
 
+/// A watcher is ended by Ctrl-C, every time. If the ordinary way to stop it
+/// can strand a temp index or leave a file half-indexed, the release makes
+/// stores less trustworthy than not running it at all.
+#[cfg(unix)]
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_interrupted_watcher_leaves_the_store_whole() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough needs flour and water.",
+    );
+    index(store.path(), corpus.path());
+
+    for (label, busy) in [("idle", false), ("mid re-embed", true)] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .arg("--store")
+            .arg(store.path())
+            .arg("watch")
+            .arg(corpus.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        // Started means the model is loaded and the catch-up pass is done.
+        assert!(
+            wait_for_vectors(store.path(), 1),
+            "{label}: the watcher never got going"
+        );
+        thread::sleep(Duration::from_secs(2));
+
+        if busy {
+            // Enough text that the embed is still running when the signal
+            // lands, which is the case worth proving.
+            let big = "Ownership and borrowing, explained again and again. ".repeat(4000);
+            fs::write(corpus.path().join("long.md"), big).unwrap();
+            thread::sleep(Duration::from_millis(700));
+        }
+
+        let status = Command::new("kill")
+            .arg("-INT")
+            .arg(child.id().to_string())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{label}: could not signal the watcher");
+
+        let exit = child.wait().unwrap();
+        assert!(exit.success(), "{label}: watcher exited {exit}");
+
+        assert!(
+            !store.path().join("index.tv.tmp").exists(),
+            "{label}: a half-written index was left behind"
+        );
+
+        // Whatever was in flight is either fully in or fully absent after the
+        // next run — never a file with chunks and no vectors.
+        let mut s = Semlith::open(store.path(), None).unwrap();
+        s.quiet = true;
+        s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+            .unwrap();
+        let (_, chunks, _) = s.stats().unwrap();
+        assert_eq!(
+            chunks as usize,
+            s.len(),
+            "{label}: {chunks} chunks against {} vectors after re-indexing",
+            s.len()
+        );
+    }
+}
+
 // ---- harness ------------------------------------------------------------
 
 /// A watcher running in its own thread, stoppable from the test, counting
