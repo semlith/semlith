@@ -36,10 +36,11 @@ const BIT_WIDTH: usize = 4;
 /// Texts handed to ONNX Runtime in one go.
 ///
 /// Keep this small. The transformer pads every text in a batch to the longest
-/// one, and attention memory grows with `batch * seq_len^2` — at a batch of
-/// 256 and the model's 512-token window that is several gigabytes of
-/// intermediate tensors, which on most machines means swapping, not speed.
-const EMBED_BATCH: usize = 32;
+/// one, and attention memory grows with `batch * seq_len^2`. Measured over the
+/// same 6527-chunk corpus, a batch of 8 peaked at 615 MB and a batch of 32 at
+/// 1799 MB — 2.9x the memory for no throughput at all (23.2 against 23.3
+/// chunks/sec), because a smaller batch also wastes less of itself on padding.
+const EMBED_BATCH: usize = 8;
 
 /// Default model: 384-dim, ~52 MB on disk. Measured against the previous
 /// default (BGE-small) on a 6260-chunk corpus it scored 16.00 code MRR@10
