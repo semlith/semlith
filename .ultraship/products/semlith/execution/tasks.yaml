@@ -149,7 +149,7 @@ tasks:
       store fresh that the agent never reads — the release would be delivered
       to the wrong caller, which is the same mistake 0.3.0's MCP task existed
       to prevent.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T03]
     acceptance_criteria:
       - >
@@ -159,7 +159,33 @@ tasks:
     files:
       - src/lib.rs
       - src/mcp.rs
-    evidence: []
+    evidence:
+      - "Answered the contract's open question: freshness is signalled by an
+         `index_generation` counter in the store's meta table, bumped after the
+         index.tv rename, not by mtime. Re-embedding one file can leave both
+         the size and a second-granularity mtime unchanged, and a reader would
+         then keep answering from vectors that no longer exist. Bumped after
+         the rename, so a reader that sees the new generation is guaranteed to
+         find the new index behind it, and read back from the store rather than
+         incremented in memory so a writer that predates another writer's run
+         cannot reuse a generation."
+      - "search_filtered calls refresh() — one SQLite read when nothing has
+         changed. mcp.rs needed no change at all: stats and the filter count
+         read SQLite, which WAL already makes fresh across processes."
+      - "cargo test --test watch -- --ignored — 9 passed, 0 failed, including a
+         real `semlith mcp` child process driven over stdio JSON-RPC: it
+         answers before the edit exists, the watcher indexes the edit, and the
+         same process — no restart, no re-initialize — returns it."
+      - "The test was proven to fail without the fix: with refresh() removed it
+         reports 'the running server is still answering from the index it
+         started with' and returns only the pre-edit file."
+      - "Two false passes were found and fixed while proving it. The first
+         query shared terms with the edited file, so FTS5 — which is fresh
+         across processes for free — answered it and the dense half was never
+         exercised; the query now shares no term with the file it must find.
+         The second waited on `all_paths`, which lists a file as soon as its
+         row is written, before its vectors are durable; it now waits on the
+         vector count."
 
   - id: US-SEMLITH-0.4.0-T05
     summary: >

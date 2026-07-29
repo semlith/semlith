@@ -10,7 +10,9 @@
 
 use semlith::Semlith;
 use std::fs;
+use std::io::{BufRead, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -329,6 +331,115 @@ fn ignored_hidden_and_store_paths_are_not_re_embedded() {
     assert!(!holds(&paths, "scratch.txt"), "store internals: {paths:#?}");
 }
 
+/// The roadmap outcome is stated for an agent, and an agent starts its MCP
+/// server once and keeps it. A store kept fresh by a watcher the agent cannot
+/// see is worth nothing to it.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_running_mcp_server_sees_an_edit_without_restarting() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough needs flour and water.",
+    );
+    index(store.path(), corpus.path());
+
+    let watcher = spawn(store.path(), corpus.path());
+
+    // A real server process over real stdio, started before the edit exists.
+    let mut server = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(store.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = server.stdin.take().unwrap();
+    let mut stdout = std::io::BufReader::new(server.stdout.take().unwrap());
+
+    rpc(
+        &mut stdin,
+        &mut stdout,
+        1,
+        "initialize",
+        r#"{"protocolVersion":"2024-11-05"}"#,
+    );
+
+    let before = search_over_mcp(&mut stdin, &mut stdout, 2);
+    assert!(
+        !before.contains("ownership"),
+        "the corpus already contained the edit: {before}"
+    );
+
+    write(
+        corpus.path(),
+        "rust.md",
+        "Ownership means each value has a single owner, and the compiler \
+         frees it when that owner goes out of scope.",
+    );
+    // Wait on the vector count, not on the file list: a file's row is written
+    // before its vectors are durable, so `all_paths` would say yes while the
+    // dense half still knows nothing about it.
+    assert!(
+        wait_for_vectors(store.path(), 2),
+        "the watcher never embedded the edit"
+    );
+
+    // Same server process, no restart, no re-initialize.
+    let after = search_over_mcp(&mut stdin, &mut stdout, 3);
+    assert!(
+        after.contains("ownership") || after.contains("Ownership"),
+        "the running server is still answering from the index it started with: {after}"
+    );
+
+    drop(stdin);
+    let _ = server.wait();
+    watcher.stop();
+}
+
+/// Deliberately shares no term with the file it should find: the keyword half
+/// of the search reads SQLite, which is fresh across processes for free, so a
+/// query it can answer proves nothing about the vector index being reloaded.
+/// Only the dense half can return this one.
+fn search_over_mcp(
+    stdin: &mut std::process::ChildStdin,
+    stdout: &mut impl BufRead,
+    id: u64,
+) -> String {
+    rpc(
+        stdin,
+        stdout,
+        id,
+        "tools/call",
+        r#"{"name":"semlith_search","arguments":{"query":"automatic memory reclamation without garbage collection","k":3}}"#,
+    )
+}
+
+/// One JSON-RPC round trip, returning the raw response line.
+fn rpc(
+    stdin: &mut std::process::ChildStdin,
+    stdout: &mut impl BufRead,
+    id: u64,
+    method: &str,
+    params: &str,
+) -> String {
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}","params":{params}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert!(!line.is_empty(), "the server closed instead of answering");
+    line
+}
+
 // ---- harness ------------------------------------------------------------
 
 /// A watcher running in its own thread, stoppable from the test, counting
@@ -415,6 +526,20 @@ fn wait_until(store: &Path, done: impl Fn(&[String]) -> bool) -> bool {
             return true;
         }
         drop(s);
+        thread::sleep(Duration::from_millis(300));
+    }
+    false
+}
+
+/// Poll until the store holds at least `at_least` vectors. The honest signal
+/// that an edit is fully in: chunks land in SQLite before `index.tv` is
+/// rewritten, so the file list runs ahead of the vectors.
+fn wait_for_vectors(store: &Path, at_least: usize) -> bool {
+    let deadline = Instant::now() + APPEAR_TIMEOUT;
+    while Instant::now() < deadline {
+        if Semlith::open(store, None).unwrap().len() >= at_least {
+            return true;
+        }
         thread::sleep(Duration::from_millis(300));
     }
     false

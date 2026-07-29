@@ -56,6 +56,15 @@ pub fn default_model() -> Model {
 /// durable yet". Any file left in this state is re-indexed on the next run.
 const PENDING: &str = "";
 
+/// Meta key counting index.tv rewrites.
+///
+/// It is what tells a long-running reader — an MCP server an agent is holding
+/// open — that `semlith watch` has replaced the index underneath it. A
+/// timestamp cannot do this job: re-embedding one file can leave both the size
+/// and the second-granularity mtime unchanged, and the reader would keep
+/// answering from vectors that no longer exist.
+const GENERATION: &str = "index_generation";
+
 /// Reciprocal-rank-fusion constant. Rank position matters more than the raw
 /// scores, which are not comparable: cosine similarity and BM25 are different
 /// units on different scales. 60 is the value from the original TREC work and
@@ -91,6 +100,9 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// The index generation this process has loaded. Compared against the
+    /// store's on every search to notice another process's writes.
+    generation: u64,
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
@@ -146,6 +158,8 @@ impl Semlith {
             IdMapIndex::new(dim, BIT_WIDTH).map_err(|e| anyhow::anyhow!("{e:?}"))?
         };
 
+        let generation = generation(&db)?;
+
         Ok(Self {
             dir,
             db,
@@ -153,8 +167,46 @@ impl Semlith {
             model,
             dim,
             embedder: None,
+            generation,
             quiet: false,
         })
+    }
+
+    /// Reload the vector index if another process has replaced it since this
+    /// one read it — `semlith watch` re-embedding while an agent holds an MCP
+    /// server open.
+    ///
+    /// Costs one SQLite read when nothing has changed, which is the case
+    /// almost every time it is called.
+    pub fn refresh(&mut self) -> Result<()> {
+        let current = generation(&self.db)?;
+        if current == self.generation {
+            return Ok(());
+        }
+
+        let path = self.dir.join("index.tv");
+        if !path.exists() {
+            return Ok(());
+        }
+        // Recorded before the load: a write that lands while this one is
+        // reading is then noticed next time rather than skipped.
+        self.generation = current;
+        let index =
+            IdMapIndex::load(&path).with_context(|| format!("reloading {}", path.display()))?;
+        if let Some(d) = index.dim_opt()
+            && d != self.dim
+        {
+            bail!(
+                "index is {d}-dimensional but {} produces {}; store is corrupt",
+                self.model,
+                self.dim
+            );
+        }
+        // A reader that reloads mid-session should not hand the cost of a cold
+        // index to whoever asked the next question.
+        index.prepare();
+        self.index = index;
+        Ok(())
     }
 
     pub fn model(&self) -> &Model {
@@ -462,6 +514,11 @@ impl Semlith {
     /// the subset is a minority of the corpus, which is the case the filter
     /// exists for.
     pub fn search_filtered(&mut self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Hit>> {
+        // A store being watched changes under a long-lived reader. Answering
+        // from the index this process happened to load at startup is how an
+        // agent ends up quoting a function that no longer exists.
+        self.refresh()?;
+
         if self.index.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
@@ -523,13 +580,20 @@ impl Semlith {
 
     /// Write the index out via a temp file + rename, so an interrupted save
     /// cannot leave a half-written `index.tv` behind.
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         let final_path = self.dir.join("index.tv");
         let tmp = self.dir.join("index.tv.tmp");
         self.index
             .write(&tmp)
             .with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &final_path)?;
+
+        // Bumped after the rename, never before: a reader that sees the new
+        // generation is guaranteed to find the new index behind it. Read back
+        // from the store rather than incremented from this process's copy,
+        // which may predate another writer's run.
+        self.generation = generation(&self.db)? + 1;
+        store::set_meta(&self.db, GENERATION, &self.generation.to_string())?;
         Ok(())
     }
 }
@@ -566,6 +630,14 @@ fn normalize(v: &mut [f32]) {
             *x /= norm;
         }
     }
+}
+
+/// How many times this store's index has been rewritten. Absent on a store
+/// written before 0.4.0, which reads as zero and is bumped on its first write.
+fn generation(db: &Connection) -> Result<u64> {
+    Ok(store::get_meta(db, GENERATION)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
 }
 
 fn now() -> i64 {
