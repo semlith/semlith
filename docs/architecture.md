@@ -104,24 +104,50 @@ share the one line number.
 ## Searching
 
 ```
-query ──▶ prefix ──▶ embed ──▶ normalize ──▶ index.search(k)
-                                                  │
-                                          (scores, chunk ids)
-                                                  │
-                                                  ▼
-                                        SELECT ... WHERE c.id = ?
-                                                  │
-                                                  ▼
-                                    Hit { score, path, lines, text }
+query ──┬─▶ prefix ──▶ embed ──▶ index.search(k*4) ──▶ chunk ids, by rank
+        │                                                      │
+        └─▶ terms ──▶ chunks_fts MATCH ──────────▶ chunk ids, by rank
+                                                               │
+                                              reciprocal rank fusion
+                                                               │
+                                                               ▼
+                                                 SELECT ... WHERE c.id = ?
+                                                               │
+                                                               ▼
+                                              Hit { score, path, lines, text }
 ```
 
+Both halves of the store answer every query. The vector index knows what a
+chunk means; FTS5 knows which literal terms it contains. Neither is sufficient
+alone — an embedding of `EMBED_BATCH` sits in the same neighbourhood as every
+other constant in the corpus, and a keyword index cannot answer "how does the
+retry backoff work".
+
 Embeddings are L2-normalized on both sides, which makes turbovec's inner product
-equal to cosine similarity. Scores land in roughly `[-1, 1]`, higher is better,
-and they are approximate because the stored vectors are quantized.
+equal to cosine similarity. That similarity is not comparable with BM25, though,
+so the two rankings are fused by position rather than by score: each half
+contributes `1 / (60 + rank)` and the sums decide the order. Reciprocal rank
+fusion needs no calibration between two score distributions that have nothing to
+do with each other, which is exactly the design problem that kept hybrid search
+out of 0.1.0.
+
+The reported score is therefore a fusion score, not a cosine. It is meaningful
+for ordering within one result set and meaningless compared across queries.
+
+Each half is searched `4 * k` deep before fusing, because a chunk ranked second
+by one half and absent from the other still deserves consideration.
+
+A query reaches FTS5 as bare terms, never as typed. FTS5's `MATCH` is a query
+language: `AND` is an operator, `*` is a prefix wildcard, and an unbalanced
+quote is a syntax error. Passing a user's words through raw would make
+`index AND search` mean something they did not type and make `call_me(` fail
+outright.
 
 BGE English models were trained asymmetrically: passages are embedded raw, but
-queries want an instruction prefix. `query_text` adds it. Omitting it measurably
-costs recall, which is why it is not a detail worth simplifying away.
+queries want an instruction prefix. `Model::query_text` adds it for those models
+only. Omitting it measurably costs recall, which is why it is not a detail worth
+simplifying away — and adding it for a model never trained with one, such as the
+default, would be just as wrong.
 
 If a chunk id comes back that SQLite does not know about, the hit is skipped
 rather than failing the query. That means the two halves have drifted, which
@@ -150,6 +176,54 @@ The server calls `warm()` at startup — loading the ONNX model and preparing th
 index's lazy caches — so the first tool call is not several hundred milliseconds
 slower than the rest.
 
+## One writer per store
+
+An index run holds an OS advisory lock on `index.lock` in the store directory
+for its whole duration, including the final `index.tv` write.
+
+The lock is the kernel's, not the file's existence. That distinction is the
+whole point: a run killed with SIGKILL, or lost with the machine, releases the
+lock when the process dies and leaves nothing to clean up. A lock file that
+meant "locked because I exist" would wedge the store until a human deleted it,
+and users would learn to delete it reflexively, which defeats the lock.
+
+A second run does not wait. It exits non-zero naming the process that holds the
+lock and when it started, because the honest options for a blocked indexer are
+"wait an unknown time" or "tell the user"; the second is more useful from a
+terminal and from a script.
+
+Reads are not locked. A search during an index run sees whatever has been
+committed so far, which is a consistent SQLite snapshot, and at worst misses
+chunks that have not landed yet.
+
+## Choosing the thread count
+
+ONNX Runtime synchronises its threads at every operator boundary, so the batch
+moves at the speed of the slowest thread. On a CPU where the cores are not
+equal, that turns extra threads into a liability: a thread scheduled onto an
+efficiency core holds up every thread on a performance core.
+
+Measured on a 4P+4E Apple M1, indexing the same corpus:
+
+| intra-op threads | chunks/sec |
+|---|---|
+| 1 | 5.1 |
+| 2 | 14.0 |
+| 4 | **16.5** |
+| 8 | 13.9 |
+
+So the default is the performance-core count on Apple silicon, and the total
+core count everywhere else, where the cores are interchangeable and the whole
+machine is the right answer. Undersubscribing costs far more than
+oversubscribing — 1 thread is three times worse than 8 — so nothing else gets a
+reduced count on a guess. `SEMLITH_EMBED_THREADS` overrides it, because this was
+measured on exactly one machine.
+
+Fanning batches across cores was measured and rejected: two workers with four
+threads each managed 7.9 chunks/sec against 16.5 for one worker, and four
+workers with one thread each managed 3.6. ONNX Runtime already owns the
+machine; a second layer of parallelism only contends with it.
+
 ## Why these dependencies
 
 | Crate | Why |
@@ -160,14 +234,10 @@ slower than the rest.
 | ignore | The `ripgrep` walker. Gets `.gitignore` semantics right, which is harder than it looks. |
 | pdf-extract | Pure Rust, no external binary. |
 | blake3 | Fast enough that hashing every file on every run is free. |
+| hf-hub | Fetches the default model's weights. fastembed uses it internally but does not expose it, and the default model is not one fastembed knows. |
+| libc | One call, `sysctlbyname`, to count performance cores on Apple silicon. |
 
 ## Things that were considered and left out
-
-**Hybrid keyword + vector search.** Dense retrieval is weak at exact identifier
-lookup — searching for `EMBED_BATCH` is a job for `grep`. SQLite's FTS5 would
-slot in naturally. It was left out because the tool is a vector store first, and
-adding a second retrieval path means deciding how to fuse two score
-distributions, which is a real design problem rather than a small addition.
 
 **A daemon or server mode.** Query latency is already ~6 ms warm; the only cost
 worth amortizing is model load, which `semlith mcp` already does. A network port
