@@ -171,12 +171,41 @@ fn main() -> Result<()> {
             let mut store = Semlith::open(&dir, None)?;
             store.quiet = quiet;
 
+            let shown: Vec<String> = roots.iter().map(|r| display(r)).collect();
             semlith::watch::run(
                 &mut store,
                 &roots,
                 std::time::Duration::from_millis(debounce),
                 &semlith::watch::STOP,
-                || {},
+                |progress| {
+                    use semlith::watch::Progress;
+                    match progress {
+                        // A watcher that has quietly stopped updating looks
+                        // exactly like a corpus nobody edited, so it says what
+                        // it is watching and what it did.
+                        Progress::Ready {
+                            catch_up,
+                            files,
+                            chunks,
+                        } => eprintln!(
+                            "watching {} — {files} files, {chunks} chunks \
+                             ({} indexed at startup, {} unchanged)",
+                            shown.join(", "),
+                            catch_up.indexed,
+                            catch_up.unchanged,
+                        ),
+                        Progress::File(path) if !quiet => eprintln!("  ~ {}", display(path)),
+                        Progress::Batch(report, elapsed) if !quiet => eprintln!(
+                            "  {} re-embedded, {} removed, {} chunks in {:.1}s",
+                            report.indexed,
+                            report.removed,
+                            report.chunks,
+                            elapsed.as_secs_f32(),
+                        ),
+                        Progress::Error(e) => eprintln!("semlith: watch error: {e}"),
+                        _ => {}
+                    }
+                },
             )?;
         }
 

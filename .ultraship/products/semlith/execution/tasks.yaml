@@ -65,7 +65,7 @@ tasks:
       user just saved from Vim, and one that ignores creates never picks up a
       new file. This is the most likely way the release ships broken while
       passing a hand-written test, so it is its own task with its own evidence.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T01]
     acceptance_criteria:
       - >
@@ -82,7 +82,19 @@ tasks:
     files:
       - src/watch.rs
       - tests/watch.rs
-    evidence: []
+    evidence:
+      - "Chosen: classify by what is on disk when the batch is indexed, not by
+         the event kind. A path in the batch that exists is re-embedded; one
+         that does not is evicted. Rename and atomic save then need no special
+         case — both are one gone path and one present path — and the
+         platform differences in how notify labels them stop mattering."
+      - "cargo test --test watch -- --ignored — 5 passed, 0 failed: a new file
+         reaches the store and a deleted one loses its vectors, a rename moves
+         the file and leaves nothing under the old path, and a write-temp-then-
+         rename save leaves the file indexed with its new contents while the
+         editor's temp file is never indexed."
+      - "Deletion is proven at both levels: gone from `all_paths`, and gone
+         from search results rather than merely unlisted."
 
   - id: US-SEMLITH-0.4.0-T03
     summary: >
@@ -95,7 +107,7 @@ tasks:
       every build artefact, which is a loop, not a feature. Without the
       hash short-circuit an editor that touches mtime on every keystroke pins a
       CPU core. Both turn "leave it running" into "do not leave it running".
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T02]
     acceptance_criteria:
       - >
@@ -111,7 +123,20 @@ tasks:
     files:
       - src/watch.rs
       - tests/watch.rs
-    evidence: []
+    evidence:
+      - "The watcher reports what it did through a Progress callback rather
+         than printing from inside the library, so the CLI owns its output and
+         a test can count re-embeds. That is what makes the debounce claim
+         checkable instead of asserted."
+      - "cargo test --test watch -- --ignored — 8 passed, 0 failed. Ten saves
+         of one file inside a one-second window produced exactly 1 re-embed;
+         three rewrites of a file with its own bytes produced 0; a gitignored
+         path, a dotfile and a write into the store's own .semlith directory
+         produced 0, with the store's file list confirming none of them was
+         indexed."
+      - "The ignore test puts the store inside the watched tree, which is the
+         default `.semlith` layout — the loop where the watcher's own index
+         write queues the next re-embed is only reachable that way."
 
   - id: US-SEMLITH-0.4.0-T04
     summary: >

@@ -16,7 +16,7 @@
 //!   have yielded, so a watched tree and an indexed tree are the same set of
 //!   files by construction rather than by two rules agreeing.
 
-use crate::{Semlith, canonical, lock, walk};
+use crate::{IndexReport, Semlith, canonical, lock, walk};
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
 use std::collections::BTreeSet;
@@ -42,24 +42,39 @@ const MAX_BATCH_WAIT: Duration = Duration::from_secs(5);
 /// Ctrl-C should not have to wait for a filesystem event to be honoured.
 const IDLE_TICK: Duration = Duration::from_millis(250);
 
-/// Watch `roots` until `stop` is set.
+/// What the watcher is doing, for whoever is watching the watcher.
 ///
-/// `on_ready` fires once the watchers are registered and the catch-up pass is
-/// done — that is, once an edit made from this moment on is guaranteed to be
-/// seen. Callers that write files and then expect them indexed need it.
+/// `Ready` matters beyond display: it fires once the watchers are registered
+/// and the catch-up pass is done, which is the first moment an edit is
+/// guaranteed to be seen. A caller that writes a file and then expects it
+/// indexed has to wait for it.
+pub enum Progress<'a> {
+    Ready {
+        catch_up: IndexReport,
+        files: i64,
+        chunks: i64,
+    },
+    File(&'a Path),
+    Batch(IndexReport, Duration),
+    /// A non-fatal backend error. Reported rather than swallowed: an exhausted
+    /// inotify watch limit leaves a process that is running and no longer
+    /// watching anything.
+    Error(String),
+}
+
+/// Watch `roots` until `stop` is set.
 pub fn run(
     store: &mut Semlith,
     roots: &[PathBuf],
     debounce: Duration,
     stop: &AtomicBool,
-    on_ready: impl FnOnce(),
+    mut progress: impl FnMut(Progress),
 ) -> Result<()> {
     // Taken before anything is watched: if the store is busy, say so now
     // rather than after a catch-up pass has already embedded half a corpus.
     let _lock = lock::StoreLock::acquire(store.dir())?;
 
     let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
-    let quiet = store.quiet;
 
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |res| {
@@ -78,35 +93,19 @@ pub fn run(
     // Catch up on whatever changed while nothing was watching. It is the same
     // incremental pass `semlith index` runs, so an unchanged tree costs a walk
     // and a hash per file, and nothing else.
-    let report = store.index_walk(&roots, |path| {
-        if !quiet {
-            eprintln!("  + {}", display(path));
-        }
-    })?;
-    if !quiet {
-        let (files, chunks, _) = store.stats()?;
-        eprintln!(
-            "watching {} ({files} files, {chunks} chunks) — {} indexed at startup, {} unchanged",
-            roots
-                .iter()
-                .map(|r| display(r))
-                .collect::<Vec<_>>()
-                .join(", "),
-            report.indexed,
-            report.unchanged,
-        );
-    }
-
-    on_ready();
+    let catch_up = store.index_walk(&roots, |path| progress(Progress::File(path)))?;
+    let (files, chunks, _) = store.stats()?;
+    progress(Progress::Ready {
+        catch_up,
+        files,
+        chunks,
+    });
 
     while !stop.load(Ordering::Relaxed) {
         let first = match rx.recv_timeout(IDLE_TICK) {
             Ok(Ok(event)) => event,
             Ok(Err(e)) => {
-                // A backend error is not fatal, but it must not be silent: an
-                // exhausted inotify watch limit leaves a process that is
-                // running and no longer watching anything.
-                eprintln!("semlith: watch error: {e}");
+                progress(Progress::Error(e.to_string()));
                 continue;
             }
             Err(RecvTimeoutError::Timeout) => continue,
@@ -115,7 +114,7 @@ pub fn run(
 
         let mut batch: BTreeSet<PathBuf> = BTreeSet::new();
         collect(&mut batch, first.paths);
-        drain(&rx, &mut batch, debounce);
+        drain(&rx, &mut batch, debounce, &mut progress);
 
         let paths = admissible(&roots, batch);
         if paths.is_empty() {
@@ -123,19 +122,9 @@ pub fn run(
         }
 
         let started = Instant::now();
-        let report = store.index_changed(paths, |path| {
-            if !quiet {
-                eprintln!("  ~ {}", display(path));
-            }
-        })?;
-        if !quiet && (report.indexed > 0 || report.removed > 0) {
-            eprintln!(
-                "  {} re-embedded, {} removed, {} chunks in {:.1}s",
-                report.indexed,
-                report.removed,
-                report.chunks,
-                started.elapsed().as_secs_f32(),
-            );
+        let report = store.index_changed(paths, |path| progress(Progress::File(path)))?;
+        if report.indexed > 0 || report.removed > 0 {
+            progress(Progress::Batch(report, started.elapsed()));
         }
     }
 
@@ -149,6 +138,7 @@ fn drain(
     rx: &mpsc::Receiver<notify::Result<notify::Event>>,
     batch: &mut BTreeSet<PathBuf>,
     debounce: Duration,
+    progress: &mut impl FnMut(Progress),
 ) {
     let deadline = Instant::now() + MAX_BATCH_WAIT;
     loop {
@@ -158,7 +148,7 @@ fn drain(
         }
         match rx.recv_timeout(debounce.min(left)) {
             Ok(Ok(event)) => collect(batch, event.paths),
-            Ok(Err(e)) => eprintln!("semlith: watch error: {e}"),
+            Ok(Err(e)) => progress(Progress::Error(e.to_string())),
             Err(RecvTimeoutError::Timeout) => return,
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -203,15 +193,6 @@ fn resolve(path: &Path) -> PathBuf {
         (Some(dir), Some(name)) if dir.exists() => canonical(dir).join(name),
         _ => path.to_path_buf(),
     }
-}
-
-/// Paths are absolute; show them relative to the cwd when possible.
-fn display(path: &Path) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    path.strip_prefix(&cwd)
-        .unwrap_or(path)
-        .display()
-        .to_string()
 }
 
 #[cfg(test)]
