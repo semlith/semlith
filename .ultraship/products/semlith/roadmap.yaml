@@ -22,8 +22,9 @@ versions:
   - version: 0.4.0
     outcome: >
       A developer leaves a store current without re-running index by hand; edited files are
-      re-embedded as they are saved.
-    detail: outline
+      re-embedded as they are saved, and an agent already connected over MCP searches the new
+      contents without restarting its server.
+    detail: specified
     status: planned
   - version: 0.5.0
     outcome: >
