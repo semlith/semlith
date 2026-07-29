@@ -15,6 +15,7 @@
 
 pub mod chunk;
 pub mod embed;
+pub mod filter;
 pub mod lock;
 pub mod mcp;
 pub mod store;
@@ -22,6 +23,7 @@ pub mod store;
 use anyhow::{Context, Result, bail};
 use embed::Model;
 use fastembed::TextEmbedding;
+use filter::Filter;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -348,14 +350,57 @@ impl Semlith {
         Ok(ids.len())
     }
 
-    /// Top-`k` chunks for `query`, best first.
+    /// Top-`k` chunks for `query`, best first, over the whole store.
+    pub fn search(&mut self, query: &str, k: usize) -> Result<Vec<Hit>> {
+        self.search_filtered(query, k, &Filter::default())
+    }
+
+    /// Resolve a filter to the ids the vector index may consider.
+    fn allowlist(&self, filter: &Filter) -> Result<Allowlist> {
+        if filter.is_empty() {
+            return Ok(Allowlist::All);
+        }
+        let ids: Vec<u64> = store::filtered_chunk_ids(&self.db, filter.groups())?
+            .into_iter()
+            // turbovec panics on an id the index does not hold, and SQLite can
+            // hold a chunk the index does not if a run was interrupted between
+            // the two. A stale row must not take a search down with it.
+            .filter(|id| self.index.contains(*id))
+            .collect();
+
+        Ok(if ids.is_empty() {
+            Allowlist::Empty
+        } else if ids.len() == self.index.len() {
+            // The filter excludes nothing, so skip building a mask the size of
+            // the whole index for no benefit.
+            Allowlist::All
+        } else {
+            Allowlist::Subset(ids)
+        })
+    }
+
+    /// How many indexed files `filter` selects.
+    ///
+    /// Zero is worth reporting on its own: a glob that matches nothing is a
+    /// different problem from a corpus that does not discuss the query.
+    pub fn matching_files(&self, filter: &Filter) -> Result<i64> {
+        store::matching_files(&self.db, filter.groups())
+    }
+
+    /// Top-`k` chunks for `query` within the part of the corpus `filter`
+    /// selects, best first.
     ///
     /// Both halves of the store are consulted: the vector index for meaning,
     /// FTS5 for the literal terms. Dense search alone reliably misses exact
     /// identifiers — an embedding of `EMBED_BATCH` is a point in the same
     /// neighbourhood as every other constant — which is precisely what someone
     /// grepping a codebase is looking for.
-    pub fn search(&mut self, query: &str, k: usize) -> Result<Vec<Hit>> {
+    ///
+    /// The filter is applied *before* each half picks its top-`k`, not after
+    /// fusion. Post-filtering a global ranking returns almost nothing whenever
+    /// the subset is a minority of the corpus, which is the case the filter
+    /// exists for.
+    pub fn search_filtered(&mut self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Hit>> {
         if self.index.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
@@ -365,9 +410,16 @@ impl Semlith {
         // other still deserves to be considered.
         let depth = (k * RANK_DEPTH).max(k);
 
+        let allowlist = self.allowlist(filter)?;
+        if matches!(allowlist, Allowlist::Empty) {
+            return Ok(Vec::new());
+        }
+
         let vector = self.embed(vec![self.model.query_text(query)])?.remove(0);
-        let (_, dense_ids) = self.index.search(&vector, depth);
-        let keyword_ids = store::keyword_search(&self.db, query, depth)?;
+        let (_, dense_ids) = self
+            .index
+            .search_with_allowlist(&vector, depth, allowlist.as_slice());
+        let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
         let mut fused: Vec<(u64, f32)> = Vec::new();
         let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
@@ -425,6 +477,25 @@ impl Semlith {
 struct Batch {
     ids: Vec<u64>,
     texts: Vec<String>,
+}
+
+/// What the vector index is allowed to look at for one query.
+enum Allowlist {
+    /// No filter, or one that selects everything the index holds.
+    All,
+    /// The filter selects nothing. The query is over before it starts.
+    Empty,
+    Subset(Vec<u64>),
+}
+
+impl Allowlist {
+    /// `None` is turbovec's "search everything".
+    fn as_slice(&self) -> Option<&[u64]> {
+        match self {
+            Allowlist::Subset(ids) => Some(ids),
+            _ => None,
+        }
+    }
 }
 
 fn normalize(v: &mut [f32]) {

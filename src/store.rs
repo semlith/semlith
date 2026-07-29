@@ -5,6 +5,7 @@
 //! here and is looked up by chunk id after the search returns.
 
 use anyhow::Result;
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -100,14 +101,79 @@ fn backfill_fts(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Chunk ids matching `query` as keywords, best first.
+/// `AND`ed groups of `OR`ed `GLOB` patterns as a SQL fragment, plus the values
+/// to bind. An empty group list yields `1` — a predicate that selects
+/// everything, so callers need no special case.
+///
+/// Patterns are matched against `lower(files.path)`: filtering is
+/// case-insensitive, because `README.MD` and `readme.md` are the same file to
+/// anyone typing `--ext md`, and no filesystem this runs on treats a path's
+/// case as load-bearing.
+fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
+    let mut binds = Vec::new();
+    let mut clauses = Vec::new();
+    for group in groups {
+        let ors: Vec<&str> = group
+            .iter()
+            .map(|p| {
+                binds.push(p.clone());
+                "lower(f.path) GLOB ?"
+            })
+            .collect();
+        clauses.push(format!("({})", ors.join(" OR ")));
+    }
+    if clauses.is_empty() {
+        return ("1".to_string(), binds);
+    }
+    (clauses.join(" AND "), binds)
+}
+
+/// Ids of every chunk whose file matches `groups`.
+///
+/// This is the single source of the subset. The vector index gets these ids as
+/// an allowlist and [`keyword_search`] applies the same predicate, so the two
+/// halves of a hybrid search can never rank a chunk the other was forbidden to
+/// see.
+pub fn filtered_chunk_ids(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<u64>> {
+    let (predicate, binds) = glob_predicate(groups);
+    let sql =
+        format!("SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE {predicate}");
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.into_iter().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
+    Ok(rows
+        .collect::<Result<Vec<i64>, _>>()?
+        .into_iter()
+        .map(|i| i as u64)
+        .collect())
+}
+
+/// How many indexed files `groups` selects.
+///
+/// Zero means the filter itself is wrong — a typo in a glob, a subsystem that
+/// was never indexed — which is a different thing to tell a user than "the
+/// corpus does not contain this".
+pub fn matching_files(db: &Connection, groups: &[Vec<String>]) -> Result<i64> {
+    let (predicate, binds) = glob_predicate(groups);
+    let sql = format!("SELECT COUNT(*) FROM files f WHERE {predicate}");
+    let args = binds.into_iter().map(Value::Text);
+    Ok(db.query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0))?)
+}
+
+/// Chunk ids matching `query` as keywords, best first, restricted to files
+/// matching `groups`.
 ///
 /// The query is reduced to bare terms before it reaches FTS5. A raw query would
 /// be parsed as FTS5 syntax, where a stray quote or `*` is a syntax error and a
 /// bare `AND` is an operator — a search for "index AND search" would silently
 /// mean something the user did not type, and a search for `foo(` would fail
 /// outright.
-pub fn keyword_search(db: &Connection, query: &str, limit: usize) -> Result<Vec<u64>> {
+pub fn keyword_search(
+    db: &Connection,
+    query: &str,
+    limit: usize,
+    groups: &[Vec<String>],
+) -> Result<Vec<u64>> {
     let terms: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|t| !t.is_empty())
@@ -118,9 +184,34 @@ pub fn keyword_search(db: &Connection, query: &str, limit: usize) -> Result<Vec<
     }
     let match_expr = terms.join(" OR ");
 
-    let mut stmt = db
-        .prepare("SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2")?;
-    let rows = stmt.query_map(params![match_expr, limit as i64], |r| r.get::<_, i64>(0))?;
+    // Unfiltered searches keep the 0.2.0 statement exactly: no join to chunks
+    // and files, so the common case is not taxed by a feature it is not using.
+    let (sql, mut args) = if groups.is_empty() {
+        (
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?"
+                .to_string(),
+            vec![Value::Text(match_expr)],
+        )
+    } else {
+        let (predicate, binds) = glob_predicate(groups);
+        let mut args = vec![Value::Text(match_expr)];
+        args.extend(binds.into_iter().map(Value::Text));
+        (
+            format!(
+                "SELECT x.rowid FROM chunks_fts x
+                 JOIN chunks c ON c.id = x.rowid
+                 JOIN files f ON f.id = c.file_id
+                 WHERE x.chunks_fts MATCH ? AND {predicate}
+                 ORDER BY x.rank LIMIT ?"
+            ),
+            args,
+        )
+    };
+    // Bound last because `LIMIT` is the final placeholder in either statement.
+    args.push(Value::Integer(limit as i64));
+
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
     Ok(rows
         .collect::<Result<Vec<i64>, _>>()?
         .into_iter()
@@ -254,11 +345,141 @@ mod tests {
         db
     }
 
+    /// A corpus with the same word in four files: two under `src`, two not,
+    /// two Rust, two Markdown. Enough to tell a union from an intersection.
+    fn mixed() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.pragma_update(None, "foreign_keys", "ON").unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        for path in [
+            "/proj/src/lib.rs",
+            "/proj/src/notes.md",
+            "/proj/vendor/other.rs",
+            "/proj/README.MD",
+        ] {
+            let f = insert_file(&db, path, "h", 10, 0).unwrap();
+            insert_chunk(&db, f, 0, 1, 5, "retry backoff and jitter").unwrap();
+        }
+        db
+    }
+
+    /// `groups()` output for a filter, so the tests exercise the same patterns
+    /// the CLI produces rather than hand-written globs that could drift from it.
+    fn filter(paths: &[&str], exts: &[&str], langs: &[&str]) -> Vec<Vec<String>> {
+        let own = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        crate::filter::Filter::new(&own(paths), &own(exts), &own(langs))
+            .unwrap()
+            .groups()
+            .to_vec()
+    }
+
+    fn paths_of(db: &Connection, ids: &[u64]) -> Vec<String> {
+        let mut out: Vec<String> = ids
+            .iter()
+            .map(|&i| chunk(db, i).unwrap().unwrap().path)
+            .collect();
+        out.sort();
+        out
+    }
+
     #[test]
     fn keyword_search_finds_an_exact_identifier() {
         let db = seeded();
-        let hits = keyword_search(&db, "EMBED_BATCH", 10).unwrap();
+        let hits = keyword_search(&db, "EMBED_BATCH", 10, &[]).unwrap();
         assert_eq!(hits, vec![1], "expected the defining chunk, got {hits:?}");
+    }
+
+    #[test]
+    fn a_path_glob_selects_only_what_is_under_it() {
+        let db = mixed();
+        let ids = filtered_chunk_ids(&db, &filter(&["src/**"], &[], &[])).unwrap();
+        assert_eq!(
+            paths_of(&db, &ids),
+            ["/proj/src/lib.rs", "/proj/src/notes.md"]
+        );
+    }
+
+    /// An absolute pattern means exactly itself: it must not pick up the
+    /// `*/` anchoring a relative one gets.
+    #[test]
+    fn an_absolute_glob_matches_only_what_it_literally_covers() {
+        let db = mixed();
+        let ids = filtered_chunk_ids(&db, &filter(&["/proj/vendor/*"], &[], &[])).unwrap();
+        assert_eq!(paths_of(&db, &ids), ["/proj/vendor/other.rs"]);
+    }
+
+    #[test]
+    fn extensions_union_and_a_language_resolves_to_the_same_set() {
+        let db = mixed();
+        let by_ext = filtered_chunk_ids(&db, &filter(&[], &["rs"], &[])).unwrap();
+        let by_lang = filtered_chunk_ids(&db, &filter(&[], &[], &["rust"])).unwrap();
+        assert_eq!(paths_of(&db, &by_ext), paths_of(&db, &by_lang));
+        assert_eq!(
+            paths_of(&db, &by_ext),
+            ["/proj/src/lib.rs", "/proj/vendor/other.rs"]
+        );
+
+        let both = filtered_chunk_ids(&db, &filter(&[], &["rs", "md"], &[])).unwrap();
+        assert_eq!(both.len(), 4, "repeating --ext must union, not intersect");
+    }
+
+    /// `README.MD` is Markdown. Extension matching folds case, so a filter
+    /// written the way anyone would write it does not miss it.
+    #[test]
+    fn extension_matching_is_case_insensitive() {
+        let db = mixed();
+        let ids = filtered_chunk_ids(&db, &filter(&[], &["md"], &[])).unwrap();
+        assert_eq!(
+            paths_of(&db, &ids),
+            ["/proj/README.MD", "/proj/src/notes.md"]
+        );
+    }
+
+    #[test]
+    fn a_path_and_an_extension_intersect() {
+        let db = mixed();
+        let ids = filtered_chunk_ids(&db, &filter(&["src/**"], &["md"], &[])).unwrap();
+        assert_eq!(
+            paths_of(&db, &ids),
+            ["/proj/src/notes.md"],
+            "the README is Markdown but is not under src"
+        );
+    }
+
+    /// The whole point of the release: the keyword half must see the same
+    /// subset the vector half is given, or fusion ranks a chunk one side was
+    /// never allowed to return.
+    #[test]
+    fn the_keyword_half_honours_the_same_filter() {
+        let db = mixed();
+        let unfiltered = keyword_search(&db, "retry backoff", 10, &[]).unwrap();
+        assert_eq!(unfiltered.len(), 4);
+
+        let scoped =
+            keyword_search(&db, "retry backoff", 10, &filter(&["src/**"], &[], &[])).unwrap();
+        assert_eq!(
+            paths_of(&db, &scoped),
+            ["/proj/src/lib.rs", "/proj/src/notes.md"]
+        );
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_selects_nothing() {
+        let db = mixed();
+        let groups = filter(&["nowhere/**"], &[], &[]);
+        assert_eq!(matching_files(&db, &groups).unwrap(), 0);
+        assert!(filtered_chunk_ids(&db, &groups).unwrap().is_empty());
+        assert!(
+            keyword_search(&db, "retry", 10, &groups)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn no_filter_counts_every_file() {
+        let db = mixed();
+        assert_eq!(matching_files(&db, &[]).unwrap(), 4);
     }
 
     #[test]
@@ -274,7 +495,7 @@ mod tests {
             "NEAR(a b)",
             "-negated",
         ] {
-            let result = keyword_search(&db, query, 10);
+            let result = keyword_search(&db, query, 10, &[]);
             assert!(
                 result.is_ok(),
                 "query {query:?} errored: {:?}",
@@ -286,16 +507,22 @@ mod tests {
     #[test]
     fn a_query_with_no_terms_matches_nothing() {
         let db = seeded();
-        assert!(keyword_search(&db, "!!! ???", 10).unwrap().is_empty());
+        assert!(keyword_search(&db, "!!! ???", 10, &[]).unwrap().is_empty());
     }
 
     #[test]
     fn deleting_a_file_removes_its_chunks_from_the_keyword_index() {
         let db = seeded();
-        assert!(!keyword_search(&db, "EMBED_BATCH", 10).unwrap().is_empty());
+        assert!(
+            !keyword_search(&db, "EMBED_BATCH", 10, &[])
+                .unwrap()
+                .is_empty()
+        );
         delete_file(&db, "/a/lib.rs").unwrap();
         assert!(
-            keyword_search(&db, "EMBED_BATCH", 10).unwrap().is_empty(),
+            keyword_search(&db, "EMBED_BATCH", 10, &[])
+                .unwrap()
+                .is_empty(),
             "cascade delete left the keyword index stale"
         );
     }
@@ -319,6 +546,9 @@ mod tests {
         // Opening it with the current schema must index what is already there.
         db.execute_batch(SCHEMA).unwrap();
         backfill_fts(&db).unwrap();
-        assert_eq!(keyword_search(&db, "EMBED_BATCH", 10).unwrap(), vec![1]);
+        assert_eq!(
+            keyword_search(&db, "EMBED_BATCH", 10, &[]).unwrap(),
+            vec![1]
+        );
     }
 }

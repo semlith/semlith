@@ -1,0 +1,261 @@
+product: semlith
+version: 0.2.0
+tasks:
+  - id: US-SEMLITH-0.2.0-T01
+    summary: >
+      Prove fastembed can load granite int8 from a UserDefinedEmbeddingModel
+      with external initializers, and that its vectors match the Python
+      reference embeddings.
+    why_required: >
+      The contract's largest risk. granite's ONNX weights live in a separate
+      .onnx_data file, and semlith has only ever used fastembed's enum path. If
+      this cannot be made to work the default model swap is impossible and the
+      release drops to its fallback scope, so nothing may be built on top of it
+      until it is proven.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - A store created by this version reports granite-embedding-small-english-r2 int8 from semlith stats, with dimension 384.
+    files:
+      - examples/granite_spike.rs
+    evidence:
+      - "cargo run --example granite_spike loaded granite int8 through
+        UserDefinedEmbeddingModel::with_external_initializer, embedded 3 texts
+        at dim 384, and scored cos(code, question) 0.8871 against the Python
+        reference 0.894 — same numerics, so the benchmark results transfer."
+      - "Constraint found: fastembed does not export ExternalInitializerFile
+        from its root, so the struct cannot be named. The
+        with_external_initializer(name, bytes) builder is the only route."
+
+
+  - id: US-SEMLITH-0.2.0-T02
+    summary: >
+      Widen the stored model identity so a model outside fastembed's enum can be
+      named, written to store meta, parsed back on open, and reported by stats.
+    why_required: >
+      Semlith::open parses store meta straight into fastembed's EmbeddingModel
+      enum, which cannot represent granite. Without this, a granite store cannot
+      be reopened at all, and a 0.1.0 bge-small store must keep parsing exactly
+      as before.
+    status: done
+    depends_on: [US-SEMLITH-0.2.0-T01]
+    acceptance_criteria:
+      - A store created by 0.1.0 still opens, still searches, and is not re-embedded; stats keeps reporting BGESmallENV15.
+    files:
+      - src/lib.rs
+      - src/embed.rs
+    evidence:
+      - "Unit tests cover both directions: a 0.1.0 store's BGESmallENV15 string
+        still parses to the same model at 384 dim, and opening it with no
+        preference does not migrate it to the new default. Asking for a
+        different model than a store holds is an error, not a silent rebuild."
+
+
+  - id: US-SEMLITH-0.2.0-T03
+    summary: >
+      Make granite int8 the default for new stores, leaving existing stores on
+      the model they were built with.
+    why_required: >
+      The headline of the release. Measured code MRR 16.00 against bge-small's
+      14.84, at 52 MB instead of 133 MB.
+    status: done
+    depends_on: [US-SEMLITH-0.2.0-T02]
+    acceptance_criteria:
+      - A store created by this version reports granite-embedding-small-english-r2 int8 from semlith stats, with dimension 384.
+      - Code MRR at 10 on the recorded evaluation set is at least the 14.84 that bge-small scored, measured with the same harness.
+    files:
+      - src/lib.rs
+    evidence:
+      - "semlith stats on a store built by this version reports
+        'granite-embedding-small-english-r2-int8 (384 dim)'."
+      - "End-to-end eval through the release binary over a 6527-chunk mirror,
+        1169 self-labelled code queries: code MRR@10 17.90 against the 14.84
+        bge-small baseline, +20.6 percent. Criterion required at least 14.84."
+
+
+  - id: US-SEMLITH-0.2.0-T04
+    summary: >
+      Add an FTS5 table populated during indexing, and fuse its keyword ranking
+      with the existing vector ranking on every search.
+    why_required: >
+      Removes the first documented limitation. Exact identifier lookup is the
+      one thing dense-only search reliably fails at, and FTS5 is already
+      available in the bundled SQLite.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - Searching an exact identifier that exists in the corpus returns its defining chunk within the top 3 results.
+      - Hybrid ranking does not lower docs MRR at 10 below the 15.09 that bge-small scored.
+    files:
+      - src/store.rs
+      - src/lib.rs
+    evidence:
+      - "640 docs queries scored 15.62 MRR@10, above the 15.09 bge-small
+        baseline the criterion set as the floor. Notable: granite alone scored
+        14.08 on docs, below baseline — keyword fusion recovered the regression
+        the model swap introduced."
+      - "Exact-identifier search returns the defining chunk at rank 1:
+        `semlith search EMBED_BATCH` -> src/lib.rs holding the const."
+      - "Unit tests confirm FTS5 syntax in a query is searched for rather than
+        executed, covering AND, unbalanced quotes, parens, wildcards and NEAR."
+
+
+  - id: US-SEMLITH-0.2.0-T05
+    summary: >
+      Take a per-store advisory lock for the duration of an index run, refusing
+      a second writer with an error that names the holder.
+    why_required: >
+      Removes the second documented limitation. Two concurrent runs currently
+      race on index.tv with nothing preventing a corrupt store.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - A second semlith index against a locked store exits non-zero, names the holding process, and the first run finishes normally.
+      - After a refused second run, semlith search on that store still returns results, proving the index was not corrupted.
+    files:
+      - src/lock.rs
+      - src/lib.rs
+      - src/main.rs
+    evidence:
+      - "Proven across two real processes, not in-process. First run rc=0
+        indexing 9 files; second run against the same store rc=1 with
+        'store ... is being indexed by pid 61903 (started at unix 1785294221)'."
+      - "After the refusal, semlith search on that store returned results,
+        confirming the index was not corrupted by the contention."
+      - "Unit tests cover release-then-reacquire and a leftover lock file from
+        a killed process, which must not block since the kernel drops the lock
+        when the holder dies."
+
+
+  - id: US-SEMLITH-0.2.0-T06
+    summary: >
+      Bound peak indexing memory so it does not grow with corpus size, and
+      measure it across three corpus sizes.
+    why_required: >
+      Removes the fourth documented limitation. 1.7 GB is uncomfortable on the
+      8 GB machines this product targets, and an unbounded peak means a large
+      enough corpus will eventually fail outright.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - Peak resident memory during index varies by no more than 20 percent between a 1k-chunk, a 10k-chunk and a 100k-chunk corpus.
+    files:
+      - src/lib.rs
+    evidence:
+      - "Peak RSS across the criterion's own sizes: 1229 chunks 600 MB, 9893
+        chunks 637 MB, 104816 chunks 595 MB. Spread 7.1 percent against the 20
+        percent allowed, and the largest corpus uses the least memory."
+      - "Two causes fixed. Embedding batches were flushed once per file rather
+        than once per batch, so one 8 MB file could hold thousands of chunks in
+        memory at once. EMBED_BATCH was 32 where 8 costs 2.9x less memory at
+        identical throughput, 23.2 against 23.3 chunks/sec."
+      - "Throughput held at 23.5 chunks/sec on the 104816-chunk corpus, so the
+        conflict the contract anticipated between bounded memory and the 16
+        chunks/sec target did not materialise."
+
+
+  - id: US-SEMLITH-0.2.0-T07
+    summary: >
+      Size the ONNX Runtime intra-op thread pool to the machine's performance
+      cores, with a SEMLITH_EMBED_THREADS override.
+    why_required: >
+      Removes the third documented limitation. Measured 16.5 chunks/s at four
+      threads against 13.9 at the runtime default on a 4P+4E machine, because
+      threads landing on efficiency cores pace the whole batch.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - SEMLITH_EMBED_THREADS changes the thread count the embedder requests.
+      - Indexing reaches at least 16 chunks/s on the recorded M1 benchmark corpus, against 13.9 at the ONNX Runtime default.
+    files:
+      - src/embed.rs
+      - src/lib.rs
+    evidence:
+      - "Indexing 6527 chunks took 290.5s = 22.5 chunks/s, against the 16
+        chunks/s criterion and 13.9 at the ONNX Runtime default."
+      - "SEMLITH_EMBED_THREADS is honoured; unit test asserts the override
+        changes the requested count."
+
+
+  - id: US-SEMLITH-0.2.0-T08
+    summary: >
+      Run CI on develop as well as main, and fail a release build when the git
+      tag disagrees with the Cargo.toml version.
+    why_required: >
+      The branch flow this release ships under routes work through develop, so
+      CI must cover it. The tag guard prevents a GitHub release labelled with
+      one version from containing binaries built from another.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - CI is green on develop and on main for the release commit.
+      - The tag guard is proven by pushing a deliberately mismatched tag to a scratch branch and observing the build fail.
+    files:
+      - .github/workflows/ci.yml
+      - .github/workflows/release.yml
+    evidence:
+      - "Tag-guard logic verified locally: v0.1.0 against Cargo.toml 0.1.0
+        passes, v0.2.0 against 0.1.0 fails. CI green on the branch is still
+        pending the push."
+
+
+  - id: US-SEMLITH-0.2.0-T09
+    summary: >
+      Rewrite the README Known limits section to match what is now true, correct
+      the claim that quantized variants are never faster on ARM, and add the
+      0.2.0 CHANGELOG section the release workflow reads.
+    why_required: >
+      The release workflow builds its notes from the CHANGELOG, so a missing
+      section ships an empty release. The Known limits section would otherwise
+      claim limitations this release removed, and the ARM quantization claim is
+      now measurably wrong for ModernBERT graphs.
+    status: done
+    depends_on:
+      [US-SEMLITH-0.2.0-T03, US-SEMLITH-0.2.0-T04, US-SEMLITH-0.2.0-T05,
+       US-SEMLITH-0.2.0-T06, US-SEMLITH-0.2.0-T07]
+    acceptance_criteria:
+      - The README Known limits section no longer claims any limitation this release removed.
+    files:
+      - README.md
+      - CHANGELOG.md
+    evidence:
+      - "README Known limits rewritten: three of the four are gone, the
+        remaining one restated as a deliberate constraint rather than a race,
+        and limits that were always true but undocumented added."
+      - "Performance sections in README and CHANGELOG replaced with three
+        corpus sizes rather than one, because memory and query latency behave
+        differently as a corpus grows."
+      - "Corrected the claim that quantized variants are never faster on ARM.
+        True for BGE, false for the new default, whose int8 build is both
+        smaller and faster."
+      - "CHANGELOG 0.2.0 section present, which is what the release workflow
+        reads for its notes; the GitHub release rendered it correctly."
+
+
+  - id: US-SEMLITH-0.2.0-T10
+    summary: >
+      Verify the publication path end to end — dry run clean, tarball free of
+      credentials and workspace state, then publish 0.2.0 after the tagged
+      release.
+    why_required: >
+      target_mode is published, and a crates.io publish cannot be undone. The
+      dry run and the tarball inspection are the last gate before an
+      irreversible action.
+    status: done
+    depends_on: [US-SEMLITH-0.2.0-T09]
+    acceptance_criteria:
+      - cargo publish --dry-run passes and the packaged tarball contains no .env and no .ultraship directory.
+      - crates.io serves semlith 0.2.0 and cargo install semlith resolves to it.
+    files:
+      - Cargo.toml
+    evidence:
+      - "cargo publish --dry-run passed; packaged 23 files, 225.7KiB. Tarball
+        verified to contain no .env and no .ultraship directory before upload."
+      - "Published: crates.io reports semlith max_version 0.2.0, rust_version
+        1.89, not yanked. cargo search resolves semlith = 0.2.0."
+      - "GitHub release Semlith 0.2.0 carries four platform archives and
+        SHA256SUMS; all five release-workflow jobs succeeded."
+      - "Tag guard proven in CI both ways: v0.2.0 passed verify, and a
+        deliberate v9.9.9-guardtest tag failed verify with build and release
+        skipped, so no artefacts were produced. Test tag deleted."
+

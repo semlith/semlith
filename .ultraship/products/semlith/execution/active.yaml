@@ -1,0 +1,34 @@
+product: semlith
+version: 0.3.0
+execution_state: DEVELOPING
+checkpoint: null
+blockers: []
+
+release_fit:
+  assessment: high
+  reasons:
+    - >
+      The workspace resource profile records minimize_cost: true and
+      allow_parallel_agents: false. This release fits inside that: one crate,
+      no new dependency, no schema migration, and a single sequential build
+      path with no fan-out required.
+    - >
+      The hard part is already solved upstream. turbovec 0.9.0 ships
+      IdMapIndex::search_with_allowlist, so the dense filter is an argument
+      rather than a re-implementation of the search kernel.
+    - >
+      No store migration. files.path has been present since 0.1.0, so filtering
+      is a read-side change only and 0.2.0 stores need nothing done to them.
+    - >
+      The publication path was exercised end to end in 0.2.0 — tag guard, four
+      platform archives, crates.io dry run and publish all proven — so the
+      release half of this version is a repeat, not a first attempt.
+  major_cost_drivers:
+    - >
+      Building an end-to-end fixture store where the filtered subset is a small
+      minority of chunks, which is the only way to prove allowlist filtering
+      beats post-filtering rather than assert it.
+    - >
+      Re-measuring unfiltered search latency on the 100k-chunk corpus to show
+      the filter path did not tax the common case.
+  recommended_scope_change: null
