@@ -25,7 +25,7 @@ versions:
       re-embedded as they are saved, and an agent already connected over MCP searches the new
       contents without restarting its server.
     detail: specified
-    status: planned
+    status: released
   - version: 0.5.0
     outcome: >
       A developer searches several stores at once from a single query, so an agent working across

@@ -360,7 +360,7 @@ tasks:
       and the tarball inspection are the last gate before an irreversible
       action. 0.3.0 shipped straight from main and recorded that as a
       limitation; doing it properly is an acceptance criterion this time.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T07]
     acceptance_criteria:
       - CI green on develop and on main for the release commit, with every action
@@ -380,4 +380,25 @@ tasks:
       - Cargo.toml
       - .github/workflows/ci.yml
       - .github/workflows/release.yml
-    evidence: []
+    evidence:
+      - "Shipped through the branch flow this time: feat/0.4.0 → PR #9 →
+         develop → PR #10 → main → tag v0.4.0. 0.3.0 committed straight to main
+         and recorded that as a limitation; this release closes it."
+      - "Started from a freshly pulled develop, and the open Dependabot PR was
+         landed first rather than left to conflict. Its CI had failed at job
+         setup because the branch predated the SHA-pinning commit — the trap
+         recorded after 0.3.0 — so it was rebased, went green on both runners,
+         and was merged before feat/0.4.0 was cut."
+      - "CI green on develop (PR #9) and on main (release commit 1eff5af) on
+         ubuntu-latest and macos-latest, with CodeQL, every action still pinned
+         to a full-length SHA. Confirmed green on main before the tag was
+         pushed, so the release workflow could not fail after the tag existed."
+      - "cargo publish --dry-run passed; the package list was inspected before
+         upload: 27 files, 321.2 KiB, no .env and no .ultraship. .env is
+         gitignored and no .env file is tracked."
+      - "release.yml — 6 of 6 jobs green. GitHub release 'Semlith 0.4.0' is
+         public, not a draft, with the four platform archives and SHA256SUMS."
+      - "Published on explicit go-ahead, since crates.io cannot be undone:
+         crates.io reports max_version 0.4.0, rust_version 1.89, not yanked,
+         uploaded 2026-07-29T18:30:54Z. `cargo install semlith --version 0.4.0
+         --locked` on a clean root installs and reports 'semlith 0.4.0'."
