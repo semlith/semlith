@@ -110,15 +110,59 @@ just those lines instead of the whole file.
 | Command | What it does |
 |---|---|
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. |
-| `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output. |
+| `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
 | `semlith stats` | File count, chunk count, model, index size. |
 | `semlith files` | List indexed files. |
 | `semlith forget <PATH>` | Drop one file from the store. |
 | `semlith mcp` | Run as an MCP server over stdio. |
 | `semlith models` | List available embedding models. |
+| `semlith languages` | List the language names `--lang` accepts. |
 
 Global: `--store <DIR>` picks the store directory (default `.semlith`, or the
 `SEMLITH_STORE` environment variable).
+
+## Searching part of a corpus
+
+One store per repository, and then ask it about one subsystem:
+
+```sh
+semlith search "how does retry backoff work" --path 'src/http/**'
+semlith search "how does retry backoff work" --ext rs --ext toml
+semlith search "how does retry backoff work" --lang rust
+```
+
+Each flag is repeatable. **Repeats union, kinds intersect** — so
+`--ext rs --ext toml` means "Rust or TOML", while `--path 'src/**' --ext md`
+means "Markdown, under `src`".
+
+The filter is applied before either half of the search picks its results, not
+after. Ask for eight hits inside a subdirectory and you get the eight best hits
+in that subdirectory, not whatever survives filtering the eight best hits in the
+repository — which, for a subdirectory that is a small part of the corpus, is
+usually nothing.
+
+Three things about the globs are worth knowing:
+
+- **A relative pattern matches anywhere in the tree.** Paths are stored
+  absolute, so `--path 'src/**'` is matched as `*/src/**` and finds
+  `/home/me/proj/src/lib.rs` from any working directory. Start a pattern with
+  `/` to mean exactly that path and nothing else.
+- **`*` crosses `/`.** This is SQLite's `GLOB`, which has no separate `**`, so
+  `--path 'src/*'` already reaches the whole subtree. Writing `src/**` is
+  allowed and means the same thing.
+- **Matching ignores case**, so `--ext md` finds `README.MD`.
+
+A filter that selects no indexed file says so, rather than reporting that
+nothing in the corpus matched the query:
+
+```
+$ semlith search "retry backoff" --path 'srv/**'
+no files match the filter (store has 6527 chunks)
+```
+
+`--lang` is a fixed table of extensions, not content sniffing. Run
+`semlith languages` to see it; an unrecognised name is an error, not a silent
+empty result.
 
 ## Using it from an agent
 
@@ -144,6 +188,14 @@ Or in an MCP client config:
 
 The server loads the embedding model at startup, so the first tool call is as
 fast as the rest.
+
+`semlith_search` takes the same filters as the CLI, as optional `path`, `ext`
+and `lang` arrays, so an agent working on one subsystem can ask about that
+subsystem instead of the whole repository:
+
+```json
+{ "query": "how does retry backoff work", "path": ["src/http/**"], "lang": ["rust"] }
+```
 
 ## What gets indexed
 
@@ -193,6 +245,14 @@ Searches consult the vector index and SQLite's FTS5 keyword index together,
 fusing the two rankings by position. Dense vectors alone are weak at exact
 identifiers — every constant in a codebase embeds to roughly the same place —
 and keywords alone cannot answer a question phrased as a sentence.
+
+`--path`, `--ext` and `--lang` resolve to one set of chunk ids by a single
+SQLite query against the stored file paths. That set becomes an allowlist the
+vector index scans inside, and the same predicate goes into the FTS5 query, so
+both halves rank within the subset and fusion never sees a chunk one half was
+forbidden to return. Nothing is stored for it: the file path has been in the
+database since 0.1.0, so filtering works on an existing store with no
+re-indexing.
 
 ## Performance
 
@@ -267,6 +327,10 @@ Everyone participating is expected to follow the
   low tens of milliseconds at a hundred thousand. The index scan is linear.
 - The default model is English-only. `semlith models` lists multilingual
   alternatives, which must be chosen when the store is created.
+- Search filters are SQLite `GLOB` patterns, so `*` crosses `/` and there is no
+  distinct `**`, no regex, and no way to express "not this path". `--lang` maps
+  a fixed table of extensions and never reads file contents, so a Perl script
+  named `build` is not Perl as far as semlith is concerned.
 - Results are not reranked. A cross-encoder over the top results would improve
   ordering, at a cost per query that a local tool should not pay by default.
 
