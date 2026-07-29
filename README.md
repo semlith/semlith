@@ -110,6 +110,7 @@ just those lines instead of the whole file.
 | Command | What it does |
 |---|---|
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. |
+| `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
 | `semlith stats` | File count, chunk count, model, index size. |
 | `semlith files` | List indexed files. |
@@ -120,6 +121,51 @@ just those lines instead of the whole file.
 
 Global: `--store <DIR>` picks the store directory (default `.semlith`, or the
 `SEMLITH_STORE` environment variable).
+
+## Keeping the store current
+
+`semlith index` is a snapshot of the moment it ran. Leave `semlith watch`
+running instead and a file is re-embedded when you save it:
+
+```sh
+semlith watch ~/notes ./src
+```
+
+```
+watching notes, src — 412 files, 2183 chunks (0 indexed at startup, 412 unchanged)
+  ~ src/client.rs
+  1 re-embedded, 0 removed, 6 chunks in 0.3s
+```
+
+It starts with the same incremental pass `index` does, so anything that changed
+while it was not running is caught up first, and then it waits on filesystem
+events — no polling, no rescanning. Measured on a 1000-file corpus: no
+measurable CPU over a 60-second idle window, and about a second from saving a
+file to that file's new text being searchable.
+
+New files are indexed, deleted files lose their chunks, and a rename moves the
+file rather than duplicating it. An editor that saves by writing a temp file and
+renaming it over the original is handled as an edit. `.gitignore`, hidden files
+and the store directory itself are skipped, exactly as `index` skips them.
+
+Saves are batched: events are collected until things go quiet for `--debounce`
+milliseconds (500 by default), so one save — or a formatter rewriting a file
+three times — costs one re-embed and one index write.
+
+Two things worth knowing:
+
+- **`watch` holds the store's write lock for as long as it runs.** A store has
+  one writer. While it is running, `semlith index` against that store exits
+  non-zero and names the watcher's process; searching is unaffected.
+- **An MCP server already running picks the changes up.** It reloads the vector
+  index when the watcher replaces it, so an agent that connected an hour ago
+  searches what you saved a second ago without restarting anything.
+
+What it does not cover: changes made while it was not running are caught by its
+next startup pass, not retroactively; network filesystems do not deliver
+reliable events and are not supported; and on Linux a very large tree can
+exhaust the per-user inotify watch limit, which is reported on stderr rather
+than leaving a watcher that is running but watching nothing.
 
 ## Searching part of a corpus
 
@@ -187,7 +233,9 @@ Or in an MCP client config:
 ```
 
 The server loads the embedding model at startup, so the first tool call is as
-fast as the rest.
+fast as the rest. It also notices when the store has been rewritten underneath
+it — run `semlith watch` alongside and the agent's answers track your working
+tree, with no restart of the server or the agent.
 
 `semlith_search` takes the same filters as the CLI, as optional `path`, `ext`
 and `lang` arrays, so an agent working on one subsystem can ask about that
@@ -319,7 +367,13 @@ Everyone participating is expected to follow the
 
 - One writer per store. A second `index` run against a store already being
   indexed exits with an error naming the process that holds it, rather than
-  waiting. Searching during an index run is fine.
+  waiting. Searching during an index run is fine. `semlith watch` is a writer
+  for as long as it runs, so it blocks `index` on that store the whole time.
+- `watch` misses nothing while it is running, but it is not a journal: changes
+  made while it was down are picked up by its next startup pass, not
+  reconstructed. It needs local filesystem events, so network mounts are out.
+  On Windows, Ctrl-C terminates it immediately rather than at a batch boundary,
+  which can leave a file to be re-indexed on the next run.
 - First-time indexing is bound by transformer speed on CPU, at roughly 23
   chunks/sec — a 100k-chunk corpus takes over an hour. Subsequent runs only
   touch what changed, and cost seconds.
