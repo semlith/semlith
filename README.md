@@ -17,6 +17,8 @@ Think of it as a semantic cache for everything your agent needs to know.
   downloaded once and cached.
 - **Fast.** Vector search runs on [turbovec](https://github.com/RyanCodrai/turbovec)
   (Google Research's TurboQuant, 4 bits per coordinate, SIMD scan).
+- **Hybrid.** Every query searches meaning *and* literal terms, so
+  `retry backoff` and `EMBED_BATCH` both land on the right chunk.
 - **Incremental.** Re-running `index` only re-embeds files whose contents
   changed, and drops files that disappeared.
 - **Agent-native.** Ships an MCP server, so any MCP-capable agent can call it
@@ -37,6 +39,12 @@ a pure-Rust implementation, so this step is Linux-only.
 sudo apt-get install libopenblas-dev     # Debian/Ubuntu
 sudo dnf install openblas-devel          # Fedora/RHEL
 sudo pacman -S openblas                  # Arch
+```
+
+### From crates.io
+
+```sh
+cargo install semlith
 ```
 
 ### From a release
@@ -60,7 +68,7 @@ your `PATH`.
 
 ### From source
 
-Needs a Rust toolchain (1.85+):
+Needs a Rust toolchain (1.89+):
 
 ```sh
 cargo install --git https://github.com/semlith/semlith
@@ -73,7 +81,7 @@ OpenBLAS step above you missed.
 
 ```sh
 # Index a directory. Creates ./.semlith and downloads the embedding model
-# (~130 MB) the first time.
+# (~52 MB) the first time.
 semlith index ~/notes ~/papers ./src
 
 # Ask it something.
@@ -172,10 +180,19 @@ A search embeds the query, gets ids from the index, and resolves them with one
 SQLite lookup each. The index only ever needs to hold vectors, so it stays
 small enough to sit in memory even for large corpora.
 
-Embeddings default to `BGESmallENV15` (384 dimensions), which runs on CPU via
-ONNX Runtime. Pick another with `semlith index --model <NAME>`; see
-`semlith models`. The model is fixed when the store is created, since vectors
-from two models are not comparable — to switch, delete the store and re-index.
+Embeddings default to `granite-embedding-small-english-r2`, quantized to int8
+(384 dimensions, ~52 MB), which runs on CPU via ONNX Runtime. Pick another with
+`semlith index --model <NAME>`; see `semlith models`. The model is fixed when
+the store is created, since vectors from two models are not comparable — to
+switch, delete the store and re-index.
+
+A store built by an earlier version keeps the model it was built with, so
+upgrading semlith never silently re-embeds a corpus.
+
+Searches consult the vector index and SQLite's FTS5 keyword index together,
+fusing the two rankings by position. Dense vectors alone are weak at exact
+identifiers — every constant in a codebase embeds to roughly the same place —
+and keywords alone cannot answer a question phrased as a sentence.
 
 ## Performance
 
@@ -197,9 +214,18 @@ before anything is embedded.
 Indexing is the slow half, and that cost is the embedding model, not the index
 — a transformer on CPU is simply not fast. If you have a large corpus and can
 trade some retrieval quality for throughput, `--model AllMiniLML6V2` is about
-1.8x faster (6 transformer layers instead of 12). Quantized variants such as
-`BGESmallENV15Q` were *not* faster in testing on ARM, though they do use less
-memory.
+1.8x faster (6 transformer layers instead of 12).
+
+Quantization is worth testing rather than assuming. The int8 build of the
+default model is both smaller *and* faster than its fp32 build on ARM, while
+BGE's quantized variants measured no faster than fp32 on the same machine —
+whether int8 wins depends on the model's graph, not on the architecture alone.
+
+Thread count is chosen rather than left to ONNX Runtime. Its threads
+synchronise at every operator, so on a CPU with performance and efficiency
+cores a thread on a slow core paces the whole batch; semlith uses the
+performance-core count on Apple silicon and the full count elsewhere. Override
+with `SEMLITH_EMBED_THREADS` if your machine disagrees.
 
 ## Contributing
 
@@ -237,4 +263,5 @@ Everyone participating is expected to follow the
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Note that semlith downloads embedding model weights at runtime; those are
-covered by their own licenses. The default, BAAI/bge-small-en-v1.5, is MIT.
+covered by their own licenses. The default,
+ibm-granite/granite-embedding-small-english-r2, is Apache-2.0.

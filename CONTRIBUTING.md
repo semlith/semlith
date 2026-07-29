@@ -8,7 +8,7 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## Getting set up
 
-You need a 64-bit machine and Rust 1.85 or newer. turbovec refuses to compile
+You need a 64-bit machine and Rust 1.89 or newer. turbovec refuses to compile
 on 32-bit targets by design.
 
 **On Linux, install OpenBLAS first** — turbovec's build script emits
@@ -41,7 +41,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-There is one more test that CI does not run, because it downloads a ~130 MB
+There is one more test that CI does not run, because it downloads a ~52 MB
 embedding model:
 
 ```sh
