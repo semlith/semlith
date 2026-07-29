@@ -1,0 +1,34 @@
+product: semlith
+version: 0.4.0
+execution_state: DEVELOPING
+checkpoint: null
+blockers: []
+release_fit:
+  assessment: probable
+  reasons:
+    - >
+      The workspace resource profile records minimize_cost: true and allow_parallel_agents: false.
+      This release fits inside that: one crate, one new dependency, no schema migration, and a
+      single sequential build path with no fan-out required.
+    - >
+      The expensive half is already built. Incremental re-indexing by content hash, chunk eviction,
+      the store lock and atomic index writes have all shipped since 0.1.0, so the watcher is an
+      event source feeding an existing pipeline rather than a second indexer.
+    - >
+      No store migration and no format change, so 0.3.0 stores are watchable and 0.4.0 stores stay
+      readable by 0.3.0 without work.
+    - >
+      Not `high`, for two reasons the contract names as risks: filesystem event semantics differ per
+      editor and per platform, and making a running MCP server see new vectors touches the read path
+      of a process that must stay warm. Both are ordinary work, but neither is proven yet.
+  major_cost_drivers:
+    - >
+      Proving editor-shaped behaviour (atomic save, rename) against real filesystem events rather
+      than against a mocked event stream.
+    - >
+      Measuring the non-functional criteria honestly — idle CPU, edit-to- searchable latency,
+      index-write cost per debounce window, memory across many events.
+    - >
+      The Windows `notify` backend, which CI does not exercise today, repeating the 0.3.0 gap unless
+      it is either tested or recorded before release.
+  recommended_scope_change: null
