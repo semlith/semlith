@@ -8,8 +8,28 @@ Run `ultraship views` to regenerate.
 
 | Version | Released | Mode | Delivered |
 | --- | --- | --- | --- |
+| 0.4.0 | 2026-07-29T18:30:54Z | published | A developer leaves `semlith watch` running over a repository and keeps working: a saved file is re-embedded about a second later, a new file is picked up, a deleted file loses its vectors, and a rename moves the file rather than duplicating it — with no `index` run. An agent already connected to that store over MCP sees the change on its next search, because the store counts index rewrites and a search reloads the vector index when the count has moved. |
 | 0.3.0 | 2026-07-29T16:02:02Z | published | A developer narrows a search to part of an indexed corpus by path glob, file extension or language — from the CLI and from an agent over MCP — and gets the best matches inside that subset, because the filter is applied before either half of the hybrid search picks its top-k rather than after. |
 | 0.2.0 | 2026-07-29T05:40:00Z | published | Index a repository on an ordinary 8 GB laptop without watching memory or fearing a second terminal, then find an exact identifier and a plain-English question with the same search. |
+
+### 0.4.0 known limitations
+
+- The Windows `notify` backend has never run. CI is Ubuntu and macOS only, so the platform that gets an archive built for it is the one platform whose filesystem-event path is unexercised — the same gap 0.3.0 recorded for its Windows path-separator branch, now covering a whole feature.
+
+- Ctrl-C is not clean on Windows. The signal handler is Unix-only, because Windows console handlers are a different mechanism, so an interrupted watcher there can leave a file to be re-indexed on the next run and can strand an index.tv.tmp until the next indexing pass clears it.
+
+- A watcher only sees what happens while it runs. Changes made while it was down are caught by its next startup pass, not reconstructed, and there is no reconcile for events lost to a backend queue overflow — a `git checkout` of a very large branch during a busy moment is the realistic case.
+
+- `watch` holds the store's write lock for its whole life, so `semlith index` against that store is refused for as long as it runs. Correct, and a behaviour change for anyone who scripted `index`.
+
+- Every batch that changes anything rewrites the whole index.tv. Measured at 202 KB for a 1000-file corpus, which is nothing; on a 100k-chunk store it is a multi-megabyte write per edit, and that crossover was not measured. The same untested-at-scale caveat 0.3.0 recorded for filtering applies here.
+
+- Each batch walks the watched tree to decide which event paths the indexer would have accepted. That keeps one definition of "which files count" instead of two, at the cost of a directory walk per batch, unmeasured on a tree with hundreds of thousands of entries.
+
+- Network filesystems are unsupported: they do not deliver reliable events. Nothing detects that a root is on one, so the failure mode is a watcher that runs and silently sees nothing.
+
+- A reader picks up new vectors only when it searches. `semlith stats` over a long-lived library handle still reports the vector count from when the process opened the store.
+
 
 ### 0.3.0 known limitations
 
