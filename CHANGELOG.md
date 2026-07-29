@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-29
+
+Narrows a search to part of a corpus, so one store per repository can answer a
+question about one subsystem.
+
+### Added
+
+- **`--path`, `--ext` and `--lang` on `semlith search`.** Each is repeatable.
+  Repeats union, kinds intersect: `--ext rs --ext toml` is "Rust or TOML",
+  `--path 'src/**' --ext md` is "Markdown, under `src`".
+
+  ```sh
+  semlith search "how does retry backoff work" --path 'src/http/**'
+  semlith search "how does retry backoff work" --lang rust
+  ```
+
+  The filter is applied *before* either half of the search picks its results.
+  Asking for eight hits inside a subdirectory returns the eight best hits in
+  that subdirectory, not whatever survives filtering the eight best hits in the
+  repository — which for a small subdirectory is usually nothing. Concretely:
+  the vector index is scanned under a turbovec allowlist and the FTS5 query
+  carries the same path predicate, both derived from one id-selection query, so
+  rank fusion never sees a chunk one half was forbidden to return.
+
+  Path patterns are SQLite `GLOB`. A pattern that does not start with `/` is
+  anchored as `*/<pattern>` against the stored absolute path, so `src/**`
+  works from any working directory; an absolute pattern means exactly itself.
+  `*` crosses `/`, so `src/*` already reaches the whole subtree. Matching
+  ignores case, so `--ext md` finds `README.MD`.
+
+  A filter that selects no indexed file reports that, rather than reporting
+  that the corpus does not match the query.
+
+- **The `semlith_search` MCP tool takes the same filters**, as optional `path`,
+  `ext` and `lang` arrays, which is the point of the release: an agent working
+  on one subsystem can scope its question to that subsystem.
+
+- **`semlith languages`** prints the language names `--lang` accepts and the
+  extensions each covers. An unrecognised name is an error naming this command,
+  not a silent empty result.
+
+### Notes
+
+No store format change. `files.path` has been recorded since 0.1.0, so
+filtering works on an existing store with no re-indexing, and a store written
+by 0.3.0 is readable by 0.2.0.
+
 ## [0.2.0] - 2026-07-29
 
 Removes three of the four limitations 0.1.0 shipped with, cuts peak indexing
@@ -146,6 +193,7 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/semlith/semlith/releases/tag/v0.3.0
 [0.2.0]: https://github.com/semlith/semlith/releases/tag/v0.2.0
 [0.1.0]: https://github.com/semlith/semlith/releases/tag/v0.1.0
