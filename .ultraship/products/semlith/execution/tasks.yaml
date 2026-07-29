@@ -313,7 +313,7 @@ tasks:
       section ships an empty release. The limits are the documentation that
       matters most here: a watcher that silently missed the hour it was not
       running is indistinguishable from one that is broken.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T06]
     acceptance_criteria:
       - >
@@ -326,7 +326,28 @@ tasks:
       - README.md
       - CHANGELOG.md
       - docs/architecture.md
-    evidence: []
+    evidence:
+      - "README gained a 'Keeping the store current' section with real output,
+         the debounce rule, the startup catch-up pass, and the two facts a user
+         has to know: watch holds the store's write lock for as long as it
+         runs, and a running MCP server picks the changes up. The commands
+         table lists `semlith watch`, and the agent section says what to run
+         beside `semlith mcp`."
+      - "The limits are documented where they will be read, not buried: known
+         limits now cover the blocked `index`, changes missed while the watcher
+         was down being caught by the next startup pass rather than
+         reconstructed, network filesystems being unsupported, and Windows
+         Ctrl-C terminating immediately rather than at a batch boundary."
+      - "CHANGELOG 0.4.0 section present with its compare link — that is what
+         the release workflow reads for the GitHub release notes — including a
+         Compatibility note stating no schema or index format change, verified
+         both ways against the 0.3.0 binary."
+      - "docs/architecture.md explains why the watcher is not a second indexer,
+         why one writer is held honestly rather than worked around, why
+         freshness is a counter bumped after the rename rather than an mtime,
+         and why classifying events by what is on disk removes the per-platform
+         rename special cases. notify and libc's new use are in the dependency
+         table."
 
   - id: US-SEMLITH-0.4.0-T08
     summary: >
