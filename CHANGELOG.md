@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-29
+
+Keeps a store current while you work: files are re-embedded as they are saved,
+and an agent already connected over MCP sees the change without restarting.
+
+### Added
+
+- **`semlith watch [PATHS...]`.** Stays running and re-embeds files as they are
+  saved, so `semlith index` stops being something you have to remember.
+
+  ```sh
+  semlith watch ~/notes ./src
+  ```
+
+  It begins with the same incremental pass `index` runs — so whatever changed
+  while nothing was watching is caught up — and then waits on filesystem events
+  rather than polling. Measured on a 1000-file corpus: no measurable CPU over a
+  60-second idle window, and about a second from a save to that text being
+  searchable.
+
+  New files are indexed, deleted files lose their chunks and vectors, and a
+  rename moves the file rather than duplicating it. An editor that saves by
+  writing a temp file and renaming it over the original is treated as an edit,
+  not as a deletion followed by a new file. Ignore rules come from the same walk
+  `index` uses, so `.gitignore`, hidden files and the store's own directory are
+  skipped by construction rather than by a second set of rules.
+
+  Events are batched until things go quiet for `--debounce` milliseconds (500 by
+  default), so one save — or a formatter rewriting a file three times — costs one
+  re-embed and one index write.
+
+- **A long-running reader now sees another process's writes.** The store counts
+  index rewrites, and a search reloads the vector index when that count has
+  moved. In practice: run `semlith watch` beside your agent's `semlith mcp`
+  server, and the agent's answers track your working tree with nothing
+  restarted. The check is one SQLite read per search.
+
+- **Ctrl-C stops a watcher cleanly.** `SIGINT` and `SIGTERM` end it at a batch
+  boundary, so `index.tv` is written whole or not at all and no temp index is
+  left behind. A second signal kills it outright. Unix only; on Windows the
+  default terminate-immediately behaviour applies.
+
+### Changed
+
+- `semlith watch` holds the store's write lock for as long as it runs. A store
+  has one writer, so `semlith index` against a watched store exits non-zero and
+  names the watcher's process. Searching is unaffected.
+- An indexing pass that changes nothing no longer rewrites `index.tv`.
+
+### Compatibility
+
+No schema change and no index format change. A 0.3.0 store is watched without
+re-indexing, and a store written by 0.4.0 opens, searches and indexes under
+0.3.0 — both verified against the 0.3.0 release binary. The only addition to the
+store is one row in the existing `meta` table.
+
 ## [0.3.0] - 2026-07-29
 
 Narrows a search to part of a corpus, so one store per repository can answer a
@@ -193,7 +249,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/semlith/semlith/releases/tag/v0.4.0
 [0.3.0]: https://github.com/semlith/semlith/releases/tag/v0.3.0
 [0.2.0]: https://github.com/semlith/semlith/releases/tag/v0.2.0
 [0.1.0]: https://github.com/semlith/semlith/releases/tag/v0.1.0
