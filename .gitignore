@@ -1,3 +1,9 @@
 /target
 .semlith/
 .DS_Store
+
+# Publishing credentials — never commit
+.env
+
+# UltraShip: transient deploy/publish hook output
+.ultraship/products/*/evidence/
