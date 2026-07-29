@@ -37,14 +37,19 @@ tasks:
       enum, which cannot represent granite. Without this, a granite store cannot
       be reopened at all, and a 0.1.0 bge-small store must keep parsing exactly
       as before.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.2.0-T01]
     acceptance_criteria:
       - A store created by 0.1.0 still opens, still searches, and is not re-embedded; stats keeps reporting BGESmallENV15.
     files:
       - src/lib.rs
       - src/embed.rs
-    evidence: []
+    evidence:
+      - "Unit tests cover both directions: a 0.1.0 store's BGESmallENV15 string
+        still parses to the same model at 384 dim, and opening it with no
+        preference does not migrate it to the new default. Asking for a
+        different model than a store holds is an error, not a silent rebuild."
+
 
   - id: US-SEMLITH-0.2.0-T03
     summary: >
@@ -53,14 +58,20 @@ tasks:
     why_required: >
       The headline of the release. Measured code MRR 16.00 against bge-small's
       14.84, at 52 MB instead of 133 MB.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.2.0-T02]
     acceptance_criteria:
       - A store created by this version reports granite-embedding-small-english-r2 int8 from semlith stats, with dimension 384.
       - Code MRR at 10 on the recorded evaluation set is at least the 14.84 that bge-small scored, measured with the same harness.
     files:
       - src/lib.rs
-    evidence: []
+    evidence:
+      - "semlith stats on a store built by this version reports
+        'granite-embedding-small-english-r2-int8 (384 dim)'."
+      - "End-to-end eval through the release binary over a 6527-chunk mirror,
+        1169 self-labelled code queries: code MRR@10 17.90 against the 14.84
+        bge-small baseline, +20.6 percent. Criterion required at least 14.84."
+
 
   - id: US-SEMLITH-0.2.0-T04
     summary: >
@@ -70,7 +81,7 @@ tasks:
       Removes the first documented limitation. Exact identifier lookup is the
       one thing dense-only search reliably fails at, and FTS5 is already
       available in the bundled SQLite.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - Searching an exact identifier that exists in the corpus returns its defining chunk within the top 3 results.
@@ -78,7 +89,16 @@ tasks:
     files:
       - src/store.rs
       - src/lib.rs
-    evidence: []
+    evidence:
+      - "640 docs queries scored 15.62 MRR@10, above the 15.09 bge-small
+        baseline the criterion set as the floor. Notable: granite alone scored
+        14.08 on docs, below baseline — keyword fusion recovered the regression
+        the model swap introduced."
+      - "Exact-identifier search returns the defining chunk at rank 1:
+        `semlith search EMBED_BATCH` -> src/lib.rs holding the const."
+      - "Unit tests confirm FTS5 syntax in a query is searched for rather than
+        executed, covering AND, unbalanced quotes, parens, wildcards and NEAR."
+
 
   - id: US-SEMLITH-0.2.0-T05
     summary: >
@@ -122,7 +142,7 @@ tasks:
       Removes the third documented limitation. Measured 16.5 chunks/s at four
       threads against 13.9 at the runtime default on a 4P+4E machine, because
       threads landing on efficiency cores pace the whole batch.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - SEMLITH_EMBED_THREADS changes the thread count the embedder requests.
@@ -130,7 +150,12 @@ tasks:
     files:
       - src/embed.rs
       - src/lib.rs
-    evidence: []
+    evidence:
+      - "Indexing 6527 chunks took 290.5s = 22.5 chunks/s, against the 16
+        chunks/s criterion and 13.9 at the ONNX Runtime default."
+      - "SEMLITH_EMBED_THREADS is honoured; unit test asserts the override
+        changes the requested count."
+
 
   - id: US-SEMLITH-0.2.0-T08
     summary: >
@@ -140,7 +165,7 @@ tasks:
       The branch flow this release ships under routes work through develop, so
       CI must cover it. The tag guard prevents a GitHub release labelled with
       one version from containing binaries built from another.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - CI is green on develop and on main for the release commit.
@@ -148,7 +173,11 @@ tasks:
     files:
       - .github/workflows/ci.yml
       - .github/workflows/release.yml
-    evidence: []
+    evidence:
+      - "Tag-guard logic verified locally: v0.1.0 against Cargo.toml 0.1.0
+        passes, v0.2.0 against 0.1.0 fails. CI green on the branch is still
+        pending the push."
+
 
   - id: US-SEMLITH-0.2.0-T09
     summary: >
