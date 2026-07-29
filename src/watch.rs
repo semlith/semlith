@@ -62,6 +62,11 @@ pub fn stop_on_signal() {}
 /// Default quiet period after the last event before a batch is indexed. One
 /// editor save is several events — write, chmod, rename — and a formatter on
 /// save is several more.
+///
+/// Measured, not guessed: at 500 ms a burst of ten rewrites of one file costs
+/// one embed and one index write, and the edit is searchable about a second
+/// after the save — against the five seconds the release budgets. One second
+/// was tried and bought nothing. `--debounce` moves it either way.
 pub const DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Longest a batch may keep growing before it is indexed anyway. Without it a

@@ -240,7 +240,7 @@ tasks:
       unmeasured is the manufactured completion the framework exists to
       prevent, and 0.3.0 already showed that a measurement can come back
       inconclusive and have to be reported as such.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.4.0-T05]
     acceptance_criteria:
       - >
@@ -266,9 +266,41 @@ tasks:
         `files`, `forget` and the MCP tools behave exactly as in 0.3.0 for a
         store nobody is watching, with the existing test suite passing unmodified.
     files:
-      - tests/watch.rs
+      - tests/measure.rs
       - tests/roundtrip.rs
-    evidence: []
+    evidence:
+      - "Measurements live in tests/measure.rs and print what they saw, so the
+         numbers are reproducible rather than quoted from a scratch script:
+         `cargo test --release --test measure -- --ignored --nocapture`."
+      - "On a 1000-file corpus (202 KB index.tv), M1, model warm: idle CPU
+         0.00s over a 60-second window — event-driven, not polling; edit to
+         searchable 1.04s against the 5s budget, measured from the write to the
+         hit appearing in a warm reader's search; a burst of ten saves inside
+         one debounce window cost exactly 1 index write; RSS 13 MB idle, and
+         after 100 successive edit events it was lower than before them (100 MB
+         → 10 MB across the churn), so it does not grow."
+      - "A measurement bug was found and fixed before any number was reported.
+         The first run said a burst cost 2 index writes; the baseline was taken
+         the instant the previous phase's hit appeared, so that phase's
+         trailing batch was counted against the burst. A direct probe of the
+         release binary showed one burst producing one '~ file' line and one
+         batch. The debounce default had been raised to 1s on the strength of
+         the bad number; with the methodology fixed, 500 ms and 1s both cost
+         one write, so the change was reverted and the comment now records what
+         was actually measured."
+      - "Cross-version, both directions, through the two release binaries: a
+         store built by 0.3.0 was watched by 0.4.0 with '0 indexed at startup,
+         2 unchanged' — no re-indexing — and the edit made during the watch
+         landed. 0.3.0 then read the 0.4.0 store: same file, chunk and vector
+         counts, and its search returned the chunk 0.4.0's watcher had added.
+         0.3.0 also indexed a further file into that store afterwards."
+      - "No schema change: after 0.4.0 the store has exactly 0.3.0's tables,
+         and the only addition is one row in the meta table that already
+         existed, index_generation=1, which 0.3.0 ignores."
+      - "The non-watch paths are untouched: cargo test — 40 passed, 0 failed,
+         unmodified, including the unit test pinning the unfiltered FTS5
+         statement to its 0.2.0 text; cargo test --test roundtrip -- --ignored
+         — 2 passed, 0 failed."
 
   - id: US-SEMLITH-0.4.0-T07
     summary: >
