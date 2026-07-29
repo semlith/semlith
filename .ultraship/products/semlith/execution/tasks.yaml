@@ -13,7 +13,7 @@ tasks:
       they can drift, and fusion would then rank a chunk one half was never
       allowed to see. One function producing one id set is what prevents that,
       so nothing else in the release can be built until it exists.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - >
@@ -23,7 +23,17 @@ tasks:
       - src/filter.rs
       - src/store.rs
       - src/lib.rs
-    evidence: []
+    evidence:
+      - "Filter::new groups patterns so repeats union and kinds intersect;
+        store::filtered_chunk_ids resolves one group list to chunk ids with a
+        single SQLite query against files.path. Unit tests cover anchoring in
+        both directions, the leading-dot form of --ext, and an unknown language."
+      - "Chosen: SQLite GLOB against lower(f.path), so matching folds case and
+        no new dependency is added. Consequence recorded as a known limit — `*`
+        crosses `/`, there is no distinct `**`, and no regex."
+      - "End-to-end through the release binary: F7a a relative glob returns the
+        same hits run from / as from the repository; F7b an absolute glob
+        returned only /…/corpus/vendor/other.rs."
 
   - id: US-SEMLITH-0.3.0-T02
     summary: >
@@ -35,7 +45,7 @@ tasks:
       hits whenever the subset is a minority of the corpus, which is the case
       the feature exists for. Filtering before the top-k is computed is the
       difference between a useful scoped search and a broken one.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.3.0-T01]
     acceptance_criteria:
       - >
@@ -45,7 +55,18 @@ tasks:
     files:
       - src/lib.rs
       - src/store.rs
-    evidence: []
+    evidence:
+      - "Measured on a 218-chunk fixture whose subsystem is 12 chunks (5.5
+        percent): `--path 'corpus/sub/**' -k 8` returned 8 hits, while the
+        unfiltered global top-8 contained 0 hits from that subsystem. A
+        post-filtered ranking would have returned nothing, which is the failure
+        this task exists to prevent."
+      - "The allowlist is intersected with the index before the call, because
+        IdMapIndex::search_with_allowlist panics on an empty allowlist and on
+        any id the index does not hold."
+      - "A filter that selects the whole index is passed as no filter, so the
+        mask is not built for no benefit; the unfiltered FTS5 statement is
+        unchanged from 0.2.0, with no join to chunks and files."
 
   - id: US-SEMLITH-0.3.0-T03
     summary: >
@@ -57,7 +78,7 @@ tasks:
       contract's fallback scope — a coherent release on its own if the rest
       runs short. The empty-selection message is what stops a typo in a glob
       from reading as "the corpus does not contain this".
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.3.0-T02]
     acceptance_criteria:
       - >
@@ -69,7 +90,14 @@ tasks:
         "no matches", and `--json` emits `[]`.
     files:
       - src/main.rs
-    evidence: []
+    evidence:
+      - "F1: on a fixture holding files inside and outside the glob, every hit
+        returned by `--path 'corpus/sub/**'` was under it — 0 escaped."
+      - "F5: `--path 'nowhere/**'` exited 0, printed
+        'no files match the filter (store has 218 chunks)' on stderr, and with
+        --json printed []."
+      - "A scoped search also reports how many files the filter selected, so a
+        glob that quietly selects almost nothing is visible rather than silent."
 
   - id: US-SEMLITH-0.3.0-T04
     summary: >
@@ -81,7 +109,7 @@ tasks:
       expressed as a glob is `--path '*.rs'`, which an agent will not reliably
       construct, and `--lang rust` is the form an agent actually reaches for.
       Without the printable map, an unknown language name is a silent miss.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.3.0-T03]
     acceptance_criteria:
       - >
@@ -96,7 +124,18 @@ tasks:
     files:
       - src/filter.rs
       - src/main.rs
-    evidence: []
+    evidence:
+      - "F3a: --ext rs and --lang rust returned identical result sets.
+        F3b: --lang klingon exited non-zero with
+        'unknown language \"klingon\"; run `semlith languages` for the list'."
+      - "F4a: --ext rs --ext toml returned both .rs and .toml hits.
+        F4b: --path 'corpus/src/**' --ext md returned exactly src/notes.md,
+        excluding the README.MD that is Markdown but not under src."
+      - "F4c: --ext md also returns README.MD, because patterns are matched
+        against lower(files.path). Extension case is noise, not signal."
+      - "25 languages, one table, printed verbatim by `semlith languages`; a
+        unit test holds the table sorted and lowercase so the printed list and
+        the lookup cannot disagree."
 
   - id: US-SEMLITH-0.3.0-T05
     summary: >
@@ -107,7 +146,7 @@ tasks:
       The outcome is stated for an agent, not a human: "so an agent can ask
       about one subsystem instead of everything". Shipping the filters on the
       CLI alone delivers the feature to the wrong caller.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.3.0-T04]
     acceptance_criteria:
       - >
@@ -116,7 +155,17 @@ tasks:
         searches the whole store exactly as 0.2.0 did.
     files:
       - src/mcp.rs
-    evidence: []
+    evidence:
+      - "Driven over real stdio JSON-RPC against the release binary.
+        F6a: a path-scoped tools/call returned the same hit set as the
+        equivalent CLI invocation. F6b: lang honoured identically.
+        F6c: omitting the filters returned the unfiltered result set."
+      - "F6d: a filter selecting nothing answers in-band with
+        'No indexed file matches that path/ext/lang filter. Try again without
+        it.', so an agent widens the filter instead of concluding the corpus is
+        empty. An unknown language is returned in-band the same way."
+      - "A bare string is accepted wherever an array is, because that is what an
+        agent produces about half the time."
 
   - id: US-SEMLITH-0.3.0-T06
     summary: >
@@ -161,7 +210,7 @@ tasks:
       section ships an empty release. The GLOB semantics are deliberate and
       surprising; undocumented, every `src/*` that behaves like `src/**` reads
       as a bug report.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.3.0-T06]
     acceptance_criteria:
       - >
@@ -173,7 +222,17 @@ tasks:
     files:
       - README.md
       - CHANGELOG.md
-    evidence: []
+    evidence:
+      - "README gained a 'Searching part of a corpus' section covering all three
+        flags, union-within-kind and intersect-across-kind, the `*/` anchoring
+        rule, that `*` crosses `/`, and case-insensitive matching. The commands
+        table and the MCP section list the new arguments."
+      - "Known limits gained the GLOB semantics and the fact that --lang is a
+        fixed extension table that never reads file contents."
+      - "CHANGELOG 0.3.0 section present with its compare link, which is what
+        the release workflow reads for the GitHub release notes."
+      - "docs/architecture.md explains why one id set drives both halves and why
+        filtering happens before the top-k rather than after."
 
   - id: US-SEMLITH-0.3.0-T08
     summary: >
