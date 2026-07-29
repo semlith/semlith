@@ -107,7 +107,7 @@ tasks:
     why_required: >
       Removes the second documented limitation. Two concurrent runs currently
       race on index.tv with nothing preventing a corrupt store.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - A second semlith index against a locked store exits non-zero, names the holding process, and the first run finishes normally.
@@ -116,7 +116,16 @@ tasks:
       - src/lock.rs
       - src/lib.rs
       - src/main.rs
-    evidence: []
+    evidence:
+      - "Proven across two real processes, not in-process. First run rc=0
+        indexing 9 files; second run against the same store rc=1 with
+        'store ... is being indexed by pid 61903 (started at unix 1785294221)'."
+      - "After the refusal, semlith search on that store returned results,
+        confirming the index was not corrupted by the contention."
+      - "Unit tests cover release-then-reacquire and a leftover lock file from
+        a killed process, which must not block since the kernel drops the lock
+        when the holder dies."
+
 
   - id: US-SEMLITH-0.2.0-T06
     summary: >
@@ -200,7 +209,7 @@ tasks:
       section ships an empty release. The Known limits section would otherwise
       claim limitations this release removed, and the ARM quantization claim is
       now measurably wrong for ModernBERT graphs.
-    status: todo
+    status: done
     depends_on:
       [US-SEMLITH-0.2.0-T03, US-SEMLITH-0.2.0-T04, US-SEMLITH-0.2.0-T05,
        US-SEMLITH-0.2.0-T06, US-SEMLITH-0.2.0-T07]
@@ -209,7 +218,19 @@ tasks:
     files:
       - README.md
       - CHANGELOG.md
-    evidence: []
+    evidence:
+      - "README Known limits rewritten: three of the four are gone, the
+        remaining one restated as a deliberate constraint rather than a race,
+        and limits that were always true but undocumented added."
+      - "Performance sections in README and CHANGELOG replaced with three
+        corpus sizes rather than one, because memory and query latency behave
+        differently as a corpus grows."
+      - "Corrected the claim that quantized variants are never faster on ARM.
+        True for BGE, false for the new default, whose int8 build is both
+        smaller and faster."
+      - "CHANGELOG 0.2.0 section present, which is what the release workflow
+        reads for its notes; the GitHub release rendered it correctly."
+
 
   - id: US-SEMLITH-0.2.0-T10
     summary: >
@@ -220,11 +241,21 @@ tasks:
       target_mode is published, and a crates.io publish cannot be undone. The
       dry run and the tarball inspection are the last gate before an
       irreversible action.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.2.0-T09]
     acceptance_criteria:
       - cargo publish --dry-run passes and the packaged tarball contains no .env and no .ultraship directory.
       - crates.io serves semlith 0.2.0 and cargo install semlith resolves to it.
     files:
       - Cargo.toml
-    evidence: []
+    evidence:
+      - "cargo publish --dry-run passed; packaged 23 files, 225.7KiB. Tarball
+        verified to contain no .env and no .ultraship directory before upload."
+      - "Published: crates.io reports semlith max_version 0.2.0, rust_version
+        1.89, not yanked. cargo search resolves semlith = 0.2.0."
+      - "GitHub release Semlith 0.2.0 carries four platform archives and
+        SHA256SUMS; all five release-workflow jobs succeeded."
+      - "Tag guard proven in CI both ways: v0.2.0 passed verify, and a
+        deliberate v9.9.9-guardtest tag failed verify with build and release
+        skipped, so no artefacts were produced. Test tag deleted."
+

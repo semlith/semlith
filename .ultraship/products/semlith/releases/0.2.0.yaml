@@ -1,6 +1,6 @@
 product: semlith
 version: 0.2.0
-status: planned
+status: released
 release_type: minor
 
 outcome:
@@ -187,3 +187,63 @@ open_questions:
     one has to give.
   - Whether FTS5 content should be stored alongside the chunk rows or in an
     external-content table, which decides how much the store grows.
+
+released_at: "2026-07-29T05:40:00Z"
+mode: published
+delivered: >
+  Index a repository on an ordinary 8 GB laptop without watching memory or
+  fearing a second terminal, then find an exact identifier and a plain-English
+  question with the same search.
+evidence:
+  tests:
+    - "cargo test - 21 passed, 0 failed"
+    - "cargo test -- --ignored - 1 passed, the end-to-end round trip CI skips"
+    - "cargo clippy --all-targets -- -D warnings - clean"
+    - "cargo fmt --all -- --check - clean"
+    - "End-to-end retrieval eval through the release binary, 1809 self-labelled
+      queries over 6527 chunks: code MRR@10 17.90 against the 14.84 required,
+      docs MRR@10 15.62 against the 15.09 floor."
+  builds:
+    - "cargo publish --dry-run - Packaged 23 files, 225.7KiB, verified from the
+      tarball rather than the working tree"
+    - "Release run 30424533920 - verify plus four targets plus release, all
+      success"
+  reviews:
+    - "PR #5 feat/0.2.0 into develop - CI green on ubuntu-latest and
+      macos-latest"
+    - "PR #6 develop into main - CI green on both runners"
+  deployments:
+    - "crates.io reports semlith max_version 0.2.0, not yanked, rust_version
+      1.89; cargo search resolves semlith = 0.2.0"
+    - "GitHub release Semlith 0.2.0 carries four platform archives and
+      SHA256SUMS"
+  health_checks:
+    - "cargo install semlith --version 0.2.0 from the registry, then indexed a
+      corpus: stats reported granite-embedding-small-english-r2-int8 (384 dim),
+      a plain-English query put lock.rs at ranks 1, 2, 4 and 5, and an exact
+      identifier put the defining chunk at rank 1."
+    - "Peak RSS 600 MB at 1229 chunks, 637 MB at 9893, 595 MB at 104816 - 7.1
+      percent spread against the 20 percent allowed."
+    - "Tag guard proven both ways in CI: matching tag passed, deliberately
+      mismatched tag failed verify with build and release skipped."
+known_limitations:
+  - "One writer per store. A second index run is refused rather than queued;
+    there is no wait-for-lock option."
+  - "Indexing remains CPU-bound at roughly 23 chunks/sec, so a 100k-chunk
+    corpus still takes over an hour on first run."
+  - "Query latency grows with corpus size, from under 3 ms at a thousand chunks
+    to 22.7 ms at a hundred thousand. The index scan is linear."
+  - "The default model is English-only."
+  - "The int8 default carries a 1.23 point code MRR deficit against the fp32
+    build that was never significance-tested; the paired bootstrap was stopped
+    by decision. Hybrid search more than covers the gap in the shipped system."
+  - "All performance figures come from one 4P+4E Apple M1 with 8 GB of RAM. The
+    performance-core thread heuristic in particular is measured on that machine
+    alone, which is why SEMLITH_EMBED_THREADS exists."
+  - "Retrieval was evaluated on a corpus that is 82 percent Rust; the code
+    retrieval gain may not transfer equally to other languages."
+  - "Existing 0.1.0 stores keep BGE-small and are not migrated. Moving one onto
+    the new default means deleting the store and re-indexing."
+supersedes: "0.1.0"
+next_recommended_version: "0.3.0"
+immutable: true

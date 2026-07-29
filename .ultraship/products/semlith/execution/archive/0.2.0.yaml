@@ -1,0 +1,26 @@
+product: semlith
+version: 0.2.0
+execution_state: COMPLETING
+checkpoint: null
+blockers: []
+release_fit:
+  assessment: probable
+  reasons:
+    - The repository is small and healthy — 1340 lines across five source files and one integration
+      test, CI already green, and 0.1.0 published cleanly.
+    - Four of the six work items are self-contained changes to code paths that already exist —
+      locking around index_paths, thread count on TextInitOptions, FTS5 alongside the existing
+      SQLite writes, and two CI workflow edits.
+    - The benchmark harness, evaluation set and baseline numbers already exist from the model
+      research, so the non-functional criteria can be measured rather than argued about.
+    - No user constraints are recorded in this workspace, so this assessment is grounded in
+      repository condition and measured evidence only, not in any budget or deadline the framework
+      was told about.
+  major_cost_drivers:
+    - Loading a model outside fastembed's enum. semlith has only ever used the enum path, and
+      granite's ONNX weights are split across a separate .onnx_data file that has to be fed in as
+      external initializers.
+    - Widening the stored model identity without breaking stores written by 0.1.0, on a crate whose
+      library API became public at publication.
+    - Locating where indexing actually holds 1.7 GB, which needs profiling.
+  recommended_scope_change: null

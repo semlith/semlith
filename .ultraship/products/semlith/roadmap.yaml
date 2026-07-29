@@ -3,47 +3,37 @@ status: active
 versions:
   - version: 0.1.0
     outcome: >
-      A developer indexes their docs and code locally and gets ranked excerpts
-      with file:line locators back, from the CLI or from an agent over MCP.
+      A developer indexes their docs and code locally and gets ranked excerpts with file:line
+      locators back, from the CLI or from an agent over MCP.
     detail: outline
     status: released
-
   - version: 0.2.0
     outcome: >
-      A developer indexes a repository on an ordinary laptop without watching
-      memory or fearing a second terminal, and one search finds both an exact
-      identifier and a plain-English question.
+      A developer indexes a repository on an ordinary laptop without watching memory or fearing a
+      second terminal, and one search finds both an exact identifier and a plain-English question.
     detail: specified
-    status: planned
-
+    status: released
   - version: 0.3.0
     outcome: >
-      A developer narrows a search to part of a corpus by path, extension or
-      language, so an agent can ask about one subsystem instead of everything.
+      A developer narrows a search to part of a corpus by path, extension or language, so an agent
+      can ask about one subsystem instead of everything.
     detail: outline
     status: planned
-
   - version: 0.4.0
     outcome: >
-      A developer leaves a store current without re-running index by hand;
-      edited files are re-embedded as they are saved.
+      A developer leaves a store current without re-running index by hand; edited files are
+      re-embedded as they are saved.
     detail: outline
     status: planned
-
   - version: 0.5.0
     outcome: >
-      A developer searches several stores at once from a single query, so an
-      agent working across repositories asks one question instead of many.
+      A developer searches several stores at once from a single query, so an agent working across
+      repositories asks one question instead of many.
     detail: hypothesis
     status: planned
-
   - version: 0.6.0
     outcome: >
-      A developer depends on semlith knowing the CLI, the MCP tools, the store
-      format and the Rust API are stable under SemVer.
+      A developer depends on semlith knowing the CLI, the MCP tools, the store format and the Rust
+      API are stable under SemVer.
     detail: hypothesis
     status: planned
-
-# No 1.0.0 entry. Declaring the CLI, MCP tools, store format and Rust API
-# stable is the maintainer's call and is not to be planned until they say so.
-# Recorded 2026-07-29 on their explicit instruction.
