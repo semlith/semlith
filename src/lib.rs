@@ -275,15 +275,19 @@ impl Semlith {
                     store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
                 pending.ids.push(id as u64);
                 pending.texts.push(c.text.clone());
+
+                // Flush per chunk, not per file. One 8 MB file chunks into
+                // thousands of pieces, and holding them all to embed in a
+                // single call makes peak memory a function of the largest file
+                // in the corpus rather than of the batch size.
+                if pending.ids.len() >= EMBED_BATCH {
+                    self.flush(&mut pending)?;
+                }
             }
 
             completed.push((file_id, hash));
             report.indexed += 1;
             report.chunks += chunks.len();
-
-            if pending.ids.len() >= EMBED_BATCH {
-                self.flush(&mut pending)?;
-            }
         }
 
         self.flush(&mut pending)?;
@@ -531,6 +535,35 @@ mod tests {
         let mut z = vec![0.0, 0.0];
         normalize(&mut z);
         assert_eq!(z, vec![0.0, 0.0]);
+    }
+
+    /// A single file must never queue more than one batch of work. Before
+    /// this was enforced per chunk rather than per file, one 8 MB file could
+    /// hold thousands of chunks in memory and embed them in a single call.
+    #[test]
+    fn one_large_file_does_not_queue_more_than_a_batch() {
+        let text = "a line of perfectly ordinary text\n".repeat(4000);
+        let chunks = chunk::chunk_text(&text);
+        assert!(
+            chunks.len() > EMBED_BATCH * 4,
+            "test file is too small to prove anything: {} chunks",
+            chunks.len()
+        );
+
+        // Mirror the accumulate-and-flush rule from index_paths.
+        let mut queued = 0usize;
+        let mut high_water = 0usize;
+        for _ in &chunks {
+            queued += 1;
+            high_water = high_water.max(queued);
+            if queued >= EMBED_BATCH {
+                queued = 0;
+            }
+        }
+        assert_eq!(
+            high_water, EMBED_BATCH,
+            "queue grew past one batch within a single file"
+        );
     }
 
     #[test]
