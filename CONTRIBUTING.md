@@ -123,6 +123,31 @@ Peak memory is a first-class concern. This tool is meant to run on a laptop
 while other things are open, and an embedding batch that is too large will
 quietly push a machine into swap and look like a hang.
 
+### The benchmark corpus is a fixture, not a per-release cost
+
+Building a hundred-thousand-chunk store takes over an hour of embedding, which
+is the whole point of the numbers in the README. **Index it once and keep it.**
+The store the published figures come from lives at
+`~/.cache/semlith/bench/100k-store`, built from crates already in the local
+cargo registry:
+
+```sh
+R=~/.cargo/registry/src/index.crates.io-*/
+semlith -s ~/.cache/semlith/bench/100k-store index \
+  $R/tracing-0.1.44 $R/rav1e-0.8.1 $R/rav1e-0.7.1 $R/ring-0.17.14 \
+  $R/spdx-0.13.4 $R/web-sys-0.3.103 $R/umya-spreadsheet-3.0.1 \
+  $R/libsqlite3-sys-0.38.1 $R/libsqlite3-sys-0.35.0 $R/libsqlite3-sys-0.30.1 \
+  $R/linux-raw-sys-0.4.15 $R/chrono-tz-0.10.4 $R/winapi-0.3.9 --quiet
+```
+
+Rebuild it only when the corpus or the default model changes — a new model
+invalidates the vectors, nothing else does. Re-running `index` against an
+unchanged corpus costs seconds, so keeping it current is nearly free.
+
+Reach for it when a release is *about* performance. A release that does not
+touch the indexing or scan path does not need a fresh hour of embedding to
+prove it left them alone.
+
 ## Things we are deliberately not doing
 
 Please open an issue to discuss before building any of these — not because they
