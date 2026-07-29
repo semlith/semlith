@@ -1,6 +1,6 @@
 product: semlith
 version: 0.3.0
-status: planned
+status: released
 release_type: minor
 
 outcome:
@@ -228,3 +228,85 @@ open_questions:
     Should `--path` also accept a plain directory (`--path src`) as shorthand
     for `src/**`? Deferred: decide during development from what the acceptance
     fixture makes obvious.
+
+released_at: 2026-07-29T16:02:02Z
+mode: published
+delivered: >
+  A developer narrows a search to part of an indexed corpus by path glob, file
+  extension or language — from the CLI and from an agent over MCP — and gets
+  the best matches inside that subset, because the filter is applied before
+  either half of the hybrid search picks its top-k rather than after.
+evidence:
+  tests:
+    - "cargo test — 37 passed, 0 failed"
+    - "cargo test --test roundtrip -- --ignored — 2 passed, 0 failed, including
+       a filtered search over a corpus whose subsystem is a small minority"
+    - "End-to-end acceptance through the release binary and a real stdio MCP
+       server — 14 passed, 0 failed, covering all seven functional criteria"
+    - "Cross-version store compatibility — 6 passed, 0 failed: a 0.2.0 store
+       filters under 0.3.0 with its chunk count and index.tv byte-identical
+       afterwards, and a 0.3.0 store opens and searches under 0.2.0"
+    - "Scoped latency p50 17.93 ms, p95 66.5 ms over 39 queries on subsets of
+       at least 100 chunks, against the contract's 250 ms"
+    - "Rank behaviour: over the same 39 self-labelled queries, scoping to the
+       directory holding the answer lowered its rank zero times"
+  builds:
+    - "cargo fmt --all -- --check — clean"
+    - "cargo clippy --all-targets -- -D warnings — exit 0"
+    - "cargo publish --dry-run — passed; packaged 24 files, 261.0 KiB, verified
+       to contain no .env and no .ultraship before upload"
+    - "CI green on main and on develop for release commit fa7f0b6"
+    - "release.yml — 6 of 6 jobs green: verify, four platform builds, release"
+  reviews:
+    - "Self-review of the diff found and fixed one defect before release:
+       matching_files errors were swallowed into 'no indexed file matches that
+       filter', telling an agent to widen a filter when the real fault was an
+       unreadable store (commit b07e94c)"
+  deployments:
+    - "GitHub release 'Semlith 0.3.0', not a draft, carrying
+       aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
+       x86_64-pc-windows-msvc and SHA256SUMS"
+    - "crates.io reports semlith max_version 0.3.0, rust_version 1.89, not
+       yanked, uploaded 2026-07-29T16:02:02Z"
+  health_checks:
+    - "Post-publication smoke test against the downloaded release archive, not
+       a local build: shasum -a 256 -c SHA256SUMS OK, ./semlith --version
+       reports 'semlith 0.3.0', ./semlith languages lists 25 languages, and a
+       scoped search returned 3 hits, all 3 inside the glob"
+known_limitations:
+  - >
+    Unfiltered search latency was not re-measured on a 100k-chunk store for
+    0.3.0. The criterion was replaced by structural proof that the unfiltered
+    path is unchanged plus identical results across six A/B runs; see
+    US-SEMLITH-0.3.0-I01. The README's 105k-chunk figures remain 0.2.0's
+    measurement and are not restated as 0.3.0's.
+  - >
+    The Windows path-separator translation in filter::anchor is unexercised.
+    CI runs Ubuntu and macOS only, so the cfg(windows) branch that rewrites `/`
+    to `\` has never executed in a test on any machine, despite Windows being a
+    shipped platform. A Windows user's first glob is the first run of that code.
+  - >
+    Filters are SQLite GLOB: `*` crosses `/`, there is no distinct `**`, no
+    regex, and no way to express "not this path". Matching folds case via
+    SQL lower(), which is ASCII-only, so a non-ASCII path differing only by
+    case will not match.
+  - >
+    `--lang` is a fixed 25-entry extension table and never reads file contents,
+    so an extensionless script is not recognised as its language.
+  - >
+    Filters are not available on `semlith files` or `semlith stats`, so there
+    is no way to preview which files a glob selects other than running a search
+    and reading the reported count.
+  - >
+    Scoped latency and rank behaviour were measured on small fixtures of a few
+    hundred chunks, not on a repository-scale corpus. A filter that selects a
+    very large subset is untested for the crossover where passing a big
+    allowlist costs more than an unfiltered scan.
+  - >
+    This release did not follow the project's `feat/<version>` → develop → main
+    pull-request flow. Work was committed directly to main and `feat/0.3.0` was
+    created afterwards at the release commit, so the branch records what shipped
+    but not a review path.
+supersedes: "0.2.0"
+next_recommended_version: "0.4.0"
+immutable: true

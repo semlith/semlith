@@ -8,7 +8,25 @@ Run `ultraship views` to regenerate.
 
 | Version | Released | Mode | Delivered |
 | --- | --- | --- | --- |
+| 0.3.0 | 2026-07-29T16:02:02Z | published | A developer narrows a search to part of an indexed corpus by path glob, file extension or language — from the CLI and from an agent over MCP — and gets the best matches inside that subset, because the filter is applied before either half of the hybrid search picks its top-k rather than after. |
 | 0.2.0 | 2026-07-29T05:40:00Z | published | Index a repository on an ordinary 8 GB laptop without watching memory or fearing a second terminal, then find an exact identifier and a plain-English question with the same search. |
+
+### 0.3.0 known limitations
+
+- Unfiltered search latency was not re-measured on a 100k-chunk store for 0.3.0. The criterion was replaced by structural proof that the unfiltered path is unchanged plus identical results across six A/B runs; see US-SEMLITH-0.3.0-I01. The README's 105k-chunk figures remain 0.2.0's measurement and are not restated as 0.3.0's.
+
+- The Windows path-separator translation in filter::anchor is unexercised. CI runs Ubuntu and macOS only, so the cfg(windows) branch that rewrites `/` to `\` has never executed in a test on any machine, despite Windows being a shipped platform. A Windows user's first glob is the first run of that code.
+
+- Filters are SQLite GLOB: `*` crosses `/`, there is no distinct `**`, no regex, and no way to express "not this path". Matching folds case via SQL lower(), which is ASCII-only, so a non-ASCII path differing only by case will not match.
+
+- `--lang` is a fixed 25-entry extension table and never reads file contents, so an extensionless script is not recognised as its language.
+
+- Filters are not available on `semlith files` or `semlith stats`, so there is no way to preview which files a glob selects other than running a search and reading the reported count.
+
+- Scoped latency and rank behaviour were measured on small fixtures of a few hundred chunks, not on a repository-scale corpus. A filter that selects a very large subset is untested for the crossover where passing a big allowlist costs more than an unfiltered scan.
+
+- This release did not follow the project's `feat/<version>` → develop → main pull-request flow. Work was committed directly to main and `feat/0.3.0` was created afterwards at the release commit, so the branch records what shipped but not a review path.
+
 
 ### 0.2.0 known limitations
 

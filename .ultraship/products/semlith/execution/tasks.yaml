@@ -275,7 +275,7 @@ tasks:
       run and the tarball inspection are the last gate before an irreversible
       action, and the tag guard added in 0.2.0 fails the build if the tag and
       Cargo.toml disagree.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.3.0-T07]
     acceptance_criteria:
       - CI green on develop and on main for the release commit.
@@ -288,4 +288,23 @@ tasks:
         SHA256SUMS, all release-workflow jobs green.
     files:
       - Cargo.toml
-    evidence: []
+      - .github/workflows/ci.yml
+      - .github/workflows/release.yml
+    evidence:
+      - "CI green on main and on develop for release commit fa7f0b6."
+      - "Blocker found and fixed first: the repository began requiring every
+        GitHub Action to be pinned to a full-length commit SHA, and CI failed
+        at job setup on both branches. All 11 action references in ci.yml and
+        release.yml are now pinned, each keeping its version as a trailing
+        comment so Dependabot still tracks it. Had this been missed, the tag
+        would have existed while release.yml failed at checkout, producing no
+        artefacts."
+      - "cargo publish --dry-run passed at the tagged commit; the packaged
+        tarball holds 24 files, 261.0 KiB, with no .env and no .ultraship
+        directory, verified by listing the archive before upload."
+      - "Release workflow: all six jobs green — verify, the four platform
+        builds, and release. GitHub release 'Semlith 0.3.0' is public, not a
+        draft, carrying aarch64-apple-darwin, aarch64-unknown-linux-gnu,
+        x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc and SHA256SUMS."
+      - "Published: crates.io reports semlith max_version 0.3.0, rust_version
+        1.89, not yanked, uploaded 2026-07-29T16:02:02Z."
