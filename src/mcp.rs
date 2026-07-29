@@ -78,7 +78,7 @@ fn tools() -> Value {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "What you are looking for, in natural language."
+                        "description": "What you are looking for. A question in plain English, or an exact identifier — both are searched."
                     },
                     "k": {
                         "type": "integer",
