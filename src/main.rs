@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use fastembed::{EmbeddingModel, TextEmbedding};
-use semlith::{Semlith, default_store_dir};
+use fastembed::TextEmbedding;
+use semlith::{Semlith, default_store_dir, embed, embed::Model};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -69,9 +69,16 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Models => {
+            // The default is listed first and separately: it is not one of
+            // fastembed's built-ins, so it never appears in their list.
+            println!(
+                "{:<44} {:>5} dim  default. IBM Granite R2 small, int8, English",
+                embed::GRANITE_NAME,
+                384
+            );
             for info in TextEmbedding::list_supported_models() {
                 println!(
-                    "{:<28} {:>5} dim  {}",
+                    "{:<44} {:>5} dim  {}",
                     info.model, info.dim, info.description
                 );
             }
@@ -83,7 +90,7 @@ fn main() -> Result<()> {
             quiet,
         } => {
             let model = model
-                .map(|m| m.parse::<EmbeddingModel>().map_err(anyhow::Error::msg))
+                .map(|m| m.parse::<Model>().map_err(anyhow::Error::msg))
                 .transpose()?;
             let mut store = Semlith::open(&dir, model)?;
             store.quiet = quiet;

@@ -1,0 +1,189 @@
+product: semlith
+version: 0.2.0
+status: planned
+release_type: minor
+
+outcome:
+  user_can: >
+    Index a repository on an ordinary 8 GB laptop without watching memory or
+    fearing a second terminal, then find an exact identifier and a
+    plain-English question with the same search.
+  business_value: >
+    Removes the four limitations the README admits to, and replaces the default
+    embedding model with one that retrieves code measurably better in a quarter
+    of the download. semlith becomes trustworthy on the machines its users
+    actually have.
+  evidence_of_value: >
+    The benchmark harness re-run on the same 6260-chunk corpus shows code MRR
+    above the 14.84 bge-small baseline, indexing at or above 16 chunks/s, and
+    peak RSS flat as the corpus grows. cargo install semlith fetches 0.2.0.
+
+scope:
+  included:
+    - Default new stores to granite-embedding-small-english-r2 int8, loaded
+      through fastembed's UserDefinedEmbeddingModel with external initializers.
+    - Widen the stored model identity so a model outside fastembed's enum can be
+      named, parsed back from an existing store, and reported by stats.
+    - Fuse SQLite FTS5 keyword ranking with the existing vector ranking on every
+      search, with no flag to turn it on.
+    - Take a per-store advisory lock during index; a second writer exits
+      non-zero naming the holder and leaves the store intact.
+    - Bound peak indexing memory so it does not grow with corpus size.
+    - Size the ONNX Runtime intra-op thread pool to performance cores, with a
+      SEMLITH_EMBED_THREADS override.
+    - Run CI on pushes to develop as well as main.
+    - Fail a release build when the git tag disagrees with the Cargo.toml
+      version.
+    - Rewrite the README Known limits section to match what is now true, and
+      correct the claim that quantized variants are never faster on ARM.
+    - Add the 0.2.0 CHANGELOG section that the release workflow reads.
+    - Publish 0.2.0 to crates.io by hand after the tagged GitHub release.
+  excluded:
+    - Cross-encoder reranking.
+    - GPU acceleration.
+    - A reindex command.
+    - Automatic migration of existing stores onto the new default model.
+    - Concurrent writers to one store.
+    - Outer parallelism across embedding batches.
+    - Publishing to crates.io from CI.
+  fallback_scope:
+    - Fuse SQLite FTS5 keyword ranking with vector ranking on every search.
+    - Take a per-store advisory lock during index.
+    - Bound peak indexing memory.
+    - Size the ONNX Runtime intra-op thread pool to performance cores.
+    - Run CI on develop, and guard tag against Cargo.toml version.
+    - Update README and CHANGELOG, and publish to crates.io.
+
+acceptance:
+  functional:
+    - A store created by this version reports granite-embedding-small-english-r2
+      int8 from semlith stats, with dimension 384.
+    - A store created by 0.1.0 still opens, still searches, and is not
+      re-embedded; stats keeps reporting BGESmallENV15.
+    - Searching an exact identifier that exists in the corpus returns its
+      defining chunk within the top 3 results.
+    - "A second semlith index against a locked store exits non-zero, names the
+      holding process, and the first run finishes normally."
+    - After a refused second run, semlith search on that store still returns
+      results, proving the index was not corrupted.
+    - SEMLITH_EMBED_THREADS changes the thread count the embedder requests.
+  non_functional:
+    - Peak resident memory during index varies by no more than 20 percent
+      between a 1k-chunk, a 10k-chunk and a 100k-chunk corpus.
+    - Indexing reaches at least 16 chunks/s on the recorded M1 benchmark corpus,
+      against 13.9 at the ONNX Runtime default.
+    - Code MRR at 10 on the recorded evaluation set is at least the 14.84 that
+      bge-small scored, measured with the same harness.
+    - Hybrid ranking does not lower docs MRR at 10 below the 15.09 that
+      bge-small scored.
+  operational:
+    - cargo publish --dry-run passes and the packaged tarball contains no .env
+      and no .ultraship directory.
+    - CI is green on develop and on main for the release commit.
+    - The tag guard is proven by pushing a deliberately mismatched tag to a
+      scratch branch and observing the build fail.
+    - crates.io serves semlith 0.2.0 and cargo install semlith resolves to it.
+    - The README Known limits section no longer claims any limitation this
+      release removed.
+
+delivery:
+  target_mode: published
+  environment: >
+    crates.io for the library and binary crate; GitHub Releases for prebuilt
+    binaries across four targets. No servers, no hosted component.
+  deployment_method: >
+    Work lands on feat/0.2.0, opens a pull request into develop, then a pull
+    request from develop into main. Tagging v0.2.0 on main triggers the release
+    workflow, which builds the four targets and creates the GitHub release.
+    cargo publish is then run by hand from a clean checkout, with the registry
+    token sourced from a gitignored .env. Publishing never runs in CI.
+  migrations:
+    - No data migration. Existing stores keep the model they were built with,
+      so 0.1.0 stores continue to work untouched.
+    - Moving an existing store onto the new default means deleting the store
+      directory and re-indexing. This is deliberate and must be documented in
+      the CHANGELOG and README.
+    - The FTS5 table is created on demand when a store is opened by this
+      version, and is populated for existing rows without re-embedding them.
+  observability:
+    - semlith stats reports the model, its dimension, and the chunk and file
+      counts, which is how a user confirms which model a store is on.
+    - Indexing reports progress so a long first run is legible rather than
+      silent.
+    - The lock error names the holding process id and when it started.
+  rollback: >
+    crates.io publishes are permanent and cannot be deleted. Rolling back means
+    yanking 0.2.0, which stops new resolution but leaves it downloadable, then
+    shipping 0.2.1 with the fix. The GitHub release and its tag can be deleted
+    outright. Users already on 0.2.0 stores are unaffected by a yank, since the
+    store records its own model. Because a yank cannot undo a bad publish, the
+    dry run and the full acceptance set must pass before the publish command is
+    run at all.
+
+dependencies:
+  products: []
+  services:
+    - crates.io, for publication and for cargo install to resolve the release.
+    - GitHub Actions, for CI and for the tag-triggered release build.
+    - Hugging Face, which serves the granite ONNX weights and tokenizer that
+      semlith downloads on first index.
+  human_approvals:
+    - The maintainer reviews and merges the pull request into develop, then the
+      pull request into main.
+    - The maintainer runs cargo publish by hand; no automation holds the
+      registry token.
+
+resource_profile:
+  complexity: medium
+  uncertainty: medium
+  likely_cost_drivers:
+    - Loading a model outside fastembed's enum, which semlith has never done and
+      which requires external initializer files to be fed in as bytes.
+    - Widening the stored model identity without breaking stores written by
+      0.1.0, on a crate whose library API is now public.
+    - Choosing and tuning a fusion rule for keyword and vector ranks, which has
+      to be validated against the benchmark rather than guessed.
+    - Finding where indexing actually holds memory, which needs profiling rather
+      than reading.
+  preferred_tools:
+    - cargo, with the existing offline test suite and the ignored round-trip test
+    - rusqlite with the bundled SQLite 3.53.2, whose FTS5 is already confirmed
+    - fastembed's UserDefinedEmbeddingModel and ExternalInitializerFile
+    - the Python ONNX Runtime benchmark harness already written for this work
+  constraints:
+    - No network at query time, and no API keys anywhere.
+    - Only Cls and Mean pooling are available, so the model choice is fixed.
+    - Outer batch parallelism is rejected on measured evidence.
+    - Rust 1.85, edition 2024, 64-bit targets only.
+
+risks:
+  - fastembed's external initializer path may not load granite's split
+    .onnx_data. This is the largest unknown in the release and it gates the
+    default model swap. It must be proven first, before anything is built on
+    top of it, and if it fails the release drops to its fallback scope.
+  - Widening the model identity changes a type in src/lib.rs, which became a
+    public API when 0.1.0 was published. The change is permitted before 1.0 but
+    has to be called out in the CHANGELOG rather than slipped in.
+  - Fusing keyword ranking into every search could lower result quality for the
+    plain-English queries that work well today. The docs half of the evaluation
+    set exists to catch this, and is an acceptance criterion for that reason.
+  - Bounding peak memory usually means smaller batches, which pulls against the
+    16 chunks/s target. The two acceptance criteria may conflict and one may
+    have to be renegotiated through iterate.
+  - The int8 default carries a 1.23 point code MRR deficit against fp32 that was
+    never significance-tested, because the paired bootstrap was stopped by
+    decision. The release ships on the measured point estimate.
+  - The performance-core thread heuristic was measured on exactly one machine.
+    It could be wrong on other topologies, which is why the override exists.
+
+open_questions:
+  - "Which fusion rule for keyword and vector ranks: reciprocal rank fusion, or
+    weighted fusion over normalised scores. Decide during development by
+    measuring both on the recorded evaluation set rather than by argument."
+  - Whether the advisory lock should be a lock file in the store directory or
+    SQLite's own locking. The lock has to cover index.tv, which SQLite does not
+    know about, which points at a lock file.
+  - Whether bounded memory and the throughput target can both be met, or whether
+    one has to give.
+  - Whether FTS5 content should be stored alongside the chunk rows or in an
+    external-content table, which decides how much the store grows.
