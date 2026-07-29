@@ -150,8 +150,19 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
             };
 
             // Told apart because an agent that scoped to the wrong subsystem
-            // should widen the filter, not conclude the corpus is empty.
-            if !filter.is_empty() && store.matching_files(&filter).unwrap_or(0) == 0 {
+            // should widen the filter, not conclude the corpus is empty. A
+            // failure here is a broken store, not an empty selection, and must
+            // not be reported as one.
+            let selected = if filter.is_empty() {
+                1
+            } else {
+                match store.matching_files(&filter) {
+                    Ok(n) => n,
+                    Err(e) => return Ok(tool_error(&format!("search failed: {e}"))),
+                }
+            };
+
+            if selected == 0 {
                 "No indexed file matches that path/ext/lang filter. Try again without it."
                     .to_string()
             } else {
