@@ -188,9 +188,6 @@ impl Semlith {
         if !path.exists() {
             return Ok(());
         }
-        // Recorded before the load: a write that lands while this one is
-        // reading is then noticed next time rather than skipped.
-        self.generation = current;
         let index =
             IdMapIndex::load(&path).with_context(|| format!("reloading {}", path.display()))?;
         if let Some(d) = index.dim_opt()
@@ -206,6 +203,11 @@ impl Semlith {
         // index to whoever asked the next question.
         index.prepare();
         self.index = index;
+        // Only now, and to the generation read *before* the load: a failed
+        // load leaves the reader due for another attempt rather than stuck on
+        // a stale index forever, and a write that landed during the load has a
+        // higher number, so it is still noticed next time.
+        self.generation = current;
         Ok(())
     }
 
