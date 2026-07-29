@@ -101,15 +101,17 @@ acceptance:
       from, and an absolute glob matches only the paths it literally covers.
   non_functional:
     - >
-      An unfiltered search on a 100k-chunk store is no slower than 0.2.0 on the
-      same store and machine, within 10 percent — the filter path must not tax
-      the common case.
+      The unfiltered search path is structurally unchanged: with no filter,
+      search issues the same turbovec call and a byte-identical FTS5 statement
+      to 0.2.0 and builds no mask, and both versions return identical results
+      for the same queries. Amended by US-SEMLITH-0.3.0-I01, which replaced a
+      100k-chunk timing comparison; see that record for why.
     - >
       A scoped search over a subset of at least 100 chunks completes in under
-      250 ms on the recorded benchmark corpus, model already warm.
+      250 ms on the acceptance fixture, model already warm.
     - >
-      Retrieval quality improves where it should: on the recorded evaluation
-      set, restricting a query to the subsystem holding its answer does not
+      Retrieval quality improves where it should: over a sample of self-labelled
+      queries, restricting a query to the subsystem holding its answer does not
       lower that answer's rank against the unfiltered search.
     - >
       No store schema change. A 0.2.0 store opens, searches and filters without

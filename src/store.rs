@@ -160,6 +160,15 @@ pub fn matching_files(db: &Connection, groups: &[Vec<String>]) -> Result<i64> {
     Ok(db.query_row(&sql, rusqlite::params_from_iter(args), |r| r.get(0))?)
 }
 
+/// The keyword statement for a search with no filter.
+///
+/// Byte-identical to the one 0.2.0 issued: no join to `chunks` and `files`, so
+/// a query that uses no filter pays nothing for the filtering feature. A test
+/// pins the text, because the cheapest way to regress the common path is to
+/// "tidy" the two branches into one.
+const UNFILTERED_SQL: &str =
+    "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?";
+
 /// Chunk ids matching `query` as keywords, best first, restricted to files
 /// matching `groups`.
 ///
@@ -184,14 +193,8 @@ pub fn keyword_search(
     }
     let match_expr = terms.join(" OR ");
 
-    // Unfiltered searches keep the 0.2.0 statement exactly: no join to chunks
-    // and files, so the common case is not taxed by a feature it is not using.
     let (sql, mut args) = if groups.is_empty() {
-        (
-            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?"
-                .to_string(),
-            vec![Value::Text(match_expr)],
-        )
+        (UNFILTERED_SQL.to_string(), vec![Value::Text(match_expr)])
     } else {
         let (predicate, binds) = glob_predicate(groups);
         let mut args = vec![Value::Text(match_expr)];
@@ -474,6 +477,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// An unfiltered search must cost exactly what it cost in 0.2.0. The
+    /// statement is the whole of that promise: adding the join unconditionally
+    /// would tax every query that uses no filter, and would not fail any other
+    /// test in this file.
+    #[test]
+    fn an_unfiltered_search_issues_the_0_2_0_statement_verbatim() {
+        assert_eq!(
+            UNFILTERED_SQL,
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?"
+        );
+        // And an empty filter must take that branch, not the general one.
+        assert_eq!(glob_predicate(&[]), ("1".to_string(), vec![]));
     }
 
     #[test]
