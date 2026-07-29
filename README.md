@@ -17,6 +17,8 @@ Think of it as a semantic cache for everything your agent needs to know.
   downloaded once and cached.
 - **Fast.** Vector search runs on [turbovec](https://github.com/RyanCodrai/turbovec)
   (Google Research's TurboQuant, 4 bits per coordinate, SIMD scan).
+- **Hybrid.** Every query searches meaning *and* literal terms, so
+  `retry backoff` and `EMBED_BATCH` both land on the right chunk.
 - **Incremental.** Re-running `index` only re-embeds files whose contents
   changed, and drops files that disappeared.
 - **Agent-native.** Ships an MCP server, so any MCP-capable agent can call it
@@ -37,6 +39,12 @@ a pure-Rust implementation, so this step is Linux-only.
 sudo apt-get install libopenblas-dev     # Debian/Ubuntu
 sudo dnf install openblas-devel          # Fedora/RHEL
 sudo pacman -S openblas                  # Arch
+```
+
+### From crates.io
+
+```sh
+cargo install semlith
 ```
 
 ### From a release
@@ -60,7 +68,7 @@ your `PATH`.
 
 ### From source
 
-Needs a Rust toolchain (1.85+):
+Needs a Rust toolchain (1.89+):
 
 ```sh
 cargo install --git https://github.com/semlith/semlith
@@ -73,7 +81,7 @@ OpenBLAS step above you missed.
 
 ```sh
 # Index a directory. Creates ./.semlith and downloads the embedding model
-# (~130 MB) the first time.
+# (~52 MB) the first time.
 semlith index ~/notes ~/papers ./src
 
 # Ask it something.
@@ -172,34 +180,60 @@ A search embeds the query, gets ids from the index, and resolves them with one
 SQLite lookup each. The index only ever needs to hold vectors, so it stays
 small enough to sit in memory even for large corpora.
 
-Embeddings default to `BGESmallENV15` (384 dimensions), which runs on CPU via
-ONNX Runtime. Pick another with `semlith index --model <NAME>`; see
-`semlith models`. The model is fixed when the store is created, since vectors
-from two models are not comparable — to switch, delete the store and re-index.
+Embeddings default to `granite-embedding-small-english-r2`, quantized to int8
+(384 dimensions, ~52 MB), which runs on CPU via ONNX Runtime. Pick another with
+`semlith index --model <NAME>`; see `semlith models`. The model is fixed when
+the store is created, since vectors from two models are not comparable — to
+switch, delete the store and re-index.
+
+A store built by an earlier version keeps the model it was built with, so
+upgrading semlith never silently re-embeds a corpus.
+
+Searches consult the vector index and SQLite's FTS5 keyword index together,
+fusing the two rankings by position. Dense vectors alone are weak at exact
+identifiers — every constant in a codebase embeds to roughly the same place —
+and keywords alone cannot answer a question phrased as a sentence.
 
 ## Performance
 
-Measured on an 8-core Apple Silicon laptop with 8 GB of RAM, indexing 79 Rust
-source files (1.5 MB, 2375 chunks):
+Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM, over three corpora
+of mixed Rust, Markdown and TypeScript:
 
-| | |
-|---|---|
-| Query, warm | **~6 ms** — embed the query, scan the index, read the rows |
-| Query, cold CLI start | ~250 ms, almost all of it loading the ONNX model |
-| Indexing | ~13 chunks/sec, ~1.7 GB peak RSS |
-| Re-index, nothing changed | 17 ms — hashes match, the model is never loaded |
+| store | warm query, p50 | p95 | indexing | peak RSS |
+|---|---|---|---|---|
+| 1.2k chunks | **2.7 ms** | 3.5 ms | 27.6 chunks/sec | 600 MB |
+| 9.9k chunks | **5.4 ms** | 11.0 ms | 24.3 chunks/sec | 637 MB |
+| 105k chunks | **22.7 ms** | 67.4 ms | 23.5 chunks/sec | 595 MB |
 
-The numbers that matter for an agent are the first and the last. `semlith mcp`
-loads the model once at startup, so every tool call costs the warm figure; and
-keeping a store current is nearly free, because unchanged files are skipped
-before anything is embedded.
+Re-indexing 8334 unchanged files takes 1.7 seconds, because content hashes
+match and the model is never loaded. Cold CLI start on the 105k store is about
+430 ms, most of it loading the model and the index.
+
+Two things are worth reading off that table. **Peak memory does not grow with
+the corpus** — 105k chunks is 85 times the work of 1.2k for slightly less
+memory, so the number to plan for is roughly 600 MB whatever you point it at.
+**Query latency does grow**, because the index scan is linear: budget a few
+milliseconds for a repository and a few tens for a very large corpus.
+
+The numbers that matter for an agent are the query row and the re-index figure.
+`semlith mcp` loads the model once at startup, so every tool call costs the warm
+figure; and keeping a store current is nearly free.
 
 Indexing is the slow half, and that cost is the embedding model, not the index
 — a transformer on CPU is simply not fast. If you have a large corpus and can
 trade some retrieval quality for throughput, `--model AllMiniLML6V2` is about
-1.8x faster (6 transformer layers instead of 12). Quantized variants such as
-`BGESmallENV15Q` were *not* faster in testing on ARM, though they do use less
-memory.
+1.8x faster (6 transformer layers instead of 12).
+
+Quantization is worth testing rather than assuming. The int8 build of the
+default model is both smaller *and* faster than its fp32 build on ARM, while
+BGE's quantized variants measured no faster than fp32 on the same machine —
+whether int8 wins depends on the model's graph, not on the architecture alone.
+
+Thread count is chosen rather than left to ONNX Runtime. Its threads
+synchronise at every operator, so on a CPU with performance and efficiency
+cores a thread on a slow core paces the whole batch; semlith uses the
+performance-core count on Apple silicon and the full count elsewhere. Override
+with `SEMLITH_EMBED_THREADS` if your machine disagrees.
 
 ## Contributing
 
@@ -223,18 +257,23 @@ Everyone participating is expected to follow the
 
 ## Known limits
 
-- Search is dense-vector only. Exact identifier lookup (`grep`-style) is still
-  better served by `grep`; hybrid keyword + vector search is not implemented.
-- One process at a time per store. Concurrent `index` runs will fight over
-  `index.tv`.
-- First-time indexing of a large corpus takes a while — see
-  [Performance](#performance). Subsequent runs only touch what changed.
-- Peak memory during indexing is around 1.7 GB. On a memory-tight machine,
-  that is the number to watch.
+- One writer per store. A second `index` run against a store already being
+  indexed exits with an error naming the process that holds it, rather than
+  waiting. Searching during an index run is fine.
+- First-time indexing is bound by transformer speed on CPU, at roughly 23
+  chunks/sec — a 100k-chunk corpus takes over an hour. Subsequent runs only
+  touch what changed, and cost seconds.
+- Query latency grows with corpus size, from under 3 ms at a thousand chunks to
+  low tens of milliseconds at a hundred thousand. The index scan is linear.
+- The default model is English-only. `semlith models` lists multilingual
+  alternatives, which must be chosen when the store is created.
+- Results are not reranked. A cross-encoder over the top results would improve
+  ordering, at a cost per query that a local tool should not pay by default.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Note that semlith downloads embedding model weights at runtime; those are
-covered by their own licenses. The default, BAAI/bge-small-en-v1.5, is MIT.
+covered by their own licenses. The default,
+ibm-granite/granite-embedding-small-english-r2, is Apache-2.0.

@@ -1,8 +1,8 @@
 [package]
 name = "semlith"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "A fast local vector store for AI agents: index docs, PDFs and code once, then answer queries in milliseconds without leaving the machine."
 repository = "https://github.com/semlith/semlith"
 homepage = "https://github.com/semlith/semlith"
@@ -17,6 +17,8 @@ exclude = [".ultraship", ".env", ".github"]
 anyhow = "1.0.104"
 blake3 = "1.8.5"
 clap = { version = "4.6.4", features = ["derive"] }
+hf-hub = { version = "0.5.0", default-features = false, features = ["native-tls", "ureq"] }
+libc = "0.2.189"
 fastembed = { version = "5.17.3", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
 ignore = "0.4.31"
 pdf-extract = "0.12.0"
