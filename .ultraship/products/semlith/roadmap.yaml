@@ -17,7 +17,7 @@ versions:
     outcome: >
       A developer narrows a search to part of a corpus by path, extension or language, so an agent
       can ask about one subsystem instead of everything.
-    detail: outline
+    detail: specified
     status: planned
   - version: 0.4.0
     outcome: >

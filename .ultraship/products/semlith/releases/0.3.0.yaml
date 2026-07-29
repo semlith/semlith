@@ -1,0 +1,228 @@
+product: semlith
+version: 0.3.0
+status: planned
+release_type: minor
+
+outcome:
+  user_can: >
+    Narrow a search to part of an indexed corpus by path glob, file extension or
+    language — from the CLI and from an agent over MCP — and get the best
+    matches inside that subset rather than the best matches overall filtered
+    down to whatever survives.
+  business_value: >
+    A store built from a whole repository is currently all-or-nothing at query
+    time. An agent working on one subsystem gets the top hits from the entire
+    corpus, so a question about the HTTP layer competes with vendored code,
+    generated files, changelogs and test fixtures. Scoping the query is what
+    turns a repo-wide store into a per-subsystem one without maintaining a
+    second store per subsystem — and re-indexing per subsystem is exactly the
+    cost semlith exists to avoid.
+  evidence_of_value: >
+    A query whose correct answer lives in a subsystem returns that chunk at a
+    higher rank when the search is scoped to the subsystem than when it is not,
+    measured on the same store with the same query set.
+
+scope:
+  included:
+    - >
+      A filter type carrying repeatable path globs, extensions and languages,
+      resolved to a set of chunk ids by one SQLite query against files.path.
+    - >
+      Dense half of the search restricted with turbovec's
+      IdMapIndex::search_with_allowlist, so the top-k is computed inside the
+      subset rather than post-filtered from a global top-k.
+    - >
+      Keyword half of the search restricted by the same path predicate inside
+      the FTS5 query, so both halves of the hybrid ranking see the same subset
+      before reciprocal-rank fusion.
+    - >
+      CLI: `semlith search --path <glob> --ext <ext> --lang <name>`, each
+      repeatable, combined as a union within a kind and an intersection is not
+      offered.
+    - >
+      MCP: `semlith_search` gains optional `path`, `ext` and `lang` array
+      arguments with the same meaning, described in the tool schema so an agent
+      knows to scope a subsystem question.
+    - >
+      A built-in extension-to-language map covering the languages semlith is
+      realistically pointed at, and `semlith languages` to print it.
+    - >
+      Non-absolute path globs are auto-anchored as `*/<pattern>` against the
+      canonical stored path; absolute patterns are used verbatim.
+    - >
+      A filter matching nothing returns no hits and says so, rather than
+      silently falling back to an unfiltered search.
+    - README, CHANGELOG 0.3.0 section, and MCP tool documentation.
+    - Publication to crates.io and a tagged GitHub release with binaries.
+  excluded:
+    - Filters on `semlith files` and `semlith stats`.
+    - Content-based language detection; extension is the only signal.
+    - Exclusion filters (`--not-path`), which invert the id-selection query.
+    - Boolean composition beyond union-within-kind, intersection-across-kind.
+    - Filtering at index time; the store still holds everything that was indexed.
+    - Any change to the store schema or to index.tv.
+    - Regex path matching. SQLite GLOB is the matcher.
+  fallback_scope:
+    - >
+      `--path <glob>` only, repeatable, on `semlith search` and on the
+      `semlith_search` MCP tool, with the same allowlist-based dense filtering
+      and the same FTS5 predicate. Drops `--ext`, `--lang` and
+      `semlith languages`; `--ext rs` becomes `--path '*.rs'`. Still a coherent
+      release: an agent can scope a question to a subsystem.
+
+acceptance:
+  functional:
+    - >
+      `semlith search <q> --path '<subdir>/**'` returns only hits whose path
+      matches the glob, on a store containing files both inside and outside it.
+    - >
+      A scoped search returns k hits when the subset holds at least k chunks,
+      where a post-filtered global top-k would return fewer. Proven on a store
+      where the subset is a small minority of chunks.
+    - >
+      `--ext rs` and `--lang rust` select the same chunk set on a corpus whose
+      only Rust files end in `.rs`, and `--lang` accepts an unknown name with a
+      clear error naming `semlith languages` rather than silently matching
+      nothing.
+    - >
+      Repeating a flag unions: `--ext rs --ext toml` returns hits from both, and
+      `--path 'src/**' --ext md` intersects across kinds — a Markdown file under
+      src matches, a Markdown file elsewhere does not.
+    - >
+      A filter that matches no indexed file exits 0 with an explicit
+      "no files match the filter" message on stderr, distinct from
+      "no matches", and `--json` emits `[]`.
+    - >
+      The `semlith_search` MCP tool accepts `path`, `ext` and `lang` arrays and
+      returns the same hits as the equivalent CLI invocation, and omitting them
+      searches the whole store exactly as 0.2.0 did.
+    - >
+      A non-absolute glob matches regardless of the directory the search is run
+      from, and an absolute glob matches only the paths it literally covers.
+  non_functional:
+    - >
+      An unfiltered search on a 100k-chunk store is no slower than 0.2.0 on the
+      same store and machine, within 10 percent — the filter path must not tax
+      the common case.
+    - >
+      A scoped search over a subset of at least 100 chunks completes in under
+      250 ms on the recorded benchmark corpus, model already warm.
+    - >
+      Retrieval quality improves where it should: on the recorded evaluation
+      set, restricting a query to the subsystem holding its answer does not
+      lower that answer's rank against the unfiltered search.
+    - >
+      No store schema change. A 0.2.0 store opens, searches and filters without
+      re-indexing, and a 0.3.0 store is readable by 0.2.0.
+  operational:
+    - CI green on develop and on main for the release commit.
+    - >
+      README documents the three filters, the `*/` anchoring rule and the fact
+      that GLOB `*` crosses `/`.
+    - >
+      CHANGELOG has a 0.3.0 section, which is what the release workflow reads
+      for its notes.
+    - >
+      `cargo publish --dry-run` passes and the packaged tarball contains no
+      `.env` and no `.ultraship` directory.
+    - crates.io serves semlith 0.3.0 and `cargo install semlith` resolves to it.
+    - >
+      The tagged GitHub release carries the four platform archives and
+      SHA256SUMS, all release-workflow jobs green.
+
+delivery:
+  target_mode: published
+  environment: >
+    A developer workstation. Distributed via crates.io and prebuilt archives on
+    GitHub Releases; there is no server to deploy to.
+  deployment_method: >
+    Merge to main, push the `v0.3.0` tag to trigger the release workflow, which
+    verifies the tag against Cargo.toml, builds four platform archives and
+    publishes the GitHub release. `cargo publish` is a deliberate manual step
+    after the tagged release, never from CI.
+  migrations:
+    - >
+      None. The filter reads `files.path`, which every store since 0.1.0
+      already holds. No new table, no new column, no index.tv change.
+  observability:
+    - >
+      `semlith search` already prints hit count and elapsed time to stderr; a
+      scoped search additionally reports how many files the filter selected, so
+      a filter that silently selects nothing is visible.
+  rollback: >
+    A crates.io publish is permanent. Rollback is `cargo yank 0.3.0` plus a
+    0.3.1 fix; 0.2.0 stays installable and is unaffected, since no store written
+    by 0.3.0 is unreadable by it. The GitHub release can be deleted outright.
+
+dependencies:
+  products: []
+  services:
+    - crates.io — publish token must be present locally.
+    - GitHub Actions — release workflow builds the platform archives.
+  human_approvals:
+    - >
+      Explicit go-ahead before `cargo publish`, since it cannot be undone.
+
+resource_profile:
+  complexity: small
+  uncertainty: low
+  likely_cost_drivers:
+    - >
+      Building an end-to-end fixture store large enough to prove that
+      allowlist filtering beats post-filtering, rather than asserting it.
+    - >
+      Re-running the 100k-chunk latency measurement to show the unfiltered path
+      did not regress.
+  preferred_tools:
+    - cargo test for the unit and roundtrip coverage.
+    - >
+      The release binary against a real corpus for the end-to-end acceptance
+      criteria; in-process tests cannot prove CLI or MCP behaviour.
+  constraints:
+    - >
+      `IdMapIndex::search_with_allowlist` panics on an empty allowlist and on
+      any id not present in the index, so the id set must be intersected with
+      the index and the empty case handled before the call.
+    - >
+      SQLite GLOB is the matcher: `*` crosses `/`, there is no `**`, and the
+      match is case-sensitive. This is a documented semantic, not a bug to fix.
+    - >
+      Paths are stored canonical and absolute, so any relative pattern needs
+      anchoring before it can match.
+    - Local only, single machine, one writer per store. Unchanged by this release.
+
+risks:
+  - >
+    The allowlist builds a `Vec<bool>` the size of the whole index on every
+    filtered query. On a 100k-chunk store that is a 100 KB allocation per
+    search, which is likely fine but is unmeasured — if it is not, the fix is to
+    pass `None` when the filter selects everything.
+  - >
+    Passing a very large id set to `search_with_allowlist` (a filter matching
+    most of the corpus) may be slower than an unfiltered search plus a
+    post-filter. The crossover point is unknown and worth measuring before
+    claiming the non-functional criterion.
+  - >
+    The FTS5 half and the dense half must agree on the subset exactly. If the
+    SQL predicate and the allowlist are derived independently they can drift,
+    and fusion would then rank a chunk that one half was never allowed to see.
+    Both must come from one id-selection function.
+  - >
+    `--lang` is a hardcoded extension map and will be wrong or incomplete for
+    somebody. Scoping it to a documented, printable list keeps that a known
+    limitation rather than a silent miss.
+  - >
+    An agent given three new optional MCP arguments may over-scope queries and
+    miss answers that live outside the subsystem it guessed. The tool
+    description has to say when not to filter.
+
+open_questions:
+  - >
+    Should a filter that selects zero files be an error exit rather than an
+    empty result? Chosen: exit 0 with a distinct message, because an agent
+    calling over MCP handles an empty result better than a failure. Revisit if
+    it hides typos in practice.
+  - >
+    Should `--path` also accept a plain directory (`--path src`) as shorthand
+    for `src/**`? Deferred: decide during development from what the acceptance
+    fixture makes obvious.
