@@ -275,7 +275,40 @@ machine; a second layer of parallelism only contends with it.
 | pdf-extract | Pure Rust, no external binary. |
 | blake3 | Fast enough that hashing every file on every run is free. |
 | hf-hub | Fetches the default model's weights. fastembed uses it internally but does not expose it, and the default model is not one fastembed knows. |
-| libc | One call, `sysctlbyname`, to count performance cores on Apple silicon. |
+| libc | `sysctlbyname` to count performance cores on Apple silicon, and the `SIGINT`/`SIGTERM` handler that stops `watch` at a batch boundary. |
+| notify | Filesystem events per platform — FSEvents, inotify, ReadDirectoryChangesW — so `watch` costs nothing while nothing changes. Writing three backends by hand is not a thing to do for one command. |
+
+## Watching, and why a reader can trust what it reads
+
+`semlith watch` is not a second indexer. Filesystem events only produce a set of
+candidate paths; the content hash, chunk eviction, batched embedding and the
+atomic `index.tv` write are the same code `index` runs. Nothing is re-embedded
+because an event fired — only because the bytes changed.
+
+Two decisions carry the design.
+
+**One writer, held honestly.** `Semlith` keeps its vector index in memory, and
+`save()` writes all of it. Two writers would therefore not interleave, they
+would overwrite: whichever saved last would erase the other's work. So `watch`
+takes the store lock for its whole life and a concurrent `index` is refused by
+name. A long-held lock is the visible cost of an invariant that was already
+there.
+
+**Freshness is a counter, not a timestamp.** A reader — an MCP server an agent
+holds open for a session — must notice that the index has been replaced. The
+store counts index rewrites in its `meta` table, bumped *after* the rename, and
+a search reloads when the count has moved. mtime cannot do this job: re-embedding
+one file can leave both the file size and a second-granularity mtime unchanged,
+and the reader would go on answering from vectors that no longer exist. Bumping
+after the rename is what makes the counter safe to trust — a reader that sees
+the new generation is guaranteed to find the new index behind it.
+
+Deciding what an event means is deliberately postponed to the moment the batch
+is indexed, and answered by the filesystem rather than by the event kind: a path
+that exists is re-embedded, a path that does not is evicted. Renames and
+write-temp-then-rename saves then need no special case, and the differences
+between how FSEvents, inotify and ReadDirectoryChangesW label things stop
+mattering.
 
 ## Things that were considered and left out
 

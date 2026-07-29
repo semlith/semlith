@@ -34,6 +34,22 @@ enum Command {
         quiet: bool,
     },
 
+    /// Keep the store current: re-embed files as they are saved. Runs until
+    /// interrupted, and holds the store's write lock while it does.
+    Watch {
+        /// Paths to watch. Defaults to the current directory.
+        paths: Vec<PathBuf>,
+
+        /// Quiet period in milliseconds after the last change before
+        /// re-embedding, so one editor save costs one re-embed.
+        #[arg(long, default_value_t = semlith::watch::DEBOUNCE.as_millis() as u64)]
+        debounce: u64,
+
+        /// Suppress per-file output and download progress.
+        #[arg(long, short)]
+        quiet: bool,
+    },
+
     /// Search the store.
     Search {
         query: String,
@@ -139,6 +155,62 @@ fn main() -> Result<()> {
                 semlith::human_bytes(bytes),
                 dir.display()
             );
+        }
+
+        Command::Watch {
+            paths,
+            debounce,
+            quiet,
+        } => {
+            let roots = if paths.is_empty() {
+                vec![PathBuf::from(".")]
+            } else {
+                paths
+            };
+
+            let mut store = Semlith::open(&dir, None)?;
+            store.quiet = quiet;
+
+            // Installed before the first event: Ctrl-C is how this command
+            // ends, so it has to leave the store whole.
+            semlith::watch::stop_on_signal();
+
+            let shown: Vec<String> = roots.iter().map(|r| display(r)).collect();
+            semlith::watch::run(
+                &mut store,
+                &roots,
+                std::time::Duration::from_millis(debounce),
+                &semlith::watch::STOP,
+                |progress| {
+                    use semlith::watch::Progress;
+                    match progress {
+                        // A watcher that has quietly stopped updating looks
+                        // exactly like a corpus nobody edited, so it says what
+                        // it is watching and what it did.
+                        Progress::Ready {
+                            catch_up,
+                            files,
+                            chunks,
+                        } => eprintln!(
+                            "watching {} — {files} files, {chunks} chunks \
+                             ({} indexed at startup, {} unchanged)",
+                            shown.join(", "),
+                            catch_up.indexed,
+                            catch_up.unchanged,
+                        ),
+                        Progress::File(path) if !quiet => eprintln!("  ~ {}", display(path)),
+                        Progress::Batch(report, elapsed) if !quiet => eprintln!(
+                            "  {} re-embedded, {} removed, {} chunks in {:.1}s",
+                            report.indexed,
+                            report.removed,
+                            report.chunks,
+                            elapsed.as_secs_f32(),
+                        ),
+                        Progress::Error(e) => eprintln!("semlith: watch error: {e}"),
+                        _ => {}
+                    }
+                },
+            )?;
         }
 
         Command::Search {
