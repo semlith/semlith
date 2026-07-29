@@ -153,6 +153,39 @@ If a chunk id comes back that SQLite does not know about, the hit is skipped
 rather than failing the query. That means the two halves have drifted, which
 should not happen — but returning four good results beats returning an error.
 
+### Narrowing to part of the corpus
+
+`--path`, `--ext` and `--lang` become one list of `GLOB` patterns, grouped so
+that repeats within a kind union and kinds intersect. `src/filter.rs` owns that
+translation; `store::filtered_chunk_ids` runs it as a single query against
+`files.path` and returns the chunk ids it selects.
+
+That one id set drives both halves. The vector half passes it to
+`IdMapIndex::search_with_allowlist`, so turbovec masks the scan and its top-`k`
+is computed *inside* the subset. The keyword half receives the same predicate
+inside its FTS5 statement. Deriving the two independently would let them drift,
+and fusion would then rank a chunk that one half was never allowed to return.
+
+Filtering before the top-`k` rather than after is the whole point. A
+subdirectory holding one percent of a corpus contributes roughly one percent of
+a global top-8 — usually none of it — so post-filtering a global ranking
+returns an empty result for exactly the query the filter was written for.
+
+Three details are load-bearing:
+
+- turbovec panics on an empty allowlist and on any id the index does not hold,
+  so the ids are intersected with the index and the empty case returns no hits
+  without calling it.
+- A filter that ends up selecting the entire index is passed as no filter at
+  all, which avoids building a mask the size of the index for no benefit.
+- The unfiltered FTS5 statement is kept exactly as it was, with no join to
+  `chunks` and `files`, so a query that uses no filter pays nothing for the
+  feature.
+
+Nothing is stored for any of this. `files.path` has been recorded since 0.1.0,
+which is why filtering works on an existing store with no migration and no
+re-embedding.
+
 ## The MCP server
 
 `semlith mcp` is newline-delimited JSON-RPC 2.0 over stdio, hand-rolled in one
@@ -175,6 +208,13 @@ of the call simply failing.
 The server calls `warm()` at startup — loading the ONNX model and preparing the
 index's lazy caches — so the first tool call is not several hundred milliseconds
 slower than the rest.
+
+`semlith_search` takes the CLI's filters as optional `path`, `ext` and `lang`
+arrays, and a bare string is accepted wherever an array is, because that is what
+an agent produces about half the time. An unknown language name and a filter
+that selects nothing are both answered in-band with text the agent can act on:
+one names `semlith languages`, the other says to try again without the filter.
+Silently returning nothing would teach an agent that the corpus is empty.
 
 ## One writer per store
 
