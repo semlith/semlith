@@ -19,6 +19,7 @@ pub mod filter;
 pub mod lock;
 pub mod mcp;
 pub mod store;
+pub mod watch;
 
 use anyhow::{Context, Result, bail};
 use embed::Model;
@@ -176,6 +177,12 @@ impl Semlith {
         &self.db
     }
 
+    /// The store directory, for a caller that needs to take the store lock
+    /// itself rather than for the length of one call.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Loading the ONNX model costs a second or so, so it is deferred until a
     /// command actually needs to embed something.
     fn embedder(&mut self) -> Result<&mut TextEmbedding> {
@@ -218,20 +225,54 @@ impl Semlith {
     pub fn index_paths(
         &mut self,
         roots: &[PathBuf],
-        mut on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path),
     ) -> Result<IndexReport> {
         // Held for the whole run, including the index.tv write at the end.
         // Two concurrent runs would otherwise interleave their SQLite writes
         // and their index rewrites until the two disagree.
         let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.index_walk(roots, on_file)
+    }
 
+    /// `index_paths` without taking the lock, for a caller that already holds
+    /// it — `semlith watch` holds it for its whole life.
+    pub(crate) fn index_walk(
+        &mut self,
+        roots: &[PathBuf],
+        on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        self.index_set(walk(roots), true, on_file)
+    }
+
+    /// Re-index exactly `paths`, evicting any that have gone from disk.
+    ///
+    /// No walk and no orphan sweep: the caller already knows which files
+    /// changed, which is the whole point of watching. The lock is the caller's
+    /// too.
+    pub(crate) fn index_changed(
+        &mut self,
+        paths: Vec<PathBuf>,
+        on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        self.index_set(paths, false, on_file)
+    }
+
+    /// The body both entry points share. `sweep` drops every recorded file
+    /// that is no longer on disk — right for a full walk, wrong for a batch of
+    /// events, which only knows about the paths in it.
+    fn index_set(
+        &mut self,
+        paths: Vec<PathBuf>,
+        sweep: bool,
+        mut on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
         // Files whose vectors are embedded but not yet durable. Their hash is
         // written only after `index.tv` lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
 
-        for path in walk(roots) {
+        for path in paths {
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
 
@@ -240,6 +281,19 @@ impl Semlith {
             match std::fs::metadata(&path) {
                 Ok(m) if m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
                 _ => {
+                    // A batch of events can name a file that has just been
+                    // deleted or renamed away. Evicting it here is what makes
+                    // a deletion visible without a full sweep.
+                    if !path.exists() {
+                        let ids = store::delete_file(&self.db, &key)?;
+                        if !ids.is_empty() {
+                            for id in ids {
+                                self.index.remove(id);
+                            }
+                            report.removed += 1;
+                            continue;
+                        }
+                    }
                     report.skipped += 1;
                     continue;
                 }
@@ -296,16 +350,23 @@ impl Semlith {
         self.flush(&mut pending)?;
 
         // Anything recorded but no longer on disk is dead weight.
-        for key in store::all_paths(&self.db)? {
-            if !Path::new(&key).exists() {
-                for id in store::delete_file(&self.db, &key)? {
-                    self.index.remove(id);
+        if sweep {
+            for key in store::all_paths(&self.db)? {
+                if !Path::new(&key).exists() {
+                    for id in store::delete_file(&self.db, &key)? {
+                        self.index.remove(id);
+                    }
+                    report.removed += 1;
                 }
-                report.removed += 1;
             }
         }
 
-        self.save()?;
+        // A batch that changed nothing must not rewrite index.tv. A watcher
+        // sees plenty of events on files whose bytes are identical, and each
+        // rewrite is the whole index.
+        if report.indexed > 0 || report.removed > 0 || !self.dir.join("index.tv").exists() {
+            self.save()?;
+        }
 
         // ponytail: hashes are committed in one shot after the index is
         // durable. A crash mid-run re-indexes the whole batch; add periodic
