@@ -37,9 +37,13 @@ versions:
     detail: hypothesis
     status: planned
 
-  - version: 1.0.0
+  - version: 0.6.0
     outcome: >
       A developer depends on semlith knowing the CLI, the MCP tools, the store
       format and the Rust API are stable under SemVer.
     detail: hypothesis
     status: planned
+
+# No 1.0.0 entry. Declaring the CLI, MCP tools, store format and Rust API
+# stable is the maintainer's call and is not to be planned until they say so.
+# Recorded 2026-07-29 on their explicit instruction.
