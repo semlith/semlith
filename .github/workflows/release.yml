@@ -9,7 +9,27 @@ permissions:
   contents: write
 
 jobs:
+  # A tag is the only thing that says which version this release is, and
+  # nothing else checks it against the crate. Without this a v0.2.0 tag on a
+  # tree still declaring 0.1.0 would publish binaries labelled with a version
+  # they were not built from.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml
+        run: |
+          cargo_version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml: $cargo_version"
+          echo "tag:        $tag_version"
+          if [ "$cargo_version" != "$tag_version" ]; then
+            echo "::error::tag $tag_version does not match Cargo.toml $cargo_version"
+            exit 1
+          fi
+
   build:
+    needs: verify
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -73,7 +93,7 @@ jobs:
             dist/*.zip
 
   release:
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
