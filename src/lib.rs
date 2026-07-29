@@ -19,6 +19,7 @@ pub mod filter;
 pub mod lock;
 pub mod mcp;
 pub mod store;
+pub mod watch;
 
 use anyhow::{Context, Result, bail};
 use embed::Model;
@@ -55,6 +56,15 @@ pub fn default_model() -> Model {
 /// durable yet". Any file left in this state is re-indexed on the next run.
 const PENDING: &str = "";
 
+/// Meta key counting index.tv rewrites.
+///
+/// It is what tells a long-running reader — an MCP server an agent is holding
+/// open — that `semlith watch` has replaced the index underneath it. A
+/// timestamp cannot do this job: re-embedding one file can leave both the size
+/// and the second-granularity mtime unchanged, and the reader would keep
+/// answering from vectors that no longer exist.
+const GENERATION: &str = "index_generation";
+
 /// Reciprocal-rank-fusion constant. Rank position matters more than the raw
 /// scores, which are not comparable: cosine similarity and BM25 are different
 /// units on different scales. 60 is the value from the original TREC work and
@@ -90,6 +100,9 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// The index generation this process has loaded. Compared against the
+    /// store's on every search to notice another process's writes.
+    generation: u64,
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
@@ -145,6 +158,8 @@ impl Semlith {
             IdMapIndex::new(dim, BIT_WIDTH).map_err(|e| anyhow::anyhow!("{e:?}"))?
         };
 
+        let generation = generation(&db)?;
+
         Ok(Self {
             dir,
             db,
@@ -152,8 +167,48 @@ impl Semlith {
             model,
             dim,
             embedder: None,
+            generation,
             quiet: false,
         })
+    }
+
+    /// Reload the vector index if another process has replaced it since this
+    /// one read it — `semlith watch` re-embedding while an agent holds an MCP
+    /// server open.
+    ///
+    /// Costs one SQLite read when nothing has changed, which is the case
+    /// almost every time it is called.
+    pub fn refresh(&mut self) -> Result<()> {
+        let current = generation(&self.db)?;
+        if current == self.generation {
+            return Ok(());
+        }
+
+        let path = self.dir.join("index.tv");
+        if !path.exists() {
+            return Ok(());
+        }
+        let index =
+            IdMapIndex::load(&path).with_context(|| format!("reloading {}", path.display()))?;
+        if let Some(d) = index.dim_opt()
+            && d != self.dim
+        {
+            bail!(
+                "index is {d}-dimensional but {} produces {}; store is corrupt",
+                self.model,
+                self.dim
+            );
+        }
+        // A reader that reloads mid-session should not hand the cost of a cold
+        // index to whoever asked the next question.
+        index.prepare();
+        self.index = index;
+        // Only now, and to the generation read *before* the load: a failed
+        // load leaves the reader due for another attempt rather than stuck on
+        // a stale index forever, and a write that landed during the load has a
+        // higher number, so it is still noticed next time.
+        self.generation = current;
+        Ok(())
     }
 
     pub fn model(&self) -> &Model {
@@ -174,6 +229,12 @@ impl Semlith {
 
     pub fn db(&self) -> &Connection {
         &self.db
+    }
+
+    /// The store directory, for a caller that needs to take the store lock
+    /// itself rather than for the length of one call.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Loading the ONNX model costs a second or so, so it is deferred until a
@@ -218,12 +279,51 @@ impl Semlith {
     pub fn index_paths(
         &mut self,
         roots: &[PathBuf],
-        mut on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path),
     ) -> Result<IndexReport> {
         // Held for the whole run, including the index.tv write at the end.
         // Two concurrent runs would otherwise interleave their SQLite writes
         // and their index rewrites until the two disagree.
         let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.index_walk(roots, on_file)
+    }
+
+    /// `index_paths` without taking the lock, for a caller that already holds
+    /// it — `semlith watch` holds it for its whole life.
+    pub(crate) fn index_walk(
+        &mut self,
+        roots: &[PathBuf],
+        on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        self.index_set(walk(roots), true, on_file)
+    }
+
+    /// Re-index exactly `paths`, evicting any that have gone from disk.
+    ///
+    /// No walk and no orphan sweep: the caller already knows which files
+    /// changed, which is the whole point of watching. The lock is the caller's
+    /// too.
+    pub(crate) fn index_changed(
+        &mut self,
+        paths: Vec<PathBuf>,
+        on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        self.index_set(paths, false, on_file)
+    }
+
+    /// The body both entry points share. `sweep` drops every recorded file
+    /// that is no longer on disk — right for a full walk, wrong for a batch of
+    /// events, which only knows about the paths in it.
+    fn index_set(
+        &mut self,
+        paths: Vec<PathBuf>,
+        sweep: bool,
+        mut on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        // A run killed mid-save leaves index.tv.tmp behind. Removing it here
+        // and not on open is deliberate: the caller holds the store lock, so
+        // there is no live writer whose half-written index this could be.
+        let _ = std::fs::remove_file(self.dir.join("index.tv.tmp"));
 
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
@@ -231,7 +331,7 @@ impl Semlith {
         // written only after `index.tv` lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
 
-        for path in walk(roots) {
+        for path in paths {
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
 
@@ -240,6 +340,19 @@ impl Semlith {
             match std::fs::metadata(&path) {
                 Ok(m) if m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
                 _ => {
+                    // A batch of events can name a file that has just been
+                    // deleted or renamed away. Evicting it here is what makes
+                    // a deletion visible without a full sweep.
+                    if !path.exists() {
+                        let ids = store::delete_file(&self.db, &key)?;
+                        if !ids.is_empty() {
+                            for id in ids {
+                                self.index.remove(id);
+                            }
+                            report.removed += 1;
+                            continue;
+                        }
+                    }
                     report.skipped += 1;
                     continue;
                 }
@@ -296,16 +409,23 @@ impl Semlith {
         self.flush(&mut pending)?;
 
         // Anything recorded but no longer on disk is dead weight.
-        for key in store::all_paths(&self.db)? {
-            if !Path::new(&key).exists() {
-                for id in store::delete_file(&self.db, &key)? {
-                    self.index.remove(id);
+        if sweep {
+            for key in store::all_paths(&self.db)? {
+                if !Path::new(&key).exists() {
+                    for id in store::delete_file(&self.db, &key)? {
+                        self.index.remove(id);
+                    }
+                    report.removed += 1;
                 }
-                report.removed += 1;
             }
         }
 
-        self.save()?;
+        // A batch that changed nothing must not rewrite index.tv. A watcher
+        // sees plenty of events on files whose bytes are identical, and each
+        // rewrite is the whole index.
+        if report.indexed > 0 || report.removed > 0 || !self.dir.join("index.tv").exists() {
+            self.save()?;
+        }
 
         // ponytail: hashes are committed in one shot after the index is
         // durable. A crash mid-run re-indexes the whole batch; add periodic
@@ -401,6 +521,11 @@ impl Semlith {
     /// the subset is a minority of the corpus, which is the case the filter
     /// exists for.
     pub fn search_filtered(&mut self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Hit>> {
+        // A store being watched changes under a long-lived reader. Answering
+        // from the index this process happened to load at startup is how an
+        // agent ends up quoting a function that no longer exists.
+        self.refresh()?;
+
         if self.index.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
@@ -462,13 +587,20 @@ impl Semlith {
 
     /// Write the index out via a temp file + rename, so an interrupted save
     /// cannot leave a half-written `index.tv` behind.
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         let final_path = self.dir.join("index.tv");
         let tmp = self.dir.join("index.tv.tmp");
         self.index
             .write(&tmp)
             .with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &final_path)?;
+
+        // Bumped after the rename, never before: a reader that sees the new
+        // generation is guaranteed to find the new index behind it. Read back
+        // from the store rather than incremented from this process's copy,
+        // which may predate another writer's run.
+        self.generation = generation(&self.db)? + 1;
+        store::set_meta(&self.db, GENERATION, &self.generation.to_string())?;
         Ok(())
     }
 }
@@ -505,6 +637,14 @@ fn normalize(v: &mut [f32]) {
             *x /= norm;
         }
     }
+}
+
+/// How many times this store's index has been rewritten. Absent on a store
+/// written before 0.4.0, which reads as zero and is bumped on its first write.
+fn generation(db: &Connection) -> Result<u64> {
+    Ok(store::get_meta(db, GENERATION)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
 }
 
 fn now() -> i64 {
