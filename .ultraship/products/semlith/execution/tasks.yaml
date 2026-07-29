@@ -126,13 +126,24 @@ tasks:
       Removes the fourth documented limitation. 1.7 GB is uncomfortable on the
       8 GB machines this product targets, and an unbounded peak means a large
       enough corpus will eventually fail outright.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - Peak resident memory during index varies by no more than 20 percent between a 1k-chunk, a 10k-chunk and a 100k-chunk corpus.
     files:
       - src/lib.rs
-    evidence: []
+    evidence:
+      - "Peak RSS across the criterion's own sizes: 1229 chunks 600 MB, 9893
+        chunks 637 MB, 104816 chunks 595 MB. Spread 7.1 percent against the 20
+        percent allowed, and the largest corpus uses the least memory."
+      - "Two causes fixed. Embedding batches were flushed once per file rather
+        than once per batch, so one 8 MB file could hold thousands of chunks in
+        memory at once. EMBED_BATCH was 32 where 8 costs 2.9x less memory at
+        identical throughput, 23.2 against 23.3 chunks/sec."
+      - "Throughput held at 23.5 chunks/sec on the 104816-chunk corpus, so the
+        conflict the contract anticipated between bounded memory and the 16
+        chunks/sec target did not materialise."
+
 
   - id: US-SEMLITH-0.2.0-T07
     summary: >

@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-07-29
 
-Removes three of the four limitations 0.1.0 shipped with, and changes the
-default embedding model.
+Removes three of the four limitations 0.1.0 shipped with, cuts peak indexing
+memory to a third, and changes the default embedding model.
 
 ### Changed
 
@@ -59,6 +59,37 @@ default embedding model.
 - A release whose git tag disagrees with `Cargo.toml` now fails the release
   build instead of publishing binaries labelled with a version they were not
   built from.
+
+### Performance
+
+Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM, over corpora of
+mixed Rust, Markdown and TypeScript.
+
+| store | warm query, p50 | indexing | peak RSS |
+|---|---|---|---|
+| 1.2k chunks | 2.7 ms | 27.6 chunks/sec | 600 MB |
+| 9.9k chunks | 5.4 ms | 24.3 chunks/sec | 637 MB |
+| 105k chunks | 22.7 ms | 23.5 chunks/sec | 595 MB |
+
+- **Peak indexing memory is now roughly 600 MB and no longer grows with the
+  corpus**, against ~1.7 GB in 0.1.0. Across a 1.2k, 9.9k and 105k chunk corpus
+  it varies by 7 percent, and the largest corpus uses the least. Two causes:
+  embedding batches were being flushed once per file rather than once per
+  batch, so a single large file could hold thousands of chunks in memory; and
+  the batch size itself was three times larger than it needed to be.
+- **Indexing throughput is up from ~13 to ~23 chunks/sec**, from sizing the
+  ONNX Runtime thread pool to the machine's performance cores.
+- **Retrieval quality**, measured end to end through the binary over a
+  6527-chunk corpus with 1809 self-labelled queries:
+
+  | | code MRR@10 | docs MRR@10 |
+  |---|---|---|
+  | 0.1.0 (BGE-small, dense only) | 14.84 | 15.09 |
+  | 0.2.0 (granite int8, dense only) | 16.00 | 14.08 |
+  | **0.2.0 as shipped (granite int8 + FTS5)** | **17.90** | **15.62** |
+
+  The model change alone would have regressed prose retrieval. Keyword fusion
+  more than recovers it, which is why the two ship together.
 
 ### Library API
 

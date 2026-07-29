@@ -239,8 +239,9 @@ machine; a second layer of parallelism only contends with it.
 
 ## Things that were considered and left out
 
-**A daemon or server mode.** Query latency is already ~6 ms warm; the only cost
-worth amortizing is model load, which `semlith mcp` already does. A network port
+**A daemon or server mode.** Query latency is a few milliseconds warm on a
+repository-sized store; the only cost worth amortizing is model load, which
+`semlith mcp` already does. A network port
 would also undermine the "everything local" property that is the entire point.
 
 **Storing embeddings in SQLite too.** Tempting for a single-file store, but then
