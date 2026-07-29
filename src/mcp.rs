@@ -7,6 +7,7 @@
 //! Everything written to stdout is protocol. Diagnostics go to stderr.
 
 use crate::Semlith;
+use crate::filter::Filter;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
@@ -72,7 +73,8 @@ fn tools() -> Value {
                 "Semantic search over the local semlith store: docs, PDFs, code, and notes \
                  that have been indexed on this machine. Returns the most relevant excerpts \
                  with their file path and line range. Use this instead of reading whole files \
-                 when you need to find where something is discussed or implemented.",
+                 when you need to find where something is discussed or implemented. \
+                 Optionally narrow the search to one part of the corpus with path, ext or lang.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -85,6 +87,30 @@ fn tools() -> Value {
                         "description": "How many excerpts to return (default 8).",
                         "minimum": 1,
                         "maximum": 50
+                    },
+                    "path": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description":
+                            "Restrict the search to files matching these globs, e.g. \"src/**\". \
+                             A pattern that does not start with / matches anywhere in the tree. \
+                             `*` crosses directory separators, so `src/*` reaches the whole \
+                             subtree. Only filter when you already know which part of the \
+                             corpus holds the answer — a wrong guess hides it entirely."
+                    },
+                    "ext": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Restrict the search to these file extensions, e.g. [\"rs\", \"toml\"]."
+                    },
+                    "lang": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description":
+                            "Restrict the search to these languages, e.g. [\"rust\"]. Accepts: \
+                             c, cpp, csharp, css, go, haskell, html, java, javascript, json, \
+                             kotlin, lua, markdown, ocaml, php, python, ruby, rust, scala, \
+                             shell, sql, swift, toml, typescript, yaml."
                     }
                 },
                 "required": ["query"]
@@ -111,12 +137,31 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
                 return Err((-32602, "missing required argument: query".into()));
             };
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(8) as usize;
-            match store.search(query, k.clamp(1, 50)) {
-                Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
-                Ok(hits) => render(&hits),
-                // Tool failures are reported in-band so the agent can react,
-                // rather than as a protocol-level error.
-                Err(e) => return Ok(tool_error(&format!("search failed: {e}"))),
+
+            let filter = match Filter::new(
+                &strings(&args, "path"),
+                &strings(&args, "ext"),
+                &strings(&args, "lang"),
+            ) {
+                Ok(f) => f,
+                // An unknown language is the agent's mistake to correct, so it
+                // goes back in-band with the list rather than as a protocol error.
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            };
+
+            // Told apart because an agent that scoped to the wrong subsystem
+            // should widen the filter, not conclude the corpus is empty.
+            if !filter.is_empty() && store.matching_files(&filter).unwrap_or(0) == 0 {
+                "No indexed file matches that path/ext/lang filter. Try again without it."
+                    .to_string()
+            } else {
+                match store.search_filtered(query, k.clamp(1, 50), &filter) {
+                    Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
+                    Ok(hits) => render(&hits),
+                    // Tool failures are reported in-band so the agent can react,
+                    // rather than as a protocol-level error.
+                    Err(e) => return Ok(tool_error(&format!("search failed: {e}"))),
+                }
             }
         }
         "semlith_stats" => match store.stats() {
@@ -132,6 +177,19 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
     };
 
     Ok(json!({ "content": [{ "type": "text", "text": body }] }))
+}
+
+/// One filter argument as strings. A bare string is accepted alongside an
+/// array, because that is what an agent produces about half the time.
+fn strings(args: &Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|i| i.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn tool_error(message: &str) -> Value {

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fastembed::TextEmbedding;
-use semlith::{Semlith, default_store_dir, embed, embed::Model};
+use semlith::{Semlith, default_store_dir, embed, embed::Model, filter::Filter};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -42,6 +42,19 @@ enum Command {
         #[arg(long, short, default_value_t = 8)]
         k: usize,
 
+        /// Only search files matching this glob. Repeatable; a relative
+        /// pattern matches anywhere in the tree.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Only search files with this extension. Repeatable.
+        #[arg(long, short)]
+        ext: Vec<String>,
+
+        /// Only search files of this language. Repeatable; see `semlith languages`.
+        #[arg(long, short)]
+        lang: Vec<String>,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -61,6 +74,9 @@ enum Command {
 
     /// List available embedding models.
     Models,
+
+    /// List the language names `--lang` accepts, and their extensions.
+    Languages,
 }
 
 fn main() -> Result<()> {
@@ -125,12 +141,41 @@ fn main() -> Result<()> {
             );
         }
 
-        Command::Search { query, k, json } => {
+        Command::Search {
+            query,
+            k,
+            path,
+            ext,
+            lang,
+            json,
+        } => {
+            // Built before the store is opened, so an unknown language name
+            // fails immediately rather than after a model load.
+            let filter = Filter::new(&path, &ext, &lang)?;
+
             let mut store = Semlith::open(&dir, None)?;
             store.quiet = json;
 
+            // A glob that selects nothing is a different answer from a corpus
+            // that does not discuss the query, and only one of them is the
+            // user's typo.
+            let selected = (!filter.is_empty())
+                .then(|| store.matching_files(&filter))
+                .transpose()?;
+            if selected == Some(0) {
+                if json {
+                    println!("[]");
+                } else {
+                    eprintln!(
+                        "no files match the filter (store has {} chunks)",
+                        store.len()
+                    );
+                }
+                return Ok(());
+            }
+
             let started = Instant::now();
-            let hits = store.search(&query, k)?;
+            let hits = store.search_filtered(&query, k, &filter)?;
             let elapsed = started.elapsed();
 
             if json {
@@ -156,7 +201,27 @@ fn main() -> Result<()> {
                     }
                     writeln!(out)?;
                 }
-                eprintln!("{} hits in {:?}", hits.len(), elapsed);
+                match selected {
+                    Some(n) => eprintln!(
+                        "{} hits in {:?} (filter selected {n} of {} files)",
+                        hits.len(),
+                        elapsed,
+                        store.stats()?.0
+                    ),
+                    None => eprintln!("{} hits in {:?}", hits.len(), elapsed),
+                }
+            }
+        }
+
+        Command::Languages => {
+            for (name, exts) in semlith::filter::LANGUAGES {
+                println!(
+                    "{name:<12} {}",
+                    exts.iter()
+                        .map(|e| format!(".{e}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
             }
         }
 
