@@ -89,6 +89,83 @@ fn index_search_update_forget() {
     assert!(!hits.iter().any(|h| h.path.ends_with("bread.md")));
 }
 
+/// A filter must narrow both halves of the search *before* either picks its
+/// top-k. Post-filtering a global ranking is the failure this guards: with the
+/// subsystem a small minority of the corpus, it returns nothing.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_filtered_search_ranks_within_the_subset() {
+    use semlith::filter::Filter;
+
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    fs::create_dir(corpus.path().join("sub")).unwrap();
+
+    for i in 0..4 {
+        write(
+            &corpus.path().join("sub"),
+            &format!("retry_{i}.rs"),
+            "fn backoff() { let delay = base * 2u32.pow(attempt); }\n\
+             // Retries use full jitter, capped at MAX_BACKOFF.",
+        );
+    }
+    // Enough noise on the same subject that an unfiltered top-k is all noise.
+    for i in 0..60 {
+        write(
+            corpus.path(),
+            &format!("noise_{i}.md"),
+            "Notes on retry backoff and jitter, at length and in prose.",
+        );
+    }
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+        .unwrap();
+
+    let scoped = Filter::new(&["sub/**".into()], &[], &[]).unwrap();
+    let hits = s
+        .search_filtered("retry backoff jitter", 4, &scoped)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        4,
+        "the subset holds four chunks; all four are due"
+    );
+    assert!(
+        hits.iter().all(|h| h.path.contains("/sub/")),
+        "a hit escaped the filter: {hits:#?}"
+    );
+
+    // The same query unscoped is dominated by the noise, which is exactly why
+    // filtering after ranking would not work.
+    let global = s.search("retry backoff jitter", 4).unwrap();
+    assert!(
+        global.iter().filter(|h| h.path.contains("/sub/")).count() < 4,
+        "fixture is too easy: the global top-4 already is the subset"
+    );
+
+    // A language name reaches the same files as the extension it covers.
+    let by_lang = s
+        .search_filtered(
+            "retry backoff jitter",
+            4,
+            &Filter::new(&[], &[], &["rust".into()]).unwrap(),
+        )
+        .unwrap();
+    assert!(by_lang.iter().all(|h| h.path.ends_with(".rs")));
+
+    // A filter that selects nothing returns nothing, rather than falling back
+    // to an unfiltered search.
+    let nowhere = Filter::new(&["nowhere/**".into()], &[], &[]).unwrap();
+    assert_eq!(s.matching_files(&nowhere).unwrap(), 0);
+    assert!(
+        s.search_filtered("retry backoff jitter", 4, &nowhere)
+            .unwrap()
+            .is_empty()
+    );
+}
+
 fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).unwrap();
 }
