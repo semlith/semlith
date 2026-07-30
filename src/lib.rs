@@ -98,6 +98,9 @@ pub struct IndexReport {
     pub skipped: usize,
     pub removed: usize,
     pub chunks: usize,
+    /// Paths a time-bounded run never reached. Zero unless a budget cut the
+    /// run short — an unbounded `index_paths` always finishes what it walked.
+    pub remaining: usize,
 }
 
 pub struct Semlith {
@@ -145,6 +148,11 @@ impl Semlith {
             None => {
                 let m = model.unwrap_or_else(default_model);
                 store::set_meta(&db, "model", &m.to_string())?;
+                // Only here, where a store is being created. Stamping it on
+                // open would rewrite every store this binary ever reads, and
+                // a store written before the key existed is format 1 whether
+                // or not it says so.
+                store::set_meta(&db, store::FORMAT_KEY, &store::FORMAT_VERSION.to_string())?;
                 m
             }
         };
@@ -319,6 +327,25 @@ impl Semlith {
         self.index_walk(roots, on_file)
     }
 
+    /// [`Semlith::index_paths`] that gives up its remaining work when `budget`
+    /// runs out, reporting what it did not reach in [`IndexReport::remaining`].
+    ///
+    /// For a caller whose own deadline is shorter than a corpus — an MCP tool
+    /// call, where a client that waited too long declares the server hung. One
+    /// file is always indexed however small the budget, so calling repeatedly
+    /// always finishes: indexing is keyed on content hashes, so the next call
+    /// walks past what this one completed rather than redoing it.
+    pub fn index_paths_within(
+        &mut self,
+        roots: &[PathBuf],
+        budget: std::time::Duration,
+        on_file: impl FnMut(&Path),
+    ) -> Result<IndexReport> {
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
+        let deadline = std::time::Instant::now() + budget;
+        self.index_set(walk(roots), true, Some(deadline), on_file)
+    }
+
     /// `index_paths` without taking the lock, for a caller that already holds
     /// it — `semlith watch` holds it for its whole life.
     pub(crate) fn index_walk(
@@ -326,7 +353,7 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path),
     ) -> Result<IndexReport> {
-        self.index_set(walk(roots), true, on_file)
+        self.index_set(walk(roots), true, None, on_file)
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -339,7 +366,7 @@ impl Semlith {
         paths: Vec<PathBuf>,
         on_file: impl FnMut(&Path),
     ) -> Result<IndexReport> {
-        self.index_set(paths, false, on_file)
+        self.index_set(paths, false, None, on_file)
     }
 
     /// The body both entry points share. `sweep` drops every recorded file
@@ -349,6 +376,7 @@ impl Semlith {
         &mut self,
         paths: Vec<PathBuf>,
         sweep: bool,
+        deadline: Option<std::time::Instant>,
         mut on_file: impl FnMut(&Path),
     ) -> Result<IndexReport> {
         // A run killed mid-save leaves index.tv.tmp behind. Removing it here
@@ -362,7 +390,18 @@ impl Semlith {
         // written only after `index.tv` lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
 
-        for path in paths {
+        let total = paths.len();
+        for (seen, path) in paths.into_iter().enumerate() {
+            // Only ever after something was embedded: a budget too small for
+            // any work at all must still make progress, or calling again is
+            // the same call forever.
+            if let Some(deadline) = deadline
+                && report.indexed > 0
+                && std::time::Instant::now() >= deadline
+            {
+                report.remaining = total - seen;
+                break;
+            }
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
 
@@ -490,6 +529,11 @@ impl Semlith {
 
     /// Remove a single file from the store.
     pub fn forget(&mut self, path: &Path) -> Result<usize> {
+        // Dropping a file rewrites `index.tv` exactly as indexing does, so it
+        // is a writer and takes the writer's lock. Without it a `forget` that
+        // lands while `semlith watch` is saving leaves the index and the
+        // database disagreeing about which chunks exist.
+        let _lock = lock::StoreLock::acquire(&self.dir)?;
         let key = canonical(path).to_string_lossy().into_owned();
         let ids = store::delete_file(&self.db, &key)?;
         for id in &ids {
@@ -536,6 +580,11 @@ impl Semlith {
     /// different problem from a corpus that does not discuss the query.
     pub fn matching_files(&self, filter: &Filter) -> Result<i64> {
         store::matching_files(&self.db, filter.groups())
+    }
+
+    /// The indexed paths `filter` selects, in path order.
+    pub fn matching_paths(&self, filter: &Filter) -> Result<Vec<String>> {
+        store::filtered_paths(&self.db, filter.groups())
     }
 
     /// Top-`k` chunks for `query` within the part of the corpus `filter`

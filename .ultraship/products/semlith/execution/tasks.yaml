@@ -1,358 +1,338 @@
 product: semlith
-version: 0.5.0
+version: 0.6.0
 tasks:
-  - id: US-SEMLITH-0.5.0-T01
+  - id: US-SEMLITH-0.6.0-T01
     summary: >
-      Search several stores from one query: a repeatable `--store` on the read
-      commands, a `SEMLITH_STORE` list, one query vector per distinct model
-      computed outside the store and handed in, per-store rankings merged by the
-      reciprocal-rank scores they already carry, and the store on every hit.
+      Negotiate the protocol version against a real list of revisions the server
+      implements, instead of echoing back whatever the client asked for.
     why_required: >
-      This is the release. Everything else either protects it from a way it
-      looks right and is wrong, proves a number about it, or ships it.
+      The server currently tells every client it speaks that client's revision.
+      Every other claim in this release is worth nothing while the first message
+      of every session is a lie.
     status: done
     depends_on: []
     acceptance_criteria:
       - >
-        One query over two stores holding disjoint corpora returns hits from
-        both, each carrying the store it came from, in a single ranked list.
+        One recorded stdio session per advertised legacy revision — `2025-11-25`,
+        `2025-06-18`, `2024-11-05` — against a real `semlith mcp` child process:
+        `initialize` is answered with that same version, `tools/list` returns the
+        five tools, and a `semlith_search` call returns excerpts.
       - >
-        A phrase that exists only in the second store is returned by a two-store
-        query at the same rank it holds when that store is searched alone —
-        adding a store does not bury the store that has the answer.
-      - >
-        `-k 5` over three stores returns five hits in total, not five per store.
-    files:
-      - src/fleet.rs
-      - src/lib.rs
-      - src/main.rs
-    evidence:
-      - "src/fleet.rs holds a Fleet of labelled stores and one loaded model per
-         distinct model. Semlith::search_ranked is the existing search with the
-         query embed lifted out, so the fleet embeds once per model and no store
-         loads weights of its own — the two paths are one body, not a copy."
-      - "Chosen: per-store results are merged, not re-ranked. Each store's list
-         arrives already ranked and that order survives; across stores the key
-         is the fused score, which is a sum of rank reciprocals from the same
-         formula at the same depth and therefore the one quantity that is the
-         same unit under any model."
-      - "cargo test --test fleet -- --ignored: one query over two disjoint
-         corpora returned hits from both, every hit carrying its store; -k 5
-         over three stores returned five hits, not fifteen."
-      - "Store provenance is Option<String>, skipped when serializing if None
-         and set only when more than one store was searched, so a single-store
-         --json is byte for byte what 0.4.0 emitted — verified against the 0.4.0
-         release binary in compat.sh."
-
-  - id: US-SEMLITH-0.5.0-T02
-    summary: >
-      Make a named store either a real store or an error: read commands refuse a
-      path that is not already a store and create nothing, and the same store
-      named twice — repeated, relative against absolute, through a symlink — is
-      searched once.
-    why_required: >
-      Both failures are invisible in a multi-store query, which is what makes
-      them worth their own task. A mistyped store today becomes an empty store
-      that contributes nothing while the other stores still return hits, and a
-      store fused with itself doubles every rank contribution it has and takes
-      over the result list.
-    status: done
-    depends_on: [US-SEMLITH-0.5.0-T01]
-    acceptance_criteria:
-      - >
-        A `--store` path that does not exist exits non-zero naming the path, and
-        no directory, `store.db` or `index.tv` is created anywhere as a result.
-      - >
-        Naming the same store twice — the flag repeated, and once by a relative
-        and once by an absolute path — produces the same result list as naming it
-        once, with no duplicated hits.
-    files:
-      - src/lib.rs
-      - src/fleet.rs
-      - tests/fleet.rs
-    evidence:
-      - "Semlith::open_existing refuses a directory with no store.db rather than
-         creating one, and every read command goes through it. cargo test --test
-         fleet: the error names the mistyped path and neither the store
-         directory nor its parent is created."
-      - "Stores are deduplicated by canonical path before they are searched. The
-         test drives the release binary with the same store named twice — once
-         absolute, once as `.semlith` from the directory holding it — and the
-         --json result list is identical to naming it once."
-      - "Why it matters rather than being tidy: merging a store with itself
-         gives every one of its hits a twin at exactly the same score, so the
-         duplicated store takes the whole result list."
-
-  - id: US-SEMLITH-0.5.0-T03
-    summary: >
-      Filters across every store, stores whose models differ searched together,
-      and the measurement that decides whether fusion needs a relevance floor:
-      does naming an unrelated store degrade a query the first store answered?
-    why_required: >
-      A filter that selects nothing in one store must not report an empty
-      selection for the query as a whole, or the filter and the multi-store flag
-      cannot be used together. Mixed models are the realistic state of a
-      developer's stores, since the default model changed in 0.3.0. And the
-      no-degradation measurement is the one that can send the fusion design
-      back, so it belongs before the release is anywhere near finished.
-    status: done
-    depends_on: [US-SEMLITH-0.5.0-T02]
-    acceptance_criteria:
-      - >
-        `--ext`/`--path`/`--lang` filter every store, and a filter that matches
-        files in only one of two stores returns that store's hits rather than
-        reporting that no files match.
-      - >
-        Two stores built with different embedding models are searched in one
-        query and both contribute hits, with each store's own model used to embed
-        the query for it.
-      - >
-        A query answered well by one store is not degraded by also naming an
-        unrelated store: the hits that a single-store search returns are still
-        present, and still ranked above the unrelated store's best effort.
-    files:
-      - src/fleet.rs
-      - tests/fleet.rs
-    evidence:
-      - "Answered the contract's open question on a relevance floor: no floor.
-         The first run of the no-degradation test found the unrelated store at
-         rank 1 — two single-file stores both scored 0.032786883, because every
-         store's best hit is dense-rank-1 in its own ranking, and the tie fell
-         to the order the stores were named in. Ties now go to the higher
-         similarity to the query vector, which reorders among equals rather than
-         dropping anything a floor would have dropped."
-      - "cargo test --test fleet -- --ignored: a phrase held by only the second
-         store comes back at the same rank a search of that store alone gives
-         it; every hit a single-store search returned is still present in the
-         two-store list with no unrelated hit above it."
-      - "Filters reach every store and the empty-selection question is asked of
-         the whole selection: --ext rs over a Markdown store and a Rust store
-         returns the Rust hits instead of reporting that no files match."
-      - "cargo test --test fleet -- --ignored different_models: stores built
-         with granite and with BGESmallENV15 both contributed hits to one query,
-         each embedding the query with its own model."
-      - "Three unit tests in src/fleet.rs pin the merge itself with no model or
-         store needed: equal scores decided by similarity rather than argument
-         order, a store's own order surviving the merge, and k bounding the
-         merged list rather than each store."
-
-  - id: US-SEMLITH-0.5.0-T04
-    summary: >
-      Serve several stores from one MCP process: store labels in the tool
-      results, an optional `store` argument that narrows a query, an unknown
-      store name answered in-band with the stores that are open, and
-      `semlith_stats` reporting each store.
-    why_required: >
-      The roadmap outcome is stated for an agent working across repositories.
-      Multi-store search that only the CLI can reach delivers the release to the
-      wrong caller — the same mistake 0.3.0's and 0.4.0's MCP tasks existed to
-      prevent.
-    status: done
-    depends_on: [US-SEMLITH-0.5.0-T03]
-    acceptance_criteria:
-      - >
-        A single `semlith_search` call against a real `semlith mcp` child process
-        opened on two stores returns excerpts from both with their store labels,
-        driven over stdio JSON-RPC; the `store` argument restricts the same query
-        to one of them; and an unknown store name comes back as an in-band tool
-        error naming the stores that are open.
+        `initialize` naming a revision the server does not implement — a bare
+        `1900-01-01` and a plausible future date — is answered with the server's
+        newest supported revision, not with the string it was sent.
     files:
       - src/mcp.rs
-      - src/main.rs
-      - tests/fleet.rs
+      - tests/mcp.rs
     evidence:
-      - "mcp::serve takes a Fleet. The open store names are written into the
-         `store` argument's description, because an agent cannot narrow to a
-         name it has never seen, and semlith_stats reports one line per store —
-         one store still answers in exactly 0.4.0's single line."
-      - "cargo test --test fleet -- --ignored: a real `semlith mcp` child
-         process opened on two stores, driven over stdio JSON-RPC, returned
-         excerpts from both with their labels in one tools/call; `store`:
-         [\"rust\"] restricted the same query to that store and dropped the
-         other's file; an unknown name came back as isError naming both open
-         stores."
-      - "Chosen: an unknown store name is an in-band tool error, not an empty
-         result. An agent reads no matches as \"the corpus does not discuss
-         this\", which is a different and wrong answer."
+      - >
+        cargo test --test mcp -- --ignored — every_advertised_revision_gets_a_working_session passed: a real `semlith mcp` child process answered 2025-11-25, 2025-06-18 and 2024-11-05 each with itself, listed the five tools, and returned excerpts on all three
+      - >
+        an_unimplemented_revision_is_answered_with_one_we_implement passed: 1900-01-01 and 2031-03-26 both answered 2025-11-25, neither echoed
+      - >
+        Two unit tests in src/mcp.rs pin `negotiate`, including that 2026-07-28 over `initialize` is answered 2025-11-25 rather than accepted
 
-  - id: US-SEMLITH-0.5.0-T05
+  - id: US-SEMLITH-0.6.0-T02
     summary: >
-      `stats` and `files` per store, and a store that `semlith watch` is holding
-      the write lock on searchable inside a multi-store query, freshness
-      included.
+      Serve the 2026-07-28 stateless era alongside the handshake:
+      `server/discover`, per-request `_meta` protocol version and client
+      capabilities, `resultType` and server identity on every result,
+      `ttlMs`/`cacheScope` on `tools/list`, and -32022 for a revision the server
+      does not implement.
     why_required: >
-      "Is this corpus even indexed" has to stay answerable per store, or an
-      empty answer from a fleet is undiagnosable. And a multi-store search that
-      takes a store lock, or that misses the generation counter on one of its
-      stores, silently turns 0.4.0's freshness guarantee off for anyone using
-      both features — which is the same developer.
+      2026-07-28 makes `server/discover` mandatory and removes `initialize`. A
+      server that answers only the handshake is invisible to any client built on
+      that revision, and clients that probe with `server/discover` first are the
+      ones shipping next.
     status: done
-    depends_on: [US-SEMLITH-0.5.0-T04]
+    depends_on:
+      - US-SEMLITH-0.6.0-T01
     acceptance_criteria:
       - >
-        `semlith stats` and `semlith files` over two stores report both, labelled,
-        and a single-store invocation prints exactly what 0.4.0 printed.
+        `server/discover`, sent as the first message with no `initialize` before
+        it, returns a `DiscoverResult` carrying `resultType: "complete"`,
+        `supportedVersions` including `2026-07-28`, `capabilities.tools`,
+        `_meta["io.modelcontextprotocol/serverInfo"]`, `ttlMs` and `cacheScope`.
       - >
-        A store being watched by a running `semlith watch` is searchable as part
-        of a multi-store query, and an edit the watcher re-embeds is returned by a
-        subsequent multi-store search from a long-running reader with no restart.
+        A `tools/call` carrying `_meta["io.modelcontextprotocol/protocolVersion"]`
+        of `2026-07-28`, with no handshake at any point in the session, returns a
+        result with `resultType: "complete"` and server identity in `_meta`; the
+        matching `tools/list` also carries `ttlMs` and `cacheScope`, and lists the
+        tools in the same order every time.
+      - >
+        A request whose `_meta` protocol version is unsupported returns JSON-RPC
+        error -32022 whose `data.supported` lists exactly the revisions the server
+        advertises and whose `data.requested` echoes what was asked.
     files:
-      - src/main.rs
+      - src/mcp.rs
+      - tests/mcp.rs
+    evidence:
+      - >
+        discover_answers_as_the_first_message_of_a_session passed: server/discover with no handshake returned resultType complete, supportedVersions [2026-07-28, 2025-11-25, 2025-06-18, 2024-11-05], capabilities.tools, serverInfo in _meta, ttlMs and cacheScope public
+      - >
+        a_modern_call_works_with_no_handshake_at_all passed: tools/list carried resultType, ttlMs, cacheScope private and the server version, listed identically twice, and a tools/call returned excerpts — no initialize sent in the session
+      - >
+        an_unimplemented_meta_version_is_refused_with_the_list passed: -32022 with data.requested 2029-01-01 and data.supported naming 2026-07-28
+
+  - id: US-SEMLITH-0.6.0-T03
+    summary: >
+      Add `semlith_files`: the indexed file list as a tool, narrowed by the same
+      path/ext/lang/store arguments as search, capped, and saying how many paths
+      it left out.
+    why_required: >
+      An agent that cannot ask which files are indexed reads an empty search
+      result as "the corpus does not discuss this", which is the failure this
+      product exists to avoid.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.6.0-T01
+    acceptance_criteria:
+      - >
+        `semlith_files` returns indexed paths for a real store, narrows correctly
+        on `path`, `ext`, `lang` and `store`, and when the store holds more files
+        than the cap it returns the cap and says how many it left out.
+    files:
+      - src/mcp.rs
+      - src/store.rs
+      - tests/mcp.rs
+    evidence:
+      - >
+        the_files_tool_lists_narrows_and_says_what_it_left_out passed: both indexed files listed, ext ["rs"] narrowed to borrow.rs alone, and limit 1 returned one path plus "1 more"
+
+  - id: US-SEMLITH-0.6.0-T04
+    summary: >
+      Let the fleet hand out one writable store: a `store` argument that is
+      optional with one store open and required with several, refusing an
+      ambiguous write in-band with the names that are open. Add `semlith_forget`
+      on top of it.
+    why_required: >
+      One writer per store is a product constraint. Both write tools need the
+      same store selection and the same refusal, and forget is the small one that
+      proves the plumbing before index depends on it.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.6.0-T01
+    acceptance_criteria:
+      - >
+        `semlith_forget` removes a file's chunks from the named store, reports the
+        count, and a subsequent `semlith_search` no longer returns that file.
+      - >
+        With two stores open, `semlith_index` and `semlith_forget` called with no
+        `store` argument return an in-band error naming both stores, and neither
+        store is written; naming one writes that one and leaves the other
+        untouched.
+    files:
       - src/fleet.rs
-      - tests/fleet.rs
+      - src/mcp.rs
+      - tests/mcp.rs
     evidence:
-      - "stats prints one block per store plus a total when several are given,
-         files prints one list per store, and both print exactly 0.4.0's output
-         for a single store — asserted in the test, not eyeballed."
-      - "cargo test --test fleet -- --ignored: with a real `semlith watch`
-         holding the write lock on one of two stores, a long-lived fleet reader
-         opened before the edit returned the watcher's newly indexed file on a
-         later search, with no reopen. A multi-store search takes no store lock,
-         and each store keeps its own generation check."
-      - "stats reports the store's own directory rather than the flag order, so
-         a store named twice is listed once."
+      - >
+        a_write_with_several_stores_open_must_name_one passed: with two stores open both semlith_index and semlith_forget returned isError naming rust and bread; naming bread removed its file and left rust untouched
+      - >
+        the_forget_tool_removes_a_file_from_search passed: the removal reported its chunk count and a later search no longer returned the file
+      - >
+        src/lib.rs forget now takes StoreLock, so the CLI and the tool share one writer rule
 
-  - id: US-SEMLITH-0.5.0-T06
+  - id: US-SEMLITH-0.6.0-T05
     summary: >
-      Measure rather than assert: query embeds per search against distinct
-      models, latency for one, two and three stores with the per-store
-      increment, resident memory for a three-store reader, cross-version
-      compatibility both ways, and the single-store paths unchanged.
+      Add `semlith_index`: index a path into an already-open store, taking the
+      write lock for the call, refusing in-band when a watcher holds it, and
+      bounded by a wall-clock budget that reports what remains and resumes on the
+      next call.
     why_required: >
-      "One embed per model" and "not three copies of the model" are exactly the
-      claims that are true in the design and false in the code. 0.4.0 found a
-      measurement bug that had already changed a default before any number was
-      reported, so the numbers get their own task and print what they saw.
+      Without it an MCP-only agent cannot make a corpus current, and without the
+      budget a first index blows through the 60-second tool timeout clients
+      default to and looks like a hung server.
     status: done
-    depends_on: [US-SEMLITH-0.5.0-T05]
+    depends_on:
+      - US-SEMLITH-0.6.0-T04
     acceptance_criteria:
       - >
-        One search embeds the query once per distinct embedding model, not once
-        per store — measured as a count, not asserted, over three same-model
-        stores.
+        Through one long-lived `semlith mcp` process: a file created after the
+        server started is indexed by a `semlith_index` call and returned by a
+        subsequent `semlith_search` in the same session, with no restart.
       - >
-        Multi-store search latency is reported on the acceptance fixture for one,
-        two and three stores, with the per-store increment stated, so the cost of
-        adding a store is a number rather than a claim.
+        `semlith_index` against a store whose write lock is held by a running
+        `semlith watch` returns an in-band tool error naming the holder; the
+        store is intact afterwards and the watcher is unaffected.
       - >
-        Resident memory for a reader open on three same-model stores is reported
-        and does not hold three copies of the model.
-      - >
-        No store schema change and no index format change: a store written by
-        0.4.0 is searchable by 0.5.0 with no re-index, and a store written by
-        0.5.0 is searchable by the 0.4.0 binary.
-      - >
-        Single-store behaviour is unchanged: `index`, `watch`, `search`, `stats`,
-        `files`, `forget` and both MCP tools behave exactly as in 0.4.0 when one
-        store is given, with the existing test suite passing unmodified.
+        A `semlith_index` call whose work exceeds its budget returns a partial
+        report naming how many files remain, and a second identical call
+        continues from there rather than re-embedding what the first call already
+        did.
     files:
-      - tests/measure.rs
+      - src/lib.rs
+      - src/fleet.rs
+      - src/mcp.rs
+      - tests/mcp.rs
+    evidence:
+      - >
+        the_index_tool_makes_a_new_file_searchable_without_a_restart passed: a file created after the server started was indexed by a tool call and returned by a search in the same session
+      - >
+        the_index_tool_refuses_a_store_a_watcher_is_holding passed: the call returned isError containing "being indexed by", and the store still answered a search afterwards
+      - >
+        an_index_over_its_budget_reports_what_remains_and_resumes passed: with SEMLITH_MCP_INDEX_BUDGET=0 over eight files the first call reported what remained and repeated calls finished the corpus, with semlith_files then listing all eight
+
+  - id: US-SEMLITH-0.6.0-T06
+    summary: >
+      Write `format_version` into the store's meta table, read a store without
+      the key as format 1, and refuse a store from a newer format naming both
+      numbers.
+    why_required: >
+      A release that writes down the store as a stable surface has to make the
+      format legible first. Without the marker the first real format change
+      silently misreads old stores instead of refusing them.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - >
+        A store created by 0.6.0 carries `format_version`; a store written by
+        0.5.0, which has no such key, is opened and searched as format 1 with no
+        migration and nothing rewritten; and a store whose `format_version` is
+        higher than the binary knows is refused with an error naming both the
+        store's number and the binary's.
+      - >
+        No store format break in either direction: the 0.5.0 binary searches and
+        indexes a store written by 0.6.0, and 0.6.0 searches a store written by
+        0.5.0 without re-embedding anything — `format_version` is an additive meta
+        key, which is exactly why it is safe to add now.
+    files:
+      - src/store.rs
+      - src/lib.rs
       - tests/roundtrip.rs
     evidence:
-      - "Measurements live in tests/measure.rs and print what they saw:
-         `cargo test --release --test measure -- --ignored --test-threads 1
-         --nocapture`. On three 300-file stores sharing a model, M1: 1 query
-         embed per search (counted by the fleet, not inferred); medians over 20
-         searches of 3.4ms for one store, 3.7ms for two and 4.0ms for three, so
-         +0.3ms per store; and a real `semlith mcp` process holding 137 MB
-         whether it was opened on one store or on three."
-      - "Two harness bugs were found and fixed before any number was reported.
-         The memory measurement first slept 15 seconds and read 17 MB for both
-         servers — neither had finished loading its model — so it now drives a
-         real search to completion over stdio and measures a process that has
-         answered. And the per-store increment used Duration subtraction, which
-         panicked the first time three stores came out faster than two; it is
-         signed milliseconds now, which is also the honest way to print a
-         difference that small."
-      - "Cross-version, both directions, through two release binaries (0.4.0
-         installed from crates.io): 0.5.0 searched a 0.4.0-written store and a
-         following index run reported the file unchanged, so nothing was
-         re-embedded; 0.4.0 then searched a 0.5.0-written store and indexed a
-         further file into it. Script and output in evidence/0.5.0/compat.sh and
-         compat-run.txt."
-      - "No schema change: `SELECT name FROM sqlite_master` is identical between
-         a 0.4.0-written and a 0.5.0-written store, and the meta keys are still
-         fts_built, index_generation and model — nothing added."
-      - "Single-store behaviour proven rather than asserted: the same query with
-         --json against the same store produced byte-identical output under the
-         0.4.0 and 0.5.0 binaries. The existing suites pass unmodified — cargo
-         test 45 passed, --test watch --ignored 10 passed, --test roundtrip
-         --ignored 2 passed, plus 11 new fleet tests."
+      - >
+        Two unit tests in src/store.rs: a store with no format_version key passes check_format and is not written to, and format 2 is refused with an error naming both 2 and 1
+      - >
+        cargo test --test roundtrip -- --ignored — a_store_written_before_the_format_key_still_opens_and_is_not_rewritten passed: a created store records format_version 1, and with the key deleted the store still searches and is not migrated
+      - >
+        compat.sh through two release binaries: a 0.5.0 store has meta keys "fts_built index_generation model" and still has no format_version after 0.6.0 searched and indexed it; a 0.6.0 store has "format_version fts_built index_generation model" and 0.5.0 searched it and indexed a further file into it
 
-  - id: US-SEMLITH-0.5.0-T07
+  - id: US-SEMLITH-0.6.0-T07
     summary: >
-      Document multi-store search where it will be read: the repeatable flag,
-      the `SEMLITH_STORE` list, what a store label is, that writes stay
-      single-store, an MCP server definition naming several stores, and the
-      CHANGELOG 0.5.0 section.
+      Document a setup stanza for every MCP client in common use, and make the
+      documentation executable: a test that extracts each stanza, parses it, and
+      runs its command line against a real server.
     why_required: >
-      The release workflow builds its notes from the CHANGELOG, so a missing
-      section ships an empty release. And a feature whose flag is repeatable on
-      some commands and not others is undiscoverable from `--help` alone.
+      A stanza that is wrong is a user's first impression of the product, and no
+      client in the list can be installed in CI. Parsing and executing what the
+      documentation actually prints is the only check available.
     status: done
-    depends_on: [US-SEMLITH-0.5.0-T06]
+    depends_on:
+      - US-SEMLITH-0.6.0-T05
     acceptance_criteria:
       - >
-        README documents multi-store search: the repeatable flag, the
-        `SEMLITH_STORE` list, what the store labels are, that writes stay
-        single-store, and an MCP server definition naming several stores.
-      - CHANGELOG has a 0.5.0 section, which is what the release workflow reads
-        for its notes.
+        Every client configuration stanza in the documentation is extracted from
+        the documentation, parsed as JSON or TOML, and its `command` plus `args`
+        executed — producing a process that answers `initialize` and `tools/list`.
+        A stanza that has drifted from the binary fails this check.
+      - >
+        README carries a per-client MCP setup section covering the clients named
+        in scope, each with the file it goes in and a stanza that names a store.
     files:
       - README.md
-      - CHANGELOG.md
-      - docs/architecture.md
+      - tests/clients.rs
     evidence:
-      - "README gained a 'Searching several stores at once' section with real
-         output, the rules that decide what a hit looks like (labels only when
-         there is something to tell apart, k global, filters everywhere, models
-         may differ), the SEMLITH_STORE list, and the two limits a user meets:
-         writes stay single-store, and a store path that is not a store is an
-         error rather than a new empty store. The commands table's global note
-         says which commands take a repeatable flag and which take one."
-      - "The agent section shows an MCP server definition naming two stores, the
-         optional store argument, and what an unknown store name comes back as —
-         that is the release's own outcome, so it is documented where an agent's
-         operator will read it."
-      - "CHANGELOG 0.5.0 section present with its compare link, which is what the
-         release workflow reads for the GitHub release notes, including the
-         behaviour change (a read command refuses a path that is not a store) and
-         a Notes paragraph on compatibility in both directions."
-      - "Known limits records what the merge does not do: a store with nothing to
-         say still offers its best hit, the similarity tiebreak compares two
-         vector spaces when two models are involved, and stores are named by path
-         with no registry and no discovery."
-      - "docs/architecture.md gained 'Several stores, one query' explaining why
-         ids never leave their store, why the embedder moved out of Semlith, why
-         results are merged rather than re-ranked, and the tie that the first
-         test caught — with the numbers that decided the tiebreak over a floor."
+      - >
+        cargo test --test clients — every_promised_client_has_a_stanza and every_json_stanza_parses passed over all twelve clients
+      - >
+        cargo test --test clients -- --ignored — every_stanza_launches_a_server_that_answers passed: every stanza was checked to name the semlith binary, its `--store … mcp` command line was read out of the README rather than hardcoded, and the resulting server completed a handshake and listed tools
+      - >
+        README gained a per-client setup section covering Claude Code, Claude Desktop, Codex, Copilot in VS Code, Copilot CLI, Cursor, Windsurf, Zed, Gemini CLI, JetBrains, Cline and Goose, each verified against that client own documentation
 
-  - id: US-SEMLITH-0.5.0-T08
+  - id: US-SEMLITH-0.6.0-T08
     summary: >
-      Bump Cargo.toml to 0.5.0 and ship it: PR `feat/0.5.0` → develop, PR
-      develop → main, CI green on both, tag v0.5.0 for the release workflow,
-      inspect the packaged tarball, then publish to crates.io on an explicit
-      go-ahead.
+      Write `docs/compatibility.md`: what SemVer covers, what it does not, and
+      what 0.x actually promises. Link it from the README.
     why_required: >
-      target_mode is published. A crates.io publish is permanent, so the dry run
-      and the tarball inspection are the last gate before an irreversible
-      action.
-    status: todo
-    depends_on: [US-SEMLITH-0.5.0-T07]
+      The roadmap outcome for this version is that a developer can depend on
+      semlith. A dependency they cannot read the terms of is not one they can
+      take.
+    status: done
+    depends_on: []
     acceptance_criteria:
-      - CI green on develop and on main for the release commit, with every action
-        still pinned to a full-length commit SHA.
+      - >
+        `docs/compatibility.md` exists, is linked from the README, and states both
+        what SemVer covers and what it does not.
+    files:
+      - docs/compatibility.md
+      - README.md
+    evidence:
+      - >
+        docs/compatibility.md written: what SemVer covers, what it does not and why, the pre-0.x honesty section, the store format rules, and what a break looks like
+      - >
+        Linked from the README under a Compatibility section
+      - >
+        Its claims about 0.2.0 (the default model change and the breaking library API change) were checked against the CHANGELOG rather than assumed
+
+  - id: US-SEMLITH-0.6.0-T09
+    summary: >
+      Prove the release cost nothing it did not intend: the old tools byte for
+      byte unchanged, no lock held at rest, the existing suite unmodified, and
+      the `tools/list` response measured before and after.
+    why_required: >
+      Three new tools and a second protocol era are exactly the shape of change
+      that quietly breaks a connected agent or spends its context. Each of those
+      is a measurement, not an opinion.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.6.0-T05
+    acceptance_criteria:
+      - >
+        `semlith_search` and `semlith_stats` answer the legacy path byte for byte
+        as they do in 0.5.0 for the same input, so an agent already connected sees
+        no change it did not ask for.
+      - >
+        The MCP server holds no store lock at rest. A lock is taken only for the
+        duration of an `index` or `forget` call, and a search issued while no
+        write is in flight takes none — a store being watched stays searchable.
+      - >
+        The size of the `tools/list` response is reported before and after the
+        release, in bytes and as a token estimate, because it is loaded into every
+        agent's context in every session and this product exists to spend less of
+        that, not more.
+      - >
+        The existing suite passes unmodified: everything 0.5.0 shipped for
+        multi-store search, watching, and the roundtrip still passes with no test
+        edited to accommodate this release.
+    files:
+      - tests/measure.rs
+      - tests/mcp.rs
+    evidence:
+      - >
+        compat.sh: semlith_search and semlith_stats over the legacy MCP path are byte-identical between the 0.5.0 and 0.6.0 release binaries, as is single-store search --json
+      - >
+        cargo test --release --test measure -- --ignored — measure_the_tool_list_and_what_an_idle_server_holds passed: `semlith index` against the store an open MCP server is serving exits 0, so the server holds no lock at rest
+      - >
+        tools/list measured through both binaries: 2220 bytes for two tools, 4790 for five — roughly 555 to 1197 estimated tokens per session
+      - >
+        The existing suites pass unmodified: fleet 10/10 and watch 10/10 ignored tests, roundtrip 3/3, 50 unit tests
+
+  - id: US-SEMLITH-0.6.0-T10
+    summary: >
+      Ship it: version bump, CHANGELOG 0.6.0 section, and a packaging check that
+      the tarball carries no secrets and no workspace state.
+    why_required: >
+      The release workflow reads the CHANGELOG for its notes and verifies the tag
+      against Cargo.toml, so neither is optional, and the publish is permanent.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.6.0-T07
+      - US-SEMLITH-0.6.0-T08
+      - US-SEMLITH-0.6.0-T09
+    acceptance_criteria:
+      - CHANGELOG has a 0.6.0 section, which is what the release workflow reads
+        for its notes.
       - >
         `cargo publish --dry-run` passes and the packaged tarball contains no
         `.env` and no `.ultraship` directory.
-      - crates.io serves semlith 0.5.0 and `cargo install semlith` resolves to it.
-      - >
-        The tagged GitHub release carries the four platform archives and
-        SHA256SUMS, all release-workflow jobs green.
-      - >
-        The release ships through the project's branch flow: `feat/0.5.0` →
-        pull request to `develop` → pull request to `main` → tag.
     files:
       - Cargo.toml
-      - .github/workflows/release.yml
-    evidence: []
+      - CHANGELOG.md
+    evidence:
+      - >
+        Cargo.toml at 0.6.0 and CHANGELOG has a 0.6.0 section with Fixed, Added, Changed and Performance
+      - >
+        cargo publish --dry-run passed: 33 files, 480.3 KiB (153.5 KiB compressed), verified build clean
+      - >
+        cargo package --list shows 33 files and no .env, no .ultraship and no .github entry

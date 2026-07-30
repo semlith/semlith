@@ -31,10 +31,24 @@ versions:
       A developer searches several stores at once from a single query, so an agent working across
       repositories asks one question instead of many.
     detail: specified
-    status: planned
+    status: released
   - version: 0.6.0
     outcome: >
-      A developer depends on semlith knowing the CLI, the MCP tools, the store format and the Rust
-      API are stable under SemVer.
+      A developer wires semlith into whichever agent they use — Claude Code, Codex, Copilot,
+      Cursor, Zed, Gemini CLI, JetBrains — from a documented config for that client, gets a tool
+      surface that covers what the CLI does rather than a fifth of it, and can read exactly which
+      parts of semlith are covered by SemVer and which are not.
+    detail: specified
+    status: planned
+  - version: 0.7.0
+    outcome: >
+      A developer runs one semlith against a corpus far larger than a repository — the store is
+      searched without loading every vector into memory, and a first index of it is resumable.
+    detail: hypothesis
+    status: planned
+  - version: 0.8.0
+    outcome: >
+      A developer hands an agent a corpus of mixed formats — office documents, notebooks, HTML —
+      and gets the same excerpts back as from code and Markdown today.
     detail: hypothesis
     status: planned

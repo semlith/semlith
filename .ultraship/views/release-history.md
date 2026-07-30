@@ -8,9 +8,27 @@ Run `ultraship views` to regenerate.
 
 | Version | Released | Mode | Delivered |
 | --- | --- | --- | --- |
+| 0.5.0 | 2026-07-30T02:01:13Z | published | A developer points one search at several stores — `semlith search "how is the store lock taken" -s ../api/.semlith -s ../cli/.semlith` — and gets one ranked list back where every excerpt names the store it came from. An agent gets the same thing from one `semlith mcp` process opened on several stores, in one tool call, with an optional `store` argument to narrow it. `-k` is global, filters reach every store, stores whose embedding models differ are searched together, and writes stay single-store. |
 | 0.4.0 | 2026-07-29T18:30:54Z | published | A developer leaves `semlith watch` running over a repository and keeps working: a saved file is re-embedded about a second later, a new file is picked up, a deleted file loses its vectors, and a rename moves the file rather than duplicating it — with no `index` run. An agent already connected to that store over MCP sees the change on its next search, because the store counts index rewrites and a search reloads the vector index when the count has moved. |
 | 0.3.0 | 2026-07-29T16:02:02Z | published | A developer narrows a search to part of an indexed corpus by path glob, file extension or language — from the CLI and from an agent over MCP — and gets the best matches inside that subset, because the filter is applied before either half of the hybrid search picks its top-k rather than after. |
 | 0.2.0 | 2026-07-29T05:40:00Z | published | Index a repository on an ordinary 8 GB laptop without watching memory or fearing a second terminal, then find an exact identifier and a plain-English question with the same search. |
+
+### 0.5.0 known limitations
+
+- The merge is not a joint ranking. Each store ranks its own chunks and the merge compares fused rank scores across them, so a store with nothing to say still offers its best hit — it is outranked rather than excluded. Ties are decided by similarity to the query vector, which across two models compares numbers from two vector spaces; that is approximate, and it decides only between hits the rank evidence has already called equal.
+
+- Refusing a store path that is not already a store is a behaviour change for a single-store user too, not only for a fleet. `semlith search --store ./nope` used to create an empty store and report no matches; it now exits non-zero. Deliberate — the old behaviour is undiagnosable in a multi-store query — but it is a change 0.4.0 scripts can see.
+
+- `SEMLITH_STORE` is split on the platform's path separator, so a store path containing `:` on Unix or `;` on Windows cannot be passed that way and has to be given as a flag. Nothing detects that case and warns.
+
+- Store labels come from the directory holding the store. Two stores whose parent directories share a name fall back to their full paths, which is correct and long — an agent then sees a path where it expected a word.
+
+- The latency and memory numbers are three stores of 300 files on one M1. The per-store cost of a hundred-thousand-chunk store was not measured, and neither was a fleet larger than three. Each store holds its own SQLite connection and its own loaded index, so memory grows with store count even though the model does not.
+
+- Windows remains unexercised by CI, as recorded for 0.4.0's watcher and 0.3.0's path handling. This release adds path-list splitting and canonical-path deduplication, both of which are places it could be wrong there.
+
+- A fleet reader picks up another process's writes on search, per store, on the counter 0.4.0 added. `semlith stats` over a long-lived library handle still reports what each store held when it was opened.
+
 
 ### 0.4.0 known limitations
 
