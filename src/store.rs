@@ -73,8 +73,41 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
     db.execute_batch(SCHEMA)?;
+    check_format(&db)?;
     backfill_fts(&db)?;
     Ok(db)
+}
+
+/// The store layout this binary understands.
+///
+/// Written into a store when one is created, and absent from every store
+/// written before 0.6.0 — which is what makes 1 the right reading of an absent
+/// key rather than an unknown.
+pub const FORMAT_VERSION: u32 = 1;
+
+pub const FORMAT_KEY: &str = "format_version";
+
+/// Refuse a store a later semlith wrote, rather than misreading it.
+///
+/// Nothing is written here. A store from before this key existed is format 1
+/// and stays exactly as it is: a read command that quietly rewrote the store
+/// it was only asked to search would be a worse surprise than the one this
+/// guards against.
+fn check_format(db: &Connection) -> Result<()> {
+    let Some(recorded) = get_meta(db, FORMAT_KEY)? else {
+        return Ok(());
+    };
+    let found: u32 = recorded.parse().map_err(|_| {
+        anyhow::anyhow!("store records {FORMAT_KEY} {recorded:?}, which is not a version number")
+    })?;
+    if found > FORMAT_VERSION {
+        anyhow::bail!(
+            "store is format {found}, and semlith {} understands format {FORMAT_VERSION}; \
+             upgrade semlith to read this store",
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+    Ok(())
 }
 
 /// Meta key recording that the keyword index has been built for this store.
@@ -341,6 +374,39 @@ pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every store written before 0.6.0 lacks the key entirely. Reading that as
+    /// anything but format 1 would refuse the whole installed base.
+    #[test]
+    fn a_store_without_the_key_is_the_format_we_understand() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        assert!(get_meta(&db, FORMAT_KEY).unwrap().is_none());
+        check_format(&db).expect("a pre-0.6.0 store is readable");
+        // And still has no key: opening a store must not rewrite it.
+        assert!(get_meta(&db, FORMAT_KEY).unwrap().is_none());
+    }
+
+    /// The point of writing the format down: a later semlith's store is refused
+    /// with both numbers, instead of read as though its layout were this one.
+    #[test]
+    fn a_newer_format_is_refused_naming_both_numbers() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        set_meta(&db, FORMAT_KEY, "2").unwrap();
+
+        let refused = check_format(&db).expect_err("a newer format must not be read");
+        let said = refused.to_string();
+        assert!(said.contains('2'), "{said}");
+        assert!(
+            said.contains(&FORMAT_VERSION.to_string()),
+            "the error must name what this binary understands: {said}"
+        );
+
+        // The format this binary wrote is of course readable.
+        set_meta(&db, FORMAT_KEY, &FORMAT_VERSION.to_string()).unwrap();
+        check_format(&db).unwrap();
+    }
 
     fn seeded() -> Connection {
         let db = Connection::open_in_memory().unwrap();
