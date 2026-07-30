@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/semlith/semlith/main/assets/semlith-logo.png"
+       alt="" width="128" height="128">
+</p>
+
 # semlith
 
 [![ci](https://github.com/semlith/semlith/actions/workflows/ci.yml/badge.svg)](https://github.com/semlith/semlith/actions/workflows/ci.yml)
