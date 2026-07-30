@@ -1,5 +1,6 @@
 //! Turning a file on disk into embeddable chunks of text.
 
+use crate::formats;
 use std::path::Path;
 
 /// Soft upper bound on chunk size, in characters.
@@ -27,7 +28,14 @@ pub struct Chunk {
 }
 
 /// Turn already-read file contents into text. `None` means "deliberately
-/// skipped", not an error: binary, or an unreadable PDF.
+/// skipped", not an error: binary, an unreadable PDF, or a document that could
+/// not be opened.
+///
+/// The extension decides, and it decides before anything looks at the bytes.
+/// That ordering is what lets a document be read at all — `.docx` and its
+/// relatives are ZIP archives, so the binary check below would reject every one
+/// of them — and it is also what keeps a corpus of ordinary source from paying
+/// for formats it does not contain.
 ///
 /// `path` is only consulted for its extension; the caller has the bytes
 /// already because it needs them to hash the file anyway.
@@ -35,25 +43,39 @@ pub fn extract(path: &Path, bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
         return None;
     }
-    if path
+    let ext = path
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
-    {
-        return extract_pdf(bytes);
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("pdf") => extract_pdf(bytes),
+        Some(ext) if formats::handles(ext) => guard(|| formats::extract(ext, bytes)),
+        _ => {
+            if is_binary(bytes) {
+                return None;
+            }
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        }
     }
-    if is_binary(bytes) {
-        return None;
-    }
-    Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// pdf-extract can panic on malformed input, and one bad PDF should not take
 /// down a whole indexing run.
 fn extract_pdf(bytes: &[u8]) -> Option<String> {
-    let text = std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem(bytes))
-        .ok()?
-        .ok()?;
+    let text = guard(|| pdf_extract::extract_text_from_mem(bytes).ok())?;
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Run an extractor so that a panic inside it is a skipped file rather than a
+/// dead process.
+///
+/// The readers in [`crate::formats`] are written not to panic and are tested
+/// against malformed input for every format, but they sit downstream of a
+/// decompressor and a document somebody else wrote. A panic here would take out
+/// an indexing run that is otherwise minutes from finishing, so the cheap
+/// insurance is worth its one line.
+fn guard(extract: impl FnOnce() -> Option<String>) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(extract)).ok()?
 }
 
 /// A NUL byte in the first 8 KiB is the same heuristic git uses.

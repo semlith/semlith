@@ -21,11 +21,12 @@ leaving the machine.
 
 </div>
 
-Point it at your docs, PDFs, notes and code. semlith chunks them, embeds them,
-and keeps a quantized vector index next to a SQLite database — all on your
-machine, nothing sent anywhere. An agent then asks a question in plain English
-and gets back the handful of excerpts that actually matter, with file paths and
-line numbers, instead of reading whole files and burning tokens on the way.
+Point it at your notes, code, PDFs, Office documents and notebooks. semlith
+reads each of them as the text a person would see, chunks it, embeds it, and
+keeps a quantized vector index next to a SQLite database — all on your machine,
+nothing sent anywhere. An agent then asks a question in plain English and gets
+back the handful of excerpts that actually matter, with file paths and line
+numbers, instead of reading whole files and burning tokens on the way.
 
 Think of it as a semantic cache for everything your agent needs to know.
 
@@ -589,9 +590,48 @@ Everything under the given paths, except:
 - files ignored by `.gitignore` (and hidden files)
 - binaries — detected by a NUL byte in the first 8 KiB
 - files larger than 8 MiB
+- an archive that decompresses to more than 32 MiB of text
 - anything under a `.semlith` directory
 
-PDFs are extracted to text automatically. Everything else is read as UTF-8.
+A file that fails one of those caps, or that cannot be read — corrupt,
+truncated, password-protected — is counted in the run's `skipped` total and the
+run carries on. An unreadable document has never been able to fail an indexing
+run, and still cannot.
+
+What is left is read as the text a person opening the file would see. The
+extension decides, and it decides before anything looks at the bytes — which is
+what lets a `.docx` be read at all, since it is a ZIP archive and the binary
+check above would reject every one of them. Where a format has divisions a line
+number cannot express, a marker line names them, so an excerpt says which slide
+or which cell it came from.
+
+| Extension | What is taken from it | Markers |
+|---|---|---|
+| anything else | The file, as UTF-8 | — |
+| `.pdf` | The extracted text | — |
+| `.ipynb` | Every cell in notebook order, source and outputs. Stream output and a result's `text/plain` are kept, truncated at 2000 characters each; images, widgets and other MIME types are dropped. | `# Cell 3 (code)`, `# Cell 1 (markdown)`, `# Output:` |
+| `.html`, `.htm` | The page's text. Tags are removed, `<script>` and `<style>` contents with them, and character entities are decoded. | — |
+| `.docx` | Paragraphs in document order, one per line. The cells of a table row are tab-separated. | — |
+| `.pptx` | Each slide's text, slides in numeric order. Speaker notes are not included. | `# Slide 11` |
+| `.xlsx` | Each sheet in workbook order, a line per row, tab-separated cells. Shared and inline strings are resolved. | `## Sheet: Q3 Notes` |
+| `.odt`, `.odp`, `.ods` | The same, from OpenDocument's `content.xml`. | `# Slide 2 (Intro)`, `## Sheet: Q3 Notes` |
+
+Two details worth knowing:
+
+- **HTML keeps its line numbers.** Every newline in the source survives,
+  including the ones inside the tags that were removed, so a hit's
+  `file:line` range still points at the line of the file on disk where that
+  sentence lives. An entity semlith does not recognise is left as it was
+  written, since `&thing;` is likelier to be text about an entity than one.
+- **A spreadsheet is indexed as its cached values.** Formulas are not
+  evaluated; what is searched is what the last program to save the file wrote
+  into the cells.
+
+The 32 MiB decompression cap is separate from the 8 MiB file cap because
+compression means the two are different numbers: a few hundred kilobytes of
+zeros expand to gigabytes, and without a bound on what comes out, the size of a
+run's largest allocation would be chosen by whoever wrote the file.
+
 Files are split into line-aligned chunks of up to 800 characters with two lines
 of overlap, so a chunk boundary rarely cuts a match in half.
 

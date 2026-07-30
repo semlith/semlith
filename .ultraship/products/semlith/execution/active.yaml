@@ -1,0 +1,49 @@
+product: semlith
+version: 0.8.0
+execution_state: DEVELOPING
+checkpoint: null
+blockers: []
+release_fit:
+  assessment: high
+  reasons:
+    - >
+      The workspace's recorded preferences are `minimize_cost: true`,
+      `allow_additional_spend: false` and `allow_parallel_agents: false`
+      (`.ultraship/ultraship.yaml`), and no per-release time or budget constraint
+      has been set. Those are the user's own settings, not anything the framework
+      measured, and this release fits inside them: it is local Rust work, one new
+      crates.io dependency and no spend, no service, and no long embedding pass —
+      the corpora it is measured on are a handful of documents, not the
+      hundred-thousand-chunk runs 0.7.0 needed.
+    - >
+      There is exactly one hook to change. Every file in a run passes through
+      `chunk::extract(path, bytes)` at `src/lib.rs:509`, and PDF already
+      demonstrates the pattern this release repeats six times: dispatch on
+      extension, return `None` for "deliberately skipped", never fail the run.
+      No caller, no store format, no schema and no command changes.
+    - >
+      Two of the six formats need no dependency at all. `.ipynb` is JSON and
+      serde_json is already in `Cargo.toml`; HTML is a character scan. Those two
+      are also the declared `fallback_scope`, so the release has a complete
+      smaller version that is reachable without the one risky decision in it.
+    - >
+      Genuine test documents are producible on this machine. LibreOffice is not
+      installed, but python-docx, python-pptx, openpyxl and odfpy are, and the
+      user's own Documents directory holds real Word, Excel and PowerPoint files
+      written by the actual applications — so the "real software, not
+      hand-written XML" acceptance criterion has both a committable fixture path
+      and an uncommittable real-corpus evidence path.
+  major_cost_drivers:
+    - >
+      Six formats behind one hook. Each is small; there are enough of them that
+      the shared parts — the archive reader, the XML text pass, the caps — have
+      to be right once rather than nearly right six times.
+    - >
+      The hostile cases: decompression bounds, truncated and corrupt archives,
+      encrypted documents, and proving no panic path is reachable from a file a
+      user indexes.
+    - >
+      Choosing and trimming the ZIP dependency. It is permanent once a version
+      carrying it is on crates.io, so its features and its licence are decided
+      once, carefully.
+  recommended_scope_change: null
