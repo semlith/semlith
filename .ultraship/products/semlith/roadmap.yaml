@@ -44,11 +44,11 @@ versions:
     outcome: >
       A developer points semlith at a corpus far larger than one repository — a notes archive, a
       monorepo, several repositories at once. The first index of it says where it is and roughly
-      what is left, and surviving an interruption costs the run its last few minutes rather than
-      all of them. Searching that store costs a bounded amount of memory instead of an amount
-      that grows with the corpus.
+      what is left, and surviving an interruption costs the run its last few minutes rather than all
+      of them. Searching that store costs a bounded amount of memory instead of an amount that grows
+      with the corpus.
     detail: specified
-    status: planned
+    status: released
   - version: 0.8.0
     outcome: >
       A developer hands an agent a corpus of mixed formats — office documents, notebooks, HTML — and
