@@ -1,12 +1,14 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/semlith/semlith/main/assets/semlith-logo.png"
-       alt="" width="128" height="128">
-</p>
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/semlith/semlith/main/assets/semlith-logo.png"
+     alt="Semlith" width="128" height="128">
 
 # semlith
 
 [![ci](https://github.com/semlith/semlith/actions/workflows/ci.yml/badge.svg)](https://github.com/semlith/semlith/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+</div>
 
 A fast local vector store for AI agents.
 

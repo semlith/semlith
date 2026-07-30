@@ -1,404 +1,235 @@
 product: semlith
-version: 0.4.0
+version: 0.5.0
 tasks:
-  - id: US-SEMLITH-0.4.0-T01
+  - id: US-SEMLITH-0.5.0-T01
     summary: >
-      Add `semlith watch [paths]`: a `notify` watcher over the same roots
-      `index` accepts, a debounce window that coalesces an event burst into one
-      re-embed per file, the existing content-hash re-index path behind it, and
-      the store lock held for the watcher's lifetime.
+      Search several stores from one query: a repeatable `--store` on the read
+      commands, a `SEMLITH_STORE` list, one query vector per distinct model
+      computed outside the store and handed in, per-store rankings merged by the
+      reciprocal-rank scores they already carry, and the store on every hit.
     why_required: >
-      This is the release. Everything else either refines what this task
-      produces or proves it. It is also the task that decides the shape of the
-      lock story: a long-running holder is a behaviour change, and taking the
-      lock for the process lifetime is what stops a concurrent `index` from
-      writing rows the watcher's in-memory index then overwrites.
-    status: done
+      This is the release. Everything else either protects it from a way it
+      looks right and is wrong, proves a number about it, or ships it.
+    status: todo
     depends_on: []
     acceptance_criteria:
       - >
-        With `semlith watch` running over a corpus, saving a new sentence into an
-        indexed file makes a search for that sentence return that file's chunk,
-        with no `index` run in between.
+        One query over two stores holding disjoint corpora returns hits from
+        both, each carrying the store it came from, in a single ranked list.
       - >
-        While `watch` is running, `semlith index` against the same store exits
-        non-zero with the existing lock error naming the watcher's pid, and the
-        store is intact afterwards.
+        A phrase that exists only in the second store is returned by a two-store
+        query at the same rank it holds when that store is searched alone —
+        adding a store does not bury the store that has the answer.
+      - >
+        `-k 5` over three stores returns five hits in total, not five per store.
     files:
-      - src/watch.rs
+      - src/fleet.rs
       - src/lib.rs
       - src/main.rs
-      - Cargo.toml
-    evidence:
-      - "The watcher feeds the existing indexer rather than duplicating it:
-         index_paths now takes the lock and delegates to index_walk, and
-         index_changed re-indexes an explicit path set with no walk and no
-         orphan sweep. Both share index_set, so the hash short-circuit, chunk
-         eviction and the atomic index.tv write are one code path."
-      - "Chosen: the store lock is held for the watcher's whole life. Semlith
-         keeps its index in memory and save() writes all of it, so a second
-         writer's rows would be overwritten from a stale copy. The refusal
-         reuses the 0.2.0 lock error, which already names the holder."
-      - "Chosen: an event is acted on only if the path is one walk() would have
-         yielded, so ignore rules have one definition rather than two that must
-         agree. Recorded as a ponytail comment with the upgrade path (a
-         prebuilt gitignore matcher) if the per-batch walk ever costs."
-      - "cargo test — 40 passed, 0 failed, including three new watch unit tests
-         covering deleted-path canonicalization, a deletions-only batch needing
-         no walk, and the store's own directory being inadmissible."
-      - "cargo test --test watch -- --ignored — 2 passed, 0 failed: an edit
-         becomes searchable with no index run, and indexing a watched store is
-         refused by name."
-      - "End-to-end through the release binary: watch started over a corpus,
-         `semlith index` against the same store exited non-zero with 'is being
-         indexed by pid 32108', a newly saved rust.md was returned by a search
-         issued from a separate process, and deleting bread.md dropped it from
-         `semlith files`."
+    evidence: []
 
-  - id: US-SEMLITH-0.4.0-T02
+  - id: US-SEMLITH-0.5.0-T02
     summary: >
-      Classify events into what actually happened on disk: create, delete,
-      rename, and the write-temp-then-rename save that arrives as remove
-      followed by create. Re-embed, evict or move accordingly.
+      Make a named store either a real store or an error: read commands refuse a
+      path that is not already a store and create nothing, and the same store
+      named twice — repeated, relative against absolute, through a symlink — is
+      searched once.
     why_required: >
-      A watcher that treats every remove as "forget this file" evicts files the
-      user just saved from Vim, and one that ignores creates never picks up a
-      new file. This is the most likely way the release ships broken while
-      passing a hand-written test, so it is its own task with its own evidence.
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T01]
+      Both failures are invisible in a multi-store query, which is what makes
+      them worth their own task. A mistyped store today becomes an empty store
+      that contributes nothing while the other stores still return hits, and a
+      store fused with itself doubles every rank contribution it has and takes
+      over the result list.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T01]
     acceptance_criteria:
       - >
-        A file created under a watched root becomes searchable, and a file
-        deleted from disk stops appearing in results and is gone from
-        `semlith files`.
+        A `--store` path that does not exist exits non-zero naming the path, and
+        no directory, `store.db` or `index.tv` is created anywhere as a result.
       - >
-        A file renamed on disk is searchable under its new path and no longer
-        returned under its old one.
-      - >
-        An editor's atomic save (write to a temp file, rename over the original)
-        is handled as an edit: the file remains indexed with its new contents,
-        and is not left evicted by the intervening remove event.
-    files:
-      - src/watch.rs
-      - tests/watch.rs
-    evidence:
-      - "Chosen: classify by what is on disk when the batch is indexed, not by
-         the event kind. A path in the batch that exists is re-embedded; one
-         that does not is evicted. Rename and atomic save then need no special
-         case — both are one gone path and one present path — and the
-         platform differences in how notify labels them stop mattering."
-      - "cargo test --test watch -- --ignored — 5 passed, 0 failed: a new file
-         reaches the store and a deleted one loses its vectors, a rename moves
-         the file and leaves nothing under the old path, and a write-temp-then-
-         rename save leaves the file indexed with its new contents while the
-         editor's temp file is never indexed."
-      - "Deletion is proven at both levels: gone from `all_paths`, and gone
-         from search results rather than merely unlisted."
-
-  - id: US-SEMLITH-0.4.0-T03
-    summary: >
-      Apply the same ignore rules the indexing walk uses (`.gitignore`, hidden
-      files, the `.semlith` directory) to events, and prove the debounce and the
-      content-hash short-circuit: a burst of saves costs one re-embed, an
-      unchanged file costs none.
-    why_required: >
-      Without the ignore rules the watcher re-embeds its own store writes and
-      every build artefact, which is a loop, not a feature. Without the
-      hash short-circuit an editor that touches mtime on every keystroke pins a
-      CPU core. Both turn "leave it running" into "do not leave it running".
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T02]
-    acceptance_criteria:
-      - >
-        A path excluded by `.gitignore`, a hidden file, and anything inside the
-        `.semlith` store directory itself produce no re-embed, verified by the
-        watcher's own output over a burst of writes to such files.
-      - >
-        Ten rapid successive saves of one file inside the debounce window produce
-        exactly one re-embed of that file, not ten.
-      - >
-        An event on a file whose contents are unchanged (`touch`) re-embeds
-        nothing.
-    files:
-      - src/watch.rs
-      - tests/watch.rs
-    evidence:
-      - "The watcher reports what it did through a Progress callback rather
-         than printing from inside the library, so the CLI owns its output and
-         a test can count re-embeds. That is what makes the debounce claim
-         checkable instead of asserted."
-      - "cargo test --test watch -- --ignored — 8 passed, 0 failed. Ten saves
-         of one file inside a one-second window produced exactly 1 re-embed;
-         three rewrites of a file with its own bytes produced 0; a gitignored
-         path, a dotfile and a write into the store's own .semlith directory
-         produced 0, with the store's file list confirming none of them was
-         indexed."
-      - "The ignore test puts the store inside the watched tree, which is the
-         default `.semlith` layout — the loop where the watcher's own index
-         write queues the next re-embed is only reachable that way."
-
-  - id: US-SEMLITH-0.4.0-T04
-    summary: >
-      Make a long-running reader see what the watcher wrote: detect that
-      `index.tv` changed and reload it before the next search, without
-      discarding the loaded ONNX model, and wire it into the MCP server.
-    why_required: >
-      The roadmap outcome is stated for an agent. An agent connects once and
-      keeps the server for the session, so without this the watcher keeps a
-      store fresh that the agent never reads — the release would be delivered
-      to the wrong caller, which is the same mistake 0.3.0's MCP task existed
-      to prevent.
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T03]
-    acceptance_criteria:
-      - >
-        An MCP server started before an edit returns the edited chunk on a search
-        issued after the watcher re-embedded it, in the same server process,
-        driven over real stdio JSON-RPC.
+        Naming the same store twice — the flag repeated, and once by a relative
+        and once by an absolute path — produces the same result list as naming it
+        once, with no duplicated hits.
     files:
       - src/lib.rs
-      - src/mcp.rs
-    evidence:
-      - "Answered the contract's open question: freshness is signalled by an
-         `index_generation` counter in the store's meta table, bumped after the
-         index.tv rename, not by mtime. Re-embedding one file can leave both
-         the size and a second-granularity mtime unchanged, and a reader would
-         then keep answering from vectors that no longer exist. Bumped after
-         the rename, so a reader that sees the new generation is guaranteed to
-         find the new index behind it, and read back from the store rather than
-         incremented in memory so a writer that predates another writer's run
-         cannot reuse a generation."
-      - "search_filtered calls refresh() — one SQLite read when nothing has
-         changed. mcp.rs needed no change at all: stats and the filter count
-         read SQLite, which WAL already makes fresh across processes."
-      - "cargo test --test watch -- --ignored — 9 passed, 0 failed, including a
-         real `semlith mcp` child process driven over stdio JSON-RPC: it
-         answers before the edit exists, the watcher indexes the edit, and the
-         same process — no restart, no re-initialize — returns it."
-      - "The test was proven to fail without the fix: with refresh() removed it
-         reports 'the running server is still answering from the index it
-         started with' and returns only the pre-edit file."
-      - "Two false passes were found and fixed while proving it. The first
-         query shared terms with the edited file, so FTS5 — which is fresh
-         across processes for free — answered it and the dense half was never
-         exercised; the query now shares no term with the file it must find.
-         The second waited on `all_paths`, which lists a file as soon as its
-         row is written, before its vectors are durable; it now waits on the
-         vector count."
+      - src/fleet.rs
+      - tests/fleet.rs
+    evidence: []
 
-  - id: US-SEMLITH-0.4.0-T05
+  - id: US-SEMLITH-0.5.0-T03
     summary: >
-      Handle Ctrl-C and SIGTERM: finish or abandon the in-flight batch
-      atomically, leave `index.tv` durable, leave no `index.tv.tmp`, and leave
-      no file recorded with the PENDING hash that is not re-indexed next run.
+      Filters across every store, stores whose models differ searched together,
+      and the measurement that decides whether fusion needs a relevance floor:
+      does naming an unrelated store degrade a query the first store answered?
     why_required: >
-      A watcher is killed every single day — that is how a foreground process
-      ends. If the ordinary exit path can corrupt a store or strand a file at
-      the PENDING sentinel, the release makes stores less trustworthy than not
-      running it at all.
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T04]
+      A filter that selects nothing in one store must not report an empty
+      selection for the query as a whole, or the filter and the multi-store flag
+      cannot be used together. Mixed models are the realistic state of a
+      developer's stores, since the default model changed in 0.3.0. And the
+      no-degradation measurement is the one that can send the fusion design
+      back, so it belongs before the release is anywhere near finished.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T02]
     acceptance_criteria:
       - >
-        Ctrl-C during idle and Ctrl-C during an in-flight re-embed both exit
-        without leaving `index.tv.tmp` behind, and a store reopened afterwards
-        reports a chunk count consistent with its index — with any file left
-        mid-flight re-indexed on the next run rather than silently half-present.
+        `--ext`/`--path`/`--lang` filter every store, and a filter that matches
+        files in only one of two stores returns that store's hits rather than
+        reporting that no files match.
+      - >
+        Two stores built with different embedding models are searched in one
+        query and both contribute hits, with each store's own model used to embed
+        the query for it.
+      - >
+        A query answered well by one store is not degraded by also naming an
+        unrelated store: the hits that a single-store search returns are still
+        present, and still ranked above the unrelated store's best effort.
     files:
-      - src/watch.rs
-      - tests/watch.rs
-    evidence:
-      - "SIGINT and SIGTERM set the same stop flag the loop already polls, so
-         the signal handler does nothing but a store and a restore — the exit
-         happens between batches, where index.tv is whole. A second signal
-         restores the default disposition, so a stuck embed can still be
-         escaped. No new dependency: libc has been in the tree since 0.2.0."
-      - "index.tv.tmp left by a hard kill is removed at the start of an
-         indexing run rather than on open, because the caller holds the store
-         lock there — removing it on open would let a reader delete a live
-         writer's half-written index out from under its rename."
-      - "cargo test --test watch -- --ignored — 10 passed, 0 failed. The
-         shutdown test signals a real `semlith watch` process twice: once idle,
-         once 700 ms into embedding a 200 KB file. Both exited 0, neither left
-         an index.tv.tmp, and after the next indexing run the store's chunk
-         count equalled its vector count — nothing stranded half-present."
-      - "Not covered: Windows, whose console handlers are a different
-         mechanism. Ctrl-C there terminates mid-write exactly as `semlith
-         index` already does; carried to the release's known limitations."
+      - src/fleet.rs
+      - tests/fleet.rs
+    evidence: []
 
-  - id: US-SEMLITH-0.4.0-T06
+  - id: US-SEMLITH-0.5.0-T04
     summary: >
-      Measure the contract's non-functional numbers rather than asserting them:
-      idle CPU over 60 seconds, edit-to-searchable latency, index writes per
-      debounce window and their cost, memory across at least 100 events, plus
-      cross-version store compatibility and that the non-watch paths are
-      untouched.
+      Serve several stores from one MCP process: store labels in the tool
+      results, an optional `store` argument that narrows a query, an unknown
+      store name answered in-band with the stores that are open, and
+      `semlith_stats` reporting each store.
     why_required: >
-      "Event-driven, not polling" and "does not grow across events" are exactly
-      the claims that are true in design and false in code. Claiming them
-      unmeasured is the manufactured completion the framework exists to
-      prevent, and 0.3.0 already showed that a measurement can come back
-      inconclusive and have to be reported as such.
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T05]
+      The roadmap outcome is stated for an agent working across repositories.
+      Multi-store search that only the CLI can reach delivers the release to the
+      wrong caller — the same mistake 0.3.0's and 0.4.0's MCP tasks existed to
+      prevent.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T03]
     acceptance_criteria:
       - >
-        An idle watcher over a repository-scale tree consumes no measurable CPU
-        over a 60-second idle window (event-driven, not polling), measured and
-        reported as a number rather than asserted.
+        A single `semlith_search` call against a real `semlith mcp` child process
+        opened on two stores returns excerpts from both with their store labels,
+        driven over stdio JSON-RPC; the `store` argument restricts the same query
+        to one of them; and an unknown store name comes back as an in-band tool
+        error naming the stores that are open.
+    files:
+      - src/mcp.rs
+      - src/main.rs
+      - tests/fleet.rs
+    evidence: []
+
+  - id: US-SEMLITH-0.5.0-T05
+    summary: >
+      `stats` and `files` per store, and a store that `semlith watch` is holding
+      the write lock on searchable inside a multi-store query, freshness
+      included.
+    why_required: >
+      "Is this corpus even indexed" has to stay answerable per store, or an
+      empty answer from a fleet is undiagnosable. And a multi-store search that
+      takes a store lock, or that misses the generation counter on one of its
+      stores, silently turns 0.4.0's freshness guarantee off for anyone using
+      both features — which is the same developer.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T04]
+    acceptance_criteria:
       - >
-        A single-file edit is searchable within 5 seconds of the save on the
-        acceptance fixture with the model already warm, measured end to end from
-        file write to the hit appearing in a search.
+        `semlith stats` and `semlith files` over two stores report both, labelled,
+        and a single-store invocation prints exactly what 0.4.0 printed.
       - >
-        Watching does not rewrite `index.tv` more than once per debounce window,
-        so a burst of saves costs one index write; the per-write cost on the
-        acceptance fixture is reported.
+        A store being watched by a running `semlith watch` is searchable as part
+        of a multi-store query, and an edit the watcher re-embeds is returned by a
+        subsequent multi-store search from a long-running reader with no restart.
+    files:
+      - src/main.rs
+      - src/fleet.rs
+      - tests/fleet.rs
+    evidence: []
+
+  - id: US-SEMLITH-0.5.0-T06
+    summary: >
+      Measure rather than assert: query embeds per search against distinct
+      models, latency for one, two and three stores with the per-store
+      increment, resident memory for a three-store reader, cross-version
+      compatibility both ways, and the single-store paths unchanged.
+    why_required: >
+      "One embed per model" and "not three copies of the model" are exactly the
+      claims that are true in the design and false in the code. 0.4.0 found a
+      measurement bug that had already changed a default before any number was
+      reported, so the numbers get their own task and print what they saw.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T05]
+    acceptance_criteria:
       - >
-        Resident memory of an idle watcher is bounded and reported; it holds one
-        loaded model and does not grow across at least 100 successive edit events.
+        One search embeds the query once per distinct embedding model, not once
+        per store — measured as a count, not asserted, over three same-model
+        stores.
       - >
-        No store schema change. A 0.3.0 store is watchable without re-indexing,
-        and a store written by 0.4.0 opens and searches under 0.3.0.
+        Multi-store search latency is reported on the acceptance fixture for one,
+        two and three stores, with the per-store increment stated, so the cost of
+        adding a store is a number rather than a claim.
       - >
-        The non-watch code paths are unchanged: `index`, `search`, `stats`,
-        `files`, `forget` and the MCP tools behave exactly as in 0.3.0 for a
-        store nobody is watching, with the existing test suite passing unmodified.
+        Resident memory for a reader open on three same-model stores is reported
+        and does not hold three copies of the model.
+      - >
+        No store schema change and no index format change: a store written by
+        0.4.0 is searchable by 0.5.0 with no re-index, and a store written by
+        0.5.0 is searchable by the 0.4.0 binary.
+      - >
+        Single-store behaviour is unchanged: `index`, `watch`, `search`, `stats`,
+        `files`, `forget` and both MCP tools behave exactly as in 0.4.0 when one
+        store is given, with the existing test suite passing unmodified.
     files:
       - tests/measure.rs
       - tests/roundtrip.rs
-    evidence:
-      - "Measurements live in tests/measure.rs and print what they saw, so the
-         numbers are reproducible rather than quoted from a scratch script:
-         `cargo test --release --test measure -- --ignored --nocapture`."
-      - "On a 1000-file corpus (202 KB index.tv), M1, model warm: idle CPU
-         0.00s over a 60-second window — event-driven, not polling; edit to
-         searchable 1.04s against the 5s budget, measured from the write to the
-         hit appearing in a warm reader's search; a burst of ten saves inside
-         one debounce window cost exactly 1 index write; RSS 13 MB idle, and
-         after 100 successive edit events it was lower than before them (100 MB
-         → 10 MB across the churn), so it does not grow."
-      - "A measurement bug was found and fixed before any number was reported.
-         The first run said a burst cost 2 index writes; the baseline was taken
-         the instant the previous phase's hit appeared, so that phase's
-         trailing batch was counted against the burst. A direct probe of the
-         release binary showed one burst producing one '~ file' line and one
-         batch. The debounce default had been raised to 1s on the strength of
-         the bad number; with the methodology fixed, 500 ms and 1s both cost
-         one write, so the change was reverted and the comment now records what
-         was actually measured."
-      - "Cross-version, both directions, through the two release binaries: a
-         store built by 0.3.0 was watched by 0.4.0 with '0 indexed at startup,
-         2 unchanged' — no re-indexing — and the edit made during the watch
-         landed. 0.3.0 then read the 0.4.0 store: same file, chunk and vector
-         counts, and its search returned the chunk 0.4.0's watcher had added.
-         0.3.0 also indexed a further file into that store afterwards."
-      - "No schema change: after 0.4.0 the store has exactly 0.3.0's tables,
-         and the only addition is one row in the meta table that already
-         existed, index_generation=1, which 0.3.0 ignores."
-      - "The non-watch paths are untouched: cargo test — 40 passed, 0 failed,
-         unmodified, including the unit test pinning the unfiltered FTS5
-         statement to its 0.2.0 text; cargo test --test roundtrip -- --ignored
-         — 2 passed, 0 failed."
+    evidence: []
 
-  - id: US-SEMLITH-0.4.0-T07
+  - id: US-SEMLITH-0.5.0-T07
     summary: >
-      Document `watch` in the README — what it catches, what it does not
-      (events missed while it was down, network filesystems), that it holds the
-      store lock, and how freshness reaches a running MCP server — and add the
-      CHANGELOG 0.4.0 section.
+      Document multi-store search where it will be read: the repeatable flag,
+      the `SEMLITH_STORE` list, what a store label is, that writes stay
+      single-store, an MCP server definition naming several stores, and the
+      CHANGELOG 0.5.0 section.
     why_required: >
       The release workflow builds its notes from the CHANGELOG, so a missing
-      section ships an empty release. The limits are the documentation that
-      matters most here: a watcher that silently missed the hour it was not
-      running is indistinguishable from one that is broken.
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T06]
+      section ships an empty release. And a feature whose flag is repeatable on
+      some commands and not others is undiscoverable from `--help` alone.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T06]
     acceptance_criteria:
       - >
-        README documents `semlith watch`, what it does not catch (events missed
-        while it was down, network filesystems), that it holds the store lock,
-        and how freshness reaches a running MCP server.
-      - CHANGELOG has a 0.4.0 section, which is what the release workflow reads
+        README documents multi-store search: the repeatable flag, the
+        `SEMLITH_STORE` list, what the store labels are, that writes stay
+        single-store, and an MCP server definition naming several stores.
+      - CHANGELOG has a 0.5.0 section, which is what the release workflow reads
         for its notes.
     files:
       - README.md
       - CHANGELOG.md
       - docs/architecture.md
-    evidence:
-      - "README gained a 'Keeping the store current' section with real output,
-         the debounce rule, the startup catch-up pass, and the two facts a user
-         has to know: watch holds the store's write lock for as long as it
-         runs, and a running MCP server picks the changes up. The commands
-         table lists `semlith watch`, and the agent section says what to run
-         beside `semlith mcp`."
-      - "The limits are documented where they will be read, not buried: known
-         limits now cover the blocked `index`, changes missed while the watcher
-         was down being caught by the next startup pass rather than
-         reconstructed, network filesystems being unsupported, and Windows
-         Ctrl-C terminating immediately rather than at a batch boundary."
-      - "CHANGELOG 0.4.0 section present with its compare link — that is what
-         the release workflow reads for the GitHub release notes — including a
-         Compatibility note stating no schema or index format change, verified
-         both ways against the 0.3.0 binary."
-      - "docs/architecture.md explains why the watcher is not a second indexer,
-         why one writer is held honestly rather than worked around, why
-         freshness is a counter bumped after the rename rather than an mtime,
-         and why classifying events by what is on disk removes the per-platform
-         rename special cases. notify and libc's new use are in the dependency
-         table."
+    evidence: []
 
-  - id: US-SEMLITH-0.4.0-T08
+  - id: US-SEMLITH-0.5.0-T08
     summary: >
-      Bump Cargo.toml to 0.4.0 and ship it through the branch flow: PR
-      `feat/0.4.0` → develop, PR develop → main, CI green on both, tag v0.4.0
-      for the release workflow, verify the packaged tarball, then publish to
-      crates.io.
+      Bump Cargo.toml to 0.5.0 and ship it: PR `feat/0.5.0` → develop, PR
+      develop → main, CI green on both, tag v0.5.0 for the release workflow,
+      inspect the packaged tarball, then publish to crates.io on an explicit
+      go-ahead.
     why_required: >
       target_mode is published. A crates.io publish is permanent, so the dry run
       and the tarball inspection are the last gate before an irreversible
-      action. 0.3.0 shipped straight from main and recorded that as a
-      limitation; doing it properly is an acceptance criterion this time.
-    status: done
-    depends_on: [US-SEMLITH-0.4.0-T07]
+      action.
+    status: todo
+    depends_on: [US-SEMLITH-0.5.0-T07]
     acceptance_criteria:
       - CI green on develop and on main for the release commit, with every action
         still pinned to a full-length commit SHA.
       - >
         `cargo publish --dry-run` passes and the packaged tarball contains no
         `.env` and no `.ultraship` directory.
-      - crates.io serves semlith 0.4.0 and `cargo install semlith` resolves to it.
+      - crates.io serves semlith 0.5.0 and `cargo install semlith` resolves to it.
       - >
         The tagged GitHub release carries the four platform archives and
         SHA256SUMS, all release-workflow jobs green.
       - >
-        The release ships through the project's branch flow: `feat/0.4.0` →
-        pull request to `develop` → pull request to `main` → tag, which 0.3.0
-        did not do and recorded as a limitation.
+        The release ships through the project's branch flow: `feat/0.5.0` →
+        pull request to `develop` → pull request to `main` → tag.
     files:
       - Cargo.toml
-      - .github/workflows/ci.yml
       - .github/workflows/release.yml
-    evidence:
-      - "Shipped through the branch flow this time: feat/0.4.0 → PR #9 →
-         develop → PR #10 → main → tag v0.4.0. 0.3.0 committed straight to main
-         and recorded that as a limitation; this release closes it."
-      - "Started from a freshly pulled develop, and the open Dependabot PR was
-         landed first rather than left to conflict. Its CI had failed at job
-         setup because the branch predated the SHA-pinning commit — the trap
-         recorded after 0.3.0 — so it was rebased, went green on both runners,
-         and was merged before feat/0.4.0 was cut."
-      - "CI green on develop (PR #9) and on main (release commit 1eff5af) on
-         ubuntu-latest and macos-latest, with CodeQL, every action still pinned
-         to a full-length SHA. Confirmed green on main before the tag was
-         pushed, so the release workflow could not fail after the tag existed."
-      - "cargo publish --dry-run passed; the package list was inspected before
-         upload: 27 files, 321.2 KiB, no .env and no .ultraship. .env is
-         gitignored and no .env file is tracked."
-      - "release.yml — 6 of 6 jobs green. GitHub release 'Semlith 0.4.0' is
-         public, not a draft, with the four platform archives and SHA256SUMS."
-      - "Published on explicit go-ahead, since crates.io cannot be undone:
-         crates.io reports max_version 0.4.0, rust_version 1.89, not yanked,
-         uploaded 2026-07-29T18:30:54Z. `cargo install semlith --version 0.4.0
-         --locked` on a clean root installs and reports 'semlith 0.4.0'."
+    evidence: []
