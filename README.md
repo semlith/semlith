@@ -283,25 +283,26 @@ holding 137 MB on one store and 137 MB on three — one loaded model, not three.
 
 ## Using it from an agent
 
-`semlith mcp` speaks MCP over stdio and exposes two tools, `semlith_search` and
-`semlith_stats`. For Claude Code:
+`semlith mcp` speaks MCP over stdio and exposes five tools:
 
-```sh
-claude mcp add semlith -- /path/to/semlith --store /path/to/.semlith mcp
-```
+| Tool | What it does |
+| --- | --- |
+| `semlith_search` | Ranked excerpts with file and line range, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. |
+| `semlith_stats` | What each open store holds, and the names the other tools accept. |
+| `semlith_files` | Which files are indexed — so "not indexed" and "not discussed" stop looking the same. |
+| `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
+| `semlith_forget` | Drop one file from a store. The file on disk is untouched. |
 
-Or in an MCP client config:
+The two write tools take the store's lock for the call and give it back. A store
+another process is writing — `semlith watch`, say — comes back as a tool error
+naming the holder rather than a corrupted index. When more than one store is
+open they need a `store` argument, because a store takes one writer and there is
+no "the" store to guess at.
 
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "/path/to/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
-    }
-  }
-}
-```
+Indexing a large tree takes longer than a client will wait for one tool call, so
+`semlith_index` works to a time budget, reports what it did not reach, and
+continues where it left off when it is called again. `SEMLITH_MCP_INDEX_BUDGET`
+sets that budget in seconds if your client's tool timeout is unusual.
 
 The server loads the embedding model at startup, so the first tool call is as
 fast as the rest. It also notices when the store has been rewritten underneath
@@ -343,6 +344,208 @@ A name that is not open comes back as a tool error listing the ones that are,
 rather than as an empty result an agent would read as "the corpus does not
 discuss this". `semlith_stats` reports one line per store, which is where those
 names come from.
+
+### Which protocol revisions
+
+semlith implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and
+`2024-11-05`, and every one of them has a session in `tests/mcp.rs` proving it.
+Clients built on `2026-07-28` — the revision that removed the `initialize`
+handshake — get `server/discover` and per-request versions; every client
+shipping today gets the handshake it expects. A revision semlith does not
+implement is answered with one it does, rather than echoed back.
+
+`2025-03-26` is deliberately not advertised. It is the one revision that
+required JSON-RPC batching, and a client pinned to it is answered with
+`2025-11-25`.
+
+### Setting it up in your client
+
+Every snippet below runs `semlith --store /path/to/.semlith mcp`. Repeat
+`--store` to open several stores, or set `SEMLITH_STORE` to a
+path-separator-delimited list instead. `cargo install semlith` puts the binary
+at `~/.cargo/bin/semlith`, which is on your `PATH` in a shell but often not in
+an editor launched from a desktop icon — those entries use the absolute path.
+
+**Claude Code** — `claude mcp add`, or a committed `.mcp.json` in the project
+root. The `--` matters: without it Claude Code reads `--store` as one of its own
+flags.
+
+```sh
+claude mcp add semlith -- semlith --store /path/to/.semlith mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →
+Developer → Edit Config opens it.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "/Users/you/.cargo/bin/semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
+and the desktop app. TOML, and the table is `mcp_servers` with an underscore.
+
+```toml
+[mcp_servers.semlith]
+command = "semlith"
+args = ["--store", "/path/to/.semlith", "mcp"]
+```
+
+`codex mcp add semlith -- semlith --store /path/to/.semlith mcp` writes the same
+table.
+
+**GitHub Copilot in VS Code** — `.vscode/mcp.json` for a workspace, or the
+profile copy that `MCP: Open User Configuration` opens. The root key is
+`servers`, not `mcpServers`.
+
+```json
+{
+  "servers": {
+    "semlith": {
+      "type": "stdio",
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
+session. Its name for a stdio server is `local`, not `stdio`.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "local",
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"],
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+**Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one repo.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "stdio",
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "/Users/you/.cargo/bin/semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**Zed** — the `zed: open settings file` command. Zed calls MCP servers context
+servers, and keys them under `context_servers`.
+
+```json
+{
+  "context_servers": {
+    "semlith": {
+      "command": "/Users/you/.cargo/bin/semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**Gemini CLI** — `~/.gemini/settings.json`, or
+`gemini mcp add semlith semlith --store /path/to/.semlith mcp`.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**JetBrains** — Junie reads `~/.junie/mcp/mcp.json`, or `.junie/mcp/mcp.json`
+per project; AI Assistant takes the same JSON under Settings → Tools → AI
+Assistant → Model Context Protocol.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+**Cline** — the MCP Servers panel, Configure. Cline's own documentation gives
+two different paths for the file it writes (`~/.cline/mcp.json` and
+`~/.cline/data/settings/cline_mcp_settings.json`), so let the panel open it
+rather than guessing.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "semlith",
+      "args": ["--store", "/path/to/.semlith", "mcp"],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+**Goose** — `goose configure` → Add Extension → Command-line Extension, or
+`~/.config/goose/config.yaml`. Goose calls them extensions and spells the
+command `cmd`.
+
+```yaml
+extensions:
+  semlith:
+    type: stdio
+    name: semlith
+    enabled: true
+    cmd: semlith
+    args: ["--store", "/path/to/.semlith", "mcp"]
+    timeout: 300
+```
 
 ## What gets indexed
 
@@ -441,6 +644,18 @@ synchronise at every operator, so on a CPU with performance and efficiency
 cores a thread on a slow core paces the whole batch; semlith uses the
 performance-core count on Apple silicon and the full count elsewhere. Override
 with `SEMLITH_EMBED_THREADS` if your machine disagrees.
+
+## Compatibility
+
+[`docs/compatibility.md`](docs/compatibility.md) says which parts of semlith are
+a contract — the CLI commands and flags, the MCP tool names and schemas, the
+protocol revisions, the store on disk, the Rust API — and which parts are free
+to change under you, such as ranking scores and the text printed for a person to
+read. It also says plainly what a 0.x version number does and does not promise.
+
+Stores carry a `format_version` from 0.6.0 on. A store written before that is
+read as format 1 and never rewritten, and a binary that meets a store from a
+newer format refuses it naming both numbers rather than misreading it.
 
 ## Contributing
 
