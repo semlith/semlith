@@ -1,6 +1,6 @@
 product: semlith
 version: 0.6.0
-status: planned
+status: released
 release_type: minor
 
 outcome:
@@ -479,3 +479,191 @@ open_questions:
     Whether the server keeps answering `ping`. 2026-07-28 removed it; answering
     an unknown method harmlessly costs three lines and every legacy client may
     still send it.
+
+released_at: 2026-07-30T04:06:55Z
+mode: published
+delivered: >
+  A developer wires semlith into whichever agent they use — twelve clients have
+  a stanza in the README, each verified against that client's own documentation
+  and each executed by a test that reads it straight out of the README. The
+  server speaks every MCP revision it advertises: 2026-07-28, 2025-11-25,
+  2025-06-18 and 2024-11-05, with a recorded session for each, and it no longer
+  answers a handshake with whatever revision it was sent. The stateless
+  2026-07-28 era is served alongside the handshake, decided per message rather
+  than per connection. The tool surface is five rather than two: search, stats,
+  files, index and forget, with both writers taking the store lock per call and
+  index bounded by a budget that reports what remains and resumes. And
+  docs/compatibility.md says which surfaces are a contract and which are not,
+  backed by a format_version marker in the store.
+evidence:
+  tests:
+    - "cargo test -- --include-ignored --test-threads 1 --skip measure — 50 unit,
+       11 mcp, 11 fleet, 10 watch, 3 roundtrip, 3 clients, 1 measure unit: all
+       pass, 0 failed. The fleet, watch and roundtrip suites are unmodified from
+       0.5.0 and 0.4.0"
+    - "tests/mcp.rs, 11 new tests driving a real `semlith mcp` child process over
+       stdio: a full session at each of 2025-11-25, 2025-06-18 and 2024-11-05
+       with the five tools and real excerpts; 1900-01-01 and 2031-03-26 both
+       answered 2025-11-25 rather than echoed; server/discover as the first
+       message of a session returning resultType complete, the four supported
+       versions, capabilities.tools, serverInfo, ttlMs and cacheScope public; a
+       tools/call and tools/list carrying _meta 2026-07-28 with no handshake at
+       any point, deterministic tool order, cacheScope private; -32022 with
+       data.supported and data.requested; semlith_files listing, narrowing by
+       ext and reporting what the cap left out; semlith_index making a file
+       created after startup searchable in the same session; the same call
+       refused in-band naming the watcher holding the lock, with the store still
+       searchable after; both writers refusing an unnamed store with two open
+       and writing only the named one; and a budget-truncated index reporting
+       what remains and finishing across repeated calls"
+    - "tests/clients.rs — every one of the twelve promised clients has a stanza,
+       every JSON stanza parses, and every stanza's `--store … mcp` command line
+       is read out of the README (not hardcoded) and run: each produced a server
+       that completed a handshake and listed tools"
+    - "cargo test --test roundtrip -- --ignored — 3 passed, including a store
+       created by 0.6.0 recording format_version 1, and the same store with the
+       key deleted still searching and not being migrated on open"
+    - "Two unit tests in src/store.rs for the format marker (absent key is format
+       1 and is not written; format 2 is refused naming both numbers) and three
+       in src/mcp.rs for negotiation, including that 2026-07-28 over `initialize`
+       is answered 2025-11-25 rather than accepted"
+    - "Cross-version through two release binaries (0.5.0 installed from
+       crates.io): a 0.5.0 store has meta keys `fts_built index_generation model`
+       and still has no format_version after 0.6.0 both searched and indexed it;
+       a 0.6.0 store has `format_version fts_built index_generation model` and
+       0.5.0 searched it and indexed a further file into it; single-store search
+       --json is byte-identical between the two binaries; and semlith_search and
+       semlith_stats over the legacy MCP path are byte-identical between them"
+  builds:
+    - "cargo fmt --all -- --check — clean"
+    - "cargo clippy --all-targets -- -D warnings — exit 0"
+    - "cargo publish --dry-run — passed; 33 files, 480.3 KiB (153.5 KiB
+       compressed); `cargo package --list` confirmed no .env, no .ultraship and
+       no .github in the package"
+    - "CI green on develop (PR #18, five checks) and on main for the release
+       commit 8112488, ubuntu-latest and macos-latest plus CodeQL, every action
+       still pinned to a full-length SHA and .github unchanged since v0.5.0"
+    - "release.yml — 6 of 6 jobs green: verify, four platform builds, release"
+  reviews:
+    - "The release began by reading the specification rather than the code, and
+       that is what found the defect. MCP revision 2026-07-28 had shipped two
+       days earlier, removing the initialize handshake and making server/discover
+       mandatory — and src/mcp.rs was echoing the client's requested
+       protocolVersion straight back, so it was already telling 2026-07-28
+       clients it spoke a revision it implemented none of. The fix is a real
+       supported list with one recorded session per entry, so the list cannot
+       outrun the implementation again"
+    - "2025-03-26 was deliberately left off the advertised list. It is the only
+       revision that required JSON-RPC batching, and the message loop reads one
+       object per line; advertising it would have repeated the defect being
+       fixed in a smaller way"
+    - "semlith forget was found to rewrite index.tv without taking the store
+       lock — a pre-existing race with `semlith watch` that only surfaced when
+       forget became reachable over MCP. Fixed in Semlith::forget where every
+       caller routes through, rather than in the tool"
+    - "The client stanzas were verified against each vendor's own documentation
+       rather than an aggregator, which is what caught that Copilot CLI calls a
+       stdio server `local`, VS Code uses `servers`, Zed uses `context_servers`,
+       and Goose uses `cmd` under `extensions`. Two vendors contradict
+       themselves — Cline documents two different config paths and Cursor's
+       reference marks `type` required while its own example omits it — and the
+       README says so rather than picking one silently"
+    - "The compatibility page initially listed src/lib.rs as covered while its
+       own prose called it the surface most likely to move, and the CHANGELOG
+       records that the library API broke in 0.2.0. The table now says
+       documented, not frozen. The page also described a stderr diagnostic that
+       did not exist yet, so the diagnostic was implemented rather than the
+       sentence deleted"
+    - "measure_the_watcher failed once during a full-suite run and passed alone.
+       Root cause was contention, not regression: it measures idle CPU and
+       edit-to-searchable latency while other test binaries spawn servers and
+       watchers. The measurement suite is run alone in release, as its own
+       module documentation already required, and gates.txt records why"
+  deployments:
+    - "GitHub release 'Semlith 0.6.0', not a draft, carrying
+       aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu,
+       x86_64-pc-windows-msvc and SHA256SUMS"
+    - "crates.io reports semlith max_version 0.6.0, rust_version 1.89, not
+       yanked, 157194 bytes, uploaded 2026-07-30T04:06:55Z"
+    - "Shipped through the branch flow: feat/0.6.0 → PR #18 → develop → PR #19 →
+       main → tag v0.6.0, with CI confirmed green on main before the tag was
+       pushed"
+  health_checks:
+    - "Post-release smoke against the downloaded archive, not a local build:
+       shasum -a 256 -c OK, ./semlith --version reports 'semlith 0.6.0', a store
+       indexed from scratch recorded format_version=1, and one MCP session
+       answered server/discover with all four revisions, negotiated 2025-11-25,
+       listed the five tools in order, listed the indexed files, forgot one file,
+       re-indexed it with semlith_index, and found it again with semlith_search"
+    - "A mistyped --store still exits 1 naming the path rather than creating an
+       empty store"
+    - "cargo install semlith --version 0.6.0 --locked from crates.io on a clean
+       root: installed, reports 'semlith 0.6.0'"
+    - "No secrets committed: no .env, secret, token, key or credential file is
+       tracked, .env is gitignored, and cargo package --list was inspected before
+       the upload"
+known_limitations:
+  - >
+    The 2026-07-28 path has never met a client that speaks it. That revision is
+    two days old and its SDKs are in beta, so server/discover, the per-request
+    _meta version, resultType and the cacheable list fields are all proven
+    against semlith's own reading of the specification and nothing else. The
+    handshake path, which every client shipping today uses, is proven against
+    real sessions.
+  - >
+    2025-03-26 is not advertised, because it is the one revision that required
+    JSON-RPC batching. A client pinned to it is answered 2025-11-25 and has to
+    accept that or disconnect. No known client is pinned there.
+  - >
+    The twelve client stanzas are verified against documentation and executed as
+    command lines; none of the twelve clients can be installed in CI, so none of
+    them has actually loaded semlith in this release's testing. Two vendors
+    document their own format ambiguously: Cline gives two different config
+    paths across two pages, and Cursor's reference table marks `"type": "stdio"`
+    required while its own example omits it. semlith includes it.
+  - >
+    semlith_index blocks the server for the length of its call. The message loop
+    handles one request at a time, so an index running to its 45-second budget
+    makes the server unresponsive to a search from the same client for that
+    time. The budget bounds it; it does not overlap it.
+  - >
+    semlith_index will embed whatever it is pointed at. .gitignore is honoured,
+    which covers the common case of a `.env` beside the code and not every case,
+    and the budget bounds a runaway rather than preventing one. An agent now has
+    a tool that writes to the store, which 0.5.0 did not give it.
+  - >
+    The budget reports paths remaining, not bytes or chunks. "40 remaining" says
+    nothing about how long the next call takes, and a corpus of large files can
+    take several calls where the count suggests one.
+  - >
+    format_version is a single number with no minimum-reader field, so a future
+    format that an older binary could read but not write cannot be expressed.
+    That distinction would need a second key and a new format version to
+    introduce it.
+  - >
+    `semlith forget` taking the write lock is a behaviour change for the CLI too,
+    not only for the tool. A `forget` that used to succeed while `semlith watch`
+    was running now exits non-zero naming the watcher. Deliberate — the old
+    behaviour could leave the index and the database disagreeing — but a 0.5.0
+    script can see it.
+  - >
+    The tool list roughly doubled: 2220 bytes for two tools to 4790 for five,
+    about 555 to 1197 estimated tokens, paid by every agent in every session
+    whether or not a tool is called. That is the cost of the wider surface and it
+    is spent on the context this product exists to save.
+  - >
+    semlith_files defaults to 200 paths. A store holding a large repository
+    returns the cap and a count, so an agent that does not narrow with
+    path/ext/lang sees a fraction of what is indexed.
+  - >
+    Windows remains unexercised by CI, as recorded for 0.5.0's path-list
+    splitting, 0.4.0's watcher and 0.3.0's path handling. Both new write tools
+    take the same advisory lock, whose behaviour there is untested.
+  - >
+    lib.rs was deliberately not restructured. The compatibility page names which
+    modules are supported, but chunk, lock and store remain public exactly as
+    they were, so the documented surface and the compiled surface are not the
+    same shape.
+supersedes: "0.5.0"
+next_recommended_version: "0.7.0"
+immutable: true

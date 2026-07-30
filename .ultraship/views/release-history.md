@@ -8,10 +8,38 @@ Run `ultraship views` to regenerate.
 
 | Version | Released | Mode | Delivered |
 | --- | --- | --- | --- |
+| 0.6.0 | 2026-07-30T04:06:55Z | published | A developer wires semlith into whichever agent they use — twelve clients have a stanza in the README, each verified against that client's own documentation and each executed by a test that reads it straight out of the README. The server speaks every MCP revision it advertises: 2026-07-28, 2025-11-25, 2025-06-18 and 2024-11-05, with a recorded session for each, and it no longer answers a handshake with whatever revision it was sent. The stateless 2026-07-28 era is served alongside the handshake, decided per message rather than per connection. The tool surface is five rather than two: search, stats, files, index and forget, with both writers taking the store lock per call and index bounded by a budget that reports what remains and resumes. And docs/compatibility.md says which surfaces are a contract and which are not, backed by a format_version marker in the store. |
 | 0.5.0 | 2026-07-30T02:01:13Z | published | A developer points one search at several stores — `semlith search "how is the store lock taken" -s ../api/.semlith -s ../cli/.semlith` — and gets one ranked list back where every excerpt names the store it came from. An agent gets the same thing from one `semlith mcp` process opened on several stores, in one tool call, with an optional `store` argument to narrow it. `-k` is global, filters reach every store, stores whose embedding models differ are searched together, and writes stay single-store. |
 | 0.4.0 | 2026-07-29T18:30:54Z | published | A developer leaves `semlith watch` running over a repository and keeps working: a saved file is re-embedded about a second later, a new file is picked up, a deleted file loses its vectors, and a rename moves the file rather than duplicating it — with no `index` run. An agent already connected to that store over MCP sees the change on its next search, because the store counts index rewrites and a search reloads the vector index when the count has moved. |
 | 0.3.0 | 2026-07-29T16:02:02Z | published | A developer narrows a search to part of an indexed corpus by path glob, file extension or language — from the CLI and from an agent over MCP — and gets the best matches inside that subset, because the filter is applied before either half of the hybrid search picks its top-k rather than after. |
 | 0.2.0 | 2026-07-29T05:40:00Z | published | Index a repository on an ordinary 8 GB laptop without watching memory or fearing a second terminal, then find an exact identifier and a plain-English question with the same search. |
+
+### 0.6.0 known limitations
+
+- The 2026-07-28 path has never met a client that speaks it. That revision is two days old and its SDKs are in beta, so server/discover, the per-request _meta version, resultType and the cacheable list fields are all proven against semlith's own reading of the specification and nothing else. The handshake path, which every client shipping today uses, is proven against real sessions.
+
+- 2025-03-26 is not advertised, because it is the one revision that required JSON-RPC batching. A client pinned to it is answered 2025-11-25 and has to accept that or disconnect. No known client is pinned there.
+
+- The twelve client stanzas are verified against documentation and executed as command lines; none of the twelve clients can be installed in CI, so none of them has actually loaded semlith in this release's testing. Two vendors document their own format ambiguously: Cline gives two different config paths across two pages, and Cursor's reference table marks `"type": "stdio"` required while its own example omits it. semlith includes it.
+
+- semlith_index blocks the server for the length of its call. The message loop handles one request at a time, so an index running to its 45-second budget makes the server unresponsive to a search from the same client for that time. The budget bounds it; it does not overlap it.
+
+- semlith_index will embed whatever it is pointed at. .gitignore is honoured, which covers the common case of a `.env` beside the code and not every case, and the budget bounds a runaway rather than preventing one. An agent now has a tool that writes to the store, which 0.5.0 did not give it.
+
+- The budget reports paths remaining, not bytes or chunks. "40 remaining" says nothing about how long the next call takes, and a corpus of large files can take several calls where the count suggests one.
+
+- format_version is a single number with no minimum-reader field, so a future format that an older binary could read but not write cannot be expressed. That distinction would need a second key and a new format version to introduce it.
+
+- `semlith forget` taking the write lock is a behaviour change for the CLI too, not only for the tool. A `forget` that used to succeed while `semlith watch` was running now exits non-zero naming the watcher. Deliberate — the old behaviour could leave the index and the database disagreeing — but a 0.5.0 script can see it.
+
+- The tool list roughly doubled: 2220 bytes for two tools to 4790 for five, about 555 to 1197 estimated tokens, paid by every agent in every session whether or not a tool is called. That is the cost of the wider surface and it is spent on the context this product exists to save.
+
+- semlith_files defaults to 200 paths. A store holding a large repository returns the cap and a count, so an agent that does not narrow with path/ext/lang sees a fraction of what is indexed.
+
+- Windows remains unexercised by CI, as recorded for 0.5.0's path-list splitting, 0.4.0's watcher and 0.3.0's path handling. Both new write tools take the same advisory lock, whose behaviour there is untested.
+
+- lib.rs was deliberately not restructured. The compatibility page names which modules are supported, but chunk, lock and store remain public exactly as they were, so the documented surface and the compiled surface are not the same shape.
+
 
 ### 0.5.0 known limitations
 
