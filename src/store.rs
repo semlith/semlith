@@ -361,6 +361,19 @@ pub fn filtered_paths(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<Str
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Chunks whose file has a committed hash — the ones whose vectors are on disk.
+///
+/// A file is recorded with the [`PENDING`](crate::PENDING) empty hash until its
+/// vectors are durable, so this is exactly what the vector index holds at rest,
+/// and it costs one indexed count instead of reading the index to find out.
+pub fn durable_chunks(db: &Connection) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.hash != ''",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 /// `(files, chunks, indexed bytes)`
 pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
