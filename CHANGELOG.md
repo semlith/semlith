@@ -47,9 +47,9 @@ one question instead of one per repository.
   `semlith_stats` reports one line per store.
 
   Adding a store is cheap: measured on three 300-file stores sharing a model,
-  one query embed per search rather than one per store, a median 3.6ms for one
-  store against 4.1ms for three, and a server holding 128 MB on one store
-  against 130 MB on three — one loaded model, not three.
+  one query embed per search rather than one per store, a median 3.4ms for one
+  store against 4.0ms for three, and a server holding 137 MB whether it was
+  opened on one store or on three — one loaded model, not three.
 
 ### Changed
 

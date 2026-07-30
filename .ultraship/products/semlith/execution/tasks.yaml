@@ -223,7 +223,7 @@ tasks:
       claims that are true in the design and false in the code. 0.4.0 found a
       measurement bug that had already changed a default before any number was
       reported, so the numbers get their own task and print what they saw.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.5.0-T05]
     acceptance_criteria:
       - >
@@ -248,7 +248,36 @@ tasks:
     files:
       - tests/measure.rs
       - tests/roundtrip.rs
-    evidence: []
+    evidence:
+      - "Measurements live in tests/measure.rs and print what they saw:
+         `cargo test --release --test measure -- --ignored --test-threads 1
+         --nocapture`. On three 300-file stores sharing a model, M1: 1 query
+         embed per search (counted by the fleet, not inferred); medians over 20
+         searches of 3.4ms for one store, 3.7ms for two and 4.0ms for three, so
+         +0.3ms per store; and a real `semlith mcp` process holding 137 MB
+         whether it was opened on one store or on three."
+      - "Two harness bugs were found and fixed before any number was reported.
+         The memory measurement first slept 15 seconds and read 17 MB for both
+         servers — neither had finished loading its model — so it now drives a
+         real search to completion over stdio and measures a process that has
+         answered. And the per-store increment used Duration subtraction, which
+         panicked the first time three stores came out faster than two; it is
+         signed milliseconds now, which is also the honest way to print a
+         difference that small."
+      - "Cross-version, both directions, through two release binaries (0.4.0
+         installed from crates.io): 0.5.0 searched a 0.4.0-written store and a
+         following index run reported the file unchanged, so nothing was
+         re-embedded; 0.4.0 then searched a 0.5.0-written store and indexed a
+         further file into it. Script and output in evidence/0.5.0/compat.sh and
+         compat-run.txt."
+      - "No schema change: `SELECT name FROM sqlite_master` is identical between
+         a 0.4.0-written and a 0.5.0-written store, and the meta keys are still
+         fts_built, index_generation and model — nothing added."
+      - "Single-store behaviour proven rather than asserted: the same query with
+         --json against the same store produced byte-identical output under the
+         0.4.0 and 0.5.0 binaries. The existing suites pass unmodified — cargo
+         test 45 passed, --test watch --ignored 10 passed, --test roundtrip
+         --ignored 2 passed, plus 11 new fleet tests."
 
   - id: US-SEMLITH-0.5.0-T07
     summary: >

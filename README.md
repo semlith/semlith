@@ -268,9 +268,9 @@ Two limits worth knowing:
   question with nothing and the other stores hide it.
 
 Adding a store is cheap. Measured on three 300-file stores that share a model,
-M1: one query embed per search rather than one per store, a median 3.6ms for one
-store rising to 4.1ms for three, and an MCP server holding 128 MB on one store
-against 130 MB on three — one loaded model, not three.
+M1: one query embed per search rather than one per store, a median 3.4ms for one
+store rising to 4.0ms for three, and an MCP server that has answered a query
+holding 137 MB on one store and 137 MB on three — one loaded model, not three.
 
 ## Using it from an agent
 
