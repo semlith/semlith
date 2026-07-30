@@ -16,6 +16,7 @@
 pub mod chunk;
 pub mod embed;
 pub mod filter;
+pub mod fleet;
 pub mod lock;
 pub mod mcp;
 pub mod store;
@@ -81,6 +82,12 @@ pub struct Hit {
     pub start_line: u32,
     pub end_line: u32,
     pub text: String,
+    /// Which store this came from, set only when more than one was searched.
+    ///
+    /// Absent for a single-store search, so its output — including `--json` —
+    /// is byte for byte what it was before stores could be combined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
@@ -172,6 +179,24 @@ impl Semlith {
         })
     }
 
+    /// Open a store that must already be one.
+    ///
+    /// [`Semlith::open`] creates what it is given, which is what `index` wants
+    /// and the opposite of what every read command wants: a mistyped store
+    /// directory becomes an empty store that answers every question with
+    /// nothing, and when several stores are searched at once the others hide it
+    /// completely.
+    pub fn open_existing(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        if !dir.join("store.db").exists() {
+            bail!(
+                "{} is not a semlith store — no store.db in it; index it first",
+                dir.display()
+            );
+        }
+        Self::open(dir, None)
+    }
+
     /// Reload the vector index if another process has replaced it since this
     /// one read it — `semlith watch` re-embedding while an agent holds an MCP
     /// server open.
@@ -261,6 +286,12 @@ impl Semlith {
         self.embedder()?;
         self.index.prepare();
         Ok(())
+    }
+
+    /// Warm the vector index without loading a model, for a caller that shares
+    /// one loaded model across several stores.
+    pub fn warm_index(&mut self) {
+        self.index.prepare();
     }
 
     fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
@@ -521,6 +552,49 @@ impl Semlith {
     /// the subset is a minority of the corpus, which is the case the filter
     /// exists for.
     pub fn search_filtered(&mut self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Hit>> {
+        let vector = self.embed(vec![self.model.query_text(query)])?.remove(0);
+        self.search_with_vector(query, &vector, k, filter)
+    }
+
+    /// [`Semlith::search_filtered`] with the query already embedded.
+    ///
+    /// This is what lets several stores share one loaded model: the caller
+    /// embeds the query once per distinct model rather than once per store, so
+    /// searching four stores built with the same model costs one embed and one
+    /// resident copy of the weights.
+    ///
+    /// `vector` must come from *this* store's model. Vectors from two models
+    /// are not comparable, and nothing downstream can tell.
+    pub fn search_with_vector(
+        &mut self,
+        query: &str,
+        vector: &[f32],
+        k: usize,
+        filter: &Filter,
+    ) -> Result<Vec<Hit>> {
+        Ok(self
+            .search_ranked(query, vector, k, filter)?
+            .into_iter()
+            .map(|(hit, _)| hit)
+            .collect())
+    }
+
+    /// [`Semlith::search_with_vector`], also returning each hit's similarity to
+    /// the query vector — `0.0` for a hit only the keyword half found.
+    ///
+    /// The fused score is a sum of rank reciprocals, so two chunks that hold
+    /// the same position in their own store's ranking score identically. Within
+    /// one store that is a rare tie between two chunks; across stores it is the
+    /// normal case, because every store has a best hit whether or not it has an
+    /// answer. The similarity is what tells those apart, so it leaves the store
+    /// alongside the score rather than being thrown away here.
+    pub fn search_ranked(
+        &mut self,
+        query: &str,
+        vector: &[f32],
+        k: usize,
+        filter: &Filter,
+    ) -> Result<Vec<(Hit, f32)>> {
         // A store being watched changes under a long-lived reader. Answering
         // from the index this process happened to load at startup is how an
         // agent ends up quoting a function that no longer exists.
@@ -540,10 +614,9 @@ impl Semlith {
             return Ok(Vec::new());
         }
 
-        let vector = self.embed(vec![self.model.query_text(query)])?.remove(0);
-        let (_, dense_ids) = self
-            .index
-            .search_with_allowlist(&vector, depth, allowlist.as_slice());
+        let (dense_scores, dense_ids) =
+            self.index
+                .search_with_allowlist(vector, depth, allowlist.as_slice());
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
         let mut fused: Vec<(u64, f32)> = Vec::new();
@@ -568,13 +641,24 @@ impl Semlith {
             // A dangling id means SQLite and the index drifted apart; skip it
             // rather than fail the whole query.
             if let Some(row) = store::chunk(&self.db, id)? {
-                hits.push(Hit {
-                    score,
-                    path: row.path,
-                    start_line: row.start_line,
-                    end_line: row.end_line,
-                    text: row.text,
-                });
+                let similarity = dense_ids
+                    .iter()
+                    .position(|d| *d == id)
+                    .and_then(|i| dense_scores.get(i).copied())
+                    .unwrap_or(0.0);
+                hits.push((
+                    Hit {
+                        score,
+                        path: row.path,
+                        start_line: row.start_line,
+                        end_line: row.end_line,
+                        text: row.text,
+                        // Set by the caller when it knows there is more than one
+                        // store to tell apart; a store cannot label itself.
+                        store: None,
+                    },
+                    similarity,
+                ));
             }
         }
         Ok(hits)
@@ -630,7 +714,7 @@ impl Allowlist {
     }
 }
 
-fn normalize(v: &mut [f32]) {
+pub(crate) fn normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         for x in v {
@@ -686,9 +770,31 @@ pub fn model_cache_dir() -> PathBuf {
 
 /// Default store location: `.semlith` beside whatever you are indexing.
 pub fn default_store_dir() -> PathBuf {
-    std::env::var("SEMLITH_STORE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".semlith"))
+    // Always at least one element, so the index is not a panic in waiting.
+    store_dirs(&[]).remove(0)
+}
+
+/// The stores a command should use: the `--store` flags if any were given, else
+/// whatever `SEMLITH_STORE` names, else `.semlith` in the current directory.
+///
+/// `SEMLITH_STORE` is split the way `PATH` is — `:` on Unix, `;` on Windows —
+/// so an agent's MCP server definition can name several stores in one variable
+/// without a wrapper script. A single value therefore still means exactly what
+/// it always meant, and the price is that a store path containing the
+/// platform's own separator has to be passed as a flag instead.
+pub fn store_dirs(flags: &[PathBuf]) -> Vec<PathBuf> {
+    if !flags.is_empty() {
+        return flags.to_vec();
+    }
+    if let Some(raw) = std::env::var_os("SEMLITH_STORE") {
+        let dirs: Vec<PathBuf> = std::env::split_paths(&raw)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        if !dirs.is_empty() {
+            return dirs;
+        }
+    }
+    vec![PathBuf::from(".semlith")]
 }
 
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns

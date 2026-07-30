@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use fastembed::TextEmbedding;
-use semlith::{Semlith, default_store_dir, embed, embed::Model, filter::Filter};
+use semlith::{Semlith, embed, embed::Model, filter::Filter, fleet::Fleet, store_dirs};
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -10,9 +10,11 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(name = "semlith", version, about, long_about = None)]
 struct Cli {
-    /// Store directory (also settable with SEMLITH_STORE).
+    /// Store directory (also settable with SEMLITH_STORE). Repeatable for
+    /// `search`, `stats`, `files` and `mcp`, which read every store named;
+    /// `index`, `watch` and `forget` write, and take exactly one.
     #[arg(long, short, global = true)]
-    store: Option<PathBuf>,
+    store: Vec<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -97,7 +99,28 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let dir = cli.store.clone().unwrap_or_else(default_store_dir);
+    let dirs = store_dirs(&cli.store);
+    // Every command that writes uses this; the read commands open all of them.
+    let dir = dirs[0].clone();
+
+    // Reading several stores is a merge; writing several would be several
+    // locks with several failure modes, against a store whose rule is one
+    // writer. Refuse it here rather than half-way through the second store.
+    if dirs.len() > 1
+        && matches!(
+            cli.command,
+            Command::Index { .. } | Command::Watch { .. } | Command::Forget { .. }
+        )
+    {
+        bail!(
+            "this command writes, so it takes one store, not {}: {}",
+            dirs.len(),
+            dirs.iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     match cli.command {
         Command::Models => {
@@ -221,18 +244,20 @@ fn main() -> Result<()> {
             lang,
             json,
         } => {
-            // Built before the store is opened, so an unknown language name
+            // Built before any store is opened, so an unknown language name
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
 
-            let mut store = Semlith::open(&dir, None)?;
-            store.quiet = json;
+            let mut fleet = Fleet::open(&dirs)?;
+            fleet.quiet = json;
 
             // A glob that selects nothing is a different answer from a corpus
             // that does not discuss the query, and only one of them is the
-            // user's typo.
+            // user's typo. Across several stores this is one question about the
+            // whole selection: a filter that matches nothing in one store but
+            // something in another has not selected nothing.
             let selected = (!filter.is_empty())
-                .then(|| store.matching_files(&filter))
+                .then(|| fleet.matching_files(&filter))
                 .transpose()?;
             if selected == Some(0) {
                 if json {
@@ -240,26 +265,33 @@ fn main() -> Result<()> {
                 } else {
                     eprintln!(
                         "no files match the filter (store has {} chunks)",
-                        store.len()
+                        fleet.chunks()
                     );
                 }
                 return Ok(());
             }
 
             let started = Instant::now();
-            let hits = store.search_filtered(&query, k, &filter)?;
+            let hits = fleet.search_filtered(&query, k, &filter)?;
             let elapsed = started.elapsed();
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
             } else if hits.is_empty() {
-                eprintln!("no matches (store has {} chunks)", store.len());
+                eprintln!("no matches (store has {} chunks)", fleet.chunks());
             } else {
                 let mut out = std::io::stdout().lock();
                 for (i, h) in hits.iter().enumerate() {
+                    // The store is named only when there is more than one to
+                    // tell apart, so a single-store search prints what it
+                    // always printed.
+                    let from = match &h.store {
+                        Some(label) => format!("[{label}] "),
+                        None => String::new(),
+                    };
                     writeln!(
                         out,
-                        "{}{}. {:.3}  {}:{}-{}{}",
+                        "{}{}. {:.3}  {from}{}:{}-{}{}",
                         bold(),
                         i + 1,
                         h.score,
@@ -273,14 +305,33 @@ fn main() -> Result<()> {
                     }
                     writeln!(out)?;
                 }
+                let across = if fleet.len() > 1 {
+                    // A store that contributed nothing is worth seeing: it is
+                    // otherwise indistinguishable from one that was never
+                    // opened.
+                    let breakdown: Vec<String> = fleet
+                        .labels()
+                        .iter()
+                        .map(|label| {
+                            let n = hits
+                                .iter()
+                                .filter(|h| h.store.as_deref() == Some(*label))
+                                .count();
+                            format!("{label} {n}")
+                        })
+                        .collect();
+                    format!(" across {} stores: {}", fleet.len(), breakdown.join(", "))
+                } else {
+                    String::new()
+                };
                 match selected {
                     Some(n) => eprintln!(
-                        "{} hits in {:?} (filter selected {n} of {} files)",
+                        "{} hits in {:?} (filter selected {n} of {} files){across}",
                         hits.len(),
                         elapsed,
-                        store.stats()?.0
+                        fleet.files()?,
                     ),
-                    None => eprintln!("{} hits in {:?}", hits.len(), elapsed),
+                    None => eprintln!("{} hits in {:?}{across}", hits.len(), elapsed),
                 }
             }
         }
@@ -298,20 +349,53 @@ fn main() -> Result<()> {
         }
 
         Command::Stats => {
-            let store = Semlith::open(&dir, None)?;
-            let (files, chunks, bytes) = store.stats()?;
-            println!("store    {}", dir.display());
-            println!("model    {} ({} dim)", store.model(), store.dim());
-            println!("files    {files}");
-            println!("chunks   {chunks}");
-            println!("vectors  {}", store.len());
-            println!("indexed  {}", semlith::human_bytes(bytes));
+            let fleet = Fleet::open(&dirs)?;
+            let many = fleet.len() > 1;
+            let mut totals = (0, 0, 0);
+            for (label, store) in fleet.each() {
+                let (files, chunks, bytes) = store.stats()?;
+                totals = (totals.0 + files, totals.1 + chunks, totals.2 + bytes);
+                if many {
+                    println!("{label}");
+                }
+                // The store's own directory, not the flag order: a store named
+                // twice was opened once.
+                println!("store    {}", store.dir().display());
+                println!("model    {} ({} dim)", store.model(), store.dim());
+                println!("files    {files}");
+                println!("chunks   {chunks}");
+                println!("vectors  {}", store.len());
+                println!("indexed  {}", semlith::human_bytes(bytes));
+                if many {
+                    println!();
+                }
+            }
+            // The per-store blocks are the diagnostic; the total is the answer
+            // to "how much is indexed".
+            if many {
+                println!(
+                    "total    {} stores, {} files, {} chunks, {}",
+                    fleet.len(),
+                    totals.0,
+                    totals.1,
+                    semlith::human_bytes(totals.2),
+                );
+            }
         }
 
         Command::Files => {
-            let store = Semlith::open(&dir, None)?;
-            for path in semlith::store::all_paths(store.db())? {
-                println!("{}", display(std::path::Path::new(&path)));
+            let fleet = Fleet::open(&dirs)?;
+            let many = fleet.len() > 1;
+            for (label, store) in fleet.each() {
+                if many {
+                    println!("{label}");
+                }
+                for path in semlith::store::all_paths(store.db())? {
+                    println!("{}", display(std::path::Path::new(&path)));
+                }
+                if many {
+                    println!();
+                }
             }
         }
 
@@ -322,13 +406,13 @@ fn main() -> Result<()> {
         }
 
         Command::Mcp => {
-            let mut store = Semlith::open(&dir, None)?;
-            // Load the model before the first tool call so an agent does not
-            // sit through a cold start mid-conversation.
-            store.quiet = true;
-            store.warm()?;
+            let mut fleet = Fleet::open(&dirs)?;
+            // Load each distinct model before the first tool call so an agent
+            // does not sit through a cold start mid-conversation.
+            fleet.quiet = true;
+            fleet.warm()?;
             semlith::mcp::serve(
-                &mut store,
+                &mut fleet,
                 std::io::stdin().lock(),
                 std::io::stdout().lock(),
             )?;
