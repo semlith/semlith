@@ -5,12 +5,21 @@
 
 # semlith
 
+**A fast local vector store for AI agents** — index files once, keep it current
+as you save, and answer questions across all of it in milliseconds without
+leaving the machine.
+
 [![ci](https://github.com/semlith/semlith/actions/workflows/ci.yml/badge.svg)](https://github.com/semlith/semlith/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/semlith.svg?logo=rust)](https://crates.io/crates/semlith)
+[![downloads](https://img.shields.io/crates/d/semlith.svg)](https://crates.io/crates/semlith)
+[![docs.rs](https://img.shields.io/docsrs/semlith?logo=docsdotrs&label=docs.rs)](https://docs.rs/semlith)
+
+[![msrv](https://img.shields.io/badge/rust-1.89%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
+[![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 </div>
-
-A fast local vector store for AI agents.
 
 Point it at your docs, PDFs, notes and code. semlith chunks them, embeds them,
 and keeps a quantized vector index next to a SQLite database — all on your
