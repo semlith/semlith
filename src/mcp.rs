@@ -156,7 +156,17 @@ fn dispatch(stores: &mut Fleet, method: &str, params: &Value) -> Result<Value, F
         )),
 
         "initialize" => {
-            let version = negotiate(params.get("protocolVersion").and_then(Value::as_str));
+            let asked = params.get("protocolVersion").and_then(Value::as_str);
+            let version = negotiate(asked);
+            // "The agent sees no tools" is otherwise undiagnosable from the
+            // client's side, and stderr is the one channel a stdio client
+            // captures for exactly this.
+            match asked {
+                Some(a) if a != version => {
+                    eprintln!("semlith: client asked for MCP {a}; answering {version}")
+                }
+                _ => eprintln!("semlith: MCP {version}"),
+            }
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
