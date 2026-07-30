@@ -271,6 +271,22 @@ impl Semlith {
         &self.dir
     }
 
+    /// How many shards the store's vectors are split across, and how many of
+    /// them may be resident at once. `None` for a store written before 0.7.0,
+    /// whose single index is all or nothing.
+    pub fn shards(&self) -> Option<(usize, usize)> {
+        self.index
+            .max_resident()
+            .map(|max| (self.index.shards(), max))
+    }
+
+    /// Shards this store has put down to stay inside its memory budget. Above
+    /// zero means the corpus has outgrown the budget and queries are paying to
+    /// read shards back.
+    pub fn evictions(&self) -> u64 {
+        self.index.evictions()
+    }
+
     /// Loading the ONNX model costs a second or so, so it is deferred until a
     /// command actually needs to embed something.
     fn embedder(&mut self) -> Result<&mut TextEmbedding> {
