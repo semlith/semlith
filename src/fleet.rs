@@ -117,13 +117,17 @@ impl Fleet {
         self.embeds
     }
 
-    /// Load every distinct model and warm every index, so the first query is
-    /// not slower than the rest.
+    /// Load every distinct model, so the first query does not pay a cold start.
+    ///
+    /// The vector indexes are deliberately left alone. They are read when a
+    /// query needs them, which for a server an agent leaves open all day may be
+    /// never; and a store larger than its memory budget would only load shards
+    /// here in order to put them straight back down. The model is the part that
+    /// is always needed and always expensive, so it is the part warmed.
     pub fn warm(&mut self) -> Result<()> {
         for i in 0..self.members.len() {
             let model = self.members[i].store.model().clone();
             self.embedder(&model)?;
-            self.members[i].store.warm_index()?;
         }
         Ok(())
     }
