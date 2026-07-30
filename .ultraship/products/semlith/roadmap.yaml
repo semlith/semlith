@@ -31,7 +31,7 @@ versions:
       A developer searches several stores at once from a single query, so an agent working across
       repositories asks one question instead of many.
     detail: specified
-    status: planned
+    status: released
   - version: 0.6.0
     outcome: >
       A developer depends on semlith knowing the CLI, the MCP tools, the store format and the Rust
