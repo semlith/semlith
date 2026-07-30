@@ -1,0 +1,481 @@
+product: semlith
+version: 0.6.0
+status: planned
+release_type: minor
+
+outcome:
+  user_can: >
+    Wire semlith into whichever agent they already use — Claude Code, Claude
+    Desktop, Codex, GitHub Copilot in VS Code, Copilot CLI, Cursor, Windsurf,
+    Zed, Gemini CLI, JetBrains — by copying the configuration stanza for that
+    client out of semlith's own documentation, and have it work first time
+    because the server speaks every MCP revision it claims to speak. Once
+    connected, the agent gets semlith's whole surface as tools rather than a
+    fifth of it: search, stats, the list of indexed files, indexing a path, and
+    forgetting one. And the developer can read one page that says which parts of
+    semlith are covered by SemVer — the CLI, the MCP tool names and schemas, the
+    store on disk, the Rust API — and which parts are free to change.
+  business_value: >
+    semlith's reason to exist is that an agent asks it questions instead of
+    reading whole files. Which agent is not semlith's choice to make: the
+    developer already has one, and it is as likely to be Codex or Copilot as
+    Claude Code. Today the README shows one client's syntax, and the server
+    tells every client that it speaks whatever revision that client asked for —
+    it echoes the requested `protocolVersion` straight back, so it answers
+    `2026-07-28` to a client on `2026-07-28` while implementing none of that
+    revision. That is not an interoperability gap that shows up as a clear
+    error; it is a server that agrees to a contract it cannot honour, and the
+    failure surfaces later as a client that hangs or silently sees no tools.
+    Meanwhile the MCP surface has not grown since 0.1.0 while the CLI has grown
+    four times: an agent connected over MCP cannot find out which files are
+    indexed, cannot index a path, and cannot drop one, so the moment its
+    question needs any of those it falls back to a shell or gives up. Fixing the
+    protocol, widening the tools, and writing the contract down are one release
+    because they are one promise: an agent can depend on this.
+  evidence_of_value: >
+    A real `semlith mcp` child process, driven over stdio, completes a full
+    handshake at every protocol revision the server advertises — one recorded
+    session per revision — and answers `server/discover` for the stateless
+    2026-07-28 era without an `initialize` ever being sent. The same process
+    lists five tools, indexes a file created after it started, and returns that
+    file from a search in the same session. Every configuration stanza printed
+    in the documentation is parsed from the documentation itself and its command
+    line executed, so a snippet that has drifted from the binary fails the
+    build rather than a user's first attempt.
+
+scope:
+  included:
+    - >
+      Honest protocol version negotiation. The server holds an explicit list of
+      the MCP revisions it implements — `2026-07-28`, `2025-11-25`,
+      `2025-06-18`, `2024-11-05` — and answers `initialize` with the requested
+      version when it is on that list and with its newest supported revision
+      when it is not, which is what every revision from 2024-11-05 onward
+      requires. It never again echoes a version it does not implement.
+    - >
+      Dual-era support. The legacy `initialize` handshake keeps working exactly
+      as it does today, because every MCP client shipping in July 2026 uses it.
+      Alongside it the server implements the 2026-07-28 stateless era: the
+      `server/discover` RPC that revision makes mandatory, per-request
+      `_meta.io.modelcontextprotocol/protocolVersion` and `clientCapabilities`,
+      `resultType` on every result, `_meta.io.modelcontextprotocol/serverInfo`
+      on every result, and `ttlMs`/`cacheScope` on `tools/list`. A request
+      naming a revision the server does not implement comes back as
+      `UnsupportedProtocolVersionError` (-32022) carrying the list of revisions
+      it does.
+    - >
+      `semlith_files` — the indexed file list as a tool, with the same `path`,
+      `ext`, `lang` and `store` narrowing `semlith_search` already takes, and a
+      cap on how many paths come back that says how many were left out. An agent
+      that cannot ask "is this file even indexed" reads an empty search result
+      as "the corpus does not discuss this".
+    - >
+      `semlith_index` — index a path into a store the server already has open.
+      It never creates a store, so no tool call can contain a model download;
+      the model is already warm from the server's startup. It takes the store's
+      write lock for the duration of the call and releases it, and a store held
+      by a running `semlith watch` comes back as an in-band tool error naming
+      the holder rather than as corruption.
+    - >
+      `semlith_index` is bounded by a wall-clock budget below the 60-second tool
+      timeout Codex and other clients default to. When the budget runs out it
+      returns what it indexed and what remains, and calling it again continues
+      rather than starting over — which is free, because indexing has been
+      content-hash incremental since 0.1.0.
+    - >
+      `semlith_forget` — drop one file's chunks from a store, reporting how many
+      went.
+    - >
+      Store selection for the writing tools. With one store open they need no
+      argument; with several open, `semlith_index` and `semlith_forget` require
+      a `store` naming one of them and refuse an ambiguous call in-band with the
+      names that are open. One writer per store stays the rule.
+    - >
+      A setup section covering every MCP client in common use, each stanza
+      verified against that client's own documentation rather than against an
+      aggregator: Claude Code (`claude mcp add` and `.mcp.json`), Claude Desktop
+      (`claude_desktop_config.json`), Codex (`~/.codex/config.toml`,
+      `[mcp_servers.semlith]`, and `codex mcp add`), GitHub Copilot in VS Code
+      (`.vscode/mcp.json`, root key `servers`, `"type": "stdio"`), GitHub
+      Copilot CLI (`~/.copilot/mcp-config.json`), Cursor (`~/.cursor/mcp.json`
+      and `.cursor/mcp.json`, root key `mcpServers`), Windsurf
+      (`~/.codeium/windsurf/mcp_config.json`), Zed (`context_servers` in
+      `settings.json`), Gemini CLI (`~/.gemini/settings.json`), and JetBrains
+      Junie (`~/.junie/mcp/mcp.json`). Each stanza names a store, because a
+      server opened on no store is the commonest way this goes wrong.
+    - >
+      `docs/compatibility.md`: what SemVer covers — CLI command and flag names,
+      exit codes, MCP tool names and input schemas, the advertised protocol
+      revisions, the on-disk store layout, and the `lib.rs` API — and what it
+      does not: ranking scores, human-readable output text, stderr diagnostics,
+      the default embedding model, and additive `--json` fields. It says plainly
+      that 0.x permits breaks and what one costs, rather than promising more
+      than a pre-1.0 project can.
+    - >
+      A `format_version` key in the store's meta table, written by new stores
+      and defaulted to 1 for a store that predates it. A binary that meets a
+      store from a newer format refuses it naming both numbers, instead of
+      misreading it — which is the whole point of writing a format down before
+      it changes.
+    - README section, CHANGELOG 0.6.0 section, and the MCP tool documentation
+      brought up to five tools.
+    - Publication to crates.io and a tagged GitHub release with binaries.
+  excluded:
+    - >
+      JSON-RPC batching, and therefore the `2025-03-26` revision, which is the
+      only one that required it. A client pinned there is answered with
+      `2025-11-25`. Batching exists in no client semlith has seen and would add
+      a second message shape to a loop that is currently one line, one message.
+    - >
+      The Tasks extension, MRTR, `subscriptions/listen`, resources, prompts,
+      sampling, roots, logging, and elicitation. semlith answers synchronous
+      tool calls; every one of those is a capability it does not advertise and
+      does not need.
+    - >
+      Streamable HTTP and any remote transport. stdio only, which is what a
+      local-only product with no network at query time can honestly serve.
+    - >
+      A `semlith mcp --print-config <client>` generator. The stanzas are five
+      lines each and live in documentation; a generator is a new public surface
+      to freeze in the release whose subject is not freezing surfaces
+      prematurely.
+    - >
+      `semlith_watch` as a tool. A watcher runs until interrupted and holds the
+      write lock while it does; neither fits a request/response tool call, and
+      0.4.0 already answers "keep the store current" with the CLI command.
+    - >
+      `semlith_models` and `semlith_languages` as tools. The model is chosen
+      once when a store is created, which is not something an agent does
+      mid-conversation, and the language list is already inline in
+      `semlith_search`'s schema where it is actually needed.
+    - >
+      `outputSchema` and `structuredContent` on the search result. The text
+      form works in every client today; a second result format is a second
+      thing to keep stable, and this release is about being able to keep
+      promises rather than making more of them.
+    - >
+      Any change to chunking, ranking, the embedding model, or `index.tv`. A
+      0.5.0 store must be searchable by 0.6.0 and a 0.6.0 store by 0.5.0.
+    - >
+      Restructuring `lib.rs` to hide the modules the compatibility page calls
+      internal. Renaming or hiding them is the kind of break this release
+      exists to make legible; the page says which are supported and 1.0.0 is
+      where the structure follows.
+  fallback_scope:
+    - >
+      The legacy era only, done correctly: version negotiation against a real
+      supported list rather than an echo, all five tools with their store
+      selection and the index budget, the per-client setup documentation, and
+      `docs/compatibility.md` with the store `format_version` marker.
+      `server/discover` and the rest of the 2026-07-28 era move to 0.7.0. Still
+      coherent, and still the outcome: every MCP client shipping today is
+      handshake-based, so a developer on any of them wires semlith in and it
+      works. What is lost is readiness for clients that have not shipped yet.
+
+acceptance:
+  functional:
+    - >
+      One recorded stdio session per advertised legacy revision — `2025-11-25`,
+      `2025-06-18`, `2024-11-05` — against a real `semlith mcp` child process:
+      `initialize` is answered with that same version, `tools/list` returns the
+      five tools, and a `semlith_search` call returns excerpts.
+    - >
+      `initialize` naming a revision the server does not implement — a bare
+      `1900-01-01` and a plausible future date — is answered with the server's
+      newest supported revision, not with the string it was sent.
+    - >
+      `server/discover`, sent as the first message with no `initialize` before
+      it, returns a `DiscoverResult` carrying `resultType: "complete"`,
+      `supportedVersions` including `2026-07-28`, `capabilities.tools`,
+      `_meta["io.modelcontextprotocol/serverInfo"]`, `ttlMs` and `cacheScope`.
+    - >
+      A `tools/call` carrying `_meta["io.modelcontextprotocol/protocolVersion"]`
+      of `2026-07-28`, with no handshake at any point in the session, returns a
+      result with `resultType: "complete"` and server identity in `_meta`; the
+      matching `tools/list` also carries `ttlMs` and `cacheScope`, and lists the
+      tools in the same order every time.
+    - >
+      A request whose `_meta` protocol version is unsupported returns JSON-RPC
+      error -32022 whose `data.supported` lists exactly the revisions the server
+      advertises and whose `data.requested` echoes what was asked.
+    - >
+      `semlith_files` returns indexed paths for a real store, narrows correctly
+      on `path`, `ext`, `lang` and `store`, and when the store holds more files
+      than the cap it returns the cap and says how many it left out.
+    - >
+      Through one long-lived `semlith mcp` process: a file created after the
+      server started is indexed by a `semlith_index` call and returned by a
+      subsequent `semlith_search` in the same session, with no restart.
+    - >
+      `semlith_index` against a store whose write lock is held by a running
+      `semlith watch` returns an in-band tool error naming the holder; the
+      store is intact afterwards and the watcher is unaffected.
+    - >
+      With two stores open, `semlith_index` and `semlith_forget` called with no
+      `store` argument return an in-band error naming both stores, and neither
+      store is written; naming one writes that one and leaves the other
+      untouched.
+    - >
+      A `semlith_index` call whose work exceeds its budget returns a partial
+      report naming how many files remain, and a second identical call
+      continues from there rather than re-embedding what the first call already
+      did.
+    - >
+      `semlith_forget` removes a file's chunks from the named store, reports the
+      count, and a subsequent `semlith_search` no longer returns that file.
+    - >
+      A store created by 0.6.0 carries `format_version`; a store written by
+      0.5.0, which has no such key, is opened and searched as format 1 with no
+      migration and nothing rewritten; and a store whose `format_version` is
+      higher than the binary knows is refused with an error naming both the
+      store's number and the binary's.
+    - >
+      Every client configuration stanza in the documentation is extracted from
+      the documentation, parsed as JSON or TOML, and its `command` plus `args`
+      executed — producing a process that answers `initialize` and `tools/list`.
+      A stanza that has drifted from the binary fails this check.
+  non_functional:
+    - >
+      No store format break in either direction: the 0.5.0 binary searches and
+      indexes a store written by 0.6.0, and 0.6.0 searches a store written by
+      0.5.0 without re-embedding anything — `format_version` is an additive meta
+      key, which is exactly why it is safe to add now.
+    - >
+      `semlith_search` and `semlith_stats` answer the legacy path byte for byte
+      as they do in 0.5.0 for the same input, so an agent already connected sees
+      no change it did not ask for.
+    - >
+      The MCP server holds no store lock at rest. A lock is taken only for the
+      duration of an `index` or `forget` call, and a search issued while no
+      write is in flight takes none — a store being watched stays searchable.
+    - >
+      The size of the `tools/list` response is reported before and after the
+      release, in bytes and as a token estimate, because it is loaded into every
+      agent's context in every session and this product exists to spend less of
+      that, not more.
+    - >
+      The existing suite passes unmodified: everything 0.5.0 shipped for
+      multi-store search, watching, and the roundtrip still passes with no test
+      edited to accommodate this release.
+  operational:
+    - CI green on develop and on main for the release commit, with every action
+      still pinned to a full-length commit SHA.
+    - >
+      README carries a per-client MCP setup section covering the clients named
+      in scope, each with the file it goes in and a stanza that names a store.
+    - >
+      `docs/compatibility.md` exists, is linked from the README, and states both
+      what SemVer covers and what it does not.
+    - CHANGELOG has a 0.6.0 section, which is what the release workflow reads
+      for its notes.
+    - >
+      `cargo publish --dry-run` passes and the packaged tarball contains no
+      `.env` and no `.ultraship` directory.
+    - crates.io serves semlith 0.6.0 and `cargo install semlith` resolves to it.
+    - >
+      The tagged GitHub release carries the four platform archives and
+      SHA256SUMS, all release-workflow jobs green.
+    - >
+      The release ships through the project's branch flow: `feat/0.6.0` → pull
+      request to `develop` → pull request to `main` → tag.
+
+delivery:
+  target_mode: published
+  environment: >
+    A developer workstation. Distributed via crates.io and prebuilt archives on
+    GitHub Releases; there is no server to deploy to. The MCP clients this
+    release targets run on that same workstation and launch semlith themselves
+    over stdio.
+  deployment_method: >
+    Merge to main, push the `v0.6.0` tag to trigger the release workflow, which
+    verifies the tag against Cargo.toml, builds four platform archives and
+    publishes the GitHub release. `cargo publish` is a deliberate manual step
+    after the tagged release, never from CI.
+  migrations:
+    - >
+      None required. `format_version` is written into the existing meta table
+      when a store is created or next written, and a store without the key is
+      read as format 1. No table is added, no row is rewritten, and no store
+      needs re-indexing.
+  observability:
+    - >
+      The server's stderr — which stdio clients capture and MUST NOT treat as
+      an error channel — names the protocol revision it negotiated and the
+      stores it opened, so "the agent sees no tools" is diagnosable from the
+      client's own log rather than by guesswork.
+    - >
+      Every tool failure stays in-band with `isError`, naming what to do
+      instead: the stores that are open when one was guessed, the lock holder
+      when a write is refused, the languages that exist when one is unknown.
+      A protocol-level error is reserved for what the agent cannot correct.
+    - >
+      `semlith_index` reports files indexed, unchanged, skipped and removed,
+      and what remains when the budget cut it short, so an agent can tell a
+      finished index from a truncated one.
+  rollback: >
+    A crates.io publish is permanent. Rollback is `cargo yank 0.6.0` plus a
+    0.6.1 fix; 0.5.0 stays installable and can still read every store 0.6.0
+    wrote, since `format_version` is additive. The GitHub release can be
+    deleted outright. For a user, rollback of the protocol change is nothing —
+    a 0.5.0 server and a 0.6.0 server both answer the handshake every current
+    client sends; rollback of the new tools is that the agent stops seeing
+    three of five.
+
+dependencies:
+  products: []
+  services:
+    - crates.io — publish token must be present locally.
+    - GitHub Actions — release workflow builds the platform archives.
+  human_approvals:
+    - Explicit go-ahead before `cargo publish`, since it cannot be undone.
+    - >
+      Any new runtime dependency. None is expected: the MCP server is
+      hand-rolled JSON-RPC over `serde_json`, and this release adds methods to
+      it rather than a protocol library.
+
+resource_profile:
+  complexity: medium
+  uncertainty: medium
+  likely_cost_drivers:
+    - >
+      Two eras in one server without two servers. The legacy path is stateful
+      and starts with `initialize`; the modern path has no handshake and carries
+      its version on every request. Deciding which era a message belongs to,
+      per message, is the design, and getting it wrong means a client that
+      appears to connect and then sees nothing.
+    - >
+      Proving conformance for revisions that cannot be exercised by their
+      clients. semlith can be driven by hand-written stdio sessions, and that
+      is the evidence available; it is only as good as the reading of the spec
+      behind each recorded exchange.
+    - >
+      A write tool inside a read-only server. `Fleet` hands out immutable
+      references today; indexing needs a mutable store, a lock taken and
+      released per call, and a clear answer when several stores are open. This
+      touches the type every command goes through.
+    - >
+      Bounding an index run by wall clock. Indexing is a loop that embeds
+      batches; stopping it cleanly mid-run, reporting what remains, and leaving
+      the store consistent enough that the next call resumes rather than
+      restarts is the fiddliest part of the release.
+    - >
+      Nine client configuration stanzas that have to be right without any of
+      those clients being installable in CI. Each one is a file path, a root
+      key and a field set that differ per client — `servers` for VS Code,
+      `context_servers` for Zed, `mcp_servers` in TOML for Codex — and a wrong
+      one is a user's first impression.
+  preferred_tools:
+    - >
+      cargo test with hand-written stdio JSON-RPC sessions against a real
+      `semlith mcp` child process, which is how 0.2.0, 0.3.0, 0.4.0 and 0.5.0
+      proved every agent-facing claim.
+    - >
+      The MCP specification pages for each advertised revision, read directly
+      rather than through a summary, since no client is available to disagree
+      with.
+    - >
+      A test that parses the documentation's own configuration stanzas, so the
+      documentation is executable rather than aspirational.
+    - >
+      Two release binaries — 0.5.0 from crates.io and the 0.6.0 build — for the
+      store format compatibility criterion, as in 0.5.0.
+  constraints:
+    - >
+      stdout is the protocol. Anything written there that is not a valid MCP
+      message breaks the client, which is why every diagnostic goes to stderr
+      and why the server has always been quiet.
+    - >
+      One writer per store. Adding write tools to the MCP server must not
+      weaken that: the lock is taken per call, and a store held elsewhere is
+      refused rather than waited on.
+    - >
+      A tool call is synchronous and the server handles one message at a time,
+      so a long `semlith_index` makes the server unresponsive for its duration.
+      The budget is what keeps that survivable.
+    - >
+      The tool list is loaded into every agent's context every session. Five
+      tools with careful descriptions cost tokens in every conversation, spent
+      whether or not any of them is called.
+    - Local only, single machine, single user. No network at query time.
+    - >
+      Pre-1.0. The compatibility page must describe the promise honestly rather
+      than borrowing 1.0's, or it is worth less than no page.
+
+risks:
+  - >
+    The 2026-07-28 revision is two days old and its SDKs are in beta. Building
+    against it means building against something that may still move, and no
+    client exercises it yet — so the modern path ships tested only against
+    semlith's own reading of the specification. The mitigation is that the
+    legacy path is what every real client uses, and the modern path is additive.
+  - >
+    Advertising a revision the server does not fully implement. This is the
+    defect being fixed, and the fix repeats it four times over if the supported
+    list is written by optimism rather than by a test per entry. Every advertised
+    revision needs its own recorded session, or the list is a wish.
+  - >
+    An agent that can now write. `semlith_index` lets a model choose what gets
+    embedded; pointed at a large tree it spends minutes and disk, and pointed at
+    a directory of credentials it embeds them. The `ignore` crate skips what
+    `.gitignore` skips, which covers the common case and not every case, and the
+    budget bounds the runaway rather than preventing it.
+  - >
+    Lock contention with `semlith watch`, which is the workflow 0.4.0 documented
+    and 0.5.0 tested. A write tool call while the watcher holds the lock must
+    fail cleanly and leave the store whole; a partial write there is corruption
+    of the store, not an error message.
+  - >
+    Resuming an interrupted index. If a budget-truncated run leaves the SQLite
+    rows and `index.tv` disagreeing, the store is broken in exactly the way the
+    lock exists to prevent, and it will surface later as searches returning
+    nothing for chunks that plainly exist.
+  - >
+    Nine configuration stanzas that no CI job can prove inside their clients.
+    Parsing them and executing their command lines catches drift and typos; it
+    does not catch a client that wants a field semlith has never heard of.
+  - >
+    Writing down a stability promise the project then breaks. 0.x permits it,
+    but a page that says "stable" and a 0.7.0 that renames a flag is worse than
+    no page — the page has to name what is provisional.
+  - >
+    Five tools rather than two is more than twice the context cost, paid by
+    every agent in every session whether it searches or not. A release about
+    saving an agent's context can spend it here without noticing.
+  - >
+    Windows remains unexercised by CI, as recorded for 0.5.0's path-list
+    splitting, 0.4.0's watcher and 0.3.0's path handling. The new write tools
+    take the same advisory lock, whose behaviour there is untested.
+
+open_questions:
+  - >
+    Whether to advertise `2025-03-26`. It is the only revision that required
+    JSON-RPC batching, and the message loop reads one object per line. Leaning
+    no: a client pinned there is answered with `2025-11-25`, which it must
+    accept or disconnect, and no known client is pinned there.
+  - >
+    The `semlith_index` budget: what value, and whether it is a fixed constant
+    or a tool argument. Leaning fixed and comfortably under the 60-second tool
+    timeout Codex documents, since a value the model can raise is a value the
+    model will raise.
+  - >
+    Whether `semlith_index` may create a store or only index into one already
+    open. Leaning only into one already open: it keeps a model download out of
+    every tool call, and a store created by an agent is a store nobody chose a
+    model for.
+  - >
+    Whether `format_version` belongs in the existing meta table beside
+    `fts_built`, `index_generation` and `model`, and whether 0.6.0 should also
+    record a minimum reader version rather than a single number.
+  - >
+    Whether tool annotations — `readOnlyHint`, `destructiveHint`, `title` — are
+    worth adding now that three of the five tools are read-only and two are not.
+    Clients that display them let a user auto-approve the safe ones, which is
+    exactly the distinction this release introduces.
+  - >
+    Whether the compatibility page promises the `--json` shape. It is the
+    surface most likely to gain fields, and "additive only" is a promise worth
+    making if it can be kept.
+  - >
+    Whether the server keeps answering `ping`. 2026-07-28 removed it; answering
+    an unknown method harmlessly costs three lines and every legacy client may
+    still send it.
