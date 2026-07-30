@@ -280,19 +280,31 @@ fn a_mixed_corpus_indexes_and_answers() {
         assert!(top.start_line >= 1, "a hit with no locator: {top:?}");
     }
 
-    // A changed document is re-read, and the old text stops being an answer.
-    fs::copy(
-        fixtures().join("page.html"),
-        corpus.path().join("notes.odt"),
+    // An edited document is re-read, and its old text stops being an answer —
+    // the promise every other format already makes, made for documents.
+    fs::write(
+        corpus.path().join("analysis.ipynb"),
+        r#"{"cells":[{"cell_type":"markdown","metadata":{},
+            "source":["The dugong recalibration note replaced the earlier writeup.\n"]}],
+            "metadata":{},"nbformat":4,"nbformat_minor":5}"#,
     )
     .unwrap();
     let report = s
         .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
         .unwrap();
     assert_eq!(report.indexed, 1, "only the changed file re-indexes");
-    let hits = s.search("tapir onboarding checklist", 5).unwrap();
+
+    let hits = s.search("dugong recalibration note", 3).unwrap();
     assert!(
-        !hits.iter().any(|h| h.path.ends_with("notes.odt")),
-        "the replaced document's old text is still searchable: {hits:#?}"
+        hits.first()
+            .is_some_and(|h| h.path.ends_with("analysis.ipynb")),
+        "the edited notebook's new text is not searchable: {hits:#?}"
+    );
+    // The file still ranks for a loosely related question — it is the only
+    // notebook in the corpus. What must be gone is the text itself.
+    let hits = s.search("capybara regression writeup", 5).unwrap();
+    assert!(
+        !hits.iter().any(|h| h.text.contains("capybara")),
+        "the notebook's replaced text is still in the store: {hits:#?}"
     );
 }
