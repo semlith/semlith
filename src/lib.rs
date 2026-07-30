@@ -148,6 +148,11 @@ impl Semlith {
             None => {
                 let m = model.unwrap_or_else(default_model);
                 store::set_meta(&db, "model", &m.to_string())?;
+                // Only here, where a store is being created. Stamping it on
+                // open would rewrite every store this binary ever reads, and
+                // a store written before the key existed is format 1 whether
+                // or not it says so.
+                store::set_meta(&db, store::FORMAT_KEY, &store::FORMAT_VERSION.to_string())?;
                 m
             }
         };
