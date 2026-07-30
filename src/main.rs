@@ -411,6 +411,19 @@ fn main() -> Result<()> {
             // does not sit through a cold start mid-conversation.
             fleet.quiet = true;
             fleet.warm()?;
+            // stdout is the protocol, so this goes to stderr — which a stdio
+            // client captures. A server opened on the wrong store answers
+            // every question with nothing, and this is the only place that is
+            // visible before a query comes back empty.
+            eprintln!(
+                "semlith {}: serving {} on {}",
+                env!("CARGO_PKG_VERSION"),
+                match fleet.len() {
+                    1 => "1 store".to_string(),
+                    n => format!("{n} stores"),
+                },
+                fleet.labels().join(", "),
+            );
             semlith::mcp::serve(
                 &mut fleet,
                 std::io::stdin().lock(),
