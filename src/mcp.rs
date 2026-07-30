@@ -496,7 +496,7 @@ fn call_tool(stores: &mut Fleet, params: &Value) -> Result<Value, Fail> {
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
 
-            match store.index_paths_within(&roots, index_budget(), |_| {}) {
+            match store.index_paths_within(&roots, index_budget(), |_, _| {}) {
                 // A store another process is writing is a conflict to report,
                 // not an error to fail the call with: the agent can wait, or
                 // write somewhere else.

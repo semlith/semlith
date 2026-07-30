@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-30
+
+A corpus larger than a repository. The first index of one says where it has got
+to, survives being interrupted, and searching it costs a bounded amount of
+memory rather than an amount that grows with the corpus.
+
+### Changed
+
+- **Breaking: a store created by 0.7.0 has a new layout, and an older semlith
+  will not read it.** Vectors now live in a directory of fixed-size shards under
+  `index/` instead of a single `index.tv`, recorded as `format_version` 2.
+
+  *Why.* Everything else in this release follows from it. A search can hold a
+  few shards instead of the whole corpus; a change to one file rewrites one
+  shard instead of the entire index, which is what `semlith watch` does on every
+  save; and an index run can make its work durable as it goes, because a
+  checkpoint is a shard that has landed. None of the three is possible while the
+  vectors are one file that must be written whole.
+
+  *What to do.* Nothing, for a store you already have: 0.7.0 reads, searches and
+  indexes into every store written before it exactly as 0.6.0 did, leaves it on
+  its single `index.tv`, and does not touch its `format_version`. Only stores
+  created by 0.7.0 are sharded. To move an existing store onto the new layout,
+  delete the store directory and index it again — the vectors in an `index.tv`
+  are quantized and cannot be split back out, so there is no migration that
+  would not re-embed the corpus anyway. For a large corpus that costs hours;
+  there is no hurry, and nothing breaks if you never do it.
+
+  *If you downgrade.* A 0.6.0 binary meeting a 0.7.0 store refuses it, naming
+  both format numbers. A 0.5.0 binary is older than `format_version` and has
+  nothing to check, so it reads such a store as an empty corpus — if you keep a
+  0.5.0 binary around, do not point it at a store 0.7.0 created.
+
+### Added
+
+- **A resident-memory budget for the vector index.** `SEMLITH_INDEX_MEMORY`, in
+  megabytes, defaults to 512. A sharded store holds at most as many shards as
+  that allows, putting down the coldest one to make room, and says on stderr
+  when it has had to. `semlith stats` reports the shard count and the budget, so
+  what a store costs to search is legible before searching it.
+
+- **Checkpointed indexing.** A sharded store makes its vectors durable every
+  thirty seconds and only then records the files they cover as indexed — in that
+  order, because a hash written ahead of its vectors is a file the next run
+  believes it has. An index run killed partway keeps everything committed so
+  far, answers searches from it immediately, and the next run walks past it
+  rather than starting again. Under 0.6.0 the same interruption left nothing.
+
+- **Progress that predicts.** `semlith index` now says how many files of how
+  many it has walked, the chunks per second it is managing, and an estimate of
+  what is left. A run that resumes says how many files it skipped as already
+  indexed.
+
+- **Opening a store loads no vectors.** `stats`, `files` and `forget` read the
+  index only if they must, and an MCP server holding several stores open for an
+  agent costs nothing for them until something is searched.
+
+### Performance
+
+- Changing one file in a sharded store rewrites one shard rather than the whole
+  index — the difference between watching a monorepo and not being able to.
+- Search latency is unchanged for a store that fits inside its budget. A store
+  larger than its budget pays to read shards back on each query; that cost is
+  measured and reported rather than smoothed over.
+
 ## [0.6.0] - 2026-07-30
 
 semlith works from whichever agent you already use, the MCP tools cover the
@@ -410,7 +475,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/semlith/semlith/releases/tag/v0.7.0
 [0.6.0]: https://github.com/semlith/semlith/releases/tag/v0.6.0
 [0.5.0]: https://github.com/semlith/semlith/releases/tag/v0.5.0
 [0.4.0]: https://github.com/semlith/semlith/releases/tag/v0.4.0
