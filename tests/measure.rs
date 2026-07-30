@@ -363,6 +363,127 @@ fn measure_the_tool_list_and_what_an_idle_server_holds() {
     server.stop();
 }
 
+/// The floor sharding has to clear, decided before the comparison was run.
+///
+/// turbovec fits its TQ+ calibration from the first batch added to an index, so
+/// a store split across shards fits it once per shard rather than once for the
+/// corpus. Two shards therefore score in slightly different coordinate systems,
+/// and the merged ranking is not guaranteed to be the ranking one index would
+/// have produced. 0.90 mean overlap at 10 is the line: below it, sharding is
+/// buying bounded memory with recall, and the release would have to change
+/// shape rather than be shipped with a footnote.
+const RECALL_FLOOR: f32 = 0.90;
+
+/// What splitting an index into shards costs the answers.
+///
+/// The same corpus, the same model, the same queries, indexed twice: once with
+/// every vector in one shard, once with the shards small enough that a corpus
+/// this size spans several. The only difference between the two stores is the
+/// split, so the difference between their answers is what the split costs.
+#[test]
+#[ignore = "indexes this repository twice; downloads an embedding model on first run"]
+fn measure_what_sharding_costs_recall() {
+    // A real corpus rather than generated notes: prose, code and configuration
+    // in the proportions a developer actually points semlith at.
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let whole = tempfile::tempdir().unwrap();
+    let split = tempfile::tempdir().unwrap();
+    // 1 shard against roughly a dozen. 128 is far below the shipped shard size,
+    // which makes this the pessimistic case: the smaller the shard, the less
+    // data each calibration is fitted on.
+    index_with(whole.path(), corpus, "100000000");
+    index_with(split.path(), corpus, "128");
+
+    let mut one = Semlith::open(whole.path(), None).unwrap();
+    one.quiet = true;
+    let mut many = Semlith::open(split.path(), None).unwrap();
+    many.quiet = true;
+
+    let shards = fs::read_dir(split.path().join("index"))
+        .map(|d| d.flatten().count())
+        .unwrap_or(0);
+    println!("\n--- recall, 1 shard against {shards}");
+    assert!(shards > 4, "the split store has only {shards} shard(s)");
+    assert_eq!(
+        one.len(),
+        many.len(),
+        "the two stores did not index the same corpus"
+    );
+
+    // Questions in the shape an agent asks them: about meaning, not about a
+    // literal identifier the keyword half would find on its own.
+    let queries = [
+        "how are vectors kept from filling memory",
+        "what happens when an index run is interrupted",
+        "how does the store decide a file has changed",
+        "why does a search look deeper than k",
+        "what stops two writers corrupting a store",
+        "how is a query embedded once for several stores",
+        "what does the watcher do when a file is deleted",
+        "how are results from keyword and vector search combined",
+        "what makes a store from an older version still readable",
+        "how does an agent narrow a search to one subsystem",
+        "what limits the size of a file that gets indexed",
+        "how does a long tool call avoid timing out",
+    ];
+
+    let mut overlaps = Vec::new();
+    let mut identical = 0;
+    for query in queries {
+        let a = ranking(&mut one, query);
+        let b = ranking(&mut many, query);
+        let shared = a.iter().filter(|hit| b.contains(hit)).count();
+        let overlap = shared as f32 / a.len().max(1) as f32;
+        if a == b {
+            identical += 1;
+        }
+        println!("  {overlap:.2}  {query}");
+        overlaps.push(overlap);
+    }
+    let mean = overlaps.iter().sum::<f32>() / overlaps.len() as f32;
+    let worst = overlaps.iter().cloned().fold(f32::INFINITY, f32::min);
+    println!(
+        "mean overlap@10 {mean:.3}, worst {worst:.2}, {identical}/{} rankings identical",
+        queries.len()
+    );
+    assert!(
+        mean >= RECALL_FLOOR,
+        "sharding cost recall: mean overlap@10 {mean:.3} is below the {RECALL_FLOOR} floor"
+    );
+}
+
+/// Index `corpus` into `store` through the binary, so the shard size is in
+/// force for the whole run.
+fn index_with(store: &Path, corpus: &Path, shard_vectors: &str) {
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(store)
+        .arg("index")
+        .arg(corpus)
+        .arg("--quiet")
+        .env("SEMLITH_SHARD_VECTORS", shard_vectors)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "indexing failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The top ten hits as a comparable list. Line spans rather than chunk ids: two
+/// stores built separately need not agree on ids, but they do on what a chunk
+/// is.
+fn ranking(store: &mut Semlith, query: &str) -> Vec<(String, u32)> {
+    store
+        .search(query, 10)
+        .unwrap()
+        .into_iter()
+        .map(|h| (h.path, h.start_line))
+        .collect()
+}
+
 /// A real `semlith mcp` process, for measuring what an agent's server costs.
 struct McpServer {
     child: Child,
