@@ -123,7 +123,7 @@ impl Fleet {
         for i in 0..self.members.len() {
             let model = self.members[i].store.model().clone();
             self.embedder(&model)?;
-            self.members[i].store.warm_index();
+            self.members[i].store.warm_index()?;
         }
         Ok(())
     }
