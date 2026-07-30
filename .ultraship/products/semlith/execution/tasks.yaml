@@ -10,7 +10,7 @@ tasks:
     why_required: >
       This is the release. Everything else either protects it from a way it
       looks right and is wrong, proves a number about it, or ships it.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - >
@@ -26,7 +26,23 @@ tasks:
       - src/fleet.rs
       - src/lib.rs
       - src/main.rs
-    evidence: []
+    evidence:
+      - "src/fleet.rs holds a Fleet of labelled stores and one loaded model per
+         distinct model. Semlith::search_ranked is the existing search with the
+         query embed lifted out, so the fleet embeds once per model and no store
+         loads weights of its own — the two paths are one body, not a copy."
+      - "Chosen: per-store results are merged, not re-ranked. Each store's list
+         arrives already ranked and that order survives; across stores the key
+         is the fused score, which is a sum of rank reciprocals from the same
+         formula at the same depth and therefore the one quantity that is the
+         same unit under any model."
+      - "cargo test --test fleet -- --ignored: one query over two disjoint
+         corpora returned hits from both, every hit carrying its store; -k 5
+         over three stores returned five hits, not fifteen."
+      - "Store provenance is Option<String>, skipped when serializing if None
+         and set only when more than one store was searched, so a single-store
+         --json is byte for byte what 0.4.0 emitted — verified against the 0.4.0
+         release binary in compat.sh."
 
   - id: US-SEMLITH-0.5.0-T02
     summary: >
@@ -40,7 +56,7 @@ tasks:
       that contributes nothing while the other stores still return hits, and a
       store fused with itself doubles every rank contribution it has and takes
       over the result list.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.5.0-T01]
     acceptance_criteria:
       - >
@@ -54,7 +70,18 @@ tasks:
       - src/lib.rs
       - src/fleet.rs
       - tests/fleet.rs
-    evidence: []
+    evidence:
+      - "Semlith::open_existing refuses a directory with no store.db rather than
+         creating one, and every read command goes through it. cargo test --test
+         fleet: the error names the mistyped path and neither the store
+         directory nor its parent is created."
+      - "Stores are deduplicated by canonical path before they are searched. The
+         test drives the release binary with the same store named twice — once
+         absolute, once as `.semlith` from the directory holding it — and the
+         --json result list is identical to naming it once."
+      - "Why it matters rather than being tidy: merging a store with itself
+         gives every one of its hits a twin at exactly the same score, so the
+         duplicated store takes the whole result list."
 
   - id: US-SEMLITH-0.5.0-T03
     summary: >
@@ -68,7 +95,7 @@ tasks:
       developer's stores, since the default model changed in 0.3.0. And the
       no-degradation measurement is the one that can send the fusion design
       back, so it belongs before the release is anywhere near finished.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.5.0-T02]
     acceptance_criteria:
       - >
@@ -86,7 +113,28 @@ tasks:
     files:
       - src/fleet.rs
       - tests/fleet.rs
-    evidence: []
+    evidence:
+      - "Answered the contract's open question on a relevance floor: no floor.
+         The first run of the no-degradation test found the unrelated store at
+         rank 1 — two single-file stores both scored 0.032786883, because every
+         store's best hit is dense-rank-1 in its own ranking, and the tie fell
+         to the order the stores were named in. Ties now go to the higher
+         similarity to the query vector, which reorders among equals rather than
+         dropping anything a floor would have dropped."
+      - "cargo test --test fleet -- --ignored: a phrase held by only the second
+         store comes back at the same rank a search of that store alone gives
+         it; every hit a single-store search returned is still present in the
+         two-store list with no unrelated hit above it."
+      - "Filters reach every store and the empty-selection question is asked of
+         the whole selection: --ext rs over a Markdown store and a Rust store
+         returns the Rust hits instead of reporting that no files match."
+      - "cargo test --test fleet -- --ignored different_models: stores built
+         with granite and with BGESmallENV15 both contributed hits to one query,
+         each embedding the query with its own model."
+      - "Three unit tests in src/fleet.rs pin the merge itself with no model or
+         store needed: equal scores decided by similarity rather than argument
+         order, a store's own order surviving the merge, and k bounding the
+         merged list rather than each store."
 
   - id: US-SEMLITH-0.5.0-T04
     summary: >
@@ -99,7 +147,7 @@ tasks:
       Multi-store search that only the CLI can reach delivers the release to the
       wrong caller — the same mistake 0.3.0's and 0.4.0's MCP tasks existed to
       prevent.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.5.0-T03]
     acceptance_criteria:
       - >
@@ -112,7 +160,20 @@ tasks:
       - src/mcp.rs
       - src/main.rs
       - tests/fleet.rs
-    evidence: []
+    evidence:
+      - "mcp::serve takes a Fleet. The open store names are written into the
+         `store` argument's description, because an agent cannot narrow to a
+         name it has never seen, and semlith_stats reports one line per store —
+         one store still answers in exactly 0.4.0's single line."
+      - "cargo test --test fleet -- --ignored: a real `semlith mcp` child
+         process opened on two stores, driven over stdio JSON-RPC, returned
+         excerpts from both with their labels in one tools/call; `store`:
+         [\"rust\"] restricted the same query to that store and dropped the
+         other's file; an unknown name came back as isError naming both open
+         stores."
+      - "Chosen: an unknown store name is an in-band tool error, not an empty
+         result. An agent reads no matches as \"the corpus does not discuss
+         this\", which is a different and wrong answer."
 
   - id: US-SEMLITH-0.5.0-T05
     summary: >
@@ -125,7 +186,7 @@ tasks:
       takes a store lock, or that misses the generation counter on one of its
       stores, silently turns 0.4.0's freshness guarantee off for anyone using
       both features — which is the same developer.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.5.0-T04]
     acceptance_criteria:
       - >
@@ -139,7 +200,17 @@ tasks:
       - src/main.rs
       - src/fleet.rs
       - tests/fleet.rs
-    evidence: []
+    evidence:
+      - "stats prints one block per store plus a total when several are given,
+         files prints one list per store, and both print exactly 0.4.0's output
+         for a single store — asserted in the test, not eyeballed."
+      - "cargo test --test fleet -- --ignored: with a real `semlith watch`
+         holding the write lock on one of two stores, a long-lived fleet reader
+         opened before the edit returned the watcher's newly indexed file on a
+         later search, with no reopen. A multi-store search takes no store lock,
+         and each store keeps its own generation check."
+      - "stats reports the store's own directory rather than the flag order, so
+         a store named twice is listed once."
 
   - id: US-SEMLITH-0.5.0-T06
     summary: >
@@ -189,7 +260,7 @@ tasks:
       The release workflow builds its notes from the CHANGELOG, so a missing
       section ships an empty release. And a feature whose flag is repeatable on
       some commands and not others is undiscoverable from `--help` alone.
-    status: todo
+    status: done
     depends_on: [US-SEMLITH-0.5.0-T06]
     acceptance_criteria:
       - >
@@ -202,7 +273,30 @@ tasks:
       - README.md
       - CHANGELOG.md
       - docs/architecture.md
-    evidence: []
+    evidence:
+      - "README gained a 'Searching several stores at once' section with real
+         output, the rules that decide what a hit looks like (labels only when
+         there is something to tell apart, k global, filters everywhere, models
+         may differ), the SEMLITH_STORE list, and the two limits a user meets:
+         writes stay single-store, and a store path that is not a store is an
+         error rather than a new empty store. The commands table's global note
+         says which commands take a repeatable flag and which take one."
+      - "The agent section shows an MCP server definition naming two stores, the
+         optional store argument, and what an unknown store name comes back as —
+         that is the release's own outcome, so it is documented where an agent's
+         operator will read it."
+      - "CHANGELOG 0.5.0 section present with its compare link, which is what the
+         release workflow reads for the GitHub release notes, including the
+         behaviour change (a read command refuses a path that is not a store) and
+         a Notes paragraph on compatibility in both directions."
+      - "Known limits records what the merge does not do: a store with nothing to
+         say still offers its best hit, the similarity tiebreak compares two
+         vector spaces when two models are involved, and stores are named by path
+         with no registry and no discovery."
+      - "docs/architecture.md gained 'Several stores, one query' explaining why
+         ids never leave their store, why the embedder moved out of Semlith, why
+         results are merged rather than re-ranked, and the tie that the first
+         test caught — with the numbers that decided the tiebreak over a floor."
 
   - id: US-SEMLITH-0.5.0-T08
     summary: >
