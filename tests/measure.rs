@@ -398,7 +398,19 @@ const FIXED_OVERHEAD_MB: u64 = 200;
 #[test]
 #[ignore = "indexes a hundred thousand chunks twice over; takes tens of minutes"]
 fn measure_the_store_at_scale() {
-    let old = std::env::var("OLD").expect("set OLD to a 0.6.0 release binary");
+    // Comparative by construction: without the release before it there is
+    // nothing to compare against, and a measurement with no baseline is a
+    // number rather than evidence. Say what is missing and stop, rather than
+    // failing a suite for want of a binary the machine may not have.
+    let Ok(old) = std::env::var("OLD") else {
+        println!(
+            "\nskipped: set OLD to a 0.6.0 release binary to run the scale comparison, e.g.\n  \
+             cargo install semlith --version 0.6.0 --root /tmp/old\n  \
+             OLD=/tmp/old/bin/semlith cargo test --release --test measure -- --ignored \
+             --nocapture measure_the_store_at_scale"
+        );
+        return;
+    };
     let new = env!("CARGO_BIN_EXE_semlith").to_string();
     println!("\n--- binaries");
     println!("old: {}", version(&old));
@@ -727,8 +739,19 @@ const RECALL_FLOOR: f32 = 0.90;
 #[ignore = "indexes this repository twice; downloads an embedding model on first run"]
 fn measure_what_sharding_costs_recall() {
     // A real corpus rather than generated notes: prose, code and configuration
-    // in the proportions a developer actually points semlith at.
-    let corpus = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // in the proportions a developer actually points semlith at. Copied out of
+    // the repository first, so both stores see identical bytes — indexing the
+    // working tree twice would let a file written between the two runs move a
+    // ranking and be read as a cost of sharding.
+    let snapshot = tempfile::tempdir().unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let corpus = snapshot.path();
+    for name in ["src", "tests", "docs"] {
+        copy_tree(&repo.join(name), &corpus.join(name));
+    }
+    for name in ["README.md", "CHANGELOG.md", "Cargo.toml"] {
+        fs::copy(repo.join(name), corpus.join(name)).unwrap();
+    }
 
     let whole = tempfile::tempdir().unwrap();
     let split = tempfile::tempdir().unwrap();
@@ -794,6 +817,20 @@ fn measure_what_sharding_costs_recall() {
         mean >= RECALL_FLOOR,
         "sharding cost recall: mean overlap@10 {mean:.3} is below the {RECALL_FLOOR} floor"
     );
+}
+
+/// Copy a directory of files, one level of nesting deep, which is as deep as
+/// this repository goes.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
 }
 
 /// Index `corpus` into `store` through the binary, so the shard size is in
