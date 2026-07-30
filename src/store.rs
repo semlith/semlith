@@ -23,8 +23,11 @@ CREATE TABLE IF NOT EXISTS files (
     indexed_at INTEGER NOT NULL
 );
 
+-- AUTOINCREMENT, not a bare rowid: a sharded index routes a chunk id to a
+-- shard by the range its file name claims, so SQLite handing a deleted row's
+-- id to a new chunk would put one id inside two shards at once.
 CREATE TABLE IF NOT EXISTS chunks (
-    id         INTEGER PRIMARY KEY,
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
     ord        INTEGER NOT NULL,
     start_line INTEGER NOT NULL,
@@ -83,7 +86,24 @@ pub fn open(path: &Path) -> Result<Connection> {
 /// Written into a store when one is created, and absent from every store
 /// written before 0.6.0 — which is what makes 1 the right reading of an absent
 /// key rather than an unknown.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// 1 is a single `index.tv`. 2 is a directory of shards, written by 0.7.0 and
+/// later; see [`crate::index`]. A binary understands every format up to its
+/// own, so this one reads both and creates the newer.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The first format that keeps its vectors in shards.
+pub const SHARDED_FORMAT: u32 = 2;
+
+/// Which layout this store's vectors are in.
+///
+/// An absent key is format 1: every store written before 0.6.0 has no key, and
+/// reading it as anything else would refuse the whole installed base.
+pub fn format(db: &Connection) -> Result<u32> {
+    Ok(get_meta(db, FORMAT_KEY)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1))
+}
 
 pub const FORMAT_KEY: &str = "format_version";
 
@@ -406,11 +426,12 @@ mod tests {
     fn a_newer_format_is_refused_naming_both_numbers() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
-        set_meta(&db, FORMAT_KEY, "2").unwrap();
+        let newer = FORMAT_VERSION + 1;
+        set_meta(&db, FORMAT_KEY, &newer.to_string()).unwrap();
 
         let refused = check_format(&db).expect_err("a newer format must not be read");
         let said = refused.to_string();
-        assert!(said.contains('2'), "{said}");
+        assert!(said.contains(&newer.to_string()), "{said}");
         assert!(
             said.contains(&FORMAT_VERSION.to_string()),
             "the error must name what this binary understands: {said}"

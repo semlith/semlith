@@ -6,8 +6,10 @@
 //!
 //! Two pieces of state live side by side in the store directory:
 //!
-//! - `index.tv` — a [`turbovec`] TurboQuant index holding only quantized
-//!   vectors keyed by chunk id.
+//! - the vectors — a [`turbovec`] TurboQuant index holding only quantized
+//!   vectors keyed by chunk id. A store created by 0.7.0 keeps them as a
+//!   directory of shards under `index/`; every store written before it keeps
+//!   the single `index.tv` it already has. See [`index`].
 //! - `store.db` — SQLite holding the chunk text, its file, and its line span.
 //!
 //! A search quantizes the query, gets ids back from the index, then resolves
@@ -160,8 +162,10 @@ impl Semlith {
 
         let dim = model.dim()?;
         // Named, not read. The vectors are the largest thing a store owns and
-        // most commands never look at them.
-        let index = VectorIndex::open(&dir, dim, BIT_WIDTH);
+        // most commands never look at them. Which layout they are in is the
+        // store's business, decided when it was created and never migrated.
+        let sharded = store::format(&db)? >= store::SHARDED_FORMAT;
+        let index = VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?;
 
         let generation = generation(&db)?;
 
@@ -563,7 +567,7 @@ impl Semlith {
 
         Ok(if ids.is_empty() {
             Allowlist::Empty
-        } else if ids.len() == self.index.count()? {
+        } else if ids.len() == self.len() {
             // The filter excludes nothing, so skip building a mask the size of
             // the whole index for no benefit.
             Allowlist::All
