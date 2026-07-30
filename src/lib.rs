@@ -121,6 +121,25 @@ pub struct Hit {
     pub store: Option<String>,
 }
 
+/// Where an index run has got to, handed to the callback with each file it
+/// starts embedding.
+///
+/// `total` is what the walk found, so `scanned` against it is a real fraction
+/// rather than a spinner — which is the difference between a long wait and a
+/// wait a person is willing to sit through.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IndexProgress {
+    /// Files considered so far, including the unchanged and the skipped.
+    pub scanned: usize,
+    /// Files embedded so far in this run.
+    pub indexed: usize,
+    /// Chunks embedded so far in this run — the unit the rate is in, because
+    /// files vary in size by orders of magnitude and chunks do not.
+    pub chunks: usize,
+    /// Files the walk found.
+    pub total: usize,
+}
+
 #[derive(Debug, Default, Clone, Copy, Serialize)]
 pub struct IndexReport {
     pub scanned: usize,
@@ -363,7 +382,7 @@ impl Semlith {
     pub fn index_paths(
         &mut self,
         roots: &[PathBuf],
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         // Held for the whole run, including the index.tv write at the end.
         // Two concurrent runs would otherwise interleave their SQLite writes
@@ -384,7 +403,7 @@ impl Semlith {
         &mut self,
         roots: &[PathBuf],
         budget: std::time::Duration,
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let _lock = lock::StoreLock::acquire(&self.dir)?;
         let deadline = std::time::Instant::now() + budget;
@@ -396,7 +415,7 @@ impl Semlith {
     pub(crate) fn index_walk(
         &mut self,
         roots: &[PathBuf],
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         self.index_set(walk(roots), true, None, on_file)
     }
@@ -409,7 +428,7 @@ impl Semlith {
     pub(crate) fn index_changed(
         &mut self,
         paths: Vec<PathBuf>,
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         self.index_set(paths, false, None, on_file)
     }
@@ -422,7 +441,7 @@ impl Semlith {
         paths: Vec<PathBuf>,
         sweep: bool,
         deadline: Option<std::time::Instant>,
-        mut on_file: impl FnMut(&Path),
+        mut on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         // A run killed mid-save leaves a temp index behind. Removing it here
         // and not on open is deliberate: the caller holds the store lock, so
@@ -497,7 +516,15 @@ impl Semlith {
                 continue;
             }
 
-            on_file(&path);
+            on_file(
+                &path,
+                IndexProgress {
+                    scanned: report.scanned,
+                    indexed: report.indexed,
+                    chunks: report.chunks,
+                    total,
+                },
+            );
 
             // Replacing a file: evict its old vectors before adding new ones.
             for id in store::delete_file(&self.db, &key)? {
