@@ -12,7 +12,7 @@ tasks:
       the cheapest proof the dispatch works: serde_json is already a dependency,
       the file is already indexed today as unreadable JSON, and the improvement is
       visible in a single search.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - >
@@ -26,7 +26,22 @@ tasks:
         parsed, so a repository of Rust must not pay for the formats it has none of.
     files:
       - src/chunk.rs
-    evidence: []
+    evidence:
+      - >
+        src/chunk.rs dispatches on the lowercased extension before the NUL-byte
+        check, so an archive reaches a reader at all and a corpus without documents
+        pays one string comparison per file: indexing this repository's src/ took
+        18.66 s under 0.7.0 and 18.98 s under 0.8.0 — interleaved, best of three
+        after a discarded warm-up round (evidence/0.8.0/formats-run.txt, section
+        4), which is inside the spread between rounds.
+      - >
+        src/formats.rs notebook_cells_come_out_as_their_source: cells in notebook
+        order, a stream output kept, a base64 image dropped, and no JSON
+        scaffolding in the text.
+      - >
+        tests/formats.rs every_document_format_yields_the_text_a_person_would_see:
+        analysis.ipynb yields all four of its phrases and none of `cell_type`,
+        `execution_count` or escaped newlines.
 
   - id: US-SEMLITH-0.8.0-T02
     summary: >
@@ -39,7 +54,7 @@ tasks:
       rather than of the page. Preserving newlines rather than reflowing is what
       lets the release keep the `file:line` promise that every other format in
       semlith makes.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T01
     acceptance_criteria:
@@ -51,7 +66,20 @@ tasks:
         disk, not against the extracted text.
     files:
       - src/chunk.rs
-    evidence: []
+    evidence:
+      - >
+        tests/formats.rs an_html_hit_points_at_the_line_of_the_file_on_disk: the
+        sentence is on line 15 of page.html and the chunk carrying it claims a
+        range that contains 15 — checked against the file on disk.
+      - >
+        src/formats.rs html_keeps_its_text_its_lines_and_none_of_its_markup:
+        script and style contents gone, attributes gone, `&amp;` and `&#233;`
+        decoded, line numbers unmoved.
+      - >
+        evidence/0.8.0/formats-run.txt section 2: page.html embedded 699
+        characters under 0.7.0, 99% of the file's 700 bytes, against 292 under
+        0.8.0 — 41%. The notebook went from 1319 characters (103%, JSON escaping
+        makes it larger than the file) to 454 (35%).
 
   - id: US-SEMLITH-0.8.0-T03
     summary: >
@@ -63,7 +91,7 @@ tasks:
       developer's corpus actually holds; all six are ZIP archives of XML, so they
       share one reader and one text pass. Without them the release is its
       fallback scope.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T02
     acceptance_criteria:
@@ -82,7 +110,28 @@ tasks:
     files:
       - src/chunk.rs
       - Cargo.toml
-    evidence: []
+    evidence:
+      - >
+        Fixtures written by real libraries, not by hand: python-docx 1.2.0,
+        python-pptx 1.0.2, openpyxl 3.1.5 and odfpy 1.4.1, via
+        tests/fixtures/generate.py.
+      - >
+        evidence/0.8.0/formats-run.txt section 1, through the real 0.7.0 release
+        binary from crates.io and this build: 0.8.0 answers 8 of 8 phrase
+        questions with the file that holds the phrase. 0.7.0 answers 2 of 8, and
+        the other six are not misses but wrong answers — it returns page.html or
+        analysis.ipynb, the only two files it could read, for a phrase that is
+        inside an archive it skipped as binary.
+      - >
+        tests/formats.rs slides_sheets_and_cells_are_named_and_in_order: slide
+        11's phrase sits under its own marker with all twelve markers in
+        ascending order, `## Sheet: Q3 Notes` follows `## Sheet: Summary` and
+        precedes the phrase it holds, and rows come out tab-separated.
+      - >
+        Two things only a real file exposed: openpyxl writes relationship
+        targets absolute (`/xl/worksheets/sheet1.xml`) where Excel writes them
+        relative, and it writes inline strings rather than a shared-string table.
+        Both were found by the fixture and are handled.
 
   - id: US-SEMLITH-0.8.0-T04
     summary: >
@@ -93,7 +142,7 @@ tasks:
       archive that expands without bound decides how much memory the run uses,
       and a panic from a malformed document ends the process rather than the
       file. This is the task that decides whether the release is safe to publish.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T03
     acceptance_criteria:
@@ -113,7 +162,26 @@ tasks:
     files:
       - src/chunk.rs
       - tests/formats.rs
-    evidence: []
+    evidence:
+      - >
+        tests/formats.rs an_unreadable_document_is_skipped_rather_than_fatal:
+        corrupt, truncated at 500 bytes, empty, random bytes, broken JSON, a
+        non-archive, and a CFB header — what a password-protected Office document
+        actually is on disk — plus the two committed files, a ZipCrypto-protected
+        .docx and bomb.docx, whose single 66 KB entry expands to 64 MiB.
+      - >
+        src/formats.rs rubbish_in_every_format_is_skipped_rather_than_read: every
+        handled extension against four kinds of rubbish, no panic, nothing read as
+        text.
+      - >
+        evidence/0.8.0/formats-run.txt section 3: peak RSS over three interleaved
+        rounds is 271, 271, 271 MB for the corpus without the bomb and 272, 271,
+        273 MB with it — under 1%, and inside the run-to-run spread. An earlier
+        build that buffered to the cap before rejecting measured 13 MB higher;
+        the entry's declared size is now checked before a byte is inflated.
+      - >
+        chunk::guard wraps every extractor in catch_unwind, which is what the PDF
+        path already did, so a panic from a document is a skipped file.
 
   - id: US-SEMLITH-0.8.0-T05
     summary: >
@@ -123,7 +191,7 @@ tasks:
       a first index is a document whose store goes stale the moment someone edits
       it. The path is shared, so this is confirmation rather than construction —
       and confirmation is exactly what an acceptance criterion is for.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T03
     acceptance_criteria:
@@ -133,7 +201,16 @@ tasks:
         returns the new text and not the old.
     files:
       - tests/formats.rs
-    evidence: []
+    evidence:
+      - >
+        tests/watch.rs a_saved_document_is_searchable_like_a_saved_source_file: a
+        .docx and a .ipynb copied into a watched directory become searchable by
+        their phrases, through a real watcher, like a saved .rs does.
+      - >
+        tests/formats.rs a_mixed_corpus_indexes_and_answers ends by editing the
+        notebook in place: exactly one file re-indexes, the new text is the top
+        hit for its phrase, and no chunk carrying the replaced text is left in the
+        store.
 
   - id: US-SEMLITH-0.8.0-T06
     summary: >
@@ -145,7 +222,7 @@ tasks:
       that already holds them keeps its old chunks until those files change.
       Without the CHANGELOG line saying so, the release looks like it did nothing
       to the person most likely to try it first.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T04
     acceptance_criteria:
@@ -167,7 +244,26 @@ tasks:
       - CHANGELOG.md
       - docs/compatibility.md
       - Cargo.toml
-    evidence: []
+    evidence:
+      - >
+        README: the intro line and a rewritten "What gets indexed" — a table of
+        every format, what is taken from it and its markers, the two caps, and
+        what happens to a file that fails one.
+      - >
+        CHANGELOG: a 0.8.0 section stating the nine formats, the 32 MiB
+        decompression cap with why, `zip` 8.6.0 (MIT, default-features off,
+        deflate-flate2 only), and — under Changed — that HTML and notebooks now
+        read differently, with `semlith forget <PATH>` as the per-file remedy and
+        re-indexing as the corpus one, and that there is no format change and no
+        migration.
+      - >
+        docs/compatibility.md: a covered row saying the documented format list
+        only grows, and an uncovered entry putting the text extracted from a file
+        on the same footing as ranking scores.
+      - >
+        docs/architecture.md: an Extraction section, the pipeline diagram
+        corrected from "PDF → pdf-extract, else UTF-8", and `zip` in the
+        dependency table with why it is taken.
 
   - id: US-SEMLITH-0.8.0-T07
     summary: >
@@ -178,7 +274,7 @@ tasks:
       0.7.0 finds none of them" — and a comparison needs the older binary run,
       not remembered. The efficiency numbers are what distinguish "the file is
       read" from "the file is read usefully".
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T05
     acceptance_criteria:
@@ -191,7 +287,18 @@ tasks:
         edited to accommodate this release.
     files:
       - .ultraship/products/semlith/evidence/0.8.0/formats.sh
-    evidence: []
+    evidence:
+      - >
+        evidence/0.8.0/formats.sh and formats-run.txt: four measurements through
+        real binaries — the same corpus answered by both, characters embedded per
+        file under each, peak RSS with and without an over-cap archive, and
+        indexing time on ordinary source. Runs are interleaved with a discarded
+        warm-up, because the machine drifts more over minutes than the two
+        binaries differ.
+      - >
+        The suite that shipped in 0.7.0 passes unmodified: no assertion was
+        changed and no existing test was edited. tests/watch.rs gained one test
+        and tests/formats.rs is new.
 
   - id: US-SEMLITH-0.8.0-T08
     summary: >
@@ -201,7 +308,7 @@ tasks:
       This release adds a dependency and a parser surface, which are the two
       things a packaging check catches and a unit test does not. Nothing ships
       until the gates are green on a clean tree.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.8.0-T07
     acceptance_criteria:
@@ -216,4 +323,26 @@ tasks:
         Apache-2.0, and it is named in the CHANGELOG.
     files:
       - Cargo.toml
-    evidence: []
+    evidence:
+      - >
+        `cargo fmt --check` exit 0. `cargo clippy --all-targets --all-features -- -D
+        warnings` exit 0.
+      - >
+        `cargo test` — 65 unit tests and every default integration test pass, 0
+        failed. The 65 include 10 new ones in src/formats.rs.
+      - >
+        `cargo test --release -- --ignored`, the full slow suite: clients 1, fleet
+        10, formats 1, mcp 11, measure 5, roundtrip 3, shards 2, watch 11 — all
+        pass, 0 failed. watch is 11 because this release added one to it; every
+        other count is what 0.7.0 shipped.
+      - >
+        `cargo publish --dry-run` on a clean tree: packaged 48 files, 772.1 KiB
+        (272.5 KiB compressed), verify build clean. `cargo package --list` shows no
+        .env, no .ultraship and no .github.
+      - >
+        The added dependency is `zip` 8.6.0 from crates.io, MIT licensed —
+        compatible with this crate's Apache-2.0 — taken with `default-features =
+        false` and only `deflate-flate2`, which is the decompressor and none of the
+        compressors or ciphers. It is named in the CHANGELOG.
+      - >
+        git grep for committed tokens, api keys and private-key headers — none.
