@@ -40,7 +40,7 @@ fn index_search_update_forget() {
     let mut s = Semlith::open(store.path(), None).unwrap();
     s.quiet = true;
 
-    let report = s.index_paths(&roots, |_| {}).unwrap();
+    let report = s.index_paths(&roots, |_, _| {}).unwrap();
     assert_eq!(report.indexed, 3, "three text files, one binary skipped");
     assert_eq!(report.skipped, 1);
     assert_eq!(s.len(), report.chunks, "one vector per chunk");
@@ -49,7 +49,7 @@ fn index_search_update_forget() {
     assert_eq!(top(&mut s, "what organelle produces energy"), "cells.md");
 
     // Unchanged corpus: nothing is re-embedded.
-    let report = s.index_paths(&roots, |_| {}).unwrap();
+    let report = s.index_paths(&roots, |_, _| {}).unwrap();
     assert_eq!(report.indexed, 0);
     assert_eq!(report.unchanged, 3);
 
@@ -61,7 +61,7 @@ fn index_search_update_forget() {
     );
     fs::remove_file(corpus.path().join("cells.md")).unwrap();
 
-    let report = s.index_paths(&roots, |_| {}).unwrap();
+    let report = s.index_paths(&roots, |_, _| {}).unwrap();
     assert_eq!(report.indexed, 1, "only the edited file is re-embedded");
     assert_eq!(report.removed, 1, "the deleted file is pruned");
 
@@ -120,7 +120,7 @@ fn a_filtered_search_ranks_within_the_subset() {
 
     let mut s = Semlith::open(store.path(), None).unwrap();
     s.quiet = true;
-    s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
         .unwrap();
 
     let scoped = Filter::new(&["sub/**".into()], &[], &[]).unwrap();
@@ -179,7 +179,7 @@ fn a_store_written_before_the_format_key_still_opens_and_is_not_rewritten() {
 
     let mut s = Semlith::open(store.path(), None).unwrap();
     s.quiet = true;
-    s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
         .unwrap();
     assert_eq!(
         semlith::store::get_meta(s.db(), semlith::store::FORMAT_KEY).unwrap(),

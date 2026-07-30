@@ -128,7 +128,7 @@ just those lines instead of the whole file.
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
-| `semlith stats` | File count, chunk count, model, index size. |
+| `semlith stats` | File count, chunk count, model, shard count and memory budget, index size. |
 | `semlith files` | List indexed files. |
 | `semlith forget <PATH>` | Drop one file from the store. |
 | `semlith mcp` | Run as an MCP server over stdio. |
@@ -139,6 +139,41 @@ Global: `--store <DIR>` picks the store directory (default `.semlith`, or the
 `SEMLITH_STORE` environment variable). `search`, `stats`, `files` and `mcp` read,
 so the flag is repeatable and they cover every store named; `index`, `watch` and
 `forget` write, so they take exactly one.
+
+## Indexing a large corpus
+
+A first index is bound by how fast a transformer runs on your CPU, so a corpus
+of a hundred thousand chunks is an hour rather than a moment. Two things make
+that hour survivable.
+
+It says where it is:
+
+```
+  + ~/notes/2019/migrations.md
+    18420/54103 files, 41230 chunks, 26 chunks/s, ~23m left
+```
+
+And it keeps what it has done. Every thirty seconds the vectors embedded so far
+are written to disk and the files they cover are recorded as indexed — in that
+order, so a file is never marked done before its vectors exist. Close the
+laptop, hit Ctrl-C, lose power: re-run the same command and it continues, saying
+how many files it skipped.
+
+```
+indexed 12043 files (38221 chunks) in 1420.6s — 18420 already indexed, 0 skipped, 0 removed
+```
+
+Searching a large store holds a bounded amount of memory rather than all of its
+vectors. `SEMLITH_INDEX_MEMORY` is that bound in megabytes, 512 by default; the
+store keeps the shards it is using and puts down the coldest to stay inside it.
+A store that fits searches at full speed; a store past its budget pays to read
+shards back on each query and says so on stderr rather than looking mysteriously
+slower. `semlith stats` shows both numbers before you spend an hour finding out.
+
+Checkpointing, the memory budget and shards are all properties of the store
+layout introduced in 0.7.0, so they apply to stores created by 0.7.0 or later.
+A store you already have keeps working exactly as it did; see
+[Compatibility](#compatibility).
 
 ## Keeping the store current
 
@@ -563,24 +598,30 @@ of overlap, so a chunk boundary rarely cuts a match in half.
 ## How it works
 
 ```
-files ──chunk──> text ──embed──> vectors ──quantize──> index.tv   (turbovec)
+files ──chunk──> text ──embed──> vectors ──quantize──> index/*.tvim  (turbovec)
                   │
-                  └──────────────────────────────────> store.db   (SQLite)
+                  └──────────────────────────────────> store.db      (SQLite)
 
-query ──embed──> vector ──search index.tv──> chunk ids ──lookup store.db──> excerpts
+query ──embed──> vector ──search shards──> chunk ids ──lookup store.db──> excerpts
 ```
 
-Two files live in the store directory:
+Two things live in the store directory:
 
-- **`index.tv`** — the turbovec index. Holds only quantized vectors keyed by
-  chunk id. TurboQuant is data-oblivious, so there is no training step and no
-  rebuild as the corpus grows: add vectors, they are searchable.
+- **`index/`** — the turbovec index, as fixed-size shards of 65536 vectors,
+  each named for the first chunk id it holds. Holds only quantized vectors keyed
+  by chunk id. TurboQuant is data-oblivious, so there is no training step and no
+  rebuild as the corpus grows: add vectors, they are searchable. Splitting the
+  index is what lets a search hold a few shards instead of the whole corpus, a
+  save rewrite one shard instead of everything, and a long index run checkpoint
+  as it goes. Stores created before 0.7.0 have a single `index.tv` instead and
+  keep it.
 - **`store.db`** — SQLite. Holds the chunk text, its file, and its line span,
   plus the content hash that makes re-indexing incremental.
 
-A search embeds the query, gets ids from the index, and resolves them with one
-SQLite lookup each. The index only ever needs to hold vectors, so it stays
-small enough to sit in memory even for large corpora.
+A search embeds the query, gets ids from the shards it needs, merges their
+rankings, and resolves the result with one SQLite lookup each. Nothing is read
+from disk until a query needs it, so opening a store — which `stats`, `files`
+and an idle MCP server all do — costs no vectors at all.
 
 Embeddings default to `granite-embedding-small-english-r2`, quantized to int8
 (384 dimensions, ~52 MB), which runs on CPU via ONNX Runtime. Pick another with
@@ -625,6 +666,40 @@ memory, so the number to plan for is roughly 600 MB whatever you point it at.
 **Query latency does grow**, because the index scan is linear: budget a few
 milliseconds for a repository and a few tens for a very large corpus.
 
+### What a store costs to hold
+
+Measured with an MCP server on one store, comparing 0.6.0 against 0.7.0 over the
+same three corpora. *Open* is the process after a handshake and `tools/list`,
+before any question has been asked; *searching* is the same process after
+twenty queries.
+
+| chunks | 0.6.0 open | 0.7.0 open | 0.6.0 searching | 0.7.0 searching | median query |
+|---|---|---|---|---|---|
+| 700 | 137 MB | 133 MB | 139 MB | 137 MB | 3.7 ms |
+| 7 000 | 141 MB | 133 MB | 144 MB | 144 MB | 7.5 ms |
+| 70 000 | 180 MB | **133 MB** | 185 MB | 179 MB | 52.6 ms |
+
+A hundredfold more corpus costs an open 0.7.0 store **0.8 MB**; the same corpus
+cost 0.6.0 **43 MB**, because it read every vector the moment the store was
+opened. An agent's server that is sitting there waiting to be asked something
+now holds a model and nothing else.
+
+Searching still holds the vectors it searches — 70 000 chunks is 43 MB and fits
+inside the 512 MB default with room to spare. Past that budget the store keeps
+what it can and reads the rest back per query, which is what makes a corpus
+larger than memory searchable at all, and it is not free: the same 70 000-chunk
+store squeezed into an 8 MB budget answered in 364 ms instead of 53 ms, holding
+110–126 MB across two hundred queries.
+
+Changing one file rewrites the shards it touches rather than the index. On a
+store of 14 shards, re-indexing one changed file wrote 176 KB of a 1436 KB
+index. Two shards, not one: the shard losing the old vector and the newest shard
+taking the new one — so the saving appears once a store is more than two shards,
+around 131 000 chunks at the default shard size.
+
+An index run killed eight seconds in, on a 6000-file corpus: 0.6.0 kept **0**
+chunks, 0.7.0 kept **1952**.
+
 The numbers that matter for an agent are the query row and the re-index figure.
 `semlith mcp` loads the model once at startup, so every tool call costs the warm
 figure; and keeping a store current is nearly free.
@@ -656,6 +731,14 @@ read. It also says plainly what a 0.x version number does and does not promise.
 Stores carry a `format_version` from 0.6.0 on. A store written before that is
 read as format 1 and never rewritten, and a binary that meets a store from a
 newer format refuses it naming both numbers rather than misreading it.
+
+0.7.0 creates format 2 stores, whose vectors are shards under `index/`. **It
+reads every older store as it finds it** — searched, indexed into, never
+migrated, `format_version` untouched — so upgrading costs an existing store
+nothing. Going the other way is the break: a 0.6.0 binary refuses a format 2
+store, and a 0.5.0 binary, which predates the key, would read one as an empty
+corpus. To move an existing store onto the new layout, delete it and index
+again; there is no migration that would not re-embed the corpus anyway.
 
 ## Contributing
 
@@ -693,6 +776,14 @@ Everyone participating is expected to follow the
   touch what changed, and cost seconds.
 - Query latency grows with corpus size, from under 3 ms at a thousand chunks to
   low tens of milliseconds at a hundred thousand. The index scan is linear.
+- A store larger than `SEMLITH_INDEX_MEMORY` reads shards back from disk on
+  every query, so the memory bound is bought with latency. The bound is the
+  point — a corpus that does not fit in memory is searchable at all — but if
+  your store fits comfortably, raising the budget is free speed.
+- Checkpointing, the memory budget and one-shard saves need the 0.7.0 store
+  layout. A store created by an earlier version keeps its single index file and
+  behaves exactly as it did, which also means an interrupted index run on one
+  still loses the run.
 - The default model is English-only. `semlith models` lists multilingual
   alternatives, which must be chosen when the store is created.
 - Search filters are SQLite `GLOB` patterns, so `*` crosses `/` and there is no

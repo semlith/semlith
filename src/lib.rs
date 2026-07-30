@@ -6,8 +6,10 @@
 //!
 //! Two pieces of state live side by side in the store directory:
 //!
-//! - `index.tv` — a [`turbovec`] TurboQuant index holding only quantized
-//!   vectors keyed by chunk id.
+//! - the vectors — a [`turbovec`] TurboQuant index holding only quantized
+//!   vectors keyed by chunk id. A store created by 0.7.0 keeps them as a
+//!   directory of shards under `index/`; every store written before it keeps
+//!   the single `index.tv` it already has. See [`index`].
 //! - `store.db` — SQLite holding the chunk text, its file, and its line span.
 //!
 //! A search quantizes the query, gets ids back from the index, then resolves
@@ -17,6 +19,7 @@ pub mod chunk;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
+pub mod index;
 pub mod lock;
 pub mod mcp;
 pub mod store;
@@ -26,11 +29,11 @@ use anyhow::{Context, Result, bail};
 use embed::Model;
 use fastembed::TextEmbedding;
 use filter::Filter;
+use index::{Allowlist, VectorIndex};
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use turbovec::IdMapIndex;
 
 /// Bits per coordinate kept by TurboQuant. 4 is the top of the supported range
 /// — the memory saving from going lower is not worth the recall on a store
@@ -75,6 +78,34 @@ const RRF_K: f32 = 60.0;
 /// How much deeper than `k` to look in each ranking before fusing.
 const RANK_DEPTH: usize = 4;
 
+/// How long an index run may go without making its work durable.
+///
+/// This is what an interruption costs: the vectors embedded since the last
+/// checkpoint, and no more. Thirty seconds is short enough that losing it is an
+/// annoyance rather than an evening, and long enough that a checkpoint's cost —
+/// rewriting the shards touched since the last one — stays a rounding error
+/// against the embedding it protects.
+///
+/// Only a sharded store checkpoints. A store written before 0.7.0 would have to
+/// rewrite its entire index to do it, which is the cost sharding exists to
+/// remove; those stores behave exactly as they did.
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Override for [`CHECKPOINT_INTERVAL`], in seconds. For the tests, which
+/// cannot spend thirty seconds proving a checkpoint happened. Not part of the
+/// documented environment.
+const CHECKPOINT_SECS_ENV: &str = "SEMLITH_CHECKPOINT_SECS";
+
+fn checkpoint_interval() -> std::time::Duration {
+    match std::env::var(CHECKPOINT_SECS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        Some(secs) => std::time::Duration::from_secs(secs),
+        None => CHECKPOINT_INTERVAL,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub score: f32,
@@ -88,6 +119,25 @@ pub struct Hit {
     /// is byte for byte what it was before stores could be combined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
+}
+
+/// Where an index run has got to, handed to the callback with each file it
+/// starts embedding.
+///
+/// `total` is what the walk found, so `scanned` against it is a real fraction
+/// rather than a spinner — which is the difference between a long wait and a
+/// wait a person is willing to sit through.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IndexProgress {
+    /// Files considered so far, including the unchanged and the skipped.
+    pub scanned: usize,
+    /// Files embedded so far in this run.
+    pub indexed: usize,
+    /// Chunks embedded so far in this run — the unit the rate is in, because
+    /// files vary in size by orders of magnitude and chunks do not.
+    pub chunks: usize,
+    /// Files the walk found.
+    pub total: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
@@ -106,7 +156,7 @@ pub struct IndexReport {
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
-    index: IdMapIndex,
+    index: VectorIndex,
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
@@ -158,20 +208,11 @@ impl Semlith {
         };
 
         let dim = model.dim()?;
-
-        let index_path = dir.join("index.tv");
-        let index = if index_path.exists() {
-            let idx = IdMapIndex::load(&index_path)
-                .with_context(|| format!("loading {}", index_path.display()))?;
-            if let Some(d) = idx.dim_opt()
-                && d != dim
-            {
-                bail!("index is {d}-dimensional but {model} produces {dim}; store is corrupt");
-            }
-            idx
-        } else {
-            IdMapIndex::new(dim, BIT_WIDTH).map_err(|e| anyhow::anyhow!("{e:?}"))?
-        };
+        // Named, not read. The vectors are the largest thing a store owns and
+        // most commands never look at them. Which layout they are in is the
+        // store's business, decided when it was created and never migrated.
+        let sharded = store::format(&db)? >= store::SHARDED_FORMAT;
+        let index = VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?;
 
         let generation = generation(&db)?;
 
@@ -216,27 +257,21 @@ impl Semlith {
         if current == self.generation {
             return Ok(());
         }
-
-        let path = self.dir.join("index.tv");
-        if !path.exists() {
+        if !self.index.exists() {
             return Ok(());
         }
-        let index =
-            IdMapIndex::load(&path).with_context(|| format!("reloading {}", path.display()))?;
-        if let Some(d) = index.dim_opt()
-            && d != self.dim
-        {
-            bail!(
-                "index is {d}-dimensional but {} produces {}; store is corrupt",
-                self.model,
-                self.dim
-            );
+
+        // Dropped rather than reloaded here: whatever asked for this refresh is
+        // about to search, and the load it triggers is the same load this used
+        // to do eagerly. A reader that only ever calls `stats` pays nothing.
+        let was_resident = self.index.is_resident();
+        self.index.evict();
+        if was_resident {
+            // Already warm before the writer moved underneath it, so warm again
+            // rather than handing the repack cost to the next question.
+            self.index.prepare()?;
         }
-        // A reader that reloads mid-session should not hand the cost of a cold
-        // index to whoever asked the next question.
-        index.prepare();
-        self.index = index;
-        // Only now, and to the generation read *before* the load: a failed
+        // Only now, and to the generation read *before* the reload: a failed
         // load leaves the reader due for another attempt rather than stuck on
         // a stale index forever, and a write that landed during the load has a
         // higher number, so it is still noticed next time.
@@ -252,12 +287,25 @@ impl Semlith {
         self.dim
     }
 
+    /// How many vectors the store holds.
+    ///
+    /// Answered from SQLite unless the vectors happen to be resident already,
+    /// because the caller asking this is usually `stats` or a fleet totalling
+    /// its members, and neither is worth loading an index for. The two agree: a
+    /// file's hash is committed only once its vectors are durable, so the chunks
+    /// of hashed files are exactly the vectors on disk. Mid-run, in the process
+    /// doing the writing, the resident index is ahead of that and is the truth.
     pub fn len(&self) -> usize {
-        self.index.len()
+        if let Some(resident) = self.index.resident_len() {
+            return resident;
+        }
+        // A failure here is a store whose SQLite side is unreadable, and every
+        // other call on it is about to say so far more usefully than a count.
+        store::durable_chunks(&self.db).unwrap_or(0) as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.len() == 0
     }
 
     pub fn db(&self) -> &Connection {
@@ -268,6 +316,22 @@ impl Semlith {
     /// itself rather than for the length of one call.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// How many shards the store's vectors are split across, and how many of
+    /// them may be resident at once. `None` for a store written before 0.7.0,
+    /// whose single index is all or nothing.
+    pub fn shards(&self) -> Option<(usize, usize)> {
+        self.index
+            .max_resident()
+            .map(|max| (self.index.shards(), max))
+    }
+
+    /// Shards this store has put down to stay inside its memory budget. Above
+    /// zero means the corpus has outgrown the budget and queries are paying to
+    /// read shards back.
+    pub fn evictions(&self) -> u64 {
+        self.index.evictions()
     }
 
     /// Loading the ONNX model costs a second or so, so it is deferred until a
@@ -292,14 +356,14 @@ impl Semlith {
     /// is not slower than the rest.
     pub fn warm(&mut self) -> Result<()> {
         self.embedder()?;
-        self.index.prepare();
+        self.index.prepare()?;
         Ok(())
     }
 
     /// Warm the vector index without loading a model, for a caller that shares
     /// one loaded model across several stores.
-    pub fn warm_index(&mut self) {
-        self.index.prepare();
+    pub fn warm_index(&mut self) -> Result<()> {
+        self.index.prepare()
     }
 
     fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
@@ -318,7 +382,7 @@ impl Semlith {
     pub fn index_paths(
         &mut self,
         roots: &[PathBuf],
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         // Held for the whole run, including the index.tv write at the end.
         // Two concurrent runs would otherwise interleave their SQLite writes
@@ -339,7 +403,7 @@ impl Semlith {
         &mut self,
         roots: &[PathBuf],
         budget: std::time::Duration,
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let _lock = lock::StoreLock::acquire(&self.dir)?;
         let deadline = std::time::Instant::now() + budget;
@@ -351,7 +415,7 @@ impl Semlith {
     pub(crate) fn index_walk(
         &mut self,
         roots: &[PathBuf],
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         self.index_set(walk(roots), true, None, on_file)
     }
@@ -364,7 +428,7 @@ impl Semlith {
     pub(crate) fn index_changed(
         &mut self,
         paths: Vec<PathBuf>,
-        on_file: impl FnMut(&Path),
+        on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         self.index_set(paths, false, None, on_file)
     }
@@ -377,18 +441,22 @@ impl Semlith {
         paths: Vec<PathBuf>,
         sweep: bool,
         deadline: Option<std::time::Instant>,
-        mut on_file: impl FnMut(&Path),
+        mut on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        // A run killed mid-save leaves index.tv.tmp behind. Removing it here
+        // A run killed mid-save leaves a temp index behind. Removing it here
         // and not on open is deliberate: the caller holds the store lock, so
         // there is no live writer whose half-written index this could be.
-        let _ = std::fs::remove_file(self.dir.join("index.tv.tmp"));
+        self.index.clean();
 
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
         // Files whose vectors are embedded but not yet durable. Their hash is
-        // written only after `index.tv` lands, so a crash re-indexes them.
+        // written only after the index lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
+
+        let checkpointing = matches!(self.index, index::VectorIndex::Sharded(_));
+        let interval = checkpoint_interval();
+        let mut last_checkpoint = std::time::Instant::now();
 
         let total = paths.len();
         for (seen, path) in paths.into_iter().enumerate() {
@@ -417,7 +485,7 @@ impl Semlith {
                         let ids = store::delete_file(&self.db, &key)?;
                         if !ids.is_empty() {
                             for id in ids {
-                                self.index.remove(id);
+                                self.index.remove(id)?;
                             }
                             report.removed += 1;
                             continue;
@@ -448,11 +516,19 @@ impl Semlith {
                 continue;
             }
 
-            on_file(&path);
+            on_file(
+                &path,
+                IndexProgress {
+                    scanned: report.scanned,
+                    indexed: report.indexed,
+                    chunks: report.chunks,
+                    total,
+                },
+            );
 
             // Replacing a file: evict its old vectors before adding new ones.
             for id in store::delete_file(&self.db, &key)? {
-                self.index.remove(id);
+                self.index.remove(id)?;
             }
 
             let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
@@ -474,6 +550,15 @@ impl Semlith {
             completed.push((file_id, hash));
             report.indexed += 1;
             report.chunks += chunks.len();
+
+            // Between files, never inside one: a file half-written into the
+            // index is a file whose hash must not be committed, and this is the
+            // one point in the loop where that cannot be true.
+            if checkpointing && last_checkpoint.elapsed() >= interval {
+                self.flush(&mut pending)?;
+                self.checkpoint(&mut completed)?;
+                last_checkpoint = std::time::Instant::now();
+            }
         }
 
         self.flush(&mut pending)?;
@@ -483,7 +568,7 @@ impl Semlith {
             for key in store::all_paths(&self.db)? {
                 if !Path::new(&key).exists() {
                     for id in store::delete_file(&self.db, &key)? {
-                        self.index.remove(id);
+                        self.index.remove(id)?;
                     }
                     report.removed += 1;
                 }
@@ -493,23 +578,47 @@ impl Semlith {
         // A batch that changed nothing must not rewrite index.tv. A watcher
         // sees plenty of events on files whose bytes are identical, and each
         // rewrite is the whole index.
-        if report.indexed > 0 || report.removed > 0 || !self.dir.join("index.tv").exists() {
+        if report.indexed > 0 || report.removed > 0 || !self.index.exists() {
             self.save()?;
         }
 
-        // ponytail: hashes are committed in one shot after the index is
-        // durable. A crash mid-run re-indexes the whole batch; add periodic
-        // checkpointing when someone indexes a corpus big enough to care.
+        self.commit_hashes(&mut completed)?;
+
+        Ok(report)
+    }
+
+    /// Make everything embedded so far durable, then record the files it
+    /// covers as indexed.
+    ///
+    /// Strictly in that order. A hash written before its vectors are on disk is
+    /// a file the next run believes is indexed and cannot answer for — which is
+    /// what the [`PENDING`] sentinel exists to prevent, and what a run that
+    /// checkpoints has many more chances to get wrong than one that does it
+    /// once at the end.
+    fn checkpoint(&mut self, completed: &mut Vec<(i64, String)>) -> Result<()> {
+        if completed.is_empty() {
+            return Ok(());
+        }
+        self.save()?;
+        self.commit_hashes(completed)
+    }
+
+    /// Record files as indexed, in one transaction. Their vectors must already
+    /// be durable.
+    fn commit_hashes(&mut self, completed: &mut Vec<(i64, String)>) -> Result<()> {
+        if completed.is_empty() {
+            return Ok(());
+        }
         let tx = self.db.unchecked_transaction()?;
-        for (file_id, hash) in &completed {
+        for (file_id, hash) in completed.iter() {
             tx.execute(
                 "UPDATE files SET hash = ?1 WHERE id = ?2",
                 rusqlite::params![hash, file_id],
             )?;
         }
         tx.commit()?;
-
-        Ok(report)
+        completed.clear();
+        Ok(())
     }
 
     fn flush(&mut self, batch: &mut Batch) -> Result<()> {
@@ -521,9 +630,7 @@ impl Semlith {
 
         let vectors = self.embed(texts)?;
         let flat: Vec<f32> = vectors.into_iter().flatten().collect();
-        self.index
-            .add_with_ids(&flat, &ids)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        self.index.add(&flat, &ids)?;
         Ok(())
     }
 
@@ -537,7 +644,7 @@ impl Semlith {
         let key = canonical(path).to_string_lossy().into_owned();
         let ids = store::delete_file(&self.db, &key)?;
         for id in &ids {
-            self.index.remove(*id);
+            self.index.remove(*id)?;
         }
         if !ids.is_empty() {
             self.save()?;
@@ -551,21 +658,24 @@ impl Semlith {
     }
 
     /// Resolve a filter to the ids the vector index may consider.
-    fn allowlist(&self, filter: &Filter) -> Result<Allowlist> {
+    fn allowlist(&mut self, filter: &Filter) -> Result<Allowlist> {
         if filter.is_empty() {
             return Ok(Allowlist::All);
         }
-        let ids: Vec<u64> = store::filtered_chunk_ids(&self.db, filter.groups())?
-            .into_iter()
+        let candidates = store::filtered_chunk_ids(&self.db, filter.groups())?;
+        let mut ids = Vec::with_capacity(candidates.len());
+        for id in candidates {
             // turbovec panics on an id the index does not hold, and SQLite can
             // hold a chunk the index does not if a run was interrupted between
             // the two. A stale row must not take a search down with it.
-            .filter(|id| self.index.contains(*id))
-            .collect();
+            if self.index.contains(id)? {
+                ids.push(id);
+            }
+        }
 
         Ok(if ids.is_empty() {
             Allowlist::Empty
-        } else if ids.len() == self.index.len() {
+        } else if ids.len() == self.len() {
             // The filter excludes nothing, so skip building a mask the size of
             // the whole index for no benefit.
             Allowlist::All
@@ -649,7 +759,7 @@ impl Semlith {
         // agent ends up quoting a function that no longer exists.
         self.refresh()?;
 
-        if self.index.is_empty() || k == 0 {
+        if k == 0 || self.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -663,9 +773,7 @@ impl Semlith {
             return Ok(Vec::new());
         }
 
-        let (dense_scores, dense_ids) =
-            self.index
-                .search_with_allowlist(vector, depth, allowlist.as_slice());
+        let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
         let mut fused: Vec<(u64, f32)> = Vec::new();
@@ -718,15 +826,10 @@ impl Semlith {
         store::stats(&self.db)
     }
 
-    /// Write the index out via a temp file + rename, so an interrupted save
-    /// cannot leave a half-written `index.tv` behind.
+    /// Write the index out durably, so an interrupted save cannot leave a
+    /// half-written index behind.
     pub fn save(&mut self) -> Result<()> {
-        let final_path = self.dir.join("index.tv");
-        let tmp = self.dir.join("index.tv.tmp");
-        self.index
-            .write(&tmp)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &final_path)?;
+        self.index.save()?;
 
         // Bumped after the rename, never before: a reader that sees the new
         // generation is guaranteed to find the new index behind it. Read back
@@ -742,25 +845,6 @@ impl Semlith {
 struct Batch {
     ids: Vec<u64>,
     texts: Vec<String>,
-}
-
-/// What the vector index is allowed to look at for one query.
-enum Allowlist {
-    /// No filter, or one that selects everything the index holds.
-    All,
-    /// The filter selects nothing. The query is over before it starts.
-    Empty,
-    Subset(Vec<u64>),
-}
-
-impl Allowlist {
-    /// `None` is turbovec's "search everything".
-    fn as_slice(&self) -> Option<&[u64]> {
-        match self {
-            Allowlist::Subset(ids) => Some(ids),
-            _ => None,
-        }
-    }
 }
 
 pub(crate) fn normalize(v: &mut [f32]) {
