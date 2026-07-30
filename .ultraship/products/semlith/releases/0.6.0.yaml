@@ -159,8 +159,8 @@ scope:
     - >
       Restructuring `lib.rs` to hide the modules the compatibility page calls
       internal. Renaming or hiding them is the kind of break this release
-      exists to make legible; the page says which are supported and 1.0.0 is
-      where the structure follows.
+      exists to make legible; the page says which are supported, and the
+      structure follows in a later release rather than in this one.
   fallback_scope:
     - >
       The legacy era only, done correctly: version negotiation against a real

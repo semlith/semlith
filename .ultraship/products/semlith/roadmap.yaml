@@ -46,9 +46,9 @@ versions:
       searched without loading every vector into memory, and a first index of it is resumable.
     detail: hypothesis
     status: planned
-  - version: 1.0.0
+  - version: 0.8.0
     outcome: >
-      A developer pins semlith in a script or an agent config and the contract 0.6.0 wrote down
-      stops being provisional: a break needs a major version.
+      A developer hands an agent a corpus of mixed formats — office documents, notebooks, HTML —
+      and gets the same excerpts back as from code and Markdown today.
     detail: hypothesis
     status: planned
