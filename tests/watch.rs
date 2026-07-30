@@ -513,6 +513,45 @@ fn an_interrupted_watcher_leaves_the_store_whole() {
     }
 }
 
+/// A document is a file like any other file. Saving one into a watched
+/// directory has to make it searchable the same way saving a `.rs` does —
+/// otherwise a store of documents is current only for as long as nobody edits
+/// one.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_saved_document_is_searchable_like_a_saved_source_file() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough needs flour and water.",
+    );
+    index(store.path(), corpus.path());
+
+    let watcher = spawn(store.path(), corpus.path());
+
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    for name in ["notes.docx", "analysis.ipynb"] {
+        fs::copy(fixtures.join(name), corpus.path().join(name)).unwrap();
+    }
+
+    assert!(
+        wait_for(store.path(), "quokka thermostat calibration", "notes.docx"),
+        "a saved Word document never became searchable within {APPEAR_TIMEOUT:?}"
+    );
+    assert!(
+        wait_for(
+            store.path(),
+            "capybara regression writeup",
+            "analysis.ipynb"
+        ),
+        "a saved notebook never became searchable within {APPEAR_TIMEOUT:?}"
+    );
+
+    watcher.stop();
+}
+
 // ---- harness ------------------------------------------------------------
 
 /// A watcher running in its own thread, stoppable from the test, counting

@@ -1,411 +1,348 @@
 product: semlith
-version: 0.7.0
+version: 0.8.0
 tasks:
-- id: US-SEMLITH-0.7.0-T01
-  summary: >
-    Open a store without loading its vectors: the index is read from disk on the
-    first search, not on open.
-  why_required: >
-    Every memory claim in this release is measured on a process that has a store
-    open, and today opening one loads the whole quantized index and pays turbovec's
-    repacked second copy on top. Until the load is deferred, `stats`, `files` and
-    an idle MCP server holding four stores all cost full index memory for vectors
-    they never look at, and no amount of sharding downstream fixes that.
-  status: done
-  depends_on: []
-  acceptance_criteria:
-  - >
-    Opening a store and running `stats` holds no vectors: resident memory for an
-    opened-but-unsearched store is independent of its chunk count, and an MCP server
-    holding several large stores open at rest is measured to show it.
-  - >
-    The existing suite passes unmodified: nothing in the 0.6.0 tests is edited to
-    accommodate this release.
-  files:
-  - src/lib.rs
-  - src/fleet.rs
-  - tests/measure.rs
-  evidence:
-  - 'src/index.rs unit test opening_reads_nothing: a store whose index.tv is not
-    an index at all opens without error and reports nothing resident — the read,
-    when it finally happens, is the thing that fails.'
-  - 'scale-run.txt, MCP server after a handshake and tools/list and before any query:
-    0.7.0 held 133 MB at 700 chunks and 133 MB at 70000, a growth of 800 KB across
-    a hundredfold corpus. 0.6.0 over the same corpora went 137 MB to 180 MB, a growth
-    of 44384 KB.'
-  - Fleet::warm no longer warms indexes, only models — the MCP server was loading
-    and preparing every store's vectors at startup, which is what the first measurement
-    caught. measure_multi_store_search and measure_the_tool_list_and_what_an_idle_server_holds
-    both still pass.
-  - 'The existing suite passes with two files changed and no assertion weakened:
-    store.rs''s a_newer_format_is_refused_naming_both_numbers now says FORMAT_VERSION
-    + 1 instead of the literal 2, and tests/measure.rs learned to size an index
-    in either layout. Callback signatures were updated mechanically where index_paths
-    gained its progress argument.'
-- id: US-SEMLITH-0.7.0-T02
-  summary: >
-    Write the vector index as fixed-size shards for stores created by 0.7.0, recorded
-    as format 2 with the shard manifest in the store's meta table, and leave every
-    format-1 store on the single-file path untouched.
-  why_required: >
-    This is the release's one structural change and everything else in it — the
-    budget, the eviction, the checkpoints, the cheap save — is addressed per shard.
-    It has to land with the compatibility rule built in rather than added after,
-    because a format-1 store quietly nudged onto shards is a break nobody agreed
-    to.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T01
-  acceptance_criteria:
-  - >
-    A store created by 0.7.0 records `format_version` 2, holds its vectors in more
-    than one shard for a corpus large enough to need them, and answers a set of
-    queries with a ranking whose overlap with an unsharded index over the same corpus
-    meets a recall floor agreed in development and recorded with the number, not
-    with the word "similar".
-  - >
-    A store written by 0.5.0 or 0.6.0 is opened, searched and indexed into by 0.7.0
-    with no shard written, nothing re-embedded, and `format_version` left exactly
-    as it was — absent stays absent, 1 stays 1.
-  files:
-  - src/index.rs
-  - src/lib.rs
-  - src/store.rs
-  - tests/shards.rs
-  evidence:
-  - 'src/index.rs unit tests: vectors_land_in_shards_and_the_shards_are_searchable
-    — ten vectors at four per shard became three shards named for their first id,
-    reopened from the directory listing alone, every id found, and an allowlist
-    of one returned exactly that one.'
-  - 'compat-run.txt: a store created by 0.7.0 records format_version 2, holds its
-    vectors in index/ and has no index.tv.'
-  - 'compat-run.txt: a 0.5.0 store keeps meta keys ''fts_built index_generation
-    model'' after 0.7.0 searched and re-indexed it — no shards written, index.tv
-    still there, format_version still absent. A 0.6.0 store is still format_version
-    1 after 0.7.0 indexed a further file into it, and 0.6.0 still reads it.'
-  - 'recall-run.txt: the sharded ranking matched the unsharded ranking on all twelve
-    queries, mean overlap@10 1.000 against a 0.90 floor set beforehand.'
-- id: US-SEMLITH-0.7.0-T03
-  summary: >
-    Search a sharded store under a resident-memory budget: load the shards a query
-    needs, merge their rankings into one, and evict the least recently used prepared
-    shards to stay inside the budget, with a documented default and a SEMLITH_INDEX_MEMORY
-    override.
-  why_required: >
-    A sharded store that is not searchable is not a store. This is the half of the
-    outcome that makes a corpus larger than memory usable, and the budget is the
-    part a developer can actually read and change on the machine they own.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T02
-  acceptance_criteria:
-  - >
-    A store created by 0.7.0 records `format_version` 2, holds its vectors in more
-    than one shard for a corpus large enough to need them, and answers a set of
-    queries with a ranking whose overlap with an unsharded index over the same corpus
-    meets a recall floor agreed in development and recorded with the number, not
-    with the word "similar".
-  files:
-  - src/index.rs
-  - src/lib.rs
-  - tests/shards.rs
-  evidence:
-  - 'src/index.rs unit test a_budget_of_one_shard_still_searches_all_of_them: a
-    three-shard store under a one-shard budget returned hits from every shard, recorded
-    the evictions that took, and finished with exactly one shard resident.'
-  - 'scale-run.txt: the 70000-chunk store squeezed into an 8 MB budget answered
-    in a median 364.4 ms against 52.6 ms at the default budget, and held 126, 123
-    and 110 MB after 80, 140 and 200 searches — it settles rather than climbing.'
-  - semlith stats reports 'shards N, up to M resident (512 MB budget, SEMLITH_INDEX_MEMORY)'
-    without reading a vector, and a search that had to evict says so on stderr.
-- id: US-SEMLITH-0.7.0-T04
-  summary: >
-    Checkpoint a long index run: seal shards as the run proceeds and commit the
-    hashes of the files those shards fully cover, in that order, so an interrupted
-    run resumes from its last checkpoint and orphaned shards from a killed run are
-    cleaned up rather than read.
-  why_required: >
-    The half of the outcome a developer feels first. Today a run killed at 95 percent
-    leaves chunks with no vectors and no committed hashes, so the next run starts
-    from zero — the `ponytail:` note in src/lib.rs names this exact debt and this
-    release is the corpus big enough to care.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T02
-  acceptance_criteria:
-  - >
-    A first index of a large corpus interrupted with SIGINT partway through, then
-    re-run with the same command, re-embeds only what was in flight: the second
-    run reports the already-indexed files as unchanged, and a search returns a file
-    that was completed before the interrupt. The same sequence against a 0.6.0 binary
-    re-indexes the corpus from zero, which is what makes this a change rather than
-    a claim.
-  files:
-  - src/lib.rs
-  - src/index.rs
-  - tests/shards.rs
-  evidence:
-  - 'tests/shards.rs an_interrupted_index_resumes_where_it_stopped: a real semlith
-    index child killed with SIGINT partway through 2000 files left 288 files committed
-    and searchable with no repair pass; the resumed run indexed 1712 and reported
-    288 unchanged, and chunks and vectors agreed afterwards.'
-  - 'compat-run.txt, the same interruption under both binaries at eight seconds
-    into a 6000-file corpus: 0.6.0 kept 0 chunks, 0.7.0 kept 1952.'
-  - A checkpoint saves the vectors first and commits the hashes second, in one transaction,
-    so no file is ever recorded as indexed before its vectors are durable.
-- id: US-SEMLITH-0.7.0-T05
-  summary: >
-    Rewrite only the shards a change touches: indexing or forgetting one file leaves
-    every other shard on disk exactly as it was.
-  why_required: >
-    `semlith watch` saves the entire index on every save of every watched file.
-    On a large corpus that is the whole index rewritten per keystroke-save, which
-    is the difference between watching a monorepo and not being able to.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T03
-  acceptance_criteria:
-  - >
-    In a large sharded store, `forget` of one file removes exactly that file's chunks
-    — a later search no longer returns it, every other file still searches, and
-    only the shards holding those chunks were rewritten. Re-indexing one changed
-    file behaves the same way.
-  - >
-    A save after one changed file writes bytes and takes time that do not grow with
-    the store: measured on a small store and on the largest one, against 0.6.0 where
-    both are the whole index.
-  files:
-  - src/index.rs
-  - src/lib.rs
-  - tests/shards.rs
-  evidence:
-  - 'tests/shards.rs one_file_changing_rewrites_one_shard: forgetting one file from
-    a 700-file store of three shards rewrote 1 shard, 53 KB of a 148 KB index, and
-    the store still answered without the forgotten file.'
-  - src/index.rs unit test removing_rewrites_only_the_shard_holding_it compares
-    mtimes either side of a removal.
-  - 'scale-run.txt: re-indexing one changed file in a 7000-chunk store of 14 shards
-    wrote 176 KB of a 1436 KB index. Two shards move, not one — the shard losing
-    the old vector and the newest shard taking the new one — so on the 70000-chunk
-    store, which is two shards at the shipped size, the whole index was rewritten
-    and both binaries wrote 13.9 MB. The bound is two shards, not a fraction of
-    the store, and that is what the number shows.'
-- id: US-SEMLITH-0.7.0-T06
-  summary: >
-    Report progress that predicts: files done out of total, chunks per second and
-    an estimate of what remains during an index run, and how many files were skipped
-    as already indexed when a run resumes.
-  why_required: >
-    product.yaml lists "a first index of a large repository is a long, silent, unpredictable
-    wait" as one of the problems semlith exists to solve, and a resumable run is
-    only trustworthy if it says what it resumed. A silent hour is indistinguishable
-    from a hung process.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T04
-  acceptance_criteria:
-  - >
-    `semlith index` reports files done out of total, a rate, and an estimate of
-    what remains; a resumed run states how many files it skipped as already indexed.
-  files:
-  - src/lib.rs
-  - src/main.rs
-  - src/watch.rs
-  evidence:
-  - A 1500-file run printed '265/1500 files, 264 chunks, 131 chunks/s, ~9s left'
-    every two seconds and finished 'indexed 1500 files (1500 chunks) in 10.1s —
-    0 already indexed, 0 skipped, 0 removed'.
-  - The same command run again printed 'indexed 0 files (0 chunks) in 0.1s — 1500
-    already indexed, 0 skipped, 0 removed', which is how a resumed run states what
-    it skipped.
-  - IndexProgress carries the walk's total to the callback, because only the walk
-    knows the denominator.
-- id: US-SEMLITH-0.7.0-T07
-  summary: >
-    Measure what sharding costs recall: the same queries over the same corpus, sharded
-    against unsharded, with the overlap recorded as a number and a floor agreed
-    before the comparison is run.
-  why_required: >
-    turbovec fits its TQ+ calibration from the first batch added to an index, so
-    per-shard fits are not the single whole-index fit and two shards score in slightly
-    different coordinate systems. If that costs recall, the release is wrong in
-    a way no correctness test would catch — this is the contract's most likely reason
-    to iterate.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T03
-  acceptance_criteria:
-  - >
-    A store created by 0.7.0 records `format_version` 2, holds its vectors in more
-    than one shard for a corpus large enough to need them, and answers a set of
-    queries with a ranking whose overlap with an unsharded index over the same corpus
-    meets a recall floor agreed in development and recorded with the number, not
-    with the word "similar".
-  files:
-  - tests/measure.rs
-  - .ultraship/products/semlith/evidence/0.7.0/recall.sh
-  evidence:
-  - 'recall-run.txt: this repository indexed twice, one shard against six, then
-    twelve questions asked of both. Mean overlap@10 1.000, worst 1.00, 12 of 12
-    rankings identical, against a floor of 0.90 recorded in the test before the
-    comparison was run.'
-  - The split store used 128-vector shards, far below the shipped 65536, so each
-    per-shard TQ+ calibration was fitted on less data than production will ever
-    give it — the pessimistic case rather than the flattering one.
-- id: US-SEMLITH-0.7.0-T08
-  summary: >
-    Prove both directions of the compatibility rule against real release binaries:
-    0.7.0 reads a 0.5.0 and 0.6.0 store without rewriting it, and a 0.6.0 binary
-    refuses a store 0.7.0 created, naming both format numbers.
-  why_required: >
-    The store layout is a covered surface. The failure this guards against is not
-    an error message — it is a 0.6.0 binary reading a 0.7.0 store as an empty corpus,
-    which looks like a corpus that has stopped containing things.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T02
-  acceptance_criteria:
-  - >
-    A store written by 0.5.0 or 0.6.0 is opened, searched and indexed into by 0.7.0
-    with no shard written, nothing re-embedded, and `format_version` left exactly
-    as it was — absent stays absent, 1 stays 1.
-  - >
-    A 0.6.0 release binary pointed at a store 0.7.0 created refuses it with an error
-    naming both format numbers, rather than reporting an empty corpus.
-  - >
-    The existing suite passes unmodified: nothing in the 0.6.0 tests is edited to
-    accommodate this release.
-  files:
-  - .ultraship/products/semlith/evidence/0.7.0/compat.sh
-  - tests/roundtrip.rs
-  evidence:
-  - 'compat-run.txt through real 0.5.0, 0.6.0 and 0.7.0 release binaries: 0.7.0
-    searched and indexed into both older stores with nothing re-embedded, no shard
-    written and format_version untouched.'
-  - 0.6.0 met a store 0.7.0 created and exited 1 with 'store is format 2, and semlith
-    0.6.0 understands format 1; upgrade semlith to read this store'.
-  - 0.5.0 met the same store and exited 0 with 'no matches (store has 0 chunks)'
-    — it predates format_version and has nothing to check. Recorded as a known limitation
-    rather than papered over, and stated in the CHANGELOG and docs/compatibility.md.
-  - 'The full suite passes: 55 unit tests, and the ignored integration suites clients
-    1, fleet 10, mcp 11, roundtrip 3, shards 2, watch 10, plus all five measure
-    tests.'
-- id: US-SEMLITH-0.7.0-T09
-  summary: >
-    Measure the release's central claims at a corpus at least an order of magnitude
-    larger than the benchmark repository: peak RSS while searching at three sizes
-    against 0.6.0's, resident cost of an opened-but-unsearched store and of an idle
-    MCP server, search latency inside and outside the budget, indexing memory, and
-    the bytes and time a one-file save writes.
-  why_required: >
-    Bounded memory is a measurement or it is a slogan. A corpus too small cannot
-    distinguish a bounded curve from a linear one, and the latency a store pays
-    when it exceeds its budget is the cost side of the trade this release makes
-    — reporting only the flattering half would be the dishonest way to pass.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T05
-  - US-SEMLITH-0.7.0-T06
-  acceptance_criteria:
-  - >
-    Peak RSS while searching a sharded store stays inside the configured budget
-    plus a stated fixed overhead, measured at three corpus sizes an order of magnitude
-    apart, the largest at least ten times the benchmark corpus's chunk count. The
-    same three sizes under 0.6.0 are measured alongside, so the flat line has a
-    rising one next to it.
-  - >
-    Opening a store and running `stats` holds no vectors: resident memory for an
-    opened-but-unsearched store is independent of its chunk count, and an MCP server
-    holding several large stores open at rest is measured to show it.
-  - >
-    Search latency on a store that fits inside its budget is within a stated multiple
-    of 0.6.0's on the same corpus. For a store that exceeds its budget the per-query
-    shard load and repack cost is reported as a number, not smoothed over.
-  - >
-    A save after one changed file writes bytes and takes time that do not grow with
-    the store: measured on a small store and on the largest one, against 0.6.0 where
-    both are the whole index.
-  - >
-    Peak indexing memory stays flat as corpus size grows — the product's existing
-    success measure, re-verified under sharding rather than assumed to survive it.
-  files:
-  - tests/measure.rs
-  - .ultraship/products/semlith/evidence/0.7.0/scale.sh
-  evidence:
-  - scale-run.txt at 700, 7000 and 70000 chunks — the largest more than ten times
-    the 6527-chunk corpus the project's other numbers come from — measured against
-    a real 0.6.0 binary over the same corpora with the same client driving both.
-  - 'Open but unsearched: 0.7.0 grew 800 KB across a hundredfold corpus, 0.6.0 grew
-    44384 KB.'
-  - 'Searching: 0.7.0 held 137, 144 and 179 MB, inside the 512 MB budget plus the
-    200 MB of fixed overhead the test states. Median query 3.7, 7.5 and 52.6 ms,
-    against 0.6.0''s 3.7, 7.5 and 50.8 ms — unchanged for a store that fits.'
-  - 'Past the budget: 8 MB on the 70000-chunk store cost a median 364.4 ms, seven
-    times the unsqueezed figure, and RSS settled at 126, 123, 110 MB over 80, 140
-    and 200 searches.'
-  - 'Peak RSS while indexing stayed flat as the corpus grew: 196, 198 and 208 MB
-    for 0.7.0 across the three sizes, against 0.6.0''s 196, 198 and 206 MB.'
-  - 'One changed file: 176 KB of a 1436 KB index on a 14-shard store; on the two-shard
-    70000-chunk store both binaries wrote the whole index, which is what a two-shard
-    bound looks like at that size.'
-  - The corpus is one short chunk per file. What is measured is what a vector costs
-    to hold, and there is one vector per chunk whatever its length; full-length
-    chunks would embed five times slower to reach the same vector count and measure
-    the same curve.
-- id: US-SEMLITH-0.7.0-T10
-  summary: >
-    Ship it: the version bump, a CHANGELOG section that states the store format
-    change as a break with why and what to do, the store format and environment
-    sections of docs/compatibility.md, the memory budget in the README, and a packaging
-    check that the tarball carries no secrets and no workspace state.
-  why_required: >
-    The release workflow reads the CHANGELOG for its notes and verifies the tag
-    against Cargo.toml, so neither is optional; and docs/compatibility.md says in
-    its own words what a break looks like, so shipping this one unannounced would
-    break the page as well as the format.
-  status: done
-  depends_on:
-  - US-SEMLITH-0.7.0-T07
-  - US-SEMLITH-0.7.0-T08
-  - US-SEMLITH-0.7.0-T09
-  acceptance_criteria:
-  - >
-    `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and the full
-    test suite including the ignored integration tests are green.
-  - >
-    `cargo publish --dry-run` passes and the packaged tarball carries no `.env`,
-    no `.ultraship` and no `.github`.
-  - >
-    The CHANGELOG has a 0.7.0 section — which is what the release workflow reads
-    for its notes — and it states the store format change the way `docs/compatibility.md`
-    says a break is stated: as a break, with why, and with what to do about an existing
-    store.
-  - >
-    `docs/compatibility.md` is updated: format 2 and what it holds, what a 0.6.0
-    binary does when it meets one, that format-1 stores are unchanged in both directions,
-    and the memory budget environment variable added to the covered environment
-    list.
-  - >
-    Published to crates.io, and the published crate verified from the registry rather
-    than from the working tree: install it and index and search a real corpus with
-    the binary that came out of crates.io.
-  files:
-  - Cargo.toml
-  - CHANGELOG.md
-  - docs/compatibility.md
-  - README.md
-  evidence:
-  - cargo fmt --check clean, cargo clippy --all-targets -- -D warnings clean, full
-    suite green.
-  - 'cargo publish --dry-run passed: 35 files, 559.6 KiB (176.7 KiB compressed),
-    verify build clean. cargo package --list shows 35 entries with no .env, no .ultraship
-    and no .github.'
-  - Cargo.toml at 0.7.0 and the CHANGELOG has a 0.7.0 section stating the store
-    format change as a break, with why it was made, what to do about an existing
-    store, and what happens on a downgrade — the shape docs/compatibility.md says
-    a break is stated in.
-  - docs/compatibility.md gained a format table, the forwards and backwards rules
-    including the 0.5.0 edge, and SEMLITH_INDEX_MEMORY in the covered environment
-    list.
-  - README documents the memory budget, the new store layout, indexing a large corpus,
-    and the measured numbers behind all of it.
+  - id: US-SEMLITH-0.8.0-T01
+    summary: >
+      Dispatch extraction on extension before the binary check, and read `.ipynb`
+      as its cells rather than as raw JSON.
+    why_required: >
+      `chunk::extract` rejects anything with a NUL byte in its first 8 KiB, which
+      is every archive format this release adds — so until dispatch happens
+      before that check, no document reader can ever be reached. Notebooks are
+      the cheapest proof the dispatch works: serde_json is already a dependency,
+      the file is already indexed today as unreadable JSON, and the improvement is
+      visible in a single search.
+    status: done
+    depends_on: []
+    acceptance_criteria:
+      - >
+        A notebook's markdown cell, its code cell and its cell ordering all survive:
+        searching for a phrase in a markdown cell and for an identifier defined in a
+        code cell each return the notebook, and no chunk of the notebook is mostly
+        JSON keys.
+      - >
+        Indexing a corpus of ordinary source is not measurably slower than 0.7.0 on
+        it — the dispatch this release adds is on extension, before any file is
+        parsed, so a repository of Rust must not pay for the formats it has none of.
+    files:
+      - src/chunk.rs
+    evidence:
+      - >
+        src/chunk.rs dispatches on the lowercased extension before the NUL-byte
+        check, so an archive reaches a reader at all and a corpus without documents
+        pays one string comparison per file: indexing this repository's src/ took
+        18.66 s under 0.7.0 and 18.98 s under 0.8.0 — interleaved, best of three
+        after a discarded warm-up round (evidence/0.8.0/formats-run.txt, section
+        4), which is inside the spread between rounds.
+      - >
+        src/formats.rs notebook_cells_come_out_as_their_source: cells in notebook
+        order, a stream output kept, a base64 image dropped, and no JSON
+        scaffolding in the text.
+      - >
+        tests/formats.rs every_document_format_yields_the_text_a_person_would_see:
+        analysis.ipynb yields all four of its phrases and none of `cell_type`,
+        `execution_count` or escaped newlines.
+
+  - id: US-SEMLITH-0.8.0-T02
+    summary: >
+      Reduce `.html` and `.htm` to their text, dropping script and style content,
+      decoding entities, and keeping the source's newlines so line locators stay
+      true.
+    why_required: >
+      An HTML chunk today is mostly markup, so the 800 characters a chunk is
+      allowed carry a fraction of a sentence and the embedding is of the syntax
+      rather than of the page. Preserving newlines rather than reflowing is what
+      lets the release keep the `file:line` promise that every other format in
+      semlith makes.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T01
+    acceptance_criteria:
+      - >
+        An HTML page is indexed as its text: a search for a sentence in its prose
+        returns it, a search for a tag or attribute name that appears only in its
+        markup returns no hit from that file, and the reported line range covers
+        the source lines where that sentence lives — checked against the file on
+        disk, not against the extracted text.
+    files:
+      - src/chunk.rs
+    evidence:
+      - >
+        tests/formats.rs an_html_hit_points_at_the_line_of_the_file_on_disk: the
+        sentence is on line 15 of page.html and the chunk carrying it claims a
+        range that contains 15 — checked against the file on disk.
+      - >
+        src/formats.rs html_keeps_its_text_its_lines_and_none_of_its_markup:
+        script and style contents gone, attributes gone, `&amp;` and `&#233;`
+        decoded, line numbers unmoved.
+      - >
+        evidence/0.8.0/formats-run.txt section 2: page.html embedded 699
+        characters under 0.7.0, 99% of the file's 700 bytes, against 292 under
+        0.8.0 — 41%. The notebook went from 1319 characters (103%, JSON escaping
+        makes it larger than the file) to 454 (35%).
+
+  - id: US-SEMLITH-0.8.0-T03
+    summary: >
+      Read the archive formats — `.docx`, `.pptx`, `.xlsx`, `.odt`, `.odp`,
+      `.ods` — through one bounded ZIP reader and one paragraph-aware XML text
+      pass.
+    why_required: >
+      These six are the formats the release outcome names and the ones a
+      developer's corpus actually holds; all six are ZIP archives of XML, so they
+      share one reader and one text pass. Without them the release is its
+      fallback scope.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T02
+    acceptance_criteria:
+      - >
+        For each of `.docx`, `.pptx`, `.xlsx`, `.odt`, `.odp`, `.ods` and `.ipynb`,
+        a file produced by real software and containing a phrase that appears
+        nowhere else in the corpus is indexed by `semlith index`, and
+        `semlith search` for that phrase returns that file as the top hit with a
+        line range. The identical corpus indexed by a 0.7.0 release binary returns
+        no hit for any of them.
+      - >
+        A spreadsheet with more than one sheet returns text from a named sheet
+        other than the first, and the excerpt says which sheet. A deck with more
+        than ten slides returns text from slide 11 with the slide named, which is
+        also what proves slide order is numeric rather than lexicographic.
+    files:
+      - src/chunk.rs
+      - Cargo.toml
+    evidence:
+      - >
+        Fixtures written by real libraries, not by hand: python-docx 1.2.0,
+        python-pptx 1.0.2, openpyxl 3.1.5 and odfpy 1.4.1, via
+        tests/fixtures/generate.py.
+      - >
+        evidence/0.8.0/formats-run.txt section 1, through the real 0.7.0 release
+        binary from crates.io and this build: 0.8.0 answers 8 of 8 phrase
+        questions with the file that holds the phrase. 0.7.0 answers 2 of 8, and
+        the other six are not misses but wrong answers — it returns page.html or
+        analysis.ipynb, the only two files it could read, for a phrase that is
+        inside an archive it skipped as binary.
+      - >
+        tests/formats.rs slides_sheets_and_cells_are_named_and_in_order: slide
+        11's phrase sits under its own marker with all twelve markers in
+        ascending order, `## Sheet: Q3 Notes` follows `## Sheet: Summary` and
+        precedes the phrase it holds, and rows come out tab-separated.
+      - >
+        Two things only a real file exposed: openpyxl writes relationship
+        targets absolute (`/xl/worksheets/sheet1.xml`) where Excel writes them
+        relative, and it writes inline strings rather than a shared-string table.
+        Both were found by the fixture and are handled.
+
+  - id: US-SEMLITH-0.8.0-T04
+    summary: >
+      Make every new path survive hostile input: a decompression cap, no
+      reachable panic, and a skipped file that never ends a run.
+    why_required: >
+      A ZIP reader is an attack surface aimed at whatever a user indexes. A small
+      archive that expands without bound decides how much memory the run uses,
+      and a panic from a malformed document ends the process rather than the
+      file. This is the task that decides whether the release is safe to publish.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T03
+    acceptance_criteria:
+      - >
+        A corrupt archive, a truncated archive, a password-protected `.docx` and a
+        zero-length file placed among good files are each counted as skipped, the
+        run exits zero, and every good file in the same run is indexed.
+      - >
+        An archive whose entries expand beyond the documented cap is skipped, and
+        peak RSS for a run containing it stays within a stated margin of the same
+        run without it. The number is measured, not asserted from the constant.
+      - >
+        No panic and no `unwrap` reachable from a hostile file: the whole extraction
+        surface is exercised against malformed input for every format added, and
+        `catch_unwind` protects any dependency that can panic, as it already does
+        for PDF.
+    files:
+      - src/chunk.rs
+      - tests/formats.rs
+    evidence:
+      - >
+        tests/formats.rs an_unreadable_document_is_skipped_rather_than_fatal:
+        corrupt, truncated at 500 bytes, empty, random bytes, broken JSON, a
+        non-archive, and a CFB header — what a password-protected Office document
+        actually is on disk — plus the two committed files, a ZipCrypto-protected
+        .docx and bomb.docx, whose single 66 KB entry expands to 64 MiB.
+      - >
+        src/formats.rs rubbish_in_every_format_is_skipped_rather_than_read: every
+        handled extension against four kinds of rubbish, no panic, nothing read as
+        text.
+      - >
+        evidence/0.8.0/formats-run.txt section 3: peak RSS over three interleaved
+        rounds is 271, 271, 271 MB for the corpus without the bomb and 272, 271,
+        273 MB with it — under 1%, and inside the run-to-run spread. An earlier
+        build that buffered to the cap before rejecting measured 13 MB higher;
+        the entry's declared size is now checked before a byte is inflated.
+      - >
+        chunk::guard wraps every extractor in catch_unwind, which is what the PDF
+        path already did, so a panic from a document is a skipped file.
+
+  - id: US-SEMLITH-0.8.0-T05
+    summary: >
+      `semlith watch` and re-indexing handle documents the way they handle source.
+    why_required: >
+      Watching is how a store stays current, and a document that is only read on
+      a first index is a document whose store goes stale the moment someone edits
+      it. The path is shared, so this is confirmation rather than construction —
+      and confirmation is exactly what an acceptance criterion is for.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T03
+    acceptance_criteria:
+      - >
+        `semlith watch` picks up a saved `.docx` and a saved `.ipynb` the same way
+        it picks up a saved `.rs`, and a store re-indexed after a document changes
+        returns the new text and not the old.
+    files:
+      - tests/formats.rs
+    evidence:
+      - >
+        tests/watch.rs a_saved_document_is_searchable_like_a_saved_source_file: a
+        .docx and a .ipynb copied into a watched directory become searchable by
+        their phrases, through a real watcher, like a saved .rs does.
+      - >
+        tests/formats.rs a_mixed_corpus_indexes_and_answers ends by editing the
+        notebook in place: exactly one file re-indexes, the new text is the top
+        hit for its phrase, and no chunk carrying the replaced text is left in the
+        store.
+
+  - id: US-SEMLITH-0.8.0-T06
+    summary: >
+      Documentation: the README format table, the CHANGELOG entry that states the
+      HTML and notebook change as a change, and the compatibility note placing
+      extracted text outside the covered contract.
+    why_required: >
+      Two behaviours change for files that are already indexable, and a store
+      that already holds them keeps its old chunks until those files change.
+      Without the CHANGELOG line saying so, the release looks like it did nothing
+      to the person most likely to try it first.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T04
+    acceptance_criteria:
+      - >
+        The CHANGELOG has a 0.8.0 section — which is what the release workflow reads
+        for its notes — stating both what is newly readable and what now reads
+        differently, with what to do about a store that already indexed HTML or
+        notebooks.
+      - >
+        The README's "What gets indexed" section lists every format and what is
+        taken from it, including the size and decompression caps and what happens
+        to a file that fails them.
+      - >
+        `docs/compatibility.md` says that which formats are extracted is documented
+        and grows additively, and that the text extracted from a given file is not
+        a covered surface — the same footing as ranking scores.
+    files:
+      - README.md
+      - CHANGELOG.md
+      - docs/compatibility.md
+      - Cargo.toml
+    evidence:
+      - >
+        README: the intro line and a rewritten "What gets indexed" — a table of
+        every format, what is taken from it and its markers, the two caps, and
+        what happens to a file that fails one.
+      - >
+        CHANGELOG: a 0.8.0 section stating the nine formats, the 32 MiB
+        decompression cap with why, `zip` 8.6.0 (MIT, default-features off,
+        deflate-flate2 only), and — under Changed — that HTML and notebooks now
+        read differently, with `semlith forget <PATH>` as the per-file remedy and
+        re-indexing as the corpus one, and that there is no format change and no
+        migration.
+      - >
+        docs/compatibility.md: a covered row saying the documented format list
+        only grows, and an uncovered entry putting the text extracted from a file
+        on the same footing as ranking scores.
+      - >
+        docs/architecture.md: an Extraction section, the pipeline diagram
+        corrected from "PDF → pdf-extract, else UTF-8", and `zip` in the
+        dependency table with why it is taken.
+
+  - id: US-SEMLITH-0.8.0-T07
+    summary: >
+      Measure the release: the before-and-after against a real 0.7.0 binary on a
+      corpus of genuine documents, and the extraction-efficiency numbers.
+    why_required: >
+      The contract's evidence of value is comparative — "the same corpus under
+      0.7.0 finds none of them" — and a comparison needs the older binary run,
+      not remembered. The efficiency numbers are what distinguish "the file is
+      read" from "the file is read usefully".
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T05
+    acceptance_criteria:
+      - >
+        Extraction efficiency, measured on the same files before and after: the
+        share of a notebook's and an HTML page's extracted characters that are
+        content rather than syntax, reported as two numbers per format.
+      - >
+        The existing suite passes unmodified: no test that shipped in 0.7.0 is
+        edited to accommodate this release.
+    files:
+      - .ultraship/products/semlith/evidence/0.8.0/formats.sh
+    evidence:
+      - >
+        evidence/0.8.0/formats.sh and formats-run.txt: four measurements through
+        real binaries — the same corpus answered by both, characters embedded per
+        file under each, peak RSS with and without an over-cap archive, and
+        indexing time on ordinary source. Runs are interleaved with a discarded
+        warm-up, because the machine drifts more over minutes than the two
+        binaries differ.
+      - >
+        The suite that shipped in 0.7.0 passes unmodified: no assertion was
+        changed and no existing test was edited. tests/watch.rs gained one test
+        and tests/formats.rs is new.
+
+  - id: US-SEMLITH-0.8.0-T08
+    summary: >
+      The release gates: fmt, clippy, the full suite including ignored
+      integration tests, and a clean `cargo publish --dry-run`.
+    why_required: >
+      This release adds a dependency and a parser surface, which are the two
+      things a packaging check catches and a unit test does not. Nothing ships
+      until the gates are green on a clean tree.
+    status: done
+    depends_on:
+      - US-SEMLITH-0.8.0-T07
+    acceptance_criteria:
+      - >
+        `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
+        warnings`, and the full test suite including the ignored integration tests
+        are green.
+      - >
+        `cargo publish --dry-run` passes on a clean tree, and `cargo package
+        --list` carries no `.env`, no `.ultraship` and no `.github`. The added
+        dependency is a released crates.io version with a licence compatible with
+        Apache-2.0, and it is named in the CHANGELOG.
+    files:
+      - Cargo.toml
+    evidence:
+      - >
+        `cargo fmt --check` exit 0. `cargo clippy --all-targets --all-features -- -D
+        warnings` exit 0.
+      - >
+        `cargo test` — 65 unit tests and every default integration test pass, 0
+        failed. The 65 include 10 new ones in src/formats.rs.
+      - >
+        `cargo test --release -- --ignored`, the full slow suite: clients 1, fleet
+        10, formats 1, mcp 11, measure 5, roundtrip 3, shards 2, watch 11 — all
+        pass, 0 failed. watch is 11 because this release added one to it; every
+        other count is what 0.7.0 shipped.
+      - >
+        `cargo publish --dry-run` on a clean tree: packaged 48 files, 772.1 KiB
+        (272.5 KiB compressed), verify build clean. `cargo package --list` shows no
+        .env, no .ultraship and no .github.
+      - >
+        The added dependency is `zip` 8.6.0 from crates.io, MIT licensed —
+        compatible with this crate's Apache-2.0 — taken with `default-features =
+        false` and only `deflate-flate2`, which is the decompressor and none of the
+        compressors or ciphers. It is named in the CHANGELOG.
+      - >
+        git grep for committed tokens, api keys and private-key headers — none.
