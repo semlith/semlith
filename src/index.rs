@@ -73,6 +73,45 @@ fn shard_capacity() -> usize {
         .unwrap_or(SHARD_VECTORS)
 }
 
+/// How much of a store's vectors may be resident at once, in megabytes.
+///
+/// 512 MB is chosen for the machines this runs on: comfortable on the 16 GB
+/// laptop most of this is developed against, and survivable on the 8 GB one
+/// product.yaml names. It bounds the vectors only — the embedding model, SQLite
+/// and the process itself are on top of it.
+pub const INDEX_MEMORY_MB: usize = 512;
+
+/// Environment override for [`INDEX_MEMORY_MB`], in megabytes.
+pub const INDEX_MEMORY_ENV: &str = "SEMLITH_INDEX_MEMORY";
+
+/// The resident budget in force, in megabytes.
+pub fn budget_mb() -> usize {
+    index_budget_bytes() / 1024 / 1024
+}
+
+fn index_budget_bytes() -> usize {
+    std::env::var(INDEX_MEMORY_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(INDEX_MEMORY_MB)
+        * 1024
+        * 1024
+}
+
+/// What `n` vectors cost in memory once turbovec has them ready to search.
+///
+/// Counted from what the crate actually holds, not from the file size: the
+/// packed codes it loaded, the repacked block layout its SIMD kernel scans
+/// (`prepare` builds a second copy), a scale per vector, the slot-to-id table,
+/// and the hash map back the other way. Those last three are why a 4-bit
+/// 384-dimensional vector costs well over the 192 bytes its codes suggest.
+pub fn resident_bytes(n: usize, dim: usize, bit_width: usize) -> usize {
+    let codes = dim * bit_width / 8;
+    // codes + repacked copy + f32 scale + u64 slot_to_id + a hashbrown entry
+    n * (2 * codes + 4 + 8 + 24)
+}
+
 /// What the vector index is allowed to look at for one query.
 pub enum Allowlist {
     /// No filter, or one that selects everything the index holds.
@@ -224,6 +263,23 @@ impl VectorIndex {
         }
     }
 
+    /// How many shards may be resident at once, or `None` for a single-file
+    /// index, which has no choice about it.
+    pub fn max_resident(&self) -> Option<usize> {
+        match self {
+            VectorIndex::Single(_) => None,
+            VectorIndex::Sharded(s) => Some(s.max_resident()),
+        }
+    }
+
+    /// Shards put down to stay inside the budget since this store was opened.
+    pub fn evictions(&self) -> u64 {
+        match self {
+            VectorIndex::Single(_) => 0,
+            VectorIndex::Sharded(s) => s.evictions(),
+        }
+    }
+
     /// How many shards the store holds. One, for a single-file index.
     pub fn shards(&self) -> usize {
         match self {
@@ -291,6 +347,9 @@ struct Shard {
     resident: Option<IdMapIndex>,
     /// Changed since it was last written.
     dirty: bool,
+    /// Reading of the index's clock when this shard was last touched. The
+    /// least of these is what gets put down when the budget is reached.
+    last_used: u64,
 }
 
 /// A directory of shards — the layout of a store created by 0.7.0.
@@ -301,6 +360,18 @@ pub struct Sharded {
     capacity: usize,
     /// Ascending by `start_id`, which is also ascending by file name.
     shards: Vec<Shard>,
+    /// How many shards may be resident at once. Derived from the memory budget
+    /// and what a full shard costs, and never less than one — a store must be
+    /// searchable on any budget, even a silly one.
+    max_resident: usize,
+    /// Ticks on every shard access, so the smallest `last_used` is the coldest
+    /// shard. A counter rather than a clock: it cannot go backwards, and two
+    /// accesses in the same microsecond still order.
+    clock: u64,
+    /// Shards put down to stay inside the budget. Worth reporting: it is the
+    /// signal that a store has outgrown its budget and every query is paying to
+    /// read shards back.
+    evictions: u64,
 }
 
 impl Sharded {
@@ -330,17 +401,33 @@ impl Sharded {
                     path,
                     resident: None,
                     dirty: false,
+                    last_used: 0,
                 });
             }
         }
         shards.sort_by_key(|s| s.start_id);
+        let capacity = shard_capacity();
+        let full = resident_bytes(capacity, dim, bit_width).max(1);
         Ok(Self {
             dir,
             dim,
             bit_width,
-            capacity: shard_capacity(),
+            capacity,
             shards,
+            max_resident: (index_budget_bytes() / full).max(1),
+            clock: 0,
+            evictions: 0,
         })
+    }
+
+    /// How many shards this store may hold in memory at once.
+    pub fn max_resident(&self) -> usize {
+        self.max_resident
+    }
+
+    /// Shards put down to stay inside the budget since this store was opened.
+    pub fn evictions(&self) -> u64 {
+        self.evictions
     }
 
     fn shard_path(&self, start_id: u64) -> PathBuf {
@@ -356,11 +443,42 @@ impl Sharded {
     }
 
     fn load(&mut self, at: usize) -> Result<&mut IdMapIndex> {
+        self.clock += 1;
+        self.shards[at].last_used = self.clock;
         if self.shards[at].resident.is_none() {
+            self.make_room(at);
             let loaded = load_or_new(&self.shards[at].path, self.dim, self.bit_width)?;
             self.shards[at].resident = Some(loaded);
         }
         Ok(self.shards[at].resident.as_mut().unwrap())
+    }
+
+    /// Put down the coldest shards until one more fits inside the budget.
+    ///
+    /// A shard with unwritten changes is never a candidate: its vectors exist
+    /// nowhere else yet, so dropping it would lose them. That is why an index
+    /// run saves as it goes rather than holding every shard it has touched.
+    fn make_room(&mut self, keep: usize) {
+        loop {
+            let resident: Vec<usize> = (0..self.shards.len())
+                .filter(|i| self.shards[*i].resident.is_some())
+                .collect();
+            if resident.len() < self.max_resident {
+                return;
+            }
+            let Some(&coldest) = resident
+                .iter()
+                .filter(|i| **i != keep && !self.shards[**i].dirty)
+                .min_by_key(|i| self.shards[**i].last_used)
+            else {
+                // Everything resident is dirty or is the shard being asked for.
+                // Exceeding the budget beats losing vectors or refusing to
+                // answer; the count says it happened.
+                return;
+            };
+            self.shards[coldest].resident = None;
+            self.evictions += 1;
+        }
     }
 
     fn evict_all(&mut self) {
@@ -387,8 +505,14 @@ impl Sharded {
         )
     }
 
+    /// Warm what the budget allows, newest first.
+    ///
+    /// Warming every shard of a store larger than its budget would evict as
+    /// fast as it loaded and leave the same shards cold, having read the whole
+    /// corpus to achieve it.
     fn prepare(&mut self) -> Result<()> {
-        for at in 0..self.shards.len() {
+        let warm = self.max_resident.min(self.shards.len());
+        for at in (self.shards.len() - warm)..self.shards.len() {
             self.load(at)?.prepare();
         }
         Ok(())
@@ -430,6 +554,8 @@ impl Sharded {
             return Ok(last);
         }
         let path = self.shard_path(next_id);
+        self.clock += 1;
+        self.make_room(self.shards.len());
         self.shards.push(Shard {
             start_id: next_id,
             path,
@@ -437,6 +563,7 @@ impl Sharded {
                 IdMapIndex::new(self.dim, self.bit_width).map_err(|e| anyhow::anyhow!("{e:?}"))?,
             ),
             dirty: true,
+            last_used: self.clock,
         });
         Ok(self.shards.len() - 1)
     }
@@ -679,6 +806,56 @@ mod tests {
             .search(&axis(dim, 0), 5, &Allowlist::Subset(vec![9]))
             .unwrap();
         assert_eq!(hits, vec![9], "an allowlist of one returned {hits:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A store larger than its budget must still answer, holding only what the
+    /// budget allows while it does.
+    #[test]
+    fn a_budget_of_one_shard_still_searches_all_of_them() {
+        let dir = scratch("budget");
+        let dim = 8;
+        let mut index = VectorIndex::open(&dir, dim, 4, true).unwrap();
+        let VectorIndex::Sharded(ref mut sharded) = index else {
+            panic!("asked for shards")
+        };
+        sharded.capacity = 4;
+
+        let ids: Vec<u64> = (1..=12).collect();
+        let flat: Vec<f32> = ids
+            .iter()
+            .flat_map(|id| axis(dim, *id as usize - 1))
+            .collect();
+        index.add(&flat, &ids).unwrap();
+        index.save().unwrap();
+        assert_eq!(index.shards(), 3);
+
+        let mut reopened = VectorIndex::open(&dir, dim, 4, true).unwrap();
+        let VectorIndex::Sharded(ref mut sharded) = reopened else {
+            panic!("shards on disk must reopen as shards")
+        };
+        sharded.max_resident = 1;
+
+        // A search still reaches every shard...
+        let (_, hits) = reopened.search(&axis(dim, 2), 12, &Allowlist::All).unwrap();
+        assert!(
+            hits.len() >= 3,
+            "a budget of one shard returned {hits:?}, so shards were skipped rather than reloaded"
+        );
+        // ...and it did so by putting shards down again.
+        assert!(
+            reopened.evictions() >= 2,
+            "three shards were searched under a one-shard budget without a single eviction"
+        );
+        let VectorIndex::Sharded(ref s) = reopened else {
+            unreachable!()
+        };
+        assert_eq!(
+            s.shards.iter().filter(|s| s.resident.is_some()).count(),
+            1,
+            "more than the budget stayed resident"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

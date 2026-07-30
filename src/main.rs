@@ -333,6 +333,18 @@ fn main() -> Result<()> {
                     ),
                     None => eprintln!("{} hits in {:?}{across}", hits.len(), elapsed),
                 }
+                // Only when it happened. A store inside its budget never sees
+                // this line, and a store past it should not have to guess why
+                // its queries got slower.
+                let evicted: u64 = fleet.each().map(|(_, s)| s.evictions()).sum();
+                if evicted > 0 {
+                    eprintln!(
+                        "semlith: put down {evicted} shard(s) to stay inside the {} MB index \
+                         budget; raise {} to hold more",
+                        semlith::index::budget_mb(),
+                        semlith::index::INDEX_MEMORY_ENV,
+                    );
+                }
             }
         }
 
@@ -365,6 +377,14 @@ fn main() -> Result<()> {
                 println!("files    {files}");
                 println!("chunks   {chunks}");
                 println!("vectors  {}", store.len());
+                if let Some((shards, max)) = store.shards() {
+                    // What the store costs to search, before searching it.
+                    println!(
+                        "shards   {shards}, up to {max} resident ({} MB budget, {})",
+                        semlith::index::budget_mb(),
+                        semlith::index::INDEX_MEMORY_ENV,
+                    );
+                }
                 println!("indexed  {}", semlith::human_bytes(bytes));
                 if many {
                     println!();
