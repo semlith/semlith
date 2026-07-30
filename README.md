@@ -127,7 +127,9 @@ just those lines instead of the whole file.
 | `semlith languages` | List the language names `--lang` accepts. |
 
 Global: `--store <DIR>` picks the store directory (default `.semlith`, or the
-`SEMLITH_STORE` environment variable).
+`SEMLITH_STORE` environment variable). `search`, `stats`, `files` and `mcp` read,
+so the flag is repeatable and they cover every store named; `index`, `watch` and
+`forget` write, so they take exactly one.
 
 ## Keeping the store current
 
@@ -217,6 +219,59 @@ no files match the filter (store has 6527 chunks)
 `semlith languages` to see it; an unrecognised name is an error, not a silent
 empty result.
 
+## Searching several stores at once
+
+Your work is not one repository. Name several stores and one query covers all of
+them:
+
+```sh
+semlith search "how is the store lock taken" -s ../api/.semlith -s ../cli/.semlith
+```
+
+```
+1. 0.033  [api] src/lock.rs:14-31
+   ...
+2. 0.032  [cli] src/main.rs:96-104
+   ...
+2 hits in 4.1ms across 2 stores: api 1, cli 1
+```
+
+- **Every hit says which store it came from** — in the text output, in `--json`
+  as a `store` field, and over MCP. With one store there is nothing to tell
+  apart, so nothing is labelled and the output is exactly what it always was.
+- **A store is named after the directory holding it**, so `../api/.semlith` is
+  `api`. Two stores that would end up with the same name get their paths instead.
+- **`-k` is global.** Ten results over three stores is ten results, not thirty.
+- **Filters apply everywhere.** `--ext rs` over two stores searches the Rust in
+  both, and a filter that matches files in only one of them returns that one's
+  hits rather than reporting that nothing matched.
+- **Stores may disagree about the model.** Each one embeds the query with its
+  own, which is the only way to query it. Merging happens on rank, not on
+  distance, so nothing compares two models' numbers.
+
+`SEMLITH_STORE` takes a list, split like `PATH`, which is what an MCP server
+definition wants:
+
+```sh
+export SEMLITH_STORE=~/work/api/.semlith:~/work/cli/.semlith
+semlith stats
+```
+
+Two limits worth knowing:
+
+- **Writes stay single-store.** `index`, `watch` and `forget` take exactly one
+  `--store`; a store has one writer, and four locks with four failure modes is
+  not an improvement. Run a `watch` per store if you want several kept current —
+  a watched store is searchable inside a multi-store query, freshness included.
+- **A store path that is not already a store is an error.** Read commands refuse
+  it instead of creating an empty one, because a mistyped store answers every
+  question with nothing and the other stores hide it.
+
+Adding a store is cheap. Measured on three 300-file stores that share a model,
+M1: one query embed per search rather than one per store, a median 3.6ms for one
+store rising to 4.1ms for three, and an MCP server holding 128 MB on one store
+against 130 MB on three — one loaded model, not three.
+
 ## Using it from an agent
 
 `semlith mcp` speaks MCP over stdio and exposes two tools, `semlith_search` and
@@ -251,6 +306,34 @@ subsystem instead of the whole repository:
 ```json
 { "query": "how does retry backoff work", "path": ["src/http/**"], "lang": ["rust"] }
 ```
+
+One server can hold several stores, which is how an agent working across
+repositories asks one question instead of one per repository:
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "/path/to/semlith",
+      "args": ["--store", "/work/api/.semlith", "--store", "/work/cli/.semlith", "mcp"]
+    }
+  }
+}
+```
+
+Every excerpt then names its store, and the tool description lists the stores
+that are open so the agent knows what it may narrow to. An optional `store`
+array restricts one query — useful only when the agent already knows which
+corpus holds the answer:
+
+```json
+{ "query": "how does retry backoff work", "store": ["api"] }
+```
+
+A name that is not open comes back as a tool error listing the ones that are,
+rather than as an empty result an agent would read as "the corpus does not
+discuss this". `semlith_stats` reports one line per store, which is where those
+names come from.
 
 ## What gets indexed
 
@@ -394,6 +477,15 @@ Everyone participating is expected to follow the
   named `build` is not Perl as far as semlith is concerned.
 - Results are not reranked. A cross-encoder over the top results would improve
   ordering, at a cost per query that a local tool should not pay by default.
+- Multi-store search is a merge, not a joint ranking. Each store ranks its own
+  chunks and the merge compares fused rank scores across them, so a store with
+  nothing to say still offers its best hit. Ties go to the closer vector, which
+  is measured against the store's own model — across two models that comparison
+  is approximate, and it only ever decides between hits the rank evidence has
+  already called equal.
+- Stores are named by path; there is no registry of named stores, and no
+  discovery. A store is searched because it was named, and its label comes from
+  the directory holding it.
 
 ## License
 

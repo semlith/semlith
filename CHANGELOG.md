@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-30
+
+One query across several stores, so an agent working across repositories asks
+one question instead of one per repository.
+
+### Added
+
+- **`--store` is repeatable on the read commands.** `search`, `stats`, `files`
+  and `mcp` cover every store named:
+
+  ```sh
+  semlith search "how is the store lock taken" -s ../api/.semlith -s ../cli/.semlith
+  ```
+
+  ```
+  1. 0.033  [api] src/lock.rs:14-31
+  2. 0.032  [cli] src/main.rs:96-104
+  2 hits in 4.1ms across 2 stores: api 1, cli 1
+  ```
+
+  `-k` stays global — ten results over three stores is ten results. Filters
+  apply to every store, and a filter matching files in only one of them returns
+  that one's hits rather than reporting that nothing matched. Stores whose
+  embedding models differ can be searched together: each embeds the query with
+  its own model, and nothing downstream compares two models' numbers.
+
+- **Every hit says which store it came from**, in the text output, in `--json`
+  as a `store` field, and over MCP. A store is named after the directory holding
+  it, so `../api/.semlith` is `api`; two stores that would collide get their
+  paths instead.
+
+- **`SEMLITH_STORE` accepts a list**, split the way `PATH` is, so an MCP server
+  definition can name several stores without a wrapper script.
+
+- **One MCP server, several stores.** `semlith_search` gained an optional
+  `store` array that narrows a query, the tool description lists the stores that
+  are open, an unknown name comes back as a tool error naming the real ones, and
+  `semlith_stats` reports one line per store.
+
+  Adding a store is cheap: measured on three 300-file stores sharing a model,
+  one query embed per search rather than one per store, a median 3.6ms for one
+  store against 4.1ms for three, and a server holding 128 MB on one store
+  against 130 MB on three — one loaded model, not three.
+
+### Changed
+
+- **A read command refuses a store path that is not already a store**, instead
+  of creating one. `search`, `stats`, `files` and `mcp` exit non-zero naming the
+  path. Previously a mistyped `--store` became an empty store that answered
+  every question with nothing — invisible in a multi-store query, where the
+  other stores still return hits. `index` still creates the store it is given.
+- **`index`, `watch` and `forget` take exactly one `--store`** and exit non-zero
+  if given more. They write, and a store has one writer.
+
+### Notes
+
+No schema change and no index format change: a 0.4.0 store is searched by 0.5.0
+with no re-index, and a store written by 0.5.0 is read by the 0.4.0 binary. A
+single-store invocation prints and serializes exactly what 0.4.0 did — the store
+label is absent when there is nothing to tell apart.
+
 ## [0.4.0] - 2026-07-29
 
 Keeps a store current while you work: files are re-embedded as they are saved,
@@ -249,7 +310,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/semlith/semlith/releases/tag/v0.5.0
 [0.4.0]: https://github.com/semlith/semlith/releases/tag/v0.4.0
 [0.3.0]: https://github.com/semlith/semlith/releases/tag/v0.3.0
 [0.2.0]: https://github.com/semlith/semlith/releases/tag/v0.2.0

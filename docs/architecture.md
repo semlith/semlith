@@ -186,6 +186,55 @@ Nothing is stored for any of this. `files.path` has been recorded since 0.1.0,
 which is why filtering works on an existing store with no migration and no
 re-embedding.
 
+### Several stores, one query
+
+`src/fleet.rs` opens the stores it is given and asks each of them the same
+question. It is deliberately not a joint index: nothing is merged on disk, no
+store learns about another, and every chunk id stays inside the store that
+issued it. Ids collide across stores by construction — id 42 exists in all of
+them — so an id that escaped its store would resolve to the right excerpt from
+the wrong repository, which reads as a plausible answer rather than as a bug.
+
+Three decisions carry the design.
+
+**The query is embedded once per distinct model, not once per store.** The
+embedder therefore lives in the fleet rather than in the store, and
+`Semlith::search_ranked` takes a vector that has already been computed. Three
+stores sharing a model cost one embed and one resident copy of the weights;
+measured, an MCP server holds 128 MB on one store and 130 MB on three. A store
+whose model differs is queried with its own model, because a vector from another
+model is a point in a different space.
+
+**Results are merged, not re-ranked.** Each store's list arrives already ranked
+and that order survives the merge — a store's own answer is not up for
+re-litigation by another store's numbers. Across stores the key is the fused
+score, which is the one quantity that is the same unit everywhere: a sum of rank
+reciprocals from the same formula at the same depth, in every store, under any
+model.
+
+**Ties are decided by similarity, not by argument order.** This is the part the
+first test caught. Every store has a best hit whether or not it has an answer,
+so a store whose top result is dense-rank-1 scores exactly what another store's
+dense-rank-1 scores, and with two single-file stores the two collide exactly.
+Ranking then fell to the order the stores were named in, which handed rank 1 to
+a store that had nothing to do with the query. Ties now go to the higher
+similarity to the query vector: it is the only evidence available about which of
+two equally-ranked chunks is closer to what was asked, and it decides only
+between hits the rank evidence has already called equal. Across two models it
+compares numbers from two vector spaces, which is approximate — the worst case
+is a reordering among equals, which is why a relevance floor was rejected. A
+floor drops answers; this does not.
+
+Two consequences elsewhere. Read commands go through `Semlith::open_existing`,
+which refuses a directory that is not already a store, because `open` creates
+what it is given and a mistyped store answers every question with nothing while
+the other stores hide it. And the same store named twice is opened once,
+deduplicated by canonical path: merging a store with itself gives every one of
+its hits a twin at the same score and hands it the whole result list.
+
+Writes are untouched. `index`, `watch` and `forget` take one store, because one
+writer per store is a property of the store, not a limitation of the command.
+
 ## The MCP server
 
 `semlith mcp` is newline-delimited JSON-RPC 2.0 over stdio, hand-rolled in one
@@ -215,6 +264,13 @@ an agent produces about half the time. An unknown language name and a filter
 that selects nothing are both answered in-band with text the agent can act on:
 one names `semlith languages`, the other says to try again without the filter.
 Silently returning nothing would teach an agent that the corpus is empty.
+
+The server serves a fleet, so one process can hold several stores. Two details
+follow from the same principle: the open store names are written into the
+`store` argument's description, because an agent cannot narrow to a name it has
+never seen, and a name that is not open comes back as an in-band error listing
+the ones that are. An empty result would be read as "the corpus does not discuss
+this", which is a different and wrong answer.
 
 ## One writer per store
 
