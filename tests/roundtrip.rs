@@ -166,6 +166,47 @@ fn a_filtered_search_ranks_within_the_subset() {
     );
 }
 
+/// The store format is written down so that the first time it changes, an old
+/// binary refuses the store instead of misreading it. That is only true if a
+/// store from before the key existed still opens — which is every store any
+/// user has today.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_store_written_before_the_format_key_still_opens_and_is_not_rewritten() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "bread.md", "Sourdough starter needs flour.");
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+        .unwrap();
+    assert_eq!(
+        semlith::store::get_meta(s.db(), semlith::store::FORMAT_KEY).unwrap(),
+        Some(semlith::store::FORMAT_VERSION.to_string()),
+        "a store this binary created must say what format it is"
+    );
+    drop(s);
+
+    // Exactly what a 0.5.0 store looks like: everything else, minus the key.
+    let db = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    db.execute(
+        "DELETE FROM meta WHERE k = ?1",
+        [semlith::store::FORMAT_KEY],
+    )
+    .unwrap();
+    drop(db);
+
+    let mut old = Semlith::open(store.path(), None).unwrap();
+    old.quiet = true;
+    assert_eq!(top(&mut old, "how do I bake bread"), "bread.md");
+    assert_eq!(
+        semlith::store::get_meta(old.db(), semlith::store::FORMAT_KEY).unwrap(),
+        None,
+        "opening a store must not migrate it behind the user's back"
+    );
+}
+
 fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).unwrap();
 }

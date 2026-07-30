@@ -14,7 +14,7 @@
 use crate::embed::Model;
 use crate::filter::Filter;
 use crate::{Hit, Semlith, canonical, chunk, model_cache_dir};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use fastembed::TextEmbedding;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -196,6 +196,70 @@ impl Fleet {
         }
 
         Ok(merge(queues, k))
+    }
+
+    /// Indexed paths across the stores `only` selects, capped at `limit`.
+    ///
+    /// Returns the paths and how many the cap left out, because a truncated
+    /// list that does not say it is truncated is how an agent concludes a file
+    /// is not indexed.
+    pub fn paths_in(
+        &self,
+        only: Option<&[String]>,
+        filter: &Filter,
+        limit: usize,
+    ) -> Result<(Vec<String>, usize)> {
+        let chosen = self.chosen(only)?;
+        let label = self.members.len() > 1;
+        let mut out = Vec::new();
+        let mut total = 0;
+        for i in chosen {
+            for path in self.members[i].store.matching_paths(filter)? {
+                total += 1;
+                if out.len() < limit {
+                    out.push(if label {
+                        format!("[{}] {path}", self.members[i].label)
+                    } else {
+                        path
+                    });
+                }
+            }
+        }
+        let left_out = total - out.len();
+        Ok((out, left_out))
+    }
+
+    /// The one store a write goes to.
+    ///
+    /// One writer per store is the product's rule, and with several stores open
+    /// there is no "the" store — so an unnamed write among several is refused
+    /// with the names that exist rather than guessed at. Guessing writes to
+    /// somebody's other repository.
+    pub fn writable(&mut self, only: &[String]) -> Result<&mut Semlith> {
+        let i = match only {
+            [] if self.members.len() == 1 => 0,
+            [] => bail!(
+                "this server has {} stores open, so a write has to name one: {}",
+                self.members.len(),
+                self.labels().join(", ")
+            ),
+            [name] => self
+                .members
+                .iter()
+                .position(|m| m.label == *name)
+                .with_context(|| {
+                    format!(
+                        "no store called {name} is open; these are: {}",
+                        self.labels().join(", ")
+                    )
+                })?,
+            names => bail!(
+                "a write goes to one store, not {}: {}",
+                names.len(),
+                names.join(", ")
+            ),
+        };
+        Ok(&mut self.members[i].store)
     }
 
     /// Indices of the stores a query should reach.

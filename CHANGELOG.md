@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-30
+
+semlith works from whichever agent you already use, the MCP tools cover the
+store rather than a fifth of it, and what counts as stable is written down.
+
+### Fixed
+
+- **The server no longer claims protocol revisions it cannot speak.**
+  `initialize` answered with whatever `protocolVersion` the client asked for, so
+  a client on `2026-07-28` was told semlith spoke `2026-07-28` — a revision that
+  had removed the very handshake it was answering. semlith now holds a list of
+  the revisions it implements and answers with the requested one when it is on
+  that list, or with the newest one it does implement when it is not.
+
+### Added
+
+- **MCP `2026-07-28`, the stateless revision, alongside the handshake.** That
+  revision deleted `initialize`, made `server/discover` mandatory and moved the
+  protocol version onto every request. semlith serves both eras, deciding per
+  message rather than per connection: a request carrying
+  `_meta.io.modelcontextprotocol/protocolVersion` gets `resultType`, server
+  identity in `_meta`, and `ttlMs`/`cacheScope` on `tools/list`; anything else
+  gets exactly the answer 0.5.0 sent. A revision semlith does not implement
+  comes back as `-32022` naming the ones it does.
+
+  The advertised list is `2026-07-28`, `2025-11-25`, `2025-06-18`,
+  `2024-11-05`, and every entry has a recorded session in `tests/mcp.rs`
+  proving it. `2025-03-26` is deliberately absent: it is the only revision that
+  required JSON-RPC batching.
+
+- **Three more tools, so the MCP surface covers what the CLI does.**
+
+  | Tool | What it does |
+  | --- | --- |
+  | `semlith_files` | Which files are indexed, narrowed by the same `path`/`ext`/`lang`/`store`, capped and saying how many it left out. |
+  | `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
+  | `semlith_forget` | Drop one file from a store. The file on disk is untouched. |
+
+  `semlith_files` exists because an agent that cannot ask "is this indexed"
+  reads an empty search result as "the corpus does not discuss this".
+
+  Both writers take the store's lock for the call and give it back, so a store
+  a `semlith watch` is holding comes back as a tool error naming the holder
+  rather than as a corrupted index. With more than one store open they require
+  a `store` argument: a store takes one writer, and there is no "the" store to
+  guess at.
+
+  `semlith_index` works to a wall-clock budget — 45 seconds, under the
+  60-second tool timeout clients default to — then returns what it reached and
+  how much is left. Calling it again continues rather than restarting, because
+  indexing has been keyed on content hashes since 0.1.0. It never creates a
+  store, so no tool call can contain a model download.
+
+- **A setup stanza for every MCP client in common use**, each verified against
+  that client's own documentation: Claude Code, Claude Desktop, Codex, GitHub
+  Copilot in VS Code, Copilot CLI, Cursor, Windsurf, Zed, Gemini CLI,
+  JetBrains, Cline and Goose. `tests/clients.rs` extracts every stanza from the
+  README, parses it, and runs its command line against a real server, so a flag
+  renamed in the code and not in the README fails the build rather than
+  somebody's first attempt.
+
+- **[`docs/compatibility.md`](docs/compatibility.md)** — which surfaces are a
+  contract (CLI commands and flags, MCP tool names and schemas, the advertised
+  protocol revisions, the store on disk, the `lib.rs` API) and which are free to
+  change (ranking scores, human-readable output, stderr, the default model,
+  additive JSON fields). It is explicit that 0.x is what backs the promise.
+
+- **`format_version` in the store's meta table.** A store created by 0.6.0
+  records format 1; a store written before the key existed is read as format 1
+  and never rewritten; a store from a format the binary does not know is refused
+  naming both numbers instead of misread. Written down now, while nothing has
+  changed, so the first change that does happen fails loudly.
+
+- **`SEMLITH_MCP_INDEX_BUDGET`**, in seconds, for a client whose tool timeout is
+  not the usual one.
+
+- **The MCP server says what it is on stderr** — the stores it opened, and the
+  revision it negotiated when that differs from what was asked. stdout is the
+  protocol; stderr is the only channel a stdio client captures, and "the agent
+  sees no tools" was otherwise undiagnosable.
+
+### Changed
+
+- **`semlith forget` takes the store's write lock.** It rewrites `index.tv`
+  exactly as indexing does, so it is a writer and now waits its turn like one.
+  A `forget` that ran while `semlith watch` was saving could leave the index and
+  the database disagreeing about which chunks exist. It now exits non-zero
+  naming the holder instead.
+
+### Performance
+
+Measured on an Apple M1:
+
+- The tool list grew from 2220 bytes for two tools to 4790 for five — roughly
+  555 estimated tokens to 1197, measured through both release binaries. It is
+  loaded into an agent's context once per session whether or not a tool is
+  called, so three more tools cost about 640 tokens a session.
+- An MCP server at rest holds no store lock: `semlith index` in another terminal
+  against the store an open server is serving succeeds.
+
 ## [0.5.0] - 2026-07-30
 
 One query across several stores, so an agent working across repositories asks
@@ -310,7 +410,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/semlith/semlith/releases/tag/v0.6.0
 [0.5.0]: https://github.com/semlith/semlith/releases/tag/v0.5.0
 [0.4.0]: https://github.com/semlith/semlith/releases/tag/v0.4.0
 [0.3.0]: https://github.com/semlith/semlith/releases/tag/v0.3.0
