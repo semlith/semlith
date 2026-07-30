@@ -1,0 +1,48 @@
+product: semlith
+version: 0.7.0
+execution_state: DEVELOPING
+checkpoint: null
+blockers: []
+release_fit:
+  assessment: probable
+  reasons:
+    - >
+      The workspace's own recorded preferences are `minimize_cost: true`,
+      `allow_additional_spend: false` and `allow_parallel_agents: false`
+      (`.ultraship/ultraship.yaml`), and no per-release time or budget
+      constraint has been set. Those are the limits this assessment is made
+      against, and they are the user's own settings rather than anything the
+      framework measured. Sharding and checkpointing are local Rust work with no
+      new dependency, no service and no spend, which fits them; the measurement
+      passes are the part that costs wall-clock rather than money, and they run
+      unattended in the background rather than needing parallel agents.
+    - >
+      The contract's own constraint that turbovec 0.9.0 has no memory-mapped
+      loader is what makes this achievable rather than research: the design is
+      fixed — hold fewer vectors at once — and the remaining decisions (shard
+      size, budget default) are measurements, not inventions.
+    - >
+      Every piece of state this release needs already has a home. The store's
+      `meta` table owns the shard manifest, the `PENDING` hash sentinel and
+      `index_generation` already define the durability order a checkpoint needs,
+      and `format_version` was written in 0.6.0 precisely so that the first real
+      format change refuses an older binary instead of being misread by it.
+    - >
+      The measurement harness exists. `tests/measure.rs` already measures a store
+      and an idle MCP server, and the evidence scripts under
+      `.ultraship/products/semlith/evidence` already drive real 0.5.0 and 0.6.0
+      release binaries for cross-version compatibility.
+  major_cost_drivers:
+    - >
+      Embedding time for a corpus an order of magnitude larger than the benchmark
+      repository, taken several times: three sizes, before and after, plus the
+      recall comparison. This is the release's largest wall-clock cost and the
+      one most likely to run long.
+    - >
+      Two live index paths — legacy single file and sharded — both exercised by
+      the suite and by the cross-version compatibility runs.
+    - >
+      The shard reader, its resident budget and its eviction sit on the hot path
+      of every search, so they need correctness tests and a latency measurement
+      rather than one standing in for the other.
+  recommended_scope_change: null
