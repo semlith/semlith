@@ -1,4 +1,5 @@
-//! The numbers behind 0.4.0's non-functional claims.
+//! The numbers behind the non-functional claims: 0.4.0's watcher, and what
+//! 0.5.0's multi-store search costs.
 //!
 //! "Event-driven, not polling" and "memory does not grow" are exactly the
 //! claims that are true in the design and false in the code, so they are
@@ -229,7 +230,7 @@ fn measure_multi_store_search() {
     );
 
     println!("\n--- latency by store count");
-    let mut previous = None;
+    let mut previous: Option<Duration> = None;
     for count in 1..=stores.len() {
         let mut fleet = semlith::fleet::Fleet::open(&stores[..count]).unwrap();
         fleet.quiet = true;
@@ -248,8 +249,15 @@ fn measure_multi_store_search() {
         }
         times.sort();
         let median = times[times.len() / 2];
+        // Signed, because at a few milliseconds the difference between two and
+        // three stores is inside the noise and can come out negative. Duration
+        // subtraction panics on that, which is how this was found.
         let increment = match previous {
-            Some(p) => format!(", +{:.1}ms per store", (median - p).as_secs_f64() * 1000.0),
+            Some(p) => format!(
+                ", {:+.1}ms against {} store(s)",
+                (median.as_secs_f64() - p.as_secs_f64()) * 1000.0,
+                count - 1
+            ),
             None => String::new(),
         };
         println!(

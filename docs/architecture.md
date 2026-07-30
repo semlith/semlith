@@ -201,7 +201,8 @@ Three decisions carry the design.
 embedder therefore lives in the fleet rather than in the store, and
 `Semlith::search_ranked` takes a vector that has already been computed. Three
 stores sharing a model cost one embed and one resident copy of the weights;
-measured, an MCP server holds 128 MB on one store and 130 MB on three. A store
+measured, an MCP server that has answered a query holds 137 MB whether it was
+opened on one store or on three. A store
 whose model differs is queried with its own model, because a vector from another
 model is a point in a different space.
 
