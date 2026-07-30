@@ -7,36 +7,36 @@ release_fit:
   assessment: probable
   reasons:
     - >
-      No constraints are recorded in the workspace (`constraints: []`, and `ultraship state`
-      reports no blockers), so the only limit to work against is the user's own stated goal for
-      this session: take 0.5.0 from development through release and publish in one pass. That is a
-      user-estimate, not anything the framework measured, and it rules out a release whose
-      unknowns need days of measurement to settle.
+      No constraints are recorded in the workspace (`constraints: []`, and `ultraship state` reports
+      no blockers), so the only limit to work against is the user's own stated goal for this
+      session: take 0.5.0 from development through release and publish in one pass. That is a
+      user-estimate, not anything the framework measured, and it rules out a release whose unknowns
+      need days of measurement to settle.
     - >
       This is a read-path release over machinery that already exists. Filters, the dense/keyword
       split, reciprocal-rank fusion, the generation counter that makes a long-lived reader fresh,
       and the store lock all shipped in 0.2.0 through 0.4.0. Searching several stores is opening
       more of them and fusing what they already return.
     - >
-      No schema change, no index format change and no migration, so cross-version compatibility
-      is a test rather than a task, exactly as it was for 0.4.0.
+      No schema change, no index format change and no migration, so cross-version compatibility is a
+      test rather than a task, exactly as it was for 0.4.0.
     - >
       Writes stay single-store, so the single-writer constraint and the watcher are untouched. The
       release cannot break indexing, because it does not go near it.
     - >
-      Not `high`, for the two reasons the contract records as risks. Rank fusion across stores
-      lets a store with nothing to say contribute a rank-1 hit, and whether that degrades a query
-      the original store answered is a measurement that can send the fusion design back. And chunk
-      ids collide across stores by construction, so every id that leaves a store has to carry its
-      store with it or the answer is the right excerpt from the wrong repository.
+      Not `high`, for the two reasons the contract records as risks. Rank fusion across stores lets
+      a store with nothing to say contribute a rank-1 hit, and whether that degrades a query the
+      original store answered is a measurement that can send the fusion design back. And chunk ids
+      collide across stores by construction, so every id that leaves a store has to carry its store
+      with it or the answer is the right excerpt from the wrong repository.
   major_cost_drivers:
     - >
       Proving that adding a store does not degrade a query the first store already answered —
       measurement, not implementation, and the criterion most likely to change the design.
     - >
-      One embedder per distinct model rather than one per store. `Semlith` owns its embedder
-      today, so the memory criterion is what forces the query vector to be computed outside the
-      store and handed in.
+      One embedder per distinct model rather than one per store. `Semlith` owns its embedder today,
+      so the memory criterion is what forces the query vector to be computed outside the store and
+      handed in.
     - >
       Making read commands refuse a path that is not already a store without breaking `index`'s
       ability to create one, in `open`, which every command goes through.
