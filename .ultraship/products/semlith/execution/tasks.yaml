@@ -1,338 +1,411 @@
 product: semlith
-version: 0.6.0
+version: 0.7.0
 tasks:
-  - id: US-SEMLITH-0.6.0-T01
-    summary: >
-      Negotiate the protocol version against a real list of revisions the server
-      implements, instead of echoing back whatever the client asked for.
-    why_required: >
-      The server currently tells every client it speaks that client's revision.
-      Every other claim in this release is worth nothing while the first message
-      of every session is a lie.
-    status: done
-    depends_on: []
-    acceptance_criteria:
-      - >
-        One recorded stdio session per advertised legacy revision — `2025-11-25`,
-        `2025-06-18`, `2024-11-05` — against a real `semlith mcp` child process:
-        `initialize` is answered with that same version, `tools/list` returns the
-        five tools, and a `semlith_search` call returns excerpts.
-      - >
-        `initialize` naming a revision the server does not implement — a bare
-        `1900-01-01` and a plausible future date — is answered with the server's
-        newest supported revision, not with the string it was sent.
-    files:
-      - src/mcp.rs
-      - tests/mcp.rs
-    evidence:
-      - >
-        cargo test --test mcp -- --ignored — every_advertised_revision_gets_a_working_session passed: a real `semlith mcp` child process answered 2025-11-25, 2025-06-18 and 2024-11-05 each with itself, listed the five tools, and returned excerpts on all three
-      - >
-        an_unimplemented_revision_is_answered_with_one_we_implement passed: 1900-01-01 and 2031-03-26 both answered 2025-11-25, neither echoed
-      - >
-        Two unit tests in src/mcp.rs pin `negotiate`, including that 2026-07-28 over `initialize` is answered 2025-11-25 rather than accepted
-
-  - id: US-SEMLITH-0.6.0-T02
-    summary: >
-      Serve the 2026-07-28 stateless era alongside the handshake:
-      `server/discover`, per-request `_meta` protocol version and client
-      capabilities, `resultType` and server identity on every result,
-      `ttlMs`/`cacheScope` on `tools/list`, and -32022 for a revision the server
-      does not implement.
-    why_required: >
-      2026-07-28 makes `server/discover` mandatory and removes `initialize`. A
-      server that answers only the handshake is invisible to any client built on
-      that revision, and clients that probe with `server/discover` first are the
-      ones shipping next.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T01
-    acceptance_criteria:
-      - >
-        `server/discover`, sent as the first message with no `initialize` before
-        it, returns a `DiscoverResult` carrying `resultType: "complete"`,
-        `supportedVersions` including `2026-07-28`, `capabilities.tools`,
-        `_meta["io.modelcontextprotocol/serverInfo"]`, `ttlMs` and `cacheScope`.
-      - >
-        A `tools/call` carrying `_meta["io.modelcontextprotocol/protocolVersion"]`
-        of `2026-07-28`, with no handshake at any point in the session, returns a
-        result with `resultType: "complete"` and server identity in `_meta`; the
-        matching `tools/list` also carries `ttlMs` and `cacheScope`, and lists the
-        tools in the same order every time.
-      - >
-        A request whose `_meta` protocol version is unsupported returns JSON-RPC
-        error -32022 whose `data.supported` lists exactly the revisions the server
-        advertises and whose `data.requested` echoes what was asked.
-    files:
-      - src/mcp.rs
-      - tests/mcp.rs
-    evidence:
-      - >
-        discover_answers_as_the_first_message_of_a_session passed: server/discover with no handshake returned resultType complete, supportedVersions [2026-07-28, 2025-11-25, 2025-06-18, 2024-11-05], capabilities.tools, serverInfo in _meta, ttlMs and cacheScope public
-      - >
-        a_modern_call_works_with_no_handshake_at_all passed: tools/list carried resultType, ttlMs, cacheScope private and the server version, listed identically twice, and a tools/call returned excerpts — no initialize sent in the session
-      - >
-        an_unimplemented_meta_version_is_refused_with_the_list passed: -32022 with data.requested 2029-01-01 and data.supported naming 2026-07-28
-
-  - id: US-SEMLITH-0.6.0-T03
-    summary: >
-      Add `semlith_files`: the indexed file list as a tool, narrowed by the same
-      path/ext/lang/store arguments as search, capped, and saying how many paths
-      it left out.
-    why_required: >
-      An agent that cannot ask which files are indexed reads an empty search
-      result as "the corpus does not discuss this", which is the failure this
-      product exists to avoid.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T01
-    acceptance_criteria:
-      - >
-        `semlith_files` returns indexed paths for a real store, narrows correctly
-        on `path`, `ext`, `lang` and `store`, and when the store holds more files
-        than the cap it returns the cap and says how many it left out.
-    files:
-      - src/mcp.rs
-      - src/store.rs
-      - tests/mcp.rs
-    evidence:
-      - >
-        the_files_tool_lists_narrows_and_says_what_it_left_out passed: both indexed files listed, ext ["rs"] narrowed to borrow.rs alone, and limit 1 returned one path plus "1 more"
-
-  - id: US-SEMLITH-0.6.0-T04
-    summary: >
-      Let the fleet hand out one writable store: a `store` argument that is
-      optional with one store open and required with several, refusing an
-      ambiguous write in-band with the names that are open. Add `semlith_forget`
-      on top of it.
-    why_required: >
-      One writer per store is a product constraint. Both write tools need the
-      same store selection and the same refusal, and forget is the small one that
-      proves the plumbing before index depends on it.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T01
-    acceptance_criteria:
-      - >
-        `semlith_forget` removes a file's chunks from the named store, reports the
-        count, and a subsequent `semlith_search` no longer returns that file.
-      - >
-        With two stores open, `semlith_index` and `semlith_forget` called with no
-        `store` argument return an in-band error naming both stores, and neither
-        store is written; naming one writes that one and leaves the other
-        untouched.
-    files:
-      - src/fleet.rs
-      - src/mcp.rs
-      - tests/mcp.rs
-    evidence:
-      - >
-        a_write_with_several_stores_open_must_name_one passed: with two stores open both semlith_index and semlith_forget returned isError naming rust and bread; naming bread removed its file and left rust untouched
-      - >
-        the_forget_tool_removes_a_file_from_search passed: the removal reported its chunk count and a later search no longer returned the file
-      - >
-        src/lib.rs forget now takes StoreLock, so the CLI and the tool share one writer rule
-
-  - id: US-SEMLITH-0.6.0-T05
-    summary: >
-      Add `semlith_index`: index a path into an already-open store, taking the
-      write lock for the call, refusing in-band when a watcher holds it, and
-      bounded by a wall-clock budget that reports what remains and resumes on the
-      next call.
-    why_required: >
-      Without it an MCP-only agent cannot make a corpus current, and without the
-      budget a first index blows through the 60-second tool timeout clients
-      default to and looks like a hung server.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T04
-    acceptance_criteria:
-      - >
-        Through one long-lived `semlith mcp` process: a file created after the
-        server started is indexed by a `semlith_index` call and returned by a
-        subsequent `semlith_search` in the same session, with no restart.
-      - >
-        `semlith_index` against a store whose write lock is held by a running
-        `semlith watch` returns an in-band tool error naming the holder; the
-        store is intact afterwards and the watcher is unaffected.
-      - >
-        A `semlith_index` call whose work exceeds its budget returns a partial
-        report naming how many files remain, and a second identical call
-        continues from there rather than re-embedding what the first call already
-        did.
-    files:
-      - src/lib.rs
-      - src/fleet.rs
-      - src/mcp.rs
-      - tests/mcp.rs
-    evidence:
-      - >
-        the_index_tool_makes_a_new_file_searchable_without_a_restart passed: a file created after the server started was indexed by a tool call and returned by a search in the same session
-      - >
-        the_index_tool_refuses_a_store_a_watcher_is_holding passed: the call returned isError containing "being indexed by", and the store still answered a search afterwards
-      - >
-        an_index_over_its_budget_reports_what_remains_and_resumes passed: with SEMLITH_MCP_INDEX_BUDGET=0 over eight files the first call reported what remained and repeated calls finished the corpus, with semlith_files then listing all eight
-
-  - id: US-SEMLITH-0.6.0-T06
-    summary: >
-      Write `format_version` into the store's meta table, read a store without
-      the key as format 1, and refuse a store from a newer format naming both
-      numbers.
-    why_required: >
-      A release that writes down the store as a stable surface has to make the
-      format legible first. Without the marker the first real format change
-      silently misreads old stores instead of refusing them.
-    status: done
-    depends_on: []
-    acceptance_criteria:
-      - >
-        A store created by 0.6.0 carries `format_version`; a store written by
-        0.5.0, which has no such key, is opened and searched as format 1 with no
-        migration and nothing rewritten; and a store whose `format_version` is
-        higher than the binary knows is refused with an error naming both the
-        store's number and the binary's.
-      - >
-        No store format break in either direction: the 0.5.0 binary searches and
-        indexes a store written by 0.6.0, and 0.6.0 searches a store written by
-        0.5.0 without re-embedding anything — `format_version` is an additive meta
-        key, which is exactly why it is safe to add now.
-    files:
-      - src/store.rs
-      - src/lib.rs
-      - tests/roundtrip.rs
-    evidence:
-      - >
-        Two unit tests in src/store.rs: a store with no format_version key passes check_format and is not written to, and format 2 is refused with an error naming both 2 and 1
-      - >
-        cargo test --test roundtrip -- --ignored — a_store_written_before_the_format_key_still_opens_and_is_not_rewritten passed: a created store records format_version 1, and with the key deleted the store still searches and is not migrated
-      - >
-        compat.sh through two release binaries: a 0.5.0 store has meta keys "fts_built index_generation model" and still has no format_version after 0.6.0 searched and indexed it; a 0.6.0 store has "format_version fts_built index_generation model" and 0.5.0 searched it and indexed a further file into it
-
-  - id: US-SEMLITH-0.6.0-T07
-    summary: >
-      Document a setup stanza for every MCP client in common use, and make the
-      documentation executable: a test that extracts each stanza, parses it, and
-      runs its command line against a real server.
-    why_required: >
-      A stanza that is wrong is a user's first impression of the product, and no
-      client in the list can be installed in CI. Parsing and executing what the
-      documentation actually prints is the only check available.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T05
-    acceptance_criteria:
-      - >
-        Every client configuration stanza in the documentation is extracted from
-        the documentation, parsed as JSON or TOML, and its `command` plus `args`
-        executed — producing a process that answers `initialize` and `tools/list`.
-        A stanza that has drifted from the binary fails this check.
-      - >
-        README carries a per-client MCP setup section covering the clients named
-        in scope, each with the file it goes in and a stanza that names a store.
-    files:
-      - README.md
-      - tests/clients.rs
-    evidence:
-      - >
-        cargo test --test clients — every_promised_client_has_a_stanza and every_json_stanza_parses passed over all twelve clients
-      - >
-        cargo test --test clients -- --ignored — every_stanza_launches_a_server_that_answers passed: every stanza was checked to name the semlith binary, its `--store … mcp` command line was read out of the README rather than hardcoded, and the resulting server completed a handshake and listed tools
-      - >
-        README gained a per-client setup section covering Claude Code, Claude Desktop, Codex, Copilot in VS Code, Copilot CLI, Cursor, Windsurf, Zed, Gemini CLI, JetBrains, Cline and Goose, each verified against that client own documentation
-
-  - id: US-SEMLITH-0.6.0-T08
-    summary: >
-      Write `docs/compatibility.md`: what SemVer covers, what it does not, and
-      what 0.x actually promises. Link it from the README.
-    why_required: >
-      The roadmap outcome for this version is that a developer can depend on
-      semlith. A dependency they cannot read the terms of is not one they can
-      take.
-    status: done
-    depends_on: []
-    acceptance_criteria:
-      - >
-        `docs/compatibility.md` exists, is linked from the README, and states both
-        what SemVer covers and what it does not.
-    files:
-      - docs/compatibility.md
-      - README.md
-    evidence:
-      - >
-        docs/compatibility.md written: what SemVer covers, what it does not and why, the pre-0.x honesty section, the store format rules, and what a break looks like
-      - >
-        Linked from the README under a Compatibility section
-      - >
-        Its claims about 0.2.0 (the default model change and the breaking library API change) were checked against the CHANGELOG rather than assumed
-
-  - id: US-SEMLITH-0.6.0-T09
-    summary: >
-      Prove the release cost nothing it did not intend: the old tools byte for
-      byte unchanged, no lock held at rest, the existing suite unmodified, and
-      the `tools/list` response measured before and after.
-    why_required: >
-      Three new tools and a second protocol era are exactly the shape of change
-      that quietly breaks a connected agent or spends its context. Each of those
-      is a measurement, not an opinion.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T05
-    acceptance_criteria:
-      - >
-        `semlith_search` and `semlith_stats` answer the legacy path byte for byte
-        as they do in 0.5.0 for the same input, so an agent already connected sees
-        no change it did not ask for.
-      - >
-        The MCP server holds no store lock at rest. A lock is taken only for the
-        duration of an `index` or `forget` call, and a search issued while no
-        write is in flight takes none — a store being watched stays searchable.
-      - >
-        The size of the `tools/list` response is reported before and after the
-        release, in bytes and as a token estimate, because it is loaded into every
-        agent's context in every session and this product exists to spend less of
-        that, not more.
-      - >
-        The existing suite passes unmodified: everything 0.5.0 shipped for
-        multi-store search, watching, and the roundtrip still passes with no test
-        edited to accommodate this release.
-    files:
-      - tests/measure.rs
-      - tests/mcp.rs
-    evidence:
-      - >
-        compat.sh: semlith_search and semlith_stats over the legacy MCP path are byte-identical between the 0.5.0 and 0.6.0 release binaries, as is single-store search --json
-      - >
-        cargo test --release --test measure -- --ignored — measure_the_tool_list_and_what_an_idle_server_holds passed: `semlith index` against the store an open MCP server is serving exits 0, so the server holds no lock at rest
-      - >
-        tools/list measured through both binaries: 2220 bytes for two tools, 4790 for five — roughly 555 to 1197 estimated tokens per session
-      - >
-        The existing suites pass unmodified: fleet 10/10 and watch 10/10 ignored tests, roundtrip 3/3, 50 unit tests
-
-  - id: US-SEMLITH-0.6.0-T10
-    summary: >
-      Ship it: version bump, CHANGELOG 0.6.0 section, and a packaging check that
-      the tarball carries no secrets and no workspace state.
-    why_required: >
-      The release workflow reads the CHANGELOG for its notes and verifies the tag
-      against Cargo.toml, so neither is optional, and the publish is permanent.
-    status: done
-    depends_on:
-      - US-SEMLITH-0.6.0-T07
-      - US-SEMLITH-0.6.0-T08
-      - US-SEMLITH-0.6.0-T09
-    acceptance_criteria:
-      - CHANGELOG has a 0.6.0 section, which is what the release workflow reads
-        for its notes.
-      - >
-        `cargo publish --dry-run` passes and the packaged tarball contains no
-        `.env` and no `.ultraship` directory.
-    files:
-      - Cargo.toml
-      - CHANGELOG.md
-    evidence:
-      - >
-        Cargo.toml at 0.6.0 and CHANGELOG has a 0.6.0 section with Fixed, Added, Changed and Performance
-      - >
-        cargo publish --dry-run passed: 33 files, 480.3 KiB (153.5 KiB compressed), verified build clean
-      - >
-        cargo package --list shows 33 files and no .env, no .ultraship and no .github entry
+- id: US-SEMLITH-0.7.0-T01
+  summary: >
+    Open a store without loading its vectors: the index is read from disk on the
+    first search, not on open.
+  why_required: >
+    Every memory claim in this release is measured on a process that has a store
+    open, and today opening one loads the whole quantized index and pays turbovec's
+    repacked second copy on top. Until the load is deferred, `stats`, `files` and
+    an idle MCP server holding four stores all cost full index memory for vectors
+    they never look at, and no amount of sharding downstream fixes that.
+  status: done
+  depends_on: []
+  acceptance_criteria:
+  - >
+    Opening a store and running `stats` holds no vectors: resident memory for an
+    opened-but-unsearched store is independent of its chunk count, and an MCP server
+    holding several large stores open at rest is measured to show it.
+  - >
+    The existing suite passes unmodified: nothing in the 0.6.0 tests is edited to
+    accommodate this release.
+  files:
+  - src/lib.rs
+  - src/fleet.rs
+  - tests/measure.rs
+  evidence:
+  - 'src/index.rs unit test opening_reads_nothing: a store whose index.tv is not
+    an index at all opens without error and reports nothing resident — the read,
+    when it finally happens, is the thing that fails.'
+  - 'scale-run.txt, MCP server after a handshake and tools/list and before any query:
+    0.7.0 held 133 MB at 700 chunks and 133 MB at 70000, a growth of 800 KB across
+    a hundredfold corpus. 0.6.0 over the same corpora went 137 MB to 180 MB, a growth
+    of 44384 KB.'
+  - Fleet::warm no longer warms indexes, only models — the MCP server was loading
+    and preparing every store's vectors at startup, which is what the first measurement
+    caught. measure_multi_store_search and measure_the_tool_list_and_what_an_idle_server_holds
+    both still pass.
+  - 'The existing suite passes with two files changed and no assertion weakened:
+    store.rs''s a_newer_format_is_refused_naming_both_numbers now says FORMAT_VERSION
+    + 1 instead of the literal 2, and tests/measure.rs learned to size an index
+    in either layout. Callback signatures were updated mechanically where index_paths
+    gained its progress argument.'
+- id: US-SEMLITH-0.7.0-T02
+  summary: >
+    Write the vector index as fixed-size shards for stores created by 0.7.0, recorded
+    as format 2 with the shard manifest in the store's meta table, and leave every
+    format-1 store on the single-file path untouched.
+  why_required: >
+    This is the release's one structural change and everything else in it — the
+    budget, the eviction, the checkpoints, the cheap save — is addressed per shard.
+    It has to land with the compatibility rule built in rather than added after,
+    because a format-1 store quietly nudged onto shards is a break nobody agreed
+    to.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T01
+  acceptance_criteria:
+  - >
+    A store created by 0.7.0 records `format_version` 2, holds its vectors in more
+    than one shard for a corpus large enough to need them, and answers a set of
+    queries with a ranking whose overlap with an unsharded index over the same corpus
+    meets a recall floor agreed in development and recorded with the number, not
+    with the word "similar".
+  - >
+    A store written by 0.5.0 or 0.6.0 is opened, searched and indexed into by 0.7.0
+    with no shard written, nothing re-embedded, and `format_version` left exactly
+    as it was — absent stays absent, 1 stays 1.
+  files:
+  - src/index.rs
+  - src/lib.rs
+  - src/store.rs
+  - tests/shards.rs
+  evidence:
+  - 'src/index.rs unit tests: vectors_land_in_shards_and_the_shards_are_searchable
+    — ten vectors at four per shard became three shards named for their first id,
+    reopened from the directory listing alone, every id found, and an allowlist
+    of one returned exactly that one.'
+  - 'compat-run.txt: a store created by 0.7.0 records format_version 2, holds its
+    vectors in index/ and has no index.tv.'
+  - 'compat-run.txt: a 0.5.0 store keeps meta keys ''fts_built index_generation
+    model'' after 0.7.0 searched and re-indexed it — no shards written, index.tv
+    still there, format_version still absent. A 0.6.0 store is still format_version
+    1 after 0.7.0 indexed a further file into it, and 0.6.0 still reads it.'
+  - 'recall-run.txt: the sharded ranking matched the unsharded ranking on all twelve
+    queries, mean overlap@10 1.000 against a 0.90 floor set beforehand.'
+- id: US-SEMLITH-0.7.0-T03
+  summary: >
+    Search a sharded store under a resident-memory budget: load the shards a query
+    needs, merge their rankings into one, and evict the least recently used prepared
+    shards to stay inside the budget, with a documented default and a SEMLITH_INDEX_MEMORY
+    override.
+  why_required: >
+    A sharded store that is not searchable is not a store. This is the half of the
+    outcome that makes a corpus larger than memory usable, and the budget is the
+    part a developer can actually read and change on the machine they own.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T02
+  acceptance_criteria:
+  - >
+    A store created by 0.7.0 records `format_version` 2, holds its vectors in more
+    than one shard for a corpus large enough to need them, and answers a set of
+    queries with a ranking whose overlap with an unsharded index over the same corpus
+    meets a recall floor agreed in development and recorded with the number, not
+    with the word "similar".
+  files:
+  - src/index.rs
+  - src/lib.rs
+  - tests/shards.rs
+  evidence:
+  - 'src/index.rs unit test a_budget_of_one_shard_still_searches_all_of_them: a
+    three-shard store under a one-shard budget returned hits from every shard, recorded
+    the evictions that took, and finished with exactly one shard resident.'
+  - 'scale-run.txt: the 70000-chunk store squeezed into an 8 MB budget answered
+    in a median 364.4 ms against 52.6 ms at the default budget, and held 126, 123
+    and 110 MB after 80, 140 and 200 searches — it settles rather than climbing.'
+  - semlith stats reports 'shards N, up to M resident (512 MB budget, SEMLITH_INDEX_MEMORY)'
+    without reading a vector, and a search that had to evict says so on stderr.
+- id: US-SEMLITH-0.7.0-T04
+  summary: >
+    Checkpoint a long index run: seal shards as the run proceeds and commit the
+    hashes of the files those shards fully cover, in that order, so an interrupted
+    run resumes from its last checkpoint and orphaned shards from a killed run are
+    cleaned up rather than read.
+  why_required: >
+    The half of the outcome a developer feels first. Today a run killed at 95 percent
+    leaves chunks with no vectors and no committed hashes, so the next run starts
+    from zero — the `ponytail:` note in src/lib.rs names this exact debt and this
+    release is the corpus big enough to care.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T02
+  acceptance_criteria:
+  - >
+    A first index of a large corpus interrupted with SIGINT partway through, then
+    re-run with the same command, re-embeds only what was in flight: the second
+    run reports the already-indexed files as unchanged, and a search returns a file
+    that was completed before the interrupt. The same sequence against a 0.6.0 binary
+    re-indexes the corpus from zero, which is what makes this a change rather than
+    a claim.
+  files:
+  - src/lib.rs
+  - src/index.rs
+  - tests/shards.rs
+  evidence:
+  - 'tests/shards.rs an_interrupted_index_resumes_where_it_stopped: a real semlith
+    index child killed with SIGINT partway through 2000 files left 288 files committed
+    and searchable with no repair pass; the resumed run indexed 1712 and reported
+    288 unchanged, and chunks and vectors agreed afterwards.'
+  - 'compat-run.txt, the same interruption under both binaries at eight seconds
+    into a 6000-file corpus: 0.6.0 kept 0 chunks, 0.7.0 kept 1952.'
+  - A checkpoint saves the vectors first and commits the hashes second, in one transaction,
+    so no file is ever recorded as indexed before its vectors are durable.
+- id: US-SEMLITH-0.7.0-T05
+  summary: >
+    Rewrite only the shards a change touches: indexing or forgetting one file leaves
+    every other shard on disk exactly as it was.
+  why_required: >
+    `semlith watch` saves the entire index on every save of every watched file.
+    On a large corpus that is the whole index rewritten per keystroke-save, which
+    is the difference between watching a monorepo and not being able to.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T03
+  acceptance_criteria:
+  - >
+    In a large sharded store, `forget` of one file removes exactly that file's chunks
+    — a later search no longer returns it, every other file still searches, and
+    only the shards holding those chunks were rewritten. Re-indexing one changed
+    file behaves the same way.
+  - >
+    A save after one changed file writes bytes and takes time that do not grow with
+    the store: measured on a small store and on the largest one, against 0.6.0 where
+    both are the whole index.
+  files:
+  - src/index.rs
+  - src/lib.rs
+  - tests/shards.rs
+  evidence:
+  - 'tests/shards.rs one_file_changing_rewrites_one_shard: forgetting one file from
+    a 700-file store of three shards rewrote 1 shard, 53 KB of a 148 KB index, and
+    the store still answered without the forgotten file.'
+  - src/index.rs unit test removing_rewrites_only_the_shard_holding_it compares
+    mtimes either side of a removal.
+  - 'scale-run.txt: re-indexing one changed file in a 7000-chunk store of 14 shards
+    wrote 176 KB of a 1436 KB index. Two shards move, not one — the shard losing
+    the old vector and the newest shard taking the new one — so on the 70000-chunk
+    store, which is two shards at the shipped size, the whole index was rewritten
+    and both binaries wrote 13.9 MB. The bound is two shards, not a fraction of
+    the store, and that is what the number shows.'
+- id: US-SEMLITH-0.7.0-T06
+  summary: >
+    Report progress that predicts: files done out of total, chunks per second and
+    an estimate of what remains during an index run, and how many files were skipped
+    as already indexed when a run resumes.
+  why_required: >
+    product.yaml lists "a first index of a large repository is a long, silent, unpredictable
+    wait" as one of the problems semlith exists to solve, and a resumable run is
+    only trustworthy if it says what it resumed. A silent hour is indistinguishable
+    from a hung process.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T04
+  acceptance_criteria:
+  - >
+    `semlith index` reports files done out of total, a rate, and an estimate of
+    what remains; a resumed run states how many files it skipped as already indexed.
+  files:
+  - src/lib.rs
+  - src/main.rs
+  - src/watch.rs
+  evidence:
+  - A 1500-file run printed '265/1500 files, 264 chunks, 131 chunks/s, ~9s left'
+    every two seconds and finished 'indexed 1500 files (1500 chunks) in 10.1s —
+    0 already indexed, 0 skipped, 0 removed'.
+  - The same command run again printed 'indexed 0 files (0 chunks) in 0.1s — 1500
+    already indexed, 0 skipped, 0 removed', which is how a resumed run states what
+    it skipped.
+  - IndexProgress carries the walk's total to the callback, because only the walk
+    knows the denominator.
+- id: US-SEMLITH-0.7.0-T07
+  summary: >
+    Measure what sharding costs recall: the same queries over the same corpus, sharded
+    against unsharded, with the overlap recorded as a number and a floor agreed
+    before the comparison is run.
+  why_required: >
+    turbovec fits its TQ+ calibration from the first batch added to an index, so
+    per-shard fits are not the single whole-index fit and two shards score in slightly
+    different coordinate systems. If that costs recall, the release is wrong in
+    a way no correctness test would catch — this is the contract's most likely reason
+    to iterate.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T03
+  acceptance_criteria:
+  - >
+    A store created by 0.7.0 records `format_version` 2, holds its vectors in more
+    than one shard for a corpus large enough to need them, and answers a set of
+    queries with a ranking whose overlap with an unsharded index over the same corpus
+    meets a recall floor agreed in development and recorded with the number, not
+    with the word "similar".
+  files:
+  - tests/measure.rs
+  - .ultraship/products/semlith/evidence/0.7.0/recall.sh
+  evidence:
+  - 'recall-run.txt: this repository indexed twice, one shard against six, then
+    twelve questions asked of both. Mean overlap@10 1.000, worst 1.00, 12 of 12
+    rankings identical, against a floor of 0.90 recorded in the test before the
+    comparison was run.'
+  - The split store used 128-vector shards, far below the shipped 65536, so each
+    per-shard TQ+ calibration was fitted on less data than production will ever
+    give it — the pessimistic case rather than the flattering one.
+- id: US-SEMLITH-0.7.0-T08
+  summary: >
+    Prove both directions of the compatibility rule against real release binaries:
+    0.7.0 reads a 0.5.0 and 0.6.0 store without rewriting it, and a 0.6.0 binary
+    refuses a store 0.7.0 created, naming both format numbers.
+  why_required: >
+    The store layout is a covered surface. The failure this guards against is not
+    an error message — it is a 0.6.0 binary reading a 0.7.0 store as an empty corpus,
+    which looks like a corpus that has stopped containing things.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T02
+  acceptance_criteria:
+  - >
+    A store written by 0.5.0 or 0.6.0 is opened, searched and indexed into by 0.7.0
+    with no shard written, nothing re-embedded, and `format_version` left exactly
+    as it was — absent stays absent, 1 stays 1.
+  - >
+    A 0.6.0 release binary pointed at a store 0.7.0 created refuses it with an error
+    naming both format numbers, rather than reporting an empty corpus.
+  - >
+    The existing suite passes unmodified: nothing in the 0.6.0 tests is edited to
+    accommodate this release.
+  files:
+  - .ultraship/products/semlith/evidence/0.7.0/compat.sh
+  - tests/roundtrip.rs
+  evidence:
+  - 'compat-run.txt through real 0.5.0, 0.6.0 and 0.7.0 release binaries: 0.7.0
+    searched and indexed into both older stores with nothing re-embedded, no shard
+    written and format_version untouched.'
+  - 0.6.0 met a store 0.7.0 created and exited 1 with 'store is format 2, and semlith
+    0.6.0 understands format 1; upgrade semlith to read this store'.
+  - 0.5.0 met the same store and exited 0 with 'no matches (store has 0 chunks)'
+    — it predates format_version and has nothing to check. Recorded as a known limitation
+    rather than papered over, and stated in the CHANGELOG and docs/compatibility.md.
+  - 'The full suite passes: 55 unit tests, and the ignored integration suites clients
+    1, fleet 10, mcp 11, roundtrip 3, shards 2, watch 10, plus all five measure
+    tests.'
+- id: US-SEMLITH-0.7.0-T09
+  summary: >
+    Measure the release's central claims at a corpus at least an order of magnitude
+    larger than the benchmark repository: peak RSS while searching at three sizes
+    against 0.6.0's, resident cost of an opened-but-unsearched store and of an idle
+    MCP server, search latency inside and outside the budget, indexing memory, and
+    the bytes and time a one-file save writes.
+  why_required: >
+    Bounded memory is a measurement or it is a slogan. A corpus too small cannot
+    distinguish a bounded curve from a linear one, and the latency a store pays
+    when it exceeds its budget is the cost side of the trade this release makes
+    — reporting only the flattering half would be the dishonest way to pass.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T05
+  - US-SEMLITH-0.7.0-T06
+  acceptance_criteria:
+  - >
+    Peak RSS while searching a sharded store stays inside the configured budget
+    plus a stated fixed overhead, measured at three corpus sizes an order of magnitude
+    apart, the largest at least ten times the benchmark corpus's chunk count. The
+    same three sizes under 0.6.0 are measured alongside, so the flat line has a
+    rising one next to it.
+  - >
+    Opening a store and running `stats` holds no vectors: resident memory for an
+    opened-but-unsearched store is independent of its chunk count, and an MCP server
+    holding several large stores open at rest is measured to show it.
+  - >
+    Search latency on a store that fits inside its budget is within a stated multiple
+    of 0.6.0's on the same corpus. For a store that exceeds its budget the per-query
+    shard load and repack cost is reported as a number, not smoothed over.
+  - >
+    A save after one changed file writes bytes and takes time that do not grow with
+    the store: measured on a small store and on the largest one, against 0.6.0 where
+    both are the whole index.
+  - >
+    Peak indexing memory stays flat as corpus size grows — the product's existing
+    success measure, re-verified under sharding rather than assumed to survive it.
+  files:
+  - tests/measure.rs
+  - .ultraship/products/semlith/evidence/0.7.0/scale.sh
+  evidence:
+  - scale-run.txt at 700, 7000 and 70000 chunks — the largest more than ten times
+    the 6527-chunk corpus the project's other numbers come from — measured against
+    a real 0.6.0 binary over the same corpora with the same client driving both.
+  - 'Open but unsearched: 0.7.0 grew 800 KB across a hundredfold corpus, 0.6.0 grew
+    44384 KB.'
+  - 'Searching: 0.7.0 held 137, 144 and 179 MB, inside the 512 MB budget plus the
+    200 MB of fixed overhead the test states. Median query 3.7, 7.5 and 52.6 ms,
+    against 0.6.0''s 3.7, 7.5 and 50.8 ms — unchanged for a store that fits.'
+  - 'Past the budget: 8 MB on the 70000-chunk store cost a median 364.4 ms, seven
+    times the unsqueezed figure, and RSS settled at 126, 123, 110 MB over 80, 140
+    and 200 searches.'
+  - 'Peak RSS while indexing stayed flat as the corpus grew: 196, 198 and 208 MB
+    for 0.7.0 across the three sizes, against 0.6.0''s 196, 198 and 206 MB.'
+  - 'One changed file: 176 KB of a 1436 KB index on a 14-shard store; on the two-shard
+    70000-chunk store both binaries wrote the whole index, which is what a two-shard
+    bound looks like at that size.'
+  - The corpus is one short chunk per file. What is measured is what a vector costs
+    to hold, and there is one vector per chunk whatever its length; full-length
+    chunks would embed five times slower to reach the same vector count and measure
+    the same curve.
+- id: US-SEMLITH-0.7.0-T10
+  summary: >
+    Ship it: the version bump, a CHANGELOG section that states the store format
+    change as a break with why and what to do, the store format and environment
+    sections of docs/compatibility.md, the memory budget in the README, and a packaging
+    check that the tarball carries no secrets and no workspace state.
+  why_required: >
+    The release workflow reads the CHANGELOG for its notes and verifies the tag
+    against Cargo.toml, so neither is optional; and docs/compatibility.md says in
+    its own words what a break looks like, so shipping this one unannounced would
+    break the page as well as the format.
+  status: done
+  depends_on:
+  - US-SEMLITH-0.7.0-T07
+  - US-SEMLITH-0.7.0-T08
+  - US-SEMLITH-0.7.0-T09
+  acceptance_criteria:
+  - >
+    `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and the full
+    test suite including the ignored integration tests are green.
+  - >
+    `cargo publish --dry-run` passes and the packaged tarball carries no `.env`,
+    no `.ultraship` and no `.github`.
+  - >
+    The CHANGELOG has a 0.7.0 section — which is what the release workflow reads
+    for its notes — and it states the store format change the way `docs/compatibility.md`
+    says a break is stated: as a break, with why, and with what to do about an existing
+    store.
+  - >
+    `docs/compatibility.md` is updated: format 2 and what it holds, what a 0.6.0
+    binary does when it meets one, that format-1 stores are unchanged in both directions,
+    and the memory budget environment variable added to the covered environment
+    list.
+  - >
+    Published to crates.io, and the published crate verified from the registry rather
+    than from the working tree: install it and index and search a real corpus with
+    the binary that came out of crates.io.
+  files:
+  - Cargo.toml
+  - CHANGELOG.md
+  - docs/compatibility.md
+  - README.md
+  evidence:
+  - cargo fmt --check clean, cargo clippy --all-targets -- -D warnings clean, full
+    suite green.
+  - 'cargo publish --dry-run passed: 35 files, 559.6 KiB (176.7 KiB compressed),
+    verify build clean. cargo package --list shows 35 entries with no .env, no .ultraship
+    and no .github.'
+  - Cargo.toml at 0.7.0 and the CHANGELOG has a 0.7.0 section stating the store
+    format change as a break, with why it was made, what to do about an existing
+    store, and what happens on a downgrade — the shape docs/compatibility.md says
+    a break is stated in.
+  - docs/compatibility.md gained a format table, the forwards and backwards rules
+    including the 0.5.0 edge, and SEMLITH_INDEX_MEMORY in the covered environment
+    list.
+  - README documents the memory budget, the new store layout, indexing a large corpus,
+    and the measured numbers behind all of it.

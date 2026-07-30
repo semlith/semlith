@@ -129,7 +129,7 @@ pub fn run(
     // Catch up on whatever changed while nothing was watching. It is the same
     // incremental pass `semlith index` runs, so an unchanged tree costs a walk
     // and a hash per file, and nothing else.
-    let catch_up = store.index_walk(&roots, |path| progress(Progress::File(path)))?;
+    let catch_up = store.index_walk(&roots, |path, _| progress(Progress::File(path)))?;
     let (files, chunks, _) = store.stats()?;
     progress(Progress::Ready {
         catch_up,
@@ -158,7 +158,7 @@ pub fn run(
         }
 
         let started = Instant::now();
-        let report = store.index_changed(paths, |path| progress(Progress::File(path)))?;
+        let report = store.index_changed(paths, |path, _| progress(Progress::File(path)))?;
         if report.indexed > 0 || report.removed > 0 {
             progress(Progress::Batch(report, started.elapsed()));
         }

@@ -77,7 +77,7 @@ fn indexing_a_watched_store_is_refused_and_names_the_watcher() {
     let mut second = Semlith::open(store.path(), None).unwrap();
     second.quiet = true;
     let err = second
-        .index_paths(&[corpus.path().to_path_buf()], |_| {})
+        .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
         .unwrap_err()
         .to_string();
     assert!(err.contains("being indexed by"), "unhelpful error: {err}");
@@ -501,7 +501,7 @@ fn an_interrupted_watcher_leaves_the_store_whole() {
         // next run — never a file with chunks and no vectors.
         let mut s = Semlith::open(store.path(), None).unwrap();
         s.quiet = true;
-        s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
             .unwrap();
         let (_, chunks, _) = s.stats().unwrap();
         assert_eq!(
@@ -642,7 +642,7 @@ fn wait_for(store: &Path, query: &str, name: &str) -> bool {
 fn index(store: &Path, corpus: &Path) {
     let mut s = Semlith::open(store, None).unwrap();
     s.quiet = true;
-    s.index_paths(&[corpus.to_path_buf()], |_| {}).unwrap();
+    s.index_paths(&[corpus.to_path_buf()], |_, _| {}).unwrap();
 }
 
 fn write(dir: &Path, name: &str, body: &str) {
