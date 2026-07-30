@@ -6,8 +6,8 @@
 //!
 //! Everything written to stdout is protocol. Diagnostics go to stderr.
 
-use crate::Semlith;
 use crate::filter::Filter;
+use crate::fleet::Fleet;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
@@ -15,8 +15,8 @@ use std::io::{BufRead, Write};
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Read requests from `input` until EOF, answering on `output`.
-pub fn serve(store: &mut Semlith, input: impl BufRead, mut output: impl Write) -> Result<()> {
-    store.quiet = true;
+pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) -> Result<()> {
+    stores.quiet = true;
 
     for line in input.lines() {
         let line = line?;
@@ -39,13 +39,13 @@ pub fn serve(store: &mut Semlith, input: impl BufRead, mut output: impl Write) -
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let result = dispatch(store, method, &params);
+        let result = dispatch(stores, method, &params);
         respond(&mut output, &id, result)?;
     }
     Ok(())
 }
 
-fn dispatch(store: &mut Semlith, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+fn dispatch(stores: &mut Fleet, method: &str, params: &Value) -> Result<Value, (i64, String)> {
     match method {
         "initialize" => {
             let version = params
@@ -59,13 +59,23 @@ fn dispatch(store: &mut Semlith, method: &str, params: &Value) -> Result<Value, 
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
-        "tools/call" => call_tool(store, params),
+        "tools/list" => Ok(json!({ "tools": tools(stores) })),
+        "tools/call" => call_tool(stores, params),
         other => Err((-32601, format!("unknown method: {other}"))),
     }
 }
 
-fn tools() -> Value {
+fn tools(stores: &Fleet) -> Value {
+    // An agent cannot narrow to a store whose name it has never seen, so the
+    // open stores are part of the tool description rather than something to
+    // discover by trial.
+    let open = stores.labels().join(", ");
+    let store_arg = format!(
+        "Restrict the search to these stores by name. Open stores: {open}. \
+         Omit to search all of them, which is usually right — narrow only when \
+         you already know which corpus holds the answer."
+    );
+
     json!([
         {
             "name": "semlith_search",
@@ -111,6 +121,11 @@ fn tools() -> Value {
                              c, cpp, csharp, css, go, haskell, html, java, javascript, json, \
                              kotlin, lua, markdown, ocaml, php, python, ruby, rust, scala, \
                              shell, sql, swift, toml, typescript, yaml."
+                    },
+                    "store": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": store_arg
                     }
                 },
                 "required": ["query"]
@@ -119,15 +134,16 @@ fn tools() -> Value {
         {
             "name": "semlith_stats",
             "description":
-                "Report what the local semlith store currently contains: file count, chunk \
-                 count, indexed bytes, and the embedding model. Use this to check whether a \
-                 corpus is indexed before searching it.",
+                "Report what the local semlith stores currently contain: file count, chunk \
+                 count, indexed bytes, and the embedding model, one line per store. Use this \
+                 to check whether a corpus is indexed before searching it, and to learn the \
+                 store names that semlith_search's store argument accepts.",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
 
-fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)> {
+fn call_tool(stores: &mut Fleet, params: &Value) -> Result<Value, (i64, String)> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -149,6 +165,10 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
 
+            // A store name the agent guessed is the agent's mistake to correct,
+            // so it comes back in-band with the names that exist.
+            let only = strings(&args, "store");
+
             // Told apart because an agent that scoped to the wrong subsystem
             // should widen the filter, not conclude the corpus is empty. A
             // failure here is a broken store, not an empty selection, and must
@@ -156,7 +176,7 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
             let selected = if filter.is_empty() {
                 1
             } else {
-                match store.matching_files(&filter) {
+                match stores.matching_files(&filter) {
                     Ok(n) => n,
                     Err(e) => return Ok(tool_error(&format!("search failed: {e}"))),
                 }
@@ -166,24 +186,39 @@ fn call_tool(store: &mut Semlith, params: &Value) -> Result<Value, (i64, String)
                 "No indexed file matches that path/ext/lang filter. Try again without it."
                     .to_string()
             } else {
-                match store.search_filtered(query, k.clamp(1, 50), &filter) {
+                match stores.search_in(Some(&only), query, k.clamp(1, 50), &filter) {
                     Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
                     Ok(hits) => render(&hits),
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
-                    Err(e) => return Ok(tool_error(&format!("search failed: {e}"))),
+                    Err(e) => return Ok(tool_error(&e.to_string())),
                 }
             }
         }
-        "semlith_stats" => match store.stats() {
-            Ok((files, chunks, bytes)) => format!(
-                "{files} files, {chunks} chunks, {} indexed, model {} ({} dim)",
-                crate::human_bytes(bytes),
-                store.model(),
-                store.dim(),
-            ),
-            Err(e) => return Ok(tool_error(&format!("stats failed: {e}"))),
-        },
+        "semlith_stats" => {
+            let many = stores.len() > 1;
+            let mut lines = Vec::new();
+            for (label, store) in stores.each() {
+                let (files, chunks, bytes) = match store.stats() {
+                    Ok(s) => s,
+                    Err(e) => return Ok(tool_error(&format!("stats failed: {e}"))),
+                };
+                let body = format!(
+                    "{files} files, {chunks} chunks, {} indexed, model {} ({} dim)",
+                    crate::human_bytes(bytes),
+                    store.model(),
+                    store.dim(),
+                );
+                // One store answers exactly as it did before stores could be
+                // combined; a name in front of it would only cost tokens.
+                lines.push(if many {
+                    format!("{label}: {body}")
+                } else {
+                    body
+                });
+            }
+            lines.join("\n")
+        }
         other => return Err((-32602, format!("unknown tool: {other}"))),
     };
 
@@ -212,8 +247,15 @@ fn tool_error(message: &str) -> Value {
 fn render(hits: &[crate::Hit]) -> String {
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
+        // The store, when there is more than one, goes in front of the path:
+        // one short word, and without it an excerpt from the client is
+        // indistinguishable from one from the service.
+        let from = match &h.store {
+            Some(label) => format!("{label} "),
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "[{}] {}:{}-{} (score {:.3})\n{}\n\n",
+            "[{}] {from}{}:{}-{} (score {:.3})\n{}\n\n",
             i + 1,
             h.path,
             h.start_line,
