@@ -116,7 +116,7 @@ fn an_interrupted_index_resumes_where_it_stopped() {
     let mut second = Semlith::open(&store, None).unwrap();
     second.quiet = true;
     let report = second
-        .index_paths(&[dir.path().to_path_buf()], |_| {})
+        .index_paths(&[dir.path().to_path_buf()], |_, _| {})
         .unwrap();
     println!(
         "resumed run: {} indexed, {} unchanged of {} files",
@@ -139,7 +139,12 @@ fn an_interrupted_index_resumes_where_it_stopped() {
     );
     let mut reader = Semlith::open(&store, None).unwrap();
     reader.quiet = true;
-    assert!(!reader.search("ownership and retries", 5).unwrap().is_empty());
+    assert!(
+        !reader
+            .search("ownership and retries", 5)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// The release's second promise: changing one file writes one shard.

@@ -157,15 +157,24 @@ fn main() -> Result<()> {
             };
 
             let started = Instant::now();
-            let report = store.index_paths(&roots, |path| {
-                if !quiet {
-                    eprintln!("  + {}", display(path));
+            // Throttled, not per file: a corpus large enough to need an
+            // estimate is one where a line per file is the noise the estimate
+            // is trying to cut through.
+            let mut spoke = Instant::now();
+            let report = store.index_paths(&roots, |path, p| {
+                if quiet {
+                    return;
+                }
+                eprintln!("  + {}", display(path));
+                if spoke.elapsed() >= PROGRESS_INTERVAL {
+                    spoke = Instant::now();
+                    eprintln!("    {}", predict(p, started.elapsed()));
                 }
             })?;
 
             let (files, chunks, bytes) = store.stats()?;
             eprintln!(
-                "indexed {} files ({} chunks) in {:.1}s — {} unchanged, {} skipped, {} removed",
+                "indexed {} files ({} chunks) in {:.1}s — {} already indexed, {} skipped, {} removed",
                 report.indexed,
                 report.chunks,
                 started.elapsed().as_secs_f32(),
@@ -457,6 +466,39 @@ fn main() -> Result<()> {
 
 /// Paths are stored absolute; show them relative to the cwd when possible,
 /// which is both shorter and directly usable as an editor target.
+/// How often an index run says where it has got to.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Where the run is, how fast it is going, and how much longer it has.
+///
+/// The estimate is the rate so far applied to the files not yet reached, which
+/// is wrong whenever the rest of the corpus does not look like the part already
+/// walked — so it is printed as an approximation and never as a countdown. A
+/// wrong estimate is still worth far more than a silent hour.
+fn predict(p: semlith::IndexProgress, elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs_f32().max(0.001);
+    let rate = p.chunks as f32 / secs;
+    let left = p.total.saturating_sub(p.scanned);
+    let per_file = secs / p.scanned.max(1) as f32;
+    format!(
+        "{}/{} files, {} chunks, {rate:.0} chunks/s, ~{} left",
+        p.scanned,
+        p.total,
+        p.chunks,
+        human_duration(left as f32 * per_file),
+    )
+}
+
+fn human_duration(secs: f32) -> String {
+    if secs >= 3600.0 {
+        format!("{:.1}h", secs / 3600.0)
+    } else if secs >= 60.0 {
+        format!("{:.0}m", secs / 60.0)
+    } else {
+        format!("{secs:.0}s")
+    }
+}
+
 fn display(path: &std::path::Path) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     path.strip_prefix(&cwd)

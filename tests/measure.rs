@@ -55,7 +55,7 @@ fn measure_the_watcher() {
     {
         let mut s = Semlith::open(store.path(), None).unwrap();
         s.quiet = true;
-        s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
             .unwrap();
     }
     println!("initial index: {:.1}s", indexed.elapsed().as_secs_f32());
@@ -208,7 +208,7 @@ fn measure_multi_store_search() {
         {
             let mut s = semlith::Semlith::open(&store, None).unwrap();
             s.quiet = true;
-            s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+            s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
                 .unwrap();
         }
         println!("store {n}: {STORE_FILES} files of {topic}");
@@ -322,7 +322,7 @@ fn measure_the_tool_list_and_what_an_idle_server_holds() {
     {
         let mut s = Semlith::open(&store, None).unwrap();
         s.quiet = true;
-        s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
             .unwrap();
     }
 
