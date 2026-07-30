@@ -44,7 +44,7 @@ map.
 walk paths ──▶ read bytes ──▶ hash ──▶ unchanged? ──▶ skip
                    │
                    ▼
-              extract text  (PDF → pdf-extract, else UTF-8)
+              extract text  (by extension: PDF, documents, else UTF-8)
                    │
                    ▼
               chunk_text()  (line-aligned, ≤800 chars, 2 lines overlap)
@@ -80,6 +80,31 @@ eviction would eventually collide an old vector with a new chunk's id.
 
 **The index is written via a temp file and a rename**, so an interrupted save
 cannot leave a truncated `index.tv` behind.
+
+## Extraction
+
+Everything a file has to survive before it can be chunked happens in one
+function, `chunk::extract`, and it dispatches on the extension before it looks
+at a byte. That ordering is load-bearing twice over. A `.docx`, `.pptx`,
+`.xlsx` or any OpenDocument file is a ZIP archive, so the NUL-byte check that
+rejects binaries would reject every document if it ran first; and a corpus of
+ordinary source, which has none of these extensions, pays one string comparison
+per file and never enters a parser.
+
+The readers live in `src/formats.rs`, private because what semlith extracts
+from a document is documented behaviour rather than API. Six of the nine
+formats are ZIP archives of XML, so they share one bounded archive reader and
+one tag scanner rather than carrying six parsers; a notebook is JSON, which
+serde_json already handles; HTML is a character scan that removes tags while
+keeping every newline the source had, which is what lets a hit into an HTML
+page still name the line of the file on disk.
+
+Two rules hold across all of them. A file that cannot be read — corrupt,
+truncated, encrypted, or expanding past the 32 MiB decompression cap — is
+`None`, which the indexer counts as skipped and walks past, exactly as it has
+always treated an unreadable PDF. And a panic inside any extractor is caught at
+this boundary, because these readers sit downstream of a decompressor and a
+document somebody else wrote.
 
 ## Chunking
 
@@ -330,6 +355,7 @@ machine; a second layer of parallelism only contends with it.
 | fastembed | Runs sentence-transformer models on CPU via ONNX Runtime, with model download and tokenization handled. |
 | ignore | The `ripgrep` walker. Gets `.gitignore` semantics right, which is harder than it looks. |
 | pdf-extract | Pure Rust, no external binary. |
+| zip | Six of the document formats — `.docx`, `.pptx`, `.xlsx`, `.odt`, `.odp`, `.ods` — are ZIP archives of XML. Inflating one by hand is a decompressor, and that is not a thing to write. Taken with `default-features = false` and only `deflate-flate2`, so it is the reader and none of the compressors or ciphers. |
 | blake3 | Fast enough that hashing every file on every run is free. |
 | hf-hub | Fetches the default model's weights. fastembed uses it internally but does not expose it, and the default model is not one fastembed knows. |
 | libc | `sysctlbyname` to count performance cores on Apple silicon, and the `SIGINT`/`SIGTERM` handler that stops `watch` at a batch boundary. |

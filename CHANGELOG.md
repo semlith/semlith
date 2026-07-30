@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-30
+
+The documents a corpus is actually made of. A notebook, a Word file, a slide
+deck, a spreadsheet or an HTML page is now read as the text a person opening it
+would see, rather than as its markup, its JSON, or not at all.
+
+### Added
+
+- **Nine more formats, behind the same extraction the PDF reader already sat
+  behind.** No new command and no new flag: `semlith index` reads them because
+  it walked past them.
+
+  | Extension | What is taken from it | Markers |
+  | --- | --- | --- |
+  | `.ipynb` | Every cell in notebook order, source and outputs. Stream output and a result's `text/plain` are kept, truncated at 2000 characters each; images, widgets and other MIME types are dropped. | `# Cell 3 (code)`, `# Output:` |
+  | `.html`, `.htm` | The page's text. Tags go, `<script>` and `<style>` contents go with them, character entities are decoded. | — |
+  | `.docx` | Paragraphs in document order, one per line; a table row's cells tab-separated. | — |
+  | `.pptx` | Each slide's text, slides in numeric order. Speaker notes are not included. | `# Slide 11` |
+  | `.xlsx` | Each sheet in workbook order, a line per row, tab-separated cells, shared and inline strings resolved. | `## Sheet: Q3 Notes` |
+  | `.odt`, `.odp`, `.ods` | The same, from OpenDocument's `content.xml`. | `# Slide 2 (Intro)`, `## Sheet: Q3 Notes` |
+
+  A marker exists wherever a format has a division a line number cannot
+  express, so an excerpt says which slide or which cell it came from.
+
+  Extracted HTML keeps every newline the source had, including the ones inside
+  the tags that were removed. That is what keeps a hit's `file:line` range
+  pointing at the line of the file on disk where the sentence lives, rather than
+  at a line number that only exists after extraction. A spreadsheet is indexed
+  as its cached cell values; formulas are not evaluated.
+
+- **A cap on what an archive may decompress to: 32 MiB of text.** Six of the
+  nine formats are ZIP archives, and the existing 8 MiB file cap only bounds the
+  compressed file on disk.
+
+  *Why.* A few hundred kilobytes of zeros expand to gigabytes. Without a bound
+  on what comes out, the size of a run's largest allocation would be chosen by
+  whoever wrote the file rather than by semlith. 32 MiB is more text than any
+  real document holds and small enough that reaching it is a decision.
+
+- **`zip` 8.6.0** (MIT), with `default-features = false` and only
+  `deflate-flate2` — the decompressor and nothing else, no compressors and no
+  ciphers.
+
+### Changed
+
+- **HTML files and notebooks are indexed differently than before, not just
+  additionally.** Under 0.7.0 an `.html` file was indexed as its raw markup and
+  a notebook as its raw JSON; both are now indexed as their text.
+
+  *Why.* A notebook chunk was mostly `"cell_type"`, `"outputs"` and escaped
+  newlines, and an HTML chunk was mostly attributes and closing tags. What a
+  person is searching for is the third line of the fourth cell, or the sentence
+  in the paragraph — so that is what gets embedded.
+
+  *What to do.* Nothing for files indexed from now on. But indexing is keyed on
+  content hashes, so a file already in a store is not re-read while its contents
+  are unchanged: an existing store keeps its old markup and JSON chunks for
+  those files until they change or the store is rebuilt. To convert one file,
+  `semlith forget <PATH>` — it drops the file's chunks and its recorded hash, so
+  the next `index` run reads it afresh. It takes exactly one path and no globs,
+  so for a corpus of them the shorter route is to delete the store directory and
+  index again. Neither is urgent; a stale chunk is worse retrieval, not a
+  broken store.
+
+- **A document that cannot be read is a skipped file.** Corrupt, truncated,
+  password-protected, or over a cap — it lands in the run's `skipped` total,
+  exactly as an unreadable PDF has since 0.1.0, and the run still exits 0 with
+  every other file indexed. A panic inside an extractor is caught and becomes a
+  skipped file too: these readers sit downstream of a decompressor and a
+  document somebody else wrote, and one bad file should not end a run that is
+  minutes from finishing.
+
+- **No store format change and no migration.** `format_version` is untouched, a
+  0.8.0 store is readable by 0.7.0 and a 0.7.0 store by 0.8.0, and downgrading
+  loses the new formats and nothing else.
+
 ## [0.7.0] - 2026-07-30
 
 A corpus larger than a repository. The first index of one says where it has got
@@ -475,7 +551,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/semlith/semlith/releases/tag/v0.8.0
 [0.7.0]: https://github.com/semlith/semlith/releases/tag/v0.7.0
 [0.6.0]: https://github.com/semlith/semlith/releases/tag/v0.6.0
 [0.5.0]: https://github.com/semlith/semlith/releases/tag/v0.5.0

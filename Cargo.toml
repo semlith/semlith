@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -27,6 +27,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 turbovec = "0.9.0"
 notify = "8.2.0"
+# Reading only: `deflate-flate2` is the decompressor and nothing else. The
+# default feature set adds every compressor and cipher the format allows, none
+# of which semlith needs to read a document.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
