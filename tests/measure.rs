@@ -171,6 +171,161 @@ fn measure_the_watcher() {
     watcher.stop();
 }
 
+/// Files per store in the multi-store fixture. Three of these is the same order
+/// of magnitude as the watcher corpus above, so the two sets of numbers are
+/// comparable.
+const STORE_FILES: usize = 300;
+
+/// Searches per configuration. Enough that one slow first query does not decide
+/// the number.
+const SEARCHES: usize = 20;
+
+/// What adding a store costs: query embeds, latency, and resident memory.
+///
+/// "One embed per model, not one per store" and "not three copies of the model"
+/// are both true in the design and cheap to get wrong in the code, so they are
+/// counted and measured rather than claimed.
+#[test]
+#[ignore = "takes minutes and downloads an embedding model on first run"]
+fn measure_multi_store_search() {
+    let mut corpora = Vec::new();
+    let mut stores = Vec::new();
+    for (n, topic) in ["fermentation", "ownership", "retries"].iter().enumerate() {
+        let corpus = tempfile::tempdir().unwrap();
+        for i in 0..STORE_FILES {
+            fs::write(
+                corpus.path().join(format!("note_{i:04}.md")),
+                format!(
+                    "Note {i} about {topic}. Described at moderate length so the \
+                     chunk is worth embedding, and so a store of {STORE_FILES} \
+                     files is a realistic size.\n"
+                ),
+            )
+            .unwrap();
+        }
+        let store = corpus.path().join(".semlith");
+        {
+            let mut s = semlith::Semlith::open(&store, None).unwrap();
+            s.quiet = true;
+            s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+                .unwrap();
+        }
+        println!("store {n}: {STORE_FILES} files of {topic}");
+        stores.push(store);
+        corpora.push(corpus);
+    }
+
+    println!("\n--- query embeds per search");
+    let mut fleet = semlith::fleet::Fleet::open(&stores).unwrap();
+    fleet.quiet = true;
+    fleet.warm().unwrap();
+    let before = fleet.query_embeds();
+    let _ = fleet.search("how does this work", 8).unwrap();
+    let embeds = fleet.query_embeds() - before;
+    println!("3 same-model stores, 1 search: {embeds} query embed(s)");
+    assert_eq!(
+        embeds, 1,
+        "a search embedded the query {embeds} times over 3 stores that share a model"
+    );
+
+    println!("\n--- latency by store count");
+    let mut previous = None;
+    for count in 1..=stores.len() {
+        let mut fleet = semlith::fleet::Fleet::open(&stores[..count]).unwrap();
+        fleet.quiet = true;
+        fleet.warm().unwrap();
+        // Warm query: the first search of a process pays for the tokenizer's
+        // first allocation, and that is not what is being measured.
+        let _ = fleet.search("a warming query", 8).unwrap();
+
+        let mut times = Vec::new();
+        for i in 0..SEARCHES {
+            let started = Instant::now();
+            let _ = fleet
+                .search(&format!("how is retry backoff described {i}"), 8)
+                .unwrap();
+            times.push(started.elapsed());
+        }
+        times.sort();
+        let median = times[times.len() / 2];
+        let increment = match previous {
+            Some(p) => format!(", +{:.1}ms per store", (median - p).as_secs_f64() * 1000.0),
+            None => String::new(),
+        };
+        println!(
+            "{count} store(s): median {:.1}ms over {SEARCHES} searches{increment}",
+            median.as_secs_f64() * 1000.0
+        );
+        previous = Some(median);
+    }
+
+    println!("\n--- resident memory of a reader");
+    // Real server processes, because the claim is about what an agent's MCP
+    // server costs, and one loaded model is most of it.
+    let one = McpServer::start(&stores[..1]);
+    let three = McpServer::start(&stores);
+    let one_rss = one.rss_kb();
+    let three_rss = three.rss_kb();
+    println!(
+        "mcp on 1 store: {} MB; on 3 stores: {} MB (+{} MB)",
+        one_rss / 1024,
+        three_rss / 1024,
+        three_rss.saturating_sub(one_rss) / 1024,
+    );
+    // Three copies of the weights would be roughly three times a one-store
+    // server. Half again as much is the ceiling this asserts: the extra is two
+    // more SQLite connections and two more vector indexes, not two more models.
+    assert!(
+        three_rss < one_rss + one_rss / 2,
+        "3 stores cost {} MB against {} MB for one — that looks like three models",
+        three_rss / 1024,
+        one_rss / 1024,
+    );
+    one.stop();
+    three.stop();
+}
+
+/// A real `semlith mcp` process, for measuring what an agent's server costs.
+struct McpServer {
+    child: Child,
+}
+
+impl McpServer {
+    fn start(stores: &[std::path::PathBuf]) -> Self {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        for store in stores {
+            cmd.arg("--store").arg(store);
+        }
+        let child = cmd
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        // The server warms every model before its first tool call, so give it
+        // time to have paid that cost before its memory is read.
+        thread::sleep(Duration::from_secs(15));
+        Self { child }
+    }
+
+    fn rss_kb(&self) -> u64 {
+        let out = Command::new("ps")
+            .args(["-o", "rss=", "-p", &self.child.id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    fn stop(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// The `index_generation` meta key, which counts index.tv rewrites.
 fn generation(store: &Path) -> i64 {
     let s = Semlith::open(store, None).unwrap();
