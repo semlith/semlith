@@ -270,6 +270,12 @@ fn archive(bytes: &[u8]) -> Option<Archive<'_>> {
 /// around the cap by holding a thousand entries just under it.
 fn entry(zip: &mut Archive<'_>, name: &str, budget: &mut u64) -> Option<String> {
     let file = zip.by_name(name).ok()?;
+    // What the entry says it expands to, before a byte of it is inflated. An
+    // archive is free to lie here, which is why the read below is bounded too —
+    // but an honest one that is simply enormous costs nothing to refuse.
+    if file.size() > *budget {
+        return None;
+    }
     let mut buf = Vec::new();
     // One byte past the budget, so filling it exactly is distinguishable from
     // running past it.
