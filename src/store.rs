@@ -311,8 +311,20 @@ pub fn chunk(db: &Connection, id: u64) -> Result<Option<ChunkRow>> {
 }
 
 pub fn all_paths(db: &Connection) -> Result<Vec<String>> {
-    let mut stmt = db.prepare("SELECT path FROM files ORDER BY path")?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    filtered_paths(db, &[])
+}
+
+/// Indexed paths whose file matches `groups`, in path order.
+///
+/// The same predicate the search halves are built on, so "which files would
+/// this filter reach" and "which files did this filter search" cannot drift
+/// apart and give an agent two different answers about one store.
+pub fn filtered_paths(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<String>> {
+    let (predicate, binds) = glob_predicate(groups);
+    let sql = format!("SELECT f.path FROM files f WHERE {predicate} ORDER BY f.path");
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.into_iter().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
