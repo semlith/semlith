@@ -11,7 +11,7 @@ tasks:
     repacked second copy on top. Until the load is deferred, `stats`, `files` and
     an idle MCP server holding four stores all cost full index memory for vectors
     they never look at, and no amount of sharding downstream fixes that.
-  status: todo
+  status: done
   depends_on: []
   acceptance_criteria:
   - >
@@ -25,7 +25,23 @@ tasks:
   - src/lib.rs
   - src/fleet.rs
   - tests/measure.rs
-  evidence: []
+  evidence:
+  - 'src/index.rs unit test opening_reads_nothing: a store whose index.tv is not
+    an index at all opens without error and reports nothing resident — the read,
+    when it finally happens, is the thing that fails.'
+  - 'scale-run.txt, MCP server after a handshake and tools/list and before any query:
+    0.7.0 held 133 MB at 700 chunks and 133 MB at 70000, a growth of 800 KB across
+    a hundredfold corpus. 0.6.0 over the same corpora went 137 MB to 180 MB, a growth
+    of 44384 KB.'
+  - Fleet::warm no longer warms indexes, only models — the MCP server was loading
+    and preparing every store's vectors at startup, which is what the first measurement
+    caught. measure_multi_store_search and measure_the_tool_list_and_what_an_idle_server_holds
+    both still pass.
+  - 'The existing suite passes with two files changed and no assertion weakened:
+    store.rs''s a_newer_format_is_refused_naming_both_numbers now says FORMAT_VERSION
+    + 1 instead of the literal 2, and tests/measure.rs learned to size an index
+    in either layout. Callback signatures were updated mechanically where index_paths
+    gained its progress argument.'
 - id: US-SEMLITH-0.7.0-T02
   summary: >
     Write the vector index as fixed-size shards for stores created by 0.7.0, recorded
@@ -37,7 +53,7 @@ tasks:
     It has to land with the compatibility rule built in rather than added after,
     because a format-1 store quietly nudged onto shards is a break nobody agreed
     to.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T01
   acceptance_criteria:
@@ -56,7 +72,19 @@ tasks:
   - src/lib.rs
   - src/store.rs
   - tests/shards.rs
-  evidence: []
+  evidence:
+  - 'src/index.rs unit tests: vectors_land_in_shards_and_the_shards_are_searchable
+    — ten vectors at four per shard became three shards named for their first id,
+    reopened from the directory listing alone, every id found, and an allowlist
+    of one returned exactly that one.'
+  - 'compat-run.txt: a store created by 0.7.0 records format_version 2, holds its
+    vectors in index/ and has no index.tv.'
+  - 'compat-run.txt: a 0.5.0 store keeps meta keys ''fts_built index_generation
+    model'' after 0.7.0 searched and re-indexed it — no shards written, index.tv
+    still there, format_version still absent. A 0.6.0 store is still format_version
+    1 after 0.7.0 indexed a further file into it, and 0.6.0 still reads it.'
+  - 'recall-run.txt: the sharded ranking matched the unsharded ranking on all twelve
+    queries, mean overlap@10 1.000 against a 0.90 floor set beforehand.'
 - id: US-SEMLITH-0.7.0-T03
   summary: >
     Search a sharded store under a resident-memory budget: load the shards a query
@@ -67,7 +95,7 @@ tasks:
     A sharded store that is not searchable is not a store. This is the half of the
     outcome that makes a corpus larger than memory usable, and the budget is the
     part a developer can actually read and change on the machine they own.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T02
   acceptance_criteria:
@@ -81,7 +109,15 @@ tasks:
   - src/index.rs
   - src/lib.rs
   - tests/shards.rs
-  evidence: []
+  evidence:
+  - 'src/index.rs unit test a_budget_of_one_shard_still_searches_all_of_them: a
+    three-shard store under a one-shard budget returned hits from every shard, recorded
+    the evictions that took, and finished with exactly one shard resident.'
+  - 'scale-run.txt: the 70000-chunk store squeezed into an 8 MB budget answered
+    in a median 364.4 ms against 52.6 ms at the default budget, and held 126, 123
+    and 110 MB after 80, 140 and 200 searches — it settles rather than climbing.'
+  - semlith stats reports 'shards N, up to M resident (512 MB budget, SEMLITH_INDEX_MEMORY)'
+    without reading a vector, and a search that had to evict says so on stderr.
 - id: US-SEMLITH-0.7.0-T04
   summary: >
     Checkpoint a long index run: seal shards as the run proceeds and commit the
@@ -93,7 +129,7 @@ tasks:
     leaves chunks with no vectors and no committed hashes, so the next run starts
     from zero — the `ponytail:` note in src/lib.rs names this exact debt and this
     release is the corpus big enough to care.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T02
   acceptance_criteria:
@@ -108,7 +144,15 @@ tasks:
   - src/lib.rs
   - src/index.rs
   - tests/shards.rs
-  evidence: []
+  evidence:
+  - 'tests/shards.rs an_interrupted_index_resumes_where_it_stopped: a real semlith
+    index child killed with SIGINT partway through 2000 files left 288 files committed
+    and searchable with no repair pass; the resumed run indexed 1712 and reported
+    288 unchanged, and chunks and vectors agreed afterwards.'
+  - 'compat-run.txt, the same interruption under both binaries at eight seconds
+    into a 6000-file corpus: 0.6.0 kept 0 chunks, 0.7.0 kept 1952.'
+  - A checkpoint saves the vectors first and commits the hashes second, in one transaction,
+    so no file is ever recorded as indexed before its vectors are durable.
 - id: US-SEMLITH-0.7.0-T05
   summary: >
     Rewrite only the shards a change touches: indexing or forgetting one file leaves
@@ -117,7 +161,7 @@ tasks:
     `semlith watch` saves the entire index on every save of every watched file.
     On a large corpus that is the whole index rewritten per keystroke-save, which
     is the difference between watching a monorepo and not being able to.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T03
   acceptance_criteria:
@@ -134,7 +178,18 @@ tasks:
   - src/index.rs
   - src/lib.rs
   - tests/shards.rs
-  evidence: []
+  evidence:
+  - 'tests/shards.rs one_file_changing_rewrites_one_shard: forgetting one file from
+    a 700-file store of three shards rewrote 1 shard, 53 KB of a 148 KB index, and
+    the store still answered without the forgotten file.'
+  - src/index.rs unit test removing_rewrites_only_the_shard_holding_it compares
+    mtimes either side of a removal.
+  - 'scale-run.txt: re-indexing one changed file in a 7000-chunk store of 14 shards
+    wrote 176 KB of a 1436 KB index. Two shards move, not one — the shard losing
+    the old vector and the newest shard taking the new one — so on the 70000-chunk
+    store, which is two shards at the shipped size, the whole index was rewritten
+    and both binaries wrote 13.9 MB. The bound is two shards, not a fraction of
+    the store, and that is what the number shows.'
 - id: US-SEMLITH-0.7.0-T06
   summary: >
     Report progress that predicts: files done out of total, chunks per second and
@@ -145,7 +200,7 @@ tasks:
     wait" as one of the problems semlith exists to solve, and a resumable run is
     only trustworthy if it says what it resumed. A silent hour is indistinguishable
     from a hung process.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T04
   acceptance_criteria:
@@ -156,7 +211,15 @@ tasks:
   - src/lib.rs
   - src/main.rs
   - src/watch.rs
-  evidence: []
+  evidence:
+  - A 1500-file run printed '265/1500 files, 264 chunks, 131 chunks/s, ~9s left'
+    every two seconds and finished 'indexed 1500 files (1500 chunks) in 10.1s —
+    0 already indexed, 0 skipped, 0 removed'.
+  - The same command run again printed 'indexed 0 files (0 chunks) in 0.1s — 1500
+    already indexed, 0 skipped, 0 removed', which is how a resumed run states what
+    it skipped.
+  - IndexProgress carries the walk's total to the callback, because only the walk
+    knows the denominator.
 - id: US-SEMLITH-0.7.0-T07
   summary: >
     Measure what sharding costs recall: the same queries over the same corpus, sharded
@@ -168,7 +231,7 @@ tasks:
     different coordinate systems. If that costs recall, the release is wrong in
     a way no correctness test would catch — this is the contract's most likely reason
     to iterate.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T03
   acceptance_criteria:
@@ -181,7 +244,14 @@ tasks:
   files:
   - tests/measure.rs
   - .ultraship/products/semlith/evidence/0.7.0/recall.sh
-  evidence: []
+  evidence:
+  - 'recall-run.txt: this repository indexed twice, one shard against six, then
+    twelve questions asked of both. Mean overlap@10 1.000, worst 1.00, 12 of 12
+    rankings identical, against a floor of 0.90 recorded in the test before the
+    comparison was run.'
+  - The split store used 128-vector shards, far below the shipped 65536, so each
+    per-shard TQ+ calibration was fitted on less data than production will ever
+    give it — the pessimistic case rather than the flattering one.
 - id: US-SEMLITH-0.7.0-T08
   summary: >
     Prove both directions of the compatibility rule against real release binaries:
@@ -191,7 +261,7 @@ tasks:
     The store layout is a covered surface. The failure this guards against is not
     an error message — it is a 0.6.0 binary reading a 0.7.0 store as an empty corpus,
     which looks like a corpus that has stopped containing things.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T02
   acceptance_criteria:
@@ -208,7 +278,18 @@ tasks:
   files:
   - .ultraship/products/semlith/evidence/0.7.0/compat.sh
   - tests/roundtrip.rs
-  evidence: []
+  evidence:
+  - 'compat-run.txt through real 0.5.0, 0.6.0 and 0.7.0 release binaries: 0.7.0
+    searched and indexed into both older stores with nothing re-embedded, no shard
+    written and format_version untouched.'
+  - 0.6.0 met a store 0.7.0 created and exited 1 with 'store is format 2, and semlith
+    0.6.0 understands format 1; upgrade semlith to read this store'.
+  - 0.5.0 met the same store and exited 0 with 'no matches (store has 0 chunks)'
+    — it predates format_version and has nothing to check. Recorded as a known limitation
+    rather than papered over, and stated in the CHANGELOG and docs/compatibility.md.
+  - 'The full suite passes: 55 unit tests, and the ignored integration suites clients
+    1, fleet 10, mcp 11, roundtrip 3, shards 2, watch 10, plus all five measure
+    tests.'
 - id: US-SEMLITH-0.7.0-T09
   summary: >
     Measure the release's central claims at a corpus at least an order of magnitude
@@ -221,7 +302,7 @@ tasks:
     distinguish a bounded curve from a linear one, and the latency a store pays
     when it exceeds its budget is the cost side of the trade this release makes
     — reporting only the flattering half would be the dishonest way to pass.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T05
   - US-SEMLITH-0.7.0-T06
@@ -250,7 +331,27 @@ tasks:
   files:
   - tests/measure.rs
   - .ultraship/products/semlith/evidence/0.7.0/scale.sh
-  evidence: []
+  evidence:
+  - scale-run.txt at 700, 7000 and 70000 chunks — the largest more than ten times
+    the 6527-chunk corpus the project's other numbers come from — measured against
+    a real 0.6.0 binary over the same corpora with the same client driving both.
+  - 'Open but unsearched: 0.7.0 grew 800 KB across a hundredfold corpus, 0.6.0 grew
+    44384 KB.'
+  - 'Searching: 0.7.0 held 137, 144 and 179 MB, inside the 512 MB budget plus the
+    200 MB of fixed overhead the test states. Median query 3.7, 7.5 and 52.6 ms,
+    against 0.6.0''s 3.7, 7.5 and 50.8 ms — unchanged for a store that fits.'
+  - 'Past the budget: 8 MB on the 70000-chunk store cost a median 364.4 ms, seven
+    times the unsqueezed figure, and RSS settled at 126, 123, 110 MB over 80, 140
+    and 200 searches.'
+  - 'Peak RSS while indexing stayed flat as the corpus grew: 196, 198 and 208 MB
+    for 0.7.0 across the three sizes, against 0.6.0''s 196, 198 and 206 MB.'
+  - 'One changed file: 176 KB of a 1436 KB index on a 14-shard store; on the two-shard
+    70000-chunk store both binaries wrote the whole index, which is what a two-shard
+    bound looks like at that size.'
+  - The corpus is one short chunk per file. What is measured is what a vector costs
+    to hold, and there is one vector per chunk whatever its length; full-length
+    chunks would embed five times slower to reach the same vector count and measure
+    the same curve.
 - id: US-SEMLITH-0.7.0-T10
   summary: >
     Ship it: the version bump, a CHANGELOG section that states the store format
@@ -262,7 +363,7 @@ tasks:
     against Cargo.toml, so neither is optional; and docs/compatibility.md says in
     its own words what a break looks like, so shipping this one unannounced would
     break the page as well as the format.
-  status: todo
+  status: done
   depends_on:
   - US-SEMLITH-0.7.0-T07
   - US-SEMLITH-0.7.0-T08
@@ -293,4 +394,18 @@ tasks:
   - CHANGELOG.md
   - docs/compatibility.md
   - README.md
-  evidence: []
+  evidence:
+  - cargo fmt --check clean, cargo clippy --all-targets -- -D warnings clean, full
+    suite green.
+  - 'cargo publish --dry-run passed: 35 files, 559.6 KiB (176.7 KiB compressed),
+    verify build clean. cargo package --list shows 35 entries with no .env, no .ultraship
+    and no .github.'
+  - Cargo.toml at 0.7.0 and the CHANGELOG has a 0.7.0 section stating the store
+    format change as a break, with why it was made, what to do about an existing
+    store, and what happens on a downgrade — the shape docs/compatibility.md says
+    a break is stated in.
+  - docs/compatibility.md gained a format table, the forwards and backwards rules
+    including the 0.5.0 edge, and SEMLITH_INDEX_MEMORY in the covered environment
+    list.
+  - README documents the memory budget, the new store layout, indexing a large corpus,
+    and the measured numbers behind all of it.

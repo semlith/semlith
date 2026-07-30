@@ -363,6 +363,349 @@ fn measure_the_tool_list_and_what_an_idle_server_holds() {
     server.stop();
 }
 
+/// Corpus sizes, in files of one chunk each: seven hundred, seven thousand and
+/// seventy thousand vectors. An order of magnitude between each, which is what
+/// it takes to tell a bounded curve from a linear one, and the largest more
+/// than ten times the 6527-chunk corpus the project's other numbers come from.
+///
+/// One chunk per file, and a short one. What is being measured is what a vector
+/// costs to hold, and there is one vector per chunk whatever its length — but
+/// embedding time is not flat in chunk length, so full-length chunks would take
+/// five times as long to reach the same vector count and measure the same
+/// curve. The corpus is shaped for the measurement and says so.
+const SCALE_FILES: [usize; 3] = [700, 7_000, 70_000];
+
+/// Everything a searching process holds that is not vectors: the ONNX runtime,
+/// the model weights, SQLite, the binary itself. Measured at the smallest
+/// corpus, where the vectors are a rounding error, and then allowed for at
+/// every larger one.
+///
+/// It is stated rather than derived because the claim is about the vectors: a
+/// bound on the whole process would be a bound on fastembed's allocator, which
+/// is not this release's to make.
+const FIXED_OVERHEAD_MB: u64 = 200;
+
+/// What a large store costs to open, to search, and to change one file in —
+/// against the release before it, on the same corpora.
+///
+/// This is the release's central claim and the only place it is a number.
+/// Point `OLD` at a 0.6.0 binary:
+///
+/// ```sh
+/// OLD=/path/to/semlith-0.6.0 cargo test --release --test measure -- \
+///     --ignored --nocapture measure_the_store_at_scale
+/// ```
+#[test]
+#[ignore = "indexes a hundred thousand chunks twice over; takes tens of minutes"]
+fn measure_the_store_at_scale() {
+    let old = std::env::var("OLD").expect("set OLD to a 0.6.0 release binary");
+    let new = env!("CARGO_BIN_EXE_semlith").to_string();
+    println!("\n--- binaries");
+    println!("old: {}", version(&old));
+    println!("new: {}", version(&new));
+
+    let root = tempfile::tempdir().unwrap();
+    let mut rows = Vec::new();
+
+    for files in SCALE_FILES {
+        let corpus = root.path().join(format!("corpus_{files}"));
+        fs::create_dir_all(&corpus).unwrap();
+        for i in 0..files {
+            // Ten paragraphs of roughly a chunk each, varied enough that the
+            // embeddings are not all the same point.
+            let body = format!(
+                "Note {i}. Fermentation, ownership, retries and backoff, indexes and \
+                 locks. This note is about topic {}, which is not what the note before \
+                 it was about.\n",
+                i % 997
+            );
+            fs::write(corpus.join(format!("note_{i:06}.md")), body).unwrap();
+        }
+
+        for (label, binary) in [("0.6.0", &old), ("0.7.0", &new)] {
+            let store = root.path().join(format!("store_{label}_{files}"));
+            let started = Instant::now();
+            let index_rss = index_and_measure(binary, &store, &corpus, None);
+            let indexed = started.elapsed();
+            let chunks = chunk_count(&store);
+            println!(
+                "\n--- {label}: {files} files, {chunks} chunks, indexed in {:.0}s, \
+                 peak RSS while indexing {} MB, index on disk {} KB",
+                indexed.as_secs_f32(),
+                index_rss / 1024,
+                index_bytes(&store) / 1024,
+            );
+
+            let mut server = McpServer::start_with(binary, std::slice::from_ref(&store), None);
+            server.handshake();
+            let idle = server.rss_kb();
+            let median = server.median_search();
+            let busy = server.rss_kb();
+            server.stop();
+            println!(
+                "{label}: idle RSS {} MB, searching RSS {} MB, median search {:.1}ms",
+                idle / 1024,
+                busy / 1024,
+                median.as_secs_f64() * 1000.0,
+            );
+            rows.push((label, chunks, idle, busy, median, index_rss, store.clone()));
+        }
+    }
+
+    // --- what a store past its budget costs ---------------------------------
+    let biggest = rows
+        .iter()
+        .filter(|r| r.0 == "0.7.0")
+        .max_by_key(|r| r.1)
+        .unwrap()
+        .clone();
+    // Below what a single shard costs, so the store cannot hold all of itself
+    // and every query pays to read a shard back. This is the cost side of the
+    // trade, and it is measured on the store that exceeds its budget rather
+    // than on one that comfortably fits.
+    //
+    // RSS is read three times, at widening query counts, because the question
+    // is not only how much a churning store holds but whether that number
+    // settles. Freed shard memory is not necessarily handed back to the
+    // operating system, so a plateau is the honest form of "bounded" here.
+    println!("\n--- 0.7.0 on {} chunks, budget cut to 8 MB", biggest.1);
+    let mut squeezed = McpServer::start_with(&new, std::slice::from_ref(&biggest.6), Some("8"));
+    squeezed.handshake();
+    println!("idle RSS {} MB", squeezed.rss_kb() / 1024);
+    let squeezed_median = squeezed.median_search();
+    let mut churn = Vec::new();
+    for round in 1..=3 {
+        for i in 0..60 {
+            let _ = squeezed.search_request(&format!("a churning question {round} {i}"));
+        }
+        let rss = squeezed.rss_kb();
+        churn.push(rss);
+        println!("after {} searches: RSS {} MB", 20 + round * 60, rss / 1024);
+    }
+    squeezed.stop();
+    println!(
+        "median search under an 8 MB budget: {:.1}ms",
+        squeezed_median.as_secs_f64() * 1000.0,
+    );
+
+    // --- what changing one file costs ---------------------------------------
+    println!("\n--- one file changed, on the largest corpus");
+    for (label, binary) in [("0.6.0", &old), ("0.7.0", &new)] {
+        let row = rows
+            .iter()
+            .filter(|r| r.0 == label)
+            .max_by_key(|r| r.1)
+            .unwrap();
+        let corpus = root.path().join(format!("corpus_{}", SCALE_FILES[2]));
+        let (rewritten, total, took) = change_one_file(binary, &row.6, &corpus, None);
+        println!(
+            "{label}: {} KB rewritten of a {} KB index, whole run {:.1}s",
+            rewritten / 1024,
+            total / 1024,
+            took.as_secs_f32(),
+        );
+    }
+
+    // At the shipped shard size a corpus of this size is two shards, and a
+    // modified file necessarily touches two: the shard losing its old vector
+    // and the open shard taking the new one. So the same measurement is taken
+    // again on a store with many shards, where the property is visible rather
+    // than hidden by the store being barely larger than a shard.
+    println!("\n--- one file changed, on a store of many shards");
+    let many = root.path().join("store_many_shards");
+    let corpus = root.path().join(format!("corpus_{}", SCALE_FILES[1]));
+    index_with_shards(&new, &many, &corpus, Some("512"));
+    let shards = fs::read_dir(many.join("index"))
+        .map(|d| d.flatten().count())
+        .unwrap_or(0);
+    let (rewritten, total, took) = change_one_file(&new, &many, &corpus, Some("512"));
+    println!(
+        "0.7.0, {} chunks in {shards} shards of 512: {} KB rewritten of a {} KB index, \
+         whole run {:.1}s",
+        chunk_count(&many),
+        rewritten / 1024,
+        total / 1024,
+        took.as_secs_f32(),
+    );
+    assert!(
+        rewritten * 3 < total,
+        "changing one file rewrote {rewritten} of {total} bytes across {shards} shards"
+    );
+
+    println!("\n--- what a hundredfold corpus costs an open store");
+    let mut slopes = Vec::new();
+    for label in ["0.6.0", "0.7.0"] {
+        let mine: Vec<_> = rows.iter().filter(|r| r.0 == label).collect();
+        let (small, large) = (mine.first().unwrap(), mine.last().unwrap());
+        let idle_growth = large.2 as i64 - small.2 as i64;
+        let busy_growth = large.3 as i64 - small.3 as i64;
+        println!(
+            "{label}: {} to {} chunks — idle RSS {} MB to {} MB ({idle_growth:+} KB), \
+             searching {} MB to {} MB ({busy_growth:+} KB), \
+             {:.0} bytes per chunk while searching",
+            small.1,
+            large.1,
+            small.2 / 1024,
+            large.2 / 1024,
+            small.3 / 1024,
+            large.3 / 1024,
+            busy_growth as f64 * 1024.0 / (large.1 - small.1).max(1) as f64,
+        );
+        slopes.push((label, idle_growth, busy_growth));
+    }
+
+    let new_rows: Vec<_> = rows.iter().filter(|r| r.0 == "0.7.0").collect();
+    let (new_idle, old_idle) = (slopes[1].1, slopes[0].1);
+    assert!(
+        new_idle < old_idle,
+        "an opened-but-unsearched 0.7.0 store grew by {new_idle} KB across a hundredfold \
+         corpus against 0.6.0's {old_idle} KB — opening is still loading vectors"
+    );
+    assert!(
+        new_idle < 16 * 1024,
+        "an opened-but-unsearched store grew {new_idle} KB with the corpus"
+    );
+
+    let budget_mb = 512u64;
+    let ceiling = (budget_mb + FIXED_OVERHEAD_MB) * 1024;
+    assert!(
+        new_rows.last().unwrap().3 < ceiling,
+        "searching the largest store held {} MB, past the {budget_mb} MB budget plus \
+         {FIXED_OVERHEAD_MB} MB of fixed overhead",
+        new_rows.last().unwrap().3 / 1024,
+    );
+    // Not a bound on RSS: a store past its budget reloads shards constantly and
+    // the allocator keeps what it frees. What must be true is that it settles.
+    assert!(
+        churn[2] < churn[1] + 32 * 1024,
+        "RSS under continuous shard churn went {} MB then {} MB then {} MB — that is \
+         not a plateau",
+        churn[0] / 1024,
+        churn[1] / 1024,
+        churn[2] / 1024,
+    );
+}
+
+/// Change one file in `corpus`, re-index it into `store`, and report
+/// `(bytes rewritten, bytes of index, how long the run took)`.
+fn change_one_file(
+    binary: &str,
+    store: &Path,
+    corpus: &Path,
+    shard_vectors: Option<&str>,
+) -> (u64, u64, Duration) {
+    let before = index_files(store);
+    fs::write(
+        corpus.join("note_000000.md"),
+        "A note rewritten so exactly one file has changed.\n",
+    )
+    .unwrap();
+    // A whole-index rewrite and a one-shard rewrite are indistinguishable
+    // inside one filesystem timestamp tick.
+    thread::sleep(Duration::from_millis(1100));
+    let started = Instant::now();
+    index_with_shards(binary, store, corpus, shard_vectors);
+    let took = started.elapsed();
+    let rewritten: u64 = index_files(store)
+        .into_iter()
+        .filter(|(p, _, when)| !before.iter().any(|(bp, _, bwhen)| bp == p && bwhen >= when))
+        .map(|(_, len, _)| len)
+        .sum();
+    (rewritten, before.iter().map(|(_, len, _)| len).sum(), took)
+}
+
+/// Index with a shard size in force, for the measurements that need more
+/// shards than a corpus a test can afford would otherwise produce.
+fn index_with_shards(binary: &str, store: &Path, corpus: &Path, shard_vectors: Option<&str>) {
+    let mut cmd = Command::new(binary);
+    if let Some(n) = shard_vectors {
+        cmd.env("SEMLITH_SHARD_VECTORS", n);
+    }
+    let out = cmd
+        .arg("--store")
+        .arg(store)
+        .arg("index")
+        .arg(corpus)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "indexing failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn version(binary: &str) -> String {
+    let out = Command::new(binary).arg("--version").output().unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn chunk_count(store: &Path) -> i64 {
+    let s = Semlith::open(store, None).unwrap();
+    semlith::store::durable_chunks(s.db()).unwrap()
+}
+
+/// Index `corpus` into `store` with `binary`, returning the run's peak RSS in
+/// kilobytes as the kernel reports it.
+fn index_and_measure(binary: &str, store: &Path, corpus: &Path, budget: Option<&str>) -> u64 {
+    let mut cmd = Command::new("/usr/bin/time");
+    cmd.arg("-l").arg(binary);
+    if let Some(mb) = budget {
+        cmd.env("SEMLITH_INDEX_MEMORY", mb);
+    }
+    let out = cmd
+        .arg("--store")
+        .arg(store)
+        .arg("index")
+        .arg(corpus)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "indexing failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    peak_rss_kb(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// `maximum resident set size` out of `/usr/bin/time -l`, in kilobytes.
+///
+/// macOS reports it in bytes on that line; GNU time prints kilobytes under a
+/// different label, and this measurement is taken on the former.
+fn peak_rss_kb(text: &str) -> u64 {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_suffix("maximum resident set size") {
+            return rest.trim().parse::<u64>().unwrap_or(0) / 1024;
+        }
+    }
+    0
+}
+
+/// Every file of a store's vector index, with its size and mtime.
+fn index_files(store: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime)> {
+    let single = store.join("index.tv");
+    let paths: Vec<std::path::PathBuf> = if single.exists() {
+        vec![single]
+    } else {
+        fs::read_dir(store.join("index"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .collect()
+    };
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let m = fs::metadata(&p).ok()?;
+            Some((p, m.len(), m.modified().ok()?))
+        })
+        .collect()
+}
+
 /// The floor sharding has to clear, decided before the comparison was run.
 ///
 /// turbovec fits its TQ+ calibration from the first batch added to an index, so
@@ -487,47 +830,84 @@ fn ranking(store: &mut Semlith, query: &str) -> Vec<(String, u32)> {
 /// A real `semlith mcp` process, for measuring what an agent's server costs.
 struct McpServer {
     child: Child,
+    /// Held for the life of the server, not made per request: a `BufReader`
+    /// built fresh each time can swallow a response that arrived in the same
+    /// read as the previous one, which turns into a hang several requests later.
+    out: std::io::BufReader<std::process::ChildStdout>,
 }
 
 impl McpServer {
     fn start(stores: &[std::path::PathBuf]) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        Self::start_with(env!("CARGO_BIN_EXE_semlith"), stores, None)
+    }
+
+    /// A server from a named binary, so one release can be measured beside
+    /// another with the same client driving both.
+    fn start_with(binary: &str, stores: &[std::path::PathBuf], budget: Option<&str>) -> Self {
+        let mut cmd = Command::new(binary);
         for store in stores {
             cmd.arg("--store").arg(store);
         }
-        let child = cmd
+        if let Some(mb) = budget {
+            cmd.env("SEMLITH_INDEX_MEMORY", mb);
+        }
+        let mut child = cmd
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        Self { child }
+        let out = std::io::BufReader::new(child.stdout.take().unwrap());
+        Self { child, out }
+    }
+
+    /// Open the session and list the tools — everything a client does before it
+    /// asks a question, and nothing that touches a vector. What the process
+    /// holds after this is what an idle server costs.
+    fn handshake(&mut self) {
+        let _ = self.request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}"#,
+        );
+        let _ = self.request(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#);
+        // Settle, so the reading is the server at rest rather than the server
+        // still parsing what it was just sent.
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    /// Median of twenty warm searches. The first few are thrown away: they pay
+    /// for the model load and the first shard reads, which is a startup cost
+    /// and not what a session's queries cost.
+    fn median_search(&mut self) -> Duration {
+        for i in 0..3 {
+            let _ = self.search_request(&format!("a warming question {i}"));
+        }
+        let mut times = Vec::new();
+        for i in 0..20 {
+            let started = Instant::now();
+            let answer = self.search_request(&format!("how is retry backoff described {i}"));
+            times.push(started.elapsed());
+            assert!(answer.contains("result"), "a search failed: {answer}");
+        }
+        times.sort();
+        times[times.len() / 2]
+    }
+
+    fn search_request(&mut self, query: &str) -> String {
+        self.request(&format!(
+            r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"semlith_search","arguments":{{"query":"{query}","k":5}}}}}}"#
+        ))
     }
 
     /// Drive one real search to completion, so the process being measured is one
     /// that has loaded its model and answered — not one that is still starting.
     fn answer_one_query(&mut self) {
-        use std::io::{BufRead, Write};
-        let stdin = self.child.stdin.as_mut().unwrap();
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05"}}}}"#
-        )
-        .unwrap();
-        writeln!(
-            stdin,
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"semlith_search","arguments":{{"query":"how is backoff described","k":3}}}}}}"#
-        )
-        .unwrap();
-        stdin.flush().unwrap();
-
-        let mut out = std::io::BufReader::new(self.child.stdout.as_mut().unwrap());
-        for _ in 0..2 {
-            let mut line = String::new();
-            out.read_line(&mut line).unwrap();
-            assert!(!line.is_empty(), "the server closed instead of answering");
-        }
+        let _ = self.request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+        );
+        let _ = self.request(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"semlith_search","arguments":{"query":"how is backoff described","k":3}}}"#,
+        );
     }
 
     /// One request, one response line.
@@ -537,9 +917,8 @@ impl McpServer {
         writeln!(stdin, "{request}").unwrap();
         stdin.flush().unwrap();
 
-        let mut out = std::io::BufReader::new(self.child.stdout.as_mut().unwrap());
         let mut line = String::new();
-        out.read_line(&mut line).unwrap();
+        self.out.read_line(&mut line).unwrap();
         assert!(!line.is_empty(), "the server closed instead of answering");
         line
     }
