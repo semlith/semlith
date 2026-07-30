@@ -19,6 +19,7 @@ break, and is treated as one.
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
 | MCP protocol revisions | The list the server advertises: `2026-07-28`, `2025-11-25`, `2025-06-18`, `2024-11-05`. Dropping one is a break. |
 | Store layout | A store directory holds `store.db` beside the store's vectors — `index.tv` in format 1, an `index/` directory of shards in format 2 — and the rules for which binary can read which store are below. |
+| The formats that are read | The list in the README's *What gets indexed* only grows. An extension semlith reads today is still read tomorrow; what is extracted from it is not covered, and is below. |
 | `src/lib.rs` | Documented, not frozen. The `Semlith` type, `Hit`, `IndexReport`, and the modules `chunk`, `embed`, `filter`, `fleet`, `lock`, `mcp`, `store`, `watch` are the supported surface — but the library API changes with the minor version, as it did in 0.2.0. See [the honest version of the promise](#the-honest-version-of-the-promise). |
 
 ## What is not covered
@@ -33,6 +34,16 @@ queries or across versions. Any improvement to ranking — a better model, a
 different fusion depth, a change to chunking — moves both the numbers and the
 order, and that is the point of making the improvement. Do not assert on a
 score, and do not assume a result stays at position three.
+
+**The text extracted from a given file.** Which formats semlith reads is
+documented and grows additively; how a document is turned into text is not. The
+marker lines, the order the pieces come out in, what is dropped as not being the
+document's text, where a paragraph ends and a line begins — all of it may change
+in any release, because the question each reader answers is "what would a person
+see if they opened this?", and a better answer to that is an improvement worth
+making. A document read differently is re-chunked and re-embedded when the file
+next changes, so the chunk text and the line ranges move with it. Do not assert
+on extracted text, and do not build a format on top of the markers.
 
 **Human-readable stdout and its formatting.** The text `semlith search` prints,
 the columns `stats` lines up, the wording of a summary line. This is written for
