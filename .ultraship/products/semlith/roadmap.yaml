@@ -30,7 +30,7 @@ versions:
     outcome: >
       A developer searches several stores at once from a single query, so an agent working across
       repositories asks one question instead of many.
-    detail: hypothesis
+    detail: specified
     status: planned
   - version: 0.6.0
     outcome: >
