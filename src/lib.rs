@@ -78,6 +78,34 @@ const RRF_K: f32 = 60.0;
 /// How much deeper than `k` to look in each ranking before fusing.
 const RANK_DEPTH: usize = 4;
 
+/// How long an index run may go without making its work durable.
+///
+/// This is what an interruption costs: the vectors embedded since the last
+/// checkpoint, and no more. Thirty seconds is short enough that losing it is an
+/// annoyance rather than an evening, and long enough that a checkpoint's cost —
+/// rewriting the shards touched since the last one — stays a rounding error
+/// against the embedding it protects.
+///
+/// Only a sharded store checkpoints. A store written before 0.7.0 would have to
+/// rewrite its entire index to do it, which is the cost sharding exists to
+/// remove; those stores behave exactly as they did.
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Override for [`CHECKPOINT_INTERVAL`], in seconds. For the tests, which
+/// cannot spend thirty seconds proving a checkpoint happened. Not part of the
+/// documented environment.
+const CHECKPOINT_SECS_ENV: &str = "SEMLITH_CHECKPOINT_SECS";
+
+fn checkpoint_interval() -> std::time::Duration {
+    match std::env::var(CHECKPOINT_SECS_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        Some(secs) => std::time::Duration::from_secs(secs),
+        None => CHECKPOINT_INTERVAL,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub score: f32,
@@ -404,8 +432,12 @@ impl Semlith {
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
         // Files whose vectors are embedded but not yet durable. Their hash is
-        // written only after `index.tv` lands, so a crash re-indexes them.
+        // written only after the index lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
+
+        let checkpointing = matches!(self.index, index::VectorIndex::Sharded(_));
+        let interval = checkpoint_interval();
+        let mut last_checkpoint = std::time::Instant::now();
 
         let total = paths.len();
         for (seen, path) in paths.into_iter().enumerate() {
@@ -491,6 +523,15 @@ impl Semlith {
             completed.push((file_id, hash));
             report.indexed += 1;
             report.chunks += chunks.len();
+
+            // Between files, never inside one: a file half-written into the
+            // index is a file whose hash must not be committed, and this is the
+            // one point in the loop where that cannot be true.
+            if checkpointing && last_checkpoint.elapsed() >= interval {
+                self.flush(&mut pending)?;
+                self.checkpoint(&mut completed)?;
+                last_checkpoint = std::time::Instant::now();
+            }
         }
 
         self.flush(&mut pending)?;
@@ -514,19 +555,43 @@ impl Semlith {
             self.save()?;
         }
 
-        // ponytail: hashes are committed in one shot after the index is
-        // durable. A crash mid-run re-indexes the whole batch; add periodic
-        // checkpointing when someone indexes a corpus big enough to care.
+        self.commit_hashes(&mut completed)?;
+
+        Ok(report)
+    }
+
+    /// Make everything embedded so far durable, then record the files it
+    /// covers as indexed.
+    ///
+    /// Strictly in that order. A hash written before its vectors are on disk is
+    /// a file the next run believes is indexed and cannot answer for — which is
+    /// what the [`PENDING`] sentinel exists to prevent, and what a run that
+    /// checkpoints has many more chances to get wrong than one that does it
+    /// once at the end.
+    fn checkpoint(&mut self, completed: &mut Vec<(i64, String)>) -> Result<()> {
+        if completed.is_empty() {
+            return Ok(());
+        }
+        self.save()?;
+        self.commit_hashes(completed)
+    }
+
+    /// Record files as indexed, in one transaction. Their vectors must already
+    /// be durable.
+    fn commit_hashes(&mut self, completed: &mut Vec<(i64, String)>) -> Result<()> {
+        if completed.is_empty() {
+            return Ok(());
+        }
         let tx = self.db.unchecked_transaction()?;
-        for (file_id, hash) in &completed {
+        for (file_id, hash) in completed.iter() {
             tx.execute(
                 "UPDATE files SET hash = ?1 WHERE id = ?2",
                 rusqlite::params![hash, file_id],
             )?;
         }
         tx.commit()?;
-
-        Ok(report)
+        completed.clear();
+        Ok(())
     }
 
     fn flush(&mut self, batch: &mut Batch) -> Result<()> {
