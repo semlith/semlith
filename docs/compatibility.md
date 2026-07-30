@@ -13,12 +13,12 @@ break, and is treated as one.
 |---|---|
 | CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `forget`, `mcp`, `models`, `languages`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
-| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`. |
+| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
 | MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_forget`. |
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
 | MCP protocol revisions | The list the server advertises: `2026-07-28`, `2025-11-25`, `2025-06-18`, `2024-11-05`. Dropping one is a break. |
-| Store layout | A store directory holds `store.db` and `index.tv`, and a store written by one 0.x binary is readable by another (see below). |
+| Store layout | A store directory holds `store.db` beside the store's vectors — `index.tv` in format 1, an `index/` directory of shards in format 2 — and the rules for which binary can read which store are below. |
 | `src/lib.rs` | Documented, not frozen. The `Semlith` type, `Hit`, `IndexReport`, and the modules `chunk`, `embed`, `filter`, `fleet`, `lock`, `mcp`, `store`, `watch` are the supported surface — but the library API changes with the minor version, as it did in 0.2.0. See [the honest version of the promise](#the-honest-version-of-the-promise). |
 
 ## What is not covered
@@ -87,15 +87,35 @@ The store's `meta` table carries a `format_version` key, written by 0.6.0 and
 later. A store without the key is format 1 — every store written before 0.6.0,
 read as-is, with no migration and nothing rewritten.
 
+| Format | Vectors live in | Written by |
+|---|---|---|
+| 1 | one `index.tv` | 0.1.0 through 0.6.0 |
+| 2 | an `index/` directory of fixed-size shards | 0.7.0 and later |
+
 A binary that opens a store whose `format_version` is higher than the format it
 knows refuses it, naming both numbers, rather than reading it as best it can.
 Misreading a newer store is the failure worth preventing: it does not look like
 an error, it looks like a corpus that has stopped containing things.
 
-As of 0.6.0, every 0.x store is readable by every other 0.x binary in both
-directions. 0.5.0 searches a store written by 0.6.0, and 0.6.0 searches a store
-written by 0.5.0 without re-embedding anything — `format_version` is an additive
-meta key, which is exactly why it was safe to add before the format needed it.
+**Forwards, every 0.x store still opens.** 0.7.0 reads, searches and indexes
+into a store written by any earlier version, on its existing single `index.tv`,
+without re-embedding anything and without touching its `format_version`. A
+format-1 store is never migrated: the vectors in an `index.tv` are quantized and
+cannot be split back out, so any migration would re-embed the corpus, which is
+something to decide rather than to have done to you. Deleting the store
+directory and indexing again is the way onto format 2, and there is no hurry.
+
+**Backwards, format 2 is where it stops.** A store created by 0.7.0 cannot be
+read by 0.6.0, which refuses it naming both numbers. That is the break this
+format change makes, and it is the reason `format_version` was added a release
+early. One sharper edge: 0.5.0 and earlier predate the key entirely and have
+nothing to check, so such a binary reads a format-2 store as an empty corpus
+rather than refusing it. If you keep a pre-0.6.0 binary around, do not point it
+at a store 0.7.0 created.
+
+Between 0.5.0 and 0.6.0 the compatibility is still total in both directions:
+`format_version` was an additive meta key, which is exactly why it was safe to
+add before the format needed it.
 
 ## What a break would look like
 
