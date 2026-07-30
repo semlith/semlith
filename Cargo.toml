@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A fast local vector store for AI agents: index docs, PDFs and code once, then answer queries in milliseconds without leaving the machine."

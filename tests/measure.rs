@@ -262,8 +262,14 @@ fn measure_multi_store_search() {
     println!("\n--- resident memory of a reader");
     // Real server processes, because the claim is about what an agent's MCP
     // server costs, and one loaded model is most of it.
-    let one = McpServer::start(&stores[..1]);
-    let three = McpServer::start(&stores);
+    let mut one = McpServer::start(&stores[..1]);
+    let mut three = McpServer::start(&stores);
+    // Measured only after each server has answered a real query. A timer would
+    // read whatever the process happened to have allocated by then: the first
+    // version of this slept 15 seconds and reported 17 MB for both, because
+    // under load neither had finished loading its model.
+    one.answer_one_query();
+    three.answer_one_query();
     let one_rss = one.rss_kb();
     let three_rss = three.rss_kb();
     println!(
@@ -303,10 +309,32 @@ impl McpServer {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        // The server warms every model before its first tool call, so give it
-        // time to have paid that cost before its memory is read.
-        thread::sleep(Duration::from_secs(15));
         Self { child }
+    }
+
+    /// Drive one real search to completion, so the process being measured is one
+    /// that has loaded its model and answered — not one that is still starting.
+    fn answer_one_query(&mut self) {
+        use std::io::{BufRead, Write};
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"semlith_search","arguments":{{"query":"how is backoff described","k":3}}}}}}"#
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+
+        let mut out = std::io::BufReader::new(self.child.stdout.as_mut().unwrap());
+        for _ in 0..2 {
+            let mut line = String::new();
+            out.read_line(&mut line).unwrap();
+            assert!(!line.is_empty(), "the server closed instead of answering");
+        }
     }
 
     fn rss_kb(&self) -> u64 {
