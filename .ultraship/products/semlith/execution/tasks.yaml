@@ -9,7 +9,7 @@ tasks:
       The server currently tells every client it speaks that client's revision.
       Every other claim in this release is worth nothing while the first message
       of every session is a lie.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - >
@@ -24,7 +24,13 @@ tasks:
     files:
       - src/mcp.rs
       - tests/mcp.rs
-    evidence: []
+    evidence:
+      - >
+        cargo test --test mcp -- --ignored — every_advertised_revision_gets_a_working_session passed: a real `semlith mcp` child process answered 2025-11-25, 2025-06-18 and 2024-11-05 each with itself, listed the five tools, and returned excerpts on all three
+      - >
+        an_unimplemented_revision_is_answered_with_one_we_implement passed: 1900-01-01 and 2031-03-26 both answered 2025-11-25, neither echoed
+      - >
+        Two unit tests in src/mcp.rs pin `negotiate`, including that 2026-07-28 over `initialize` is answered 2025-11-25 rather than accepted
 
   - id: US-SEMLITH-0.6.0-T02
     summary: >
@@ -38,7 +44,7 @@ tasks:
       server that answers only the handshake is invisible to any client built on
       that revision, and clients that probe with `server/discover` first are the
       ones shipping next.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T01
     acceptance_criteria:
@@ -60,7 +66,13 @@ tasks:
     files:
       - src/mcp.rs
       - tests/mcp.rs
-    evidence: []
+    evidence:
+      - >
+        discover_answers_as_the_first_message_of_a_session passed: server/discover with no handshake returned resultType complete, supportedVersions [2026-07-28, 2025-11-25, 2025-06-18, 2024-11-05], capabilities.tools, serverInfo in _meta, ttlMs and cacheScope public
+      - >
+        a_modern_call_works_with_no_handshake_at_all passed: tools/list carried resultType, ttlMs, cacheScope private and the server version, listed identically twice, and a tools/call returned excerpts — no initialize sent in the session
+      - >
+        an_unimplemented_meta_version_is_refused_with_the_list passed: -32022 with data.requested 2029-01-01 and data.supported naming 2026-07-28
 
   - id: US-SEMLITH-0.6.0-T03
     summary: >
@@ -71,7 +83,7 @@ tasks:
       An agent that cannot ask which files are indexed reads an empty search
       result as "the corpus does not discuss this", which is the failure this
       product exists to avoid.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T01
     acceptance_criteria:
@@ -83,7 +95,9 @@ tasks:
       - src/mcp.rs
       - src/store.rs
       - tests/mcp.rs
-    evidence: []
+    evidence:
+      - >
+        the_files_tool_lists_narrows_and_says_what_it_left_out passed: both indexed files listed, ext ["rs"] narrowed to borrow.rs alone, and limit 1 returned one path plus "1 more"
 
   - id: US-SEMLITH-0.6.0-T04
     summary: >
@@ -95,7 +109,7 @@ tasks:
       One writer per store is a product constraint. Both write tools need the
       same store selection and the same refusal, and forget is the small one that
       proves the plumbing before index depends on it.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T01
     acceptance_criteria:
@@ -111,7 +125,13 @@ tasks:
       - src/fleet.rs
       - src/mcp.rs
       - tests/mcp.rs
-    evidence: []
+    evidence:
+      - >
+        a_write_with_several_stores_open_must_name_one passed: with two stores open both semlith_index and semlith_forget returned isError naming rust and bread; naming bread removed its file and left rust untouched
+      - >
+        the_forget_tool_removes_a_file_from_search passed: the removal reported its chunk count and a later search no longer returned the file
+      - >
+        src/lib.rs forget now takes StoreLock, so the CLI and the tool share one writer rule
 
   - id: US-SEMLITH-0.6.0-T05
     summary: >
@@ -123,7 +143,7 @@ tasks:
       Without it an MCP-only agent cannot make a corpus current, and without the
       budget a first index blows through the 60-second tool timeout clients
       default to and looks like a hung server.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T04
     acceptance_criteria:
@@ -145,7 +165,13 @@ tasks:
       - src/fleet.rs
       - src/mcp.rs
       - tests/mcp.rs
-    evidence: []
+    evidence:
+      - >
+        the_index_tool_makes_a_new_file_searchable_without_a_restart passed: a file created after the server started was indexed by a tool call and returned by a search in the same session
+      - >
+        the_index_tool_refuses_a_store_a_watcher_is_holding passed: the call returned isError containing "being indexed by", and the store still answered a search afterwards
+      - >
+        an_index_over_its_budget_reports_what_remains_and_resumes passed: with SEMLITH_MCP_INDEX_BUDGET=0 over eight files the first call reported what remained and repeated calls finished the corpus, with semlith_files then listing all eight
 
   - id: US-SEMLITH-0.6.0-T06
     summary: >
@@ -156,7 +182,7 @@ tasks:
       A release that writes down the store as a stable surface has to make the
       format legible first. Without the marker the first real format change
       silently misreads old stores instead of refusing them.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - >
@@ -174,7 +200,13 @@ tasks:
       - src/store.rs
       - src/lib.rs
       - tests/roundtrip.rs
-    evidence: []
+    evidence:
+      - >
+        Two unit tests in src/store.rs: a store with no format_version key passes check_format and is not written to, and format 2 is refused with an error naming both 2 and 1
+      - >
+        cargo test --test roundtrip -- --ignored — a_store_written_before_the_format_key_still_opens_and_is_not_rewritten passed: a created store records format_version 1, and with the key deleted the store still searches and is not migrated
+      - >
+        compat.sh through two release binaries: a 0.5.0 store has meta keys "fts_built index_generation model" and still has no format_version after 0.6.0 searched and indexed it; a 0.6.0 store has "format_version fts_built index_generation model" and 0.5.0 searched it and indexed a further file into it
 
   - id: US-SEMLITH-0.6.0-T07
     summary: >
@@ -185,7 +217,7 @@ tasks:
       A stanza that is wrong is a user's first impression of the product, and no
       client in the list can be installed in CI. Parsing and executing what the
       documentation actually prints is the only check available.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T05
     acceptance_criteria:
@@ -200,7 +232,13 @@ tasks:
     files:
       - README.md
       - tests/clients.rs
-    evidence: []
+    evidence:
+      - >
+        cargo test --test clients — every_promised_client_has_a_stanza and every_json_stanza_parses passed over all twelve clients
+      - >
+        cargo test --test clients -- --ignored — every_stanza_launches_a_server_that_answers passed: every stanza was checked to name the semlith binary, its `--store … mcp` command line was read out of the README rather than hardcoded, and the resulting server completed a handshake and listed tools
+      - >
+        README gained a per-client setup section covering Claude Code, Claude Desktop, Codex, Copilot in VS Code, Copilot CLI, Cursor, Windsurf, Zed, Gemini CLI, JetBrains, Cline and Goose, each verified against that client own documentation
 
   - id: US-SEMLITH-0.6.0-T08
     summary: >
@@ -210,7 +248,7 @@ tasks:
       The roadmap outcome for this version is that a developer can depend on
       semlith. A dependency they cannot read the terms of is not one they can
       take.
-    status: todo
+    status: done
     depends_on: []
     acceptance_criteria:
       - >
@@ -219,7 +257,13 @@ tasks:
     files:
       - docs/compatibility.md
       - README.md
-    evidence: []
+    evidence:
+      - >
+        docs/compatibility.md written: what SemVer covers, what it does not and why, the pre-0.x honesty section, the store format rules, and what a break looks like
+      - >
+        Linked from the README under a Compatibility section
+      - >
+        Its claims about 0.2.0 (the default model change and the breaking library API change) were checked against the CHANGELOG rather than assumed
 
   - id: US-SEMLITH-0.6.0-T09
     summary: >
@@ -230,7 +274,7 @@ tasks:
       Three new tools and a second protocol era are exactly the shape of change
       that quietly breaks a connected agent or spends its context. Each of those
       is a measurement, not an opinion.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T05
     acceptance_criteria:
@@ -254,7 +298,15 @@ tasks:
     files:
       - tests/measure.rs
       - tests/mcp.rs
-    evidence: []
+    evidence:
+      - >
+        compat.sh: semlith_search and semlith_stats over the legacy MCP path are byte-identical between the 0.5.0 and 0.6.0 release binaries, as is single-store search --json
+      - >
+        cargo test --release --test measure -- --ignored — measure_the_tool_list_and_what_an_idle_server_holds passed: `semlith index` against the store an open MCP server is serving exits 0, so the server holds no lock at rest
+      - >
+        tools/list measured through both binaries: 2220 bytes for two tools, 4790 for five — roughly 555 to 1197 estimated tokens per session
+      - >
+        The existing suites pass unmodified: fleet 10/10 and watch 10/10 ignored tests, roundtrip 3/3, 50 unit tests
 
   - id: US-SEMLITH-0.6.0-T10
     summary: >
@@ -263,7 +315,7 @@ tasks:
     why_required: >
       The release workflow reads the CHANGELOG for its notes and verifies the tag
       against Cargo.toml, so neither is optional, and the publish is permanent.
-    status: todo
+    status: done
     depends_on:
       - US-SEMLITH-0.6.0-T07
       - US-SEMLITH-0.6.0-T08
@@ -277,4 +329,10 @@ tasks:
     files:
       - Cargo.toml
       - CHANGELOG.md
-    evidence: []
+    evidence:
+      - >
+        Cargo.toml at 0.6.0 and CHANGELOG has a 0.6.0 section with Fixed, Added, Changed and Performance
+      - >
+        cargo publish --dry-run passed: 33 files, 480.3 KiB (153.5 KiB compressed), verified build clean
+      - >
+        cargo package --list shows 33 files and no .env, no .ultraship and no .github entry
