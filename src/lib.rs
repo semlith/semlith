@@ -19,6 +19,9 @@ pub mod chunk;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
+/// Readers for the formats that are not plain text. Private: what semlith
+/// extracts from a given document is documented behaviour, not an API.
+mod formats;
 pub mod index;
 pub mod lock;
 pub mod mcp;

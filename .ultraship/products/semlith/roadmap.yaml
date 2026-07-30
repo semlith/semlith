@@ -51,7 +51,9 @@ versions:
     status: released
   - version: 0.8.0
     outcome: >
-      A developer hands an agent a corpus of mixed formats — office documents, notebooks, HTML — and
-      gets the same excerpts back as from code and Markdown today.
-    detail: hypothesis
-    status: planned
+      A developer hands an agent a corpus of mixed formats — Word, PowerPoint and Excel documents,
+      their OpenDocument equivalents, Jupyter notebooks, HTML pages — and gets the same ranked
+      excerpts with locators back as from code and Markdown today, from the same index command, with
+      no converter run by hand first.
+    detail: specified
+    status: released
