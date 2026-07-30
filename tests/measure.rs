@@ -299,6 +299,70 @@ fn measure_multi_store_search() {
     three.stop();
 }
 
+/// What the tool list costs an agent, and what a server holds while it idles.
+///
+/// The tool list is loaded into an agent's context at the start of every
+/// session, whether or not a single tool is called, so growing it spends the
+/// context this product exists to save. 0.5.0 shipped two tools; 0.6.0 ships
+/// five, and the size of that is a number rather than a shrug.
+///
+/// The lock is measured in the same test because both are properties of a
+/// server sitting still: an MCP server must hold no store lock at rest, or
+/// `semlith index` in another terminal fails for as long as the agent is open.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn measure_the_tool_list_and_what_an_idle_server_holds() {
+    let corpus = tempfile::tempdir().unwrap();
+    fs::write(
+        corpus.path().join("ownership.md"),
+        "Rust ownership gives every value exactly one owner.\n",
+    )
+    .unwrap();
+    let store = corpus.path().join(".semlith");
+    {
+        let mut s = Semlith::open(&store, None).unwrap();
+        s.quiet = true;
+        s.index_paths(&[corpus.path().to_path_buf()], |_| {})
+            .unwrap();
+    }
+
+    let mut server = McpServer::start(std::slice::from_ref(&store));
+    let listed = server.request(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#);
+
+    let tools: serde_json::Value = serde_json::from_str(&listed).unwrap();
+    let count = tools["result"]["tools"].as_array().unwrap().len();
+    let bytes = listed.trim_end().len();
+    // Four characters to the token is the rule of thumb every tokenizer
+    // roughly agrees with on English prose; it is an estimate and is printed
+    // as one.
+    println!("\n--- what the tool list costs every session");
+    println!(
+        "{count} tools: {bytes} bytes on the wire, ~{} tokens estimated at 4 bytes/token",
+        bytes.div_ceil(4)
+    );
+
+    println!("\n--- what an idle server holds");
+    let indexed = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(&store)
+        .arg("index")
+        .arg(corpus.path())
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    println!(
+        "`semlith index` against the store an MCP server is open on: exit {}",
+        indexed.status
+    );
+    assert!(
+        indexed.status.success(),
+        "the idle MCP server was holding the store's write lock: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    server.stop();
+}
+
 /// A real `semlith mcp` process, for measuring what an agent's server costs.
 struct McpServer {
     child: Child,
@@ -343,6 +407,20 @@ impl McpServer {
             out.read_line(&mut line).unwrap();
             assert!(!line.is_empty(), "the server closed instead of answering");
         }
+    }
+
+    /// One request, one response line.
+    fn request(&mut self, request: &str) -> String {
+        use std::io::{BufRead, Write};
+        let stdin = self.child.stdin.as_mut().unwrap();
+        writeln!(stdin, "{request}").unwrap();
+        stdin.flush().unwrap();
+
+        let mut out = std::io::BufReader::new(self.child.stdout.as_mut().unwrap());
+        let mut line = String::new();
+        out.read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "the server closed instead of answering");
+        line
     }
 
     fn rss_kb(&self) -> u64 {
