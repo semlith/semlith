@@ -60,8 +60,8 @@ fn measure_the_watcher() {
     }
     println!("initial index: {:.1}s", indexed.elapsed().as_secs_f32());
 
-    let index_bytes = fs::metadata(store.path().join("index.tv")).unwrap().len();
-    println!("index.tv: {} KB", index_bytes / 1024);
+    let index_bytes = index_bytes(store.path());
+    println!("vector index: {} KB", index_bytes / 1024);
 
     let mut watcher = Watcher::start(store.path(), corpus.path());
     watcher.wait_until_watching();
@@ -440,7 +440,24 @@ impl McpServer {
     }
 }
 
-/// The `index_generation` meta key, which counts index.tv rewrites.
+/// Every byte of a store's vector index, in whichever layout it is written:
+/// one `index.tv` for a store from before 0.7.0, a directory of shards for one
+/// created by it.
+fn index_bytes(store: &Path) -> u64 {
+    let single = store.join("index.tv");
+    if single.exists() {
+        return fs::metadata(single).map(|m| m.len()).unwrap_or(0);
+    }
+    fs::read_dir(store.join("index"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// The `index_generation` meta key, which counts index rewrites.
 fn generation(store: &Path) -> i64 {
     let s = Semlith::open(store, None).unwrap();
     semlith::store::get_meta(s.db(), "index_generation")
