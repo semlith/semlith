@@ -31,11 +31,24 @@ jobs:
       # macOS. Accelerate ships with the OS; OpenBLAS has to be installed.
       - name: Install OpenBLAS
         if: runner.os == 'Linux'
-        # DPkg::Lock::Timeout stops apt waiting forever when the runner's
-        # unattended-upgrades still holds the dpkg lock; fail fast instead.
+        timeout-minutes: 5
+        # The Azure apt mirror goes unreachable and the archive.ubuntu.com
+        # fallback then stalls mid-transfer with no output, so bound every
+        # fetch and retry rather than waiting on a dead socket. The lock
+        # timeout covers the runner's unattended-upgrades holding dpkg.
         run: |
-          sudo apt-get -o DPkg::Lock::Timeout=120 update
-          sudo apt-get -o DPkg::Lock::Timeout=120 install -y libopenblas-dev
+          opts='-o Acquire::Retries=3
+                -o Acquire::http::Timeout=20
+                -o Acquire::https::Timeout=20
+                -o DPkg::Lock::Timeout=120'
+          for attempt in 1 2 3; do
+            sudo apt-get $opts update \
+              && sudo apt-get $opts install -y libopenblas-dev \
+              && exit 0
+            echo "apt attempt $attempt failed, retrying"
+            sleep 5
+          done
+          exit 1
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
