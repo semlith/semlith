@@ -10,8 +10,8 @@ license = "Apache-2.0"
 readme = "README.md"
 keywords = ["vector-search", "embeddings", "rag", "mcp", "semantic-search"]
 categories = ["command-line-utilities", "database", "text-processing"]
-# Workspace/planning state and local credentials are not part of the crate.
-exclude = [".ultraship", ".env", ".github"]
+# CI config and local credentials are not part of the crate.
+exclude = [".env", ".github"]
 
 [dependencies]
 anyhow = "1.0.104"
