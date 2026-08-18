@@ -5,5 +5,5 @@
 # Publishing credentials — never commit
 .env
 
-# UltraShip: transient deploy/publish hook output
-.ultraship/products/*/evidence/
+# UltraShip: local-only workspace, never pushed
+.ultraship/
