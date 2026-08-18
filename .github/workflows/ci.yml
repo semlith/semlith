@@ -11,9 +11,15 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same ref makes the older run redundant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -25,7 +31,11 @@ jobs:
       # macOS. Accelerate ships with the OS; OpenBLAS has to be installed.
       - name: Install OpenBLAS
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+        # DPkg::Lock::Timeout stops apt waiting forever when the runner's
+        # unattended-upgrades still holds the dpkg lock; fail fast instead.
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=120 update
+          sudo apt-get -o DPkg::Lock::Timeout=120 install -y libopenblas-dev
 
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
