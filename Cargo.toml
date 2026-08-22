@@ -25,7 +25,7 @@ pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-turbovec = "0.9.0"
+turbovec = "1.0.0"
 notify = "8.2.0"
 # Reading only: `deflate-flate2` is the decompressor and nothing else. The
 # default feature set adds every compressor and cipher the format allows, none
