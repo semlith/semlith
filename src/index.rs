@@ -249,7 +249,9 @@ impl VectorIndex {
                     Allowlist::Subset(ids) => Some(ids.as_slice()),
                     _ => None,
                 };
-                Ok(index.search_with_allowlist(vector, depth, list))
+                index
+                    .search_with_allowlist(vector, depth, list)
+                    .map_err(|e| anyhow::anyhow!("searching the vector index: {e}"))
             }
             VectorIndex::Sharded(s) => s.search(vector, depth, allowlist),
         }
@@ -621,9 +623,11 @@ impl Sharded {
             if index.is_empty() {
                 continue;
             }
-            // turbovec panics on an id the index does not hold, and a shard can
-            // be missing an id its range covers — a chunk deleted since, or one
-            // whose vectors a killed run never made durable.
+            // A shard can be missing an id its range covers — a chunk deleted
+            // since, or one whose vectors a killed run never made durable.
+            // turbovec 1.0 reports that as an error rather than panicking, but
+            // an allowlist entry the shard does not hold is normal here and
+            // not something to fail a search over, so it is filtered out.
             let subset = subset.map(|ids| {
                 ids.into_iter()
                     .filter(|id| index.contains(*id))
@@ -632,7 +636,9 @@ impl Sharded {
             if subset.as_ref().is_some_and(|ids| ids.is_empty()) {
                 continue;
             }
-            let (scores, ids) = index.search_with_allowlist(vector, depth, subset.as_deref());
+            let (scores, ids) = index
+                .search_with_allowlist(vector, depth, subset.as_deref())
+                .map_err(|e| anyhow::anyhow!("searching a vector shard: {e}"))?;
             merged.extend(scores.into_iter().zip(ids));
         }
 
