@@ -143,6 +143,25 @@ enum Command {
     /// Remove a file from the store.
     Forget { path: PathBuf },
 
+    /// Fetch one URL into the store and index it: a web page, a PDF such as an
+    /// arXiv paper, or a file on GitHub. One request, for exactly the URL
+    /// given — semlith never follows links, re-fetches, or sends a credential.
+    Add {
+        /// The https URL to fetch. A `github.com/.../blob/...` link is
+        /// rewritten to the raw file it displays.
+        url: String,
+
+        /// Name the store in the store home, instead of naming it after the
+        /// current directory.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Refuse to reach the network, which is the whole of this command, so
+        /// it exits before opening a socket.
+        #[arg(long)]
+        airgap: bool,
+    },
+
     /// Run as an MCP server over stdio, for agents to call as a tool.
     Mcp,
 
@@ -553,6 +572,46 @@ fn main() -> Result<()> {
                     println!();
                 }
             }
+        }
+
+        Command::Add { url, name, airgap } => {
+            arm_airgap(airgap);
+
+            // The current directory is the anchor, the way it is for `index`
+            // with no path: "add this to the store I am working in".
+            let choice = home::resolve(&cli.store, &cwd, name.as_deref())?;
+            if let Some(hint) = choice.hint() {
+                eprintln!("{hint}");
+            }
+            let dir = choice.one()?;
+
+            let spinner = cliclack::spinner();
+            spinner.start(format!("fetching {url}"));
+            let fetched = match semlith::add::fetch(&url, &dir) {
+                Ok(fetched) => {
+                    spinner.stop(format!(
+                        "fetched {}",
+                        semlith::human_bytes(fetched.bytes as i64)
+                    ));
+                    fetched
+                }
+                Err(e) => {
+                    spinner.error("fetch failed");
+                    return Err(e);
+                }
+            };
+
+            let mut store = Semlith::open(&dir, None)?;
+            store.quiet = true;
+            let report = store.index_paths(&[fetched.path.clone()], |_, _| {})?;
+
+            // Recorded after the fetch and the index both succeeded, so a
+            // failed add leaves no registry entry pointing at nothing.
+            let model_name = store.model().to_string();
+            home::record(&choice, &[fetched.path.clone()], &model_name)?;
+
+            eprintln!("{} -> {}", fetched.url, display(&fetched.path));
+            eprintln!("indexed {} chunks into {}", report.chunks, dir.display());
         }
 
         Command::Forget { path } => {

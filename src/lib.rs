@@ -15,6 +15,7 @@
 //! A search quantizes the query, gets ids back from the index, then resolves
 //! them to text with one SQLite lookup each.
 
+pub mod add;
 pub mod chunk;
 pub mod clients;
 pub mod daemon;

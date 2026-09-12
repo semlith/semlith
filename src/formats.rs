@@ -860,9 +860,13 @@ fn join(base: &str, href: &str) -> String {
     parts.join("/")
 }
 
-/// `%20` back to a space. Only the escapes a filename can carry, because that
-/// is the only thing this is ever given.
-fn unpercent(s: &str) -> String {
+/// `%20` back to a space, and every other `%hh` back to its byte.
+///
+/// Shared with [`crate::add`], which needs the same decoding for the opposite
+/// reason: here it is so a chapter whose name has a space in it is found in the
+/// archive, and there it is so a percent-encoded `..` cannot slip past the path
+/// sanitiser as one opaque segment.
+pub(crate) fn unpercent(s: &str) -> String {
     if !s.contains('%') {
         return s.to_string();
     }
