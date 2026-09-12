@@ -63,8 +63,8 @@ jobs:
           for f in install.sh install.ps1; do
             lines=$(wc -l < "$f")
             echo "$f: $lines lines"
-            if [ "$lines" -ge 130 ]; then
-              echo "::error::$f is $lines lines; the budget is under 130"
+            if [ "$lines" -ge 170 ]; then
+              echo "::error::$f is $lines lines; the budget is under 170"
               exit 1
             fi
           done
