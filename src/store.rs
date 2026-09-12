@@ -482,6 +482,15 @@ mod tests {
 
     /// A corpus with the same word in four files: two under `src`, two not,
     /// two Rust, two Markdown. Enough to tell a union from an intersection.
+    /// A store holds the paths its own platform produces, and `filter::anchor`
+    /// builds patterns to match those — backslashes on Windows, forward
+    /// slashes everywhere else. A fixture written with one separator therefore
+    /// tests nothing on the other platform, so these are spelled in the
+    /// separator the code under test is going to use.
+    fn native(path: &str) -> String {
+        path.replace('/', std::path::MAIN_SEPARATOR_STR)
+    }
+
     fn mixed() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -492,7 +501,7 @@ mod tests {
             "/proj/vendor/other.rs",
             "/proj/README.MD",
         ] {
-            let f = insert_file(&db, path, "h", 10, 0).unwrap();
+            let f = insert_file(&db, &native(path), "h", 10, 0).unwrap();
             insert_chunk(&db, f, 0, 1, 5, "retry backoff and jitter").unwrap();
         }
         db
@@ -530,7 +539,7 @@ mod tests {
         let ids = filtered_chunk_ids(&db, &filter(&["src/**"], &[], &[])).unwrap();
         assert_eq!(
             paths_of(&db, &ids),
-            ["/proj/src/lib.rs", "/proj/src/notes.md"]
+            [native("/proj/src/lib.rs"), native("/proj/src/notes.md")]
         );
     }
 
@@ -540,7 +549,7 @@ mod tests {
     fn an_absolute_glob_matches_only_what_it_literally_covers() {
         let db = mixed();
         let ids = filtered_chunk_ids(&db, &filter(&["/proj/vendor/*"], &[], &[])).unwrap();
-        assert_eq!(paths_of(&db, &ids), ["/proj/vendor/other.rs"]);
+        assert_eq!(paths_of(&db, &ids), [native("/proj/vendor/other.rs")]);
     }
 
     #[test]
@@ -551,7 +560,7 @@ mod tests {
         assert_eq!(paths_of(&db, &by_ext), paths_of(&db, &by_lang));
         assert_eq!(
             paths_of(&db, &by_ext),
-            ["/proj/src/lib.rs", "/proj/vendor/other.rs"]
+            [native("/proj/src/lib.rs"), native("/proj/vendor/other.rs")]
         );
 
         let both = filtered_chunk_ids(&db, &filter(&[], &["rs", "md"], &[])).unwrap();
@@ -566,7 +575,7 @@ mod tests {
         let ids = filtered_chunk_ids(&db, &filter(&[], &["md"], &[])).unwrap();
         assert_eq!(
             paths_of(&db, &ids),
-            ["/proj/README.MD", "/proj/src/notes.md"]
+            [native("/proj/README.MD"), native("/proj/src/notes.md")]
         );
     }
 
@@ -576,7 +585,7 @@ mod tests {
         let ids = filtered_chunk_ids(&db, &filter(&["src/**"], &["md"], &[])).unwrap();
         assert_eq!(
             paths_of(&db, &ids),
-            ["/proj/src/notes.md"],
+            [native("/proj/src/notes.md")],
             "the README is Markdown but is not under src"
         );
     }
@@ -594,7 +603,7 @@ mod tests {
             keyword_search(&db, "retry backoff", 10, &filter(&["src/**"], &[], &[])).unwrap();
         assert_eq!(
             paths_of(&db, &scoped),
-            ["/proj/src/lib.rs", "/proj/src/notes.md"]
+            [native("/proj/src/lib.rs"), native("/proj/src/notes.md")]
         );
     }
 

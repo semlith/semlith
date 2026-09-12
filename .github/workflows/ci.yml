@@ -23,7 +23,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Windows binaries have shipped since 0.1.0 and nothing on a pull
+        # request ever compiled them: the tag build was the first and only
+        # place Windows code was touched, and it only compiled, never tested.
+        # 0.10.0 ships a Windows installer, so Windows joins the matrix.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

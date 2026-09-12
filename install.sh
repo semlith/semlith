@@ -4,10 +4,9 @@
 # SEMLITH_VERSION=v0.10.0  pin a release tag (default: the latest release)
 # SEMLITH_HOME=<dir>       install into <dir>/bin (default: ~/.semlith/bin)
 # SEMLITH_YES=1            answer yes to every `semlith setup` prompt
-# SEMLITH_RELEASES_ORIGIN  where releases are fetched from; for the tests
 set -eu
 repo=semlith/semlith
-origin=${SEMLITH_RELEASES_ORIGIN:-https://github.com}
+origin=${SEMLITH_RELEASES_ORIGIN:-https://github.com}  # redirected by the tests
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -104,9 +103,10 @@ if "$bin_dir/semlith" setup --help >/dev/null 2>&1; then
     "$bin_dir/semlith" setup --yes
   elif [ -t 0 ]; then
     "$bin_dir/semlith" setup
-  elif [ -r /dev/tty ]; then
-    # `curl | sh` leaves stdin on the pipe, so the guided flow reads the
-    # terminal rather than every pasted install silently taking the defaults.
+  elif (: </dev/tty) 2>/dev/null; then
+    # `curl | sh` leaves stdin on the pipe, so read the terminal instead of
+    # silently taking defaults. Opening it is the test: in a container
+    # /dev/tty exists and passes -r but cannot be opened.
     "$bin_dir/semlith" setup </dev/tty
   else
     "$bin_dir/semlith" setup --yes

@@ -251,10 +251,18 @@ fn step_binary(yes: bool) -> Result<Step> {
 
 /// The rc file of `$SHELL`. `.profile` is the fallback rather than nothing,
 /// because a login shell reads it and an unknown shell is still a shell.
+///
+/// `SHELL` unset is the case that matters: a container, a CI runner and a cron
+/// job all have a HOME and no `SHELL`, and returning `None` there left the
+/// binary off `PATH` after an otherwise perfect install. Only a missing HOME
+/// means there is genuinely nowhere to write.
 fn rc_file() -> Option<PathBuf> {
     let base = PathBuf::from(std::env::var_os("HOME")?);
     let shell = std::env::var("SHELL").unwrap_or_default();
-    let name = Path::new(&shell).file_name()?.to_string_lossy().to_string();
+    let name = Path::new(&shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     Some(match name.as_str() {
         "zsh" => base.join(".zshrc"),
         "fish" => base.join(".config").join("fish").join("config.fish"),
