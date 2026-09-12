@@ -263,6 +263,10 @@ table {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .pill.on i {
+    animation: none;
+  }
+
   * {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
@@ -1568,10 +1572,617 @@ pre.code {
   min-width: 0;
 }
 
+/* ----------------------------------------------------------------- graph */
+
+/* The canvas pages. Everything below uses the scales at the top of the file;
+ * a value not in one of them does not belong here. */
+
+.graph-page,
+.impact-page,
+.ledger-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+.graph-controls,
+.impact-controls,
+.path-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.graph-scope {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 0 var(--sp-3);
+  height: 36px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  color: var(--muted);
+  transition: border-color 140ms ease;
+}
+
+.graph-scope:focus-within {
+  border-color: var(--accent-edge);
+}
+
+.graph-scope input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--ink);
+  outline: none;
+}
+
+.graph-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
+
+.graph-frame {
+  position: relative;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  overflow: hidden;
+}
+
+.graph-stage,
+.rings {
+  position: relative;
+  width: 100%;
+  height: 460px;
+  min-width: 0;
+}
+
+.graph-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  touch-action: none;
+}
+
+.graph-canvas:active {
+  cursor: grabbing;
+}
+
+/* A strip under the canvas rather than floating over it: a legend drawn on
+ * top of the drawing is a legend sitting on a node. */
+.graph-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--line-soft);
+  background: var(--soft);
+}
+
+.graph-legend {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+
+.graph-legend .key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.graph-legend i {
+  width: 14px;
+  height: 0;
+  border-top: 2px solid var(--muted);
+  display: inline-block;
+}
+
+.graph-legend .extracted i {
+  border-top-color: var(--green);
+}
+
+.graph-legend .inferred i {
+  border-top: 2px dashed var(--amber-ink);
+}
+
+.graph-legend .selected i {
+  border-top-color: var(--accent-edge);
+  border-top-width: 3px;
+}
+
+.graph-meta {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+
+.graph-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+  padding: var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+}
+
+.graph-selected .sym {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--t-lead);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.graph-selected .loc {
+  margin-top: var(--sp-1);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.graph-selected .chips {
+  margin-top: var(--sp-2);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.rail-group h3 {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--t-small);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.rail-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.rail-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-2);
+  font-size: var(--t-body-sm);
+  min-width: 0;
+  transition: background 140ms ease;
+}
+
+.rail-list li:hover {
+  background: var(--soft);
+}
+
+.rail-list a {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.rail-list .via {
+  margin-left: auto;
+  font-size: var(--t-micro);
+  color: var(--muted);
+}
+
+.rail-hint {
+  font-size: var(--t-body-sm);
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.rail-actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* Confidence, everywhere it appears. Never colour alone: an inferred edge
+ * reads as inferred in a greyscale screenshot too. */
+.conf {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+}
+
+.conf.extracted {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.conf.inferred {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+  border: 1px dashed currentColor;
+}
+
+/* ---------------------------------------------------------------- impact */
+
+.impact-title,
+.ledger-page .impact-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.tool-name {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+.impact-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
+}
+
+.impact-head .label {
+  color: var(--muted);
+}
+
+.impact-head .sym {
+  font-family: var(--mono);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.chip.static.amber {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--sp-3);
+}
+
+.stat {
+  padding: var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  min-width: 0;
+}
+
+.stat-label {
+  font-size: var(--t-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.stat-value {
+  margin-top: var(--sp-1);
+  font-size: var(--t-display);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-note {
+  margin-top: var(--sp-1);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.impact-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
+
+.impact-table {
+  min-width: 0;
+  overflow-x: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+}
+
+.impact-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-body-sm);
+}
+
+.impact-table th {
+  text-align: left;
+  font-size: var(--t-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: var(--sp-3) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.impact-table td {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+
+.impact-table td .conf {
+  margin-left: var(--sp-2);
+}
+
+.impact-table .mono {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+/* Truncated rather than broken mid-word: `corpus/route s.rs:274` across three
+ * lines is worse than an ellipsis, and the full path is on the cell's title. */
+.impact-table .where {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rings {
+  height: 320px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  overflow: hidden;
+}
+
+.path-finder {
+  padding: var(--sp-4);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  min-width: 0;
+}
+
+.path-finder h2 {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--t-title);
+}
+
+/* The depth picker. A bare <select> is the one control a browser will not
+ * theme for us, and an unstyled white box in a dark page is the tell. */
+.impact-controls select {
+  height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 140ms ease;
+}
+
+.impact-controls select:hover {
+  border-color: var(--accent-edge);
+}
+
+.impact-controls select:focus-visible {
+  outline: 2px solid var(--accent-edge);
+  outline-offset: 2px;
+}
+
+.path-controls input {
+  flex: 1 1 160px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--soft);
+  font: inherit;
+  color: var(--ink);
+  transition: border-color 140ms ease;
+}
+
+.path-controls input:focus {
+  outline: none;
+  border-color: var(--accent-edge);
+}
+
+.chain {
+  margin: var(--sp-3) 0 var(--sp-2);
+  padding-left: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.chain li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--t-body-sm);
+}
+
+.chain .mono {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.chain .edge {
+  font-size: var(--t-micro);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+/* ---------------------------------------------------------------- ledger */
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  background: var(--chip);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pill.on {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.pill.on i {
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+.note {
+  padding: var(--sp-4);
+  background: var(--soft);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  font-size: var(--t-body-sm);
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.note .what {
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: var(--sp-1);
+}
+
+.card-title {
+  margin: var(--sp-4) 0 var(--sp-2);
+  font-size: var(--t-body);
+  font-weight: 600;
+}
+
+.card-title:first-child {
+  margin-top: 0;
+}
+
+/* ----------------------------------------------------- fusion badges */
+
+.badges {
+  display: inline-flex;
+  gap: var(--sp-1);
+}
+
+.badge {
+  width: 17px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-1);
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  font-weight: 500;
+  cursor: help;
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.badge.vector {
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.badge.keyword {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.badge.graph {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+
+.hit-actions {
+  display: flex;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.hit-actions .quiet {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  transition: color 140ms ease;
+}
+
+.hit-actions .quiet:hover {
+  color: var(--accent-edge);
+}
+
 /* --------------------------------------------------------------- narrow */
 
 
 @media (max-width: 899px) {
+  /* The canvas pages are two columns of real content, so they stack rather
+   * than squeeze: a 280px rail beside a 300px canvas is two unusable halves. */
+  .graph-body,
+  .impact-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .graph-stage {
+    height: 360px;
+  }
+
+  .rings {
+    height: 280px;
+  }
+
   /* The rail is navigation for a wide screen; on a phone the drawer is. */
   .rail {
     display: none;
@@ -1645,6 +2256,24 @@ pre.code {
 }
 
 @media (max-width: 520px) {
+  .graph-stage {
+    height: 280px;
+  }
+
+  .rings {
+    height: 240px;
+  }
+
+  .graph-controls,
+  .impact-controls,
+  .path-controls {
+    gap: var(--sp-2);
+  }
+
+  .stat-value {
+    font-size: var(--t-h1);
+  }
+
   .kv .k {
     width: auto;
   }

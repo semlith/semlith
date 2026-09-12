@@ -23,15 +23,16 @@ const BREAD: &str = "Sourdough rises because a starter of flour and water fermen
                      Hydration is the ratio of water to flour by weight, and a wetter \
                      dough gives a more open crumb after baking.";
 
-/// Every tool the server is expected to expose, in the order it lists them.
-const TOOLS: [&str; 6] = [
-    "semlith_search",
-    "semlith_stats",
-    "semlith_files",
-    "semlith_index",
-    "semlith_add",
-    "semlith_forget",
-];
+/// Every tool the server exposes, in the order it lists them.
+///
+/// Read from the server's own definitions rather than repeated here. What these
+/// tests are about is that a revision serves the same surface as every other
+/// one — not what that surface happens to contain this release — and a second
+/// hand-written copy only means a release that adds a tool fails here for the
+/// wrong reason.
+fn tools() -> Vec<String> {
+    semlith::mcp::tool_names()
+}
 
 // ---------------------------------------------------------------- T01
 
@@ -57,13 +58,13 @@ fn every_advertised_revision_gets_a_working_session() {
         );
 
         let listed = server.call("tools/list", json!({}));
-        let names: Vec<&str> = listed["result"]["tools"]
+        let names: Vec<String> = listed["result"]["tools"]
             .as_array()
             .expect("tools/list returns an array")
             .iter()
-            .map(|t| t["name"].as_str().unwrap())
+            .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names, TOOLS, "wrong tool surface on {revision}");
+        assert_eq!(names, tools(), "wrong tool surface on {revision}");
 
         let hit = server.call(
             "tools/call",

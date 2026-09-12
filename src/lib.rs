@@ -25,6 +25,7 @@ pub mod fleet;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
+pub mod graph;
 pub mod home;
 pub mod http;
 pub mod index;
@@ -132,6 +133,16 @@ pub struct Hit {
     /// is byte for byte what it was before stores could be combined.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
+    /// Which ranked lists found this chunk: any of `vector`, `keyword`,
+    /// `graph`. A hit reached only through the graph is a different kind of
+    /// answer from one the embedding matched, and saying so is what keeps it
+    /// from being mistaken for a semantic match.
+    ///
+    /// Empty is impossible — a hit is in the result because some list ranked
+    /// it — but it is skipped when empty so a caller that never looks at it
+    /// sees the JSON it saw before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lists: Vec<&'static str>,
 }
 
 /// Where an index run has got to, handed to the callback with each file it
@@ -151,6 +162,9 @@ pub struct IndexProgress {
     pub chunks: usize,
     /// Files the walk found.
     pub total: usize,
+    /// Symbols extracted so far in this run. Zero for a corpus of languages
+    /// that carry no edges, which is not an error — see [`crate::graph`].
+    pub symbols: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
@@ -164,6 +178,9 @@ pub struct IndexReport {
     /// Paths a time-bounded run never reached. Zero unless a budget cut the
     /// run short — an unbounded `index_paths` always finishes what it walked.
     pub remaining: usize,
+    /// Symbols extracted in this run, and the edges between them.
+    pub symbols: usize,
+    pub edges: usize,
 }
 
 pub struct Semlith {
@@ -548,6 +565,7 @@ impl Semlith {
                     indexed: report.indexed,
                     chunks: report.chunks,
                     total,
+                    symbols: report.symbols,
                 },
             );
 
@@ -557,9 +575,11 @@ impl Semlith {
             }
 
             let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+            let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
             for (ord, c) in chunks.iter().enumerate() {
                 let id =
                     store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
+                spans.push((c.start_line, c.end_line, id));
                 pending.ids.push(id as u64);
                 pending.texts.push(c.text.clone());
 
@@ -571,6 +591,15 @@ impl Semlith {
                     self.flush(&mut pending)?;
                 }
             }
+
+            // The structure half, on the same changed-file path and inside the
+            // same lock. A file whose symbols were extracted by an earlier run
+            // had them deleted by `delete_file` above, along with its chunks
+            // and the edges leaving them, so this writes a whole fresh set
+            // rather than reconciling one.
+            let (symbols, edges) = self.extract_graph(&path, &text, file_id, &spans)?;
+            report.symbols += symbols;
+            report.edges += edges;
 
             completed.push((file_id, hash));
             report.indexed += 1;
@@ -626,6 +655,123 @@ impl Semlith {
         }
         self.save()?;
         self.commit_hashes(completed)
+    }
+
+    /// Chunks reached from the top hits by one hop through the graph.
+    ///
+    /// Seeded from the chunks the other two lists already found, mapped to the
+    /// symbols defined in them, expanded one hop in both directions, and
+    /// resolved back to the chunks those neighbours live in. One hop, not a
+    /// ranked walk: a personalized PageRank over the graph is a real idea and
+    /// a change to be justified by a recall measurement, not shipped untested
+    /// inside a release that is already large.
+    ///
+    /// Everything here is gated by the same `Filter` the other two halves use,
+    /// through the same `symbols_by_names` predicate — so the one-id-set
+    /// invariant `filter.rs` documents holds across all three lists rather than
+    /// two. A chunk outside the filter cannot arrive through the graph.
+    fn graph_expansion(
+        &self,
+        dense: &[u64],
+        keyword: &[u64],
+        depth: usize,
+        filter: &Filter,
+    ) -> Result<Vec<u64>> {
+        // Seeded from the best of each list rather than all of it. Expanding
+        // from a chunk ranked fortieth is expansion from noise.
+        const SEEDS: usize = 8;
+        let seeds: Vec<u64> = dense
+            .iter()
+            .take(SEEDS)
+            .chain(keyword.iter().take(SEEDS))
+            .copied()
+            .collect();
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let names = store::symbols_in_chunks(&self.db, &seeds)?;
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut neighbours: Vec<String> = Vec::new();
+        for name in &names {
+            for end in store::edges_out(&self.db, name, &[])?
+                .into_iter()
+                .chain(store::edges_in(&self.db, name, &[])?)
+            {
+                if !neighbours.contains(&end.symbol.name) {
+                    neighbours.push(end.symbol.name);
+                }
+            }
+            if neighbours.len() >= depth * 4 {
+                break;
+            }
+        }
+
+        let mut ids = Vec::new();
+        for symbol in store::symbols_by_names(&self.db, &neighbours, filter.groups())? {
+            let Some(chunk_id) = symbol.chunk_id else {
+                continue;
+            };
+            let id = chunk_id as u64;
+            // A chunk the other two lists already ranked gains nothing from
+            // being re-ranked here; the fusion adds the contribution anyway.
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            if ids.len() >= depth {
+                break;
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Extract one file's symbols and outgoing edges, and write them.
+    ///
+    /// Returns `(symbols, edges)` written. A file in a language that carries no
+    /// edges returns `(0, 0)` and is not an error — most corpora are mostly
+    /// prose, and the graph simply has nothing to say about them.
+    ///
+    /// Edges are written by name, so an edge to something not indexed yet — or
+    /// never — is still recorded and resolves when and if its target appears.
+    /// That is what lets a repository be indexed in any order.
+    fn extract_graph(
+        &self,
+        path: &Path,
+        text: &str,
+        file_id: i64,
+        spans: &[(u32, u32, i64)],
+    ) -> Result<(usize, usize)> {
+        let Some(extraction) = graph::extract(path, text)? else {
+            return Ok((0, 0));
+        };
+
+        // Name to id, for the edges below. A file may define the same name
+        // twice — two `new` methods on two types — and the first wins, because
+        // an edge out of this file names its source by name and nothing here
+        // can tell them apart either.
+        let mut ids: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+        for symbol in &extraction.symbols {
+            let chunk_id = spans
+                .iter()
+                .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
+                .map(|(_, _, id)| *id);
+            let id = store::insert_symbol(&self.db, file_id, chunk_id, symbol)?;
+            ids.entry(symbol.name.as_str()).or_insert(id);
+        }
+
+        let mut written = 0;
+        for edge in &extraction.edges {
+            let Some(src) = ids.get(edge.from.as_str()) else {
+                continue;
+            };
+            store::insert_edge(&self.db, *src, &edge.to, &edge.kind, &edge.confidence)?;
+            written += 1;
+        }
+
+        Ok((extraction.symbols.len(), written))
     }
 
     /// Record files as indexed, in one transaction. Their vectors must already
@@ -807,25 +953,45 @@ impl Semlith {
         let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
+        // The third list. The two lists above are what the query said; this is
+        // what the code says about what they found — the symbols inside the top
+        // hits, one hop out, and the chunks those neighbours live in. It costs
+        // no embedding and no model call, and it is what pulls together a
+        // concept spread across files that share no vocabulary.
+        let graph_ids = self.graph_expansion(&dense_ids, &keyword_ids, depth, filter)?;
+
         let mut fused: Vec<(u64, f32)> = Vec::new();
         let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-        for ranking in [&dense_ids, &keyword_ids] {
+        let mut lists: Vec<Vec<&'static str>> = Vec::new();
+        for (name, ranking) in [
+            ("vector", &dense_ids),
+            ("keyword", &keyword_ids),
+            ("graph", &graph_ids),
+        ] {
             for (rank, id) in ranking.iter().enumerate() {
                 let contribution = 1.0 / (RRF_K + rank as f32 + 1.0);
                 match seen.get(id) {
-                    Some(&slot) => fused[slot].1 += contribution,
+                    Some(&slot) => {
+                        fused[slot].1 += contribution;
+                        lists[slot].push(name);
+                    }
                     None => {
                         seen.insert(*id, fused.len());
                         fused.push((*id, contribution));
+                        lists.push(vec![name]);
                     }
                 }
             }
         }
-        fused.sort_by(|a, b| b.1.total_cmp(&a.1));
-        fused.truncate(k);
+        // Sorted together with their provenance, so a hit never carries the
+        // badges of whichever chunk happened to land in its slot.
+        let mut ranked: Vec<((u64, f32), Vec<&'static str>)> =
+            fused.into_iter().zip(lists).collect();
+        ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1));
+        ranked.truncate(k);
 
-        let mut hits = Vec::with_capacity(fused.len());
-        for (id, score) in fused {
+        let mut hits = Vec::with_capacity(ranked.len());
+        for ((id, score), found_by) in ranked {
             // A dangling id means SQLite and the index drifted apart; skip it
             // rather than fail the whole query.
             if let Some(row) = store::chunk(&self.db, id)? {
@@ -844,6 +1010,7 @@ impl Semlith {
                         // Set by the caller when it knows there is more than one
                         // store to tell apart; a store cannot label itself.
                         store: None,
+                        lists: found_by,
                     },
                     similarity,
                 ));

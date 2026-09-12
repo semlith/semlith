@@ -134,6 +134,9 @@ const NAV_ICONS = {
   index: "M4 6h16|M4 12h10|M4 18h13",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
   languages: "M4 6h9|M8 6v2c0 3-2 5-4 6|M7 11c1 2 3 3 5 3.5|M13 20l4-9 4 9|M14.6 17h4.8",
+  graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
+  impact: "M4 18l5-6 4 3 7-9|M20 6h-4|M20 6v4",
+  ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
   privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
@@ -222,19 +225,25 @@ const state = {
   navOpen: !window.matchMedia(NARROW).matches,
   /** Carried from the welcome screen into the Index view's path field. */
   pendingPath: "",
+  /** Carried from a Graph selection into Impact, or into Search. */
+  pendingSymbol: "",
+  pendingQuery: "",
 };
 
 /* Pages, in the design's grouping. The ones the roadmap puts in a later
- * release — Graph, Impact, Inside the index, Ledger, Reports, License — are
- * deliberately absent rather than stubbed: a nav item that leads nowhere is
- * worse than one that does not exist yet. */
+ * release — Inside the index, Reports, License — are deliberately absent
+ * rather than stubbed: a nav item that leads nowhere is worse than one that
+ * does not exist yet. Everything listed here is free on every tier. */
 const VIEWS = [
   { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
   { group: "Workspace", id: "index", label: "Index", title: "Index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
+  { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
+  { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
   { group: "Explore", id: "languages", label: "Languages", title: "Languages" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
+  { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
   { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
   { group: "About", id: "about", label: "About", title: "About" },
 ];
@@ -246,6 +255,1013 @@ function paintStoreCount() {
   if (!node) return;
   const many = state.stores.length;
   node.textContent = `${many} store${many === 1 ? "" : "s"}`;
+}
+
+
+// ---------------------------------------------------------------- graph
+
+/* The colours the canvas draws with, read from the stylesheet rather than
+ * repeated here: the page is themed by CSS custom properties, and a canvas
+ * cannot inherit one. Re-read on every paint so a theme switch is picked up. */
+function graphInk() {
+  const style = getComputedStyle(document.documentElement);
+  const read = (name, fallback) => (style.getPropertyValue(name) || fallback).trim();
+  return {
+    extracted: read("--green", "#3e9a6e"),
+    inferred: read("--amber-ink", "#7a4e0a"),
+    selected: read("--accent-edge", "#c97f14"),
+    line: read("--line", "#dce3e8"),
+    ink: read("--ink", "#1e2a35"),
+    muted: read("--muted", "#64778a"),
+    panel: read("--panel", "#ffffff"),
+  };
+}
+
+/* A force layout, written out because the portal may not load a library: the
+ * CSP allows only 'self' and every byte is compiled into the binary.
+ *
+ * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
+ * so that is ~16k pairs — fine at 60fps. If the budget ever rises past a few
+ * hundred, this wants a quadtree, not a faster loop.
+ */
+function layout(nodes, edges, width, height) {
+  const cx = width / 2;
+  const cy = height / 2;
+  // Repulsion has to grow with the crowd. A constant that reads well at twenty
+  // nodes collapses a hundred into one ball, which is the hairball every graph
+  // view is accused of being.
+  const repulsion = 2200 + nodes.length * 90;
+  const pad = 26;
+  // The rest length grows with the crowd: forty nodes at ninety pixels apart
+  // need more room than eight do, and a constant here is what turns a dense
+  // neighbourhood into a knot.
+  const rest = 70 + nodes.length * 1.6;
+  // How many edges each node carries, so the springs can be shared out. A hub
+  // with forty edges would otherwise be dragged to the centre by forty pulls
+  // while a leaf feels one, and every graph would collapse to its hubs.
+  const load = nodes.map(() => 1);
+  for (const edge of edges) {
+    if (load[edge.from] !== undefined) load[edge.from]++;
+    if (load[edge.to] !== undefined) load[edge.to]++;
+  }
+  // Seeded on a circle rather than at random, so the same graph draws the same
+  // way twice. A layout that reshuffles on every visit is one nobody can learn.
+  nodes.forEach((node, i) => {
+    const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
+    const radius = Math.min(width, height) * 0.32;
+    node.x = cx + Math.cos(angle) * radius;
+    node.y = cy + Math.sin(angle) * radius;
+    node.vx = 0;
+    node.vy = 0;
+  });
+
+  return function step(alpha) {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 0.01) {
+          // Exactly coincident nodes have no direction to separate along.
+          dx = (i % 2 ? 1 : -1) * 0.5;
+          dy = 0.5;
+          d2 = 0.5;
+        }
+        const force = (repulsion / d2) * alpha;
+        const d = Math.sqrt(d2);
+        a.vx += (dx / d) * force;
+        a.vy += (dy / d) * force;
+        b.vx -= (dx / d) * force;
+        b.vy -= (dy / d) * force;
+      }
+    }
+    for (const edge of edges) {
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      if (!a || !b) continue;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = ((d - rest) / d) * 0.06 * alpha;
+      a.vx += (dx * pull) / Math.sqrt(load[edge.from]);
+      a.vy += (dy * pull) / Math.sqrt(load[edge.from]);
+      b.vx -= (dx * pull) / Math.sqrt(load[edge.to]);
+      b.vy -= (dy * pull) / Math.sqrt(load[edge.to]);
+    }
+    for (const node of nodes) {
+      if (node.held) continue;
+      node.vx += (cx - node.x) * 0.0016 * alpha;
+      node.vy += (cy - node.y) * 0.0016 * alpha;
+      node.x += node.vx;
+      node.y += node.vy;
+      node.vx *= 0.84;
+      node.vy *= 0.84;
+      // Kept inside the frame. A node that drifts off-canvas is a node nobody
+      // can click, and the pan control is for choosing a view, not for going
+      // to fetch something that escaped.
+      node.x = Math.min(width - pad, Math.max(pad, node.x));
+      node.y = Math.min(height - pad, Math.max(pad, node.y));
+    }
+  };
+}
+
+/** The last two segments of a path: enough to recognise, short enough to read.
+ * The whole path is on the element's title, which is where someone goes when
+ * two files share a name. */
+function shortPath(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || path;
+}
+
+/** True when the viewer has asked for less movement. */
+function stillness() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/* A pannable, zoomable canvas of nodes and edges.
+ *
+ * Returns the element plus `draw(data)` and `stop()`. The caller owns the data;
+ * this owns the pixels. */
+function graphCanvas(onPick) {
+  const canvas = el("canvas", { class: "graph-canvas" });
+  const wrap = el("div", { class: "graph-stage" }, canvas);
+  const view = { x: 0, y: 0, scale: 1 };
+  let nodes = [];
+  let edges = [];
+  let selected = null;
+  let step = null;
+  let alpha = 0;
+  let frame = null;
+  let running = true;
+  let dragging = null;
+  let panning = null;
+
+  function size() {
+    const ratio = window.devicePixelRatio || 1;
+    const box = wrap.getBoundingClientRect();
+    const w = Math.max(box.width, 320);
+    const h = Math.max(box.height, 320);
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+    return { w, h, ratio };
+  }
+
+  function paint() {
+    const { w, h, ratio } = size();
+    const ink = graphInk();
+    const ctx = canvas.getContext("2d");
+    void h;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.translate(view.x, view.y);
+    ctx.scale(view.scale, view.scale);
+
+    for (const edge of edges) {
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      if (!a || !b) continue;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.strokeStyle = edge.confidence === "extracted" ? ink.extracted : ink.inferred;
+      // An inferred edge is drawn dashed as well as coloured: colour alone is
+      // not a distinction everyone can see.
+      ctx.setLineDash(edge.confidence === "extracted" ? [] : [4, 3]);
+      ctx.lineWidth = edge.confidence === "extracted" ? 1.2 : 1;
+      ctx.globalAlpha = selected && edge.from !== selected && edge.to !== selected ? 0.22 : 0.75;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const on = i === selected;
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, on ? 8 : 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = on ? ink.selected : ink.panel;
+      ctx.strokeStyle = on ? ink.selected : ink.muted;
+      ctx.lineWidth = on ? 2.5 : 1.4;
+      ctx.fill();
+      ctx.stroke();
+      // Labels only where they can be read. Every node labelled at once is a
+      // grey haze that makes the shape harder to see rather than easier, so
+      // this draws the selection, whatever it touches, and the busiest few —
+      // and everything only once the view is zoomed in far enough to have room.
+      // On a phone the frame is ~350px wide and a dozen labels is a smear, so
+      // there the selection and its neighbours carry names and nothing else
+      // does until the reader zooms in.
+      const roomy = w > 520;
+      if (on || node.near || (roomy && node.busy && view.scale > 0.75) || view.scale > 2) {
+        ctx.font = `${on ? 600 : 400} 11px "IBM Plex Mono", ui-monospace, monospace`;
+        ctx.fillStyle = on ? ink.ink : ink.muted;
+        ctx.textAlign = "center";
+        // Test names run to sixty characters and would cover their
+        // neighbours. The full name is in the rail the moment a node is
+        // picked, so the canvas shows as much as fits.
+        const label = node.name.length > 22 ? `${node.name.slice(0, 21)}…` : node.name;
+        ctx.fillText(label, node.x, node.y - (on ? 13 : 10));
+      }
+    }
+    ctx.restore();
+  }
+
+  function tick() {
+    if (step && alpha > 0.005) {
+      step(alpha);
+      alpha *= 0.97;
+    }
+    paint();
+    frame = running ? requestAnimationFrame(tick) : null;
+  }
+
+  function at(event) {
+    const box = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - box.left - view.x) / view.scale,
+      y: (event.clientY - box.top - view.y) / view.scale,
+    };
+  }
+
+  function nearest(point) {
+    let best = null;
+    let bestD = 14 / view.scale;
+    nodes.forEach((node, i) => {
+      const d = Math.hypot(node.x - point.x, node.y - point.y);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    return best;
+  }
+
+  canvas.addEventListener("pointerdown", (event) => {
+    const point = at(event);
+    const hit = nearest(point);
+    canvas.setPointerCapture(event.pointerId);
+    if (hit === null) {
+      panning = { x: event.clientX - view.x, y: event.clientY - view.y };
+      return;
+    }
+    selected = hit;
+    for (const node of nodes) node.near = false;
+    for (const edge of edges) {
+      if (edge.from === hit && nodes[edge.to]) nodes[edge.to].near = true;
+      if (edge.to === hit && nodes[edge.from]) nodes[edge.from].near = true;
+    }
+    nodes[hit].held = true;
+    dragging = hit;
+    alpha = Math.max(alpha, 0.25);
+    if (onPick) onPick(nodes[hit]);
+    paint();
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (dragging !== null) {
+      const point = at(event);
+      nodes[dragging].x = point.x;
+      nodes[dragging].y = point.y;
+      paint();
+    } else if (panning) {
+      view.x = event.clientX - panning.x;
+      view.y = event.clientY - panning.y;
+      paint();
+    }
+  });
+
+  const release = () => {
+    if (dragging !== null) nodes[dragging].held = false;
+    dragging = null;
+    panning = null;
+  };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const box = canvas.getBoundingClientRect();
+    const px = event.clientX - box.left;
+    const py = event.clientY - box.top;
+    const factor = Math.exp(-event.deltaY * 0.0015);
+    const next = Math.min(3, Math.max(0.3, view.scale * factor));
+    view.x = px - ((px - view.x) / view.scale) * next;
+    view.y = py - ((py - view.y) / view.scale) * next;
+    view.scale = next;
+    paint();
+  });
+
+  return {
+    node: wrap,
+    draw(data) {
+      const { w, h } = size();
+      nodes = (data.nodes || []).map((row) => ({ ...row, degree: 0 }));
+      edges = data.edges || [];
+      for (const edge of edges) {
+        if (nodes[edge.from]) nodes[edge.from].degree++;
+        if (nodes[edge.to]) nodes[edge.to].degree++;
+      }
+      // The dozen busiest nodes carry a label at moderate zoom: they are the
+      // ones a reader is orienting by.
+      const ranked = [...nodes].sort((a, b) => b.degree - a.degree).slice(0, 12);
+      for (const node of ranked) node.busy = true;
+      selected = null;
+      step = layout(nodes, edges, w, h);
+      // Under reduced motion the layout is solved before the first paint, so
+      // the page arrives settled instead of animating into place.
+      if (stillness()) {
+        for (let i = 0; i < 420; i++) step(1);
+        step = null;
+        alpha = 0;
+      } else {
+        alpha = 1;
+      }
+      paint();
+    },
+    /** Select a node by name, as though it had been clicked. */
+    pick(name) {
+      const index = nodes.findIndex((node) => node.name === name);
+      if (index < 0) return false;
+      selected = index;
+      for (const node of nodes) node.near = false;
+      for (const edge of edges) {
+        if (edge.from === index && nodes[edge.to]) nodes[edge.to].near = true;
+        if (edge.to === index && nodes[edge.from]) nodes[edge.from].near = true;
+      }
+      paint();
+      if (onPick) onPick(nodes[index]);
+      return true;
+    },
+    running: () => running,
+    toggle() {
+      running = !running;
+      if (running) {
+        alpha = Math.max(alpha, 0.35);
+        tick();
+      } else if (frame) {
+        cancelAnimationFrame(frame);
+        frame = null;
+      }
+      return running;
+    },
+    start() {
+      running = !stillness();
+      if (running) tick();
+      else paint();
+    },
+    stop() {
+      running = false;
+      if (frame) cancelAnimationFrame(frame);
+      frame = null;
+    },
+    repaint: paint,
+  };
+}
+
+async function graphView() {
+  await refreshStores();
+
+  const chosen = new Set();
+  const meta = el("span", { class: "graph-meta" });
+  const rail = el("div", { class: "graph-rail" });
+
+  const canvas = graphCanvas((node) => select(node));
+
+  const pause = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Pause",
+    onclick: (e) => {
+      const on = canvas.toggle();
+      e.currentTarget.textContent = on ? "Pause" : "Resume";
+    },
+  });
+
+  /* The label has to come from what the canvas is actually doing, not from a
+   * second reading of the media query: under reduced motion `start` never
+   * begins a loop, and a button reading "Pause" beside a still picture is a
+   * lie about which of the two is in charge. */
+  function paintPause() {
+    pause.textContent = canvas.running() ? "Pause" : "Settled";
+  }
+
+  function blank(message) {
+    return fill(
+      rail,
+      el("div", { class: "graph-selected" }, el("div", { class: "rail-hint", text: message })),
+    );
+  }
+
+  function ends(title, list, absent) {
+    return el(
+      "div",
+      { class: "rail-group" },
+      el("h3", { text: title }),
+      list.length
+        ? el(
+            "ul",
+            { class: "rail-list" },
+            list.map((end) =>
+              el(
+                "li",
+                {},
+                el("a", {
+                  href: `#graph?name=${encodeURIComponent(end.name)}`,
+                  text: end.name,
+                  onclick: (e) => {
+                    e.preventDefault();
+                    focus(end.name);
+                  },
+                }),
+                el("span", {
+                  class: `conf ${end.confidence}`,
+                  text: end.confidence,
+                  title:
+                    end.confidence === "extracted"
+                      ? "Resolved through an import in the source file."
+                      : "Matched by name. Two functions can share one.",
+                }),
+                el("span", { class: "via", text: end.kind }),
+              ),
+            ),
+          )
+        : el("div", { class: "rail-hint", text: absent }),
+    );
+  }
+
+  async function select(node) {
+    fill(rail, el("div", { class: "rail-hint", text: "Loading…" }));
+    let data;
+    try {
+      data = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}`);
+    } catch (e) {
+      return fill(rail, error(e.message));
+    }
+    const callers = data.callers.map((e) => ({
+      name: e.name,
+      kind: e.kind,
+      confidence: e.confidence,
+    }));
+    const callees = data.callees.map((e) => ({
+      name: e.name,
+      kind: e.kind,
+      confidence: e.confidence,
+    }));
+
+    fill(
+      rail,
+      el(
+        "div",
+        { class: "graph-selected" },
+        el("h2", { class: "sym", text: node.name }),
+        el("div", {
+          class: "loc",
+          title: node.path,
+          text: `${shortPath(node.path)}:${node.start_line}-${node.end_line}`,
+        }),
+        el(
+          "div",
+          { class: "chips" },
+          el("span", { class: "chip static", text: node.kind }),
+          node.store ? el("span", { class: "chip static", text: node.store }) : null,
+          el("span", {
+            class: "chip static",
+            text: `${Math.max(node.end_line - node.start_line + 1, 1)} lines`,
+          }),
+        ),
+      ),
+      ends("Callers", callers, "Nothing in the graph calls this."),
+      ends("Callees", callees, "A leaf, as far as the extracted edges go."),
+      el(
+        "div",
+        { class: "rail-actions" },
+        el("a", {
+          class: "button secondary small",
+          href: `#search`,
+          text: "Chunks it lives in",
+          onclick: (e) => {
+            e.preventDefault();
+            state.pendingQuery = node.name;
+            go("search");
+          },
+        }),
+        el("a", {
+          class: "button small",
+          href: `#impact`,
+          text: "Blast radius",
+          onclick: (e) => {
+            e.preventDefault();
+            state.pendingSymbol = node.name;
+            go("impact");
+          },
+        }),
+      ),
+    );
+  }
+
+  async function load(params) {
+    meta.textContent = "loading…";
+    const query = new URLSearchParams(params || {});
+    for (const store of chosen) query.append("store", store);
+    let data;
+    try {
+      data = await api(`/api/graph?${query}`);
+    } catch (e) {
+      meta.textContent = "";
+      return fill(rail, error(e.message));
+    }
+    if (!data.nodes.length) {
+      meta.textContent = "";
+      canvas.draw({ nodes: [], edges: [] });
+      return blank(
+        data.total === 0
+          ? "This store has no symbols yet. The graph is built as files are indexed — run Index once, or leave the daemon watching."
+          : "Nothing in this scope. Clear the filters, or pick a store.",
+      );
+    }
+    meta.textContent =
+      data.shown < data.total
+        ? `${n(data.shown)} of ${n(data.total)} symbols · ${n(data.edges.length)} edges drawn`
+        : `${n(data.shown)} symbols · ${n(data.edges.length)} edges`;
+    canvas.draw(data);
+    // A focused view arrives with its centre chosen, so the rail says something
+    // before the first click rather than asking for one.
+    const centre = params && params.name;
+    if (centre && canvas.pick(centre)) return;
+    blank("Pick a node to see what calls it and what it calls.");
+  }
+
+  function focus(name) {
+    load({ name, limit: "45" });
+  }
+
+  const scopeInput = el("input", {
+    type: "search",
+    placeholder: "Scope to a path, or find a symbol",
+    onkeydown: (e) => {
+      if (e.key !== "Enter") return;
+      const value = e.currentTarget.value.trim();
+      if (!value) return load({});
+      // A path fragment scopes; anything else is read as a symbol to centre on.
+      load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
+    },
+  });
+
+  const storeChips = state.stores.map((store) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": "false",
+      text: store.name,
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+        e.currentTarget.setAttribute("aria-pressed", String(on));
+        if (on) chosen.add(store.name);
+        else chosen.delete(store.name);
+        load({});
+      },
+    }),
+  );
+
+  const page = el(
+    "div",
+    { class: "view graph-page" },
+    pageHead(
+      "Graph",
+      "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
+    ),
+    el(
+      "div",
+      { class: "graph-controls" },
+      el("div", { class: "graph-scope" }, icon(ICONS.search, 16), labelled("graph-scope", "Scope the graph", scopeInput)),
+      el("div", { class: "filters" }, storeChips.length > 1 ? storeChips : null),
+      el("span", { class: "spacer" }),
+      pause,
+    ),
+    el(
+      "div",
+      { class: "graph-body" },
+      el(
+        "div",
+        { class: "graph-frame" },
+        canvas.node,
+        el(
+          "div",
+          { class: "graph-foot" },
+          el(
+            "div",
+            { class: "graph-legend" },
+            el("span", { class: "key extracted" }, el("i", {}), "extracted"),
+            el("span", { class: "key inferred" }, el("i", {}), "inferred"),
+            el("span", { class: "key selected" }, el("i", {}), "selected"),
+          ),
+          meta,
+        ),
+      ),
+      rail,
+    ),
+  );
+
+  blank("Pick a node to see what calls it and what it calls.");
+  // The canvas has no size until it is in the document.
+  setTimeout(async () => {
+    canvas.start();
+    paintPause();
+    const pending = state.pendingSymbol;
+    state.pendingSymbol = "";
+    if (pending) return load({ name: pending, limit: "45" });
+    // Land on the busiest symbol's neighbourhood rather than on everything at
+    // once. The whole store drawn at once is honest and unreadable — hundreds
+    // of edges among the hubs is what the corpus actually looks like — and a
+    // reader arriving at a knot learns nothing. One symbol and what touches it
+    // is the view the rest of the page is about, and the scope box widens it.
+    try {
+      const overview = await api("/api/graph?limit=1");
+      const busiest = (overview.nodes || [])[0];
+      if (busiest) return focus(busiest.name);
+    } catch (_) {
+      /* fall through to the overview */
+    }
+    load({});
+  }, 0);
+  return page;
+}
+
+// --------------------------------------------------------------- impact
+
+/** Reverse reachability drawn as rings, one ring per hop. */
+function ringCanvas() {
+  const canvas = el("canvas", { class: "graph-canvas" });
+  const wrap = el("div", { class: "rings" }, canvas);
+  let rows = [];
+  let centre = "";
+
+  function paint() {
+    const ratio = window.devicePixelRatio || 1;
+    const box = wrap.getBoundingClientRect();
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 240);
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+    const ink = graphInk();
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const cx = w / 2;
+    const cy = h / 2;
+    const hops = Math.max(1, ...rows.map((r) => r.hops));
+    const gap = Math.min(w, h) / 2 / (hops + 1);
+
+    for (let hop = 1; hop <= hops; hop++) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, gap * hop, 0, Math.PI * 2);
+      ctx.strokeStyle = ink.line;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    const byHop = new Map();
+    for (const row of rows) {
+      if (!byHop.has(row.hops)) byHop.set(row.hops, []);
+      byHop.get(row.hops).push(row);
+    }
+    for (const [hop, list] of byHop) {
+      list.forEach((row, i) => {
+        const angle = (i / list.length) * Math.PI * 2 - Math.PI / 2;
+        const x = cx + Math.cos(angle) * gap * hop;
+        const y = cy + Math.sin(angle) * gap * hop;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(x, y);
+        ctx.strokeStyle = row.confidence === "extracted" ? ink.extracted : ink.inferred;
+        ctx.setLineDash(row.confidence === "extracted" ? [] : [4, 3]);
+        ctx.globalAlpha = 0.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+
+        ctx.beginPath();
+        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = ink.panel;
+        ctx.strokeStyle = row.confidence === "extracted" ? ink.extracted : ink.inferred;
+        ctx.lineWidth = 1.5;
+        ctx.fill();
+        ctx.stroke();
+      });
+    }
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+    ctx.fillStyle = ink.selected;
+    ctx.fill();
+    ctx.font = '600 11px "IBM Plex Mono", ui-monospace, monospace';
+    ctx.fillStyle = ink.ink;
+    ctx.textAlign = "center";
+    ctx.fillText(centre, cx, cy - 15);
+  }
+
+  return {
+    node: wrap,
+    draw(name, list) {
+      centre = name;
+      rows = list;
+      paint();
+    },
+  };
+}
+
+async function impactView() {
+  const summary = el("div", { class: "impact-summary" });
+  const table = el("div", { class: "impact-table" });
+  const rings = ringCanvas();
+  const pathOut = el("div", { class: "path-steps" });
+
+  const name = el("input", {
+    type: "search",
+    placeholder: "A symbol you are about to change",
+    value: state.pendingSymbol || "",
+    onkeydown: (e) => {
+      if (e.key === "Enter") run();
+    },
+  });
+  state.pendingSymbol = "";
+
+  const depth = el("select", { onchange: () => run() }, [1, 2, 3, 4, 5].map((d) =>
+    el("option", { value: String(d), selected: d === 3, text: `${d} hop${d === 1 ? "" : "s"}` }),
+  ));
+
+  async function run() {
+    const symbol = name.value.trim();
+    if (!symbol) {
+      fill(summary, empty("Name a symbol. Its blast radius is what reaches it, not what it reaches."));
+      fill(table);
+      fill(pathOut);
+      rings.draw("", []);
+      return;
+    }
+    fill(summary, el("div", { class: "rail-hint", text: "Walking the edges…" }));
+    let data;
+    try {
+      data = await api(`/api/impact?name=${encodeURIComponent(symbol)}&depth=${depth.value}`);
+    } catch (e) {
+      return fill(summary, error(e.message));
+    }
+
+    const rows = data.reached || [];
+    const inferred = rows.filter((r) => r.confidence !== "extracted").length;
+    const files = new Set(rows.map((r) => r.path)).size;
+
+    fill(
+      summary,
+      el(
+        "div",
+        { class: "impact-head" },
+        el("span", { class: "label", text: "Changing" }),
+        el("span", { class: "sym", text: symbol }),
+        el("span", { class: "chip static amber", text: `${data.depth} hop${data.depth === 1 ? "" : "s"}` }),
+      ),
+      el(
+        "div",
+        { class: "stat-row" },
+        stat("Symbols reached", n(rows.length)),
+        stat("Files touched", n(files)),
+        stat("Matched by name", n(inferred), inferred ? "not resolved through an import" : "every edge resolved"),
+      ),
+      data.truncated
+        ? el("div", { class: "rail-hint", text: "Stopped at the node budget; the real radius is larger." })
+        : null,
+    );
+
+    if (!rows.length) {
+      fill(table, empty("Nothing in the graph reaches this. Either it is a leaf, or its callers are in a language that carries no edges."));
+      rings.draw(symbol, []);
+      return;
+    }
+
+    fill(
+      table,
+      el(
+        "table",
+        {},
+        el(
+          "thead",
+          {},
+          el(
+            "tr",
+            {},
+            el("th", { text: "Reached symbol" }),
+            el("th", { text: "Via" }),
+            el("th", { text: "Hops" }),
+            el("th", { text: "Where" }),
+          ),
+        ),
+        el(
+          "tbody",
+          {},
+          rows.map((row) =>
+            el(
+              "tr",
+              {},
+              el("td", { class: "mono", text: row.name }),
+              el(
+                "td",
+                {},
+                el("span", { text: row.via }),
+                el("span", { class: `conf ${row.confidence}`, text: row.confidence }),
+              ),
+              el("td", { text: String(row.hops) }),
+              el("td", {
+                class: "where",
+                title: row.path,
+                text: `${shortPath(row.path)}:${row.start_line}`,
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+    rings.draw(symbol, rows);
+  }
+
+  // ---- path finder
+  const from = el("input", { type: "search", placeholder: "from" });
+  const to = el("input", { type: "search", placeholder: "to" });
+
+  async function findPath() {
+    const a = from.value.trim();
+    const b = to.value.trim();
+    if (!a || !b) {
+      return fill(pathOut, empty("Name both ends."));
+    }
+    fill(pathOut, el("div", { class: "rail-hint", text: "Searching…" }));
+    let data;
+    try {
+      data = await api(`/api/path?from=${encodeURIComponent(a)}&to=${encodeURIComponent(b)}`);
+    } catch (e) {
+      return fill(pathOut, error(e.message));
+    }
+    const steps = data.path;
+    if (!steps) {
+      return fill(
+        pathOut,
+        empty(`No chain from ${a} to ${b}. They may be unconnected, or connected further than six hops.`),
+      );
+    }
+    if (!steps.length) {
+      return fill(pathOut, empty(`${a} is ${b}.`));
+    }
+    fill(
+      pathOut,
+      el(
+        "ol",
+        { class: "chain" },
+        steps.map((step) =>
+          el(
+            "li",
+            {},
+            el("span", { class: "mono", text: step.from }),
+            el("span", { class: "edge", text: step.kind }),
+            el("span", { class: "mono", text: step.to }),
+            el("span", { class: `conf ${step.confidence}`, text: step.confidence }),
+          ),
+        ),
+      ),
+      el("div", {
+        class: "rail-hint",
+        text: `${steps.length} hop${steps.length === 1 ? "" : "s"}, ${
+          steps.every((s) => s.confidence === "extracted") ? "all extracted" : "some matched by name"
+        }.`,
+      }),
+    );
+  }
+
+  from.addEventListener("keydown", (e) => e.key === "Enter" && findPath());
+  to.addEventListener("keydown", (e) => e.key === "Enter" && findPath());
+
+  const page = el(
+    "div",
+    { class: "view impact-page" },
+    el(
+      "div",
+      { class: "impact-title" },
+      pageHead(
+        "Impact",
+        "Reverse reachability. What breaks if this changes — before the edit, not after the test run.",
+      ),
+      el("span", { class: "tool-name", text: "semlith_impact" }),
+    ),
+    el(
+      "div",
+      { class: "impact-controls" },
+      el("div", { class: "graph-scope" }, icon(ICONS.search, 16), labelled("impact-name", "Symbol", name)),
+      labelled("impact-depth", "Hop depth", depth),
+      el("button", { class: "button small", type: "button", text: "Show", onclick: run }),
+    ),
+    summary,
+    el("div", { class: "impact-body" }, table, rings.node),
+    el(
+      "div",
+      { class: "path-finder" },
+      el("h2", { text: "Path finder" }),
+      el(
+        "div",
+        { class: "path-controls" },
+        labelled("path-from", "From symbol", from),
+        icon(ICONS.up, 16),
+        labelled("path-to", "To symbol", to),
+        el("button", { class: "button secondary small", type: "button", text: "Find", onclick: findPath }),
+      ),
+      pathOut,
+    ),
+  );
+
+  fill(pathOut, empty("Name two symbols to see the shortest chain of edges between them."));
+  setTimeout(() => {
+    if (name.value) run();
+    else fill(summary, empty("Name a symbol. Its blast radius is what reaches it, not what it reaches."));
+  }, 0);
+  return page;
+}
+
+/** One figure with its label, as the design draws them. */
+function stat(label, value, note) {
+  return el(
+    "div",
+    { class: "stat" },
+    el("div", { class: "stat-label", text: label }),
+    el("div", { class: "stat-value", text: value }),
+    note ? el("div", { class: "stat-note", text: note }) : null,
+  );
+}
+
+// --------------------------------------------------------------- ledger
+
+async function ledgerView() {
+  let data;
+  try {
+    data = await api("/api/ledger");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Retrieval ledger"), error(e.message));
+  }
+
+  const on = data.recording;
+  return el(
+    "div",
+    { class: "view ledger-page" },
+    el(
+      "div",
+      { class: "impact-title" },
+      pageHead(
+        "Retrieval ledger",
+        "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
+      ),
+      el(
+        "span",
+        { class: `pill ${on ? "on" : "off"}` },
+        el("i", {}),
+        on ? "recording · opt-in" : "not recording",
+      ),
+    ),
+    el(
+      "div",
+      { class: "stat-row wide" },
+      stat("Queries recorded", n(data.queries), `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`),
+      stat("Excerpt tokens", n(data.excerpt_tokens), "what the agents actually read"),
+      stat("Whole-file tokens", n(data.whole_file_tokens), "what a grep loop would have cost"),
+      stat(
+        "Measured ratio",
+        data.ratio ? `${data.ratio.toFixed(1)}×` : "—",
+        data.ratio ? "not a marketing claim" : "needs a recorded query",
+      ),
+    ),
+    copyField("semlith ledger --last 20"),
+    el("div", {
+      class: "rail-hint",
+      text: "Prints the ledger on the command line. Nothing here needs a key.",
+    }),
+    on
+      ? null
+      : el(
+          "div",
+          { class: "note" },
+          el("div", { class: "what", text: "Recording is off" }),
+          el("div", {
+            text: "Start the daemon with --ledger to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+          }),
+        ),
+    el(
+      "div",
+      { class: "note" },
+      el("div", { class: "what", text: "Per-session views arrive with the paid release" }),
+      el("div", {
+        text: "Recording and the semlith ledger dump are free, permanently. The per-session table, the filters and CSV/JSON export are what 0.13.0 adds on top — they will not lock anything that works today.",
+      }),
+    ),
+  );
 }
 
 /** Read the store list into `state`, so every view agrees on how many exist. */
@@ -725,6 +1741,35 @@ async function languagesView() {
 
 // ---------------------------------------------------------------- search
 
+/* Which of the three ranked lists found a hit. One letter each, with the name
+ * on hover: a hit the graph alone reached is a neighbour of a match rather
+ * than a match, and reading it as a match is the mistake this prevents. */
+const LIST_LABELS = {
+  vector: ["v", "vector — the embedding matched"],
+  keyword: ["f", "full text — the terms matched"],
+  graph: ["g", "graph — reached from a neighbouring symbol"],
+};
+
+function fusionBadges(lists) {
+  if (!lists || !lists.length) return null;
+  return el(
+    "span",
+    { class: "badges" },
+    lists.map((list) => {
+      const [letter, title] = LIST_LABELS[list] || [list[0], list];
+      return el("span", { class: `badge ${list}`, title, text: letter });
+    }),
+  );
+}
+
+/** The likeliest symbol name in a hit, for the graph and impact links. */
+function symbolIn(hit) {
+  const match = hit.text.match(
+    /(?:fn|function|def|func|class|struct|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/,
+  );
+  return match ? match[1] : "";
+}
+
 async function searchView() {
   await refreshStores();
 
@@ -794,8 +1839,34 @@ async function searchView() {
             el("span", { class: "file", text: hit.path }),
             el("span", { class: "lines", text: `${hit.start_line}-${hit.end_line}` }),
             el("span", { class: "from", text: hit.store }),
+            el("span", { class: "spacer" }),
+            fusionBadges(hit.lists),
           ),
           el("pre", { text: hit.text }),
+          el(
+            "div",
+            { class: "hit-actions" },
+            el("a", {
+              href: "#graph",
+              class: "quiet",
+              text: "Open in graph",
+              onclick: (e) => {
+                e.preventDefault();
+                state.pendingSymbol = symbolIn(hit);
+                go("graph");
+              },
+            }),
+            el("a", {
+              href: "#impact",
+              class: "quiet",
+              text: "Blast radius",
+              onclick: (e) => {
+                e.preventDefault();
+                state.pendingSymbol = symbolIn(hit);
+                go("impact");
+              },
+            }),
+          ),
         ),
       ),
     );
@@ -818,7 +1889,14 @@ async function searchView() {
   );
 
   fill(results, nothing());
-  setTimeout(() => input.focus(), 0);
+  setTimeout(() => {
+    if (state.pendingQuery) {
+      input.value = state.pendingQuery;
+      state.pendingQuery = "";
+      run();
+    }
+    input.focus();
+  }, 0);
 
   return el(
     "div",
@@ -839,7 +1917,7 @@ async function searchView() {
         { class: "filters" },
         storeChips.length > 1 ? storeChips : null,
         el("span", { class: "spacer" }),
-        el("span", { class: "meta", text: "vector + fts5, fused by rank" }),
+        el("span", { class: "meta", text: "vector + fts5 + graph, fused by rank" }),
       ),
     ),
     results,
@@ -1523,6 +2601,28 @@ async function aboutView() {
       ),
       el(
         "div",
+        { class: "card pad" },
+        el("h2", { class: "card-title", text: "Languages with graph edges" }),
+        el(
+          "div",
+          { class: "chips" },
+          (about.graph_languages || []).map((lang) =>
+            el("span", { class: "chip static", text: lang }),
+          ),
+        ),
+        el("p", {
+          class: "subtitle",
+          text: `${(about.graph_languages || []).length} of ${about.languages} languages carry symbols and edges. The rest are searchable exactly as before, just without structure.`,
+        }),
+        el("h2", { class: "card-title", text: "Edge kinds" }),
+        el(
+          "div",
+          { class: "chips" },
+          (about.edge_kinds || []).map((kind) => el("span", { class: "chip static", text: kind })),
+        ),
+      ),
+      el(
+        "div",
         { class: "card" },
         list.length
           ? el(
@@ -1669,6 +2769,9 @@ const RENDER = {
   agents: agentsView,
   privacy: privacyView,
   about: aboutView,
+  graph: graphView,
+  impact: impactView,
+  ledger: ledgerView,
 };
 
 function go(id) {

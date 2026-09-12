@@ -160,7 +160,12 @@ just those lines instead of the whole file.
 | `semlith files` | List indexed files. |
 | `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
 | `semlith forget <PATH>` | Drop one file from the store. |
-| `semlith start [PATHS...]` | Own every registered store, keep them current, and serve the portal on `127.0.0.1:7365`. `--port`, `--debounce`, `--airgap`. |
+| `semlith symbol <NAME>` | Where a symbol is defined, by exact name, from the parsed syntax tree rather than a grep for `fn name`. |
+| `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind. |
+| `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
+| `semlith impact <NAME>` | What breaks if this changes: everything that reaches it, walking edges backwards. `--depth N`, default 3. |
+| `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`. Needs no key. |
+| `semlith start [PATHS...]` | Own every registered store, keep them current, and serve the portal on `127.0.0.1:7365`. `--port`, `--debounce`, `--airgap`, `--ledger`. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
@@ -462,6 +467,72 @@ Adding a store is cheap. Measured on three 300-file stores that share a model,
 M1: one query embed per search rather than one per store, a median 3.4ms for one
 store rising to 4.0ms for three, and an MCP server that has answered a query
 holding 137 MB on one store and 137 MB on three — one loaded model, not three.
+
+## The code graph
+
+From 0.12.0 a store knows the structure of the code in it, not only its text.
+Indexing extracts symbols and the edges between them with tree-sitter — for
+Rust, TypeScript, Python, Go, Java and C — on the same changed-file path that
+drives re-embedding. So a file saved under `semlith start` updates its edges in
+the same pass that updates its vectors, and there is no build step and no
+artifact that can quietly go stale.
+
+```console
+$ semlith symbol acquire
+acquire method  src/lock.rs:32-85
+
+$ semlith neighbors acquire
+callers (2)
+  lock via defines (extracted)  src/lock.rs:1
+  run_held via calls (inferred)  src/watch.rs:122
+callees (3)
+  ...
+
+$ semlith impact acquire --depth 2
+4 symbols reach acquire within 2 hops
+  1 hop   run_held via calls (inferred)  src/watch.rs:122
+  2 hops  run via calls (inferred)  src/watch.rs:102
+```
+
+`semlith impact` before an edit is the point. The most expensive mistake an
+agent makes on a real codebase is changing the call site it was told about and
+leaving every sibling caller broken; this is the one call that answers "who else
+does this touch" without a grep chain that stops when the agent decides it has
+seen enough.
+
+**Extracted or inferred.** Every edge says how it was resolved. A call whose
+name the file also imports was resolved by the file itself and is marked
+`extracted`; a bare name match is `inferred`. Two functions called `new` in
+different modules is the normal case in real code, so semlith records which kind
+of edge it has and never shows one as the other. Treat an inferred edge as a
+strong hint, not a fact.
+
+**Search uses it.** The top vector and keyword hits are mapped to the symbols in
+them, expanded one hop, and the chunks those neighbours live in join the ranking
+as a third fused list. That costs no embedding and no model call, and it reaches
+the case neither other list can: a concept spread over files that share no
+vocabulary. Every hit says which lists found it — `v` vector, `f` full text, `g`
+graph — so a result the graph alone reached reads as a neighbour of a match
+rather than as a match.
+
+Six languages carry edges. Everything else is searchable exactly as it was, with
+no symbols; the portal's About page lists the six that carry edges.
+
+## The retrieval ledger
+
+Off unless you ask for it. `semlith start --ledger` records every query an agent
+ran into the store: the query, the client, how many hits came back, the excerpt
+tokens the agent actually read, and the whole-file tokens reading those files
+would have cost.
+
+```console
+$ semlith ledger --last 3
+20:14:31 d20345  claude-code      8 hits      6 ms  where is the writer lock taken
+```
+
+Each row carries the hash of the row before it, so an edited or removed row is
+detectable rather than merely unlikely — an audit record rather than a log file.
+Nothing is sent anywhere, and the command needs no licence key, now or ever.
 
 ## Using it from an agent
 

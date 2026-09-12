@@ -50,6 +50,12 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/privacy") => privacy(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
+        (true, _, "/api/symbol") => symbol(state, request),
+        (true, _, "/api/neighbors") => neighbors(state, request),
+        (true, _, "/api/path") => shortest_path(state, request),
+        (true, _, "/api/impact") => impact(state, request),
+        (true, _, "/api/graph") => graph(state, request),
+        (true, _, "/api/ledger") => ledger(state),
         (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
@@ -243,9 +249,14 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "end_line": h.end_line,
                 "text": h.text,
                 "store": h.store.clone().or_else(|| single.then(|| label.clone()).flatten()),
+                "lists": h.lists,
             })
         })
         .collect();
+
+    if state.ledger {
+        record(fleet, "portal", query, &hits, elapsed);
+    }
 
     Response::json(&json!({
         "hits": out,
@@ -253,6 +264,88 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
     }))
+}
+
+/// Write one retrieval into every store that answered.
+///
+/// Tokens are estimated at four characters each. That is a rough rule and it is
+/// said to be one on the page: what matters for the ratio is that both sides
+/// are measured the same way, not that either is exact.
+fn record(
+    fleet: &crate::fleet::Fleet,
+    client: &str,
+    query: &str,
+    hits: &[crate::Hit],
+    elapsed: std::time::Duration,
+) {
+    const CHARS_PER_TOKEN: i64 = 4;
+    let excerpt: i64 = hits.iter().map(|h| h.text.len() as i64).sum::<i64>() / CHARS_PER_TOKEN;
+
+    for (label, store) in fleet.each() {
+        // Only the stores this answer actually came from, so a search across
+        // three stores does not write three identical rows.
+        let mine: Vec<&crate::Hit> = hits
+            .iter()
+            .filter(|h| h.store.as_deref().is_none_or(|s| s == label))
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        // What reading those files whole would have cost, which is the honest
+        // denominator: the ratio is measured against a real alternative.
+        let paths: std::collections::BTreeSet<&str> =
+            mine.iter().map(|h| h.path.as_str()).collect();
+        let whole: i64 = paths
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len() as i64 / CHARS_PER_TOKEN)
+            .sum();
+        let _ = store::record_retrieval(
+            store.db(),
+            client,
+            query,
+            mine.len() as i64,
+            elapsed.as_micros() as i64,
+            excerpt,
+            whole,
+        );
+    }
+}
+
+/// The free half of the ledger: whether it is recording, and the totals.
+fn ledger(state: &Arc<State>) -> Response {
+    let empty = json!({
+        "recording": state.ledger,
+        "queries": 0,
+        "clients": 0,
+        "excerpt_tokens": 0,
+        "whole_file_tokens": 0,
+        "ratio": null,
+        "intact": true,
+    });
+    let recording = state.ledger;
+    with_fleet(state, empty, move |fleet| {
+        let (mut queries, mut clients, mut excerpt, mut whole) = (0, 0, 0, 0);
+        let mut intact = true;
+        for (_, store) in fleet.each() {
+            let (q, c, e, w) = store::ledger_totals(store.db())?;
+            queries += q;
+            clients = clients.max(c);
+            excerpt += e;
+            whole += w;
+            intact = intact && store::ledger_break(store.db())?.is_none();
+        }
+        let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
+        Ok(json!({
+            "recording": recording,
+            "queries": queries,
+            "clients": clients,
+            "excerpt_tokens": excerpt,
+            "whole_file_tokens": whole,
+            "ratio": ratio,
+            "intact": intact,
+        }))
+    })
 }
 
 fn models() -> Response {
@@ -378,6 +471,11 @@ fn about(state: &Arc<State>) -> Response {
         "model_cache": crate::model_cache_dir().display().to_string(),
         "models": TextEmbedding::list_supported_models().len() + 1,
         "languages": LANGUAGES.len(),
+        // Which of those languages carry graph edges. The rest are searchable
+        // exactly as before and simply have no symbols, which is a different
+        // thing from being unsupported.
+        "graph_languages": crate::graph::LANGUAGES,
+        "edge_kinds": crate::graph::KINDS,
         "stores": state.stores().len(),
     }))
 }
@@ -393,14 +491,9 @@ fn agents(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
         "connected": state.proxy_count(),
-        "tools": [
-            "semlith_search",
-            "semlith_stats",
-            "semlith_files",
-            "semlith_index",
-            "semlith_add",
-            "semlith_forget",
-        ],
+        // Read from the MCP server's own definitions rather than repeated
+        // here: a second copy is how a tool ends up served and invisible.
+        "tools": crate::mcp::tool_names(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         "install": {
@@ -415,6 +508,142 @@ fn agents(state: &Arc<State>) -> Response {
 /// read: nothing here installs anything.
 fn setup() -> Response {
     Response::json(&json!(crate::setup::status()))
+}
+
+// ----------------------------------------------------------------- graph
+
+/// Run a read against the open fleet, or answer with `empty` when no store is
+/// open yet. Every graph route has the same three lines in front of it.
+fn with_fleet(
+    state: &Arc<State>,
+    empty: Value,
+    read: impl FnOnce(&crate::fleet::Fleet) -> anyhow::Result<Value>,
+) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let fleet = state.fleet.lock().expect("the fleet lock");
+    let Some(fleet) = fleet.as_ref() else {
+        return Response::json(&empty);
+    };
+    match read(fleet) {
+        Ok(value) => Response::json(&value),
+        Err(e) => Response::error(500, &e.to_string()),
+    }
+}
+
+fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let k = request
+        .query("k")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 200);
+    let only = request.query_all("store");
+    with_fleet(state, json!({ "symbols": [] }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let found = fleet.symbols_in(only.as_deref(), &name, k)?;
+        Ok(json!({ "symbols": found }))
+    })
+}
+
+fn neighbors(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let kinds = request.query_all("kind");
+    if let Some(bad) = kinds
+        .iter()
+        .find(|k| !crate::graph::KINDS.contains(&k.as_str()))
+    {
+        return Response::error(400, &format!("unknown edge kind {bad:?}"));
+    }
+    let only = request.query_all("store");
+    let empty = json!({ "callers": [], "callees": [] });
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        Ok(json!(fleet.neighbours_in(
+            only.as_deref(),
+            &name,
+            &kinds
+        )?))
+    })
+}
+
+fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
+    let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
+        return Response::error(400, "missing from or to");
+    };
+    let (from, to) = (from.to_string(), to.to_string());
+    let depth = request
+        .query("depth")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(6)
+        .clamp(1, 20);
+    let only = request.query_all("store");
+    with_fleet(state, json!({ "path": null }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        Ok(json!({ "path": fleet.path_in(only.as_deref(), &from, &to, depth)? }))
+    })
+}
+
+fn impact(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let depth = request
+        .query("depth")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(crate::graph::DEFAULT_DEPTH)
+        .clamp(1, 20);
+    let only = request.query_all("store");
+    let empty = json!({ "reached": [], "depth": depth, "truncated": false });
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let reached = fleet.impact_in(only.as_deref(), &name, depth)?;
+        let truncated = reached.len() >= crate::graph::MAX_NODES;
+        Ok(json!({ "reached": reached, "depth": depth, "truncated": truncated }))
+    })
+}
+
+/// The nodes and edges the Graph page draws.
+///
+/// Scoped to a store, to a directory, or to one symbol and its neighbourhood —
+/// never the whole corpus, because a force layout over a monorepo is neither
+/// drawable nor readable. The payload is a documented shape rather than
+/// whatever the renderer happened to want: `{ nodes, edges, total, shown }`,
+/// so another tool can draw the same graph and the renderer can be replaced.
+fn graph(state: &Arc<State>, request: &Request) -> Response {
+    let focus = request.query("name").map(str::to_string);
+    let prefix = request.query("path").map(str::to_string);
+    let limit = request
+        .query("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        // Deliberately small. A force layout is readable at dozens of nodes
+        // and a hairball at hundreds, and the scope box is how someone asks
+        // for a different part of the graph rather than more of it at once.
+        .unwrap_or(70)
+        .clamp(1, crate::graph::MAX_NODES);
+    let only = request.query_all("store");
+    let empty = json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 });
+
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let chosen: Vec<(&str, &crate::Semlith)> = match &only {
+            Some(names) => fleet
+                .each()
+                .filter(|(label, _)| names.iter().any(|n| n == label))
+                .collect(),
+            None => fleet.each().collect(),
+        };
+        let many = fleet.len() > 1;
+        crate::graph::scoped(&chosen, focus.as_deref(), prefix.as_deref(), limit, many)
+    })
 }
 
 // ---------------------------------------------------------------- writes
