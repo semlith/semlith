@@ -558,6 +558,26 @@ fn main() -> Result<()> {
         Command::Mcp => {
             // Every registered store, so a client stanza is `semlith mcp` and
             // nothing else.
+            let dirs = semlith::home::all_dirs(&cli.store, &cwd)?;
+
+            // A daemon is the writer for every store it opened, so an agent
+            // that opened the store itself could not index while a portal was
+            // open. Forwarding removes that: the daemon answers, and it is the
+            // one process allowed to write.
+            if let Some(upstream) = semlith::proxy::find(&semlith::proxy::candidates(&dirs)) {
+                eprintln!(
+                    "semlith {}: forwarding to the daemon on 127.0.0.1:{} (found via {})",
+                    env!("CARGO_PKG_VERSION"),
+                    upstream.port,
+                    upstream.via.display(),
+                );
+                return semlith::proxy::serve(
+                    &upstream,
+                    std::io::stdin().lock(),
+                    std::io::stdout().lock(),
+                );
+            }
+
             let mut fleet = read_fleet(&cli.store, &cwd, true)?;
             // Load each distinct model before the first tool call so an agent
             // does not sit through a cold start mid-conversation.

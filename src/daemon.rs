@@ -175,9 +175,22 @@ pub struct State {
     pub started: SystemTime,
     /// Refusals by class, for the line the daemon logs on shutdown.
     pub refusals: Mutex<BTreeMap<&'static str, u64>>,
-    /// `semlith mcp` processes currently forwarding here.
-    pub proxied: AtomicUsize,
+    /// `semlith mcp` processes forwarding here: pid to the unix second it was
+    /// last heard from. A proxy has no disconnect to observe — its client may
+    /// simply stop asking — so recency is the only honest answer to "how many
+    /// are connected".
+    pub proxies: Mutex<BTreeMap<u32, u64>>,
+    /// A second reader, for forwarded MCP calls, opened on first use.
+    ///
+    /// Separate from `fleet` on purpose: a forwarded `semlith_index` blocks its
+    /// caller until the writer has run it, and sharing one lock would mean an
+    /// agent's index freezing the portal for as long as the slice lasts. A
+    /// reader that is never used costs a SQLite handle and no vectors.
+    pub mcp_fleet: Mutex<Option<Fleet>>,
 }
+
+/// How recently a proxy must have called to count as connected.
+const PROXY_FRESH: u64 = 120;
 
 impl State {
     pub fn store(&self, name: &str) -> Option<&Arc<Store>> {
@@ -224,6 +237,41 @@ impl State {
             let _ = discovery(self.server.port(), &fresh).write(&store.dir);
         }
         fresh
+    }
+
+    /// Note that a forwarding `semlith mcp` is alive.
+    pub fn saw_proxy(&self, pid: u32) {
+        let mut proxies = self.proxies.lock().expect("the proxy lock");
+        let now = now();
+        proxies.insert(pid, now);
+        proxies.retain(|_, seen| now.saturating_sub(*seen) <= PROXY_FRESH);
+    }
+
+    /// How many `semlith mcp` processes are currently forwarding here.
+    pub fn proxy_count(&self) -> usize {
+        let now = now();
+        self.proxies
+            .lock()
+            .expect("the proxy lock")
+            .values()
+            .filter(|seen| now.saturating_sub(**seen) <= PROXY_FRESH)
+            .count()
+    }
+
+    /// The reader forwarded MCP calls answer from, opened on first use.
+    pub fn open_mcp_fleet(&self) -> Result<()> {
+        let mut fleet = self.mcp_fleet.lock().expect("the mcp fleet lock");
+        if fleet.is_some() {
+            return Ok(());
+        }
+        let dirs: Vec<PathBuf> = self.stores.iter().map(|s| s.dir.clone()).collect();
+        if dirs.is_empty() {
+            bail!("this daemon has no store open");
+        }
+        let mut opened = Fleet::open(&dirs)?;
+        opened.quiet = true;
+        *fleet = Some(opened);
+        Ok(())
     }
 
     pub fn refuse(&self, class: Refusal) {
@@ -379,7 +427,8 @@ pub fn run(
         airgap,
         started: SystemTime::now(),
         refusals: Mutex::new(BTreeMap::new()),
-        proxied: AtomicUsize::new(0),
+        proxies: Mutex::new(BTreeMap::new()),
+        mcp_fleet: Mutex::new(None),
     });
 
     // Installed before the first thread starts: the signal is how this process
@@ -566,6 +615,71 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
     }
 }
 
+/// The daemon standing in as the writer for a forwarded `semlith_index` or
+/// `semlith_forget`.
+///
+/// The agent's call blocks here until the watcher thread — the only thread
+/// allowed to write — has run it, which is exactly the guarantee the agent
+/// wanted and could not have in 0.8.0: the call either happens or reports why,
+/// and never fails because somebody else holds the lock.
+pub struct Writer(pub Arc<State>);
+
+impl crate::mcp::Writer for Writer {
+    fn index(&self, store: Option<&str>, paths: &[PathBuf]) -> Result<String, String> {
+        let store = self.0.writable(store).map_err(|e| e.to_string())?.clone();
+        let progress = self.0.index(&store, paths.to_vec());
+        let mut last = None;
+        for event in progress {
+            match event["event"].as_str() {
+                Some("error") => {
+                    return Err(event["error"]
+                        .as_str()
+                        .unwrap_or("indexing failed")
+                        .to_string());
+                }
+                Some("done") => last = Some(event),
+                // "file" events are the portal's progress bar; an agent gets
+                // the summary it has always got.
+                _ => {}
+            }
+        }
+        let done = last.ok_or_else(|| "the writer stopped before answering".to_string())?;
+        let count = |key: &str| done[key].as_u64().unwrap_or(0);
+        let mut text = format!(
+            "{} indexed, {} unchanged, {} skipped, {} removed ({} chunks)",
+            count("indexed"),
+            count("unchanged"),
+            count("skipped"),
+            count("removed"),
+            count("chunks"),
+        );
+        if count("remaining") > 0 {
+            text.push_str(&format!(
+                "\nStopped at the time limit with {} paths remaining. \
+                 Call semlith_index again with the same arguments to continue; \
+                 nothing already indexed is redone.",
+                count("remaining")
+            ));
+        }
+        Ok(text)
+    }
+
+    fn forget(&self, store: Option<&str>, path: &str) -> Result<String, String> {
+        let store = self.0.writable(store).map_err(|e| e.to_string())?.clone();
+        let progress = self.0.forget(&store, PathBuf::from(path));
+        let done = progress
+            .recv()
+            .map_err(|_| "the writer stopped before answering".to_string())?;
+        if let Some(error) = done["error"].as_str() {
+            return Err(error.to_string());
+        }
+        Ok(match done["forgot"].as_u64().unwrap_or(0) {
+            0 => format!("{path} was not indexed; nothing removed."),
+            n => format!("Removed {n} chunks for {path}."),
+        })
+    }
+}
+
 /// The URL the daemon prints, and the only place the token is shown.
 pub fn url(state: &State) -> String {
     state.server.url()
@@ -639,7 +753,8 @@ mod tests {
             airgap: false,
             started: SystemTime::now(),
             refusals: Mutex::new(BTreeMap::new()),
-            proxied: AtomicUsize::new(0),
+            proxies: Mutex::new(BTreeMap::new()),
+            mcp_fleet: Mutex::new(None),
         };
 
         let err = match state.writable(None) {

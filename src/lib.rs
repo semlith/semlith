@@ -30,6 +30,7 @@ pub mod index;
 pub mod lock;
 pub mod mcp;
 pub mod portal;
+pub mod proxy;
 pub mod routes;
 pub mod store;
 pub mod watch;

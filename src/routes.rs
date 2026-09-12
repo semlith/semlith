@@ -55,6 +55,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/rotate") => rotate(state),
+        (_, true, "/api/mcp") => mcp(state, request),
 
         // A method that exists on another verb is worth telling apart from a
         // route that does not exist: one is a bug in the page, the other is a
@@ -363,8 +364,8 @@ fn about(state: &Arc<State>) -> Response {
 /// MCP status, and the stanza for every client the README documents.
 fn agents(state: &Arc<State>) -> Response {
     Response::json(&json!({
-        "forwarding": state.proxied.load(Ordering::Relaxed) > 0,
-        "connected": state.proxied.load(Ordering::Relaxed),
+        "forwarding": state.proxy_count() > 0,
+        "connected": state.proxy_count(),
         "tools": ["semlith_search", "semlith_stats", "semlith_files", "semlith_index", "semlith_forget"],
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
@@ -444,6 +445,35 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
             "restart_required": true,
         })),
         Err(e) => Response::error(400, &e.to_string()),
+    }
+}
+
+/// One forwarded JSON-RPC request, answered by the same code the stdio server
+/// runs — which is what makes every supported protocol revision behave the
+/// same through the proxy as it does in process.
+fn mcp(state: &Arc<State>, request: &Request) -> Response {
+    if let Some(pid) = crate::proxy::proxy_pid(request.header("semlith-proxy")) {
+        state.saw_proxy(pid);
+    }
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    if let Err(e) = state.open_mcp_fleet() {
+        return Response::error(409, &e.to_string());
+    }
+
+    let writer = daemon::Writer(Arc::clone(state));
+    let mut fleet = state.mcp_fleet.lock().expect("the mcp fleet lock");
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::error(409, "this daemon has no store open");
+    };
+
+    match crate::mcp::answer(fleet, Some(&writer), &body) {
+        Some(value) => Response::json(&value),
+        // A notification. Answered with an empty 200 rather than an empty JSON
+        // object, so the proxy writes nothing to a client that expects nothing.
+        None => Response::new(200, "application/json; charset=utf-8", Vec::new()),
     }
 }
 

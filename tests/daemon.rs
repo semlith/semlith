@@ -734,3 +734,223 @@ fn the_agents_route_serves_the_readme_stanzas_verbatim() {
         }
     }
 }
+
+// ---------------------------------------------------------------- T09
+
+/// A `semlith mcp` driven through the daemon, as a client would drive it.
+struct Proxied {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl Proxied {
+    fn open(home: &Path, cwd: &Path) -> Self {
+        let mut child = semlith(home)
+            .arg("mcp")
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("semlith mcp runs");
+        let stdin = child.stdin.take().expect("stdin is piped");
+        let stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+        Self {
+            child,
+            stdin,
+            stdout,
+        }
+    }
+
+    fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+        });
+        writeln!(self.stdin, "{request}").expect("the server takes a request");
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        self.stdout
+            .read_line(&mut line)
+            .expect("the server answers");
+        assert!(!line.trim().is_empty(), "the server closed on {method}");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("not JSON-RPC: {e}\n{line}"))
+    }
+}
+
+impl Drop for Proxied {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Every revision the server advertises has to work through the proxy exactly
+/// as it does in process — which is what the daemon running the same
+/// `mcp::answer` buys, rather than a second protocol implementation that agrees
+/// until somebody edits one of them.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn every_revision_proves_itself_through_the_proxy_too() {
+    let (dir, home, work) = sandbox("proxy-revisions");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let root = work.join("api");
+    let daemon = Daemon::start_in(dir, home.clone(), root.clone(), &[]);
+
+    for revision in ["2025-11-25", "2025-06-18", "2024-11-05"] {
+        let mut server = Proxied::open(&home, &root);
+        let hello = server.call(
+            "initialize",
+            serde_json::json!({ "protocolVersion": revision, "capabilities": {} }),
+        );
+        assert_eq!(
+            hello["result"]["protocolVersion"], revision,
+            "the proxy changed what {revision} is answered with: {hello}"
+        );
+
+        let listed = server.call("tools/list", serde_json::json!({}));
+        let names: Vec<&str> = listed["result"]["tools"]
+            .as_array()
+            .expect("tools/list returns an array")
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "semlith_search",
+                "semlith_stats",
+                "semlith_files",
+                "semlith_index",
+                "semlith_forget"
+            ],
+            "wrong tool surface on {revision} through the proxy"
+        );
+
+        let hit = server.call(
+            "tools/call",
+            serde_json::json!({
+                "name": "semlith_search",
+                "arguments": { "query": "Fleet::writable", "k": 3 }
+            }),
+        );
+        let text = hit["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("fleet.rs"),
+            "no excerpts on {revision}: {text}"
+        );
+    }
+
+    // And the modern revision, which shakes no hands at all.
+    let mut modern = Proxied::open(&home, &root);
+    let found = modern.call(
+        "server/discover",
+        serde_json::json!({
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" }
+        }),
+    );
+    assert_eq!(found["result"]["resultType"], "complete", "{found}");
+    assert_eq!(
+        found["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "semlith"
+    );
+    drop(daemon);
+}
+
+/// The reason the proxy exists. In 0.8.0 this call failed for as long as a
+/// watcher held the store; now the daemon performs it and the agent gets the
+/// answer it asked for.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn the_write_tools_work_through_the_proxy_while_the_daemon_holds_the_lock() {
+    let (dir, home, work) = sandbox("proxy-writes");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let root = work.join("api");
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
+
+    let daemon = Daemon::start_in(dir, home.clone(), root.clone(), &[]);
+    let mut server = Proxied::open(&home, &root);
+
+    let stats = server.call("tools/call", serde_json::json!({ "name": "semlith_stats" }));
+    assert!(
+        stats["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("chunks"),
+        "{stats}"
+    );
+
+    let indexed = server.call(
+        "tools/call",
+        serde_json::json!({
+            "name": "semlith_index",
+            "arguments": { "path": extra.display().to_string() }
+        }),
+    );
+    let text = indexed["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("1 indexed"),
+        "the write tool did not go through the daemon: {text}"
+    );
+    assert!(
+        !text.contains("being indexed by") && !text.contains("is held by"),
+        "the write tool still hit the lock: {text}"
+    );
+
+    let forgotten = server.call(
+        "tools/call",
+        serde_json::json!({
+            "name": "semlith_forget",
+            "arguments": { "path": extra.join("lock.rs").display().to_string() }
+        }),
+    );
+    assert!(
+        forgotten["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Removed"),
+        "{forgotten}"
+    );
+
+    // And the daemon now counts the client, which is what the Agents view shows.
+    let agents = daemon.get("/api/agents").json();
+    assert_eq!(agents["forwarding"], serde_json::json!(true), "{agents}");
+    assert!(agents["connected"].as_u64().unwrap_or(0) >= 1, "{agents}");
+}
+
+/// A discovery file left by a daemon that was killed must not send a client to
+/// a dead port. The fallback is the whole of 0.8.0's behaviour, unchanged.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_stale_discovery_file_falls_back_to_opening_the_store() {
+    let (dir, home, work) = sandbox("stale");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let root = work.join("api");
+    let store = home.join("stores").join("api");
+
+    // A port nothing is listening on, recorded as if a daemon had been there.
+    let dead = {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        drop(socket);
+        port
+    };
+    std::fs::write(
+        store.join("daemon.json"),
+        format!(r#"{{"pid":999999,"port":{dead},"token":"nothing","version":"0.9.0"}}"#),
+    )
+    .unwrap();
+
+    let mut server = Proxied::open(&home, &root);
+    let stats = server.call("tools/call", serde_json::json!({ "name": "semlith_stats" }));
+    assert!(
+        stats["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("chunks"),
+        "a stale discovery file broke the server instead of being ignored: {stats}"
+    );
+    drop(dir);
+}
