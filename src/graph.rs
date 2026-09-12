@@ -106,8 +106,18 @@ fn supplement(lang: &str) -> &'static str {
         "rust" => {
             r#"
             (use_declaration argument: (_) @reference.import)
+            ; A scoped call names two things worth an edge: the type or module
+            ; it went through, and the function itself. `File::create` is most
+            ; useful as an edge to `File`; `store::record_retrieval` is most
+            ; useful as an edge to `record_retrieval`. Capture both rather than
+            ; guess which kind of path this is.
             (call_expression
               function: (scoped_identifier path: (identifier) @name) @reference.call)
+            (call_expression
+              function: (scoped_identifier name: (identifier) @name) @reference.call)
+            ; A method call: `self.flush()`, `store.db()`.
+            (call_expression
+              function: (field_expression field: (field_identifier) @name) @reference.call)
         "#
         }
         // TypeScript's bundled query matches nothing on ordinary unexported
@@ -742,11 +752,19 @@ pub fn scoped(
         let db = store.db();
         let picked = match focus {
             Some(name) => {
-                let mut around = crate::store::symbols_named(db, name, limit)?;
+                // The symbol itself, then what touches it. Deduplicated by the
+                // caller, and cut at the budget: a name like `new` is called
+                // from everywhere, and drawing all of it is a knot rather than
+                // a neighbourhood. The rail lists every caller and callee
+                // either way, so nothing is hidden by this — only undrawn.
+                let mut around = crate::store::symbols_named(db, name, 4)?;
                 for end in crate::store::edges_in(db, name, &[])?
                     .into_iter()
                     .chain(crate::store::edges_out(db, name, &[])?)
                 {
+                    if around.len() >= limit {
+                        break;
+                    }
                     around.push(end.symbol);
                 }
                 around

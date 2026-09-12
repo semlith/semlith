@@ -49,6 +49,7 @@ const VIEWS: &[(&str, &str)] = &[
     ("neighbors", "/api/neighbors"),
     ("path", "/api/path"),
     ("impact", "/api/impact"),
+    ("ledger", "/api/ledger"),
 ];
 
 /// And the same for the MCP tool surface.
