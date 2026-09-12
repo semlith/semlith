@@ -30,6 +30,7 @@ const NO_VIEW: [&str; 2] = ["start", "mcp"];
 /// view, and this list is the thing a reviewer looks at.
 const VIEWS: &[(&str, &str)] = &[
     ("index", "/api/index"),
+    ("add", "/api/add"),
     // The daemon *is* the watcher, and the Stores view is where its event feed
     // and per-store "watching" flag are read from.
     ("watch", "/api/stores"),
@@ -52,8 +53,22 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_stats", "/api/stores"),
     ("semlith_files", "/api/files"),
     ("semlith_index", "/api/index"),
+    ("semlith_add", "/api/add"),
     ("semlith_forget", "/api/forget"),
 ];
+
+/// Which verb a route answers on.
+///
+/// One list, because there were three of these and they had already drifted
+/// apart from each other — a route added to one and forgotten in the next is a
+/// test that passes by asking the wrong question and reports 405 as a missing
+/// view.
+fn method_for(route: &str) -> &'static str {
+    match route {
+        "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/upgrade" => "POST",
+        _ => "GET",
+    }
+}
 
 struct Daemon {
     child: Child,
@@ -195,15 +210,7 @@ fn every_cli_command_has_a_portal_view() {
                 )
             });
 
-        // GET for the read routes, POST for the ones that write.
-        let method = if matches!(
-            route,
-            "/api/index" | "/api/forget" | "/api/adopt" | "/api/upgrade"
-        ) {
-            "POST"
-        } else {
-            "GET"
-        };
+        let method = method_for(route);
         let status = daemon.status(method, route);
         assert_ne!(
             status, 404,
@@ -255,11 +262,7 @@ fn every_mcp_tool_has_a_portal_view() {
                      tests/portal.rs."
                 )
             });
-        let method = if matches!(route, "/api/index" | "/api/forget") {
-            "POST"
-        } else {
-            "GET"
-        };
+        let method = method_for(route);
         assert_ne!(
             daemon.status(method, route),
             404,
@@ -310,11 +313,7 @@ fn no_view_in_the_map_is_a_route_that_does_not_exist() {
             continue;
         }
         seen.push(route);
-        let method = if matches!(route, "/api/index" | "/api/forget" | "/api/adopt") {
-            "POST"
-        } else {
-            "GET"
-        };
+        let method = method_for(route);
         assert_ne!(daemon.status(method, route), 404, "{route} is not served");
     }
 }

@@ -93,10 +93,20 @@ pub fn status() -> Status {
         .unwrap_or(false);
     let cache = model_cache_dir();
 
+    // Each of these is asked once and then reused. `claude_registered` spawns
+    // `claude mcp list` and waits for it, and this function used to call it
+    // four times — twice for the agents step alone, once for its state and
+    // once for its detail. On a machine where that CLI is slow it turned the
+    // portal's Agents page into a twenty-second wait that looked like a hang.
+    let registered = claude_registered();
+    let installed = bin.join(exe_name()).exists();
+    let path_has_bin = on_path(&bin);
+    let model_cached = embed::is_cached(&cache);
+
     let steps = vec![
         Step {
             name: "binary",
-            state: if bin.join(exe_name()).exists() {
+            state: if installed {
                 State::AlreadyDone
             } else {
                 State::Skipped
@@ -105,7 +115,7 @@ pub fn status() -> Status {
         },
         Step {
             name: "path",
-            state: if on_path(&bin) {
+            state: if path_has_bin {
                 State::AlreadyDone
             } else {
                 State::Skipped
@@ -117,7 +127,7 @@ pub fn status() -> Status {
         },
         Step {
             name: "model",
-            state: if embed::is_cached(&cache) {
+            state: if model_cached {
                 State::AlreadyDone
             } else {
                 State::Skipped
@@ -126,12 +136,11 @@ pub fn status() -> Status {
         },
         Step {
             name: "agents",
-            state: match claude_registered() {
+            state: match registered {
                 Some(true) => State::AlreadyDone,
-                Some(false) => State::Skipped,
-                None => State::Skipped,
+                Some(false) | None => State::Skipped,
             },
-            detail: match claude_registered() {
+            detail: match registered {
                 Some(true) => "Claude Code has the semlith server".into(),
                 Some(false) => "Claude Code is installed but has no semlith server".into(),
                 None => "the claude CLI is not on PATH".into(),
@@ -141,13 +150,13 @@ pub fn status() -> Status {
 
     Status {
         bin_dir: bin.display().to_string(),
-        binary_installed: bin.join(exe_name()).exists(),
-        on_path: on_path(&bin),
+        binary_installed: installed,
+        on_path: path_has_bin,
         rc_file: rc.map(|p| p.display().to_string()),
         rc_block_present: block,
         model_cache: cache.display().to_string(),
-        model_cached: embed::is_cached(&cache),
-        claude_registered: claude_registered(),
+        model_cached,
+        claude_registered: registered,
         version: env!("CARGO_PKG_VERSION"),
         install_sh: INSTALL_SH,
         install_ps1: INSTALL_PS1,

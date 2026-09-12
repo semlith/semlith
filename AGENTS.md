@@ -74,13 +74,14 @@ Module responsibilities:
 | `src/store.rs` | Every SQL statement. Nothing else touches the database |
 | `src/index.rs` | Vector side: `Single` vs `Sharded` layouts, memory budget |
 | `src/chunk.rs` | File bytes → text → chunks (800 chars, 2 overlap lines, 8 MiB cap) |
-| `src/formats.rs` | Readers for the nine non-plain-text formats. Private on purpose |
+| `src/formats.rs` | Readers for the thirteen non-plain-text formats. Private on purpose |
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
 | `src/mcp.rs` | Hand-rolled stdio JSON-RPC MCP server |
+| `src/add.rs` | `semlith add`: the one outbound fetch, its refusals, and where a fetched file lands |
 | `src/home.rs` | The store home, `registry.json`, and which store a command resolves to |
 | `src/http.rs` | Hand-rolled synchronous HTTP/1.1: the token, `Host` and CSP rules live here |
 | `src/daemon.rs` | `semlith start`: the locks, the watcher threads, the write queue |
@@ -114,6 +115,15 @@ Module responsibilities:
   id set, so the two halves can never disagree about eligibility.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
+- **`add` is the only command that reaches the network besides `upgrade` and
+  the model download**, it is https-only, it refuses before opening a socket
+  under `--airgap`, and it writes only inside the store's own `downloads/`.
+  Every one of those is a tested case in `tests/add.rs`, not a comment. See
+  [#50](https://github.com/semlith/semlith/issues/50).
+- `filter::LANGUAGES` has a `filenames` column as well as `extensions`, because
+  a Dockerfile and a Makefile have no extension. Both resolve into the same
+  pattern group, so there is still one code path behind the vector allowlist and
+  the FTS5 predicate.
 
 Env overrides: `SEMLITH_STORE` (PATH-style separated), `SEMLITH_HOME`,
 `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`,
@@ -158,9 +168,11 @@ than stated, and that are not up for relaxation without an issue like
 - No telemetry, no analytics, and no update check semlith makes on its own.
   `semlith upgrade` and `semlith upgrade --check` exist from 0.10.0 and reach
   GitHub, but only in the second a user asks: there is no startup check, no
-  timer, and no banner that appears without a click. The other two downloads are
-  the embedding model, once, on first index, and `semlith setup`'s pre-fetch of
-  the same file — `--airgap` refuses all of it.
+  timer, and no banner that appears without a click. `semlith add` is the same
+  shape from 0.11.0 — one request, for one URL, because somebody asked for it,
+  with no crawling and no re-fetching. The other two downloads are the embedding
+  model, once, on first index, and `semlith setup`'s pre-fetch of the same file
+  — `--airgap` refuses all of it.
 
 Discuss in an issue before building: any other bind address, MCP over HTTP as an
 endpoint agents connect to directly, hosted embedding APIs, any outbound

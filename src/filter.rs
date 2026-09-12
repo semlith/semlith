@@ -8,38 +8,103 @@
 
 use anyhow::{Result, bail};
 
-/// Extensions that make up each language name accepted by `--lang`.
+/// One `--lang` name and everything that counts as it.
+pub struct Language {
+    pub name: &'static str,
+    /// Lowercase, without the dot, sorted.
+    pub extensions: &'static [&'static str],
+    /// Whole filenames, lowercase, for the languages whose files carry no
+    /// extension at all. Glob patterns, so `dockerfile.*` covers
+    /// `Dockerfile.prod` alongside the bare name.
+    pub filenames: &'static [&'static str],
+}
+
+/// What makes up each language name accepted by `--lang`.
 ///
-/// Extension is the only signal. Reading file contents to tell Perl from
-/// anything else is a research project, and a store is queried far more often
-/// than it is built, so guessing at query time would cost on every search.
-pub const LANGUAGES: &[(&str, &[&str])] = &[
-    ("c", &["c", "h"]),
-    ("cpp", &["cc", "cpp", "cxx", "hh", "hpp", "hxx"]),
-    ("csharp", &["cs"]),
-    ("css", &["css", "sass", "scss"]),
-    ("go", &["go"]),
-    ("haskell", &["hs"]),
-    ("html", &["htm", "html"]),
-    ("java", &["java"]),
-    ("javascript", &["cjs", "js", "jsx", "mjs"]),
-    ("json", &["json"]),
-    ("kotlin", &["kt", "kts"]),
-    ("lua", &["lua"]),
-    ("markdown", &["markdown", "md"]),
-    ("ocaml", &["ml", "mli"]),
-    ("php", &["php"]),
-    ("python", &["py", "pyi"]),
-    ("ruby", &["rb"]),
-    ("rust", &["rs"]),
-    ("scala", &["sc", "scala"]),
-    ("shell", &["bash", "sh", "zsh"]),
-    ("sql", &["sql"]),
-    ("swift", &["swift"]),
-    ("toml", &["toml"]),
-    ("typescript", &["cts", "mts", "ts", "tsx"]),
-    ("yaml", &["yaml", "yml"]),
+/// The name is the signal, and for almost every language the name is the
+/// extension. The two exceptions are the reason `filenames` exists: a
+/// Dockerfile and a Makefile are identified by being called that, and a filter
+/// that only knew extensions would answer `--lang dockerfile` with an empty
+/// result on a repository full of them — which is indistinguishable from
+/// "there are none", the worst answer available.
+///
+/// Contents are never read. Telling Perl from anything else by looking at it is
+/// a research project, and a store is queried far more often than it is built,
+/// so guessing at query time would cost on every search.
+pub const LANGUAGES: &[Language] = &[
+    lang("c", &["c", "h"], &[]),
+    lang("clojure", &["clj", "cljc", "cljs", "edn"], &[]),
+    lang("cpp", &["cc", "cpp", "cxx", "hh", "hpp", "hxx"], &[]),
+    lang("csharp", &["cs"], &[]),
+    lang("css", &["css", "sass", "scss"], &[]),
+    lang("dart", &["dart"], &[]),
+    lang(
+        "dockerfile",
+        &["dockerfile"],
+        &["dockerfile", "dockerfile.*"],
+    ),
+    lang("elixir", &["ex", "exs"], &[]),
+    lang("elm", &["elm"], &[]),
+    lang("erlang", &["erl", "hrl"], &[]),
+    lang("fortran", &["f", "f03", "f90", "f95"], &[]),
+    lang("go", &["go"], &[]),
+    lang("graphql", &["gql", "graphql"], &[]),
+    lang("groovy", &["gradle", "groovy"], &[]),
+    lang("haskell", &["hs"], &[]),
+    lang("html", &["htm", "html"], &[]),
+    lang("java", &["java"], &[]),
+    lang("javascript", &["cjs", "js", "jsx", "mjs"], &[]),
+    lang("json", &["json"], &[]),
+    lang("julia", &["jl"], &[]),
+    lang("kotlin", &["kt", "kts"], &[]),
+    lang("lua", &["lua"], &[]),
+    lang("makefile", &["mk"], &["gnumakefile", "makefile"]),
+    lang("markdown", &["markdown", "md"], &[]),
+    lang("nix", &["nix"], &[]),
+    // `.m` is Objective-C and it is also MATLAB. Objective-C is the one with a
+    // header file beside it, which is the only signal an extension-based filter
+    // has, so it takes the extension.
+    lang("objective-c", &["m", "mm"], &[]),
+    lang("ocaml", &["ml", "mli"], &[]),
+    lang("perl", &["pl", "pm", "t"], &[]),
+    lang("php", &["php"], &[]),
+    lang("powershell", &["ps1", "psd1", "psm1"], &[]),
+    lang("proto", &["proto"], &[]),
+    lang("python", &["py", "pyi"], &[]),
+    lang("r", &["r"], &[]),
+    lang("ruby", &["rb"], &[]),
+    lang("rust", &["rs"], &[]),
+    lang("scala", &["sc", "scala"], &[]),
+    lang("shell", &["bash", "sh", "zsh"], &[]),
+    lang("sql", &["sql"], &[]),
+    lang("svelte", &["svelte"], &[]),
+    lang("swift", &["swift"], &[]),
+    lang("terraform", &["tf", "tfvars"], &[]),
+    lang("toml", &["toml"], &[]),
+    lang("typescript", &["cts", "mts", "ts", "tsx"], &[]),
+    lang("vue", &["vue"], &[]),
+    lang("yaml", &["yaml", "yml"], &[]),
+    lang("zig", &["zig"], &[]),
 ];
+
+/// One row of [`LANGUAGES`], so the table reads as a table.
+const fn lang(
+    name: &'static str,
+    extensions: &'static [&'static str],
+    filenames: &'static [&'static str],
+) -> Language {
+    Language {
+        name,
+        extensions,
+        filenames,
+    }
+}
+
+/// The entry for a `--lang` name, matched case-insensitively.
+pub fn language(name: &str) -> Option<&'static Language> {
+    let wanted = name.to_ascii_lowercase();
+    LANGUAGES.iter().find(|entry| entry.name == wanted)
+}
 
 /// Which chunks a search is allowed to see.
 ///
@@ -67,24 +132,22 @@ impl Filter {
         // Extensions and languages are both extension sets, so they share one
         // group: `--ext rs --lang markdown` means "Rust or Markdown", the same
         // way two `--ext` flags do.
-        let mut extensions: Vec<String> = exts
+        let mut patterns: Vec<String> = exts
             .iter()
-            .map(|e| e.trim_start_matches('.').to_ascii_lowercase())
+            .map(|e| format!("*.{}", e.trim_start_matches('.').to_ascii_lowercase()))
             .collect();
-        for lang in langs {
-            let want = lang.to_ascii_lowercase();
-            let Some((_, exts)) = LANGUAGES.iter().find(|(name, _)| *name == want) else {
-                bail!("unknown language {lang:?}; run `semlith languages` for the list");
+        for name in langs {
+            let Some(entry) = language(name) else {
+                bail!("unknown language {name:?}; run `semlith languages` for the list");
             };
-            extensions.extend(exts.iter().map(|e| e.to_string()));
+            patterns.extend(entry.extensions.iter().map(|e| format!("*.{e}")));
+            // A filename pattern resolves into the same group as an extension
+            // one, so `--lang dockerfile --ext md` unions exactly the way two
+            // extensions do and nothing downstream has a second case to handle.
+            patterns.extend(entry.filenames.iter().map(|f| f.to_string()));
         }
-        if !extensions.is_empty() {
-            groups.push(
-                extensions
-                    .iter()
-                    .map(|e| anchor(&format!("*.{e}")))
-                    .collect(),
-            );
+        if !patterns.is_empty() {
+            groups.push(patterns.iter().map(|p| anchor(p)).collect());
         }
 
         Ok(Self { groups })
@@ -192,6 +255,49 @@ mod tests {
         assert!(err.contains("semlith languages"), "unhelpful error: {err}");
     }
 
+    /// The two languages whose files carry no extension. Without the filename
+    /// column `--lang dockerfile` resolves to `*.dockerfile` alone, which
+    /// matches none of the Dockerfiles anyone actually has.
+    #[test]
+    fn a_language_with_no_extension_matches_by_filename() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let f = Filter::new(&[], &[], &s(&["dockerfile"])).unwrap();
+        assert_eq!(
+            f.groups()[0],
+            [
+                format!("*{sep}*.dockerfile"),
+                format!("*{sep}dockerfile"),
+                format!("*{sep}dockerfile.*"),
+            ],
+            "a bare Dockerfile and a Dockerfile.prod are both the language"
+        );
+
+        let f = Filter::new(&[], &[], &s(&["makefile"])).unwrap();
+        assert_eq!(
+            f.groups()[0],
+            [
+                format!("*{sep}*.mk"),
+                format!("*{sep}gnumakefile"),
+                format!("*{sep}makefile"),
+            ]
+        );
+
+        // Filenames land in the same group extensions do, so the two union
+        // rather than intersecting — one code path, so the vector allowlist and
+        // the FTS5 predicate cannot come to different answers about them.
+        let f = Filter::new(&[], &s(&["md"]), &s(&["dockerfile"])).unwrap();
+        assert_eq!(f.groups().len(), 1);
+        assert_eq!(f.groups()[0].len(), 4);
+    }
+
+    /// `--lang` is case-insensitive on the way in, the way `--ext` is.
+    #[test]
+    fn a_language_name_is_matched_however_it_is_typed() {
+        let lower = Filter::new(&[], &[], &s(&["dockerfile"])).unwrap();
+        let shouted = Filter::new(&[], &[], &s(&["DockerFile"])).unwrap();
+        assert_eq!(lower, shouted);
+    }
+
     #[test]
     fn no_flags_is_no_filter() {
         assert!(Filter::new(&[], &[], &[]).unwrap().is_empty());
@@ -203,13 +309,20 @@ mod tests {
     #[test]
     fn the_language_table_is_normalised_and_sorted() {
         let mut previous = "";
-        for (name, exts) in LANGUAGES {
-            assert!(name > &previous, "language table is out of order at {name}");
+        for entry in LANGUAGES {
+            let name = entry.name;
+            assert!(name > previous, "language table is out of order at {name}");
             previous = name;
-            assert_eq!(*name, name.to_ascii_lowercase());
-            let mut sorted = exts.to_vec();
-            sorted.sort_unstable();
-            assert_eq!(&sorted, exts, "extensions for {name} are out of order");
+            assert_eq!(name, name.to_ascii_lowercase());
+            for set in [entry.extensions, entry.filenames] {
+                let mut sorted = set.to_vec();
+                sorted.sort_unstable();
+                assert_eq!(&sorted, &set, "{name}'s entries are out of order");
+                assert!(
+                    set.iter().all(|e| *e == e.to_ascii_lowercase()),
+                    "{name} has an uppercase entry"
+                );
+            }
         }
     }
 }

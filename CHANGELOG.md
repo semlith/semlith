@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-12
+
+The rest of a real archive, and a way to put something into a store that was
+never a file on the disk.
+
+### Added
+
+- **EPUB, RTF, `.eml` and `.mbox` readers.** A book is read as its chapters in
+  the order the spine gives, which is not the order the filenames sort in — so a
+  book no longer opens on its copyright page. An RTF document is read as the
+  text a word processor would show, with font and colour tables, style sheets,
+  embedded pictures and revision metadata skipped whole and `\'hh` and `\uN`
+  escapes decoded. A message is read as its `From`, `To`, `Cc`, `Date` and
+  `Subject` followed by its body: the `text/plain` part of a multipart, or the
+  HTML part run through the existing HTML reader when there is no plain one.
+  Headers are unfolded and RFC 2047 encoded-words decoded, so a subject with an
+  accent in it is searchable by the word rather than by `=?utf-8?Q?`. An
+  attachment is named and never decoded. An `.mbox` is every message in the
+  file, each one marked with its own subject. None of it adds a dependency: an
+  EPUB is a ZIP of XHTML, so it costs the archive reader and the HTML scanner
+  that were already here, and the other two are hand-written scanners.
+- **`semlith add <URL>`**, on the CLI, as the `semlith_add` MCP tool, and as a
+  URL field on the portal's Index page. Fetches one https URL into the store's
+  own `downloads/` directory and indexes it through the readers that already
+  exist — a web page, a PDF such as an arXiv paper, or a file on GitHub, whose
+  `/blob/` link is rewritten to the raw file it displays. The directory is
+  registered as a root of the store, so `semlith start` keeps what was added
+  current.
+- **Twenty-one more languages for `--lang`**: zig, dart, elixir, terraform,
+  powershell, julia, fortran, r, perl, dockerfile, makefile, vue, svelte, proto,
+  graphql, nix, clojure, erlang, elm, groovy and objective-c, bringing the table
+  to 46. Two of them have no extension to match on, so a language may now be
+  identified by filename as well: `--lang dockerfile` finds a bare `Dockerfile`
+  and a `Dockerfile.prod`, and `--lang makefile` finds `Makefile` and
+  `GNUmakefile`.
+- **A Languages view in the portal**, listing all 46 with the extensions and
+  filenames that make each one up, read from the same table the filter uses.
+
+### Changed
+
+- The portal's Files view shows a language for a file that has no extension,
+  where it previously showed nothing.
+
+### Security
+
+- `semlith add` is the first outbound connection semlith makes that is not the
+  model download or `semlith upgrade`, and it holds to the same rules. It is
+  https-only and refuses plain http rather than silently upgrading it; it
+  refuses a redirect that leaves https and a chain longer than five; it caps a
+  body at 32 MiB; it refuses a content type no reader handles, cross-checking
+  the declared type against the first bytes; it never sends a credential; and
+  under `--airgap` it refuses before a socket is opened. The path it writes to
+  is derived from the URL, so escapes are decoded before the path is split,
+  every segment is sanitised, and the result is checked to be inside the
+  downloads directory before anything is written. Nothing is crawled and nothing
+  is re-fetched. See [#50](https://github.com/semlith/semlith/issues/50).
+
 ## [0.10.0] - 2026-09-12
 
 One command on a fresh machine. No Rust toolchain, no package manager, nothing

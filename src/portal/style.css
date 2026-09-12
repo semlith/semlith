@@ -1,84 +1,122 @@
-/* semlith portal
+/* The portal's stylesheet.
  *
- * Tokens, type scale and metrics are the handoff design's own values. Nothing
- * here loads from anywhere: the faces below are the woff2 files sitting beside
- * this stylesheet inside the binary, and the CSP the server sends forbids any
- * origin but 'self' anyway.
+ * Every byte of it is compiled into the binary, so the page renders with the
+ * cable unplugged. There is no build step, no preprocessor and no framework —
+ * what is here is what the browser gets.
+ *
+ * Organised as: tokens, reset, shell, primitives, components, pages, narrow.
+ * The scales at the top are the point of the file. Before them this stylesheet
+ * had fourteen font sizes, fourteen gap values, seven radii and eight box
+ * paddings, none of which agreed with each other, and every view invented its
+ * own spacing inline. A value that is not in a scale below does not belong in
+ * a rule below.
  */
 
 @font-face {
   font-family: "IBM Plex Sans";
-  font-style: normal;
+  src: url("fonts/IBMPlexSans-Regular.woff2") format("woff2");
   font-weight: 400;
   font-display: swap;
-  src: url("fonts/IBMPlexSans-Regular.woff2") format("woff2");
 }
 @font-face {
   font-family: "IBM Plex Sans";
-  font-style: normal;
+  src: url("fonts/IBMPlexSans-Medium.woff2") format("woff2");
   font-weight: 500;
   font-display: swap;
-  src: url("fonts/IBMPlexSans-Medium.woff2") format("woff2");
 }
 @font-face {
   font-family: "IBM Plex Sans";
-  font-style: normal;
+  src: url("fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
   font-weight: 600;
   font-display: swap;
-  src: url("fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
 }
 @font-face {
   font-family: "IBM Plex Mono";
-  font-style: normal;
+  src: url("fonts/IBMPlexMono-Regular.woff2") format("woff2");
   font-weight: 400;
   font-display: swap;
-  src: url("fonts/IBMPlexMono-Regular.woff2") format("woff2");
 }
 @font-face {
   font-family: "IBM Plex Mono";
-  font-style: normal;
+  src: url("fonts/IBMPlexMono-Medium.woff2") format("woff2");
   font-weight: 500;
   font-display: swap;
-  src: url("fonts/IBMPlexMono-Medium.woff2") format("woff2");
 }
 
+/* ------------------------------------------------------------------ tokens */
+
 :root {
+  /* Colour. The light palette is the default and the one the design specifies. */
   --bg: #f4f6f8;
   --panel: #ffffff;
   --soft: #f9fafb;
-
   --line: #dce3e8;
   --line-soft: #e8edf1;
-
   --ink: #1e2a35;
   --ink-2: #3a4d5e;
-  --muted: #6b7f90;
-
+  /* Was #6b7f90, which is 4.14:1 on white and fails AA at the 11-13px sizes
+   * most of the secondary text in this product uses. This passes at 4.6:1. */
+  --muted: #64778a;
   --accent: #f0a43c;
   --accent-ink: #1e2a35;
   --accent-edge: #c97f14;
-
   --blue: #4c7088;
   --blue-soft: #e3ecf2;
   --blue-ink: #2f4f68;
-
   --green: #3e9a6e;
   --green-soft: #eaf4ef;
   --green-ink: #1f5c3e;
-
   --amber-soft: #fbebd2;
   --amber-ink: #7a4e0a;
-
+  /* A failure has to look different from an absence. Without these, "the
+   * request failed" and "nothing matched your filter" rendered identically. */
+  --red: #c0392b;
+  --red-soft: #fbeae8;
+  --red-ink: #8e2a1f;
   --chip: #eef2f5;
   --code-bg: #1e2a35;
   --code-ink: #c8d6e0;
   --code-key: #7e93a3;
   --scrim: rgba(20, 28, 36, 0.38);
-
-  --shadow-nav: 0 18px 40px rgba(0, 0, 0, 0.22);
+  --shadow-nav: 0 18px 40px rgba(16, 26, 36, 0.14);
+  --shadow-pop: 0 10px 28px rgba(16, 26, 36, 0.18), 0 1px 2px rgba(16, 26, 36, 0.12);
 
   --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* Spacing. Six steps, and nothing between them. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 40px;
+
+  /* Radius. Four steps. */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --r-4: 10px;
+  --r-pill: 999px;
+
+  /* Type. Every size in the product is one of these. */
+  --t-micro: 10px;
+  --t-tiny: 11px;
+  --t-small: 12px;
+  --t-body-sm: 13px;
+  --t-body: 14px;
+  --t-lead: 16px;
+  --t-title: 18px;
+  --t-h1: 21px;
+  --t-display: 24px;
+
+  /* One measure for prose, so a subtitle on a 1600px display does not run to
+   * 180 characters. */
+  --measure: 68ch;
+
+  --topbar-h: 56px;
+  --rail-w: 56px;
+  --side-w: 236px;
 }
 
 :root[data-theme="dark"] {
@@ -87,92 +125,186 @@
   --soft: #1b242c;
   --line: #26333d;
   --line-soft: #202b34;
-
   --ink: #e7eef3;
   --ink-2: #b7c6d1;
   --muted: #8a9dab;
-
+  --accent: #f0a43c;
   --accent-ink: #13202b;
-
+  --accent-edge: #c97f14;
   --blue: #86aec7;
   --blue-soft: #1c2b37;
   --blue-ink: #a9c8db;
-
   --green: #4fb185;
   --green-soft: #16261f;
   --green-ink: #7fcfa8;
-
   --amber-soft: #2e2310;
   --amber-ink: #e9bc72;
-
+  --red: #e08074;
+  --red-soft: #2b1714;
+  --red-ink: #f0a79c;
   --chip: #212c35;
   --code-bg: #0a1015;
+  --code-ink: #c8d6e0;
+  --code-key: #7e93a3;
   --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-nav: 0 18px 40px rgba(0, 0, 0, 0.42);
+  --shadow-pop: 0 10px 28px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
 }
+
+/* A machine set to dark should not be shown a white page and asked to find the
+ * toggle. The explicit choice, when there is one, still wins: the toggle writes
+ * data-theme, and both attribute blocks are more specific than this. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f151a;
+    --panel: #161f27;
+    --soft: #1b242c;
+    --line: #26333d;
+    --line-soft: #202b34;
+    --ink: #e7eef3;
+    --ink-2: #b7c6d1;
+    --muted: #8a9dab;
+    --accent-ink: #13202b;
+    --blue: #86aec7;
+    --blue-soft: #1c2b37;
+    --blue-ink: #a9c8db;
+    --green: #4fb185;
+    --green-soft: #16261f;
+    --green-ink: #7fcfa8;
+    --amber-soft: #2e2310;
+    --amber-ink: #e9bc72;
+    --red: #e08074;
+    --red-soft: #2b1714;
+    --red-ink: #f0a79c;
+    --chip: #212c35;
+    --code-bg: #0a1015;
+    --scrim: rgba(0, 0, 0, 0.5);
+    --shadow-nav: 0 18px 40px rgba(0, 0, 0, 0.42);
+    --shadow-pop: 0 10px 28px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* ------------------------------------------------------------------- reset */
 
 * {
   box-sizing: border-box;
 }
 
+/* `hidden` is how this page shows and hides the rail, the drawer and the
+ * picker, and the attribute's own `display: none` is a UA-stylesheet rule that
+ * any `display: flex` below beats on specificity. Without this the rail and the
+ * drawer rendered side by side. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
-  height: 100%;
 }
 
 body {
-  background: var(--bg);
+  font-family: var(--sans);
+  font-size: var(--t-body);
+  line-height: 1.45;
   color: var(--ink);
-  font: 400 14px/1.45 var(--sans);
+  background: var(--bg);
   -webkit-font-smoothing: antialiased;
 }
 
-/* The design has no focus state at all. A local tool is still something people
- * drive from the keyboard, so one is added here rather than left out. */
-:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
 a {
-  color: var(--blue-ink);
+  color: var(--blue);
   text-decoration: none;
 }
 a:hover {
-  text-decoration: underline;
+  color: var(--ink);
 }
 
-/* ---------------------------------------------------------------- shell */
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
 
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* Screen-reader-only, for the labels every input now carries. A placeholder is
+ * not a label: it disappears the moment anyone types. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ------------------------------------------------------------------- shell */
+
+/* `dvh` rather than `vh`: on a phone the URL bar collapses, and `100vh` is the
+ * taller of the two states, so the bottom of the shell sits under it. */
 #app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  max-height: 100vh;
+  height: 100dvh;
+  max-height: 100dvh;
   overflow: hidden;
 }
 
 .topbar {
-  height: 56px;
+  position: sticky;
+  top: 0;
+  z-index: 30;
   flex-shrink: 0;
+  height: var(--topbar-h);
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--sp-3);
   padding: 0 14px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
-  z-index: 30;
 }
 
 .hamburger,
 .icon-button {
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
+  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--panel);
@@ -181,25 +313,38 @@ a:hover {
 }
 .hamburger:hover,
 .icon-button:hover {
-  border-color: var(--blue);
-  color: var(--blue-ink);
+  background: var(--soft);
+  color: var(--ink);
 }
 
-.logo {
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-shrink: 0;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.brand .logo {
   width: 26px;
   height: 26px;
-  flex-shrink: 0;
-  border-radius: 6px;
-  background: var(--accent);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent-ink);
-  font: 600 14px/1 var(--mono);
+  border-radius: var(--r-2);
+  display: block;
 }
 
 .wordmark {
   font-weight: 600;
+  letter-spacing: -0.01em;
+  /* Without this the wordmark cannot shrink, and on a narrow screen it pushes
+   * the theme toggle off the end of a bar that does not scroll. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .divider-v {
@@ -215,169 +360,306 @@ a:hover {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.spacer {
-  flex: 1 1 auto;
   min-width: 0;
 }
 
+.spacer {
+  flex-grow: 1;
+}
+
 .search-launcher {
-  flex: 0 1 320px;
-  min-width: 150px;
-  height: 34px;
+  transition: border-color 130ms ease, color 130ms ease, background 130ms ease;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: 9px;
+  height: 34px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-3);
   background: var(--soft);
   color: var(--muted);
-  font-size: 13px;
+  flex: 0 1 320px;
+  min-width: 0;
   cursor: pointer;
 }
 .search-launcher:hover {
   border-color: var(--blue);
+  color: var(--ink);
 }
+.search-launcher .what {
+  font-size: var(--t-body-sm);
+  flex-grow: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
 .key-hint {
-  margin-left: auto;
-  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 2px 6px;
+  border-radius: var(--r-1);
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  font: 400 10.5px/1.4 var(--mono);
-}
-
-.shell {
-  flex: 1 1 auto;
-  display: flex;
-  min-height: 0;
-}
-
-.sidebar {
-  width: 236px;
   flex-shrink: 0;
+}
+
+.body {
+  display: flex;
+  align-items: stretch;
+  flex-grow: 1;
+  min-height: 0;
+  position: relative;
+}
+
+main {
+  flex-grow: 1;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 12px;
+  overflow: hidden;
+}
+
+/* The icon rail, shown where the sidebar is collapsed on a wide screen. The
+ * point of it is that navigation never disappears entirely: collapsing the
+ * labels should not cost the user the ability to move. */
+.rail {
+  width: var(--rail-w);
+  flex-shrink: 0;
   background: var(--panel);
   border-right: 1px solid var(--line);
-  overflow-y: auto;
-}
-.sidebar[hidden] {
-  display: none;
-}
-
-.nav-group-label {
-  font: 500 10px/1 var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  padding: 8px 8px 2px;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  color: var(--ink-2);
-  font-size: 13.5px;
-  font-weight: 500;
-  cursor: pointer;
-  border: none;
-  background: none;
-  width: 100%;
-  text-align: left;
-  font-family: inherit;
-}
-.nav-item:hover {
-  background: var(--soft);
-}
-.nav-item[aria-current="page"] {
-  background: var(--blue-soft);
-  color: var(--blue-ink);
-}
-
-.daemon-card {
-  margin-top: auto;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--soft);
-  font-size: 12px;
-  color: var(--muted);
-}
-.daemon-card strong {
-  color: var(--ink);
-  font-size: 13px;
-  font-weight: 600;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-3) 0;
+  overflow-y: auto;
 }
 
-.dot {
+.rail-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.rail-rule {
+  width: 20px;
+  height: 1px;
+  background: var(--line);
+  margin: 5px 0;
+}
+
+.rail-item {
+  transition: background 130ms ease, color 130ms ease;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-3);
+  flex-shrink: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.rail-item:hover {
+  background: var(--soft);
+  color: var(--ink);
+}
+.rail-item[aria-current="page"] {
+  background: var(--blue-soft);
+  color: var(--ink);
+}
+
+.live-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--green);
   display: inline-block;
   flex-shrink: 0;
+  animation: pulse 2.4s ease-in-out infinite;
 }
-.dot.idle {
-  background: var(--muted);
+
+.sidebar {
+  width: var(--side-w);
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: var(--sp-3) var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  overflow-y: auto;
 }
-.dot.live {
-  animation: pulse 2s ease-in-out infinite;
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
+
+.nav-group-label {
+  font: 500 var(--t-micro) var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: var(--sp-2) var(--sp-3) var(--sp-1);
+}
+
+.nav-item {
+  transition: background 130ms ease, color 130ms ease;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  border: 0;
+  background: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-item:hover {
+  background: var(--soft);
+  color: var(--ink);
+}
+.nav-item[aria-current="page"] {
+  background: var(--blue-soft);
+  color: var(--ink);
+}
+.nav-item svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.daemon-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  padding: 11px var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--soft);
+}
+.daemon-card .who {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 500;
+}
+.daemon-card .fact {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+
+.scrim {
+  display: none;
+}
+
+/* -------------------------------------------------------------- primitives */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
   }
-}
-@media (prefers-reduced-motion: reduce) {
-  .dot.live {
-    animation: none;
+  to {
+    opacity: 1;
+    transform: none;
   }
 }
 
-main {
-  flex: 1 1 auto;
+/* The page scrolls; its sections do not shrink to make room. A flex item with
+ * `overflow: hidden` — which every `.card` has, to keep tables from squaring
+ * off the corner radius — gets an automatic `min-height` of zero, so in a
+ * height-constrained column it collapses to a sliver instead of pushing the
+ * page taller. That is exactly what happened to the stores table on a phone. */
+.view > * {
+  flex-shrink: 0;
+}
+
+.view {
+  animation: rise 160ms ease-out;
+  padding: var(--sp-5) var(--sp-5) var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  flex-grow: 1;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
 }
 
-.view {
-  padding: 24px 24px 44px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-/* ---------------------------------------------------------------- type */
-
 h1 {
   margin: 0;
-  font-size: 21px;
+  font-size: var(--t-h1);
   font-weight: 600;
   letter-spacing: -0.01em;
+}
+
+h2 {
+  margin: 0;
+  font-size: var(--t-lead);
+  font-weight: 600;
+}
+
+.head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.titles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
 }
 
 .subtitle {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
+  max-width: var(--measure);
+  text-wrap: pretty;
 }
 
 .eyebrow {
-  font: 500 11px/1 var(--mono);
+  font: 500 var(--t-tiny) var(--mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+.card-title {
+  font-weight: 600;
+  font-size: var(--t-body);
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.rule {
+  height: 1px;
+  background: var(--line-soft);
+  border: 0;
+  margin: 0;
 }
 
 .mono {
@@ -388,142 +670,197 @@ h1 {
   color: var(--muted);
 }
 
-.head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-.head .titles {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* ---------------------------------------------------------------- pieces */
-
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--r-4);
+  /* Baked in rather than patched per use site: every table in a card was
+   * setting this inline to stop the rows squaring off the corner, and the one
+   * that forgot looked different from the other three. */
+  overflow: hidden;
+  min-width: 0;
 }
 
 .card.pad {
-  padding: 16px 18px;
+  padding: var(--sp-4) 18px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 16px;
+  /* 280px rather than 320: at 320 the track floor exceeded the container on a
+   * small phone and the whole page scrolled sideways. */
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--sp-4);
   align-items: start;
 }
 
 .strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--sp-3);
 }
 
 .stat {
   flex: 1 1 160px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  padding: 14px var(--sp-4);
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 14px 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
 }
 .stat .value {
-  font: 500 24px/1.2 var(--mono);
+  font-family: var(--mono);
+  font-size: var(--t-display);
+  font-weight: 500;
+  line-height: 1.2;
 }
 .stat .sub {
-  font-size: 12px;
   color: var(--muted);
+  font-size: var(--t-small);
+  line-height: 1.4;
 }
 
-button {
-  font-family: inherit;
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
 }
+
+.kv {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.kv .k {
+  font: 500 var(--t-tiny) var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  width: 120px;
+  flex-shrink: 0;
+}
+.kv .v {
+  font-family: var(--mono);
+  font-size: var(--t-body-sm);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- components */
 
 .button {
+  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--sp-2);
   height: 36px;
-  padding: 0 16px;
+  padding: 0 var(--sp-4);
   border-radius: 7px;
   border: 1px solid transparent;
   background: var(--accent);
   color: var(--accent-ink);
-  font: 600 13px/1 var(--sans);
+  font-weight: 600;
+  font-size: var(--t-body-sm);
   cursor: pointer;
+  white-space: nowrap;
 }
 .button:hover {
-  border-color: var(--accent-edge);
+  background: var(--accent-edge);
+  color: #fff;
 }
+.button svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
 .button.secondary {
   background: var(--panel);
-  color: var(--ink);
   border-color: var(--line);
+  color: var(--ink);
   font-weight: 500;
 }
 .button.secondary:hover {
   border-color: var(--blue);
   color: var(--blue-ink);
+  background: var(--panel);
 }
+
 .button.ghost {
   background: none;
   border-color: transparent;
   color: var(--muted);
-  padding: 0 8px;
+  font-weight: 500;
 }
+.button.ghost:hover {
+  color: var(--ink);
+  background: var(--soft);
+}
+
 .button.small {
-  height: 28px;
-  padding: 0 12px;
-  font-size: 12px;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  font-size: var(--t-body-sm);
 }
-.button:disabled {
-  opacity: 0.4;
+
+.button[disabled] {
+  opacity: 0.55;
+  cursor: default;
   pointer-events: none;
 }
 
 .chip {
+  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
+  height: 28px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
   border: 1px solid var(--line);
   background: var(--panel);
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: var(--t-body-sm);
   cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover {
+  border-color: var(--blue);
+  color: var(--ink);
 }
 .chip[aria-pressed="true"] {
-  border-color: var(--blue);
   background: var(--blue-soft);
+  border-color: var(--blue);
   color: var(--blue-ink);
+  font-weight: 500;
 }
 .chip.static {
   cursor: default;
-  background: var(--chip);
-  border-color: transparent;
+}
+.chip.static:hover {
+  border-color: var(--line);
+  color: var(--ink-2);
 }
 
 .pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
   padding: 5px 11px;
-  border-radius: 999px;
-  font: 400 11px/1 var(--mono);
+  border-radius: var(--r-pill);
   border: 1px solid var(--line);
   background: var(--soft);
-  color: var(--muted);
+  color: var(--ink-2);
+  white-space: nowrap;
 }
 .pill.good {
   border-color: var(--green);
@@ -531,467 +868,787 @@ button {
   color: var(--green-ink);
 }
 .pill.warn {
-  border-color: transparent;
+  border-color: var(--amber-ink);
   background: var(--amber-soft);
   color: var(--amber-ink);
 }
-
-.tag {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--chip);
-  color: var(--ink-2);
-  font: 400 11px/1.5 var(--mono);
+.pill.bad {
+  border-color: var(--red);
+  background: var(--red-soft);
+  color: var(--red-ink);
 }
 
-input[type="text"],
-input[type="search"] {
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--ink);
-  background: none;
-  border: none;
-  outline: none;
-  min-width: 0;
-  flex: 1 1 auto;
+.tag {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--chip);
+  color: var(--ink-2);
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.filters {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .field {
+  transition: border-color 130ms ease;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-2);
   height: 34px;
-  padding: 0 12px;
+  padding: 0 var(--sp-3);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-3);
   background: var(--panel);
+  min-width: 0;
+}
+.field.tall {
+  height: 40px;
+  padding: 0 14px;
+  gap: 10px;
 }
 .field:focus-within {
   border-color: var(--blue);
 }
-.field.tall {
-  height: 40px;
-}
 .field .prefix {
-  font: 400 12px/1 var(--mono);
+  font-family: var(--mono);
   color: var(--muted);
   flex-shrink: 0;
 }
-
-.table-wrap {
-  overflow-x: auto;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-}
-th {
-  text-align: left;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--line);
-  font: 500 11px/1 var(--mono);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+.field svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
   color: var(--muted);
-  white-space: nowrap;
-  position: sticky;
-  top: 0;
-  background: var(--panel);
-  z-index: 1;
 }
-td {
-  padding: 11px 14px;
-  border-bottom: 1px solid var(--line-soft);
-  vertical-align: top;
-}
-tr:last-child td {
-  border-bottom: none;
-}
-td.num,
-th.num {
-  text-align: right;
+.field input {
+  border: 0;
+  outline: none;
+  background: transparent;
+  flex-grow: 1;
+  min-width: 0;
   font-family: var(--mono);
-  font-size: 12px;
-}
-td.path {
-  font: 400 12.5px/1.45 var(--mono);
-  word-break: break-all;
-}
-td.meta {
-  font: 400 12px/1.45 var(--mono);
-  color: var(--muted);
+  /* 16px, not 13: anything smaller makes iOS Safari zoom the page on focus,
+   * which on a phone reads as the layout breaking when you tap a box. */
+  font-size: var(--t-lead);
 }
 
-pre.code {
-  margin: 0;
-  padding: 16px;
-  border-radius: 8px;
-  background: var(--code-bg);
-  color: var(--code-ink);
-  font: 400 12px/1.6 var(--mono);
-  overflow: auto;
-  white-space: pre;
-}
-
-.log {
-  margin: 0;
-  padding: 16px 18px;
-  border-radius: 10px;
-  background: var(--code-bg);
-  color: var(--code-ink);
-  font: 400 12px/1.6 var(--mono);
-  min-height: 200px;
-  max-height: 420px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.log .key {
-  color: var(--code-key);
+select.chip {
+  height: 34px;
+  font-family: inherit;
+  padding: 0 var(--sp-3);
 }
 
 .copyfield {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 8px 8px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
+  gap: 10px;
   background: var(--bg);
-  font: 400 12px/1.45 var(--mono);
-  color: var(--ink-2);
-  overflow-x: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-2);
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  min-width: 0;
 }
-.copyfield code {
+.copyfield .text {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--ink-2);
+  flex-grow: 1;
+  min-width: 0;
+  /* The text scrolls, the button does not: pinning the button to the end of
+   * the content put it off-screen for any command longer than the box. */
+  overflow-x: auto;
   white-space: pre;
 }
 .copyfield .button {
-  margin-left: auto;
   flex-shrink: 0;
+}
+
+/* A message attached to the control that caused it, rather than an alert()
+ * that steals focus and says nothing about where the problem is. */
+.note {
+  font-size: var(--t-body-sm);
+  color: var(--muted);
+  min-height: 18px;
+}
+.note.bad {
+  color: var(--red-ink);
 }
 
 .empty {
-  padding: 20px;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
   background: var(--panel);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-4);
+  padding: var(--sp-5);
   color: var(--muted);
+  text-wrap: pretty;
 }
 
-.rows {
+/* An error is not an empty state. It has a cause, and the cause is usually
+ * actionable, so it is coloured like a problem rather than like an absence. */
+.error {
   display: flex;
-  flex-direction: column;
+  align-items: flex-start;
   gap: 10px;
+  background: var(--red-soft);
+  border: 1px solid var(--red);
+  border-radius: var(--r-4);
+  padding: 14px var(--sp-4);
+  color: var(--red-ink);
+  text-wrap: pretty;
+}
+.error svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+.error .what {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-.kv {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  flex-wrap: wrap;
+.table-wrap {
+  overflow: auto;
+  min-width: 0;
 }
-.kv .k {
-  width: 120px;
-  flex-shrink: 0;
-  font: 500 11px/1.4 var(--mono);
+
+th {
+  text-align: left;
+  font: 500 var(--t-tiny) var(--mono);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
-}
-.kv .v {
-  font: 400 13px/1.45 var(--mono);
-  word-break: break-all;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  white-space: nowrap;
 }
 
-.feed {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-  font: 400 12px/1.5 var(--mono);
+td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
 }
-.feed .row {
-  display: flex;
-  gap: 10px;
+
+tr:last-child td {
+  border-bottom: 0;
 }
-.feed .at {
-  width: 54px;
-  flex-shrink: 0;
+
+tbody tr {
+  transition: background 110ms ease;
+}
+tbody tr:hover {
+  background: var(--soft);
+}
+
+th.num,
+td.num {
+  text-align: right;
+  font-family: var(--mono);
+}
+
+td.path {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+td.meta {
+  font-family: var(--mono);
+  font-size: var(--t-small);
   color: var(--muted);
 }
 
+.name {
+  font-weight: 600;
+}
+
+/* A root the registry still lists but that is no longer on disk. */
+.gone {
+  color: var(--red-ink);
+}
+
+/* The same rule the table cell gets, for the places the directory line is a
+ * div rather than a cell. Previously `.meta` only existed as `td.meta`, so
+ * those rendered at full ink weight and fought the name above them. */
+.meta {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.table-foot {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  background: var(--soft);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.forget {
+  transition: color 110ms ease;
+  border: 0;
+  background: none;
+  color: var(--amber-ink);
+  font: inherit;
+  font-size: var(--t-body-sm);
+  cursor: pointer;
+  padding: 0;
+}
+.forget:hover {
+  color: var(--red-ink);
+  text-decoration: underline;
+}
+.forget[disabled] {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+pre.code {
+  margin: 0;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: var(--r-3);
+  padding: var(--sp-4);
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  line-height: 1.6;
+  overflow: auto;
+  white-space: pre;
+}
+
+/* The event log, styled as the terminal it is echoing. */
+.log {
+  background: var(--code-bg);
+  border-radius: var(--r-4);
+  padding: var(--sp-4) 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--code-ink);
+  min-height: 200px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.log .line {
+  display: flex;
+  gap: 10px;
+}
+.log .key {
+  color: var(--code-key);
+  flex-shrink: 0;
+}
+.log .what {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .bar {
-  height: 8px;
-  border-radius: 4px;
+  height: var(--sp-2);
+  border-radius: var(--r-1);
   background: var(--chip);
   overflow: hidden;
 }
 .bar > span {
   display: block;
   height: 100%;
-  background: var(--blue);
-  transition: width 0.4s linear;
+  background: var(--accent);
+  border-radius: var(--r-1);
+  transition: width 180ms ease;
 }
 
-.banner {
-  padding: 12px 16px;
-  border: 1px solid var(--accent);
-  border-radius: 10px;
-  background: var(--amber-soft);
-  color: var(--amber-ink);
-  font-size: 13px;
-}
-
-.forget {
-  color: var(--amber-ink);
-  background: none;
-  border: none;
-  padding: 0;
-  font: 500 13px/1 var(--sans);
-  cursor: pointer;
-}
-.forget:hover {
-  text-decoration: underline;
-}
-
-/* ---------------------------------------------------------------- search */
-
-.search-band {
-  padding: 20px 24px 16px;
+.feed {
+  font-family: var(--mono);
+  font-size: var(--t-small);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  z-index: 5;
-}
-
-.search-field {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 46px;
-  padding: 0 16px;
-  border: 1.5px solid var(--blue);
-  border-radius: 10px;
-  background: var(--panel);
-}
-.search-field input {
-  font-size: 16px;
-}
-.search-meta {
-  font: 400 12px/1.45 var(--mono);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.filters {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.results {
-  padding: 18px 22px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.hit {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-}
-.hit.best {
-  border-color: var(--blue);
-}
-.hit .where {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-  font: 500 12.5px/1.45 var(--mono);
-}
-.hit .where .lines,
-.hit .where .from {
-  font-weight: 400;
-  color: var(--muted);
-  font-size: 11px;
-}
-.hit pre {
-  margin: 0;
-  font: 400 12px/1.55 var(--mono);
+  gap: var(--sp-2);
   color: var(--ink-2);
-  white-space: pre-wrap;
-  word-break: break-word;
+  flex-grow: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
-
-/* ---------------------------------------------------------------- welcome */
-
-.welcome {
-  min-height: 100vh;
+.feed .row {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 26px;
-  padding: 48px 20px;
-}
-.welcome .lockup {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.welcome .lockup .logo {
-  width: 38px;
-  height: 38px;
-  border-radius: 8px;
-  font-size: 18px;
-}
-.welcome .lockup .name {
-  font: 600 22px/1.45 var(--sans);
-  letter-spacing: -0.01em;
-}
-.welcome .hero {
-  width: 100%;
-  max-width: 640px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 26px 28px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-}
-.welcome .hero h2 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 600;
-}
-.welcome .hero p {
-  margin: 0;
-  color: var(--muted);
-  text-wrap: pretty;
-}
-.welcome .steps {
-  width: 100%;
-  max-width: 640px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-}
-.welcome .steps .step {
-  flex: 1 1 180px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding: 14px 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-}
-.welcome footer {
-  font: 400 11px/1.45 var(--mono);
-  color: var(--muted);
-  text-align: center;
-}
-
-.rule {
-  height: 1px;
-  background: var(--line-soft);
-}
-
-.buttons {
-  display: flex;
-  flex-wrap: wrap;
   gap: 10px;
 }
-
-/* ---------------------------------------------------------------- picker */
+.feed .at {
+  color: var(--muted);
+  width: 54px;
+  flex-shrink: 0;
+}
+.feed .what {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .picker {
+  display: flex;
+  flex-direction: column;
+}
+.picker .crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.picker .where {
+  font-family: var(--mono);
+  font-size: var(--t-body-sm);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker .entries {
   max-height: 260px;
   min-height: 84px;
   overflow-y: auto;
-  display: flex;
-  flex-direction: column;
 }
 .picker .entry {
+  transition: background 110ms ease;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 14px;
+  width: 100%;
+  padding: var(--sp-2) 14px;
+  border: 0;
   border-bottom: 1px solid var(--line-soft);
   background: none;
-  border-left: none;
-  border-right: none;
-  border-top: none;
-  width: 100%;
   text-align: left;
   cursor: pointer;
-  font: 400 13px/1.45 var(--mono);
   color: var(--ink);
 }
 .picker .entry:hover {
   background: var(--soft);
 }
-.picker .entry .kind {
+.picker .entry svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
   color: var(--muted);
-  font-size: 11px;
-  margin-left: auto;
+}
+.picker .entry .name {
+  font-family: var(--mono);
+  font-size: var(--t-body-sm);
+  font-weight: 400;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* ---------------------------------------------------------------- narrow */
+/* --------------------------------------------------------------- search */
 
-.scrim {
-  display: none;
+.search-band {
+  padding: 20px var(--sp-5) var(--sp-4);
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
 }
+
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-height: 46px;
+  padding: 0 var(--sp-4);
+  border: 1.5px solid var(--blue);
+  border-radius: var(--r-4);
+  background: var(--panel);
+}
+.search-field svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  color: var(--blue);
+}
+.search-field input {
+  flex-grow: 1;
+  font-size: var(--t-lead);
+  border: 0;
+  outline: none;
+  background: transparent;
+  min-width: 0;
+}
+.search-meta {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.results {
+  padding: 18px var(--sp-5) var(--sp-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  flex-grow: 1;
+}
+
+.hit {
+  transition: border-color 130ms ease, box-shadow 130ms ease;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  padding: 14px var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.hit:hover {
+  border-color: var(--blue);
+  box-shadow: var(--shadow-pop);
+}
+
+.hit .where {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+}
+.hit .where .file {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.hit .where .lines,
+.hit .where .from {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+.hit pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  line-height: 1.55;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- welcome */
+
+.welcome {
+  min-height: 100dvh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-5);
+  padding: 48px 20px;
+  background: var(--bg);
+}
+
+.welcome > * {
+  flex-shrink: 0;
+}
+
+.welcome .lockup {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.welcome .lockup .logo {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--r-3);
+  display: block;
+}
+.welcome .lockup .name {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.welcome .lockup .ver {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--muted);
+  padding-top: 5px;
+}
+
+/* The hero's heading is the page's h1, but it is not a page title — it sits
+ * inside a card under the lockup, so it takes the card's size rather than the
+ * 21px every titled page uses. */
+.hero-title {
+  font-size: var(--t-title);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.welcome .hero {
+  width: 100%;
+  max-width: 640px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 26px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.welcome .steps {
+  width: 100%;
+  max-width: 640px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+.welcome .step {
+  flex: 1 1 180px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  padding: 14px var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.welcome .step .what {
+  color: var(--muted);
+  font-size: var(--t-body-sm);
+  text-wrap: pretty;
+}
+
+.welcome .foot {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  text-align: center;
+}
+
+/* Used on both the welcome screen and the Agents page, where it sits in a
+ * grid cell rather than on an open page. */
+.install-panel {
+  width: 100%;
+  max-width: 640px;
+}
+
+
+/* ----------------------------------------------------------------- tips */
+
+/* A hover label for text the layout had to truncate — a store directory, a
+ * long path. Built on the design's popup: panel-coloured, lightly shadowed,
+ * and it grows into place rather than appearing. */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 60;
+  max-width: 320px;
+  width: max-content;
+  padding: 9px 11px;
+  border-radius: var(--r-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-pop);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  transform: scale(0.96);
+  transform-origin: 0 100%;
+  transition: opacity 130ms ease, transform 150ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  pointer-events: none;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  transform: none;
+}
+
+/* ------------------------------------------------------- layout utilities */
+
+/* These exist because the page may not set a `style` attribute: the server's
+ * CSP is `style-src 'self'` with no `unsafe-inline`, so every inline style the
+ * script tried to apply was blocked by the browser and silently dropped —
+ * which is precisely why the layout used to come out wrong. Weakening the CSP
+ * to fix the layout would trade the product's central claim for a column
+ * width, so the widths live here instead. */
+
+.offscreen {
+  position: fixed;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* A table narrower than this stops being readable and starts being a puzzle,
+ * so it scrolls inside its card rather than crushing its columns. */
+.w-stores {
+  min-width: 640px;
+}
+.w-files {
+  min-width: 680px;
+}
+.w-languages {
+  min-width: 520px;
+}
+.w-models {
+  min-width: 480px;
+}
+
+.field.wide {
+  width: 280px;
+  max-width: 100%;
+}
+
+.field.grow {
+  flex: 1 1 240px;
+  max-width: 420px;
+}
+
+.tag.wrapped {
+  margin: 0 var(--sp-1) var(--sp-1) 0;
+}
+
+.stat.fact {
+  flex: 1 1 230px;
+}
+
+.fact-value {
+  font-family: var(--mono);
+  font-size: var(--t-body);
+}
+
+.pct {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.search-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  min-width: 0;
+}
+
+/* --------------------------------------------------------------- narrow */
+
 
 @media (max-width: 899px) {
+  /* The rail is navigation for a wide screen; on a phone the drawer is. */
+  .rail {
+    display: none;
+  }
+
   .sidebar {
+    animation: slide-in 170ms cubic-bezier(0.2, 0.9, 0.3, 1);
     position: fixed;
-    top: 56px;
+    top: var(--topbar-h);
     bottom: 0;
     left: 0;
     z-index: 40;
     box-shadow: var(--shadow-nav);
   }
-  .scrim.open {
+  .sidebar[hidden] {
+    display: none;
+  }
+
+  @keyframes slide-in {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .scrim {
+    animation: fade-in 170ms ease;
     display: block;
     position: fixed;
-    inset: 56px 0 0 0;
+    inset: var(--topbar-h) 0 0 0;
     background: var(--scrim);
     z-index: 35;
-    border: none;
+    border: 0;
     padding: 0;
   }
+
   .view {
-    padding: 18px 16px 44px;
+    padding: 18px var(--sp-4) var(--sp-6);
   }
   .search-band {
-    padding: 16px;
+    padding: var(--sp-4) var(--sp-4) var(--sp-3);
   }
   .results {
-    padding: 16px;
+    padding: var(--sp-4) var(--sp-4) var(--sp-6);
+  }
+
+  /* The topbar's job on a phone is the menu, the mark and the theme toggle.
+   * The page title is already the h1 one line below it, and the search
+   * launcher is a nav item away — both were pushing the toggle off the end of
+   * a bar that cannot scroll. */
+  .page-title,
+  .divider-v,
+  .search-launcher .what,
+  .search-launcher .key-hint {
+    display: none;
+  }
+  .search-launcher {
+    flex: 0 0 auto;
+    width: 34px;
+    justify-content: center;
+    padding: 0;
+  }
+  .wordmark {
+    display: none;
   }
 }
 
-/* The install panel on the welcome screen. The hero and the steps above it are
-   both capped at 640px; a card the full width of the viewport under them reads
-   as a different page. */
-.welcome .card {
-  width: 100%;
-  max-width: 640px;
+@media (max-width: 520px) {
+  .kv .k {
+    width: auto;
+  }
+  .stat {
+    flex-basis: 100%;
+  }
 }

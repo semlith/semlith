@@ -20,6 +20,14 @@ use semlith::chunk;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Malformed RTF, as literals rather than inline, because every one of them is
+/// a backslash escape that a reader of this file has to be able to trust.
+const RTF_OPEN: &[u8] = br"{\rtf1";
+const RTF_MIDWORD: &[u8] = br"{\rtf1 text and then \u";
+const RTF_MIDHEX: &[u8] = br"{\rtf1 text and then \'";
+const RTF_MIDHEX2: &[u8] = br"{\rtf1 text and then \'e";
+const RTF_GREEDY: &[u8] = br"{\rtf1\uc2147483647 \u233?? tail}";
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
@@ -215,6 +223,304 @@ fn an_unreadable_document_is_skipped_rather_than_fatal() {
     }
 }
 
+/// 0.11.0's four new readers, each against the fixture its own library wrote.
+///
+/// The assertions are deliberately about what a person would see — the spine
+/// order of a book, the chosen part of a mail, the decoded escape — rather than
+/// about a substring being present somewhere. A reader that returns the right
+/// words in the wrong order passes the first kind of test and fails a user.
+#[test]
+fn the_new_formats_yield_the_text_a_person_would_see() {
+    let cases: &[(&str, &[&str], &[&str])] = &[
+        (
+            "book.epub",
+            &[
+                "The numbat lighthouse inventory was copied out twice before anyone trusted it.",
+                "By then the saiga ferry timetable had been pinned to the wall for a season.",
+                "What remained was the lemur harbour survey, unfinished and still unread.",
+            ],
+            // The chapters are XHTML inside the archive; none of it survives.
+            &["<html", "<body", "xmlns", "<?xml"],
+        ),
+        (
+            "notes.rtf",
+            &[
+                "The binturong pier maintenance log was reopened after the winter inspection.",
+                // The font and colour tables are groups the reader skips whole,
+                // so neither their control words nor their contents appear.
+                "urgent",
+                "deferred",
+            ],
+            &["fonttbl", "colortbl", "\\par", "Times New Roman", "rtf1"],
+        ),
+        (
+            "message.eml",
+            &[
+                "The serval dispatch confirmation arrived before the café closed.",
+                "Two crates are still unaccounted for and the ferry leaves at six.",
+            ],
+            &[
+                // The html alternative, its base64, the quoted-printable of the
+                // plain part, and the headers that are nobody's search term.
+                "This html alternative must never be the extracted text.",
+                "Content-Transfer-Encoding",
+                "=C3=A9",
+                "X-Mailer",
+                "Message-ID",
+                "=?utf-8?",
+            ],
+        ),
+        (
+            "archive.mbox",
+            &[
+                "The aardwolf shipping manifest lists eleven pallets, not nine.",
+                "The kinkajou warehouse audit closed with two open findings.",
+                "Filed the vicuna freight receipt against the wrong quarter.",
+            ],
+            &[
+                "Ignore this markup branch entirely.",
+                "=?utf-8?",
+                "X-Mailer",
+            ],
+        ),
+    ];
+
+    for (name, wanted, unwanted) in cases {
+        let text = text_of(name);
+        for phrase in *wanted {
+            assert!(
+                text.contains(phrase),
+                "{name} does not contain {phrase:?}:\n{text}"
+            );
+        }
+        for syntax in *unwanted {
+            assert!(
+                !text.contains(syntax),
+                "{name} still carries {syntax:?}:\n{text}"
+            );
+        }
+    }
+}
+
+/// A book is read in the order the book gives, which is the whole reason the
+/// spine is consulted at all.
+///
+/// The fixture's chapter files are named so that filename order and spine order
+/// disagree: sorted by name they are alpha, mike, zulu, and the book says zulu,
+/// alpha, mike. A reader that listed the archive would pass every phrase
+/// assertion above and still hand back the chapters shuffled.
+#[test]
+fn an_epub_is_read_in_spine_order_not_filename_order() {
+    let book = text_of("book.epub");
+
+    let first = book.find("numbat lighthouse inventory").unwrap();
+    let second = book.find("saiga ferry timetable").unwrap();
+    let third = book.find("lemur harbour survey").unwrap();
+    assert!(
+        first < second && second < third,
+        "the chapters came out in filename order rather than spine order:\n{book}"
+    );
+
+    // Each chapter is marked with the file it came from, the way a slide and a
+    // notebook cell are marked.
+    assert!(
+        book.contains("# zulu.xhtml"),
+        "a chapter is not named:\n{book}"
+    );
+    assert!(
+        book.find("# zulu.xhtml").unwrap() < first,
+        "the marker is not above the chapter it names:\n{book}"
+    );
+}
+
+/// The two escapes that carry every non-ASCII character an RTF document holds.
+///
+/// `\'e9` is a byte in the document's codepage and `舒?` is a Unicode code
+/// point followed by an ASCII fallback for readers that cannot show it. Getting
+/// the first wrong turns every accented word into mojibake; getting the second
+/// wrong prints the character and then a stray `?` after it.
+#[test]
+fn rtf_escapes_decode_to_the_characters_they_name() {
+    let text = text_of("notes.rtf");
+
+    assert!(
+        text.contains("café"),
+        "the \\'hh escape did not decode through the codepage:\n{text}"
+    );
+    assert!(
+        text.contains("café wing — modestly"),
+        "the \\u escape did not decode, or its ? fallback was kept:\n{text}"
+    );
+    assert!(
+        !text.contains("—?"),
+        "the \\u fallback character was indexed as well as the character:\n{text}"
+    );
+}
+
+/// A message is its five headers and its body, and nothing else.
+#[test]
+fn a_message_keeps_the_headers_worth_searching_and_drops_the_rest() {
+    let text = text_of("message.eml");
+
+    // The Subject travelled folded across two lines and RFC 2047 encoded. Both
+    // have to be undone before the word is searchable.
+    assert!(
+        text.contains(
+            "Subject: Résumé of the quarterly walkthrough and the follow-up items we \
+                       agreed on site"
+        ),
+        "the Subject was not unfolded and decoded:\n{text}"
+    );
+    for header in [
+        "From: Ines Okonkwo",
+        "To: Harbour Office",
+        "Cc: Records",
+        "Date: Tue, 11 Jun",
+    ] {
+        assert!(text.contains(header), "{header:?} is missing:\n{text}");
+    }
+
+    // Named, not decoded: the attachment is findable by its filename and its
+    // bytes never reach a second format reader.
+    assert!(
+        text.contains("# Attachment: manifest.txt"),
+        "the attachment was not named:\n{text}"
+    );
+    assert!(
+        !text.contains("crate 42: missing"),
+        "an attachment's contents were indexed:\n{text}"
+    );
+
+    // An mbox names each message, because a line number cannot say which of
+    // three hundred messages a hit is in.
+    let archive = text_of("archive.mbox");
+    assert!(
+        archive.contains("# Message 1: North route loading"),
+        "a message is not named by its subject:\n{archive}"
+    );
+    assert!(
+        archive.contains("# Message 2: Inventaire de l'entrepôt"),
+        "an encoded-word subject was not decoded in the marker:\n{archive}"
+    );
+    let order: Vec<usize> = (1..=3)
+        .map(|n| archive.find(&format!("# Message {n}: ")).unwrap())
+        .collect();
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "the messages came out of file order:\n{archive}"
+    );
+}
+
+/// Every way one of the new formats can be unreadable, and the same answer to
+/// all of them: skipped, not an error, not a panic, not a hang.
+///
+/// The RTF cases are the ones worth being careful about. Its reader walks a
+/// character stream with a brace depth, and unbalanced braces, a file that ends
+/// mid-control-word and a `\uc` claiming an enormous fallback are each a way to
+/// write a loop that never ends.
+#[test]
+fn an_unreadable_new_format_is_skipped_rather_than_fatal() {
+    let book = fs::read(fixtures().join("book.epub")).unwrap();
+
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("truncated.epub", book[..400].to_vec()),
+        ("plain.epub", b"this is not an archive at all".to_vec()),
+        // A ZIP with no container.xml is a valid archive and not a book.
+        (
+            "notabook.epub",
+            fs::read(fixtures().join("notes.docx")).unwrap(),
+        ),
+        (
+            "notrtf.rtf",
+            b"a plain sentence saved with the wrong extension".to_vec(),
+        ),
+        (
+            "unbalanced.rtf",
+            br"{\rtf1{{{{\fonttbl a paragraph".to_vec(),
+        ),
+        // A header block with no empty line after it has no body, and is far
+        // likelier to be a truncated file than a message.
+        (
+            "noblank.eml",
+            b"Subject: nothing follows this line".to_vec(),
+        ),
+        ("empty.eml", b"\n\n".to_vec()),
+        // An mbox is defined by its separator; a file without one is not one.
+        (
+            "nosep.mbox",
+            b"Subject: this never had a From line\n\nbody\n".to_vec(),
+        ),
+        ("binary.mbox", (0u8..=255).cycle().take(4096).collect()),
+    ];
+
+    for (name, bytes) in cases {
+        let path = PathBuf::from(name);
+        assert!(
+            chunk::extract(&path, &bytes).is_none(),
+            "{name} was read as text rather than skipped"
+        );
+    }
+
+    // A zip bomb wearing a book's extension spends from the same decompression
+    // budget every archive format shares.
+    let bomb = fs::read(fixtures().join("bomb.docx")).unwrap();
+    assert!(
+        chunk::extract(&PathBuf::from("bomb.epub"), &bomb).is_none(),
+        "the archive cap does not hold for EPUB"
+    );
+
+    // A document truncated partway through is a different case, and `None` is
+    // the wrong answer to it: the text before the truncation is real text, and
+    // a reader that threw it away would lose the readable nine tenths of a file
+    // over its last line. What these have to do is terminate. Each one is a way
+    // to write a scan that runs off the end of its input or loops on a
+    // parameter the document handed it.
+    let terminates: Vec<(&str, Vec<u8>)> = vec![
+        ("midword.rtf", RTF_MIDWORD.to_vec()),
+        ("midhex.rtf", RTF_MIDHEX.to_vec()),
+        ("midhex2.rtf", RTF_MIDHEX2.to_vec()),
+        // `\uc` claiming more fallback characters than the file holds.
+        ("greedy.rtf", RTF_GREEDY.to_vec()),
+        // A group that opens ten thousand times and closes none of them.
+        ("deep.rtf", {
+            let mut bytes = RTF_OPEN.to_vec();
+            bytes.extend(std::iter::repeat_n(b'{', 10_000));
+            bytes.extend(b" tail");
+            bytes
+        }),
+        // A multipart that names a boundary and then stops at its first one.
+        (
+            "unclosed.eml",
+            b"Content-Type: multipart/mixed; boundary=b\n\n--b\n".to_vec(),
+        ),
+    ];
+    for (name, bytes) in terminates {
+        // The assertion is that this returns at all. Whether it found any text
+        // is the file's business rather than the reader's.
+        let _ = chunk::extract(&PathBuf::from(name), &bytes);
+    }
+}
+
+/// The portal's Files view says which reader parsed a file, because "that book
+/// came out empty" and "that book was read as binary and skipped" look
+/// identical in a file list and are different problems.
+#[test]
+fn the_new_formats_name_the_reader_that_parsed_them() {
+    let cases = [
+        ("book.epub", "epub"),
+        ("notes.rtf", "rtf"),
+        ("message.eml", "mail"),
+        ("archive.mbox", "mail"),
+    ];
+    for (name, reader) in cases {
+        assert_eq!(
+            chunk::reader_of(&PathBuf::from(name)),
+            reader,
+            "{name} names the wrong reader"
+        );
+    }
+}
+
 /// The round trip the release exists for: a directory of documents, one index
 /// run, and a question answered with the file that holds the answer.
 #[test]
@@ -232,6 +538,10 @@ fn a_mixed_corpus_indexes_and_answers() {
         "sheet.ods",
         "analysis.ipynb",
         "page.html",
+        "book.epub",
+        "notes.rtf",
+        "message.eml",
+        "archive.mbox",
     ];
     for name in documents {
         fs::copy(fixtures().join(name), corpus.path().join(name)).unwrap();
@@ -266,6 +576,10 @@ fn a_mixed_corpus_indexes_and_answers() {
         ("civet expense summary", "sheet.ods"),
         ("capybara regression writeup", "analysis.ipynb"),
         ("wombat migration corridor", "page.html"),
+        ("numbat lighthouse inventory", "book.epub"),
+        ("binturong pier maintenance log", "notes.rtf"),
+        ("serval dispatch confirmation", "message.eml"),
+        ("aardwolf shipping manifest pallets", "archive.mbox"),
     ];
     for (question, expected) in questions {
         let hits = s.search(question, 3).unwrap();
