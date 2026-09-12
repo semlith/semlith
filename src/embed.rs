@@ -7,7 +7,7 @@
 //! fastembed knows" and "the one we assemble ourselves", so a store can record
 //! either and read it back.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fastembed::{
     EmbeddingModel, InitOptionsUserDefined, Pooling, TextEmbedding, TextInitOptions,
     TokenizerFiles, UserDefinedEmbeddingModel,
@@ -101,6 +101,18 @@ impl Model {
         max_length: usize,
         quiet: bool,
     ) -> Result<TextEmbedding> {
+        // Checked here, in the one place weights are ever fetched, rather than
+        // at each call site: an airgapped machine's whole claim is that this
+        // process cannot have been the one that reached the network, and a
+        // check that lives anywhere else is a check a later caller can miss.
+        if airgap() && !is_cached(&cache_dir) {
+            bail!(
+                "{AIRGAP_ENV} is set and no model is cached at {} — \
+                 pre-seed it with SEMLITH_MODEL_CACHE on a connected machine, \
+                 or drop --airgap to let this run download it",
+                cache_dir.display()
+            );
+        }
         match self {
             Model::Builtin(m) => {
                 let opts = TextInitOptions::new(m.clone())
@@ -167,6 +179,29 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
 /// measured on a 4P+4E M1, four threads indexed at 16.5 chunks/s while eight
 /// managed only 13.9, and one managed 5.1. Undersubscribing costs far more than
 /// oversubscribing, so only heterogeneous machines get a reduced count.
+/// Refuse to download model weights, so an air-gapped machine can prove this
+/// process never reached the network. Set by `--airgap` and readable directly.
+pub const AIRGAP_ENV: &str = "SEMLITH_AIRGAP";
+
+pub fn airgap() -> bool {
+    matches!(
+        std::env::var(AIRGAP_ENV).ok().as_deref(),
+        Some("1" | "true" | "yes")
+    )
+}
+
+/// Whether the cache already holds something to load.
+///
+/// Deliberately "is there anything here", not "are these the right files":
+/// the loader below fails with its own, far more specific error if what is
+/// cached is wrong, and duplicating its file list here would be a second
+/// definition of the model to keep in step.
+fn is_cached(cache_dir: &Path) -> bool {
+    std::fs::read_dir(cache_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 pub fn embed_threads() -> usize {
     if let Ok(raw) = std::env::var(THREADS_ENV)
         && let Ok(n) = raw.parse::<usize>()

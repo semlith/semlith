@@ -51,6 +51,18 @@ impl StoreLock {
             } else {
                 held_by.to_string()
             };
+            // A daemon leaves a discovery file beside this lock. Saying
+            // "run by pid 4213" when the answer is "your `semlith start` has
+            // it, and always will" sends someone hunting a stray process.
+            if daemon_holds(dir) {
+                bail!(
+                    "store {} is held by a running `semlith start`, which is its writer \
+                     for as long as it runs\n\
+                     index through the portal or through `semlith mcp`, which forward to it, \
+                     or stop the daemon first",
+                    dir.display()
+                );
+            }
             bail!(
                 "store {} is being indexed by {who}\n\
                  wait for it to finish, or use --store for a separate store",
@@ -81,6 +93,15 @@ impl Drop for StoreLock {
         // process that has already opened it.
         let _ = self.path;
     }
+}
+
+/// Whether a `semlith start` is the thing holding this store.
+///
+/// The file alone is not proof — a killed daemon leaves one behind — but the
+/// OS lock being held is, and this is only ever consulted after `try_lock`
+/// has already failed. The two together mean a live daemon.
+fn daemon_holds(dir: &Path) -> bool {
+    dir.join(crate::daemon::DISCOVERY_FILE).exists()
 }
 
 fn describe_holder() -> String {

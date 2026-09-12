@@ -395,10 +395,24 @@ mattering.
 
 ## Things that were considered and left out
 
-**A daemon or server mode.** Query latency is a few milliseconds warm on a
-repository-sized store; the only cost worth amortizing is model load, which
-`semlith mcp` already does. A network port
-would also undermine the "everything local" property that is the entire point.
+**A daemon reachable from anywhere but this machine.** `semlith start` (0.9.0)
+is a daemon, and it listens on a port — but only on `127.0.0.1`, and there is no
+flag to change that. The property being protected was never "no port"; it was
+"nothing about semlith reaches the network, and you can check it in a minute".
+A loopback socket, a per-run token required as a `SameSite=Strict` cookie, a
+`Host` header check, a `Content-Security-Policy` allowing only `'self'`, no CORS
+header anywhere, and every byte of the portal `include_bytes!`d into the binary
+keep that property exactly as true as it was — and `--airgap` makes it
+falsifiable rather than asserted. See [#41](https://github.com/semlith/semlith/issues/41).
+
+What the daemon buys is not latency. Query latency was already a few
+milliseconds warm, and model load was already amortized by `semlith mcp`. It
+buys the end of the one-writer conflict: before it, `semlith watch` held a
+store's lock for its life, so an agent's `semlith_index` against that store was
+refused for as long as the watcher ran, and a developer had to choose between a
+current store and a writable one. One process being the writer, with everything
+else a client of it, is the only fix that does not weaken the rule that keeps
+the vector index and SQLite agreeing.
 
 **Storing embeddings in SQLite too.** Tempting for a single-file store, but then
 every query either scans blobs out of SQLite or duplicates them in memory.

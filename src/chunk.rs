@@ -59,6 +59,29 @@ pub fn extract(path: &Path, bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// Which reader turned this file into text.
+///
+/// The portal's Files view shows it, because "that .docx came out empty" and
+/// "that .docx was read as binary and skipped" look identical in a file list
+/// and are two entirely different problems. Derived from the same extension
+/// dispatch [`extract`] uses, so it cannot describe a reader that did not run.
+pub fn reader_of(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("pdf") => "pdf",
+        Some("ipynb") => "notebook",
+        Some("html" | "htm") => "html",
+        Some("docx") => "word",
+        Some("pptx") => "powerpoint",
+        Some("xlsx") => "excel",
+        Some("odt" | "odp" | "ods") => "opendocument",
+        _ => "text",
+    }
+}
+
 /// pdf-extract can panic on malformed input, and one bad PDF should not take
 /// down a whole indexing run.
 fn extract_pdf(bytes: &[u8]) -> Option<String> {

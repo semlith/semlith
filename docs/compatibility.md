@@ -11,13 +11,15 @@ break, and is treated as one.
 
 | Surface | What is promised |
 |---|---|
-| CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `forget`, `mcp`, `models`, `languages`, and what each one does. |
+| CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
-| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. |
+| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
 | MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_forget`. |
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
 | MCP protocol revisions | The list the server advertises: `2026-07-28`, `2025-11-25`, `2025-06-18`, `2024-11-05`. Dropping one is a break. |
+| Where the daemon binds | `127.0.0.1`, and only that. Widening it would be a break in the direction that matters, and is not something a flag will ever do. |
+| The default port | `7365`. It does not move on its own: a taken port is an error, not a reassignment. |
 | Store layout | A store directory holds `store.db` beside the store's vectors — `index.tv` in format 1, an `index/` directory of shards in format 2 — and the rules for which binary can read which store are below. |
 | The formats that are read | The list in the README's *What gets indexed* only grows. An extension semlith reads today is still read tomorrow; what is extracted from it is not covered, and is below. |
 | `src/lib.rs` | Documented, not frozen. The `Semlith` type, `Hit`, `IndexReport`, and the modules `chunk`, `embed`, `filter`, `fleet`, `lock`, `mcp`, `store`, `watch` are the supported surface — but the library API changes with the minor version, as it did in 0.2.0. See [the honest version of the promise](#the-honest-version-of-the-promise). |
@@ -27,6 +29,31 @@ break, and is treated as one.
 Everything below is deliberately outside the contract. Each is excluded for a
 reason, and the reason is usually that freezing it would freeze something semlith
 should be free to improve.
+
+**The default store location.** Before 0.9.0 a bare `semlith index` wrote to
+`./.semlith`; from 0.9.0 it writes to `~/.semlith/stores/<name>`. Nothing about
+an existing store changed — the format is identical and a store 0.8.0 wrote
+opens unchanged wherever it sits — and the resolution order finds a `.semlith`
+beside the corpus before it looks at the home, so no existing setup moves until
+somebody runs `semlith adopt`. But *where a new store is created* is different
+from what it was, and that is the change to know about in this release.
+
+**The daemon's HTTP routes.** Everything under `/api/` is how the portal talks
+to the process that serves it, and both halves ship in the same binary. Paths,
+shapes and status codes may change in any release. If you want a stable
+programmatic surface, that is `--json` on the CLI and the MCP tools, both of
+which are covered above. MCP over HTTP as an endpoint clients connect to
+directly is 0.11.0 and will be covered when it arrives.
+
+**`~/.semlith/registry.json` and the daemon discovery file.** Both are
+tool-written state, like `store.db` and the lock file. semlith writes them,
+there is no supported way to hand-edit them, a field semlith does not recognise
+is dropped on the next write, and their shapes are free to change. An older
+binary never reads either of them, which is why reinstalling 0.8.0 loses the
+registry and nothing else.
+
+**The portal itself.** Its routes, its markup, its assets and its appearance are
+not a contract. It is a page, served to a browser on the same machine.
 
 **Ranking scores and result ordering.** The `score` on a hit is a reciprocal
 rank fusion score. It orders results within one query and means nothing across
