@@ -59,6 +59,12 @@ enum Command {
         /// Stores to open. Defaults to every registered store.
         paths: Vec<PathBuf>,
 
+        /// Record what agents retrieve into each store's ledger. Off unless
+        /// asked for, and nothing recorded ever leaves the machine — see
+        /// `semlith ledger`.
+        #[arg(long)]
+        ledger: bool,
+
         /// Port to listen on (also settable with SEMLITH_PORT). Never falls
         /// back to another port: the URL is meant to be a bookmark.
         #[arg(long)]
@@ -202,6 +208,18 @@ enum Command {
 
     /// List the language names `--lang` accepts, and their extensions.
     Languages,
+
+    /// Print what agents retrieved from this store, newest first. Needs no
+    /// key: recording and this dump are free on every tier.
+    Ledger {
+        /// How many retrievals to print.
+        #[arg(long, default_value_t = 20)]
+        last: usize,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Find where a symbol is defined.
     Symbol {
@@ -571,6 +589,54 @@ fn main() -> Result<()> {
             }
         }
 
+        Command::Ledger { last, json } => {
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let many = fleet.len() > 1;
+            let mut any = false;
+            for (label, store) in fleet.each() {
+                let rows = semlith::store::retrievals(store.db(), last)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                    any = any || !rows.is_empty();
+                    continue;
+                }
+                if many {
+                    println!("{}{label}{}", bold(), reset());
+                }
+                if rows.is_empty() {
+                    continue;
+                }
+                any = true;
+                let mut out = std::io::stdout().lock();
+                for row in &rows {
+                    writeln!(
+                        out,
+                        "{}  {:<14} {:>3} hits  {:>6} ms  {}",
+                        human_time(row.at),
+                        row.client,
+                        row.hits,
+                        row.micros / 1000,
+                        row.query,
+                    )?;
+                }
+                // A chain that does not verify is the one thing this table can
+                // say that a log file cannot, so it is said loudly.
+                if let Some(broken) = semlith::store::ledger_break(store.db())? {
+                    writeln!(
+                        out,
+                        "\n  the chain does not verify from row {broken} onwards: \
+                         these rows have been edited or removed"
+                    )?;
+                }
+            }
+            if !any && !json {
+                eprintln!(
+                    "nothing recorded. Recording is off unless `semlith start --ledger` asked \
+                     for it, and nothing recorded ever leaves this machine."
+                );
+            }
+        }
+
         Command::Symbol { name, k, json } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let found = fleet.symbols_in(None, &name, k)?;
@@ -863,6 +929,7 @@ fn main() -> Result<()> {
 
         Command::Start {
             paths,
+            ledger,
             port,
             debounce,
             airgap,
@@ -880,6 +947,7 @@ fn main() -> Result<()> {
                 semlith::daemon::port_of(port),
                 std::time::Duration::from_millis(debounce),
                 semlith::embed::airgap(),
+                ledger,
                 |line| eprintln!("semlith: {line}"),
             )?;
         }
@@ -1169,4 +1237,17 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         )?;
     }
     Ok(())
+}
+
+/// A unix second as a local clock time, for the ledger's rows.
+fn human_time(at: i64) -> String {
+    let secs = at.max(0) as u64;
+    let day = secs / 86_400;
+    let rest = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} d{day}",
+        rest / 3600,
+        (rest % 3600) / 60,
+        rest % 60
+    )
 }

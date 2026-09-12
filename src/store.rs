@@ -105,6 +105,33 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
+
+-- The retrieval ledger, from 0.12.0. Additive and empty unless recording is
+-- switched on, which it is not by default.
+--
+-- `prev` is the hash of the row before it and `hash` covers this row's own
+-- fields plus `prev`, so the table is a chain: editing or deleting a row
+-- breaks every hash after it and `semlith ledger` can say so. That is what
+-- makes this an audit record rather than a log file, and it costs one blake3
+-- of a short string per query.
+--
+-- `excerpt_tokens` is what the agent actually read. `whole_file_tokens` is
+-- what reading those files whole would have cost — the honest denominator for
+-- a savings number, measured rather than claimed.
+CREATE TABLE IF NOT EXISTS retrievals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    at                INTEGER NOT NULL,
+    client            TEXT NOT NULL,
+    query             TEXT NOT NULL,
+    hits              INTEGER NOT NULL,
+    micros            INTEGER NOT NULL,
+    excerpt_tokens    INTEGER NOT NULL,
+    whole_file_tokens INTEGER NOT NULL,
+    prev              TEXT NOT NULL,
+    hash              TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS retrievals_at ON retrievals(at);
 "#;
 
 /// A chunk row joined with its file's path — what a search hit resolves to.
@@ -583,10 +610,16 @@ pub fn symbols_scoped(
         }
         None => ("1".to_string(), Vec::new()),
     };
+    // Busiest first. A scope filled with symbols that touch nothing draws a
+    // field of dots: technically the graph, and of no use to anyone looking at
+    // it. Ordering by how connected a symbol is puts the shape on the screen.
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
          WHERE {predicate} AND s.kind != 'module'
-         ORDER BY f.path, s.start_line LIMIT ?"
+         ORDER BY (
+           (SELECT COUNT(*) FROM edges e WHERE e.src = s.id)
+           + (SELECT COUNT(*) FROM edges e WHERE e.dst = s.name)
+         ) DESC, f.path, s.start_line LIMIT ?"
     );
     let mut stmt = db.prepare(&sql)?;
     let mut args: Vec<Value> = binds.into_iter().map(Value::Text).collect();
@@ -697,6 +730,154 @@ pub fn symbols_in_chunks(db: &Connection, chunk_ids: &[u64]) -> Result<Vec<Strin
     let args = chunk_ids.iter().map(|i| Value::Integer(*i as i64));
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// One recorded retrieval.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Retrieval {
+    pub id: i64,
+    pub at: i64,
+    pub client: String,
+    pub query: String,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    pub hash: String,
+}
+
+/// Append one retrieval, chained to the row before it.
+///
+/// The chain is the point: a row cannot be quietly edited or removed without
+/// every hash after it failing to recompute.
+pub fn record_retrieval(
+    db: &Connection,
+    client: &str,
+    query: &str,
+    hits: i64,
+    micros: i64,
+    excerpt_tokens: i64,
+    whole_file_tokens: i64,
+) -> Result<()> {
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let prev: String = db
+        .query_row(
+            "SELECT hash FROM retrievals ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let hash = chain_hash(
+        &prev,
+        at,
+        client,
+        query,
+        hits,
+        micros,
+        excerpt_tokens,
+        whole_file_tokens,
+    );
+    db.execute(
+        "INSERT INTO retrievals
+         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            at,
+            client,
+            query,
+            hits,
+            micros,
+            excerpt_tokens,
+            whole_file_tokens,
+            prev,
+            hash
+        ],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chain_hash(
+    prev: &str,
+    at: i64,
+    client: &str,
+    query: &str,
+    hits: i64,
+    micros: i64,
+    excerpt: i64,
+    whole: i64,
+) -> String {
+    let payload = format!(
+        "{prev}\u{1f}{at}\u{1f}{client}\u{1f}{query}\u{1f}{hits}\u{1f}{micros}\u{1f}{excerpt}\u{1f}{whole}"
+    );
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+/// The most recent `limit` retrievals, newest first.
+pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
+    let mut stmt = db.prepare(
+        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash
+         FROM retrievals ORDER BY id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |r| {
+        Ok(Retrieval {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            client: r.get(2)?,
+            query: r.get(3)?,
+            hits: r.get(4)?,
+            micros: r.get(5)?,
+            excerpt_tokens: r.get(6)?,
+            whole_file_tokens: r.get(7)?,
+            hash: r.get(8)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole
+/// ledger — what the Ledger page shows.
+pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
+    Ok(db.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT client), COALESCE(SUM(excerpt_tokens), 0),
+                COALESCE(SUM(whole_file_tokens), 0) FROM retrievals",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?)
+}
+
+/// Re-walk the chain and return the id of the first row that does not verify.
+///
+/// `None` means the ledger is intact.
+pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
+    let mut stmt = db.prepare(
+        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash
+         FROM retrievals ORDER BY id",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut expected = String::new();
+    while let Some(r) = rows.next()? {
+        let (id, at): (i64, i64) = (r.get(0)?, r.get(1)?);
+        let client: String = r.get(2)?;
+        let query: String = r.get(3)?;
+        let (hits, micros, excerpt, whole): (i64, i64, i64, i64) =
+            (r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?);
+        let prev: String = r.get(8)?;
+        let hash: String = r.get(9)?;
+        if prev != expected {
+            return Ok(Some(id));
+        }
+        let recomputed = chain_hash(&prev, at, &client, &query, hits, micros, excerpt, whole);
+        if recomputed != hash {
+            return Ok(Some(id));
+        }
+        expected = hash;
+    }
+    Ok(None)
 }
 
 /// `(symbols, edges)` — the graph's size, for `stats` and the portal.
