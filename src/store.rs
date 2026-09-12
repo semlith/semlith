@@ -462,6 +462,14 @@ pub fn durable_chunks(db: &Connection) -> Result<i64> {
     )?)
 }
 
+/// Apply the schema to a bare in-memory connection, for tests in other
+/// modules that need somewhere to put symbols and edges.
+#[cfg(test)]
+pub fn prepare_for_tests(db: &Connection) {
+    db.execute_batch(SCHEMA).unwrap();
+    db.pragma_update(None, "foreign_keys", "ON").unwrap();
+}
+
 /// A symbol row joined with its file's path — what a graph answer resolves to.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SymbolRow {

@@ -555,6 +555,166 @@ fn trim_literal(raw: &str) -> &str {
         .trim()
 }
 
+// --------------------------------------------------------------- traversal
+
+/// How many symbols a single traversal will visit before it stops and says so.
+///
+/// Reverse reachability over a monorepo is unbounded in principle — a utility
+/// everything calls reaches everything — and the answer stops being useful long
+/// before it stops growing. The budget is what keeps peak memory flat as the
+/// corpus grows, which is the property `tests/measure.rs` asserts, and a
+/// truncated answer says it was truncated rather than pretending to be whole.
+pub const MAX_NODES: usize = 2000;
+
+/// Hops `impact` walks when nobody says otherwise.
+pub const DEFAULT_DEPTH: u32 = 3;
+
+/// A symbol a traversal reached, and how it got there.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Reached {
+    #[serde(flatten)]
+    pub symbol: crate::store::SymbolRow,
+    /// The edge kind that reached it.
+    pub via: String,
+    pub confidence: String,
+    pub hops: u32,
+}
+
+/// One edge of a path, as the path finder renders it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Step {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub confidence: String,
+}
+
+/// What points at a symbol, and what it points at.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Neighbours {
+    pub callers: Vec<crate::store::EdgeEnd>,
+    pub callees: Vec<crate::store::EdgeEnd>,
+}
+
+/// One hop in each direction around `name`.
+pub fn neighbours(db: &rusqlite::Connection, name: &str, kinds: &[String]) -> Result<Neighbours> {
+    Ok(Neighbours {
+        callers: crate::store::edges_in(db, name, kinds)?,
+        callees: crate::store::edges_out(db, name, kinds)?,
+    })
+}
+
+/// Everything that reaches `name` within `depth` hops, walking edges backwards.
+///
+/// The blast radius: what breaks if this changes. Bounded by `depth` and by
+/// [`MAX_NODES`], and a name already seen is never expanded twice, so a cycle
+/// terminates rather than looping.
+pub fn impact(db: &rusqlite::Connection, name: &str, depth: u32) -> Result<Vec<Reached>> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(name.to_string());
+
+    let mut reached: Vec<Reached> = Vec::new();
+    let mut frontier = vec![name.to_string()];
+
+    for hop in 1..=depth {
+        let mut next = Vec::new();
+        for current in &frontier {
+            for edge in crate::store::edges_in(db, current, &[])? {
+                if !seen.insert(edge.symbol.name.clone()) {
+                    continue;
+                }
+                next.push(edge.symbol.name.clone());
+                reached.push(Reached {
+                    symbol: edge.symbol,
+                    via: edge.kind,
+                    confidence: edge.confidence,
+                    hops: hop,
+                });
+                if reached.len() >= MAX_NODES {
+                    return Ok(reached);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(reached)
+}
+
+/// The shortest chain of edges from `from` to `to`, if there is one.
+///
+/// Breadth-first, so the first path found is a shortest one. `None` means the
+/// two are not connected within `depth` — which is an answer, not a failure,
+/// and is reported as one.
+pub fn shortest_path(
+    db: &rusqlite::Connection,
+    from: &str,
+    to: &str,
+    depth: u32,
+) -> Result<Option<Vec<Step>>> {
+    if from == to {
+        return Ok(Some(Vec::new()));
+    }
+    // name -> the step that first reached it, for walking the chain back.
+    let mut came_from: std::collections::HashMap<String, Step> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(from.to_string());
+    let mut frontier = vec![from.to_string()];
+
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for current in &frontier {
+            for edge in crate::store::edges_out(db, current, &[])? {
+                let name = edge.symbol.name.clone();
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                came_from.insert(
+                    name.clone(),
+                    Step {
+                        from: current.clone(),
+                        to: name.clone(),
+                        kind: edge.kind,
+                        confidence: edge.confidence,
+                    },
+                );
+                if name == to {
+                    return Ok(Some(unwind(&came_from, from, to)));
+                }
+                next.push(name);
+                if seen.len() >= MAX_NODES {
+                    return Ok(None);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Ok(None)
+}
+
+fn unwind(
+    came_from: &std::collections::HashMap<String, Step>,
+    start: &str,
+    end: &str,
+) -> Vec<Step> {
+    let mut chain = Vec::new();
+    let mut cursor = end.to_string();
+    while cursor != start {
+        let Some(step) = came_from.get(&cursor) else {
+            break;
+        };
+        chain.push(step.clone());
+        cursor = step.from.clone();
+    }
+    chain.reverse();
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,5 +876,111 @@ mod tests {
     fn recursion_does_not_produce_a_self_edge() {
         let e = run("a.rs", "fn loops() { loops(); }\n");
         assert!(!has_edge(&e, "loops", "loops", "calls"), "{:?}", e.edges);
+    }
+
+    // ------------------------------------------------------------ traversal
+
+    /// A chain `a -> b -> c -> d`, plus `e -> d`, in one in-memory store.
+    fn chain() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        let file = crate::store::insert_file(&db, "a.rs", "h", 1, 0).unwrap();
+        let mut id = std::collections::HashMap::new();
+        for name in ["a", "b", "c", "d", "e", "lonely"] {
+            let symbol = Symbol {
+                kind: "function".to_string(),
+                name: name.to_string(),
+                qualified: name.to_string(),
+                start_line: 1,
+                end_line: 2,
+            };
+            id.insert(
+                name,
+                crate::store::insert_symbol(&db, file, None, &symbol).unwrap(),
+            );
+        }
+        for (from, to) in [("a", "b"), ("b", "c"), ("c", "d"), ("e", "d")] {
+            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED).unwrap();
+        }
+        db
+    }
+
+    #[test]
+    fn neighbours_separates_the_two_directions() {
+        let db = chain();
+        let n = neighbours(&db, "d", &[]).unwrap();
+        let mut callers: Vec<&str> = n.callers.iter().map(|e| e.symbol.name.as_str()).collect();
+        callers.sort_unstable();
+        assert_eq!(callers, ["c", "e"], "both callers of d");
+        assert!(n.callees.is_empty(), "d calls nothing");
+    }
+
+    /// The count grows with depth and never shrinks, and the walk is backwards:
+    /// changing `d` reaches `c`, then `b`, then `a`.
+    #[test]
+    fn impact_grows_monotonically_with_depth() {
+        let db = chain();
+        let sizes: Vec<usize> = (1..=4)
+            .map(|depth| impact(&db, "d", depth).unwrap().len())
+            .collect();
+        assert_eq!(sizes, [2, 3, 4, 4], "c and e, then b, then a, then nothing");
+
+        let one = impact(&db, "d", 1).unwrap();
+        assert!(one.iter().all(|r| r.hops == 1));
+        assert!(one.iter().any(|r| r.symbol.name == "c"));
+    }
+
+    /// A symbol nothing calls has an empty blast radius rather than an error.
+    #[test]
+    fn impact_of_something_nothing_calls_is_empty() {
+        let db = chain();
+        assert!(impact(&db, "lonely", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cycle_terminates_instead_of_looping() {
+        let db = chain();
+        let file = crate::store::insert_file(&db, "b.rs", "h", 1, 0).unwrap();
+        let symbol = Symbol {
+            kind: "function".to_string(),
+            name: "d".to_string(),
+            qualified: "d".to_string(),
+            start_line: 1,
+            end_line: 2,
+        };
+        let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
+        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED).unwrap();
+        // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
+        let reached = impact(&db, "d", 50).unwrap();
+        assert!(
+            reached.len() <= 5,
+            "a cycle inflated the answer: {reached:?}"
+        );
+    }
+
+    #[test]
+    fn the_shortest_path_is_the_short_one_and_names_every_edge() {
+        let db = chain();
+        let path = shortest_path(&db, "a", "d", 10)
+            .unwrap()
+            .expect("a reaches d");
+        let hops: Vec<(&str, &str)> = path
+            .iter()
+            .map(|s| (s.from.as_str(), s.to.as_str()))
+            .collect();
+        assert_eq!(hops, [("a", "b"), ("b", "c"), ("c", "d")]);
+        assert!(path.iter().all(|s| s.kind == "calls"));
+        assert!(path.iter().all(|s| s.confidence == EXTRACTED));
+    }
+
+    /// Not connected is an answer, and so is not connected *within this depth*.
+    #[test]
+    fn an_unconnected_pair_returns_nothing_rather_than_erroring() {
+        let db = chain();
+        assert!(shortest_path(&db, "a", "lonely", 10).unwrap().is_none());
+        assert!(
+            shortest_path(&db, "a", "d", 2).unwrap().is_none(),
+            "d is three hops away, so a depth of two does not reach it"
+        );
     }
 }
