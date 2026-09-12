@@ -27,29 +27,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # turbovec links against a system BLAS: OpenBLAS on Linux, Accelerate on
-      # macOS. Accelerate ships with the OS; OpenBLAS has to be installed.
-      - name: Install OpenBLAS
-        if: runner.os == 'Linux'
-        timeout-minutes: 5
-        # The Azure apt mirror goes unreachable and the archive.ubuntu.com
-        # fallback then stalls mid-transfer with no output, so bound every
-        # fetch and retry rather than waiting on a dead socket. The lock
-        # timeout covers the runner's unattended-upgrades holding dpkg.
-        run: |
-          opts='-o Acquire::Retries=3
-                -o Acquire::http::Timeout=20
-                -o Acquire::https::Timeout=20
-                -o DPkg::Lock::Timeout=120'
-          for attempt in 1 2 3; do
-            sudo apt-get $opts update \
-              && sudo apt-get $opts install -y libopenblas-dev \
-              && exit 0
-            echo "apt attempt $attempt failed, retrying"
-            sleep 5
-          done
-          exit 1
-
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
@@ -65,3 +42,34 @@ jobs:
       - run: cargo test
 
       - run: cargo build --release
+
+  # The install scripts are the front door and nothing else compiles them, so
+  # the linters are the only thing standing between a typo and a broken paste.
+  scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: shellcheck
+        run: shellcheck install.sh
+
+      - name: Line budget
+        run: |
+          for f in install.sh install.ps1; do
+            lines=$(wc -l < "$f")
+            echo "$f: $lines lines"
+            if [ "$lines" -ge 120 ]; then
+              echo "::error::$f is $lines lines; the budget is under 120"
+              exit 1
+            fi
+          done
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $found = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error
+          $found | Format-Table -AutoSize
+          if ($found) { throw "PSScriptAnalyzer reported $($found.Count) finding(s)" }
