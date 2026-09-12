@@ -392,8 +392,10 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
-    let progress = state.index(&store, paths);
-    stream(progress)
+    match state.index(&store, paths) {
+        Ok(progress) => stream(progress),
+        Err(e) => Response::error(409, &e.to_string()),
+    }
 }
 
 fn forget(state: &Arc<State>, request: &Request) -> Response {
@@ -411,7 +413,10 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
 
     // Not streamed: forgetting a file is one statement, and a client that has
     // to parse a stream to learn a number is a client doing extra work.
-    let progress = state.forget(&store, PathBuf::from(path));
+    let progress = match state.forget(&store, PathBuf::from(path)) {
+        Ok(p) => p,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
     match progress.recv() {
         Ok(value) => Response::json(&value),
         Err(_) => Response::error(500, "the writer stopped before answering"),

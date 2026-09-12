@@ -221,12 +221,36 @@ impl State {
         &self,
         store: &Arc<Store>,
         paths: Vec<PathBuf>,
-    ) -> mpsc::Receiver<serde_json::Value> {
-        store.submit(Job::Index(paths))
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit(Job::Index(paths)))
     }
 
-    pub fn forget(&self, store: &Arc<Store>, path: PathBuf) -> mpsc::Receiver<serde_json::Value> {
-        store.submit(Job::Forget(path))
+    pub fn forget(
+        &self,
+        store: &Arc<Store>,
+        path: PathBuf,
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit(Job::Forget(path)))
+    }
+
+    /// Refuse to queue work for a store whose writer is gone.
+    ///
+    /// The queue is drained by the watcher thread and by nothing else, so a
+    /// job submitted after that thread has returned would never be performed
+    /// and never be answered — its caller would hold an HTTP worker open until
+    /// the daemon stopped. A watcher only returns on a backend failure it has
+    /// already reported, so this is a real condition, not a theoretical one.
+    fn writer_alive(store: &Arc<Store>) -> Result<()> {
+        if store.watching.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        bail!(
+            "the writer for {} is not running, so it cannot be written to; \
+             the daemon's stderr says why, and restarting it is the fix",
+            store.name
+        )
     }
 
     /// Rotate the token and tell every discovery file about it, so a
@@ -440,6 +464,11 @@ pub fn run(
     let mut watchers = Vec::new();
     for (store, lock) in state.stores.iter().cloned().zip(locks) {
         let report = Arc::clone(&report);
+        // Set here rather than inside the thread: the flag is what the write
+        // queue checks before accepting a job, and opening the store takes
+        // long enough that a request arriving in that window would otherwise
+        // be told the writer was gone when it was merely starting.
+        store.watching.store(true, Ordering::Relaxed);
         watchers.push(std::thread::spawn(move || {
             // Moved in so the lock's life is the thread's life, which is what
             // makes "the daemon is the writer" true rather than intended.
@@ -517,7 +546,6 @@ fn tend(
 ) -> Result<()> {
     let mut writer = Semlith::open(&store.dir, None)?;
     writer.quiet = true;
-    store.watching.store(true, Ordering::Relaxed);
 
     // A store with no root on disk still gets a thread, because it still has a
     // queue: the portal can index a new path into it even though there is
@@ -645,7 +673,10 @@ pub struct Writer(pub Arc<State>);
 impl crate::mcp::Writer for Writer {
     fn index(&self, store: Option<&str>, paths: &[PathBuf]) -> Result<String, String> {
         let store = self.0.writable(store).map_err(|e| e.to_string())?.clone();
-        let progress = self.0.index(&store, paths.to_vec());
+        let progress = self
+            .0
+            .index(&store, paths.to_vec())
+            .map_err(|e| e.to_string())?;
         let mut last = None;
         for event in progress {
             match event["event"].as_str() {
@@ -684,7 +715,10 @@ impl crate::mcp::Writer for Writer {
 
     fn forget(&self, store: Option<&str>, path: &str) -> Result<String, String> {
         let store = self.0.writable(store).map_err(|e| e.to_string())?.clone();
-        let progress = self.0.forget(&store, PathBuf::from(path));
+        let progress = self
+            .0
+            .forget(&store, PathBuf::from(path))
+            .map_err(|e| e.to_string())?;
         let done = progress
             .recv()
             .map_err(|_| "the writer stopped before answering".to_string())?;
