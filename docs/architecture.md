@@ -421,3 +421,105 @@ Keeping vectors in a purpose-built index is what makes the query fast.
 **Per-file license headers.** Apache-2.0 recommends but does not require them,
 and the Rust ecosystem convention is the `license` field in `Cargo.toml` plus a
 `LICENSE` file. Both are present.
+
+
+## The code graph (0.12.0)
+
+### Where extraction happens, and why it is not a command
+
+`Semlith::index_set` reads a file, hashes it with blake3, skips it when the hash
+is unchanged, deletes the old rows and writes new chunks. Symbol extraction is
+spliced into that sequence, after the delete and while the file id and every new
+chunk id are still in hand. Nothing else calls it.
+
+That placement is the entire freshness claim. The pass that re-embeds a file is
+the pass that re-extracts it, so the manual `index`, the watcher's
+`index_changed` and the daemon's queued `index_within_held` all inherit the
+behaviour through one code path, and there is no build artifact that can drift
+from the corpus. A `semlith graph build` would reintroduce exactly the staleness
+this design removes; the absence of that command is a feature.
+
+### The shape of the tables
+
+```
+symbols(id, file_id -> files.id CASCADE, chunk_id, kind, name, qualified, start_line, end_line)
+edges(src -> symbols.id CASCADE, dst TEXT, kind, confidence)
+```
+
+An edge belongs to the file its **source** is in, and dies with it. Its **target
+is a name**, resolved through `symbols(name)` when a query runs.
+
+The asymmetry is the important part. Symbol ids are reissued every time a file is
+re-extracted, so an id in `dst` would mean that re-indexing `b.rs` silently
+deleted every edge pointing into it from `a.rs` — the graph would rot on the one
+operation this release exists to make safe. Resolving by name instead makes an
+edge exactly as current as both of its ends, and has a second benefit: an edge to
+something the corpus does not contain, such as a standard-library call, is still
+recorded and simply resolves to nothing.
+
+### Where the queries come from
+
+Each grammar ships a `TAGS_QUERY` written for `tree-sitter tags`. It is a good
+source of definitions and an uneven one for references: none of the six capture
+imports, and TypeScript and C capture no calls. So each language pairs the
+bundled query with a short supplement in `graph.rs`, and matches are read whole
+rather than capture by capture — a tags query names its tag with `@name` and
+spans it separately, so Java lands `@reference.call` on the argument list with
+the method name beside it.
+
+Queries are compiled once per process and cached. Compiling is far dearer than
+running, and indexing runs these over every file walked.
+
+### Traversal, and the memory budget
+
+There is no graph library and no in-memory graph. `neighbours`, `shortest_path`
+and `impact` walk the indexed `edges(src)` and `edges(dst)` columns one hop at a
+time, bounded by a depth limit and `graph::MAX_NODES`. A name already seen is
+never expanded twice, so a cycle terminates.
+
+That is what keeps peak RSS flat as the corpus grows, which `tests/measure.rs`
+asserts. Reverse reachability from a widely-called utility is unbounded in
+principle — it reaches everything — and stops being useful long before it stops
+growing, so a truncated answer says it was truncated rather than pretending to be
+whole.
+
+`impact` and `path` follow `calls`, `imports` and `references` only. `defines`
+and `contains` are structural and true, and useless here: every symbol is one hop
+from the file that defines it, so including them would make the blast radius of
+anything at least its whole file, and make two unrelated functions in one file
+look like a two-hop dependency.
+
+### The third ranked list
+
+`graph_expansion` seeds from the top few hits of the vector and keyword lists,
+maps them to the symbols defined in those chunks, takes one hop, and returns the
+chunks those neighbours live in. Those ids join the same reciprocal-rank fusion
+at the same weight.
+
+One hop, not a ranked walk. A personalized PageRank over the graph is a real idea
+and a change to justify with a recall measurement, not to ship untested inside a
+release that is already large.
+
+The expansion resolves neighbours through `store::symbols_by_names`, which takes
+the same `Filter` predicate as the other two halves. So `filter.rs`'s
+one-id-set invariant now holds across three lists rather than two: a chunk
+outside the filter cannot arrive through the graph by the back door.
+
+## The retrieval ledger (0.12.0)
+
+`retrievals` is append-only and hash-chained: each row stores the hash of the row
+before it, and its own hash covers its fields plus that link. `store::ledger_break`
+re-walks the chain and returns the first row that does not verify, so an edited or
+deleted row is detectable rather than merely unlikely. That is the difference
+between an audit record and a log file, and it costs one blake3 of a short string
+per recorded query.
+
+Recording is off unless `--ledger` asks for it. A local tool that begins recording
+what you searched for without being told to is not meaningfully different from one
+that phones home, and the whole product is built on not being that.
+
+Whole-file tokens are measured from the files the hits actually came from, so the
+saving has a real denominator. Tokens are estimated at four characters each, which
+is a rough rule — what makes the ratio meaningful is that both sides are estimated
+the same way, and the portal says so rather than implying precision it does not
+have.

@@ -173,6 +173,40 @@ Between 0.5.0 and 0.6.0 the compatibility is still total in both directions:
 `format_version` was an additive meta key, which is exactly why it was safe to
 add before the format needed it.
 
+### 0.12.0 adds tables and does not move the number
+
+0.12.0 puts the code graph (`symbols`, `edges`) and the retrieval ledger
+(`retrievals`) inside `store.db`, and `format_version` stays **2**. That is
+deliberate, and the reasoning is worth writing down, because "new tables, new
+format number" looks like the careful choice and is the wrong one here.
+
+The schema is applied with `CREATE TABLE IF NOT EXISTS` on every open, and
+`format_version` is written only when a store is *created*. So bumping the
+number would not upgrade anything: every store in existence would keep saying 2
+for ever, with no path to 3 short of deleting it and re-embedding the corpus —
+and every 0.11.0 binary would start refusing stores that 0.12.0 had merely
+opened. A number no store can reach, bought at the price of breaking the
+previous release, is worse than no number.
+
+What the number is *for* is the vector layout, where misreading a store is
+silent: format 1's single `index.tv` and format 2's shard directory cannot be
+told apart by reading them. Tables are not like that. An older binary does not
+read `symbols`, `edges` or `retrievals` at all, so their presence cannot mislead
+it, and their absence in a store an older binary wrote is exactly the empty
+state a newer binary already handles.
+
+**So, in both directions, with no migration:** a store written by 0.11.0 opens
+under 0.12.0 with an empty graph and an empty ledger, searches correctly, and
+gains its graph on the next `index` pass — which re-reads the file bytes,
+because symbols cannot be recovered from chunk text alone. A store written by
+0.12.0 opens under 0.11.0 and searches exactly as it did before; the extra
+tables sit there unread. Both directions were run against the released 0.11.0
+binary rather than asserted here.
+
+The internal table layout is [not a covered surface](#what-is-not-covered), and
+this does not change that. It is described because people plan around it, not
+because it is promised.
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

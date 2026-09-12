@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-13
+
+The store learns the shape of the code in it, and search uses it.
+
+### Added
+
+- **A code graph, extracted on the same pass that re-embeds a file.** Symbols
+  and the `defines`, `calls`, `imports`, `references` and `contains` edges
+  between them, read out of the syntax tree by tree-sitter, for Rust,
+  TypeScript, Python, Go, Java and C. It hangs off the blake3 hash-change path
+  that already drives re-embedding, so an edit under `semlith start` updates the
+  graph in the same pass that updates the vectors. There is no build step and no
+  artifact that can quietly go stale — which is the failure every snapshot-based
+  code graph has, and the reason this one is not a snapshot.
+- **Extracted or inferred, on every edge.** A call whose name the file also
+  imports was resolved by the file itself; a bare name match was not. Two
+  functions called `new` in different modules is the normal case in real code,
+  not a corner case, so the difference is recorded and shown everywhere an edge
+  appears. Nothing presents the second as the first.
+- **`semlith symbol`, `semlith neighbors`, `semlith path`, `semlith impact`**, and
+  the same four as the MCP tools `semlith_symbol`, `semlith_neighbors`,
+  `semlith_path` and `semlith_impact`. Where a symbol is defined; what calls it
+  and what it calls; the shortest chain of edges between two symbols; and what
+  breaks if this one changes. `impact` is the answer to the most expensive
+  mistake an agent makes on a real codebase — patching the call site that was
+  reported and leaving every sibling caller broken.
+- **Graph-aware search.** The top vector and keyword hits are mapped to the
+  symbols in them, expanded one hop, and the chunks those neighbours live in
+  become a third ranked list fused at the same weight as the other two. It costs
+  no embedding and no model call, and it reaches the case neither existing list
+  can: a concept spread across files that share no vocabulary. Every hit now
+  says which lists found it — `v`, `f`, `g` on the command line — so a result the
+  graph alone reached is legible as a neighbour of a match rather than a match.
+- **A Graph page and an Impact page in the portal.** The graph on a canvas with
+  a force layout that can be paused, panned, zoomed and dragged, beside a rail
+  carrying the selected symbol's callers, callees and chunks. Reverse
+  reachability as a table and as rings by hop, with a path finder. Both are free
+  on every tier, now and after 0.13.0 makes the product paid.
+- **An opt-in retrieval ledger.** `semlith start --ledger` records every query an
+  agent ran into a hash-chained `retrievals` table inside the store: the query,
+  the client, the hits, the excerpt tokens they actually read and the whole-file
+  tokens a grep loop would have cost. Each row carries the hash of the row
+  before it, so an edited or deleted row is detectable rather than merely
+  unlikely. `semlith ledger --last N` prints it, the Ledger page shows the
+  totals and the measured ratio, and none of it needs a key or leaves the
+  machine. It is off unless asked for: a local tool that starts recording what
+  you searched for without being told to is not meaningfully different from one
+  that phones home.
+
+### Fixed
+
+- **The install script's progress bar.** `curl -L --progress-bar` draws a bar for
+  every hop of a redirect, and a hop carries no content length, so curl fell
+  back to its bouncing `#=O=-` spinner. A GitHub release URL always redirects,
+  so every install showed that before the real bar arrived, and a working
+  download looked like line noise. The final URL is resolved first, which gives
+  one request against a known size and one bar from 0% to 100%.
+
+### Notes
+
+- **Existing stores open unchanged.** `format_version` stays 2 and nothing
+  migrates: the new tables are created by the same `IF NOT EXISTS` batch every
+  open already runs, so a store written by 0.11.0 opens with an empty graph and
+  fills it on the next `index` pass, and a store written by 0.12.0 still opens
+  under 0.11.0. Both directions are tested against the released 0.11.0 binary.
+  `docs/compatibility.md` explains why the number did not move.
+- **Measured.** Extraction costs 98 ms over 589 KiB of source producing 757
+  symbols and 5,536 edges — 0.17% of the 58 s that corpus takes to index, because
+  embedding dominates and tree-sitter is fast. The six grammars add 4.6 MB to
+  the binary, 38.6 MB to 43.2 MB.
+- **Six languages carry edges.** Everything else is searchable exactly as
+  before, with no symbols. The About page says which is which.
+- **Everything in this release is free on every tier, permanently.** 0.13.0
+  introduces paid tiers by adding views above these, never by locking one.
+
 ## [0.11.0] - 2026-09-12
 
 The rest of a real archive, and a way to put something into a store that was
