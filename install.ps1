@@ -1,13 +1,11 @@
 <#
 .SYNOPSIS
-    Install semlith from a GitHub release.
-.DESCRIPTION
-    Downloads the Windows binary for the requested release, verifies it
-    against SHA256SUMS, installs it into %USERPROFILE%\.semlith\bin and hands
-    off to `semlith setup`.
+    Install semlith from a GitHub release: download the Windows binary, verify
+    it against SHA256SUMS, install it into ~\.semlith\bin and hand off to
+    `semlith setup`.
 
         irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
-
+.DESCRIPTION
     SEMLITH_VERSION  pin a release tag such as v0.10.0 (default: latest)
     SEMLITH_HOME     install into <dir>\bin (default: ~\.semlith\bin)
     SEMLITH_YES      set to 1 to answer yes to every `semlith setup` prompt
@@ -18,6 +16,10 @@ $repo = 'semlith/semlith'
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
     throw "semlith has no prebuilt Windows binary for $arch."
+}
+# One Windows target is built; on ARM64 it runs under Windows 11's x64 emulation.
+if ($arch -eq 'ARM64') {
+    Write-Information 'No native ARM64 build yet; installing the x64 binary, which Windows emulates.' -InformationAction Continue
 }
 $target = 'x86_64-pc-windows-msvc'
 
@@ -108,10 +110,7 @@ if ($hasSetup) {
 else {
     Write-Information '' -InformationAction Continue
     Write-Information "This release has no 'setup' command, so add semlith to your PATH:" -InformationAction Continue
-    Write-Information '' -InformationAction Continue
     Write-Information "    `$env:Path = '$binDir;' + `$env:Path" -InformationAction Continue
-    Write-Information '' -InformationAction Continue
-    Write-Information 'To make that permanent, add the directory in System Properties >' -InformationAction Continue
-    Write-Information 'Environment Variables, or run:' -InformationAction Continue
+    Write-Information 'To make that permanent, run:' -InformationAction Continue
     Write-Information "    setx PATH `"$binDir;%PATH%`"" -InformationAction Continue
 }
