@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::{Duration, SystemTime};
 
 /// Written beside the store's lock while a daemon holds it, so `semlith mcp`
@@ -170,9 +170,22 @@ pub struct State {
     /// there is one browser, so contention is theoretical; if it ever is not,
     /// the upgrade is a reader per store rather than a shared `Fleet`.
     pub fleet: Mutex<Option<Fleet>>,
-    pub stores: Vec<Arc<Store>>,
+    /// The open stores.
+    ///
+    /// Behind a lock because the set is no longer fixed at startup: indexing a
+    /// folder on a machine with no store yet has to be able to make one and
+    /// serve it in the same breath, without the developer restarting the
+    /// daemon they only just started. Readers take a snapshot rather than hold
+    /// the guard, so a slow search never blocks a store being opened.
+    stores: RwLock<Vec<Arc<Store>>>,
     pub airgap: bool,
     pub started: SystemTime,
+    /// How long a watcher waits for a file to stop changing. Kept so a store
+    /// opened later gets the same debounce as the ones opened at startup.
+    debounce: Duration,
+    /// The daemon's log line, so a store opened at runtime reports itself the
+    /// way the startup ones do.
+    report: Arc<dyn Fn(&str) + Send + Sync>,
     /// Refusals by class, for the line the daemon logs on shutdown.
     pub refusals: Mutex<BTreeMap<&'static str, u64>>,
     /// `semlith mcp` processes forwarding here: pid to the unix second it was
@@ -193,17 +206,27 @@ pub struct State {
 const PROXY_FRESH: u64 = 120;
 
 impl State {
-    pub fn store(&self, name: &str) -> Option<&Arc<Store>> {
-        self.stores.iter().find(|s| s.name == name)
+    /// Every open store, as a snapshot.
+    ///
+    /// Cloned out rather than handed back under the guard: an `Arc` clone is a
+    /// counter bump, and holding a read lock across a search would stop a new
+    /// store being opened for as long as the search took.
+    pub fn stores(&self) -> Vec<Arc<Store>> {
+        self.stores.read().expect("the stores lock").clone()
+    }
+
+    pub fn store(&self, name: &str) -> Option<Arc<Store>> {
+        self.stores().into_iter().find(|s| s.name == name)
     }
 
     /// The one store a write means, or an error naming the alternatives.
-    pub fn writable(&self, name: Option<&str>) -> Result<&Arc<Store>> {
-        match (name, self.stores.as_slice()) {
+    pub fn writable(&self, name: Option<&str>) -> Result<Arc<Store>> {
+        let stores = self.stores();
+        match (name, stores.as_slice()) {
             (Some(name), _) => self
                 .store(name)
                 .with_context(|| format!("no store called {name} is open")),
-            (None, [one]) => Ok(one),
+            (None, [one]) => Ok(Arc::clone(one)),
             (None, []) => bail!("no store is open"),
             (None, many) => bail!(
                 "this daemon has {} stores open, so a write has to name one: {}",
@@ -257,7 +280,7 @@ impl State {
     /// forwarding `semlith mcp` is not cut off by the Privacy page's button.
     pub fn rotate(&self) -> String {
         let fresh = self.server.rotate();
-        for store in &self.stores {
+        for store in self.stores() {
             let _ = discovery(self.server.port(), &fresh).write(&store.dir);
         }
         fresh
@@ -288,9 +311,102 @@ impl State {
         if fleet.is_some() {
             return Ok(());
         }
-        let dirs: Vec<PathBuf> = self.stores.iter().map(|s| s.dir.clone()).collect();
+        let dirs: Vec<PathBuf> = self.stores().iter().map(|s| s.dir.clone()).collect();
         if dirs.is_empty() {
             bail!("this daemon has no store open");
+        }
+        let mut opened = Fleet::open(&dirs)?;
+        opened.quiet = true;
+        *fleet = Some(opened);
+        Ok(())
+    }
+
+    /// Open a store that was not open when the daemon started, and serve it
+    /// immediately.
+    ///
+    /// This is what makes the portal's first run work. A machine with nothing
+    /// indexed starts the daemon with no stores, and the Index page then has
+    /// nothing to write to — so indexing a folder there has to be able to
+    /// create the store, take its lock, start watching it and put it in front
+    /// of the reader without the developer restarting anything.
+    ///
+    /// The order is the same one `run` uses and matters for the same reason:
+    /// the lock is taken before the store is announced, so nothing is offered
+    /// that another process might already own.
+    pub fn open_store(self: &Arc<Self>, dir: &Path) -> Result<Arc<Store>> {
+        let dir = crate::canonical(dir);
+        if let Some(open) = self.stores().into_iter().find(|s| s.dir == dir) {
+            return Ok(open);
+        }
+
+        let lock = StoreLock::acquire(&dir)
+            .with_context(|| format!("{} cannot be opened by the daemon", dir.display()))?;
+
+        let registry = Registry::load()?;
+        let (name, roots) = roots_for(&dir, &registry);
+        let watched: Vec<PathBuf> = roots.iter().filter(|r| r.exists()).cloned().collect();
+
+        let store = Arc::new(Store {
+            name: name.clone(),
+            dir: dir.clone(),
+            roots,
+            watched,
+            queue: Mutex::new(VecDeque::new()),
+            events: Mutex::new(VecDeque::new()),
+            watching: AtomicBool::new(true),
+            last_write: AtomicUsize::new(0),
+        });
+
+        discovery(self.server.port(), &self.server.token()).write(&store.dir)?;
+        self.stores
+            .write()
+            .expect("the stores lock")
+            .push(Arc::clone(&store));
+
+        // Same shape as the startup watchers: the lock moves into the thread so
+        // its life is the thread's life, which is what makes "the daemon is the
+        // writer" true rather than intended.
+        let watching = Arc::clone(&store);
+        let debounce = self.debounce;
+        let report = Arc::clone(&self.report);
+        std::thread::spawn(move || {
+            let _lock = lock;
+            if let Err(e) = tend(&watching, debounce, &watch::STOP, &*report) {
+                report(&format!("{}: watcher stopped: {e}", watching.name));
+                watching.note(format!("watcher stopped: {e}"));
+            }
+            watching.watching.store(false, Ordering::Relaxed);
+        });
+
+        (self.report)(&format!(
+            "opened {name} at {} — now serving it",
+            dir.display()
+        ));
+        self.reopen_readers();
+        Ok(store)
+    }
+
+    /// Throw away the readers so the next request builds one that knows about
+    /// every store, including any opened since.
+    ///
+    /// Dropped rather than rebuilt here: rebuilding loads the embedding model,
+    /// and doing that while holding the lock would stall whichever request
+    /// happened to be next. The reader is opened on demand anyway.
+    fn reopen_readers(&self) {
+        *self.fleet.lock().expect("the fleet lock") = None;
+        *self.mcp_fleet.lock().expect("the mcp fleet lock") = None;
+    }
+
+    /// The reader every read route answers from, opened on first use and
+    /// reopened after a store joins.
+    pub fn open_fleet(&self) -> Result<()> {
+        let mut fleet = self.fleet.lock().expect("the fleet lock");
+        if fleet.is_some() {
+            return Ok(());
+        }
+        let dirs: Vec<PathBuf> = self.stores().iter().map(|s| s.dir.clone()).collect();
+        if dirs.is_empty() {
+            return Ok(());
         }
         let mut opened = Fleet::open(&dirs)?;
         opened.quiet = true;
@@ -444,12 +560,16 @@ pub fn run(
         discovery(server.port(), &token).write(&store.dir)?;
     }
 
+    let report_line: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(report);
+
     let state = Arc::new(State {
         server: Arc::clone(&server),
         fleet: Mutex::new(fleet),
-        stores,
+        stores: RwLock::new(stores),
         airgap,
         started: SystemTime::now(),
+        debounce,
+        report: Arc::clone(&report_line),
         refusals: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
@@ -459,10 +579,9 @@ pub fn run(
     // ends, so the ordinary exit has to be the safe one.
     watch::stop_on_signal();
 
-    let report_line = Arc::new(report);
     let report = Arc::clone(&report_line);
     let mut watchers = Vec::new();
-    for (store, lock) in state.stores.iter().cloned().zip(locks) {
+    for (store, lock) in state.stores().into_iter().zip(locks) {
         let report = Arc::clone(&report);
         // Set here rather than inside the thread: the flag is what the write
         // queue checks before accepting a job, and opening the store takes
@@ -519,7 +638,7 @@ pub fn run(
         for watcher in watchers {
             let _ = watcher.join();
         }
-        for store in &state.stores {
+        for store in state.stores() {
             Discovery::remove(&store.dir);
         }
 
@@ -805,23 +924,27 @@ mod tests {
         let state = State {
             server: Arc::new(Server::bind(0).expect("an ephemeral port")),
             fleet: Mutex::new(None),
-            stores: ["api", "cli"]
-                .into_iter()
-                .map(|name| {
-                    Arc::new(Store {
-                        name: name.to_string(),
-                        dir: PathBuf::from("/nowhere").join(name),
-                        roots: Vec::new(),
-                        watched: Vec::new(),
-                        queue: Mutex::new(VecDeque::new()),
-                        events: Mutex::new(VecDeque::new()),
-                        watching: AtomicBool::new(false),
-                        last_write: AtomicUsize::new(0),
+            stores: RwLock::new(
+                ["api", "cli"]
+                    .into_iter()
+                    .map(|name| {
+                        Arc::new(Store {
+                            name: name.to_string(),
+                            dir: PathBuf::from("/nowhere").join(name),
+                            roots: Vec::new(),
+                            watched: Vec::new(),
+                            queue: Mutex::new(VecDeque::new()),
+                            events: Mutex::new(VecDeque::new()),
+                            watching: AtomicBool::new(false),
+                            last_write: AtomicUsize::new(0),
+                        })
                     })
-                })
-                .collect(),
+                    .collect(),
+            ),
             airgap: false,
             started: SystemTime::now(),
+            debounce: Duration::from_millis(500),
+            report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
