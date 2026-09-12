@@ -585,7 +585,7 @@ mod tests {
         let ids = filtered_chunk_ids(&db, &filter(&["src/**"], &["md"], &[])).unwrap();
         assert_eq!(
             paths_of(&db, &ids),
-            ["/proj/src/notes.md"],
+            [native("/proj/src/notes.md")],
             "the README is Markdown but is not under src"
         );
     }
