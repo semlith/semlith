@@ -16,6 +16,8 @@
 //! them to text with one SQLite lookup each.
 
 pub mod chunk;
+pub mod clients;
+pub mod daemon;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
@@ -23,9 +25,12 @@ pub mod fleet;
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
 pub mod home;
+pub mod http;
 pub mod index;
 pub mod lock;
 pub mod mcp;
+pub mod portal;
+pub mod routes;
 pub mod store;
 pub mod watch;
 
@@ -410,6 +415,18 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.index_within_held(roots, budget, on_file)
+    }
+
+    /// [`Semlith::index_paths_within`] without taking the lock, for a caller
+    /// that already holds it — `semlith start` holds it for the daemon's life,
+    /// and its queue runs on the thread that holds it.
+    pub(crate) fn index_within_held(
+        &mut self,
+        roots: &[PathBuf],
+        budget: std::time::Duration,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
         self.index_set(walk(roots), true, Some(deadline), on_file)
     }
@@ -645,6 +662,12 @@ impl Semlith {
         // lands while `semlith watch` is saving leaves the index and the
         // database disagreeing about which chunks exist.
         let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.forget_held(path)
+    }
+
+    /// [`Semlith::forget`] without taking the lock, for a caller that already
+    /// holds it.
+    pub(crate) fn forget_held(&mut self, path: &Path) -> Result<usize> {
         let key = canonical(path).to_string_lossy().into_owned();
         let ids = store::delete_file(&self.db, &key)?;
         for id in &ids {

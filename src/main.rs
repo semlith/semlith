@@ -44,6 +44,34 @@ enum Command {
         /// Suppress per-file output and download progress.
         #[arg(long, short)]
         quiet: bool,
+
+        /// Refuse to download model weights. Exits non-zero naming the cache
+        /// path if the model is not already there, so an air-gapped machine can
+        /// prove this process never reached the network.
+        #[arg(long)]
+        airgap: bool,
+    },
+
+    /// Run the daemon: hold every registered store's write lock, keep them
+    /// current as files are saved, and serve the portal on 127.0.0.1. Runs
+    /// until interrupted.
+    Start {
+        /// Stores to open. Defaults to every registered store.
+        paths: Vec<PathBuf>,
+
+        /// Port to listen on (also settable with SEMLITH_PORT). Never falls
+        /// back to another port: the URL is meant to be a bookmark.
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Quiet period in milliseconds after the last change before
+        /// re-embedding, so one editor save costs one re-embed.
+        #[arg(long, default_value_t = semlith::watch::DEBOUNCE.as_millis() as u64)]
+        debounce: u64,
+
+        /// Refuse to download model weights.
+        #[arg(long)]
+        airgap: bool,
     },
 
     /// Move an existing store directory into the store home and register it,
@@ -151,7 +179,9 @@ fn main() -> Result<()> {
             model,
             name,
             quiet,
+            airgap,
         } => {
+            arm_airgap(airgap);
             let model = model
                 .map(|m| m.parse::<Model>().map_err(anyhow::Error::msg))
                 .transpose()?;
@@ -468,6 +498,29 @@ fn main() -> Result<()> {
             eprintln!("removed {n} chunks for {}", path.display());
         }
 
+        Command::Start {
+            paths,
+            port,
+            debounce,
+            airgap,
+        } => {
+            arm_airgap(airgap);
+            let dirs = semlith::daemon::stores_to_open(&cli.store, &paths, &cwd)?;
+            if dirs.is_empty() {
+                // Not an error: the portal's welcome screen exists for exactly
+                // this, and telling someone to go index something first is what
+                // the screen does better than a bail! does.
+                eprintln!("semlith: no store registered yet — the portal will offer to make one");
+            }
+            semlith::daemon::run(
+                &dirs,
+                semlith::daemon::port_of(port),
+                std::time::Duration::from_millis(debounce),
+                semlith::embed::airgap(),
+                |line| eprintln!("semlith: {line}"),
+            )?;
+        }
+
         Command::Adopt {
             store_dir,
             root,
@@ -532,6 +585,18 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Turn `--airgap` into the environment variable the loader reads.
+///
+/// One switch rather than a flag threaded through `Semlith`, `Fleet` and the
+/// daemon: the check lives at the single place weights are fetched, and this is
+/// how the flag reaches it. Called before any thread starts, which is what
+/// makes the `set_var` safe.
+fn arm_airgap(on: bool) {
+    if on {
+        unsafe { std::env::set_var(semlith::embed::AIRGAP_ENV, "1") };
+    }
 }
 
 /// The stores a read-only command opens.

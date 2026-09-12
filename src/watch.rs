@@ -104,12 +104,29 @@ pub fn run(
     roots: &[PathBuf],
     debounce: Duration,
     stop: &AtomicBool,
-    mut progress: impl FnMut(Progress),
+    progress: impl FnMut(Progress),
 ) -> Result<()> {
     // Taken before anything is watched: if the store is busy, say so now
     // rather than after a catch-up pass has already embedded half a corpus.
     let _lock = lock::StoreLock::acquire(store.dir())?;
+    run_held(store, roots, debounce, stop, progress, |_| Ok(()))
+}
 
+/// [`run`] for a caller that already holds the store's write lock and has work
+/// of its own to give the writer.
+///
+/// `semlith start` is that caller. It owns the lock for the daemon's life, and
+/// `pump` is how a portal or a forwarded `semlith_index` reaches the one thread
+/// allowed to write — called between batches, so a queued job and a filesystem
+/// event never overlap and there is still exactly one writer.
+pub fn run_held(
+    store: &mut Semlith,
+    roots: &[PathBuf],
+    debounce: Duration,
+    stop: &AtomicBool,
+    mut progress: impl FnMut(Progress),
+    mut pump: impl FnMut(&mut Semlith) -> Result<()>,
+) -> Result<()> {
     let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
 
     let (tx, rx) = mpsc::channel();
@@ -138,6 +155,13 @@ pub fn run(
     });
 
     while !stop.load(Ordering::Relaxed) {
+        // Before waiting on the filesystem, not after: a request that arrived
+        // while the last batch was embedding should not sit for another idle
+        // tick behind a tree nobody is editing.
+        if let Err(e) = pump(store) {
+            progress(Progress::Error(e.to_string()));
+        }
+
         let first = match rx.recv_timeout(IDLE_TICK) {
             Ok(Ok(event)) => event,
             Ok(Err(e)) => {
