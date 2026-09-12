@@ -233,6 +233,86 @@ impl Fleet {
         Ok((out, left_out))
     }
 
+    /// Every definition of `name` across the stores `only` selects.
+    pub fn symbols_in(
+        &self,
+        only: Option<&[String]>,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::store::SymbolRow>> {
+        self.graph_in(only, |store| {
+            crate::store::symbols_named(store.db(), name, limit)
+        })
+    }
+
+    /// Callers and callees of `name`, merged across the chosen stores.
+    pub fn neighbours_in(
+        &self,
+        only: Option<&[String]>,
+        name: &str,
+        kinds: &[String],
+    ) -> Result<crate::graph::Neighbours> {
+        let callers = self.graph_in(only, |s| crate::store::edges_in(s.db(), name, kinds))?;
+        let callees = self.graph_in(only, |s| crate::store::edges_out(s.db(), name, kinds))?;
+        Ok(crate::graph::Neighbours { callers, callees })
+    }
+
+    /// What reaches `name` within `depth` hops, across the chosen stores.
+    pub fn impact_in(
+        &self,
+        only: Option<&[String]>,
+        name: &str,
+        depth: u32,
+    ) -> Result<Vec<crate::graph::Reached>> {
+        self.graph_in(only, |s| crate::graph::impact(s.db(), name, depth))
+    }
+
+    /// The shortest chain from `from` to `to`, in the first store that has one.
+    ///
+    /// A path that crossed two stores would be a path through two unrelated
+    /// corpora, which is not a fact about anybody's code, so each store is
+    /// asked separately and the shortest answer wins.
+    pub fn path_in(
+        &self,
+        only: Option<&[String]>,
+        from: &str,
+        to: &str,
+        depth: u32,
+    ) -> Result<Option<Vec<crate::graph::Step>>> {
+        let mut best: Option<Vec<crate::graph::Step>> = None;
+        for i in self.chosen(only)? {
+            if let Some(path) =
+                crate::graph::shortest_path(self.members[i].store.db(), from, to, depth)?
+                && best.as_ref().is_none_or(|b| path.len() < b.len())
+            {
+                best = Some(path);
+            }
+        }
+        Ok(best)
+    }
+
+    /// Run a read over the chosen stores and concatenate what comes back,
+    /// labelling each row with its store when more than one is open.
+    fn graph_in<T: Labelled>(
+        &self,
+        only: Option<&[String]>,
+        read: impl Fn(&Semlith) -> Result<Vec<T>>,
+    ) -> Result<Vec<T>> {
+        let chosen = self.chosen(only)?;
+        let label_rows = self.members.len() > 1;
+        let mut out = Vec::new();
+        for i in chosen {
+            let label = self.members[i].label.clone();
+            for mut row in read(&self.members[i].store)? {
+                if label_rows {
+                    row.label(&label);
+                }
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
     /// The one store a write goes to.
     ///
     /// One writer per store is the product's rule, and with several stores open
@@ -401,6 +481,32 @@ fn disambiguate(members: &mut [Member], keys: &[PathBuf]) {
         {
             member.label = keys[i].display().to_string();
         }
+    }
+}
+
+/// A graph row that can say which store it came from.
+///
+/// The three graph reads return three different shapes over the same rows, and
+/// labelling is the only thing `Fleet` adds to any of them.
+pub trait Labelled {
+    fn label(&mut self, store: &str);
+}
+
+impl Labelled for crate::store::SymbolRow {
+    fn label(&mut self, store: &str) {
+        self.store = Some(store.to_string());
+    }
+}
+
+impl Labelled for crate::store::EdgeEnd {
+    fn label(&mut self, store: &str) {
+        self.symbol.store = Some(store.to_string());
+    }
+}
+
+impl Labelled for crate::graph::Reached {
+    fn label(&mut self, store: &str) {
+        self.symbol.store = Some(store.to_string());
     }
 }
 

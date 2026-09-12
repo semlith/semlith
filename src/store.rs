@@ -482,6 +482,11 @@ pub struct SymbolRow {
     pub end_line: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<i64>,
+    /// Which store this came from, when more than one is open. Absent for a
+    /// single store, so one store's output is what it would have been before
+    /// stores could be combined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 /// One end of a traversal: the symbol reached, and the edge that reached it.
@@ -506,6 +511,7 @@ fn symbol_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
         start_line: r.get(5)?,
         end_line: r.get(6)?,
         chunk_id: r.get(7)?,
+        store: None,
     })
 }
 

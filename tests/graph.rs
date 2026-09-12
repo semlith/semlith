@@ -284,7 +284,97 @@ fn an_edit_under_the_watcher_updates_the_graph_with_the_vectors() {
     handle.join().unwrap();
 }
 
+/// The four commands answer, and `impact` at depth 1 agrees with a full-text
+/// sweep of the corpus: every direct caller, and nothing a sweep does not find.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_four_commands_answer_and_impact_agrees_with_a_sweep() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "lock.rs",
+        "fn acquire() { hold(); }\n\
+         fn hold() { release(); }\n\
+         fn release() {}\n\
+         fn alone() {}\n",
+    );
+    index(store.path(), corpus.path());
+
+    let out = cli(store.path(), &["symbol", "hold"]);
+    assert!(out.contains("lock.rs"), "symbol found nothing: {out}");
+
+    let out = cli(store.path(), &["neighbors", "hold"]);
+    assert!(out.contains("acquire"), "hold's caller is missing: {out}");
+    assert!(out.contains("release"), "hold's callee is missing: {out}");
+
+    let out = cli(store.path(), &["path", "acquire", "release"]);
+    assert!(out.contains("acquire --calls--> hold"), "{out}");
+    assert!(out.contains("hold --calls--> release"), "{out}");
+
+    let out = cli(store.path(), &["path", "acquire", "alone"]);
+    assert!(out.contains("no chain"), "unconnected must say so: {out}");
+
+    // Depth 1 against the sweep: `release` is called once, by `hold`.
+    let body = fs::read_to_string(corpus.path().join("lock.rs")).unwrap();
+    let callers: Vec<&str> = ["acquire", "hold", "alone"]
+        .into_iter()
+        .filter(|f| {
+            let start = body.find(&format!("fn {f}()")).unwrap();
+            body[start..]
+                .split_once('}')
+                .is_some_and(|(b, _)| b.contains("release("))
+        })
+        .collect();
+    assert_eq!(callers, ["hold"], "the sweep itself is wrong");
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let reached = semlith::graph::impact(s.db(), "release", 1).unwrap();
+    let names: Vec<String> = reached.iter().map(|r| r.symbol.name.clone()).collect();
+    assert_eq!(names, ["hold"], "impact disagrees with a full-text sweep");
+    drop(s);
+
+    // And the count only ever grows with depth.
+    let out = cli(store.path(), &["impact", "release", "--depth", "2"]);
+    assert!(
+        out.contains("acquire"),
+        "depth 2 lost the indirect caller: {out}"
+    );
+}
+
+/// Every graph answer is the same whether it came from the library or the
+/// command line, so an agent and a person are never told different things.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_json_output_matches_what_the_library_returns() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "lock.rs", "fn a() { b(); }\nfn b() {}\n");
+    index(store.path(), corpus.path());
+
+    let printed: serde_json::Value =
+        serde_json::from_str(&cli(store.path(), &["impact", "b", "--json"])).unwrap();
+    let s = Semlith::open(store.path(), None).unwrap();
+    let direct = serde_json::to_value(semlith::graph::impact(s.db(), "b", 3).unwrap()).unwrap();
+    assert_eq!(printed, direct);
+}
+
 // ----------------------------------------------------------------- helpers
+
+/// Run the built binary against `store` and return its stdout and stderr.
+fn cli(store: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(store)
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
 
 fn symbols_in(db: &Connection, name: &str) -> i64 {
     db.query_row(

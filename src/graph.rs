@@ -569,6 +569,21 @@ pub const MAX_NODES: usize = 2000;
 /// Hops `impact` walks when nobody says otherwise.
 pub const DEFAULT_DEPTH: u32 = 3;
 
+/// The edge kinds that mean "depends on", which are the only ones a blast
+/// radius or a path is about.
+///
+/// `defines` and `contains` are structural: they say a symbol sits inside a
+/// file or another symbol. True, and useless here — every symbol is reached in
+/// one hop from the file it lives in, so including them makes the blast radius
+/// of anything at least its whole file, and makes a path between two unrelated
+/// functions in one file look like a two-hop dependency. Neighbours still show
+/// them, because "what is in this" is a question someone asks.
+pub const DEPENDENCY_KINDS: [&str; 3] = ["calls", "imports", "references"];
+
+fn dependency_kinds() -> Vec<String> {
+    DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
+}
+
 /// A symbol a traversal reached, and how it got there.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Reached {
@@ -615,11 +630,12 @@ pub fn impact(db: &rusqlite::Connection, name: &str, depth: u32) -> Result<Vec<R
 
     let mut reached: Vec<Reached> = Vec::new();
     let mut frontier = vec![name.to_string()];
+    let kinds = dependency_kinds();
 
     for hop in 1..=depth {
         let mut next = Vec::new();
         for current in &frontier {
-            for edge in crate::store::edges_in(db, current, &[])? {
+            for edge in crate::store::edges_in(db, current, &kinds)? {
                 if !seen.insert(edge.symbol.name.clone()) {
                     continue;
                 }
@@ -662,11 +678,12 @@ pub fn shortest_path(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     seen.insert(from.to_string());
     let mut frontier = vec![from.to_string()];
+    let kinds = dependency_kinds();
 
     for _ in 0..depth {
         let mut next = Vec::new();
         for current in &frontier {
-            for edge in crate::store::edges_out(db, current, &[])? {
+            for edge in crate::store::edges_out(db, current, &kinds)? {
                 let name = edge.symbol.name.clone();
                 if !seen.insert(name.clone()) {
                     continue;
