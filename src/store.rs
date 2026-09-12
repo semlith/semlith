@@ -566,6 +566,35 @@ pub fn symbols_named(db: &Connection, name: &str, limit: usize) -> Result<Vec<Sy
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Symbols to draw for a scope, newest-defined first within each file.
+///
+/// `prefix` narrows to a directory or a file the way the Files view does.
+/// Module symbols are left out: every file has one, so they would fill the
+/// budget with nodes that say only "this file exists".
+pub fn symbols_scoped(
+    db: &Connection,
+    prefix: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SymbolRow>> {
+    let (predicate, binds) = match prefix {
+        Some(p) => {
+            let pattern = format!("*{}*", p.to_lowercase());
+            ("lower(f.path) GLOB ?".to_string(), vec![pattern])
+        }
+        None => ("1".to_string(), Vec::new()),
+    };
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE {predicate} AND s.kind != 'module'
+         ORDER BY f.path, s.start_line LIMIT ?"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut args: Vec<Value> = binds.into_iter().map(Value::Text).collect();
+    args.push(Value::Integer(limit as i64));
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), symbol_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Symbols defined in files matching `groups` whose name is one of `names`.
 ///
 /// The resolution step every traversal shares: an edge names its target, and

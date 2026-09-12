@@ -45,6 +45,10 @@ const VIEWS: &[(&str, &str)] = &[
     // A check and an install both reach the network, so neither is something a
     // route answers to a GET that a browser might replay.
     ("upgrade", "/api/upgrade"),
+    ("symbol", "/api/symbol"),
+    ("neighbors", "/api/neighbors"),
+    ("path", "/api/path"),
+    ("impact", "/api/impact"),
 ];
 
 /// And the same for the MCP tool surface.
@@ -55,6 +59,10 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_index", "/api/index"),
     ("semlith_add", "/api/add"),
     ("semlith_forget", "/api/forget"),
+    ("semlith_symbol", "/api/symbol"),
+    ("semlith_neighbors", "/api/neighbors"),
+    ("semlith_path", "/api/path"),
+    ("semlith_impact", "/api/impact"),
 ];
 
 /// Which verb a route answers on.
@@ -267,6 +275,30 @@ fn every_mcp_tool_has_a_portal_view() {
             daemon.status(method, route),
             404,
             "{tool} claims the route {route}, which does not exist"
+        );
+    }
+}
+
+/// Every tool the MCP server actually serves has a parity row.
+///
+/// The test above reads the Agents route, which now derives its list from
+/// `mcp::tool_names()` rather than repeating it — so this asserts against the
+/// server's own definitions directly, and a tool added to `mcp::tools` with no
+/// route and no row fails here rather than shipping invisible.
+#[test]
+fn every_tool_the_server_defines_has_a_parity_row() {
+    let served = semlith::mcp::tool_names();
+    assert!(!served.is_empty(), "the server defines no tools at all");
+    for tool in &served {
+        assert!(
+            TOOL_VIEWS.iter().any(|(name, _)| name == tool),
+            "{tool} is served by mcp::tools but has no row in TOOL_VIEWS"
+        );
+    }
+    for (name, _) in TOOL_VIEWS {
+        assert!(
+            served.iter().any(|t| t == name),
+            "TOOL_VIEWS lists {name}, which the server does not serve"
         );
     }
 }

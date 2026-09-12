@@ -50,6 +50,11 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/privacy") => privacy(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
+        (true, _, "/api/symbol") => symbol(state, request),
+        (true, _, "/api/neighbors") => neighbors(state, request),
+        (true, _, "/api/path") => shortest_path(state, request),
+        (true, _, "/api/impact") => impact(state, request),
+        (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
@@ -393,14 +398,9 @@ fn agents(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
         "connected": state.proxy_count(),
-        "tools": [
-            "semlith_search",
-            "semlith_stats",
-            "semlith_files",
-            "semlith_index",
-            "semlith_add",
-            "semlith_forget",
-        ],
+        // Read from the MCP server's own definitions rather than repeated
+        // here: a second copy is how a tool ends up served and invisible.
+        "tools": crate::mcp::tool_names(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         "install": {
@@ -415,6 +415,139 @@ fn agents(state: &Arc<State>) -> Response {
 /// read: nothing here installs anything.
 fn setup() -> Response {
     Response::json(&json!(crate::setup::status()))
+}
+
+// ----------------------------------------------------------------- graph
+
+/// Run a read against the open fleet, or answer with `empty` when no store is
+/// open yet. Every graph route has the same three lines in front of it.
+fn with_fleet(
+    state: &Arc<State>,
+    empty: Value,
+    read: impl FnOnce(&crate::fleet::Fleet) -> anyhow::Result<Value>,
+) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let fleet = state.fleet.lock().expect("the fleet lock");
+    let Some(fleet) = fleet.as_ref() else {
+        return Response::json(&empty);
+    };
+    match read(fleet) {
+        Ok(value) => Response::json(&value),
+        Err(e) => Response::error(500, &e.to_string()),
+    }
+}
+
+fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let k = request
+        .query("k")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 200);
+    let only = request.query_all("store");
+    with_fleet(state, json!({ "symbols": [] }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let found = fleet.symbols_in(only.as_deref(), &name, k)?;
+        Ok(json!({ "symbols": found }))
+    })
+}
+
+fn neighbors(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let kinds = request.query_all("kind");
+    if let Some(bad) = kinds
+        .iter()
+        .find(|k| !crate::graph::KINDS.contains(&k.as_str()))
+    {
+        return Response::error(400, &format!("unknown edge kind {bad:?}"));
+    }
+    let only = request.query_all("store");
+    let empty = json!({ "callers": [], "callees": [] });
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        Ok(json!(fleet.neighbours_in(
+            only.as_deref(),
+            &name,
+            &kinds
+        )?))
+    })
+}
+
+fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
+    let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
+        return Response::error(400, "missing from or to");
+    };
+    let (from, to) = (from.to_string(), to.to_string());
+    let depth = request
+        .query("depth")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(6)
+        .clamp(1, 20);
+    let only = request.query_all("store");
+    with_fleet(state, json!({ "path": null }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        Ok(json!({ "path": fleet.path_in(only.as_deref(), &from, &to, depth)? }))
+    })
+}
+
+fn impact(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let depth = request
+        .query("depth")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(crate::graph::DEFAULT_DEPTH)
+        .clamp(1, 20);
+    let only = request.query_all("store");
+    let empty = json!({ "reached": [], "depth": depth, "truncated": false });
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let reached = fleet.impact_in(only.as_deref(), &name, depth)?;
+        let truncated = reached.len() >= crate::graph::MAX_NODES;
+        Ok(json!({ "reached": reached, "depth": depth, "truncated": truncated }))
+    })
+}
+
+/// The nodes and edges the Graph page draws.
+///
+/// Scoped to a store, to a directory, or to one symbol and its neighbourhood —
+/// never the whole corpus, because a force layout over a monorepo is neither
+/// drawable nor readable. The payload is a documented shape rather than
+/// whatever the renderer happened to want: `{ nodes, edges, total, shown }`,
+/// so another tool can draw the same graph and the renderer can be replaced.
+fn graph(state: &Arc<State>, request: &Request) -> Response {
+    let focus = request.query("name").map(str::to_string);
+    let prefix = request.query("path").map(str::to_string);
+    let limit = request
+        .query("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(180)
+        .clamp(1, crate::graph::MAX_NODES);
+    let only = request.query_all("store");
+    let empty = json!({ "nodes": [], "edges": [], "total": 0, "shown": 0 });
+
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let chosen: Vec<(&str, &crate::Semlith)> = match &only {
+            Some(names) => fleet
+                .each()
+                .filter(|(label, _)| names.iter().any(|n| n == label))
+                .collect(),
+            None => fleet.each().collect(),
+        };
+        let many = fleet.len() > 1;
+        crate::graph::scoped(&chosen, focus.as_deref(), prefix.as_deref(), limit, many)
+    })
 }
 
 // ---------------------------------------------------------------- writes

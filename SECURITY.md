@@ -6,23 +6,28 @@ semlith is pre-1.0. Only the latest release receives security fixes.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | ✅ |
-| < 0.1 | ❌ |
+| 0.12.x | ✅ |
+| < 0.12 | ❌ |
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue for a security problem.**
+**Do not open a public issue for security problems.**
 
-Report privately through GitHub's
-[private vulnerability reporting](https://github.com/semlith/semlith/security/advisories/new),
-which is the preferred route. If that is unavailable to you, email
-**aakashpawar1999@gmail.com** with `[semlith security]` in the subject.
+Report privately through GitHub, on this repository's **Security** tab →
+**Report a vulnerability**, or directly at
+<https://github.com/semlith/semlith/security/advisories/new>. The report, and
+everything discussed on it, stays private to you and the maintainers until an
+advisory is published.
 
 Please include:
 
 - What the issue is and roughly how bad you think it is
-- Steps to reproduce, ideally with a minimal input file or command
+- Steps to reproduce or a proof of concept, ideally with a minimal input file
+  or command
 - The version (`semlith --version`) and your OS
+
+Reporting this way rather than by email is deliberate: the advisory, the fix and
+the credit live in one place, and a private fork for the patch comes with it.
 
 What to expect:
 
@@ -32,7 +37,8 @@ What to expect:
   named.
 
 This is a small project maintained in spare time. Fixes are made as quickly as
-is practical, and we will keep you informed either way.
+is practical, and we will keep you informed either way. Please give us
+reasonable time to release a fix before any public disclosure.
 
 ## What semlith actually does with your data
 

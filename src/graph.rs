@@ -714,6 +714,91 @@ pub fn shortest_path(
     Ok(None)
 }
 
+/// The graph a page draws, scoped so it is drawable.
+///
+/// The payload shape is the contract between the store and any renderer, and
+/// is deliberately boring: `nodes` with an id, name, kind, path, lines and
+/// store; `edges` with `from`/`to` as indexes into `nodes`, a kind and a
+/// confidence; and `total`/`shown` so a truncated drawing can say so rather
+/// than quietly looking complete.
+///
+/// Scope is one of: a symbol and its one-hop neighbourhood, a path prefix, or
+/// a whole store — in that order of preference. There is no "everything"
+/// scope, because a force layout over a monorepo is neither drawable nor
+/// readable, and pretending otherwise just produces a hairball.
+pub fn scoped(
+    stores: &[(&str, &crate::Semlith)],
+    focus: Option<&str>,
+    prefix: Option<&str>,
+    limit: usize,
+    label_stores: bool,
+) -> Result<serde_json::Value> {
+    let mut nodes: Vec<crate::store::SymbolRow> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut edges: Vec<serde_json::Value> = Vec::new();
+    let mut total = 0usize;
+
+    for (label, store) in stores {
+        let db = store.db();
+        let picked = match focus {
+            Some(name) => {
+                let mut around = crate::store::symbols_named(db, name, limit)?;
+                for end in crate::store::edges_in(db, name, &[])?
+                    .into_iter()
+                    .chain(crate::store::edges_out(db, name, &[])?)
+                {
+                    around.push(end.symbol);
+                }
+                around
+            }
+            None => crate::store::symbols_scoped(db, prefix, limit)?,
+        };
+        total += crate::store::graph_stats(db)?.0 as usize;
+
+        for mut symbol in picked {
+            if nodes.len() >= limit {
+                break;
+            }
+            if index.contains_key(&symbol.name) {
+                continue;
+            }
+            if label_stores {
+                symbol.store = Some((*label).to_string());
+            }
+            index.insert(symbol.name.clone(), nodes.len());
+            nodes.push(symbol);
+        }
+    }
+
+    // Only edges whose both ends are drawn. An edge to something off-canvas is
+    // not a line anyone can follow.
+    for (from_name, from_index) in &index {
+        for (_, store) in stores {
+            for end in crate::store::edges_out(store.db(), from_name, &[])? {
+                let Some(to_index) = index.get(&end.symbol.name) else {
+                    continue;
+                };
+                if from_index == to_index {
+                    continue;
+                }
+                edges.push(serde_json::json!({
+                    "from": from_index,
+                    "to": to_index,
+                    "kind": end.kind,
+                    "confidence": end.confidence,
+                }));
+            }
+        }
+    }
+
+    Ok(serde_json::json!({
+        "nodes": nodes,
+        "edges": edges,
+        "total": total,
+        "shown": nodes.len(),
+    }))
+}
+
 fn unwind(
     came_from: &std::collections::HashMap<String, Step>,
     start: &str,
