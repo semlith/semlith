@@ -57,6 +57,54 @@ END;
 CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.id, old.text);
 END;
+
+-- Structure half of the store, from 0.12.0. Additive: an older store grows
+-- these tables on its next open and they stay empty until something indexes
+-- into it, which is why the format version does not move for them. See
+-- `docs/compatibility.md`.
+--
+-- `chunk_id` is nullable on purpose. A symbol's defining line always falls
+-- inside some chunk, but a file whose chunks were rewritten between extraction
+-- and insertion would otherwise have to fail rather than record the symbol.
+CREATE TABLE IF NOT EXISTS symbols (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id    INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    chunk_id   INTEGER,
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    qualified  TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS symbols_file_id ON symbols(file_id);
+CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
+
+-- An edge is owned by the file its *source* is in: `src` is a symbol id, and
+-- the cascade above deletes an edge when its source file is re-indexed or
+-- forgotten.
+--
+-- `dst` is a symbol NAME, not an id, and that asymmetry is the point. Ids are
+-- reissued every time a file is re-extracted, so an id here would mean that
+-- re-indexing `b.rs` silently deleted every edge pointing into it from `a.rs`
+-- — the graph would rot from the one operation this release exists to make
+-- safe. A name is resolved against `symbols_name` at query time instead, so an
+-- edge is always as current as both of its ends, and an edge to something not
+-- indexed (a standard-library call) is still recorded and simply resolves to
+-- nothing.
+--
+-- `confidence` is `extracted` when an import in the source file named where the
+-- target came from, and `inferred` when the target was matched by bare name.
+-- Nothing that displays an edge may present the second as the first.
+CREATE TABLE IF NOT EXISTS edges (
+    src        INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    dst        TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    confidence TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
+CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
 "#;
 
 /// A chunk row joined with its file's path — what a search hit resolves to.
@@ -414,6 +462,196 @@ pub fn durable_chunks(db: &Connection) -> Result<i64> {
     )?)
 }
 
+/// A symbol row joined with its file's path — what a graph answer resolves to.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SymbolRow {
+    pub id: i64,
+    pub path: String,
+    pub kind: String,
+    pub name: String,
+    pub qualified: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<i64>,
+}
+
+/// One end of a traversal: the symbol reached, and the edge that reached it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EdgeEnd {
+    #[serde(flatten)]
+    pub symbol: SymbolRow,
+    pub kind: String,
+    pub confidence: String,
+}
+
+const SYMBOL_COLUMNS: &str = "s.id, f.path, s.kind, s.name, s.qualified, s.start_line, s.end_line, s.chunk_id";
+
+fn symbol_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
+    Ok(SymbolRow {
+        id: r.get(0)?,
+        path: r.get(1)?,
+        kind: r.get(2)?,
+        name: r.get(3)?,
+        qualified: r.get(4)?,
+        start_line: r.get(5)?,
+        end_line: r.get(6)?,
+        chunk_id: r.get(7)?,
+    })
+}
+
+pub fn insert_symbol(
+    db: &Connection,
+    file_id: i64,
+    chunk_id: Option<i64>,
+    kind: &str,
+    name: &str,
+    qualified: &str,
+    start_line: u32,
+    end_line: u32,
+) -> Result<i64> {
+    db.execute(
+        "INSERT INTO symbols (file_id, chunk_id, kind, name, qualified, start_line, end_line)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![file_id, chunk_id, kind, name, qualified, start_line, end_line],
+    )?;
+    Ok(db.last_insert_rowid())
+}
+
+pub fn insert_edge(db: &Connection, src: i64, dst: &str, kind: &str, confidence: &str) -> Result<()> {
+    db.execute(
+        "INSERT INTO edges (src, dst, kind, confidence) VALUES (?1, ?2, ?3, ?4)",
+        params![src, dst, kind, confidence],
+    )?;
+    Ok(())
+}
+
+/// Every definition of `name`, across the whole store.
+///
+/// Exact match, not a glob: `semlith symbol acquire` asking about `acquire` and
+/// being handed `acquire_timeout` as well would make the answer something the
+/// caller has to re-filter.
+pub fn symbols_named(db: &Connection, name: &str, limit: usize) -> Result<Vec<SymbolRow>> {
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.name = ?1 ORDER BY f.path, s.start_line LIMIT ?2"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(params![name, limit as i64], |r| symbol_row(r))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Symbols defined in files matching `groups` whose name is one of `names`.
+///
+/// The resolution step every traversal shares: an edge names its target, and
+/// this is what turns that name back into rows. The filter is threaded through
+/// so graph expansion obeys the same chunk-id set as the other two search
+/// halves rather than reaching outside it.
+pub fn symbols_by_names(
+    db: &Connection,
+    names: &[String],
+    groups: &[Vec<String>],
+) -> Result<Vec<SymbolRow>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (predicate, mut binds) = glob_predicate(groups);
+    let holes = vec!["?"; names.len()].join(", ");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE {predicate} AND s.name IN ({holes}) ORDER BY f.path, s.start_line"
+    );
+    binds.extend(names.iter().cloned());
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.into_iter().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| symbol_row(r))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// What the symbols named `name` point at: callees, imports, references out.
+///
+/// One hop. `kinds` empty means every edge kind.
+pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
+    let filter = kind_predicate(kinds, "e.kind");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence
+         FROM symbols src
+         JOIN edges e ON e.src = src.id
+         JOIN symbols s ON s.name = e.dst
+         JOIN files f ON f.id = s.file_id
+         WHERE src.name = ?1 AND {filter}
+         ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
+    binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+        Ok(EdgeEnd {
+            symbol: symbol_row(r)?,
+            kind: r.get(8)?,
+            confidence: r.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// What points at `name`: callers, importers, references in.
+///
+/// The direction `impact` walks, and the reason `edges_dst` exists.
+pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
+    let filter = kind_predicate(kinds, "e.kind");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence
+         FROM edges e
+         JOIN symbols s ON s.id = e.src
+         JOIN files f ON f.id = s.file_id
+         WHERE e.dst = ?1 AND {filter}
+         ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
+    binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+        Ok(EdgeEnd {
+            symbol: symbol_row(r)?,
+            kind: r.get(8)?,
+            confidence: r.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn kind_predicate(kinds: &[String], column: &str) -> String {
+    if kinds.is_empty() {
+        return "1".to_string();
+    }
+    let holes = vec!["?"; kinds.len()].join(", ");
+    format!("{column} IN ({holes})")
+}
+
+/// The names of every symbol whose defining lines overlap one of `chunk_ids`.
+///
+/// The seed of graph expansion: search returns chunks, the graph knows symbols,
+/// and this is the join between them.
+pub fn symbols_in_chunks(db: &Connection, chunk_ids: &[u64]) -> Result<Vec<String>> {
+    if chunk_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holes = vec!["?"; chunk_ids.len()].join(", ");
+    let sql = format!("SELECT DISTINCT name FROM symbols WHERE chunk_id IN ({holes})");
+    let mut stmt = db.prepare(&sql)?;
+    let args = chunk_ids.iter().map(|i| Value::Integer(*i as i64));
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// `(symbols, edges)` — the graph's size, for `stats` and the portal.
+pub fn graph_stats(db: &Connection) -> Result<(i64, i64)> {
+    let symbols: i64 = db.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
+    let edges: i64 = db.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+    Ok((symbols, edges))
+}
+
 /// `(files, chunks, indexed bytes)`
 pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
@@ -427,6 +665,93 @@ pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a store with one file, one chunk and one symbol, and return the
+    /// connection plus the symbol's id.
+    fn one_symbol(db: &Connection, path: &str, name: &str) -> i64 {
+        db.execute_batch(SCHEMA).unwrap();
+        db.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let file_id = insert_file(db, path, "h", 1, 0).unwrap();
+        let chunk_id = insert_chunk(db, file_id, 0, 1, 2, name).unwrap();
+        insert_symbol(db, file_id, Some(chunk_id), "function", name, name, 1, 2).unwrap()
+    }
+
+    /// Forgetting a file takes its symbols and its outgoing edges with it.
+    ///
+    /// The cascade does this, not the caller — which is why it is worth a test:
+    /// a missing `ON DELETE CASCADE` would leave rows pointing at a file id
+    /// SQLite is free to reissue.
+    #[test]
+    fn deleting_a_file_deletes_its_symbols_and_its_outgoing_edges() {
+        let db = Connection::open_in_memory().unwrap();
+        let caller = one_symbol(&db, "a.rs", "caller");
+        insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
+        assert_eq!(graph_stats(&db).unwrap(), (1, 1));
+
+        delete_file(&db, "a.rs").unwrap();
+        assert_eq!(
+            graph_stats(&db).unwrap(),
+            (0, 0),
+            "the file's symbols and the edges leaving them both cascade"
+        );
+    }
+
+    /// Re-indexing the file an edge points *into* must not delete the edge.
+    ///
+    /// This is the whole reason `edges.dst` is a name and not an id. With an id
+    /// there, re-extracting `b.rs` would reissue its symbol ids and orphan
+    /// every edge from `a.rs` into it — the graph would rot on exactly the
+    /// operation this release exists to make safe.
+    #[test]
+    fn re_indexing_the_target_file_leaves_edges_into_it_intact() {
+        let db = Connection::open_in_memory().unwrap();
+        let caller = one_symbol(&db, "a.rs", "caller");
+        insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
+        let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
+        insert_symbol(&db, b, None, "function", "callee", "callee", 1, 2).unwrap();
+        assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 1);
+
+        // b.rs changes: its symbols are dropped and re-extracted with new ids.
+        delete_file(&db, "b.rs").unwrap();
+        let b = insert_file(&db, "b.rs", "h2", 1, 0).unwrap();
+        insert_symbol(&db, b, None, "function", "callee", "callee", 9, 10).unwrap();
+
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1, "the edge survived its target being re-indexed");
+        assert_eq!(out[0].symbol.start_line, 9, "and now points at the new rows");
+    }
+
+    /// Both directions resolve, and the edge kind filter applies to each.
+    #[test]
+    fn edges_resolve_in_both_directions_and_filter_by_kind() {
+        let db = Connection::open_in_memory().unwrap();
+        let caller = one_symbol(&db, "a.rs", "caller");
+        let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
+        insert_symbol(&db, b, None, "function", "callee", "callee", 1, 2).unwrap();
+        insert_edge(&db, caller, "callee", "calls", "extracted").unwrap();
+        insert_edge(&db, caller, "callee", "references", "inferred").unwrap();
+
+        assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 2);
+        let calls = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].confidence, "extracted");
+
+        let inbound = edges_in(&db, "callee", &["calls".to_string()]).unwrap();
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].symbol.name, "caller", "edges_in reports the source");
+    }
+
+    /// An edge to something the corpus does not contain is still recorded, and
+    /// simply resolves to nothing. A call into the standard library is the
+    /// common case, and dropping it would lose the fact that the call is there.
+    #[test]
+    fn an_edge_to_an_unindexed_target_resolves_to_nothing_without_erroring() {
+        let db = Connection::open_in_memory().unwrap();
+        let caller = one_symbol(&db, "a.rs", "caller");
+        insert_edge(&db, caller, "println", "calls", "inferred").unwrap();
+        assert!(edges_out(&db, "caller", &[]).unwrap().is_empty());
+        assert_eq!(graph_stats(&db).unwrap().1, 1, "but the edge row is there");
+    }
 
     /// Every store written before 0.6.0 lacks the key entirely. Reading that as
     /// anything but format 1 would refuse the whole installed base.
