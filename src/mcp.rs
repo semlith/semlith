@@ -79,6 +79,8 @@ pub trait Writer: Send + Sync {
     fn index(&self, store: Option<&str>, paths: &[PathBuf]) -> Result<String, String>;
     /// `semlith_forget`, returning the text the tool reports.
     fn forget(&self, store: Option<&str>, path: &str) -> Result<String, String>;
+    /// `semlith_add`, returning the text the tool reports.
+    fn add(&self, store: Option<&str>, url: &str) -> Result<String, String>;
 }
 
 /// Answer one JSON-RPC request. `None` for a notification, which must not be
@@ -395,6 +397,33 @@ fn tools(stores: &Fleet) -> Value {
             "annotations": { "title": "Index files into the store", "readOnlyHint": false }
         },
         {
+            "name": "semlith_add",
+            "description":
+                "Fetch one URL into the store and index it, so its contents become \
+                 searchable in this session: a web page, a PDF such as an arXiv paper, or a \
+                 file on GitHub (a /blob/ link is rewritten to the raw file). Exactly one \
+                 request is made, for exactly this URL — nothing is crawled, no link is \
+                 followed, and no credential is ever sent. The file is written inside the \
+                 store's own downloads directory, never into the user's working tree. \
+                 Refused when semlith is running with --airgap.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The https URL to fetch. Plain http is refused."
+                    },
+                    "store": { "type": "string", "description": write_store_arg }
+                },
+                "required": ["url"]
+            },
+            "annotations": {
+                "title": "Add a URL to the store",
+                "readOnlyHint": false,
+                "openWorldHint": true
+            }
+        },
+        {
             "name": "semlith_forget",
             "description":
                 "Remove one file from a store, so it stops appearing in searches. The file on \
@@ -567,6 +596,56 @@ fn call_tool(
                     }
                     out
                 }
+            }
+        }
+        "semlith_add" => {
+            // A bare string is what the schema asks for; an agent sends a
+            // one-element array often enough that refusing it teaches nothing.
+            let urls = strings(&args, "url");
+            let url = match urls.as_slice() {
+                [one] => one.clone(),
+                [] => return Err((-32602, "missing required argument: url".into(), None)),
+                many => {
+                    return Ok(tool_error(&format!(
+                        "semlith_add fetches one URL, not {}: {}",
+                        many.len(),
+                        many.join(", ")
+                    )));
+                }
+            };
+            let named = strings(&args, "store");
+
+            if let Some(writer) = writer {
+                return Ok(match writer.add(named.first().map(String::as_str), &url) {
+                    Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+                    Err(e) => tool_error(&e),
+                });
+            }
+
+            let store = match stores.writable(&named) {
+                Ok(s) => s,
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            };
+
+            // A refused fetch is the agent's answer, not a protocol failure:
+            // the URL was http, or too large, or a type with no reader, and the
+            // agent can act on any of those.
+            let fetched = match crate::add::fetch(&url, store.dir()) {
+                Ok(fetched) => fetched,
+                Err(e) => return Ok(tool_error(&format!("{e:#}"))),
+            };
+            match store.index_paths_within(
+                std::slice::from_ref(&fetched.path),
+                index_budget(),
+                |_, _| {},
+            ) {
+                Err(e) => return Ok(tool_error(&e.to_string())),
+                Ok(report) => format!(
+                    "Fetched {} into {} and indexed {} chunks.",
+                    fetched.url,
+                    fetched.path.display(),
+                    report.chunks
+                ),
             }
         }
         "semlith_forget" => {

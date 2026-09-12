@@ -6,11 +6,16 @@ Rust extraction tests grep for; phrases must not repeat across fixtures.
 """
 
 import json
+import mailbox
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime
 from pathlib import Path
 
 import docx
 import openpyxl
 import pptx
+from ebooklib import epub
 from odf.draw import Frame, Page, TextBox
 from odf.opendocument import (
     OpenDocumentPresentation,
@@ -210,7 +215,145 @@ def make_ipynb():
     (OUT / "analysis.ipynb").write_text(json.dumps(nb, indent=1) + "\n")
 
 
+def make_epub():
+    b = epub.EpubBook()
+    b.set_identifier("urn:uuid:6f3d1b02-8c41-4f7e-9a55-2d0b7c1e44aa")
+    b.set_title("The Numbat Lighthouse")
+    b.set_language("en")
+    b.add_author("Perpetua Vance")
+
+    # Filenames sort zulu > mike > alpha, so a reader that ignores the spine
+    # and sorts by filename emits the chapters in the wrong order.
+    chapters = []
+    for filename, title, body in [
+        ("zulu.xhtml", "Chapter One", "The numbat lighthouse inventory was copied out twice before anyone trusted it."),
+        ("alpha.xhtml", "Chapter Two", "By then the saiga ferry timetable had been pinned to the wall for a season."),
+        ("mike.xhtml", "Chapter Three", "What remained was the lemur harbour survey, unfinished and still unread."),
+    ]:
+        c = epub.EpubHtml(title=title, file_name=filename, lang="en")
+        c.content = f"<html><body><h1>{title}</h1><p>{body}</p></body></html>"
+        b.add_item(c)
+        chapters.append(c)
+
+    b.toc = tuple(chapters)
+    b.add_item(epub.EpubNcx())
+    b.add_item(epub.EpubNav())
+    b.spine = ["nav", *chapters]
+    epub.write_epub(OUT / "book.epub", b)
+
+
+# Literal RTF: no LibreOffice (`soffice`) and no `pandoc` on this machine, and
+# PyRTF3 writes non-ASCII as raw UTF-8 rather than the \'hh and \uN escapes this
+# fixture exists to exercise. RTF is plain text a person legitimately hand-writes
+# -- unlike the zipped XML formats this file's docstring warns about -- so the
+# literal below is the honest source. \'e9 decodes to U+00E9 and 舒? to
+# U+2014 with the '?' fallback discarded.
+RTF = (
+    r"""{\rtf1\ansi\ansicpg1252\deff0\deflang1033
+{\fonttbl{\f0\froman\fcharset0 Times New Roman;}{\f1\fswiss\fcharset0 Helvetica;}}
+{\colortbl;\red0\green0\blue0;\red192\green32\blue32;\red32\green64\blue160;}
+\pard\f0\fs24 The binturong pier maintenance log was reopened after the winter inspection.\par
+\pard\f0\fs24 Costs rose in the caf\'e9 wing """
+    # Spelled with an explicit backslash: Python decodes \uXXXX even in raw
+    # strings, so the RTF escape cannot be written literally above.
+    "\\u8212?"
+    r""" modestly, but they rose.\par
+\pard\f0\fs24 The surveyor marked the decking as \b urgent\b0  and the railings as \i deferred\i0 .\par
+\pard\f0\fs24 Nothing else needs a decision before the spring review.\par
+}
+"""
+)
+
+
+def make_rtf():
+    (OUT / "notes.rtf").write_text(RTF, encoding="ascii")
+
+
+def make_eml():
+    m = EmailMessage()
+    m["From"] = "Ines Okonkwo <ines@example.org>"
+    m["To"] = "Harbour Office <harbour@example.net>"
+    m["Cc"] = "Records <records@example.net>, Dilip Rao <dilip@example.org>"
+    m["Date"] = format_datetime(datetime(2024, 6, 11, 9, 32, tzinfo=timezone.utc))
+    m["Subject"] = (
+        "Résumé of the quarterly walkthrough and the follow-up items "
+        "we agreed on site"
+    )
+    # Headers the reader is meant to drop.
+    m["X-Mailer"] = "Fixture Generator 1.0"
+    m["Message-ID"] = "<serval-2024-06-11-0932@example.org>"
+
+    m.set_content(
+        "The serval dispatch confirmation arrived before the café closed.\n"
+        "Two crates are still unaccounted for and the ferry leaves at six.\n",
+        cte="quoted-printable",
+    )
+    m.add_alternative(
+        "<html><body><p>This html alternative must never be the extracted text."
+        "</p></body></html>",
+        subtype="html",
+        cte="base64",
+    )
+    m.add_attachment(
+        "crate 41: sealed\ncrate 42: missing\n",
+        subtype="plain",
+        filename="manifest.txt",
+    )
+    (OUT / "message.eml").write_bytes(m.as_bytes())
+
+
+def make_mbox():
+    path = OUT / "archive.mbox"
+    path.unlink(missing_ok=True)
+    box = mailbox.mbox(path)
+
+    m1 = EmailMessage()
+    m1["From"] = "Depot <depot@example.net>"
+    m1["To"] = "ines@example.org"
+    m1["Date"] = format_datetime(datetime(2024, 3, 2, 7, 15, tzinfo=timezone.utc))
+    m1["Subject"] = "North route loading"
+    m1.set_content("The aardwolf shipping manifest lists eleven pallets, not nine.\n")
+
+    m2 = EmailMessage()
+    m2["From"] = "Adaeze Nwosu <adaeze@example.org>"
+    m2["To"] = "depot@example.net"
+    m2["Date"] = format_datetime(datetime(2024, 3, 5, 16, 40, tzinfo=timezone.utc))
+    m2["Subject"] = "Inventaire de l'entrepôt"
+    m2.set_content(
+        "The kinkajou warehouse audit closed with two open findings.\n",
+        cte="quoted-printable",
+    )
+    m2.add_alternative(
+        "<html><body><p>Ignore this markup branch entirely.</p></body></html>",
+        subtype="html",
+    )
+
+    m3 = EmailMessage()
+    m3["From"] = "Freight Desk <freight@example.net>"
+    m3["To"] = "records@example.net"
+    m3["Date"] = format_datetime(datetime(2024, 3, 9, 11, 5, tzinfo=timezone.utc))
+    m3["Subject"] = "Receipt for the March haul"
+    m3.set_content("Filed the vicuna freight receipt against the wrong quarter.\n")
+
+    for m in (m1, m2, m3):
+        box.add(m)
+    box.flush()
+    box.close()
+
+
 if __name__ == "__main__":
-    for fn in (make_docx, make_pptx, make_xlsx, make_odt, make_odp, make_ods, make_ipynb):
+    for fn in (
+        make_docx,
+        make_pptx,
+        make_xlsx,
+        make_odt,
+        make_odp,
+        make_ods,
+        make_ipynb,
+        make_epub,
+        make_rtf,
+        make_eml,
+        make_mbox,
+    ):
         fn()
         print(fn.__name__.removeprefix("make_"), "ok")

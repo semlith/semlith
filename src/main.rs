@@ -143,6 +143,25 @@ enum Command {
     /// Remove a file from the store.
     Forget { path: PathBuf },
 
+    /// Fetch one URL into the store and index it: a web page, a PDF such as an
+    /// arXiv paper, or a file on GitHub. One request, for exactly the URL
+    /// given — semlith never follows links, re-fetches, or sends a credential.
+    Add {
+        /// The https URL to fetch. A `github.com/.../blob/...` link is
+        /// rewritten to the raw file it displays.
+        url: String,
+
+        /// Name the store in the store home, instead of naming it after the
+        /// current directory.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Refuse to reach the network, which is the whole of this command, so
+        /// it exits before opening a socket.
+        #[arg(long)]
+        airgap: bool,
+    },
+
     /// Run as an MCP server over stdio, for agents to call as a tool.
     Mcp,
 
@@ -481,14 +500,18 @@ fn main() -> Result<()> {
         }
 
         Command::Languages => {
-            for (name, exts) in semlith::filter::LANGUAGES {
-                println!(
-                    "{name:<12} {}",
-                    exts.iter()
-                        .map(|e| format!(".{e}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
+            for entry in semlith::filter::LANGUAGES {
+                // Extensions print with their dot and filenames without one,
+                // which is the difference a reader has to see: `.mk` is an
+                // extension and `Makefile` is the whole name of the file.
+                let what = entry
+                    .extensions
+                    .iter()
+                    .map(|e| format!(".{e}"))
+                    .chain(entry.filenames.iter().map(|f| f.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("{:<12} {what}", entry.name);
             }
         }
 
@@ -549,6 +572,51 @@ fn main() -> Result<()> {
                     println!();
                 }
             }
+        }
+
+        Command::Add { url, name, airgap } => {
+            arm_airgap(airgap);
+
+            // The current directory is the anchor, the way it is for `index`
+            // with no path: "add this to the store I am working in".
+            let choice = home::resolve(&cli.store, &cwd, name.as_deref())?;
+            let choice = resolve_for_add(choice, &cli.store, name.as_deref())?;
+            if let Some(hint) = choice.hint() {
+                eprintln!("{hint}");
+            }
+            let dir = choice.one()?;
+
+            let spinner = cliclack::spinner();
+            spinner.start(format!("fetching {url}"));
+            let fetched = match semlith::add::fetch(&url, &dir) {
+                Ok(fetched) => {
+                    spinner.stop(format!(
+                        "fetched {}",
+                        semlith::human_bytes(fetched.bytes as i64)
+                    ));
+                    fetched
+                }
+                Err(e) => {
+                    spinner.error("fetch failed");
+                    return Err(e);
+                }
+            };
+
+            let mut store = Semlith::open(&dir, None)?;
+            store.quiet = true;
+            let report = store.index_paths(std::slice::from_ref(&fetched.path), |_, _| {})?;
+
+            // The root recorded is the downloads directory, not the file: a
+            // root is what `semlith start` watches, and watching one file would
+            // leave the next thing added to the same store unwatched.
+            //
+            // Recorded after the fetch and the index both succeeded, so a
+            // failed add leaves no registry entry pointing at nothing.
+            let model_name = store.model().to_string();
+            home::record(&choice, &[semlith::add::downloads_dir(&dir)], &model_name)?;
+
+            eprintln!("{} -> {}", fetched.url, display(&fetched.path));
+            eprintln!("indexed {} chunks into {}", report.chunks, dir.display());
         }
 
         Command::Forget { path } => {
@@ -737,6 +805,59 @@ fn human_duration(secs: f32) -> String {
         format!("{:.0}m", secs / 60.0)
     } else {
         format!("{secs:.0}s")
+    }
+}
+
+/// The store `semlith add` writes to, when nothing covers the current
+/// directory.
+///
+/// `index` is free to create a store named after wherever it is run, because
+/// that directory is the thing being indexed. `add` is not: the URL is what is
+/// being added, and the shell's current directory has nothing to do with it. So
+/// a `New` choice here would silently create a store named after a directory
+/// the user never mentioned — and, because the root recorded is the store's own
+/// downloads folder, the next `add` from the same place would not find it and
+/// would create another one beside it. Running `semlith add` twice from `/tmp`
+/// produced stores called `tmp` and `tmp-2`, neither of which anyone asked for.
+///
+/// With exactly one store in the home, that is plainly the one meant. With
+/// several, or none, say so rather than guess.
+fn resolve_for_add(
+    choice: home::Choice,
+    flags: &[PathBuf],
+    name: Option<&str>,
+) -> Result<home::Choice> {
+    // An explicit --store or --name is the user saying which, so it stands.
+    if !matches!(choice, home::Choice::New { .. }) || !flags.is_empty() || name.is_some() {
+        return Ok(choice);
+    }
+
+    let registry = home::Registry::load()?;
+    let mut names = registry.stores.keys();
+    match (names.next(), names.next()) {
+        (Some(only), None) => {
+            let only = only.clone();
+            Ok(home::Choice::Registered {
+                dir: home::Registry::dir_of(&only),
+                name: only,
+            })
+        }
+        (None, _) => bail!(
+            "there is no store to add to yet — run `semlith index <path>` first, \
+             or give this one a name with `semlith add <url> --name <store>`"
+        ),
+        _ => bail!(
+            "nothing indexes this directory, and there are {} stores to choose from: {}. \
+             Name one with `--store <dir>` or `--name <store>`, or run this from a \
+             directory one of them covers",
+            registry.stores.len(),
+            registry
+                .stores
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

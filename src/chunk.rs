@@ -78,6 +78,9 @@ pub fn reader_of(path: &Path) -> &'static str {
         Some("pptx") => "powerpoint",
         Some("xlsx") => "excel",
         Some("odt" | "odp" | "ods") => "opendocument",
+        Some("epub") => "epub",
+        Some("rtf") => "rtf",
+        Some("eml" | "mbox") => "mail",
         _ => "text",
     }
 }

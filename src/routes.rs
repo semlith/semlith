@@ -53,6 +53,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
+        (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/rotate") => rotate(state),
@@ -71,10 +72,16 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
 
 /// Every open store, what it holds, and whether it is being kept current.
 fn stores(state: &Arc<State>) -> Response {
+    // Opened here rather than at startup: it is None until the first read, and
+    // None again after a store joins, so every read route has to be able to
+    // put it back. Cheap when it is already open.
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
     let mut fleet = state.fleet.lock().expect("the fleet lock");
     let mut out = Vec::new();
 
-    for handle in &state.stores {
+    for handle in state.stores() {
         let stats = fleet
             .as_mut()
             .and_then(|f| {
@@ -132,6 +139,9 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
     let mut fleet = state.fleet.lock().expect("the fleet lock");
     let Some(fleet) = fleet.as_mut() else {
         return Response::json(&json!({ "files": [], "total": 0 }));
@@ -187,6 +197,9 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
     let mut fleet = state.fleet.lock().expect("the fleet lock");
     let Some(fleet) = fleet.as_mut() else {
         return Response::json(&json!({ "hits": [], "selected": 0 }));
@@ -261,7 +274,13 @@ fn models() -> Response {
 fn languages() -> Response {
     let out: Vec<Value> = LANGUAGES
         .iter()
-        .map(|(name, exts)| json!({ "name": name, "extensions": exts }))
+        .map(|entry| {
+            json!({
+                "name": entry.name,
+                "extensions": entry.extensions,
+                "filenames": entry.filenames,
+            })
+        })
         .collect();
     Response::json(&json!({ "languages": out }))
 }
@@ -359,23 +378,35 @@ fn about(state: &Arc<State>) -> Response {
         "model_cache": crate::model_cache_dir().display().to_string(),
         "models": TextEmbedding::list_supported_models().len() + 1,
         "languages": LANGUAGES.len(),
-        "stores": state.stores.len(),
+        "stores": state.stores().len(),
     }))
 }
 
 /// MCP status, and the stanza for every client the README documents.
+///
+/// Deliberately without `setup::status()`, which used to be embedded here.
+/// That function shells out to `claude mcp list` and waits for it, so carrying
+/// it made the Agents page block on a subprocess for a payload the page never
+/// read — it asks `/api/setup` separately, and renders that panel when the
+/// answer arrives rather than holding the whole page for it.
 fn agents(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
         "connected": state.proxy_count(),
-        "tools": ["semlith_search", "semlith_stats", "semlith_files", "semlith_index", "semlith_forget"],
+        "tools": [
+            "semlith_search",
+            "semlith_stats",
+            "semlith_files",
+            "semlith_index",
+            "semlith_add",
+            "semlith_forget",
+        ],
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         "install": {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,
         },
-        "setup": crate::setup::status(),
     }))
 }
 
@@ -401,12 +432,85 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     if paths.is_empty() {
         return Response::error(400, "no path given");
     }
-    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
-        Ok(s) => Arc::clone(s),
+    let named = body.get("store").and_then(Value::as_str);
+    let store = match state.writable(named) {
+        Ok(s) => s,
+        // Nothing to write to, and no store named: this is the first run. The
+        // daemon was started on a machine with nothing indexed, so the store
+        // this path belongs in does not exist yet — make it, exactly as
+        // `semlith index` would, and serve it without a restart. Before this,
+        // the portal's first-run screen invited a developer to index a folder
+        // and then answered the button with "no store is open".
+        Err(e) if named.is_none() && state.stores().is_empty() => {
+            match first_store(state, &paths[0]) {
+                Ok(store) => store,
+                Err(made) => return Response::error(409, &format!("{e}: {made:#}")),
+            }
+        }
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
     match state.index(&store, paths) {
+        Ok(progress) => stream(progress),
+        Err(e) => Response::error(409, &e.to_string()),
+    }
+}
+
+/// Create the store `path` belongs in and open it in this daemon.
+///
+/// The resolution is `home`'s, not a second copy of it, so the portal puts the
+/// store exactly where `semlith index <path>` would have — same name, same
+/// directory under the store home, same registry entry — and the two ways in
+/// cannot disagree about where a corpus lives.
+fn first_store(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Error> {
+    let choice = home::resolve(&[], path, None)?;
+    let dir = choice.one()?;
+
+    // Created before it is opened: `Semlith::open` is what lays the store down,
+    // and the daemon can only take a lock on something that exists. The handle
+    // is dropped immediately so the watcher thread can take the lock itself.
+    {
+        let store = crate::Semlith::open(&dir, None)?;
+        let model = store.model().to_string();
+        home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)?;
+    }
+
+    state.open_store(&dir)
+}
+
+/// Fetch one URL into the store and index what landed, streaming the same
+/// progress the folder picker streams.
+///
+/// The fetch runs here rather than inside the write queue. It is network work,
+/// and holding a store's queue open for the length of a download would stall
+/// every other write behind it — while the indexing of what landed, which is
+/// the part the one-writer rule is about, still goes through the queue.
+fn add(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(url) = body
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+    else {
+        return Response::error(400, "no url given");
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+
+    // A refused fetch is an answer the page shows, not a 500. Every one of them
+    // names something the person can act on: the URL was http, or too large, or
+    // a type nothing here can read.
+    let fetched = match crate::add::fetch(url, &store.dir) {
+        Ok(fetched) => fetched,
+        Err(e) => return Response::error(400, &format!("{e:#}")),
+    };
+
+    match state.index(&store, vec![fetched.path.clone()]) {
         Ok(progress) => stream(progress),
         Err(e) => Response::error(409, &e.to_string()),
     }
@@ -454,7 +558,7 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, "no path given");
     };
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
-        Ok(s) => Arc::clone(s),
+        Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
@@ -484,7 +588,11 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
     // A store this daemon holds the lock on cannot be moved out from under
     // itself, and the error for that should say so rather than be an IO error
     // halfway through a rename.
-    if state.stores.iter().any(|s| s.dir == crate::canonical(&dir)) {
+    if state
+        .stores()
+        .iter()
+        .any(|s| s.dir == crate::canonical(&dir))
+    {
         return Response::error(409, "this daemon is already using that store");
     }
     match home::adopt(&dir, None, None) {
@@ -573,22 +681,53 @@ fn strings(value: &Value, key: &str) -> Vec<String> {
     }
 }
 
-/// Which `--lang` name covers this file's extension, if any.
+/// Which `--lang` name covers this file, if any.
+///
+/// The extension answers for almost every file, and the filename answers for
+/// the ones that have no extension. Both are read out of the one [`LANGUAGES`]
+/// table the filter uses, so the Files view can never disagree with what
+/// `--lang` would actually have matched.
 fn language_of(path: &Path) -> &'static str {
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return "";
-    };
-    let ext = ext.to_ascii_lowercase();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
     LANGUAGES
         .iter()
-        .find(|(_, exts)| exts.contains(&ext.as_str()))
-        .map(|(name, _)| *name)
+        .find(|entry| {
+            (!ext.is_empty() && entry.extensions.contains(&ext.as_str()))
+                || entry
+                    .filenames
+                    .iter()
+                    .any(|pattern| matches(pattern, &name))
+        })
+        .map(|entry| entry.name)
         .unwrap_or("")
+}
+
+/// The one glob shape [`crate::filter::Language::filenames`] uses: a literal
+/// name, optionally ending in `*`.
+///
+/// Written out rather than reached for through SQLite because this runs per
+/// file in a listing of five hundred, and because the patterns are ours rather
+/// than a user's — a full glob engine here would be capability nobody can call.
+fn matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
 }
 
 /// The one place a route needs to know a [`Store`] by name for a test.
 #[allow(dead_code)]
-fn named<'a>(state: &'a Arc<State>, name: &str) -> Option<&'a Arc<Store>> {
+fn named(state: &Arc<State>, name: &str) -> Option<Arc<Store>> {
     state.store(name)
 }
 

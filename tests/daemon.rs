@@ -822,6 +822,7 @@ fn every_revision_proves_itself_through_the_proxy_too() {
                 "semlith_stats",
                 "semlith_files",
                 "semlith_index",
+                "semlith_add",
                 "semlith_forget"
             ],
             "wrong tool surface on {revision} through the proxy"

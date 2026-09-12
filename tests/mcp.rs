@@ -24,11 +24,12 @@ const BREAD: &str = "Sourdough rises because a starter of flour and water fermen
                      dough gives a more open crumb after baking.";
 
 /// Every tool the server is expected to expose, in the order it lists them.
-const TOOLS: [&str; 5] = [
+const TOOLS: [&str; 6] = [
     "semlith_search",
     "semlith_stats",
     "semlith_files",
     "semlith_index",
+    "semlith_add",
     "semlith_forget",
 ];
 
