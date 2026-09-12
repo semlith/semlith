@@ -500,9 +500,21 @@ fn main() -> Result<()> {
                         Some(label) => format!("[{label}] "),
                         None => String::new(),
                     };
+                    // One letter per list that found it: v vector, f full
+                    // text, g graph. A hit the graph alone reached is a
+                    // neighbour of a match rather than a match.
+                    let via: String = h
+                        .lists
+                        .iter()
+                        .map(|l| match *l {
+                            "vector" => 'v',
+                            "keyword" => 'f',
+                            _ => 'g',
+                        })
+                        .collect();
                     writeln!(
                         out,
-                        "{}{}. {:.3}  {from}{}:{}-{}{}",
+                        "{}{}. {:.3} {via:<3} {from}{}:{}-{}{}",
                         bold(),
                         i + 1,
                         h.score,

@@ -522,6 +522,7 @@ mod tests {
             end_line: 1,
             text: String::new(),
             store: None,
+            lists: vec!["vector"],
         }
     }
 

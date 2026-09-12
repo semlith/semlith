@@ -359,6 +359,93 @@ fn the_json_output_matches_what_the_library_returns() {
     assert_eq!(printed, direct);
 }
 
+/// The third list earns its place: a chunk that shares no vocabulary with the
+/// query is still returned, because a symbol in the top hit points at it — and
+/// it says it arrived through the graph rather than passing as a match.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_chunk_reachable_only_through_the_graph_is_returned_and_badged() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+
+    // The query's words are all in `mixing.rs`. `proving.rs` shares none of
+    // them, and is reachable only because `knead` calls `autolyse`.
+    write(
+        corpus.path(),
+        "mixing.rs",
+        "/// Combine flour and water for the sourdough loaf.\n\
+         fn knead() { autolyse(); }\n",
+    );
+    write(
+        corpus.path(),
+        "proving.rs",
+        "fn autolyse() { let _ = 1; }\n",
+    );
+    index(store.path(), corpus.path());
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    let hits = s
+        .search("combine flour and water for the sourdough loaf", 8)
+        .unwrap();
+
+    let reached = hits
+        .iter()
+        .find(|h| h.path.ends_with("proving.rs"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the graph-reached chunk is missing; got {:?}",
+                hits.iter().map(|h| (&h.path, &h.lists)).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        reached.lists.contains(&"graph"),
+        "the chunk came back without saying the graph found it: {:?}",
+        reached.lists
+    );
+
+    // Every hit says how it was found, and the top hit is a real match.
+    assert!(hits.iter().all(|h| !h.lists.is_empty()));
+    assert!(
+        hits[0].path.ends_with("mixing.rs"),
+        "expansion outranked the actual match"
+    );
+}
+
+/// The filter gates all three lists, not two. A chunk outside it must not
+/// arrive through the graph by the back door.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_filter_constrains_the_graph_list_too() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "mixing.rs",
+        "/// Combine flour and water for the sourdough loaf.\n\
+         fn knead() { autolyse(); }\n",
+    );
+    write(
+        corpus.path(),
+        "proving.rs",
+        "fn autolyse() { let _ = 1; }\n",
+    );
+    index(store.path(), corpus.path());
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    let filter = semlith::filter::Filter::new(&["**/mixing.rs".to_string()], &[], &[]).unwrap();
+    let hits = s
+        .search_filtered("combine flour and water for the sourdough loaf", 8, &filter)
+        .unwrap();
+
+    assert!(
+        hits.iter().all(|h| h.path.ends_with("mixing.rs")),
+        "graph expansion reached outside the filter: {:?}",
+        hits.iter().map(|h| &h.path).collect::<Vec<_>>()
+    );
+}
+
 // ----------------------------------------------------------------- helpers
 
 /// Run the built binary against `store` and return its stdout and stderr.

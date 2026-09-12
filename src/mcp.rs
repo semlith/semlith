@@ -1034,8 +1034,16 @@ fn render(hits: &[crate::Hit]) -> String {
             Some(label) => format!("{label} "),
             None => String::new(),
         };
+        // Which lists found it. A hit that only the graph reached is a
+        // neighbour of a match rather than a match, and an agent that cannot
+        // tell the two apart will quote it as though the query found it.
+        let via = if h.lists.is_empty() {
+            String::new()
+        } else {
+            format!(" via {}", h.lists.join("+"))
+        };
         out.push_str(&format!(
-            "[{}] {from}{}:{}-{} (score {:.3})\n{}\n\n",
+            "[{}] {from}{}:{}-{} (score {:.3}{via})\n{}\n\n",
             i + 1,
             h.path,
             h.start_line,
