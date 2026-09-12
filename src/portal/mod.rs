@@ -25,6 +25,12 @@ const MONO_400: &[u8] = include_bytes!("fonts/IBMPlexMono-Regular.woff2");
 const MONO_500: &[u8] = include_bytes!("fonts/IBMPlexMono-Medium.woff2");
 const FONT_LICENSE: &[u8] = include_bytes!("fonts/LICENSE.txt");
 
+/// The mark, in both themes. SVG rather than the design's PNGs: the same
+/// artwork at a twentieth of the bytes, and sharp at 26px in a topbar and 38px
+/// on the welcome screen without shipping two rasters of each.
+const LOGO: &[u8] = include_bytes!("logo.svg");
+const LOGO_DARK: &[u8] = include_bytes!("logo-dark.svg");
+
 /// Everything served from the binary, as `(route, media type, bytes)`.
 ///
 /// One table rather than a match arm each, so [`asset`] and the size assertion
@@ -32,6 +38,8 @@ const FONT_LICENSE: &[u8] = include_bytes!("fonts/LICENSE.txt");
 const ASSETS: &[(&str, &str, &[u8])] = &[
     ("/style.css", "text/css; charset=utf-8", STYLE),
     ("/app.js", "text/javascript; charset=utf-8", APP),
+    ("/logo.svg", "image/svg+xml", LOGO),
+    ("/logo-dark.svg", "image/svg+xml", LOGO_DARK),
     ("/fonts/IBMPlexSans-Regular.woff2", "font/woff2", SANS_400),
     ("/fonts/IBMPlexSans-Medium.woff2", "font/woff2", SANS_500),
     ("/fonts/IBMPlexSans-SemiBold.woff2", "font/woff2", SANS_600),
