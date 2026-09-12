@@ -58,11 +58,29 @@ impl Fixture {
 }
 
 fn answer(mut stream: TcpStream, routes: &HashMap<String, Vec<u8>>) {
+    let Ok(peer) = stream.try_clone() else {
+        return;
+    };
+    let mut reader = BufReader::new(peer);
     let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line).is_err() {
+    if reader.read_line(&mut line).is_err() {
         return;
     }
     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+
+    // Drain the rest of the request before answering. Replying and closing
+    // while the client is still writing its headers makes the peer see a reset
+    // instead of the response — on macOS that turned a checksum assertion into
+    // "Connection reset by peer" and failed the run on CI.
+    loop {
+        let mut header = String::new();
+        match reader.read_line(&mut header) {
+            Ok(0) => break,
+            Ok(_) if header == "\r\n" || header == "\n" => break,
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
 
     // The only redirect that matters: `releases/latest` lands on the tag, and
     // `upgrade` reads the tag out of where it landed.
@@ -70,12 +88,15 @@ fn answer(mut stream: TcpStream, routes: &HashMap<String, Vec<u8>>) {
         let to = format!("/semlith/semlith/releases/tag/{NEWER}");
         let _ = write!(
             stream,
-            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\n\r\n"
+            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         );
         return;
     }
     if path.ends_with(&format!("/releases/tag/{NEWER}")) {
-        let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
         return;
     }
 
@@ -83,7 +104,7 @@ fn answer(mut stream: TcpStream, routes: &HashMap<String, Vec<u8>>) {
         Some(body) => {
             let _ = write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = stream.write_all(body);
