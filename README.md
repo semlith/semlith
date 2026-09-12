@@ -158,6 +158,7 @@ just those lines instead of the whole file.
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
 | `semlith stats` | File count, chunk count, model, shard count and memory budget, index size. |
 | `semlith files` | List indexed files. |
+| `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
 | `semlith forget <PATH>` | Drop one file from the store. |
 | `semlith start [PATHS...]` | Own every registered store, keep them current, and serve the portal on `127.0.0.1:7365`. `--port`, `--debounce`, `--airgap`. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
@@ -283,8 +284,11 @@ The page has the stores with their counts and the watcher's live event feed,
 the indexed files with the same `path`/`ext`/`lang` filters the CLI has and the
 reader that parsed each one, a search box running the same fused search the CLI
 and the MCP tools run, a folder picker that indexes into a store with progress
-streaming as it goes, the client stanzas for every agent, a Privacy page, and an
-About page. With no store yet it opens on a welcome screen instead.
+streaming as it goes, a URL field beside it that fetches one page or paper into
+the store and indexes it the same way, every language `--lang` accepts with the
+extensions and filenames that make it up, the client stanzas for every agent, a
+Privacy page, and an About page. With no store yet it opens on a welcome screen
+instead.
 
 **It is not on the network.** `127.0.0.1` is the only address it binds and there
 is no flag to change that. Every request needs the per-run token, held in a
@@ -469,6 +473,7 @@ holding 137 MB on one store and 137 MB on three — one loaded model, not three.
 | `semlith_stats` | What each open store holds, and the names the other tools accept. |
 | `semlith_files` | Which files are indexed — so "not indexed" and "not discussed" stop looking the same. |
 | `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
+| `semlith_add` | Fetch one https URL into a store and index it, so a page or a paper joins the corpus mid-conversation. |
 | `semlith_forget` | Drop one file from a store. The file on disk is untouched. |
 
 The two write tools take the store's lock for the call and give it back. A store
@@ -777,6 +782,10 @@ or which cell it came from.
 | `.pptx` | Each slide's text, slides in numeric order. Speaker notes are not included. | `# Slide 11` |
 | `.xlsx` | Each sheet in workbook order, a line per row, tab-separated cells. Shared and inline strings are resolved. | `## Sheet: Q3 Notes` |
 | `.odt`, `.odp`, `.ods` | The same, from OpenDocument's `content.xml`. | `# Slide 2 (Intro)`, `## Sheet: Q3 Notes` |
+| `.epub` | Every chapter, in the order the book's spine gives — not the order the filenames sort in. | `# chapter-3.xhtml` |
+| `.rtf` | The document's text. Font and colour tables, style sheets, embedded pictures and revision metadata are skipped whole; `\'hh` and `\uN` escapes are decoded. | — |
+| `.eml` | `From`, `To`, `Cc`, `Date` and `Subject`, then the body: the `text/plain` part of a multipart, or its HTML part when there is no plain one. | `# Attachment: manifest.txt` |
+| `.mbox` | Every message in the file, each read as an `.eml`. | `# Message 2: Inventaire de l'entrepôt` |
 
 Two details worth knowing:
 
@@ -788,6 +797,13 @@ Two details worth knowing:
 - **A spreadsheet is indexed as its cached values.** Formulas are not
   evaluated; what is searched is what the last program to save the file wrote
   into the cells.
+- **A book is read in spine order.** Chapters are named `part0012.xhtml` as
+  often as `chapter-three.xhtml`, so a reader that listed the archive would
+  often open a book on its copyright page.
+- **Mail keeps five headers and drops the rest.** A real message carries thirty,
+  and twenty-five of them are routing, spam scoring and client fingerprints that
+  are identical in every message a person owns. An attachment is named but never
+  decoded.
 
 The 32 MiB decompression cap is separate from the 8 MiB file cap because
 compression means the two are different numbers: a few hundred kilobytes of
