@@ -52,7 +52,7 @@ pub struct Check {
 pub fn check() -> Result<Check> {
     let installed = env!("CARGO_PKG_VERSION").to_string();
     let latest = latest_tag()?;
-    let available = latest.trim_start_matches('v') != installed;
+    let available = newer(&latest, &installed);
     Ok(Check {
         available,
         blocked: blocked().map(|e| e.to_string()),
@@ -75,8 +75,8 @@ pub fn apply(tag: Option<String>) -> Result<()> {
         Some(t) => format!("v{t}"),
         None => latest_tag()?,
     };
-    if tag.trim_start_matches('v') == installed {
-        println!("already on {installed}");
+    if !newer(&tag, installed) {
+        println!("already on {installed}; {} is not newer", &tag[1..]);
         return Ok(());
     }
 
@@ -302,6 +302,44 @@ fn host_target() -> Result<&'static str> {
     })
 }
 
+/// Whether the release is actually ahead of what is running. Inequality is not
+/// enough: a binary built between tags is newer than `releases/latest`, and
+/// telling its user to "upgrade" to the version they already passed is how a
+/// check earns being ignored. A version neither side can parse is treated as
+/// not newer, because offering to replace a binary is the answer that does
+/// damage when it is wrong.
+fn newer(latest: &str, installed: &str) -> bool {
+    match (semver(latest), semver(installed)) {
+        (Some(l), Some(i)) => l > i,
+        _ => false,
+    }
+}
+
+fn semver(v: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = v.trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    // A tag may carry a pre-release suffix; the patch number is what precedes it.
+    let patch = parts.next()?.split(['-', '+']).next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
 fn archive_ext() -> &'static str {
     if cfg!(windows) { "zip" } else { "tar.gz" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newer;
+
+    #[test]
+    fn only_a_higher_version_counts_as_an_upgrade() {
+        assert!(newer("v0.11.0", "0.10.0"));
+        assert!(newer("v0.10.1", "0.10.0"));
+        assert!(newer("v1.0.0", "0.99.99"));
+        assert!(!newer("v0.10.0", "0.10.0"));
+        // The case the portal found: a local build ahead of the newest tag.
+        assert!(!newer("v0.9.0", "0.10.0"));
+        assert!(!newer("not-a-version", "0.10.0"));
+    }
 }
