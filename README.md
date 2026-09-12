@@ -136,10 +136,18 @@ just those lines instead of the whole file.
 | `semlith models` | List available embedding models. |
 | `semlith languages` | List the language names `--lang` accepts. |
 
-Global: `--store <DIR>` picks the store directory (default `.semlith`, or the
-`SEMLITH_STORE` environment variable). `search`, `stats`, `files` and `mcp` read,
-so the flag is repeatable and they cover every store named; `index`, `watch` and
+Global: `--store <DIR>` picks the store directory, and `SEMLITH_STORE` does the
+same from the environment. `search`, `stats`, `files` and `mcp` read, so the
+flag is repeatable and they cover every store named; `index`, `watch` and
 `forget` write, so they take exactly one.
+
+With no flag, semlith resolves a store itself, in this order: an existing
+`.semlith` beside the directory in question; a registered store whose root is
+that directory or an ancestor of it; otherwise a new store under
+`~/.semlith/stores/`, registered against that directory. `semlith mcp` and
+`semlith start` are the exception — with no flag they open *every* registered
+store, because a client stanza cannot know which directory the agent will be
+started in.
 
 ## Indexing a large corpus
 
@@ -354,7 +362,17 @@ subsystem instead of the whole repository:
 ```
 
 One server can hold several stores, which is how an agent working across
-repositories asks one question instead of one per repository:
+repositories asks one question instead of one per repository. Since 0.9.0 that
+is what a bare `semlith mcp` already does — it opens every store in the
+registry — so indexing a second repository needs no edit to any client's
+configuration:
+
+```sh
+semlith index ~/work/api
+semlith index ~/work/cli
+```
+
+To pin a server to a chosen set instead, name them:
 
 ```json
 {
@@ -396,18 +414,28 @@ required JSON-RPC batching, and a client pinned to it is answered with
 
 ### Setting it up in your client
 
-Every snippet below runs `semlith --store /path/to/.semlith mcp`. Repeat
-`--store` to open several stores, or set `SEMLITH_STORE` to a
-path-separator-delimited list instead. `cargo install semlith` puts the binary
-at `~/.cargo/bin/semlith`, which is on your `PATH` in a shell but often not in
-an editor launched from a desktop icon — those entries use the absolute path.
+Every snippet below runs `semlith mcp`, with no path in it. The server opens
+every store registered in `~/.semlith/registry.json` — which is every store
+`semlith index` has made since 0.9.0 — plus a `.semlith` beside the directory
+the agent was started in, if there is one. Index another repository and the
+agent that is already configured can search it, with no edit to any of these
+files.
+
+`--store` still works and still wins when it is given: repeat it to open a
+chosen set of stores, or set `SEMLITH_STORE` to a path-separator-delimited
+list. A store written before 0.9.0 keeps working where it is, and `semlith
+adopt ./.semlith` moves it into the home so these stanzas reach it.
+
+`cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
+your `PATH` in a shell but often not in an editor launched from a desktop icon
+— those entries use the absolute path.
 
 **Claude Code** — `claude mcp add`, or a committed `.mcp.json` in the project
-root. The `--` matters: without it Claude Code reads `--store` as one of its own
-flags.
+root. The `--` matters: without it Claude Code reads anything starting with a
+dash as one of its own flags.
 
 ```sh
-claude mcp add semlith -- semlith --store /path/to/.semlith mcp
+claude mcp add semlith -- semlith mcp
 ```
 
 ```json
@@ -415,7 +443,7 @@ claude mcp add semlith -- semlith --store /path/to/.semlith mcp
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -430,7 +458,7 @@ Developer → Edit Config opens it.
   "mcpServers": {
     "semlith": {
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -442,10 +470,10 @@ and the desktop app. TOML, and the table is `mcp_servers` with an underscore.
 ```toml
 [mcp_servers.semlith]
 command = "semlith"
-args = ["--store", "/path/to/.semlith", "mcp"]
+args = ["mcp"]
 ```
 
-`codex mcp add semlith -- semlith --store /path/to/.semlith mcp` writes the same
+`codex mcp add semlith -- semlith mcp` writes the same
 table.
 
 **GitHub Copilot in VS Code** — `.vscode/mcp.json` for a workspace, or the
@@ -458,7 +486,7 @@ profile copy that `MCP: Open User Configuration` opens. The root key is
     "semlith": {
       "type": "stdio",
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -473,7 +501,7 @@ session. Its name for a stdio server is `local`, not `stdio`.
     "semlith": {
       "type": "local",
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"],
+      "args": ["mcp"],
       "tools": ["*"]
     }
   }
@@ -488,7 +516,7 @@ session. Its name for a stdio server is `local`, not `stdio`.
     "semlith": {
       "type": "stdio",
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -501,7 +529,7 @@ session. Its name for a stdio server is `local`, not `stdio`.
   "mcpServers": {
     "semlith": {
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -515,21 +543,21 @@ servers, and keys them under `context_servers`.
   "context_servers": {
     "semlith": {
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
 ```
 
 **Gemini CLI** — `~/.gemini/settings.json`, or
-`gemini mcp add semlith semlith --store /path/to/.semlith mcp`.
+`gemini mcp add semlith semlith mcp`.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -544,7 +572,7 @@ Assistant → Model Context Protocol.
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -560,7 +588,7 @@ rather than guessing.
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"],
+      "args": ["mcp"],
       "disabled": false,
       "autoApprove": []
     }
@@ -579,7 +607,7 @@ extensions:
     name: semlith
     enabled: true
     cmd: semlith
-    args: ["--store", "/path/to/.semlith", "mcp"]
+    args: ["mcp"]
     timeout: 300
 ```
 
