@@ -50,29 +50,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # turbovec links against a system BLAS: OpenBLAS on Linux, Accelerate on
-      # macOS. Accelerate ships with the OS; OpenBLAS has to be installed.
-      - name: Install OpenBLAS
-        if: runner.os == 'Linux'
-        timeout-minutes: 5
-        # The Azure apt mirror goes unreachable and the archive.ubuntu.com
-        # fallback then stalls mid-transfer with no output, so bound every
-        # fetch and retry rather than waiting on a dead socket. The lock
-        # timeout covers the runner's unattended-upgrades holding dpkg.
-        run: |
-          opts='-o Acquire::Retries=3
-                -o Acquire::http::Timeout=20
-                -o Acquire::https::Timeout=20
-                -o DPkg::Lock::Timeout=120'
-          for attempt in 1 2 3; do
-            sudo apt-get $opts update \
-              && sudo apt-get $opts install -y libopenblas-dev \
-              && exit 0
-            echo "apt attempt $attempt failed, retrying"
-            sleep 5
-          done
-          exit 1
-
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
@@ -82,6 +59,20 @@ jobs:
           key: ${{ matrix.target }}
 
       - run: cargo build --release --target ${{ matrix.target }}
+
+      # A binary that needs OpenSSL or OpenBLAS installed is not a binary you
+      # can paste a one-liner for. Print every library the build ended up
+      # needing, then fail on the three that mean a system package.
+      - name: Shared libraries
+        if: runner.os == 'Linux'
+        run: |
+          binary="target/${{ matrix.target }}/release/semlith"
+          echo "NEEDED entries for $binary:"
+          readelf -d "$binary" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tee needed.txt
+          if grep -Eq 'libssl|libcrypto|libopenblas' needed.txt; then
+            echo "::error::the Linux binary still links a system library that has to be installed"
+            exit 1
+          fi
 
       # turbovec requires a 64-bit target; every entry above is one.
       - name: Package
@@ -140,18 +131,21 @@ jobs:
             on && /^## \[/ { exit }
             on && !/^\[[^]]*\]:/ { print }
           ' CHANGELOG.md > notes.md
-          cat >> notes.md <<'EOF'
+          # The install text is lifted out of the README between its
+          # markers, so the release notes and the page the install URL sends
+          # people to cannot drift apart.
+          {
+            printf '\n### Install\n\n'
+            awk '/<!-- install-oneliners:start -->/{on=1;next} /<!-- install-oneliners:end -->/{exit} on' README.md
+            cat <<'EOF'
 
-          ### Install
+Or download the archive for your platform below, unpack it, and put `semlith` on
+your `PATH`. Intel macOS has no prebuilt binary: ONNX Runtime no longer publishes
+x86_64 macOS builds.
 
-          Download the archive for your platform, unpack it, and put `semlith` on
-          your `PATH`. Linux builds need OpenBLAS at runtime
-          (`apt-get install libopenblas-dev` or your distribution's equivalent).
-          Intel macOS has no prebuilt binary: ONNX Runtime no longer publishes
-          x86_64 macOS builds.
-
-          Verify a download against `SHA256SUMS` before running it.
-          EOF
+Verify a download against `SHA256SUMS` before running it.
+EOF
+          } >> notes.md
           cat notes.md
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3

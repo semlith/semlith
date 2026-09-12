@@ -17,16 +17,21 @@ exclude = [".env", ".github"]
 anyhow = "1.0.104"
 blake3 = "1.8.5"
 clap = { version = "4.6.4", features = ["derive"] }
-hf-hub = { version = "0.5.0", default-features = false, features = ["native-tls", "ureq"] }
+cliclack = "0.5.6"
+hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 libc = "0.2.189"
-fastembed = { version = "6.0.3", default-features = false, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+fastembed = { version = "6.0.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub"] }
 ignore = "0.4.31"
 pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10.9"
 turbovec = "1.0.0"
 notify = "8.2.0"
+# Already in the tree under hf-hub; named here so `upgrade` can use them
+# directly. Neither adds a crate to the build.
+ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 # Reading only: `deflate-flate2` is the decompressor and nothing else. The
 # default feature set adds every compressor and cipher the format allows, none
 # of which semlith needs to read a document.
