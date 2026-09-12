@@ -1,0 +1,360 @@
+//! What the code graph promises: that it is extracted from the same pass that
+//! re-embeds a file, and so is never a build artifact that has gone stale.
+//!
+//! These drive a real store, so they download an embedding model on first run:
+//!
+//! ```sh
+//! cargo test --test graph -- --ignored
+//! ```
+//!
+//! The extractor's own behaviour — which languages, which edge kinds, how
+//! confidence is decided — is unit-tested in `src/graph.rs` where it needs no
+//! model. What is proven here is the wiring: that indexing writes the rows,
+//! that changing a file rewrites its rows and nobody else's, and that the
+//! watcher's path inherits all of it.
+
+use rusqlite::Connection;
+use semlith::Semlith;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const APPEAR_TIMEOUT: Duration = Duration::from_secs(60);
+const DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// Every language that carries edges, in one corpus, each calling a helper it
+/// defines itself so there is an edge to look for.
+fn polyglot(dir: &Path) {
+    write(
+        dir,
+        "lock.rs",
+        "use std::fs::File;\n\
+         fn helper() {}\n\
+         fn acquire() { helper(); }\n",
+    );
+    write(
+        dir,
+        "app.ts",
+        "import {x} from './m';\n\
+         function helper(){}\n\
+         function acquire(){ helper(); }\n",
+    );
+    write(
+        dir,
+        "run.py",
+        "import os\n\
+         def helper():\n    pass\n\
+         def acquire():\n    helper()\n",
+    );
+    write(
+        dir,
+        "serve.go",
+        "package m\nimport \"fmt\"\n\
+         func helper() {}\n\
+         func acquire() { helper() }\n",
+    );
+    write(
+        dir,
+        "Main.java",
+        "import java.util.List;\n\
+         class Main { void helper(){} void acquire(){ helper(); } }\n",
+    );
+    write(
+        dir,
+        "main.c",
+        "#include <stdio.h>\n\
+         int helper(){ return 1; }\n\
+         int acquire(){ return helper(); }\n",
+    );
+    // Prose, which carries no edges and must not be an error.
+    write(dir, "notes.md", "The lock is acquired before the write.");
+}
+
+/// Indexing a polyglot repository fills the graph for the six languages that
+/// carry edges and says nothing about the file that does not.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn indexing_fills_the_graph_for_every_advertised_language() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    polyglot(corpus.path());
+    index(store.path(), corpus.path());
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    for file in [
+        "lock.rs",
+        "app.ts",
+        "run.py",
+        "serve.go",
+        "Main.java",
+        "main.c",
+    ] {
+        assert!(
+            symbols_in(s.db(), file) > 0,
+            "{file} produced no symbols at all"
+        );
+        assert!(
+            calls_from(s.db(), "acquire").contains(&"helper".to_string()),
+            "{file}: acquire -> helper was not extracted; calls found: {:?}",
+            calls_from(s.db(), "acquire")
+        );
+    }
+
+    assert_eq!(
+        symbols_in(s.db(), "notes.md"),
+        0,
+        "a language with no grammar must contribute no symbols, not an error"
+    );
+
+    // Every edge is one of the two confidences, never null and never a third.
+    let bad: i64 = s
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM edges WHERE confidence NOT IN ('extracted', 'inferred')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bad, 0, "an edge carries a confidence outside the two");
+}
+
+/// Re-indexing one changed file rewrites that file's rows and leaves every
+/// other file's alone — and leaves nothing behind pointing at a dead file id.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn editing_a_file_re_extracts_that_file_and_only_that_file() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    polyglot(corpus.path());
+    index(store.path(), corpus.path());
+
+    let before: Vec<(String, i64)> = {
+        let s = Semlith::open(store.path(), None).unwrap();
+        per_file_counts(s.db())
+    };
+
+    // `acquire` stops calling `helper` and starts calling `release`.
+    write(
+        corpus.path(),
+        "lock.rs",
+        "use std::fs::File;\n\
+         fn helper() {}\n\
+         fn release() {}\n\
+         fn acquire() { release(); }\n",
+    );
+    index(store.path(), corpus.path());
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let after = per_file_counts(s.db());
+
+    for (path, count) in &before {
+        if path.ends_with("lock.rs") {
+            continue;
+        }
+        let now = after
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, c)| *c)
+            .unwrap_or(-1);
+        assert_eq!(
+            *count, now,
+            "{path} was re-extracted by an edit to another file"
+        );
+    }
+
+    let calls = calls_from_in(s.db(), "acquire", "lock.rs");
+    assert!(
+        calls.contains(&"release".to_string()),
+        "the new call was not extracted: {calls:?}"
+    );
+    assert!(
+        !calls.contains(&"helper".to_string()),
+        "the old call survived the edit: {calls:?}"
+    );
+
+    let orphans: i64 = s
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM symbols s LEFT JOIN files f ON f.id = s.file_id
+             WHERE f.id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphans, 0,
+        "symbols survived the file they were extracted from"
+    );
+}
+
+/// Forgetting a file takes its symbols and its outgoing edges with it.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn forgetting_a_file_takes_its_symbols_and_edges() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    polyglot(corpus.path());
+    index(store.path(), corpus.path());
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    assert!(symbols_in(s.db(), "lock.rs") > 0);
+    let elsewhere = symbols_in(s.db(), "run.py");
+
+    s.forget(&corpus.path().join("lock.rs")).unwrap();
+
+    assert_eq!(
+        symbols_in(s.db(), "lock.rs"),
+        0,
+        "symbols outlived the file"
+    );
+    assert_eq!(
+        symbols_in(s.db(), "run.py"),
+        elsewhere,
+        "forgetting one file disturbed another"
+    );
+    let dangling: i64 = s
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM edges e LEFT JOIN symbols s ON s.id = e.src
+             WHERE s.id IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dangling, 0, "edges outlived the symbols they leave");
+}
+
+/// The claim the whole release rests on: an edit under a running watcher
+/// updates the graph in the same pass that updates the vectors. No separate
+/// command, no build step, nothing that can be out of date.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_edit_under_the_watcher_updates_the_graph_with_the_vectors() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "lock.rs",
+        "fn helper() {}\nfn acquire() { helper(); }\n",
+    );
+    index(store.path(), corpus.path());
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (store_path, roots, flag) = (
+            store.path().to_path_buf(),
+            vec![corpus.path().to_path_buf()],
+            Arc::clone(&stop),
+        );
+        thread::spawn(move || {
+            let mut s = Semlith::open(&store_path, None).unwrap();
+            s.quiet = true;
+            semlith::watch::run(&mut s, &roots, DEBOUNCE, &flag, |_| {}).unwrap();
+        })
+    };
+
+    // Nobody runs `index`. The file is simply saved, as an editor would.
+    write(
+        corpus.path(),
+        "lock.rs",
+        "fn helper() {}\nfn release() {}\nfn acquire() { release(); }\n",
+    );
+
+    let updated = wait_until(store.path(), |db| {
+        calls_from_in(db, "acquire", "lock.rs").contains(&"release".to_string())
+    });
+    assert!(
+        updated,
+        "the watcher re-embedded the file but the graph still describes the old text"
+    );
+
+    // And the old edge is gone, not merely outnumbered.
+    let s = Semlith::open(store.path(), None).unwrap();
+    assert!(
+        !calls_from_in(s.db(), "acquire", "lock.rs").contains(&"helper".to_string()),
+        "the edge the edit removed is still in the graph"
+    );
+    drop(s);
+
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+}
+
+// ----------------------------------------------------------------- helpers
+
+fn symbols_in(db: &Connection, name: &str) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE f.path LIKE '%' || ?1",
+        rusqlite::params![name],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+fn per_file_counts(db: &Connection) -> Vec<(String, i64)> {
+    let mut stmt = db
+        .prepare(
+            "SELECT f.path, COUNT(s.id) FROM files f LEFT JOIN symbols s ON s.file_id = f.id
+             GROUP BY f.id ORDER BY f.path",
+        )
+        .unwrap();
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    rows.collect::<Result<Vec<_>, _>>().unwrap()
+}
+
+fn calls_from(db: &Connection, from: &str) -> Vec<String> {
+    let mut stmt = db
+        .prepare(
+            "SELECT e.dst FROM edges e JOIN symbols s ON s.id = e.src
+                  WHERE s.name = ?1 AND e.kind = 'calls'",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map(rusqlite::params![from], |r| r.get::<_, String>(0))
+        .unwrap();
+    rows.collect::<Result<Vec<_>, _>>().unwrap()
+}
+
+fn calls_from_in(db: &Connection, from: &str, file: &str) -> Vec<String> {
+    let mut stmt = db
+        .prepare(
+            "SELECT e.dst FROM edges e
+             JOIN symbols s ON s.id = e.src
+             JOIN files f ON f.id = s.file_id
+             WHERE s.name = ?1 AND e.kind = 'calls' AND f.path LIKE '%' || ?2",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map(rusqlite::params![from, file], |r| r.get::<_, String>(0))
+        .unwrap();
+    rows.collect::<Result<Vec<_>, _>>().unwrap()
+}
+
+/// Poll a fresh reader until the graph satisfies `done`, or time runs out.
+fn wait_until(store: &Path, done: impl Fn(&Connection) -> bool) -> bool {
+    let deadline = Instant::now() + APPEAR_TIMEOUT;
+    while Instant::now() < deadline {
+        let s = Semlith::open(store, None).unwrap();
+        if done(s.db()) {
+            return true;
+        }
+        drop(s);
+        thread::sleep(Duration::from_millis(300));
+    }
+    false
+}
+
+fn index(store: &Path, corpus: &Path) {
+    let mut s = Semlith::open(store, None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.to_path_buf()], |_, _| {}).unwrap();
+}
+
+fn write(dir: &Path, name: &str, body: &str) {
+    fs::write(dir.join(name), body).unwrap();
+}

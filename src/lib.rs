@@ -152,6 +152,9 @@ pub struct IndexProgress {
     pub chunks: usize,
     /// Files the walk found.
     pub total: usize,
+    /// Symbols extracted so far in this run. Zero for a corpus of languages
+    /// that carry no edges, which is not an error — see [`crate::graph`].
+    pub symbols: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
@@ -165,6 +168,9 @@ pub struct IndexReport {
     /// Paths a time-bounded run never reached. Zero unless a budget cut the
     /// run short — an unbounded `index_paths` always finishes what it walked.
     pub remaining: usize,
+    /// Symbols extracted in this run, and the edges between them.
+    pub symbols: usize,
+    pub edges: usize,
 }
 
 pub struct Semlith {
@@ -549,6 +555,7 @@ impl Semlith {
                     indexed: report.indexed,
                     chunks: report.chunks,
                     total,
+                    symbols: report.symbols,
                 },
             );
 
@@ -558,9 +565,11 @@ impl Semlith {
             }
 
             let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+            let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
             for (ord, c) in chunks.iter().enumerate() {
                 let id =
                     store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
+                spans.push((c.start_line, c.end_line, id));
                 pending.ids.push(id as u64);
                 pending.texts.push(c.text.clone());
 
@@ -572,6 +581,15 @@ impl Semlith {
                     self.flush(&mut pending)?;
                 }
             }
+
+            // The structure half, on the same changed-file path and inside the
+            // same lock. A file whose symbols were extracted by an earlier run
+            // had them deleted by `delete_file` above, along with its chunks
+            // and the edges leaving them, so this writes a whole fresh set
+            // rather than reconciling one.
+            let (symbols, edges) = self.extract_graph(&path, &text, file_id, &spans)?;
+            report.symbols += symbols;
+            report.edges += edges;
 
             completed.push((file_id, hash));
             report.indexed += 1;
@@ -627,6 +645,52 @@ impl Semlith {
         }
         self.save()?;
         self.commit_hashes(completed)
+    }
+
+    /// Extract one file's symbols and outgoing edges, and write them.
+    ///
+    /// Returns `(symbols, edges)` written. A file in a language that carries no
+    /// edges returns `(0, 0)` and is not an error — most corpora are mostly
+    /// prose, and the graph simply has nothing to say about them.
+    ///
+    /// Edges are written by name, so an edge to something not indexed yet — or
+    /// never — is still recorded and resolves when and if its target appears.
+    /// That is what lets a repository be indexed in any order.
+    fn extract_graph(
+        &self,
+        path: &Path,
+        text: &str,
+        file_id: i64,
+        spans: &[(u32, u32, i64)],
+    ) -> Result<(usize, usize)> {
+        let Some(extraction) = graph::extract(path, text)? else {
+            return Ok((0, 0));
+        };
+
+        // Name to id, for the edges below. A file may define the same name
+        // twice — two `new` methods on two types — and the first wins, because
+        // an edge out of this file names its source by name and nothing here
+        // can tell them apart either.
+        let mut ids: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+        for symbol in &extraction.symbols {
+            let chunk_id = spans
+                .iter()
+                .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
+                .map(|(_, _, id)| *id);
+            let id = store::insert_symbol(&self.db, file_id, chunk_id, symbol)?;
+            ids.entry(symbol.name.as_str()).or_insert(id);
+        }
+
+        let mut written = 0;
+        for edge in &extraction.edges {
+            let Some(src) = ids.get(edge.from.as_str()) else {
+                continue;
+            };
+            store::insert_edge(&self.db, *src, &edge.to, &edge.kind, &edge.confidence)?;
+            written += 1;
+        }
+
+        Ok((extraction.symbols.len(), written))
     }
 
     /// Record files as indexed, in one transaction. Their vectors must already
