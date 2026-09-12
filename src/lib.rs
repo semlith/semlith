@@ -25,6 +25,7 @@ pub mod fleet;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
+pub mod graph;
 pub mod home;
 pub mod http;
 pub mod index;

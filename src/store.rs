@@ -485,7 +485,8 @@ pub struct EdgeEnd {
     pub confidence: String,
 }
 
-const SYMBOL_COLUMNS: &str = "s.id, f.path, s.kind, s.name, s.qualified, s.start_line, s.end_line, s.chunk_id";
+const SYMBOL_COLUMNS: &str =
+    "s.id, f.path, s.kind, s.name, s.qualified, s.start_line, s.end_line, s.chunk_id";
 
 fn symbol_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
     Ok(SymbolRow {
@@ -504,21 +505,31 @@ pub fn insert_symbol(
     db: &Connection,
     file_id: i64,
     chunk_id: Option<i64>,
-    kind: &str,
-    name: &str,
-    qualified: &str,
-    start_line: u32,
-    end_line: u32,
+    symbol: &crate::graph::Symbol,
 ) -> Result<i64> {
     db.execute(
         "INSERT INTO symbols (file_id, chunk_id, kind, name, qualified, start_line, end_line)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![file_id, chunk_id, kind, name, qualified, start_line, end_line],
+        params![
+            file_id,
+            chunk_id,
+            symbol.kind,
+            symbol.name,
+            symbol.qualified,
+            symbol.start_line,
+            symbol.end_line
+        ],
     )?;
     Ok(db.last_insert_rowid())
 }
 
-pub fn insert_edge(db: &Connection, src: i64, dst: &str, kind: &str, confidence: &str) -> Result<()> {
+pub fn insert_edge(
+    db: &Connection,
+    src: i64,
+    dst: &str,
+    kind: &str,
+    confidence: &str,
+) -> Result<()> {
     db.execute(
         "INSERT INTO edges (src, dst, kind, confidence) VALUES (?1, ?2, ?3, ?4)",
         params![src, dst, kind, confidence],
@@ -537,7 +548,7 @@ pub fn symbols_named(db: &Connection, name: &str, limit: usize) -> Result<Vec<Sy
          WHERE s.name = ?1 ORDER BY f.path, s.start_line LIMIT ?2"
     );
     let mut stmt = db.prepare(&sql)?;
-    let rows = stmt.query_map(params![name, limit as i64], |r| symbol_row(r))?;
+    let rows = stmt.query_map(params![name, limit as i64], symbol_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -564,7 +575,7 @@ pub fn symbols_by_names(
     binds.extend(names.iter().cloned());
     let mut stmt = db.prepare(&sql)?;
     let args = binds.into_iter().map(Value::Text);
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| symbol_row(r))?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), symbol_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -666,6 +677,22 @@ pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
 mod tests {
     use super::*;
 
+    fn sym(name: &str) -> crate::graph::Symbol {
+        crate::graph::Symbol {
+            kind: "function".to_string(),
+            name: name.to_string(),
+            qualified: name.to_string(),
+            start_line: 1,
+            end_line: 2,
+        }
+    }
+
+    fn at(mut s: crate::graph::Symbol, start: u32, end: u32) -> crate::graph::Symbol {
+        s.start_line = start;
+        s.end_line = end;
+        s
+    }
+
     /// Build a store with one file, one chunk and one symbol, and return the
     /// connection plus the symbol's id.
     fn one_symbol(db: &Connection, path: &str, name: &str) -> i64 {
@@ -673,7 +700,7 @@ mod tests {
         db.pragma_update(None, "foreign_keys", "ON").unwrap();
         let file_id = insert_file(db, path, "h", 1, 0).unwrap();
         let chunk_id = insert_chunk(db, file_id, 0, 1, 2, name).unwrap();
-        insert_symbol(db, file_id, Some(chunk_id), "function", name, name, 1, 2).unwrap()
+        insert_symbol(db, file_id, Some(chunk_id), &sym(name)).unwrap()
     }
 
     /// Forgetting a file takes its symbols and its outgoing edges with it.
@@ -708,17 +735,24 @@ mod tests {
         let caller = one_symbol(&db, "a.rs", "caller");
         insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
-        insert_symbol(&db, b, None, "function", "callee", "callee", 1, 2).unwrap();
+        insert_symbol(&db, b, None, &sym("callee")).unwrap();
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 1);
 
         // b.rs changes: its symbols are dropped and re-extracted with new ids.
         delete_file(&db, "b.rs").unwrap();
         let b = insert_file(&db, "b.rs", "h2", 1, 0).unwrap();
-        insert_symbol(&db, b, None, "function", "callee", "callee", 9, 10).unwrap();
+        insert_symbol(&db, b, None, &at(sym("callee"), 9, 10)).unwrap();
 
         let out = edges_out(&db, "caller", &[]).unwrap();
-        assert_eq!(out.len(), 1, "the edge survived its target being re-indexed");
-        assert_eq!(out[0].symbol.start_line, 9, "and now points at the new rows");
+        assert_eq!(
+            out.len(),
+            1,
+            "the edge survived its target being re-indexed"
+        );
+        assert_eq!(
+            out[0].symbol.start_line, 9,
+            "and now points at the new rows"
+        );
     }
 
     /// Both directions resolve, and the edge kind filter applies to each.
@@ -727,7 +761,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
-        insert_symbol(&db, b, None, "function", "callee", "callee", 1, 2).unwrap();
+        insert_symbol(&db, b, None, &sym("callee")).unwrap();
         insert_edge(&db, caller, "callee", "calls", "extracted").unwrap();
         insert_edge(&db, caller, "callee", "references", "inferred").unwrap();
 
@@ -738,7 +772,10 @@ mod tests {
 
         let inbound = edges_in(&db, "callee", &["calls".to_string()]).unwrap();
         assert_eq!(inbound.len(), 1);
-        assert_eq!(inbound[0].symbol.name, "caller", "edges_in reports the source");
+        assert_eq!(
+            inbound[0].symbol.name, "caller",
+            "edges_in reports the source"
+        );
     }
 
     /// An edge to something the corpus does not contain is still recorded, and
