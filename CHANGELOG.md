@@ -64,6 +64,14 @@ current and an agent being able to write to it.
   of panicking on an id the index does not hold, which is the better contract
   for a shard that legitimately lacks an id its range covers.
 - `fastembed` 6.0.1 → 6.0.3.
+- Three further Dependabot updates that landed on `develop` while this release
+  was in flight and are merged into it rather than shipped separately: a
+  patch-updates group of two crates, `Swatinem/rust-cache` in both workflows,
+  and `softprops/action-gh-release` 3.0.2 → 3.0.3. Both actions stay SHA-pinned
+  with their trailing version comment.
+- `chacha20` in the lockfile, which had been yanked upstream. It arrives through
+  `pdf-extract` → `lopdf` → `rand` and nothing here calls it, but
+  `cargo install --locked` would otherwise pull a yanked crate.
 
 ### Security
 
