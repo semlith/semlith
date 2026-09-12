@@ -603,12 +603,16 @@ fn main() -> Result<()> {
 
             let mut store = Semlith::open(&dir, None)?;
             store.quiet = true;
-            let report = store.index_paths(&[fetched.path.clone()], |_, _| {})?;
+            let report = store.index_paths(std::slice::from_ref(&fetched.path), |_, _| {})?;
 
+            // The root recorded is the downloads directory, not the file: a
+            // root is what `semlith start` watches, and watching one file would
+            // leave the next thing added to the same store unwatched.
+            //
             // Recorded after the fetch and the index both succeeded, so a
             // failed add leaves no registry entry pointing at nothing.
             let model_name = store.model().to_string();
-            home::record(&choice, &[fetched.path.clone()], &model_name)?;
+            home::record(&choice, &[semlith::add::downloads_dir(&dir)], &model_name)?;
 
             eprintln!("{} -> {}", fetched.url, display(&fetched.path));
             eprintln!("indexed {} chunks into {}", report.chunks, dir.display());

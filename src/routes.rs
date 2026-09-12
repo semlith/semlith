@@ -53,6 +53,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
+        (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/rotate") => rotate(state),
@@ -374,7 +375,14 @@ fn agents(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
         "connected": state.proxy_count(),
-        "tools": ["semlith_search", "semlith_stats", "semlith_files", "semlith_index", "semlith_forget"],
+        "tools": [
+            "semlith_search",
+            "semlith_stats",
+            "semlith_files",
+            "semlith_index",
+            "semlith_add",
+            "semlith_forget",
+        ],
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         "install": {
@@ -413,6 +421,44 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     };
 
     match state.index(&store, paths) {
+        Ok(progress) => stream(progress),
+        Err(e) => Response::error(409, &e.to_string()),
+    }
+}
+
+/// Fetch one URL into the store and index what landed, streaming the same
+/// progress the folder picker streams.
+///
+/// The fetch runs here rather than inside the write queue. It is network work,
+/// and holding a store's queue open for the length of a download would stall
+/// every other write behind it — while the indexing of what landed, which is
+/// the part the one-writer rule is about, still goes through the queue.
+fn add(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(url) = body
+        .get("url")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+    else {
+        return Response::error(400, "no url given");
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => Arc::clone(s),
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+
+    // A refused fetch is an answer the page shows, not a 500. Every one of them
+    // names something the person can act on: the URL was http, or too large, or
+    // a type nothing here can read.
+    let fetched = match crate::add::fetch(url, &store.dir) {
+        Ok(fetched) => fetched,
+        Err(e) => return Response::error(400, &format!("{e:#}")),
+    };
+
+    match state.index(&store, vec![fetched.path.clone()]) {
         Ok(progress) => stream(progress),
         Err(e) => Response::error(409, &e.to_string()),
     }

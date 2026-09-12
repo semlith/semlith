@@ -118,6 +118,19 @@ fn rewrite(url: &str) -> String {
     }
 }
 
+/// One plain-HTTP origin that may be fetched anyway, for tests.
+///
+/// `tests/add.rs` has to exercise the real fetch path — the redirect chain, the
+/// size cap, the content-type check — against a server it controls, and a
+/// fixture server that speaks TLS would mean shipping a certificate to test a
+/// rule that has nothing to do with TLS. So one origin, named exactly, may be
+/// plain HTTP; every other URL still has to be https, including every hop of a
+/// redirect that starts at this one.
+///
+/// The same shape and the same reasoning as `SEMLITH_RELEASES_ORIGIN` in
+/// `upgrade.rs`, and like it, deliberately not in `docs/compatibility.md`.
+const HTTP_ORIGIN_ENV: &str = "SEMLITH_ADD_ORIGIN";
+
 /// HTTPS only, at every hop.
 ///
 /// Plain HTTP is refused rather than upgraded: silently rewriting a URL a
@@ -126,6 +139,13 @@ fn rewrite(url: &str) -> String {
 /// the wrong kind of helpful.
 fn require_https(url: &str) -> Result<()> {
     if url.starts_with("https://") {
+        return Ok(());
+    }
+    if let Some(origin) = std::env::var(HTTP_ORIGIN_ENV)
+        .ok()
+        .filter(|o| !o.is_empty())
+        && url.starts_with(&origin)
+    {
         return Ok(());
     }
     bail!("{url} is not https; `semlith add` fetches over https only")

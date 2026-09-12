@@ -169,6 +169,7 @@ const VIEWS = [
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
   { group: "Workspace", id: "index", label: "Index", title: "Index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
+  { group: "Explore", id: "languages", label: "Languages", title: "Languages" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
   { group: "About", id: "about", label: "About", title: "About" },
@@ -449,7 +450,7 @@ async function filesView() {
     },
   });
 
-  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "json", "pdf", "ipynb", "docx"];
+  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "json", "pdf", "ipynb", "docx", "epub", "rtf", "eml"];
   const extChips = EXTENSIONS.map((ext) =>
     el("button", {
       class: "chip",
@@ -492,6 +493,90 @@ async function filesView() {
     el("p", {
       class: "subtitle",
       text: "Forget drops the file's chunks and vectors. The file on disk is untouched.",
+    }),
+  );
+}
+
+// Every name `--lang` accepts and what makes it up.
+//
+// The table is the filter's own, served from /api/languages, so what is shown
+// here is what a search would actually have matched rather than a second list
+// that drifts. Two of the names have no extension at all — a Dockerfile and a
+// Makefile are known by being called that — which is why filenames get their
+// own column instead of being written as if they were extensions.
+async function languagesView() {
+  let data;
+  try {
+    data = await api("/api/languages");
+  } catch (e) {
+    return el("div", { class: "view" }, error(e.message));
+  }
+  const languages = data.languages || [];
+
+  const rows = languages.map((language) =>
+    el(
+      "tr",
+      {},
+      el("td", { class: "path" }, language.name),
+      el(
+        "td",
+        { class: "meta" },
+        (language.extensions || []).map((ext) => el("span", { class: "tag", text: `.${ext}` })),
+      ),
+      el(
+        "td",
+        { class: "meta" },
+        (language.filenames || []).length
+          ? language.filenames.map((name) => el("span", { class: "tag", text: name }))
+          : el("span", { class: "muted", text: "—" }),
+      ),
+    ),
+  );
+
+  return el(
+    "div",
+    { class: "view" },
+    el(
+      "div",
+      { class: "head" },
+      el(
+        "div",
+        { class: "titles" },
+        el("h1", { text: "Languages" }),
+        el("p", {
+          class: "subtitle",
+          text: "What --lang accepts on the command line, in the MCP tools and in the search box.",
+        }),
+      ),
+      el("span", { class: "pill", text: `${languages.length} languages` }),
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "table-wrap" },
+        el(
+          "table",
+          {},
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              el("th", { text: "Name" }),
+              el("th", { text: "Extensions" }),
+              el("th", { text: "Filenames" }),
+            ),
+          ),
+          el("tbody", {}, rows),
+        ),
+      ),
+    ),
+    el("p", {
+      class: "subtitle",
+      text: "Extension and filename decide the language; file contents are never read to guess it, because a store is searched far more often than it is built.",
     }),
   );
 }
@@ -614,6 +699,14 @@ async function indexView() {
   const bar = el("span", { style: "width:0%" });
   const picker = el("div", { class: "card", hidden: true });
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  // No example URL in the placeholder: every byte the portal serves is checked
+  // to name no origin but its own, and a literal link here reads as one.
+  const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
+  const addButton = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Fetch and index",
+  });
 
   const storeSelect = el(
     "select",
@@ -686,26 +779,23 @@ async function indexView() {
     );
   }
 
-  start.addEventListener("click", async () => {
-    const path = field.value.trim();
-    if (!path) {
-      alert("Give a path to index.");
-      return;
-    }
+  // One reader for both buttons. /api/add fetches the URL and then hands what
+  // landed to the same write queue a folder goes through, so it answers with
+  // the same event stream and there is no second progress mechanism to keep in
+  // step with this one.
+  async function run(route, body) {
     start.disabled = true;
+    addButton.disabled = true;
     log.replaceChildren();
-    say("POST /api/index · newline-delimited JSON, chunked", "→");
+    say(`POST ${route} · newline-delimited JSON, chunked`, "→");
     bar.style.width = "0%";
 
     try {
-      const response = await fetch("/api/index", {
+      const response = await fetch(route, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path,
-          store: storeSelect.value || undefined,
-        }),
+        body: JSON.stringify({ ...body, store: storeSelect.value || undefined }),
       });
       if (!response.ok) throw new Error((await response.text()) || response.statusText);
 
@@ -752,7 +842,26 @@ async function indexView() {
       say(e.message, "error");
     } finally {
       start.disabled = false;
+      addButton.disabled = false;
     }
+  }
+
+  start.addEventListener("click", () => {
+    const path = field.value.trim();
+    if (!path) {
+      alert("Give a path to index.");
+      return;
+    }
+    run("/api/index", { path });
+  });
+
+  addButton.addEventListener("click", () => {
+    const url = urlField.value.trim();
+    if (!url) {
+      alert("Give an https URL to fetch.");
+      return;
+    }
+    run("/api/add", { url });
   });
 
   return el(
@@ -792,6 +901,27 @@ async function indexView() {
       }),
     ),
     picker,
+    el(
+      "div",
+      { class: "card pad" },
+      el("div", { class: "eyebrow", text: "Add from a URL" }),
+      el("p", {
+        class: "subtitle",
+        style: "margin:6px 0 12px",
+        text: "One https request, for exactly this URL — a page, a PDF, or a file on GitHub. Nothing is crawled and no credential is ever sent. The file is saved inside this store's downloads folder, never in your working tree.",
+      }),
+      el(
+        "div",
+        { class: "filters", style: "margin:0" },
+        el(
+          "div",
+          { class: "field tall", style: "flex:1 1 240px;max-width:420px" },
+          el("span", { class: "prefix", text: "url" }),
+          urlField,
+        ),
+        addButton,
+      ),
+    ),
     el(
       "div",
       { class: "card pad" },
@@ -1285,6 +1415,7 @@ const RENDER = {
   stores: storesView,
   files: filesView,
   search: searchView,
+  languages: languagesView,
   index: indexView,
   agents: agentsView,
   privacy: privacyView,
