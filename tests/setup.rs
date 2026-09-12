@@ -47,6 +47,22 @@ impl Machine {
         }
     }
 
+    /// The same run with no `SHELL` in the environment, which is what a
+    /// container, a CI runner and a cron job all look like.
+    fn setup_without_shell(&self, args: &[&str]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        command
+            .arg("setup")
+            .args(args)
+            .env("HOME", &self.home)
+            .env_remove("SHELL")
+            .env("SEMLITH_HOME", &self.store_home)
+            .env("SEMLITH_MODEL_CACHE", &self.cache)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null());
+        command.output().expect("running semlith setup")
+    }
+
     fn setup(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_semlith"))
             .arg("setup")
@@ -207,5 +223,37 @@ fn airgap_with_an_empty_cache_skips_the_model_and_exits_zero() {
     assert!(
         said.contains("--airgap") && said.contains(machine.cache.to_str().unwrap()),
         "the skip note should name --airgap and the cache to pre-seed:\n{said}"
+    );
+}
+
+/// Found on a clean `ubuntu:24.04` container installing the real 0.10.0
+/// archive: `SHELL` is unset there, `rc_file` gave up, and the install
+/// finished with a binary nobody's shell could find. A HOME with no SHELL is
+/// the normal shape of a container, a CI runner and a cron job, so it gets a
+/// test rather than a comment.
+#[test]
+fn an_unset_shell_still_gets_a_path_block() {
+    let machine = Machine::new();
+
+    let run = machine.setup_without_shell(&["--yes", "--airgap"]);
+    assert!(
+        run.status.success(),
+        "setup with no SHELL exited {:?}:\n{}",
+        run.status.code(),
+        Machine::said(&run)
+    );
+
+    let profile = machine.home.join(".profile");
+    let written = std::fs::read_to_string(&profile)
+        .unwrap_or_else(|e| panic!("setup wrote no {}: {e}", profile.display()));
+    assert!(
+        written.contains(BEGIN) && written.contains(".semlith/bin"),
+        "the fallback rc file has no semlith block:\n{written}"
+    );
+
+    let said = Machine::said(&run);
+    assert!(
+        !said.contains("no HOME"),
+        "setup blamed a missing HOME when only SHELL was unset:\n{said}"
     );
 }
