@@ -43,6 +43,10 @@ impl StoreLock {
             // Whoever holds the lock wrote their identity into the file before
             // starting work. Read it back so the error names them rather than
             // saying "busy".
+            // Best effort, and on Windows it reads nothing: the exclusive lock
+            // the holder took also blocks this read, so `who` falls back to
+            // "another process" there. The refusal is the part that matters and
+            // it is identical on every platform; only the name is thinner.
             let mut held_by = String::new();
             let _ = file.read_to_string(&mut held_by);
             let held_by = held_by.trim();
@@ -130,9 +134,19 @@ mod tests {
 
         let err = StoreLock::acquire(&dir).unwrap_err().to_string();
         assert!(err.contains("being indexed by"), "unhelpful error: {err}");
+
+        // Windows cannot read the holder's line while the holder has the file
+        // locked, so the message names "another process" rather than a pid.
+        // The refusal is what protects the store and it happens either way.
+        #[cfg(unix)]
         assert!(
             err.contains(&format!("pid {}", std::process::id())),
             "error does not name the holder: {err}"
+        );
+        #[cfg(windows)]
+        assert!(
+            err.contains("another process"),
+            "error should fall back to naming no one: {err}"
         );
 
         drop(first);
