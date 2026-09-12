@@ -8,8 +8,11 @@
 //! semlith cannot read is a file the run walks past, never an error that ends
 //! the run.
 //!
-//! Six of the nine formats are ZIP archives of XML, which is why they cost one
-//! archive reader and one tag scanner between them rather than six parsers.
+//! Seven of the thirteen formats are ZIP archives of XML, which is why they
+//! cost one archive reader and one tag scanner between them rather than seven
+//! parsers. EPUB is the seventh and the cheapest of all of them: a book is a
+//! ZIP of XHTML, so it is the archive reader and the HTML reader already here,
+//! joined by the spine order its own manifest states.
 
 use std::io::{Cursor, Read};
 
@@ -17,7 +20,8 @@ use std::io::{Cursor, Read};
 /// list before it looks at the bytes, so a corpus with none of these formats
 /// pays one string comparison per file and nothing else.
 const HANDLED: &[&str] = &[
-    "ipynb", "html", "htm", "docx", "pptx", "xlsx", "odt", "odp", "ods",
+    "ipynb", "html", "htm", "docx", "pptx", "xlsx", "odt", "odp", "ods", "epub", "rtf", "eml",
+    "mbox",
 ];
 
 /// How much text one archive may decompress to.
@@ -49,6 +53,10 @@ pub(crate) fn extract(ext: &str, bytes: &[u8]) -> Option<String> {
         "pptx" => pptx(bytes),
         "xlsx" => xlsx(bytes),
         "odt" | "odp" | "ods" => odf(bytes),
+        "epub" => epub(bytes),
+        "rtf" => rtf(bytes),
+        "eml" => eml(bytes),
+        "mbox" => mbox(bytes),
         _ => None,
     }?;
     (!text.trim().is_empty()).then_some(text)
@@ -143,9 +151,17 @@ fn truncate_chars(mut s: String, max: usize) -> String {
 /// line-for-line aligned with the file on disk, so the `file:line` locator on a
 /// hit points at the line a person opening the file will find the sentence on.
 fn html(bytes: &[u8]) -> Option<String> {
-    let source = String::from_utf8_lossy(bytes);
+    Some(html_text(&String::from_utf8_lossy(bytes)))
+}
+
+/// The body of [`html`], over text that has already been decoded.
+///
+/// Split out because an EPUB chapter arrives as a `String` from the archive
+/// reader rather than as bytes, and running it back through a lossy decode to
+/// reach the same scanner would be a copy for nothing.
+fn html_text(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
-    let mut rest = source.as_ref();
+    let mut rest = source;
 
     while let Some(at) = rest.find('<') {
         out.push_str(&rest[..at]);
@@ -173,7 +189,7 @@ fn html(bytes: &[u8]) -> Option<String> {
         rest = &rest[skipped..];
     }
     out.push_str(rest);
-    Some(decode_entities(&out))
+    decode_entities(&out)
 }
 
 /// How far to the end of `needle`, or to the end of the input when a document
@@ -721,6 +737,845 @@ fn attr(attrs: &str, key: &str) -> Option<String> {
         return Some(decode_entities(&value[1..end]));
     }
     None
+}
+
+// --------------------------------------------------------------------- EPUB
+
+/// An EPUB book as its chapters, in the order the book says to read them.
+///
+/// The spine is the whole reason this is not "every XHTML file in the archive".
+/// Chapters are named `part0012.xhtml` as often as `chapter-three.xhtml`, so
+/// sorted-by-filename is a different book — and often a book whose first
+/// chapter is the copyright page. The manifest maps an id to a file and the
+/// spine lists those ids in reading order; both are stated by the book rather
+/// than guessed from it.
+fn epub(bytes: &[u8]) -> Option<String> {
+    let mut zip = archive(bytes)?;
+    let mut budget = MAX_ARCHIVE_TEXT;
+
+    // The one path the specification fixes. Everything else in an EPUB is
+    // found by following this file.
+    let container = entry(&mut zip, "META-INF/container.xml", &mut budget)?;
+    let opf_path = rootfile(&container)?;
+    let opf = entry(&mut zip, &opf_path, &mut budget)?;
+
+    // Manifest hrefs are relative to the OPF, which normally sits a directory
+    // below the archive root.
+    let base = opf_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+
+    let mut out = String::new();
+    for href in spine(&opf) {
+        // A spine entry the archive does not hold is a broken book, not a
+        // reason to throw away the chapters that are fine.
+        let Some(source) = entry(&mut zip, &join(base, &href), &mut budget) else {
+            continue;
+        };
+        let text = html_text(&source);
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("# {href}\n"));
+        out.push_str(text.trim_end());
+        out.push('\n');
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Where `META-INF/container.xml` says the package document is.
+fn rootfile(xml: &str) -> Option<String> {
+    let mut path = None;
+    scan(xml, |event| {
+        if let Event::Open { name, attrs } = event
+            && local(name) == "rootfile"
+            && path.is_none()
+        {
+            path = attr(attrs, "full-path");
+        }
+    });
+    path.filter(|p| !p.is_empty())
+}
+
+/// Chapter hrefs in reading order: the spine's `idref`s, each resolved through
+/// the manifest to the file it names.
+fn spine(opf: &str) -> Vec<String> {
+    let mut manifest: Vec<(String, String)> = Vec::new();
+    let mut order: Vec<String> = Vec::new();
+
+    scan(opf, |event| {
+        if let Event::Open { name, attrs } = event {
+            match local(name) {
+                "item" => {
+                    if let (Some(id), Some(href)) = (attr(attrs, "id"), attr(attrs, "href")) {
+                        manifest.push((id, href));
+                    }
+                }
+                "itemref" => {
+                    if let Some(idref) = attr(attrs, "idref") {
+                        order.push(idref);
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    order
+        .iter()
+        .filter_map(|wanted| {
+            manifest
+                .iter()
+                .find(|(id, _)| id == wanted)
+                .map(|(_, href)| href.clone())
+        })
+        .collect()
+}
+
+/// An element's name without its namespace prefix. EPUB's own files are
+/// written both ways — `<package>` in one book, `<opf:package>` in the next —
+/// and the prefix is chosen by whoever built the book, so matching on it would
+/// read some books and not others.
+fn local(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+/// A manifest href resolved against the OPF's own directory.
+///
+/// ZIP entry names are literal strings, so a path still holding `..` or a
+/// percent escape matches nothing and the chapter silently disappears.
+fn join(base: &str, href: &str) -> String {
+    let href = unpercent(href.split('#').next().unwrap_or(href));
+    let mut parts: Vec<&str> = base.split('/').filter(|p| !p.is_empty()).collect();
+    for segment in href.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+/// `%20` back to a space. Only the escapes a filename can carry, because that
+/// is the only thing this is ever given.
+fn unpercent(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let mut out = Vec::with_capacity(s.len());
+    let mut rest = s.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        rest = tail;
+        if byte != b'%' || rest.len() < 2 {
+            out.push(byte);
+            continue;
+        }
+        match hex_byte(&rest[..2]) {
+            Some(decoded) => {
+                out.push(decoded);
+                rest = &rest[2..];
+            }
+            None => out.push(byte),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Two ASCII hex digits as the byte they name.
+fn hex_byte(pair: &[u8]) -> Option<u8> {
+    let text = std::str::from_utf8(pair).ok()?;
+    u8::from_str_radix(text, 16).ok()
+}
+
+// ---------------------------------------------------------------------- RTF
+
+/// Control words that open a group holding something other than the
+/// document's text.
+///
+/// This list is what makes a reader this small possible. RTF interleaves its
+/// prose with font and colour tables, style sheets, embedded pictures and
+/// revision metadata, and all of them live in a group named by its own first
+/// control word — so they can be skipped whole rather than filtered out of the
+/// text afterwards. `\*` covers every destination not named here, which is how
+/// a writer's private extensions stay out without this list having to know
+/// them.
+const RTF_SKIPPED: &[&str] = &[
+    "fonttbl",
+    "colortbl",
+    "stylesheet",
+    "info",
+    "pict",
+    "filetbl",
+    "listtable",
+    "listoverridetable",
+    "rsidtbl",
+    "generator",
+    "themedata",
+    "colorschememapping",
+    "latentstyles",
+    "datastore",
+    "objdata",
+    "xmlnstbl",
+];
+
+/// The 32 code points Windows-1252 puts where Latin-1 has control characters.
+///
+/// This range is the entire practical difference between the two, and it holds
+/// the characters a word processor actually emits — curly quotes, the dashes,
+/// the ellipsis. Reading them as Latin-1 controls turns every quotation mark in
+/// a document into an invisible character.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+/// An RTF document as the text a word processor would show.
+///
+/// RTF is a stream of three things: literal characters, `{}` groups, and
+/// `\control` words. Almost none of a real file is text, so the reader is
+/// mostly a list of what to throw away — the destinations in [`RTF_SKIPPED`],
+/// and every control word that is neither a line break nor a character.
+///
+/// It cannot loop: the scan only ever moves forward through the input, so
+/// unbalanced braces and a file that stops mid-control-word both end it.
+fn rtf(bytes: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(bytes);
+    // The signature, rather than the extension, decides. Something else saved
+    // as `.rtf` would otherwise be emitted as its own markup.
+    if !source.trim_start().starts_with("{\\rtf") {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut depth: i32 = 0;
+    // The depth at which a skipped destination opened, if one is open.
+    let mut skipping: Option<i32> = None;
+    // Characters still to be swallowed as a `\u` escape's ASCII fallback.
+    let mut fallback = 0usize;
+    // How many of them each `\u` is followed by, per `\uc`.
+    let mut fallback_width = 1usize;
+    let mut codepage = 1252u32;
+    // A group's first control word is the one that can name it a destination.
+    let mut at_group_start = false;
+
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                depth += 1;
+                at_group_start = true;
+                fallback = 0;
+            }
+            '}' => {
+                depth -= 1;
+                at_group_start = false;
+                fallback = 0;
+                if skipping.is_some_and(|opened| depth < opened) {
+                    skipping = None;
+                }
+            }
+            // A newline in the source is layout, not text: RTF marks its own
+            // line breaks with `\par` and `\line`.
+            '\r' | '\n' => at_group_start = false,
+            '\\' => {
+                let first_in_group = at_group_start;
+                at_group_start = false;
+                match control(&mut chars) {
+                    Control::Literal(c) => {
+                        emit(&mut out, c, &skipping, &mut fallback);
+                    }
+                    Control::Byte(byte) => {
+                        emit(
+                            &mut out,
+                            ansi_char(byte, codepage),
+                            &skipping,
+                            &mut fallback,
+                        );
+                    }
+                    Control::Word { word, param } => {
+                        if first_in_group && RTF_SKIPPED.contains(&word.as_str()) {
+                            skipping = Some(depth);
+                            continue;
+                        }
+                        match word.as_str() {
+                            // `\*` marks the group it opens as a destination
+                            // whose contents a reader that does not know the
+                            // word must not show.
+                            "*" => skipping = Some(depth),
+                            "ansicpg" => codepage = param.unwrap_or(1252) as u32,
+                            "uc" => fallback_width = param.unwrap_or(1).max(0) as usize,
+                            "u" => {
+                                // Negative parameters are how RTF writes a code
+                                // point above 32767 in a signed 16-bit field.
+                                let code = param.unwrap_or(0);
+                                let code = if code < 0 { code + 65536 } else { code };
+                                if let Some(c) = u32::try_from(code).ok().and_then(char::from_u32) {
+                                    emit(&mut out, c, &skipping, &mut fallback);
+                                }
+                                fallback = fallback_width;
+                            }
+                            "par" | "line" | "sect" | "page" | "row" => {
+                                emit(&mut out, '\n', &skipping, &mut fallback)
+                            }
+                            "tab" | "cell" => emit(&mut out, '\t', &skipping, &mut fallback),
+                            "emdash" => emit(&mut out, '\u{2014}', &skipping, &mut fallback),
+                            "endash" => emit(&mut out, '\u{2013}', &skipping, &mut fallback),
+                            "bullet" => emit(&mut out, '\u{2022}', &skipping, &mut fallback),
+                            "lquote" => emit(&mut out, '\u{2018}', &skipping, &mut fallback),
+                            "rquote" => emit(&mut out, '\u{2019}', &skipping, &mut fallback),
+                            "ldblquote" => emit(&mut out, '\u{201C}', &skipping, &mut fallback),
+                            "rdblquote" => emit(&mut out, '\u{201D}', &skipping, &mut fallback),
+                            _ => {}
+                        }
+                    }
+                    Control::End => break,
+                }
+            }
+            _ => {
+                at_group_start = false;
+                emit(&mut out, c, &skipping, &mut fallback);
+            }
+        }
+    }
+
+    let text: String = out
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Append one character, unless a skipped destination is open or the character
+/// is part of a `\u` escape's fallback.
+fn emit(out: &mut String, c: char, skipping: &Option<i32>, fallback: &mut usize) {
+    if skipping.is_some() {
+        return;
+    }
+    if *fallback > 0 {
+        // The fallback is the same character written again for a reader that
+        // cannot do Unicode. Showing both would double every accented letter.
+        *fallback -= 1;
+        return;
+    }
+    out.push(c);
+}
+
+/// What followed a backslash.
+enum Control {
+    /// An escaped literal: `\\`, `\{`, `\}`, a non-breaking space.
+    Literal(char),
+    /// A `\'hh` byte, still to be read through the document's codepage.
+    Byte(u8),
+    Word {
+        word: String,
+        param: Option<i32>,
+    },
+    /// The file ended mid-escape.
+    End,
+}
+
+/// One control sequence, consumed from the character stream.
+fn control(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Control {
+    let Some(&next) = chars.peek() else {
+        return Control::End;
+    };
+
+    if !next.is_ascii_alphabetic() {
+        chars.next();
+        return match next {
+            '\\' | '{' | '}' => Control::Literal(next),
+            '~' => Control::Literal('\u{00A0}'),
+            '_' => Control::Literal('\u{2011}'),
+            // A backslash directly before a line ending is how some writers
+            // spell a paragraph break.
+            '\r' | '\n' => Control::Literal('\n'),
+            '\'' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                match hex_byte(hex.as_bytes()) {
+                    Some(byte) => Control::Byte(byte),
+                    None => Control::End,
+                }
+            }
+            other => Control::Word {
+                word: other.to_string(),
+                param: None,
+            },
+        };
+    }
+
+    let mut word = String::new();
+    while let Some(&c) = chars.peek() {
+        if !c.is_ascii_alphabetic() {
+            break;
+        }
+        word.push(c);
+        chars.next();
+    }
+
+    let mut digits = String::new();
+    if chars.peek() == Some(&'-') {
+        digits.push('-');
+        chars.next();
+    }
+    while let Some(&c) = chars.peek() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        digits.push(c);
+        chars.next();
+    }
+
+    // A single space after a control word delimits it and is not text. A
+    // second space is.
+    if chars.peek() == Some(&' ') {
+        chars.next();
+    }
+
+    Control::Word {
+        word,
+        param: digits.parse().ok(),
+    }
+}
+
+/// A `\'hh` byte as a character, through the document's declared codepage.
+fn ansi_char(byte: u8, codepage: u32) -> char {
+    if byte < 0x80 {
+        return byte as char;
+    }
+    if codepage == 1252 && byte <= 0x9F {
+        return CP1252_HIGH[(byte - 0x80) as usize];
+    }
+    // Every other codepage is read as Latin-1, where the byte is the code
+    // point. Wrong for a Cyrillic or Greek document, and still far better than
+    // dropping the character: the surrounding text stays searchable either way.
+    byte as char
+}
+
+// --------------------------------------------------------------------- mail
+
+/// The headers kept, in the order they are emitted.
+///
+/// Fixed rather than "all of them": a real message carries thirty headers and
+/// twenty-five of them are routing, spam scoring and client fingerprints.
+/// Indexed, they bury the five a person is actually searching for under a
+/// screen of `X-` lines that are the same in every message they own.
+const MAIL_HEADERS: [&str; 5] = ["From", "To", "Cc", "Date", "Subject"];
+
+/// How deep a `multipart/*` may nest before the reader stops following it. Real
+/// mail reaches three; anything past this is a message built to be walked
+/// rather than read.
+const MAX_MAIL_DEPTH: usize = 8;
+
+/// One RFC 5322 message: its five headers, then its body.
+fn eml(bytes: &[u8]) -> Option<String> {
+    message(&String::from_utf8_lossy(bytes)).map(|(_, text)| text)
+}
+
+/// An mbox archive as every message in it, in file order.
+///
+/// The `From ` separator is the whole of the format's structure, so a file that
+/// does not open with one is not an mbox. Reading it as one anyway would
+/// produce a single message out of whatever it actually is, which looks like a
+/// successful parse and is not one.
+fn mbox(bytes: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(bytes);
+    if !source.starts_with("From ") {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut number = 0u32;
+    for raw in mbox_messages(&source) {
+        let Some((subject, text)) = message(&raw) else {
+            continue;
+        };
+        number += 1;
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("# Message {number}: {subject}\n"));
+        out.push_str(text.trim_end());
+        out.push('\n');
+    }
+    (!out.trim().is_empty()).then_some(out)
+}
+
+/// The archive split at its separators, each message without the separator
+/// line that introduced it.
+fn mbox_messages(source: &str) -> Vec<String> {
+    let mut messages = Vec::new();
+    let mut current = String::new();
+
+    for line in source.lines() {
+        if line.starts_with("From ") {
+            if !current.is_empty() {
+                messages.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        // A body line that would look like a separator was escaped with `>`
+        // when the archive was written. What the message said is the line
+        // without it.
+        let line = match line.strip_prefix('>') {
+            Some(rest) if rest.starts_with("From ") => rest,
+            _ => line,
+        };
+        current.push_str(line);
+        current.push('\n');
+    }
+
+    if !current.is_empty() {
+        messages.push(current);
+    }
+    messages
+}
+
+/// One message as its decoded subject and the text to index.
+fn message(raw: &str) -> Option<(String, String)> {
+    let (head, body) = split_head(raw)?;
+    let fields = fields(head);
+
+    let mut out = String::new();
+    let mut subject = String::new();
+    for name in MAIL_HEADERS {
+        let Some(value) = field(&fields, name) else {
+            continue;
+        };
+        let decoded = decode_words(value);
+        if name == "Subject" {
+            subject = decoded.clone();
+        }
+        out.push_str(&format!("{name}: {decoded}\n"));
+    }
+
+    out.push('\n');
+    out.push_str(body_text(&fields, body, 0).trim_end());
+    out.push('\n');
+
+    (!out.trim().is_empty()).then_some((subject, out))
+}
+
+/// The header block and the body, split at the first empty line.
+///
+/// A message with no empty line has no body by definition, and is far more
+/// likely to be a truncated file than a real message — so it is `None`, which
+/// is a skipped file rather than an error.
+fn split_head(raw: &str) -> Option<(&str, &str)> {
+    let crlf = raw.find("\r\n\r\n").map(|at| (at, 4));
+    let lf = raw.find("\n\n").map(|at| (at, 2));
+    let (at, width) = match (crlf, lf) {
+        (Some(a), Some(b)) => {
+            if a.0 <= b.0 {
+                a
+            } else {
+                b
+            }
+        }
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return None,
+    };
+    Some((&raw[..at], &raw[at + width..]))
+}
+
+/// The header block as name/value pairs, unfolded, names lowercased.
+fn fields(head: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for line in head.lines() {
+        // A line starting with whitespace continues the one before it. That is
+        // how a long Subject or a list of twenty recipients crosses lines, and
+        // reading it as a header of its own loses the rest of the value.
+        if line.starts_with([' ', '\t']) {
+            if let Some(last) = out.last_mut() {
+                last.1.push(' ');
+                last.1.push_str(line.trim());
+            }
+            continue;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            out.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+        }
+    }
+    out
+}
+
+fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    let wanted = name.to_ascii_lowercase();
+    fields
+        .iter()
+        .find(|(key, _)| *key == wanted)
+        .map(|(_, value)| value.as_str())
+}
+
+/// The readable text of one part, following `multipart/*` into its children.
+fn body_text(fields: &[(String, String)], body: &str, depth: usize) -> String {
+    let content_type = field(fields, "content-type").unwrap_or_default();
+    let mime = mime_of(content_type);
+
+    if mime.starts_with("multipart/") {
+        if depth >= MAX_MAIL_DEPTH {
+            return String::new();
+        }
+        return match parameter(content_type, "boundary") {
+            Some(boundary) => multipart(body, &boundary, depth + 1),
+            None => String::new(),
+        };
+    }
+
+    let encoding = field(fields, "content-transfer-encoding").unwrap_or_default();
+    let decoded = decode_transfer(body, encoding.trim());
+    match mime.as_str() {
+        "text/html" => html_text(&decoded),
+        _ => decoded,
+    }
+}
+
+/// A `multipart/*` body as the one part worth indexing, plus the names of any
+/// attachments.
+///
+/// The plain part is preferred over the HTML one because they say the same
+/// thing and the plain one says it without markup. The HTML one is the
+/// fallback rather than an addition, so a `multipart/alternative` is not
+/// indexed twice.
+fn multipart(body: &str, boundary: &str, depth: usize) -> String {
+    let mut plain: Option<String> = None;
+    let mut html: Option<String> = None;
+    let mut attachments: Vec<String> = Vec::new();
+
+    for part in parts(body, boundary) {
+        let Some((head, part_body)) = split_head(part) else {
+            continue;
+        };
+        let fields = fields(head);
+        let content_type = field(&fields, "content-type").unwrap_or_default();
+        let disposition = field(&fields, "content-disposition").unwrap_or_default();
+        let mime = mime_of(content_type);
+
+        if disposition
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("attachment")
+        {
+            // Named, never decoded. Running a base64 blob back through a second
+            // format reader is a matrix of its own, and the filename is both
+            // what makes the attachment findable and what a person remembers
+            // about it.
+            attachments.push(
+                parameter(disposition, "filename")
+                    .or_else(|| parameter(content_type, "name"))
+                    .map(|name| decode_words(&name))
+                    .unwrap_or_else(|| "attachment".to_string()),
+            );
+            continue;
+        }
+
+        let text = body_text(&fields, part_body, depth);
+        match mime.as_str() {
+            "text/html" if html.is_none() => html = Some(text),
+            "text/plain" | "" if plain.is_none() => plain = Some(text),
+            _ if mime.starts_with("multipart/") && plain.is_none() && !text.trim().is_empty() => {
+                plain = Some(text)
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = plain.or(html).unwrap_or_default().trim_end().to_string();
+    for name in attachments {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("# Attachment: {name}"));
+    }
+    out
+}
+
+/// The pieces between a boundary and the closing `--boundary--`.
+fn parts<'a>(body: &'a str, boundary: &str) -> Vec<&'a str> {
+    let delimiter = format!("--{boundary}");
+    let mut out = Vec::new();
+    for piece in body.split(delimiter.as_str()).skip(1) {
+        // Two dashes straight after the boundary close the multipart; the
+        // epilogue after it belongs to no part.
+        if piece.starts_with("--") {
+            break;
+        }
+        out.push(piece.trim_start_matches(['\r', '\n']));
+    }
+    out
+}
+
+/// The type and subtype of a Content-Type, lowercased, without its parameters.
+fn mime_of(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// One `; key=value` parameter of a header value, unquoted.
+fn parameter(value: &str, key: &str) -> Option<String> {
+    for piece in value.split(';').skip(1) {
+        let Some((name, raw)) = piece.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let raw = raw.trim();
+        let unquoted = raw
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or(raw);
+        return Some(unquoted.to_string());
+    }
+    None
+}
+
+/// A body decoded from whatever `Content-Transfer-Encoding` it declared.
+fn decode_transfer(body: &str, encoding: &str) -> String {
+    let bytes = match encoding.to_ascii_lowercase().as_str() {
+        "quoted-printable" => quoted_printable(body, false),
+        "base64" => base64(body),
+        // `7bit`, `8bit` and `binary` all mean the bytes are already the text.
+        _ => return body.to_string(),
+    };
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Quoted-printable, as bytes.
+///
+/// Bytes rather than a `String` because an encoded-word may be in a charset
+/// that is not UTF-8, and deciding that is the caller's job.
+fn quoted_printable(s: &str, underscore_is_space: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut rest = s.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        rest = tail;
+        match byte {
+            b'=' => {
+                // `=` at the end of a line is a soft break: the line continues
+                // and neither the marker nor the break is part of the text.
+                if let Some(after) = rest.strip_prefix(b"\r\n".as_slice()) {
+                    rest = after;
+                    continue;
+                }
+                if let Some(after) = rest.strip_prefix(b"\n".as_slice()) {
+                    rest = after;
+                    continue;
+                }
+                match rest.get(..2).and_then(hex_byte) {
+                    Some(decoded) => {
+                        out.push(decoded);
+                        rest = &rest[2..];
+                    }
+                    // A stray `=` that is not an escape is a literal one.
+                    None => out.push(b'='),
+                }
+            }
+            b'_' if underscore_is_space => out.push(b' '),
+            _ => out.push(byte),
+        }
+    }
+    out
+}
+
+/// Base64, as bytes, ignoring everything outside the alphabet.
+///
+/// Line breaks, padding and whitespace are all simply not alphabet characters,
+/// so skipping anything that is not one handles all three without a case for
+/// each.
+fn base64(s: &str) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut accumulator = 0u32;
+    let mut bits = 0u32;
+    for byte in s.bytes() {
+        let Some(value) = ALPHABET.iter().position(|&c| c == byte) else {
+            continue;
+        };
+        accumulator = (accumulator << 6) | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((accumulator >> bits) as u8);
+        }
+    }
+    out
+}
+
+/// RFC 2047 encoded-words in a header value, decoded.
+///
+/// A Subject with a non-ASCII character in it does not travel as that
+/// character. It travels as `=?utf-8?Q?caf=C3=A9?=`, which is exactly what a
+/// person searching for the word will never type.
+fn decode_words(value: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    let mut previous_was_word = false;
+
+    while let Some(at) = rest.find("=?") {
+        let (before, from) = rest.split_at(at);
+        match encoded_word(from) {
+            Some((text, tail)) => {
+                // Whitespace between two adjacent encoded-words is how a long
+                // value was folded, not part of what it says. Whitespace
+                // anywhere else is the value's own.
+                if !(previous_was_word && before.trim().is_empty()) {
+                    out.push_str(before);
+                }
+                out.push_str(&text);
+                rest = tail;
+                previous_was_word = true;
+            }
+            None => {
+                out.push_str(before);
+                out.push_str("=?");
+                rest = &from[2..];
+                previous_was_word = false;
+            }
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// One `=?charset?encoding?text?=` and whatever follows it.
+fn encoded_word(s: &str) -> Option<(String, &str)> {
+    let body = s.strip_prefix("=?")?;
+    // `?` has to be encoded inside the text, so the first `?=` is the end.
+    let end = body.find("?=")?;
+    let (inside, tail) = (&body[..end], &body[end + 2..]);
+
+    let mut parts = inside.splitn(3, '?');
+    let charset = parts.next()?.to_ascii_lowercase();
+    let encoding = parts.next()?.to_ascii_lowercase();
+    let text = parts.next()?;
+
+    let bytes = match encoding.as_str() {
+        "b" => base64(text),
+        "q" => quoted_printable(text, true),
+        _ => return None,
+    };
+
+    let decoded = match charset.as_str() {
+        "utf-8" | "utf8" | "us-ascii" | "ascii" => String::from_utf8_lossy(&bytes).into_owned(),
+        // Every other charset is read as Latin-1, where the byte is the code
+        // point. Wrong for a Cyrillic or Greek subject, and still better than
+        // leaving the raw `=?...?=` in place, which is searchable by nobody.
+        _ => bytes.iter().map(|&b| b as char).collect(),
+    };
+    Some((decoded, tail))
 }
 
 #[cfg(test)]
