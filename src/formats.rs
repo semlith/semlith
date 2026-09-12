@@ -770,18 +770,47 @@ fn epub(bytes: &[u8]) -> Option<String> {
         let Some(source) = entry(&mut zip, &join(base, &href), &mut budget) else {
             continue;
         };
-        let text = html_text(&source);
-        if text.trim().is_empty() {
+        let text = squeeze(&html_text(&source));
+        if text.is_empty() {
             continue;
         }
         if !out.is_empty() {
             out.push('\n');
         }
         out.push_str(&format!("# {href}\n"));
-        out.push_str(text.trim_end());
+        out.push_str(&text);
         out.push('\n');
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// A chapter's text with its blank lines collapsed.
+///
+/// The HTML reader keeps every newline in the source, including the ones inside
+/// the tags it removed, so that a hit's `file:line` still points at the line of
+/// the file on disk. That is exactly right for an `.html` file and pointless
+/// here: the chapters are concatenated, so a line number in the output is not a
+/// line number in anything a person can open. What is left is the cost — a
+/// chapter of prose arrives under thirty blank lines of stripped markup, and an
+/// excerpt of it is mostly whitespace.
+fn squeeze(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut blanks = 0;
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            blanks += 1;
+            continue;
+        }
+        // One blank line between paragraphs, never a screen of them.
+        if blanks > 0 && !out.is_empty() {
+            out.push('\n');
+        }
+        blanks = 0;
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 /// Where `META-INF/container.xml` says the package document is.

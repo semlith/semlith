@@ -580,6 +580,7 @@ fn main() -> Result<()> {
             // The current directory is the anchor, the way it is for `index`
             // with no path: "add this to the store I am working in".
             let choice = home::resolve(&cli.store, &cwd, name.as_deref())?;
+            let choice = resolve_for_add(choice, &cli.store, name.as_deref())?;
             if let Some(hint) = choice.hint() {
                 eprintln!("{hint}");
             }
@@ -804,6 +805,59 @@ fn human_duration(secs: f32) -> String {
         format!("{:.0}m", secs / 60.0)
     } else {
         format!("{secs:.0}s")
+    }
+}
+
+/// The store `semlith add` writes to, when nothing covers the current
+/// directory.
+///
+/// `index` is free to create a store named after wherever it is run, because
+/// that directory is the thing being indexed. `add` is not: the URL is what is
+/// being added, and the shell's current directory has nothing to do with it. So
+/// a `New` choice here would silently create a store named after a directory
+/// the user never mentioned — and, because the root recorded is the store's own
+/// downloads folder, the next `add` from the same place would not find it and
+/// would create another one beside it. Running `semlith add` twice from `/tmp`
+/// produced stores called `tmp` and `tmp-2`, neither of which anyone asked for.
+///
+/// With exactly one store in the home, that is plainly the one meant. With
+/// several, or none, say so rather than guess.
+fn resolve_for_add(
+    choice: home::Choice,
+    flags: &[PathBuf],
+    name: Option<&str>,
+) -> Result<home::Choice> {
+    // An explicit --store or --name is the user saying which, so it stands.
+    if !matches!(choice, home::Choice::New { .. }) || !flags.is_empty() || name.is_some() {
+        return Ok(choice);
+    }
+
+    let registry = home::Registry::load()?;
+    let mut names = registry.stores.keys();
+    match (names.next(), names.next()) {
+        (Some(only), None) => {
+            let only = only.clone();
+            Ok(home::Choice::Registered {
+                dir: home::Registry::dir_of(&only),
+                name: only,
+            })
+        }
+        (None, _) => bail!(
+            "there is no store to add to yet — run `semlith index <path>` first, \
+             or give this one a name with `semlith add <url> --name <store>`"
+        ),
+        _ => bail!(
+            "nothing indexes this directory, and there are {} stores to choose from: {}. \
+             Name one with `--store <dir>` or `--name <store>`, or run this from a \
+             directory one of them covers",
+            registry.stores.len(),
+            registry
+                .stores
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
