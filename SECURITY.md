@@ -54,6 +54,24 @@ store holds secrets.
 hidden files, but that is a convenience, not a security boundary. Check what
 `semlith files` lists if you are unsure.
 
+**`semlith start` listens on a port, and only on this machine.** Since 0.9.0 the
+daemon serves a portal over HTTP. It binds `127.0.0.1` and there is no flag to
+change that. Every request needs the per-run token the daemon prints once in its
+URL, carried in a `SameSite=Strict; HttpOnly` cookie; without it the answer is
+401 and an empty body. The `Host` header must be `localhost`, `127.0.0.1` or
+`::1`, so a page on another origin cannot reach the daemon through a name that
+resolves to loopback — every other `Host` gets 400 before any route runs. Every
+response carries a `Content-Security-Policy` allowing only `'self'`, and no CORS
+header is sent anywhere. Every byte the page loads is compiled into the binary,
+so it fetches nothing. `--airgap`, or `SEMLITH_AIRGAP=1`, refuses even the model
+download and exits naming the cache path.
+
+The token grants full access to every store the daemon opened. It lives in the
+URL the daemon prints and in `daemon.json` inside each store directory, which is
+written `0600` on Unix. Anyone who can read that file can read the token, and
+therefore the stores — the same trust boundary as the store itself. The Privacy
+page has a Rotate button that invalidates the current token immediately.
+
 **The MCP server exposes the whole store.** `semlith mcp` speaks over stdio to
 whatever process launched it and will return any indexed chunk that matches a
 query. Scope this with `--store`: point an agent at a store containing only what
@@ -72,12 +90,27 @@ If you are looking for somewhere to dig, these are the honest weak points:
 - **Memory during indexing.** Embedding batches are bounded deliberately; an
   input that defeats those bounds and drives the process into swap is a real
   bug, and we would like to know about it.
+- **The hand-written HTTP server.** `src/http.rs` parses requests itself rather
+  than through a crate. Request line and header parsing, the chunked response
+  writer, the cookie reader and the `Host` check are all semlith's code, and a
+  request that gets past the token or the `Host` check, or that wedges a worker
+  thread, is exactly the kind of thing worth reporting. Header and body sizes
+  are capped and sockets carry read and write timeouts, but this is new code.
+- **The directory-listing route.** The portal's folder picker can list
+  directories under `$HOME`. It canonicalises before checking containment, so
+  `..` and symlinks are resolved first — a path that escapes that check is a
+  bug worth reporting.
 
 ## Out of scope
 
 - The store being readable by other users on the same machine. Set directory
   permissions appropriately; semlith does not attempt to protect against a
-  local attacker who can already read your files.
+  local attacker who can already read your files. The daemon's token is in that
+  same category: it sits in `daemon.json` inside the store directory, and a
+  local attacker who can read the store does not need the token anyway.
+- Another process on this machine connecting to the daemon with a token it
+  obtained legitimately. The token guards against a web page and a stray
+  process, not against a user who can already read your home directory.
 - Vulnerabilities in dependencies that do not affect semlith's use of them.
   Report those upstream, though a heads-up here is welcome.
 - Retrieval returning an irrelevant or unexpected chunk. That is a quality

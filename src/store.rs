@@ -363,6 +363,26 @@ pub fn chunk(db: &Connection, id: u64) -> Result<Option<ChunkRow>> {
         .optional()?)
 }
 
+/// One row per indexed file: path, bytes, chunks, and the last line any chunk
+/// of it covers.
+///
+/// The Files view's row, in one query. Asking per file would be one statement
+/// per file, and a corpus is tens of thousands of them.
+pub fn file_rows(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<(String, i64, i64, i64)>> {
+    let (predicate, binds) = glob_predicate(groups);
+    let sql = format!(
+        "SELECT f.path, f.bytes, COUNT(c.id), COALESCE(MAX(c.end_line), 0) \
+         FROM files f LEFT JOIN chunks c ON c.file_id = f.id \
+         WHERE {predicate} GROUP BY f.id ORDER BY f.path"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.into_iter().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn all_paths(db: &Connection) -> Result<Vec<String>> {
     filtered_paths(db, &[])
 }

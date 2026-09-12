@@ -40,6 +40,9 @@ Think of it as a semantic cache for everything your agent needs to know.
   changed, and drops files that disappeared.
 - **Agent-native.** Ships an MCP server, so any MCP-capable agent can call it
   as a tool.
+- **Visible.** `semlith start` keeps every store current and serves a portal on
+  `127.0.0.1` — your corpus, your searches and your agents' config, in a page
+  that is compiled into the binary and loads with the cable unplugged.
 
 ## Install
 
@@ -97,8 +100,8 @@ OpenBLAS step above you missed.
 ## Quick start
 
 ```sh
-# Index a directory. Creates ./.semlith and downloads the embedding model
-# (~52 MB) the first time.
+# Index a directory. Creates a store under ~/.semlith and downloads the
+# embedding model (~52 MB) the first time.
 semlith index ~/notes ~/papers ./src
 
 # Ask it something.
@@ -106,6 +109,9 @@ semlith search "how does the retry backoff work"
 
 # What's in there?
 semlith stats
+
+# Or see it, and keep it current as you save:
+semlith start
 ```
 
 Output looks like this:
@@ -132,14 +138,24 @@ just those lines instead of the whole file.
 | `semlith stats` | File count, chunk count, model, shard count and memory budget, index size. |
 | `semlith files` | List indexed files. |
 | `semlith forget <PATH>` | Drop one file from the store. |
-| `semlith mcp` | Run as an MCP server over stdio. |
+| `semlith start [PATHS...]` | Own every registered store, keep them current, and serve the portal on `127.0.0.1:7365`. `--port`, `--debounce`, `--airgap`. |
+| `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
+| `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
 | `semlith languages` | List the language names `--lang` accepts. |
 
-Global: `--store <DIR>` picks the store directory (default `.semlith`, or the
-`SEMLITH_STORE` environment variable). `search`, `stats`, `files` and `mcp` read,
-so the flag is repeatable and they cover every store named; `index`, `watch` and
+Global: `--store <DIR>` picks the store directory, and `SEMLITH_STORE` does the
+same from the environment. `search`, `stats`, `files` and `mcp` read, so the
+flag is repeatable and they cover every store named; `index`, `watch` and
 `forget` write, so they take exactly one.
+
+With no flag, semlith resolves a store itself, in this order: an existing
+`.semlith` beside the directory in question; a registered store whose root is
+that directory or an ancestor of it; otherwise a new store under
+`~/.semlith/stores/`, registered against that directory. `semlith mcp` and
+`semlith start` are the exception — with no flag they open *every* registered
+store, because a client stanza cannot know which directory the agent will be
+started in.
 
 ## Indexing a large corpus
 
@@ -220,6 +236,109 @@ next startup pass, not retroactively; network filesystems do not deliver
 reliable events and are not supported; and on Linux a very large tree can
 exhaust the per-user inotify watch limit, which is reported on stderr rather
 than leaving a watcher that is running but watching nothing.
+
+## The portal
+
+`semlith start` is one process that owns every store you have indexed. It takes
+each store's write lock, watches its roots and re-embeds files as they are
+saved — exactly as `semlith watch` does — and serves a page you can open:
+
+```sh
+semlith start
+```
+
+```
+http://127.0.0.1:7365/?token=6f1c…
+semlith: listening on 127.0.0.1:7365
+semlith: opened api at /Users/you/.semlith/stores/api — watching 1 root(s)
+```
+
+That one URL is printed once, on stdout. Everything else the daemon says goes
+to stderr, and the token never appears there.
+
+The page has the stores with their counts and the watcher's live event feed,
+the indexed files with the same `path`/`ext`/`lang` filters the CLI has and the
+reader that parsed each one, a search box running the same fused search the CLI
+and the MCP tools run, a folder picker that indexes into a store with progress
+streaming as it goes, the client stanzas for every agent, a Privacy page, and an
+About page. With no store yet it opens on a welcome screen instead.
+
+**It is not on the network.** `127.0.0.1` is the only address it binds and there
+is no flag to change that. Every request needs the per-run token, held in a
+`SameSite=Strict; HttpOnly` cookie — without it, 401 and an empty body. The
+`Host` header must be `localhost`, `127.0.0.1` or `::1`; anything else gets 400.
+Every response carries a `Content-Security-Policy` allowing only `'self'`, and
+no CORS header is sent anywhere. Every byte the page loads — the script, the
+stylesheet, the IBM Plex faces — is compiled into the binary, so it opens with
+the cable unplugged. The Privacy page shows all of it, with a packet-capture
+recipe if you would rather check than be told.
+
+`--airgap`, or `SEMLITH_AIRGAP=1`, is the check that makes that falsifiable: it
+refuses to download model weights at all and exits naming the cache path, so a
+machine that pre-seeded `SEMLITH_MODEL_CACHE` can prove nothing was fetched.
+
+### One writer, and why that stopped being a problem
+
+A store has one writer. Before 0.9.0 that meant choosing: `semlith watch`
+holding the lock so your store stayed current, *or* an agent able to call
+`semlith_index`. The second one was refused for as long as the first ran.
+
+The daemon ends that without weakening the rule. It *is* the writer, and
+everything else is a client of it: when a daemon is running, `semlith mcp`
+finds it and forwards each call over loopback, so an agent's `semlith_index`
+and the watcher share one writer and never collide. Your client configuration
+does not change — it is still `semlith mcp` — and when no daemon is running,
+`semlith mcp` opens the stores itself exactly as it always did.
+
+```sh
+semlith start                 # in one terminal, or as a login item
+                              # your agent keeps using `semlith mcp`
+```
+
+The port is 7365 and it does not move. If something is already on it the daemon
+exits saying so rather than quietly picking another, because a URL that wanders
+is not a bookmark. `--port` or `SEMLITH_PORT` changes it deliberately.
+
+## Where stores live
+
+Since 0.9.0 a new store goes in `~/.semlith/stores/<name>`, and
+`~/.semlith/registry.json` records which directories it covers:
+
+```sh
+cd ~/work/api && semlith index .     # ~/.semlith/stores/api
+semlith index ~/work/cli             # ~/.semlith/stores/cli
+semlith mcp                          # serves both, with no path anywhere
+```
+
+`SEMLITH_HOME` moves the home. `--name` names a store explicitly; two
+directories called `api` get `api` and `api-2` rather than being merged.
+
+With no `--store` flag, semlith resolves a store in this order:
+
+1. `--store` or `SEMLITH_STORE`, which always win.
+2. A `.semlith` directory beside the corpus, if there is one. **This is what
+   keeps every setup written before 0.9.0 working unchanged** — a local store
+   still wins, and the only difference you see is a line on stderr saying
+   `adopt` would move it into the home.
+3. A registered store whose root is this directory or an ancestor of it, so
+   running from `src/` reaches the store that covers the repository.
+4. Otherwise a new store in the home, registered against this directory.
+
+`semlith mcp` and `semlith start` are the exception: with no flag they open
+*every* registered store, because a client stanza cannot know which directory
+your agent will be started in.
+
+To move an existing store into the home:
+
+```sh
+semlith adopt ./.semlith
+```
+
+Nothing is re-embedded and nothing about the store changes — `semlith stats` is
+identical before and after, apart from where it says the store is. If a corpus
+moved rather than the store, `semlith adopt ~/.semlith/stores/api --root
+~/work/api-renamed` re-points it.
+
 
 ## Searching part of a corpus
 
@@ -354,7 +473,17 @@ subsystem instead of the whole repository:
 ```
 
 One server can hold several stores, which is how an agent working across
-repositories asks one question instead of one per repository:
+repositories asks one question instead of one per repository. Since 0.9.0 that
+is what a bare `semlith mcp` already does — it opens every store in the
+registry — so indexing a second repository needs no edit to any client's
+configuration:
+
+```sh
+semlith index ~/work/api
+semlith index ~/work/cli
+```
+
+To pin a server to a chosen set instead, name them:
 
 ```json
 {
@@ -396,18 +525,28 @@ required JSON-RPC batching, and a client pinned to it is answered with
 
 ### Setting it up in your client
 
-Every snippet below runs `semlith --store /path/to/.semlith mcp`. Repeat
-`--store` to open several stores, or set `SEMLITH_STORE` to a
-path-separator-delimited list instead. `cargo install semlith` puts the binary
-at `~/.cargo/bin/semlith`, which is on your `PATH` in a shell but often not in
-an editor launched from a desktop icon — those entries use the absolute path.
+Every snippet below runs `semlith mcp`, with no path in it. The server opens
+every store registered in `~/.semlith/registry.json` — which is every store
+`semlith index` has made since 0.9.0 — plus a `.semlith` beside the directory
+the agent was started in, if there is one. Index another repository and the
+agent that is already configured can search it, with no edit to any of these
+files.
+
+`--store` still works and still wins when it is given: repeat it to open a
+chosen set of stores, or set `SEMLITH_STORE` to a path-separator-delimited
+list. A store written before 0.9.0 keeps working where it is, and `semlith
+adopt ./.semlith` moves it into the home so these stanzas reach it.
+
+`cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
+your `PATH` in a shell but often not in an editor launched from a desktop icon
+— those entries use the absolute path.
 
 **Claude Code** — `claude mcp add`, or a committed `.mcp.json` in the project
-root. The `--` matters: without it Claude Code reads `--store` as one of its own
-flags.
+root. The `--` matters: without it Claude Code reads anything starting with a
+dash as one of its own flags.
 
 ```sh
-claude mcp add semlith -- semlith --store /path/to/.semlith mcp
+claude mcp add semlith -- semlith mcp
 ```
 
 ```json
@@ -415,7 +554,7 @@ claude mcp add semlith -- semlith --store /path/to/.semlith mcp
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -430,7 +569,7 @@ Developer → Edit Config opens it.
   "mcpServers": {
     "semlith": {
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -442,10 +581,10 @@ and the desktop app. TOML, and the table is `mcp_servers` with an underscore.
 ```toml
 [mcp_servers.semlith]
 command = "semlith"
-args = ["--store", "/path/to/.semlith", "mcp"]
+args = ["mcp"]
 ```
 
-`codex mcp add semlith -- semlith --store /path/to/.semlith mcp` writes the same
+`codex mcp add semlith -- semlith mcp` writes the same
 table.
 
 **GitHub Copilot in VS Code** — `.vscode/mcp.json` for a workspace, or the
@@ -458,7 +597,7 @@ profile copy that `MCP: Open User Configuration` opens. The root key is
     "semlith": {
       "type": "stdio",
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -473,7 +612,7 @@ session. Its name for a stdio server is `local`, not `stdio`.
     "semlith": {
       "type": "local",
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"],
+      "args": ["mcp"],
       "tools": ["*"]
     }
   }
@@ -488,7 +627,7 @@ session. Its name for a stdio server is `local`, not `stdio`.
     "semlith": {
       "type": "stdio",
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -501,7 +640,7 @@ session. Its name for a stdio server is `local`, not `stdio`.
   "mcpServers": {
     "semlith": {
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -515,21 +654,21 @@ servers, and keys them under `context_servers`.
   "context_servers": {
     "semlith": {
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
 ```
 
 **Gemini CLI** — `~/.gemini/settings.json`, or
-`gemini mcp add semlith semlith --store /path/to/.semlith mcp`.
+`gemini mcp add semlith semlith mcp`.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -544,7 +683,7 @@ Assistant → Model Context Protocol.
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
@@ -560,7 +699,7 @@ rather than guessing.
   "mcpServers": {
     "semlith": {
       "command": "semlith",
-      "args": ["--store", "/path/to/.semlith", "mcp"],
+      "args": ["mcp"],
       "disabled": false,
       "autoApprove": []
     }
@@ -579,7 +718,7 @@ extensions:
     name: semlith
     enabled: true
     cmd: semlith
-    args: ["--store", "/path/to/.semlith", "mcp"]
+    args: ["mcp"]
     timeout: 300
 ```
 

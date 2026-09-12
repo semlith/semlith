@@ -67,6 +67,34 @@ const INDEX_BUDGET: Duration = Duration::from_secs(45);
 /// the protocol defines a shape for.
 type Fail = (i64, String, Option<Value>);
 
+/// Where a write goes when this process is not the one holding the lock.
+///
+/// `semlith mcp` in 0.8.0 wrote through its own `Fleet`, which is why an agent
+/// and a watcher could not both be pointed at one store. When a daemon is
+/// running it is the writer, and the two write tools are handed to it instead;
+/// everything else still reads through the `Fleet`, because a reader is allowed
+/// to exist alongside the writer and always was.
+pub trait Writer: Send + Sync {
+    /// `semlith_index`, returning the text the tool reports.
+    fn index(&self, store: Option<&str>, paths: &[PathBuf]) -> Result<String, String>;
+    /// `semlith_forget`, returning the text the tool reports.
+    fn forget(&self, store: Option<&str>, path: &str) -> Result<String, String>;
+}
+
+/// Answer one JSON-RPC request. `None` for a notification, which must not be
+/// answered at all.
+///
+/// The whole protocol lives behind this one function, so a request that arrives
+/// over stdio and the same request forwarded over loopback are answered by the
+/// same code — which is what makes "every supported revision works through the
+/// proxy" true by construction rather than by a second implementation agreeing.
+pub fn answer(stores: &mut Fleet, writer: Option<&dyn Writer>, request: &Value) -> Option<Value> {
+    let id = request.get("id").cloned()?;
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = request.get("params").cloned().unwrap_or(json!({}));
+    Some(reply(&id, dispatch(stores, writer, method, &params)))
+}
+
 /// Read requests from `input` until EOF, answering on `output`.
 pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) -> Result<()> {
     stores.quiet = true;
@@ -96,7 +124,7 @@ pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) ->
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let result = dispatch(stores, method, &params);
+        let result = dispatch(stores, None, method, &params);
         respond(&mut output, &id, result)?;
     }
     Ok(())
@@ -123,7 +151,12 @@ fn modernize(mut result: Value, cacheable: Option<&str>) -> Value {
     result
 }
 
-fn dispatch(stores: &mut Fleet, method: &str, params: &Value) -> Result<Value, Fail> {
+fn dispatch(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    method: &str,
+    params: &Value,
+) -> Result<Value, Fail> {
     let declared = declared_version(params);
 
     // Checked before the method runs, so a client on a revision we do not
@@ -191,7 +224,7 @@ fn dispatch(stores: &mut Fleet, method: &str, params: &Value) -> Result<Value, F
         }
 
         "tools/call" => {
-            let called = call_tool(stores, params)?;
+            let called = call_tool(stores, writer, params)?;
             Ok(if modern {
                 modernize(called, None)
             } else {
@@ -383,7 +416,11 @@ fn tools(stores: &Fleet) -> Value {
     ])
 }
 
-fn call_tool(stores: &mut Fleet, params: &Value) -> Result<Value, Fail> {
+fn call_tool(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    params: &Value,
+) -> Result<Value, Fail> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -491,6 +528,16 @@ fn call_tool(stores: &mut Fleet, params: &Value) -> Result<Value, Fail> {
             if roots.is_empty() {
                 return Err((-32602, "missing required argument: path".into(), None));
             }
+            if let Some(writer) = writer {
+                let named = strings(&args, "store");
+                return Ok(
+                    match writer.index(named.first().map(String::as_str), &roots) {
+                        Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+                        Err(e) => tool_error(&e),
+                    },
+                );
+            }
+
             let store = match stores.writable(&strings(&args, "store")) {
                 Ok(s) => s,
                 Err(e) => return Ok(tool_error(&e.to_string())),
@@ -537,6 +584,16 @@ fn call_tool(stores: &mut Fleet, params: &Value) -> Result<Value, Fail> {
                     )));
                 }
             };
+            if let Some(writer) = writer {
+                let named = strings(&args, "store");
+                return Ok(
+                    match writer.forget(named.first().map(String::as_str), &path) {
+                        Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+                        Err(e) => tool_error(&e),
+                    },
+                );
+            }
+
             let store = match stores.writable(&strings(&args, "store")) {
                 Ok(s) => s,
                 Err(e) => return Ok(tool_error(&e.to_string())),
@@ -621,7 +678,13 @@ fn render(hits: &[crate::Hit]) -> String {
 }
 
 fn respond(out: &mut impl Write, id: &Value, result: Result<Value, Fail>) -> std::io::Result<()> {
-    let msg = match result {
+    writeln!(out, "{}", reply(id, result))?;
+    out.flush()
+}
+
+/// One JSON-RPC response object.
+fn reply(id: &Value, result: Result<Value, Fail>) -> Value {
+    match result {
         Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
         Err((code, message, data)) => {
             let mut error = json!({ "code": code, "message": message });
@@ -630,9 +693,7 @@ fn respond(out: &mut impl Write, id: &Value, result: Result<Value, Fail>) -> std
             }
             json!({ "jsonrpc": "2.0", "id": id, "error": error })
         }
-    };
-    writeln!(out, "{msg}")?;
-    out.flush()
+    }
 }
 
 #[cfg(test)]

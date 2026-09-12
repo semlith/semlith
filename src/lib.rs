@@ -16,15 +16,22 @@
 //! them to text with one SQLite lookup each.
 
 pub mod chunk;
+pub mod clients;
+pub mod daemon;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
+pub mod home;
+pub mod http;
 pub mod index;
 pub mod lock;
 pub mod mcp;
+pub mod portal;
+pub mod proxy;
+pub mod routes;
 pub mod store;
 pub mod watch;
 
@@ -409,6 +416,18 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.index_within_held(roots, budget, on_file)
+    }
+
+    /// [`Semlith::index_paths_within`] without taking the lock, for a caller
+    /// that already holds it — `semlith start` holds it for the daemon's life,
+    /// and its queue runs on the thread that holds it.
+    pub(crate) fn index_within_held(
+        &mut self,
+        roots: &[PathBuf],
+        budget: std::time::Duration,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
         self.index_set(walk(roots), true, Some(deadline), on_file)
     }
@@ -644,6 +663,12 @@ impl Semlith {
         // lands while `semlith watch` is saving leaves the index and the
         // database disagreeing about which chunks exist.
         let _lock = lock::StoreLock::acquire(&self.dir)?;
+        self.forget_held(path)
+    }
+
+    /// [`Semlith::forget`] without taking the lock, for a caller that already
+    /// holds it.
+    pub(crate) fn forget_held(&mut self, path: &Path) -> Result<usize> {
         let key = canonical(path).to_string_lossy().into_owned();
         let ids = store::delete_file(&self.db, &key)?;
         for id in &ids {
@@ -902,35 +927,6 @@ pub fn model_cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     base.join(".cache").join("semlith").join("models")
-}
-
-/// Default store location: `.semlith` beside whatever you are indexing.
-pub fn default_store_dir() -> PathBuf {
-    // Always at least one element, so the index is not a panic in waiting.
-    store_dirs(&[]).remove(0)
-}
-
-/// The stores a command should use: the `--store` flags if any were given, else
-/// whatever `SEMLITH_STORE` names, else `.semlith` in the current directory.
-///
-/// `SEMLITH_STORE` is split the way `PATH` is — `:` on Unix, `;` on Windows —
-/// so an agent's MCP server definition can name several stores in one variable
-/// without a wrapper script. A single value therefore still means exactly what
-/// it always meant, and the price is that a store path containing the
-/// platform's own separator has to be passed as a flag instead.
-pub fn store_dirs(flags: &[PathBuf]) -> Vec<PathBuf> {
-    if !flags.is_empty() {
-        return flags.to_vec();
-    }
-    if let Some(raw) = std::env::var_os("SEMLITH_STORE") {
-        let dirs: Vec<PathBuf> = std::env::split_paths(&raw)
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect();
-        if !dirs.is_empty() {
-            return dirs;
-        }
-    }
-    vec![PathBuf::from(".semlith")]
 }
 
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns

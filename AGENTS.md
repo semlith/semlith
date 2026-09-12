@@ -78,6 +78,13 @@ Module responsibilities:
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
 | `src/mcp.rs` | Hand-rolled stdio JSON-RPC MCP server |
+| `src/home.rs` | The store home, `registry.json`, and which store a command resolves to |
+| `src/http.rs` | Hand-rolled synchronous HTTP/1.1: the token, `Host` and CSP rules live here |
+| `src/daemon.rs` | `semlith start`: the locks, the watcher threads, the write queue |
+| `src/routes.rs` | The daemon's routes, as adapters over `Fleet` and the queue |
+| `src/portal/` | The page itself, `include_bytes!`d — HTML, CSS, JS, IBM Plex |
+| `src/proxy.rs` | `semlith mcp` forwarding to a running daemon |
+| `src/clients.rs` | The README's client stanzas, parsed, so the portal shows the tested text |
 | `src/main.rs` | Clap parsing and human output formatting |
 
 ### Invariants worth knowing before editing
@@ -86,7 +93,14 @@ Module responsibilities:
   not comparable; switching means delete and re-index. Changing
   `embed::GRANITE_NAME` orphans every store that recorded the old string.
 - **One writer per store.** `watch` holds the lock for its whole life, so a
-  concurrent `index` on that store is refused by design.
+  concurrent `index` on that store is refused by design. `semlith start` is the
+  same rule taken further: it is the writer for every store it opened, and the
+  portal and a forwarded `semlith_index` reach it through the store's queue —
+  `Semlith::index_within_held` and `forget_held` exist for exactly that caller.
+- **`semlith mcp` forwards when a daemon is running**, found through the
+  discovery file beside the lock, and the daemon answers with the same
+  `mcp::answer` the stdio server runs. Every failure to reach one — no file, an
+  unreadable file, a dead port — falls back to opening the store directly.
 - **`mcp.rs`: stdout is protocol, stderr is diagnostics.** Never print to
   stdout outside the JSON-RPC framing, and keep `quiet` set on the Fleet there.
 - The MCP server speaks two protocol eras at once, decided per message by the
@@ -98,7 +112,8 @@ Module responsibilities:
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
 
-Env overrides: `SEMLITH_STORE` (PATH-style separated), `SEMLITH_EMBED_THREADS`,
+Env overrides: `SEMLITH_STORE` (PATH-style separated), `SEMLITH_HOME`,
+`SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`,
 `SEMLITH_INDEX_MEMORY`, `SEMLITH_SHARD_VECTORS`, `SEMLITH_CHECKPOINT_SECS`,
 `SEMLITH_MODEL_CACHE`, `SEMLITH_MCP_INDEX_BUDGET`.
 
@@ -124,9 +139,37 @@ contract lives in `docs/compatibility.md`.
 
 ## Deliberately out of scope
 
-Discuss in an issue before building: a server/daemon mode or anything listening
-on a port, hosted embedding APIs, config files. Local means local; flags and env
-vars have been enough.
+**Local means local, and it is checkable.** Since 0.9.0 semlith does listen on a
+port — `semlith start` serves the portal — under rules that are tested rather
+than stated, and that are not up for relaxation without an issue like
+[#41](https://github.com/semlith/semlith/issues/41):
+
+- `127.0.0.1` is the only bind address, and there is no flag to change it.
+- Every request needs the per-run token, as a `SameSite=Strict; HttpOnly`
+  cookie. Without it: 401 and an empty body.
+- The `Host` header must be `localhost`, `127.0.0.1` or `::1`. Otherwise: 400.
+- Every response carries a `Content-Security-Policy` allowing only `'self'`, and
+  no CORS header is emitted anywhere.
+- Every byte the portal loads is `include_bytes!`d into the binary. No CDN, no
+  build step, no npm. The page loads with the cable unplugged.
+- No telemetry, no analytics, no update check. The one download that exists is
+  the embedding model, once, on first index — and `--airgap` refuses even that.
+
+Discuss in an issue before building: any other bind address, MCP over HTTP as an
+endpoint agents connect to directly, hosted embedding APIs, any outbound
+connection, or a user-editable config file. `~/.semlith/registry.json` is not
+one: it is tool-written state, like `store.db` and the lock file. semlith writes
+it, nothing documents a way to hand-edit it, and `--store`/`SEMLITH_STORE`
+remain the only way a user names a store.
+
+## Portal parity
+
+**A CLI command or an MCP tool is not done until its portal view exists.** Every
+release that adds one adds the view in the same release; parity debt is not a
+thing this repository carries. `tests/portal.rs` is the gate: it reads the
+subcommand list out of `--help` and the tool list off a running daemon, and
+fails if any of them — bar `start` and `mcp`, which have their reasons recorded
+there — has no route.
 
 ## Release
 

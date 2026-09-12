@@ -1,0 +1,658 @@
+//! The store home, and how a command decides which store it means.
+//!
+//! Before 0.9.0 a store was a `.semlith` directory beside the corpus, and the
+//! only way to name one was `--store`. That made every client configuration
+//! carry a path, and it put a store one forgotten `.gitignore` line away from
+//! being committed into the repository it indexes.
+//!
+//! From 0.9.0 a new store is created under `~/.semlith/stores/<name>`, and
+//! `registry.json` beside it records which roots each store covers. The
+//! registry is the single source of truth three things read: `semlith start`
+//! opens and watches every store in it, the portal lists them, and a client
+//! stanza becomes `semlith mcp` with no arguments.
+//!
+//! The layout inside a store directory does not change. A store written by
+//! 0.8.0 opens unchanged wherever it sits, which is why the resolution order
+//! below prefers an existing `./.semlith` over the home: nobody's setup changes
+//! until they run `semlith adopt`.
+//!
+//! The registry is written by semlith and by nothing else. It is state, not
+//! configuration — there is no supported way to hand-edit it, and a field it
+//! does not recognise is dropped on the next write.
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Overrides the store home. One greppable path on every platform beats three
+/// platform conventions, and anyone who disagrees sets this.
+pub const HOME_ENV: &str = "SEMLITH_HOME";
+
+/// Where stores live: `~/.semlith`, or whatever [`HOME_ENV`] names.
+pub fn home() -> PathBuf {
+    if let Some(dir) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(".semlith")
+}
+
+/// The directory holding one subdirectory per store.
+pub fn stores_root() -> PathBuf {
+    home().join("stores")
+}
+
+/// The registry file. Model weights deliberately do not live under the home:
+/// a cache is deletable and a store is not, so weights stay in
+/// `~/.cache/semlith/models`.
+pub fn registry_path() -> PathBuf {
+    home().join("registry.json")
+}
+
+/// What a store directory is called when it sits beside its corpus.
+pub const LOCAL_DIR: &str = ".semlith";
+
+/// One store's entry in the registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Entry {
+    /// Every directory this store indexes, canonical. `semlith start` watches
+    /// all of them; a root that no longer exists is reported, never fatal.
+    pub roots: Vec<PathBuf>,
+    /// The embedding model the store was built with, recorded so the portal
+    /// and `semlith mcp` can say it without opening the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Unix seconds. Only ever set when the entry is created.
+    pub created: u64,
+}
+
+/// `registry.json` — store name to the roots it covers.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Registry {
+    #[serde(default)]
+    pub stores: BTreeMap<String, Entry>,
+}
+
+impl Registry {
+    /// Read the registry, or an empty one if there is no home yet.
+    ///
+    /// A registry that cannot be parsed is an error rather than an empty
+    /// registry: silently starting over would create a second store for a
+    /// corpus that already has one, and the first store's vectors would then
+    /// quietly stop being updated.
+    pub fn load() -> Result<Self> {
+        let path = registry_path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        serde_json::from_str(&text).with_context(|| {
+            format!(
+                "{} is not readable as a registry; move it aside to start over",
+                path.display()
+            )
+        })
+    }
+
+    /// Write the registry, creating the home if it is not there.
+    ///
+    /// Written to a temporary file and renamed, so a process killed mid-write
+    /// leaves the previous registry rather than half of a new one.
+    pub fn save(&self) -> Result<()> {
+        let path = registry_path();
+        let dir = path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating the store home {}", dir.display()))?;
+        let temp = path.with_extension("json.new");
+        let body = serde_json::to_string_pretty(self)? + "\n";
+        std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
+        std::fs::rename(&temp, &path).with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Where a registered store's directory is.
+    pub fn dir_of(name: &str) -> PathBuf {
+        stores_root().join(name)
+    }
+
+    /// Every registered store's directory, in name order.
+    pub fn dirs(&self) -> Vec<PathBuf> {
+        self.stores.keys().map(|n| Self::dir_of(n)).collect()
+    }
+
+    /// The registered store whose roots cover `path`, most specific first.
+    ///
+    /// Most specific wins so a store registered against one package inside a
+    /// monorepo keeps that package, rather than being swallowed by a store
+    /// registered against the whole tree.
+    pub fn covering(&self, path: &Path) -> Option<(&str, &Entry)> {
+        let mut best: Option<(&str, &Entry, usize)> = None;
+        for (name, entry) in &self.stores {
+            for root in &entry.roots {
+                if path == root || path.starts_with(root) {
+                    let depth = root.components().count();
+                    if best.is_none_or(|(_, _, d)| depth > d) {
+                        best = Some((name, entry, depth));
+                    }
+                }
+            }
+        }
+        best.map(|(n, e, _)| (n, e))
+    }
+
+    /// The name a registered store directory has, if it is one of ours.
+    pub fn name_of(&self, dir: &Path) -> Option<&str> {
+        let dir = crate::canonical(dir);
+        self.stores
+            .keys()
+            .map(String::as_str)
+            .find(|n| crate::canonical(&Self::dir_of(n)) == dir)
+    }
+
+    /// Record a store and the root it covers, creating the entry if new.
+    ///
+    /// Adding a root that a recorded root already covers is a no-op, so
+    /// indexing the same tree twice does not grow the watch list.
+    pub fn register(&mut self, name: &str, root: &Path, model: Option<&str>) -> Result<()> {
+        let root = crate::canonical(root);
+        let entry = self
+            .stores
+            .entry(name.to_string())
+            .or_insert_with(|| Entry {
+                roots: Vec::new(),
+                model: model.map(str::to_string),
+                created: now(),
+            });
+        if entry.model.is_none() {
+            entry.model = model.map(str::to_string);
+        }
+        if !entry.roots.iter().any(|r| root.starts_with(r)) {
+            // A new root that contains recorded ones replaces them: two watches
+            // over the same tree is two re-embeds of every save.
+            entry.roots.retain(|r| !r.starts_with(&root));
+            entry.roots.push(root);
+            entry.roots.sort();
+        }
+        self.save()
+    }
+
+    /// A store name that is free, derived from `stem`.
+    ///
+    /// A collision gets a numeric suffix rather than merging into the store
+    /// that holds the name: two directories called `api` are two corpora, and
+    /// merging them would make every search answer about the wrong one.
+    pub fn free_name(&self, stem: &str) -> String {
+        let stem = sanitize(stem);
+        let taken = |n: &str| self.stores.contains_key(n) || Self::dir_of(n).exists();
+        if !taken(&stem) {
+            return stem;
+        }
+        for n in 2.. {
+            let candidate = format!("{stem}-{n}");
+            if !taken(&candidate) {
+                return candidate;
+            }
+        }
+        unreachable!("the integers run out before the names do")
+    }
+}
+
+/// Which store a command means, and why.
+#[derive(Debug, Clone)]
+pub enum Choice {
+    /// `--store` or `SEMLITH_STORE` named them explicitly.
+    Named(Vec<PathBuf>),
+    /// A `.semlith` directory beside the corpus, from before the home existed.
+    Local(PathBuf),
+    /// A registered store whose root is the anchor or an ancestor of it.
+    Registered { name: String, dir: PathBuf },
+    /// Nothing covers the anchor yet, so this is the store that would be made.
+    New {
+        name: String,
+        dir: PathBuf,
+        root: PathBuf,
+    },
+}
+
+impl Choice {
+    /// The single store directory this choice names.
+    ///
+    /// `Named` with several stores is refused here rather than silently using
+    /// the first: a write goes to one store, and picking one of several is a
+    /// guess at somebody's other repository.
+    pub fn one(&self) -> Result<PathBuf> {
+        Ok(match self {
+            Choice::Named(dirs) => match dirs.as_slice() {
+                [one] => one.clone(),
+                many => bail!(
+                    "this command writes, so it takes one store, not {}: {}",
+                    many.len(),
+                    many.iter()
+                        .map(|d| d.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+            Choice::Local(dir) => dir.clone(),
+            Choice::Registered { dir, .. } | Choice::New { dir, .. } => dir.clone(),
+        })
+    }
+
+    /// Every store directory this choice names.
+    pub fn all(&self) -> Vec<PathBuf> {
+        match self {
+            Choice::Named(dirs) => dirs.clone(),
+            Choice::Local(dir) => vec![dir.clone()],
+            Choice::Registered { dir, .. } | Choice::New { dir, .. } => vec![dir.clone()],
+        }
+    }
+
+    /// The one line of stderr a choice is worth, or nothing.
+    ///
+    /// Only `Local` says anything. A store found beside its corpus still works
+    /// exactly as it did, and the hint is the only place a user learns that
+    /// moving it into the home is a command rather than a migration.
+    pub fn hint(&self) -> Option<String> {
+        match self {
+            Choice::Local(dir) => Some(format!(
+                "semlith: using the store at {} — `semlith adopt {}` moves it into {} \
+                 so `semlith mcp` and `semlith start` find it with no flags",
+                dir.display(),
+                dir.display(),
+                stores_root().display(),
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Which store a command means, in the order the release documents:
+///
+/// 1. `--store` or `SEMLITH_STORE`,
+/// 2. an existing `.semlith` beside `anchor`,
+/// 3. a registered store whose root is `anchor` or an ancestor of it,
+/// 4. otherwise a new store in the home, named after `anchor`.
+///
+/// `anchor` is the working directory for most commands and the first path
+/// argument for `index`, so `semlith index ~/work/api` from anywhere makes a
+/// store called `api` registered against `~/work/api` — which is what the
+/// person typing it meant.
+pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<Choice> {
+    if !flags.is_empty() {
+        return Ok(Choice::Named(flags.to_vec()));
+    }
+    if let Some(raw) = std::env::var_os("SEMLITH_STORE") {
+        let dirs: Vec<PathBuf> = std::env::split_paths(&raw)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        if !dirs.is_empty() {
+            return Ok(Choice::Named(dirs));
+        }
+    }
+
+    let anchor_dir = directory_of(anchor);
+    let registry = Registry::load()?;
+
+    // An explicit `--name` is an instruction, so it skips the search: it names
+    // the store to use or to create, and nothing else may answer for it.
+    if let Some(name) = name {
+        let name = sanitize(name);
+        let dir = Registry::dir_of(&name);
+        return Ok(if registry.stores.contains_key(&name) {
+            Choice::Registered { name, dir }
+        } else {
+            Choice::New {
+                name,
+                dir,
+                root: crate::canonical(&anchor_dir),
+            }
+        });
+    }
+
+    let local = anchor_dir.join(LOCAL_DIR);
+    if local.join("store.db").exists() {
+        return Ok(Choice::Local(local));
+    }
+
+    let canonical_anchor = crate::canonical(&anchor_dir);
+    if let Some((name, _)) = registry.covering(&canonical_anchor) {
+        return Ok(Choice::Registered {
+            name: name.to_string(),
+            dir: Registry::dir_of(name),
+        });
+    }
+
+    let stem = canonical_anchor
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "store".to_string());
+    let name = registry.free_name(&stem);
+    Ok(Choice::New {
+        dir: Registry::dir_of(&name),
+        name,
+        root: canonical_anchor,
+    })
+}
+
+/// The stores a read-only command opens with no flags: the one covering the
+/// working directory, or every registered store when nothing covers it.
+///
+/// Standing in a repository, a question is about that repository. Standing
+/// anywhere else there is no "that repository", and every store the developer
+/// has is a better answer than an error about a directory that was never a
+/// store.
+pub fn read_dirs(flags: &[PathBuf], cwd: &Path) -> Result<Vec<PathBuf>> {
+    match resolve(flags, cwd, None)? {
+        Choice::New { .. } => all_dirs(flags, cwd),
+        other => Ok(other.all()),
+    }
+}
+
+/// Record what an index run just covered, so `semlith start` watches it.
+///
+/// Only a store in the home is recorded. A `--store` path and a `.semlith`
+/// beside its corpus are both things the user is naming themselves every time,
+/// and registering them would put a store in the portal that the next command
+/// does not resolve to.
+pub fn record(choice: &Choice, roots: &[PathBuf], model: &str) -> Result<()> {
+    let name = match choice {
+        Choice::New { name, .. } | Choice::Registered { name, .. } => name.clone(),
+        Choice::Local(_) | Choice::Named(_) => return Ok(()),
+    };
+    let mut registry = Registry::load()?;
+    for root in roots {
+        let root = directory_of(&crate::canonical(root));
+        registry.register(&name, &root, Some(model))?;
+    }
+    Ok(())
+}
+
+/// Every store a read-only command with no flags should open: each registered
+/// store, plus a `.semlith` beside the working directory if there is one.
+///
+/// The local store is included so a developer who has not run `adopt` sees no
+/// change from 0.8.0 — `semlith mcp` in a repository with a `.semlith` still
+/// serves it.
+pub fn all_dirs(flags: &[PathBuf], cwd: &Path) -> Result<Vec<PathBuf>> {
+    if !flags.is_empty() {
+        return Ok(flags.to_vec());
+    }
+    if let Some(raw) = std::env::var_os("SEMLITH_STORE") {
+        let dirs: Vec<PathBuf> = std::env::split_paths(&raw)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        if !dirs.is_empty() {
+            return Ok(dirs);
+        }
+    }
+
+    let mut out = Vec::new();
+    let local = cwd.join(LOCAL_DIR);
+    if local.join("store.db").exists() {
+        out.push(local);
+    }
+    for dir in Registry::load()?.dirs() {
+        if dir.join("store.db").exists() {
+            out.push(dir);
+        }
+    }
+    Ok(out)
+}
+
+/// Move an existing store directory into the home and register it.
+///
+/// A rename when the home is on the same filesystem and a copy-then-remove
+/// when it is not. Neither re-embeds anything: the store's bytes are the store,
+/// and where they sit is not part of its format.
+pub fn adopt(source: &Path, root: Option<&Path>, name: Option<&str>) -> Result<(String, PathBuf)> {
+    if !source.join("store.db").exists() {
+        bail!(
+            "{} is not a semlith store — no store.db in it",
+            source.display()
+        );
+    }
+    let source = crate::canonical(source);
+
+    let mut registry = Registry::load()?;
+    if let Some(existing) = registry.name_of(&source) {
+        bail!(
+            "{} is already the registered store {existing}",
+            source.display()
+        );
+    }
+
+    // The root defaults to the directory the store sat in, which for a
+    // `.semlith` is exactly the corpus it was indexing.
+    let root = match root {
+        Some(r) => crate::canonical(r),
+        None => source
+            .parent()
+            .map(crate::canonical)
+            .unwrap_or_else(|| source.clone()),
+    };
+
+    let stem = match name {
+        Some(n) => n.to_string(),
+        None => label_for(&source),
+    };
+    let name = registry.free_name(&stem);
+    let target = Registry::dir_of(&name);
+
+    std::fs::create_dir_all(stores_root())
+        .with_context(|| format!("creating {}", stores_root().display()))?;
+    match std::fs::rename(&source, &target) {
+        Ok(()) => {}
+        Err(_) => {
+            // A different filesystem. Copy, verify the copy opens, then remove
+            // the source — in that order, so a failed copy never costs the
+            // original.
+            copy_tree(&source, &target)
+                .with_context(|| format!("copying {} to {}", source.display(), target.display()))?;
+            if !target.join("store.db").exists() {
+                bail!("copying {} left no store.db behind", source.display());
+            }
+            std::fs::remove_dir_all(&source)
+                .with_context(|| format!("removing {}", source.display()))?;
+        }
+    }
+
+    let model = crate::Semlith::open_existing(&target)
+        .ok()
+        .map(|s| s.model().to_string());
+    registry.register(&name, &root, model.as_deref())?;
+    Ok((name, target))
+}
+
+/// Re-point a registered store whose corpus moved.
+pub fn repoint(name: &str, root: &Path) -> Result<()> {
+    let mut registry = Registry::load()?;
+    let Some(entry) = registry.stores.get_mut(name) else {
+        bail!(
+            "no registered store called {name}; these are: {}",
+            registry
+                .stores
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    };
+    entry.roots = vec![crate::canonical(root)];
+    registry.save()
+}
+
+/// What to call a store adopted from `dir`: the directory holding it, because
+/// almost every adopted store is a `.semlith` whose own name says nothing.
+fn label_for(dir: &Path) -> String {
+    let own = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if (own.starts_with('.') || own.is_empty())
+        && let Some(parent) = dir
+            .parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+    {
+        return parent;
+    }
+    if own.is_empty() {
+        "store".to_string()
+    } else {
+        own
+    }
+}
+
+/// The directory a path anchors to: itself, or its parent if it is a file.
+fn directory_of(path: &Path) -> PathBuf {
+    if path.is_file() {
+        return path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    }
+    path.to_path_buf()
+}
+
+/// A store name that is one safe path segment.
+///
+/// The name becomes a directory under the home and appears in the portal, so
+/// anything that is not a plain character becomes a dash rather than a
+/// traversal.
+fn sanitize(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['-', '.']).to_string();
+    if cleaned.is_empty() {
+        "store".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(roots: &[&str]) -> Entry {
+        Entry {
+            roots: roots.iter().map(PathBuf::from).collect(),
+            model: None,
+            created: 0,
+        }
+    }
+
+    /// A store registered against a package inside a monorepo must not be
+    /// swallowed by one registered against the whole tree: the narrower answer
+    /// is the one the developer standing in that package meant.
+    #[test]
+    fn the_most_specific_root_wins() {
+        let mut registry = Registry::default();
+        registry
+            .stores
+            .insert("mono".into(), entry(&["/work/mono"]));
+        registry
+            .stores
+            .insert("api".into(), entry(&["/work/mono/services/api"]));
+
+        let (name, _) = registry
+            .covering(Path::new("/work/mono/services/api/src"))
+            .expect("an ancestor root covers a subdirectory");
+        assert_eq!(name, "api");
+
+        let (name, _) = registry
+            .covering(Path::new("/work/mono/docs"))
+            .expect("the wide root still covers everything else");
+        assert_eq!(name, "mono");
+
+        assert!(registry.covering(Path::new("/elsewhere")).is_none());
+    }
+
+    /// Two directories called `api` are two corpora. Merging them would make
+    /// every search answer about whichever one was indexed second.
+    #[test]
+    fn a_taken_name_gets_a_suffix_rather_than_being_shared() {
+        let mut registry = Registry::default();
+        assert_eq!(registry.free_name("api"), "api");
+        registry.stores.insert("api".into(), entry(&["/a/api"]));
+        assert_eq!(registry.free_name("api"), "api-2");
+        registry.stores.insert("api-2".into(), entry(&["/b/api"]));
+        assert_eq!(registry.free_name("api"), "api-3");
+    }
+
+    /// The name becomes a directory under the home, so a path separator in it
+    /// must not become a path.
+    #[test]
+    fn a_name_is_one_safe_segment() {
+        assert_eq!(sanitize("../../etc"), "etc");
+        assert_eq!(sanitize("my repo"), "my-repo");
+        assert_eq!(sanitize("ok-name_1.2"), "ok-name_1.2");
+        assert_eq!(sanitize("///"), "store");
+    }
+
+    /// Indexing the same tree twice must not grow the watch list, and a root
+    /// that contains recorded ones replaces them rather than joining them.
+    #[test]
+    fn roots_do_not_accumulate_overlaps() {
+        let mut e = entry(&[]);
+        let add = |e: &mut Entry, root: &str| {
+            let root = PathBuf::from(root);
+            if !e.roots.iter().any(|r| root.starts_with(r)) {
+                e.roots.retain(|r| !r.starts_with(&root));
+                e.roots.push(root);
+                e.roots.sort();
+            }
+        };
+        add(&mut e, "/work/api/src");
+        add(&mut e, "/work/api/src");
+        assert_eq!(e.roots, vec![PathBuf::from("/work/api/src")]);
+        add(&mut e, "/work/api/tests");
+        assert_eq!(e.roots.len(), 2);
+        add(&mut e, "/work/api");
+        assert_eq!(
+            e.roots,
+            vec![PathBuf::from("/work/api")],
+            "a root that contains the others replaces them"
+        );
+    }
+
+    /// An adopted `.semlith` is named after the directory holding it; its own
+    /// name says nothing about the corpus.
+    #[test]
+    fn an_adopted_store_is_named_after_its_corpus() {
+        assert_eq!(label_for(Path::new("/work/api/.semlith")), "api");
+        assert_eq!(label_for(Path::new("/work/api-store")), "api-store");
+    }
+}
