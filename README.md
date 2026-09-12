@@ -164,6 +164,8 @@ just those lines instead of the whole file.
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
 | `semlith languages` | List the language names `--lang` accepts. |
+| `semlith setup [--yes]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register agent clients. Idempotent, so it is also the repair command. `--airgap` skips the model. |
+| `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
 Global: `--store <DIR>` picks the store directory, and `SEMLITH_STORE` does the
 same from the environment. `search`, `stats`, `files` and `mcp` read, so the
@@ -1001,6 +1003,18 @@ Everyone participating is expected to follow the
 - Stores are named by path; there is no registry of named stores, and no
   discovery. A store is searched because it was named, and its label comes from
   the directory holding it.
+- The install scripts are the only packaged install. Homebrew, winget and Scoop
+  are not there yet, so the one-liner and `cargo install` are the two ways in.
+- Nothing is code-signed or notarized. A curl download carries no macOS
+  quarantine attribute and the Windows script calls `Unblock-File`, which is
+  enough for both to run — but neither binary is signed.
+- There is no native ARM64 Windows build and no Intel macOS build. ARM64 Windows
+  runs the x64 binary under emulation; Intel macOS has no option, because ONNX
+  Runtime no longer publishes `osx-x86_64`.
+- `semlith upgrade` only replaces a binary in `~/.semlith/bin`. A `cargo install`
+  or a hand-placed copy is left alone, with the matching upgrade command
+  printed instead — replacing a file this tool did not put there is not its
+  business.
 
 ## License
 
