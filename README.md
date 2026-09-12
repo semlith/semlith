@@ -40,6 +40,9 @@ Think of it as a semantic cache for everything your agent needs to know.
   changed, and drops files that disappeared.
 - **Agent-native.** Ships an MCP server, so any MCP-capable agent can call it
   as a tool.
+- **Visible.** `semlith start` keeps every store current and serves a portal on
+  `127.0.0.1` — your corpus, your searches and your agents' config, in a page
+  that is compiled into the binary and loads with the cable unplugged.
 
 ## Install
 
@@ -97,8 +100,8 @@ OpenBLAS step above you missed.
 ## Quick start
 
 ```sh
-# Index a directory. Creates ./.semlith and downloads the embedding model
-# (~52 MB) the first time.
+# Index a directory. Creates a store under ~/.semlith and downloads the
+# embedding model (~52 MB) the first time.
 semlith index ~/notes ~/papers ./src
 
 # Ask it something.
@@ -106,6 +109,9 @@ semlith search "how does the retry backoff work"
 
 # What's in there?
 semlith stats
+
+# Or see it, and keep it current as you save:
+semlith start
 ```
 
 Output looks like this:
