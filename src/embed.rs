@@ -196,7 +196,7 @@ pub fn airgap() -> bool {
 /// the loader below fails with its own, far more specific error if what is
 /// cached is wrong, and duplicating its file list here would be a second
 /// definition of the model to keep in step.
-fn is_cached(cache_dir: &Path) -> bool {
+pub fn is_cached(cache_dir: &Path) -> bool {
     std::fs::read_dir(cache_dir)
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false)

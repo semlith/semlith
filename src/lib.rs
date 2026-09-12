@@ -32,7 +32,9 @@ pub mod mcp;
 pub mod portal;
 pub mod proxy;
 pub mod routes;
+pub mod setup;
 pub mod store;
+pub mod upgrade;
 pub mod watch;
 
 use anyhow::{Context, Result, bail};

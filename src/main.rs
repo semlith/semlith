@@ -146,6 +146,33 @@ enum Command {
     /// Run as an MCP server over stdio, for agents to call as a tool.
     Mcp,
 
+    /// Put semlith on PATH, pre-fetch the embedding model and register it
+    /// with the agents you use. Every step is idempotent, so this is also the
+    /// repair command.
+    Setup {
+        /// Take the default at every prompt — add to PATH, download the model,
+        /// register no agent — so a script or an agent can run it unattended.
+        #[arg(long, short)]
+        yes: bool,
+
+        /// Refuse to download model weights. The other steps still run.
+        #[arg(long)]
+        airgap: bool,
+    },
+
+    /// Replace this binary with the newest release for this machine. Runs only
+    /// when asked: semlith never checks for an update on its own.
+    Upgrade {
+        /// Say whether a newer release exists and change nothing. Exits 0 when
+        /// current and 10 when an upgrade is available.
+        #[arg(long)]
+        check: bool,
+
+        /// Install this tag instead of the newest release, e.g. `v0.9.0`.
+        #[arg(long)]
+        version: Option<String>,
+    },
+
     /// List available embedding models.
     Models,
 
@@ -158,6 +185,29 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match cli.command {
+        Command::Setup { yes, airgap } => {
+            arm_airgap(airgap);
+            semlith::setup::run(yes, airgap)?;
+        }
+
+        Command::Upgrade { check, version } => {
+            if check {
+                let found = semlith::upgrade::check()?;
+                println!("installed {}", found.installed);
+                println!("latest    {}", found.latest.trim_start_matches('v'));
+                if let Some(reason) = &found.blocked {
+                    println!("note: {reason}");
+                }
+                if found.available {
+                    println!("run `semlith upgrade` to install it");
+                    std::process::exit(semlith::upgrade::UPGRADE_AVAILABLE);
+                }
+                println!("already current");
+            } else {
+                semlith::upgrade::apply(version)?;
+            }
+        }
+
         Command::Models => {
             // The default is listed first and separately: it is not one of
             // fastembed's built-ins, so it never appears in their list.
