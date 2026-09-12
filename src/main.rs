@@ -1,9 +1,10 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use fastembed::TextEmbedding;
-use semlith::{Semlith, embed, embed::Model, filter::Filter, fleet::Fleet, store_dirs};
+use semlith::home;
+use semlith::{Semlith, embed, embed::Model, filter::Filter, fleet::Fleet};
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 /// A local semantic cache for AI agents.
@@ -13,6 +14,10 @@ struct Cli {
     /// Store directory (also settable with SEMLITH_STORE). Repeatable for
     /// `search`, `stats`, `files` and `mcp`, which read every store named;
     /// `index`, `watch` and `forget` write, and take exactly one.
+    ///
+    /// With no flag, semlith resolves a store itself: a `.semlith` beside the
+    /// corpus if there is one, else the registered store covering this
+    /// directory, else a new one under the store home.
     #[arg(long, short, global = true)]
     store: Vec<PathBuf>,
 
@@ -31,9 +36,32 @@ enum Command {
         #[arg(long, short)]
         model: Option<String>,
 
+        /// Name the store in the store home, instead of naming it after the
+        /// directory being indexed.
+        #[arg(long)]
+        name: Option<String>,
+
         /// Suppress per-file output and download progress.
         #[arg(long, short)]
         quiet: bool,
+    },
+
+    /// Move an existing store directory into the store home and register it,
+    /// so `semlith mcp` and `semlith start` find it with no flags. Nothing is
+    /// re-embedded and the store's format does not change.
+    Adopt {
+        /// The store directory to move — usually `./.semlith`.
+        store_dir: PathBuf,
+
+        /// The directory this store indexes. Defaults to the directory the
+        /// store sat in. Given on its own with `--name`, re-points a
+        /// registered store whose corpus moved.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Name it in the home explicitly.
+        #[arg(long)]
+        name: Option<String>,
     },
 
     /// Keep the store current: re-embed files as they are saved. Runs until
@@ -99,28 +127,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let dirs = store_dirs(&cli.store);
-    // Every command that writes uses this; the read commands open all of them.
-    let dir = dirs[0].clone();
-
-    // Reading several stores is a merge; writing several would be several
-    // locks with several failure modes, against a store whose rule is one
-    // writer. Refuse it here rather than half-way through the second store.
-    if dirs.len() > 1
-        && matches!(
-            cli.command,
-            Command::Index { .. } | Command::Watch { .. } | Command::Forget { .. }
-        )
-    {
-        bail!(
-            "this command writes, so it takes one store, not {}: {}",
-            dirs.len(),
-            dirs.iter()
-                .map(|d| d.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match cli.command {
         Command::Models => {
@@ -142,19 +149,30 @@ fn main() -> Result<()> {
         Command::Index {
             paths,
             model,
+            name,
             quiet,
         } => {
             let model = model
                 .map(|m| m.parse::<Model>().map_err(anyhow::Error::msg))
                 .transpose()?;
-            let mut store = Semlith::open(&dir, model)?;
-            store.quiet = quiet;
 
             let roots = if paths.is_empty() {
                 vec![PathBuf::from(".")]
             } else {
                 paths
             };
+
+            // The first path is what the store is about, so it is what names
+            // the store and what the registry records as its root. `semlith
+            // index ~/work/api` from anywhere means the api store, not a store
+            // named after wherever the shell happened to be.
+            let choice = home::resolve(&cli.store, &roots[0], name.as_deref())?;
+            if let Some(hint) = choice.hint() {
+                eprintln!("{hint}");
+            }
+            let dir = choice.one()?;
+            let mut store = Semlith::open(&dir, model)?;
+            store.quiet = quiet;
 
             let started = Instant::now();
             // Throttled, not per file: a corpus large enough to need an
@@ -171,6 +189,12 @@ fn main() -> Result<()> {
                     eprintln!("    {}", predict(p, started.elapsed()));
                 }
             })?;
+
+            // Recorded after the run, not before it: a registry entry for a
+            // store that failed to index is a store the daemon opens and the
+            // portal lists with nothing in it.
+            let model_name = store.model().to_string();
+            home::record(&choice, &roots, &model_name)?;
 
             let (files, chunks, bytes) = store.stats()?;
             eprintln!(
@@ -200,8 +224,14 @@ fn main() -> Result<()> {
                 paths
             };
 
+            let choice = home::resolve(&cli.store, &roots[0], None)?;
+            if let Some(hint) = choice.hint() {
+                eprintln!("{hint}");
+            }
+            let dir = choice.one()?;
             let mut store = Semlith::open(&dir, None)?;
             store.quiet = quiet;
+            home::record(&choice, &roots, &store.model().to_string())?;
 
             // Installed before the first event: Ctrl-C is how this command
             // ends, so it has to leave the store whole.
@@ -257,7 +287,7 @@ fn main() -> Result<()> {
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
 
-            let mut fleet = Fleet::open(&dirs)?;
+            let mut fleet = read_fleet(&cli.store, &cwd, false)?;
             fleet.quiet = json;
 
             // A glob that selects nothing is a different answer from a corpus
@@ -370,7 +400,7 @@ fn main() -> Result<()> {
         }
 
         Command::Stats => {
-            let fleet = Fleet::open(&dirs)?;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
             let many = fleet.len() > 1;
             let mut totals = (0, 0, 0);
             for (label, store) in fleet.each() {
@@ -413,7 +443,7 @@ fn main() -> Result<()> {
         }
 
         Command::Files => {
-            let fleet = Fleet::open(&dirs)?;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
             let many = fleet.len() > 1;
             for (label, store) in fleet.each() {
                 if many {
@@ -429,13 +459,53 @@ fn main() -> Result<()> {
         }
 
         Command::Forget { path } => {
-            let mut store = Semlith::open(&dir, None)?;
+            let choice = home::resolve(&cli.store, &cwd, None)?;
+            if let Some(hint) = choice.hint() {
+                eprintln!("{hint}");
+            }
+            let mut store = Semlith::open(&choice.one()?, None)?;
             let n = store.forget(&path)?;
             eprintln!("removed {n} chunks for {}", path.display());
         }
 
+        Command::Adopt {
+            store_dir,
+            root,
+            name,
+        } => {
+            // `--root` with a store that is already registered is the
+            // re-point: the corpus moved, the store did not.
+            let registered = home::Registry::load()?
+                .name_of(&store_dir)
+                .map(str::to_string)
+                .or_else(|| {
+                    name.as_deref()
+                        .filter(|n| home::Registry::load().is_ok_and(|r| r.stores.contains_key(*n)))
+                        .map(str::to_string)
+                });
+            match (registered, &root) {
+                (Some(name), Some(root)) => {
+                    home::repoint(&name, root)?;
+                    eprintln!("{name} now indexes {}", root.display());
+                }
+                _ => {
+                    let (name, target) = home::adopt(&store_dir, root.as_deref(), name.as_deref())?;
+                    let store = Semlith::open_existing(&target)?;
+                    let (files, chunks, bytes) = store.stats()?;
+                    eprintln!(
+                        "adopted {} as {name} — {files} files, {chunks} chunks, {} at {}",
+                        store_dir.display(),
+                        semlith::human_bytes(bytes),
+                        target.display(),
+                    );
+                }
+            }
+        }
+
         Command::Mcp => {
-            let mut fleet = Fleet::open(&dirs)?;
+            // Every registered store, so a client stanza is `semlith mcp` and
+            // nothing else.
+            let mut fleet = read_fleet(&cli.store, &cwd, true)?;
             // Load each distinct model before the first tool call so an agent
             // does not sit through a cold start mid-conversation.
             fleet.quiet = true;
@@ -462,6 +532,29 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The stores a read-only command opens.
+///
+/// `all` is what `mcp` asks for: every registered store, because a client
+/// stanza cannot know which directory the agent will be started in. Everything
+/// else asks about the store covering the working directory.
+fn read_fleet(flags: &[PathBuf], cwd: &Path, all: bool) -> Result<Fleet> {
+    let dirs = if all {
+        home::all_dirs(flags, cwd)?
+    } else {
+        home::read_dirs(flags, cwd)?
+    };
+    if dirs.is_empty() {
+        bail!(
+            "no semlith store covers {} and none is registered — \
+             run `semlith index` in a directory to make one, \
+             or `semlith adopt ./.semlith` to move an existing one into {}",
+            cwd.display(),
+            semlith::home::stores_root().display(),
+        );
+    }
+    Fleet::open(&dirs)
 }
 
 /// Paths are stored absolute; show them relative to the cwd when possible,

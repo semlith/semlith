@@ -22,6 +22,7 @@ pub mod fleet;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
+pub mod home;
 pub mod index;
 pub mod lock;
 pub mod mcp;
@@ -902,35 +903,6 @@ pub fn model_cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     base.join(".cache").join("semlith").join("models")
-}
-
-/// Default store location: `.semlith` beside whatever you are indexing.
-pub fn default_store_dir() -> PathBuf {
-    // Always at least one element, so the index is not a panic in waiting.
-    store_dirs(&[]).remove(0)
-}
-
-/// The stores a command should use: the `--store` flags if any were given, else
-/// whatever `SEMLITH_STORE` names, else `.semlith` in the current directory.
-///
-/// `SEMLITH_STORE` is split the way `PATH` is — `:` on Unix, `;` on Windows —
-/// so an agent's MCP server definition can name several stores in one variable
-/// without a wrapper script. A single value therefore still means exactly what
-/// it always meant, and the price is that a store path containing the
-/// platform's own separator has to be passed as a flag instead.
-pub fn store_dirs(flags: &[PathBuf]) -> Vec<PathBuf> {
-    if !flags.is_empty() {
-        return flags.to_vec();
-    }
-    if let Some(raw) = std::env::var_os("SEMLITH_STORE") {
-        let dirs: Vec<PathBuf> = std::env::split_paths(&raw)
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect();
-        if !dirs.is_empty() {
-            return dirs;
-        }
-    }
-    vec![PathBuf::from(".semlith")]
 }
 
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
