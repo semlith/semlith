@@ -131,20 +131,20 @@ jobs:
             on && /^## \[/ { exit }
             on && !/^\[[^]]*\]:/ { print }
           ' CHANGELOG.md > notes.md
-          # The install text is lifted out of the README between its
-          # markers, so the release notes and the page the install URL sends
-          # people to cannot drift apart.
+          # The install text is lifted out of the README between its markers, so
+          # the release notes and the page the install URL sends people to
+          # cannot drift apart.
           {
             printf '\n### Install\n\n'
             awk '/<!-- install-oneliners:start -->/{on=1;next} /<!-- install-oneliners:end -->/{exit} on' README.md
             cat <<'EOF'
 
-Or download the archive for your platform below, unpack it, and put `semlith` on
-your `PATH`. Intel macOS has no prebuilt binary: ONNX Runtime no longer publishes
-x86_64 macOS builds.
+          Or download the archive for your platform below, unpack it, and put
+          `semlith` on your `PATH`. Intel macOS has no prebuilt binary: ONNX
+          Runtime no longer publishes x86_64 macOS builds.
 
-Verify a download against `SHA256SUMS` before running it.
-EOF
+          Verify a download against `SHA256SUMS` before running it.
+          EOF
           } >> notes.md
           cat notes.md
 
