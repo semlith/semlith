@@ -1,0 +1,211 @@
+//! `semlith setup`, run twice.
+//!
+//! The whole promise of this command is that it is safe to run again: it is the
+//! install step and the repair step, and a user who reruns it after moving
+//! machines should not end up with two PATH blocks in their rc file or a second
+//! copy of anything. That is what this file holds to — a second run must change
+//! no file at all.
+//!
+//! Everything runs against a temporary `HOME`, `SEMLITH_HOME` and model cache,
+//! so nothing here can touch the machine it runs on, and `--airgap` keeps the
+//! model step from reaching the network in the default test set.
+
+#![cfg(unix)]
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+/// The fences `setup` writes around the block it owns.
+const BEGIN: &str = "# >>> semlith >>>";
+
+struct Machine {
+    _dir: tempfile::TempDir,
+    home: PathBuf,
+    store_home: PathBuf,
+    cache: PathBuf,
+}
+
+impl Machine {
+    /// A clean machine with a pre-seeded model cache, so the model step reports
+    /// "already done" instead of asking for 52 MB over the network.
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let home = dir.path().join("home");
+        let cache = dir.path().join("cache");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        // `is_cached` asks whether anything is there, deliberately, so one file
+        // is a seeded cache.
+        std::fs::write(cache.join("seeded"), b"weights would be here").unwrap();
+        std::fs::write(home.join(".zshrc"), "# a shell rc somebody already owns\n").unwrap();
+        Self {
+            store_home: home.join(".semlith"),
+            home,
+            cache,
+            _dir: dir,
+        }
+    }
+
+    fn setup(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .arg("setup")
+            .args(args)
+            .env("HOME", &self.home)
+            .env("SHELL", "/bin/zsh")
+            .env("SEMLITH_HOME", &self.store_home)
+            .env("SEMLITH_MODEL_CACHE", &self.cache)
+            // Whatever ran the test suite is on PATH; the bin directory is not,
+            // which is the state the PATH step exists for.
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("running semlith setup")
+    }
+
+    /// cliclack draws on stderr, so what a user reads is both streams together.
+    fn said(out: &Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    fn rc(&self) -> String {
+        std::fs::read_to_string(self.home.join(".zshrc")).expect("the rc file")
+    }
+}
+
+/// Every file under a directory with its bytes, so "changed nothing" is a
+/// comparison rather than a claim. Content rather than mtime: a rewrite with
+/// identical bytes is still a rewrite, and this is the check that would catch
+/// one appending a duplicate block.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                out.insert(path, bytes);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn a_second_run_changes_nothing() {
+    let machine = Machine::new();
+
+    let first = machine.setup(&["--yes", "--airgap"]);
+    assert!(
+        first.status.success(),
+        "the first `semlith setup --yes --airgap` exited {:?}:\n{}",
+        first.status.code(),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        machine.rc().matches(BEGIN).count(),
+        1,
+        "the first run should leave exactly one semlith block in the rc file, got:\n{}",
+        machine.rc()
+    );
+
+    let before = snapshot(&machine.home);
+
+    let second = machine.setup(&["--yes", "--airgap"]);
+    assert!(
+        second.status.success(),
+        "the second run exited {:?}:\n{}",
+        second.status.code(),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        machine.rc().matches(BEGIN).count(),
+        1,
+        "the second run added a second semlith block:\n{}",
+        machine.rc()
+    );
+    assert_eq!(
+        snapshot(&machine.home),
+        before,
+        "the second run changed a file; setup is meant to be a no-op once it has run"
+    );
+
+    let said = Machine::said(&second);
+    assert!(
+        said.contains("Nothing changed"),
+        "the second run should say it changed nothing, it said:\n{said}"
+    );
+}
+
+/// The rc file belongs to the user. `setup` may add its own block to the end of
+/// it and may not touch a line of what was already there.
+#[test]
+fn the_users_own_rc_file_survives() {
+    let machine = Machine::new();
+    let original = machine.rc();
+
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(run.status.success());
+
+    let after = machine.rc();
+    assert!(
+        after.starts_with(&original),
+        "setup rewrote what was already in the rc file.\nbefore:\n{original}\nafter:\n{after}"
+    );
+    assert!(
+        after.contains(".semlith/bin"),
+        "the block should put the bin directory on PATH:\n{after}"
+    );
+}
+
+/// `--yes` is what a script and an installer run, so it has to finish with
+/// nothing attached to stdin, and it must not reach into any agent's config on
+/// the way.
+#[test]
+fn yes_completes_with_stdin_closed_and_registers_no_agent() {
+    let machine = Machine::new();
+
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(
+        run.status.success(),
+        "`--yes` with stdin closed exited {:?}",
+        run.status.code()
+    );
+
+    let said = Machine::said(&run);
+    assert!(
+        said.contains("registers no agent"),
+        "`--yes` should say it registered no agent, it said:\n{said}"
+    );
+}
+
+/// An air-gapped machine's claim is that the process never reached the network.
+/// With an empty cache the model step has to say so and step aside, not fail
+/// the install and not try anyway.
+#[test]
+fn airgap_with_an_empty_cache_skips_the_model_and_exits_zero() {
+    let machine = Machine::new();
+    std::fs::remove_file(machine.cache.join("seeded")).unwrap();
+
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(
+        run.status.success(),
+        "--airgap with an empty cache should still exit zero, it exited {:?}",
+        run.status.code()
+    );
+
+    let said = Machine::said(&run);
+    assert!(
+        said.contains("--airgap") && said.contains(machine.cache.to_str().unwrap()),
+        "the skip note should name --airgap and the cache to pre-seed:\n{said}"
+    );
+}
