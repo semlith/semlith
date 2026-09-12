@@ -809,22 +809,20 @@ fn every_revision_proves_itself_through_the_proxy_too() {
         );
 
         let listed = server.call("tools/list", serde_json::json!({}));
-        let names: Vec<&str> = listed["result"]["tools"]
+        let names: Vec<String> = listed["result"]["tools"]
             .as_array()
             .expect("tools/list returns an array")
             .iter()
-            .map(|t| t["name"].as_str().unwrap())
+            .map(|t| t["name"].as_str().unwrap().to_string())
             .collect();
+        // Read from the server's own definitions rather than repeated here.
+        // What this test is about is that the proxy does not *alter* the tool
+        // surface on any revision; a second hand-written copy of that surface
+        // only means a release that adds a tool fails here for the wrong
+        // reason, which is exactly what happened when the graph tools landed.
         assert_eq!(
             names,
-            vec![
-                "semlith_search",
-                "semlith_stats",
-                "semlith_files",
-                "semlith_index",
-                "semlith_add",
-                "semlith_forget"
-            ],
+            semlith::mcp::tool_names(),
             "wrong tool surface on {revision} through the proxy"
         );
 

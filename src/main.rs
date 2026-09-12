@@ -59,6 +59,12 @@ enum Command {
         /// Stores to open. Defaults to every registered store.
         paths: Vec<PathBuf>,
 
+        /// Record what agents retrieve into each store's ledger. Off unless
+        /// asked for, and nothing recorded ever leaves the machine — see
+        /// `semlith ledger`.
+        #[arg(long)]
+        ledger: bool,
+
         /// Port to listen on (also settable with SEMLITH_PORT). Never falls
         /// back to another port: the URL is meant to be a bookmark.
         #[arg(long)]
@@ -202,6 +208,78 @@ enum Command {
 
     /// List the language names `--lang` accepts, and their extensions.
     Languages,
+
+    /// Print what agents retrieved from this store, newest first. Needs no
+    /// key: recording and this dump are free on every tier.
+    Ledger {
+        /// How many retrievals to print.
+        #[arg(long, default_value_t = 20)]
+        last: usize,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find where a symbol is defined.
+    Symbol {
+        /// The symbol's name, matched exactly.
+        name: String,
+
+        /// Most definitions to print.
+        #[arg(long, short, default_value_t = 20)]
+        k: usize,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List what calls a symbol and what it calls.
+    Neighbors {
+        /// The symbol's name, matched exactly.
+        name: String,
+
+        /// Only follow edges of this kind. Repeatable; one of defines, calls,
+        /// imports, references, contains. Every kind by default.
+        #[arg(long, short)]
+        kind: Vec<String>,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the shortest chain of edges between two symbols.
+    Path {
+        /// The symbol the chain starts at.
+        from: String,
+
+        /// The symbol the chain ends at.
+        to: String,
+
+        /// Most hops to search before giving up.
+        #[arg(long, short, default_value_t = 6)]
+        depth: u32,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show what breaks if a symbol changes — its blast radius.
+    Impact {
+        /// The symbol's name, matched exactly.
+        name: String,
+
+        /// How many hops backwards to walk.
+        #[arg(long, short, default_value_t = semlith::graph::DEFAULT_DEPTH)]
+        depth: u32,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -440,9 +518,21 @@ fn main() -> Result<()> {
                         Some(label) => format!("[{label}] "),
                         None => String::new(),
                     };
+                    // One letter per list that found it: v vector, f full
+                    // text, g graph. A hit the graph alone reached is a
+                    // neighbour of a match rather than a match.
+                    let via: String = h
+                        .lists
+                        .iter()
+                        .map(|l| match *l {
+                            "vector" => 'v',
+                            "keyword" => 'f',
+                            _ => 'g',
+                        })
+                        .collect();
                     writeln!(
                         out,
-                        "{}{}. {:.3}  {from}{}:{}-{}{}",
+                        "{}{}. {:.3} {via:<3} {from}{}:{}-{}{}",
                         bold(),
                         i + 1,
                         h.score,
@@ -495,6 +585,214 @@ fn main() -> Result<()> {
                         semlith::index::budget_mb(),
                         semlith::index::INDEX_MEMORY_ENV,
                     );
+                }
+            }
+        }
+
+        Command::Ledger { last, json } => {
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let many = fleet.len() > 1;
+            let mut any = false;
+            for (label, store) in fleet.each() {
+                let rows = semlith::store::retrievals(store.db(), last)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                    any = any || !rows.is_empty();
+                    continue;
+                }
+                if many {
+                    println!("{}{label}{}", bold(), reset());
+                }
+                if rows.is_empty() {
+                    continue;
+                }
+                any = true;
+                let mut out = std::io::stdout().lock();
+                for row in &rows {
+                    writeln!(
+                        out,
+                        "{}  {:<14} {:>3} hits  {:>6} ms  {}",
+                        human_time(row.at),
+                        row.client,
+                        row.hits,
+                        row.micros / 1000,
+                        row.query,
+                    )?;
+                }
+                // A chain that does not verify is the one thing this table can
+                // say that a log file cannot, so it is said loudly.
+                if let Some(broken) = semlith::store::ledger_break(store.db())? {
+                    writeln!(
+                        out,
+                        "\n  the chain does not verify from row {broken} onwards: \
+                         these rows have been edited or removed"
+                    )?;
+                }
+            }
+            if !any && !json {
+                eprintln!(
+                    "nothing recorded. Recording is off unless `semlith start --ledger` asked \
+                     for it, and nothing recorded ever leaves this machine."
+                );
+            }
+        }
+
+        Command::Symbol { name, k, json } => {
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let found = fleet.symbols_in(None, &name, k)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else if found.is_empty() {
+                eprintln!("{}", nothing_known(&fleet, &name));
+            } else {
+                let mut out = std::io::stdout().lock();
+                for symbol in &found {
+                    writeln!(
+                        out,
+                        "{}{}{} {}  {}{}:{}-{}",
+                        bold(),
+                        symbol.name,
+                        reset(),
+                        symbol.kind,
+                        store_prefix(&symbol.store),
+                        display(std::path::Path::new(&symbol.path)),
+                        symbol.start_line,
+                        symbol.end_line,
+                    )?;
+                }
+            }
+        }
+
+        Command::Neighbors { name, kind, json } => {
+            for k in &kind {
+                if !semlith::graph::KINDS.contains(&k.as_str()) {
+                    anyhow::bail!(
+                        "unknown edge kind {k:?}; the kinds are {}",
+                        semlith::graph::KINDS.join(", ")
+                    );
+                }
+            }
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let neighbours = fleet.neighbours_in(None, &name, &kind)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&neighbours)?);
+            } else if neighbours.callers.is_empty() && neighbours.callees.is_empty() {
+                eprintln!("{}", nothing_known(&fleet, &name));
+            } else {
+                let mut out = std::io::stdout().lock();
+                print_ends(&mut out, "callers", &neighbours.callers)?;
+                print_ends(&mut out, "callees", &neighbours.callees)?;
+            }
+        }
+
+        Command::Path {
+            from,
+            to,
+            depth,
+            json,
+        } => {
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let path = fleet.path_in(None, &from, &to, depth)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&path)?);
+            } else {
+                match path {
+                    // An empty chain is `from == to`, which is a path of no
+                    // hops rather than no path.
+                    Some(steps) if steps.is_empty() => {
+                        println!("{from} is {to}");
+                    }
+                    Some(steps) => {
+                        let mut out = std::io::stdout().lock();
+                        for (i, step) in steps.iter().enumerate() {
+                            writeln!(
+                                out,
+                                "{}{}.{} {} --{}--> {}  ({})",
+                                bold(),
+                                i + 1,
+                                reset(),
+                                step.from,
+                                step.kind,
+                                step.to,
+                                step.confidence,
+                            )?;
+                        }
+                        let all = steps
+                            .iter()
+                            .all(|s| s.confidence == semlith::graph::EXTRACTED);
+                        writeln!(
+                            out,
+                            "{} hop{}, {}",
+                            steps.len(),
+                            if steps.len() == 1 { "" } else { "s" },
+                            if all {
+                                "all extracted"
+                            } else {
+                                "some inferred by name"
+                            },
+                        )?;
+                    }
+                    None => eprintln!(
+                        "no chain from {from} to {to} within {depth} hops \
+                         (a longer --depth may find one)"
+                    ),
+                }
+            }
+        }
+
+        Command::Impact { name, depth, json } => {
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let reached = fleet.impact_in(None, &name, depth)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reached)?);
+            } else if reached.is_empty() {
+                eprintln!("nothing in the graph reaches {name} within {depth} hops");
+            } else {
+                let mut out = std::io::stdout().lock();
+                let inferred = reached
+                    .iter()
+                    .filter(|r| r.confidence == semlith::graph::INFERRED)
+                    .count();
+                writeln!(
+                    out,
+                    "{}{} symbol{} {} {name} within {depth} hop{}{}",
+                    bold(),
+                    reached.len(),
+                    if reached.len() == 1 { "" } else { "s" },
+                    if reached.len() == 1 {
+                        "reaches"
+                    } else {
+                        "reach"
+                    },
+                    if depth == 1 { "" } else { "s" },
+                    reset(),
+                )?;
+                for r in &reached {
+                    writeln!(
+                        out,
+                        "  {} hop{}  {} via {} ({})  {}{}:{}",
+                        r.hops,
+                        if r.hops == 1 { " " } else { "s" },
+                        r.symbol.name,
+                        r.via,
+                        r.confidence,
+                        store_prefix(&r.symbol.store),
+                        display(std::path::Path::new(&r.symbol.path)),
+                        r.symbol.start_line,
+                    )?;
+                }
+                if inferred > 0 {
+                    writeln!(
+                        out,
+                        "{inferred} of these were matched by name, not resolved through an import."
+                    )?;
+                }
+                if reached.len() >= semlith::graph::MAX_NODES {
+                    writeln!(
+                        out,
+                        "Stopped at the {} symbol budget; the real radius is larger.",
+                        semlith::graph::MAX_NODES
+                    )?;
                 }
             }
         }
@@ -631,6 +929,7 @@ fn main() -> Result<()> {
 
         Command::Start {
             paths,
+            ledger,
             port,
             debounce,
             airgap,
@@ -648,6 +947,7 @@ fn main() -> Result<()> {
                 semlith::daemon::port_of(port),
                 std::time::Duration::from_millis(debounce),
                 semlith::embed::airgap(),
+                ledger,
                 |line| eprintln!("semlith: {line}"),
             )?;
         }
@@ -883,4 +1183,71 @@ fn reset() -> &'static str {
     } else {
         ""
     }
+}
+
+/// The message for a name the graph has never heard of.
+///
+/// A store with an empty graph and a store that simply does not contain the
+/// symbol are different facts, and only one of them means "run index". Saying
+/// "not found" for both is how someone concludes the feature is broken.
+fn nothing_known(fleet: &semlith::fleet::Fleet, name: &str) -> String {
+    let symbols: i64 = fleet
+        .each()
+        .map(|(_, store)| {
+            semlith::store::graph_stats(store.db())
+                .map(|(s, _)| s)
+                .unwrap_or(0)
+        })
+        .sum();
+    if symbols == 0 {
+        format!(
+            "no symbols in this store yet. The graph is built as files are indexed, \
+             so run `semlith index` once (or leave `semlith start` running) and \
+             {name} will be there if the corpus defines it."
+        )
+    } else {
+        format!("no symbol named {name} in the graph")
+    }
+}
+
+/// `[store] ` when several stores are open, and nothing when one is.
+fn store_prefix(store: &Option<String>) -> String {
+    match store {
+        Some(label) => format!("[{label}] "),
+        None => String::new(),
+    }
+}
+
+fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeEnd]) -> Result<()> {
+    writeln!(out, "{}{heading}{} ({})", bold(), reset(), ends.len())?;
+    if ends.is_empty() {
+        writeln!(out, "  none")?;
+        return Ok(());
+    }
+    for end in ends {
+        writeln!(
+            out,
+            "  {} via {} ({})  {}{}:{}",
+            end.symbol.name,
+            end.kind,
+            end.confidence,
+            store_prefix(&end.symbol.store),
+            display(std::path::Path::new(&end.symbol.path)),
+            end.symbol.start_line,
+        )?;
+    }
+    Ok(())
+}
+
+/// A unix second as a local clock time, for the ledger's rows.
+fn human_time(at: i64) -> String {
+    let secs = at.max(0) as u64;
+    let day = secs / 86_400;
+    let rest = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02} d{day}",
+        rest / 3600,
+        (rest % 3600) / 60,
+        rest % 60
+    )
 }

@@ -259,7 +259,28 @@ fn tools(stores: &Fleet) -> Value {
     // An agent cannot narrow to a store whose name it has never seen, so the
     // open stores are part of the tool description rather than something to
     // discover by trial.
-    let open = stores.labels().join(", ");
+    tool_defs(&stores.labels().join(", "))
+}
+
+/// Every tool name this server serves.
+///
+/// The portal's Agents page reads this rather than repeating the list. Two
+/// hand-written copies of a tool surface in two files is precisely how a tool
+/// ends up served by the server and invisible in the portal, which the parity
+/// rule exists to prevent — so there is only one copy.
+pub fn tool_names() -> Vec<String> {
+    tool_defs("")
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn tool_defs(open: &str) -> Value {
     let store_arg = format!(
         "Restrict the search to these stores by name. Open stores: {open}. \
          Omit to search all of them, which is usually right — narrow only when \
@@ -441,6 +462,95 @@ fn tools(stores: &Fleet) -> Value {
                 "readOnlyHint": false,
                 "destructiveHint": true
             }
+        },
+        {
+            "name": "semlith_symbol",
+            "description":
+                "Find where a symbol is defined, by exact name, across every indexed store. \
+                 Returns the file and line range of each definition. Use this instead of \
+                 grepping for `fn name` or `def name`: it reads the definition out of the \
+                 parsed syntax tree, so it does not match the name in a comment, a string, \
+                 or a call. Six languages carry symbols — Rust, TypeScript, Python, Go, Java \
+                 and C.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
+                    "k": { "type": "integer", "description": "Most definitions to return. Default 20." },
+                    "store": { "type": "string", "description": store_arg }
+                },
+                "required": ["name"]
+            },
+            "annotations": { "title": "Find a symbol's definition", "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_neighbors",
+            "description":
+                "List what calls a symbol and what it calls, one hop in each direction, from \
+                 the extracted code graph. Use this to answer \"who uses this\" and \"what \
+                 does this depend on\" in one call rather than a chain of greps. Each edge \
+                 says whether it was resolved through an import (extracted) or matched by \
+                 name (inferred) — do not treat an inferred edge as certain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
+                    "kind": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description":
+                            "Only follow edges of these kinds: defines, calls, imports, \
+                             references, contains. Omit for all of them."
+                    },
+                    "store": { "type": "string", "description": store_arg }
+                },
+                "required": ["name"]
+            },
+            "annotations": { "title": "List a symbol's callers and callees", "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_path",
+            "description":
+                "Show the shortest chain of edges from one symbol to another, naming every \
+                 edge in it. Use it to find out how two parts of a codebase are connected, \
+                 or to confirm that they are not. Follows calls, imports and references; \
+                 returns nothing when the two are unconnected within the depth searched, \
+                 which is an answer rather than a failure.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "The symbol the chain starts at." },
+                    "to": { "type": "string", "description": "The symbol the chain ends at." },
+                    "depth": { "type": "integer", "description": "Most hops to search. Default 6." },
+                    "store": { "type": "string", "description": store_arg }
+                },
+                "required": ["from", "to"]
+            },
+            "annotations": { "title": "Find the path between two symbols", "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_impact",
+            "description":
+                "The blast radius of a change: everything that reaches this symbol, walking \
+                 calls, imports and references backwards to a hop depth. Call this BEFORE \
+                 editing a shared function. It is the direct fix for the most common editing \
+                 mistake — changing the one call site that was reported and leaving every \
+                 sibling caller broken.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
+                    "depth": {
+                        "type": "integer",
+                        "description":
+                            "How many hops backwards to walk. Default 3. Depth 1 is the direct \
+                             callers."
+                    },
+                    "store": { "type": "string", "description": store_arg }
+                },
+                "required": ["name"]
+            },
+            "annotations": { "title": "Find what a change would break", "readOnlyHint": true }
         }
     ])
 }
@@ -683,10 +793,191 @@ fn call_tool(
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
+        "semlith_symbol" => {
+            let Some(name) = args.get("name").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: name".into(), None));
+            };
+            let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
+            let only = strings(&args, "store");
+            match stores.symbols_in(Some(&only), name, k.clamp(1, 200)) {
+                Ok(found) if found.is_empty() => empty_graph(stores, name),
+                Ok(found) => found
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{} ({}) {}{}:{}-{}",
+                            s.name,
+                            s.kind,
+                            label_of(&s.store),
+                            s.path,
+                            s.start_line,
+                            s.end_line
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_neighbors" => {
+            let Some(name) = args.get("name").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: name".into(), None));
+            };
+            let kinds = strings(&args, "kind");
+            if let Some(bad) = kinds
+                .iter()
+                .find(|k| !crate::graph::KINDS.contains(&k.as_str()))
+            {
+                return Ok(tool_error(&format!(
+                    "unknown edge kind {bad:?}; the kinds are {}",
+                    crate::graph::KINDS.join(", ")
+                )));
+            }
+            let only = strings(&args, "store");
+            match stores.neighbours_in(Some(&only), name, &kinds) {
+                Ok(n) if n.callers.is_empty() && n.callees.is_empty() => empty_graph(stores, name),
+                Ok(n) => format!(
+                    "callers of {name} ({}):\n{}\n\ncallees of {name} ({}):\n{}",
+                    n.callers.len(),
+                    render_ends(&n.callers),
+                    n.callees.len(),
+                    render_ends(&n.callees),
+                ),
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_path" => {
+            let (Some(from), Some(to)) = (
+                args.get("from").and_then(Value::as_str),
+                args.get("to").and_then(Value::as_str),
+            ) else {
+                return Err((-32602, "missing required arguments: from, to".into(), None));
+            };
+            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(6) as u32;
+            let only = strings(&args, "store");
+            match stores.path_in(Some(&only), from, to, depth.clamp(1, 20)) {
+                Ok(Some(steps)) if steps.is_empty() => format!("{from} is {to}."),
+                Ok(Some(steps)) => {
+                    let chain = steps
+                        .iter()
+                        .map(|s| format!("{} --{}({})--> {}", s.from, s.kind, s.confidence, s.to))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("{} hops:\n{chain}", steps.len())
+                }
+                Ok(None) => format!(
+                    "No chain from {from} to {to} within {depth} hops. They may be \
+                     unconnected, or connected only further than that."
+                ),
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_impact" => {
+            let Some(name) = args.get("name").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: name".into(), None));
+            };
+            let depth = args
+                .get("depth")
+                .and_then(Value::as_u64)
+                .unwrap_or(crate::graph::DEFAULT_DEPTH as u64) as u32;
+            let only = strings(&args, "store");
+            match stores.impact_in(Some(&only), name, depth.clamp(1, 20)) {
+                Ok(reached) if reached.is_empty() => {
+                    format!("Nothing in the graph reaches {name} within {depth} hops.")
+                }
+                Ok(reached) => {
+                    let rows = reached
+                        .iter()
+                        .map(|r| {
+                            format!(
+                                "{} hop{}  {} via {} ({})  {}{}:{}",
+                                r.hops,
+                                if r.hops == 1 { "" } else { "s" },
+                                r.symbol.name,
+                                r.via,
+                                r.confidence,
+                                label_of(&r.symbol.store),
+                                r.symbol.path,
+                                r.symbol.start_line,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let truncated = if reached.len() >= crate::graph::MAX_NODES {
+                        format!(
+                            "\n\nStopped at the {} symbol budget; the real radius is larger.",
+                            crate::graph::MAX_NODES
+                        )
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{} symbols reach {name} within {depth} hops. Check each before \
+                         changing its signature or behaviour.\n{rows}{truncated}",
+                        reached.len()
+                    )
+                }
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
         other => return Err((-32602, format!("unknown tool: {other}"), None)),
     };
 
     Ok(json!({ "content": [{ "type": "text", "text": body }] }))
+}
+
+/// What to say when the graph has nothing for a name.
+///
+/// An empty graph and an absent symbol read identically to an agent, and only
+/// one of them means "this corpus has not been indexed since the graph
+/// existed". Telling them apart is the difference between the agent running
+/// `semlith_index` and concluding the symbol is not there.
+fn empty_graph(stores: &Fleet, name: &str) -> String {
+    let symbols: i64 = stores
+        .each()
+        .map(|(_, store)| {
+            crate::store::graph_stats(store.db())
+                .map(|(s, _)| s)
+                .unwrap_or(0)
+        })
+        .sum();
+    if symbols == 0 {
+        "This store has no symbols yet: its graph is built as files are indexed. Call \
+         semlith_index on the corpus, then ask again."
+            .to_string()
+    } else {
+        format!(
+            "No symbol named {name} in the graph. Only Rust, TypeScript, Python, Go, Java \
+             and C carry symbols; semlith_search still finds text in everything else."
+        )
+    }
+}
+
+fn label_of(store: &Option<String>) -> String {
+    match store {
+        Some(label) => format!("[{label}] "),
+        None => String::new(),
+    }
+}
+
+fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
+    if ends.is_empty() {
+        return "  none".to_string();
+    }
+    ends.iter()
+        .map(|e| {
+            format!(
+                "  {} via {} ({})  {}{}:{}",
+                e.symbol.name,
+                e.kind,
+                e.confidence,
+                label_of(&e.symbol.store),
+                e.symbol.path,
+                e.symbol.start_line
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// How long an index tool call may work for.
@@ -743,8 +1034,16 @@ fn render(hits: &[crate::Hit]) -> String {
             Some(label) => format!("{label} "),
             None => String::new(),
         };
+        // Which lists found it. A hit that only the graph reached is a
+        // neighbour of a match rather than a match, and an agent that cannot
+        // tell the two apart will quote it as though the query found it.
+        let via = if h.lists.is_empty() {
+            String::new()
+        } else {
+            format!(" via {}", h.lists.join("+"))
+        };
         out.push_str(&format!(
-            "[{}] {from}{}:{}-{} (score {:.3})\n{}\n\n",
+            "[{}] {from}{}:{}-{} (score {:.3}{via})\n{}\n\n",
             i + 1,
             h.path,
             h.start_line,

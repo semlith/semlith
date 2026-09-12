@@ -200,6 +200,12 @@ pub struct State {
     /// agent's index freezing the portal for as long as the slice lasts. A
     /// reader that is never used costs a SQLite handle and no vectors.
     pub mcp_fleet: Mutex<Option<Fleet>>,
+    /// Whether retrievals are recorded into each store's `retrievals` table.
+    ///
+    /// Off unless asked for, on the principle the whole product is built on:
+    /// a local tool that starts logging what you searched for without being
+    /// told to is not meaningfully different from one that phones home.
+    pub ledger: bool,
 }
 
 /// How recently a proxy must have called to count as connected.
@@ -489,11 +495,13 @@ fn roots_for(dir: &Path, registry: &Registry) -> (String, Vec<PathBuf>) {
 /// `report` is the daemon's stderr: the bound port, each store opened, each
 /// re-embed, and the refusal counts on the way out. Never the token — that
 /// appears in the URL and in the discovery file, and nowhere else.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     dirs: &[PathBuf],
     port: u16,
     debounce: Duration,
     airgap: bool,
+    ledger: bool,
     report: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Arc<State>> {
     let registry = Registry::load()?;
@@ -573,6 +581,7 @@ pub fn run(
         refusals: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
+        ledger,
     });
 
     // Installed before the first thread starts: the signal is how this process
@@ -948,6 +957,7 @@ mod tests {
             refusals: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
+            ledger: false,
         };
 
         let err = match state.writable(None) {

@@ -78,6 +78,7 @@ Module responsibilities:
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
+| `src/graph.rs` | tree-sitter extraction, and the bounded traversals over the edges |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
 | `src/mcp.rs` | Hand-rolled stdio JSON-RPC MCP server |
@@ -112,7 +113,40 @@ Module responsibilities:
   `mcp::SUPPORTED` has a session in `tests/mcp.rs` proving it — adding a
   revision means adding that session.
 - `filter.rs` derives both the vector allowlist and the FTS5 predicate from one
-  id set, so the two halves can never disagree about eligibility.
+  id set, so the three halves can never disagree about eligibility — graph
+  expansion resolves its neighbours through `store::symbols_by_names`, which
+  takes the same predicate, so a chunk outside the filter cannot arrive through
+  the graph either.
+- **The graph is extracted inside `index_set`, never separately.** It is written
+  where the file id and the new chunk ids are both already in hand, after
+  `delete_file` has taken the old rows away. That is the whole freshness claim:
+  the pass that re-embeds a file is the pass that re-extracts it, so there is no
+  artifact that can be stale. A `semlith graph build` command would be the one
+  change that breaks the release's central property — do not add one.
+- **`edges.dst` is a symbol *name*, not an id.** `edges.src` is an id and
+  cascades with its file; the target is resolved through `symbols(name)` at
+  query time. With an id there, re-indexing `b.rs` would reissue its symbol ids
+  and silently orphan every edge pointing into it from `a.rs` — the graph would
+  rot on exactly the operation this design exists to make safe. It also lets an
+  edge to something unindexed (a standard-library call) still be recorded.
+- **`extracted` versus `inferred` is load-bearing.** A call whose name the file
+  imports is extracted; a bare name match is inferred. Two functions called `new`
+  in different modules is the normal case, so nothing that renders an edge may
+  present the second as the first.
+- **Traversal is bounded and reads one hop at a time.** No `petgraph`, no
+  in-memory whole-graph structure: `graph::impact` and `graph::shortest_path`
+  walk the indexed `edges(src)`/`edges(dst)` columns under a depth limit and
+  `graph::MAX_NODES`, which is what keeps peak RSS flat as the corpus grows.
+  `impact` and `path` follow `DEPENDENCY_KINDS` only — the structural edges are
+  true and useless for a blast radius, since every symbol is one hop from the
+  file that defines it.
+- **The ledger is off unless asked for**, and its rows are hash-chained: each
+  carries the hash of the one before it, so `store::ledger_break` finds an edited
+  or deleted row. Recording and `semlith ledger` are free on every tier,
+  permanently; do not put either behind a key.
+- **`mcp::tool_names` is the one tool list.** `routes::agents` reads it rather
+  than repeating it, because two hand-written copies is how a tool ends up served
+  by the server and invisible in the portal.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
 - **`add` is the only command that reaches the network besides `upgrade` and
