@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A store no longer has to live inside the repository it indexes, and a portal in
+your browser shows you what is in it. `semlith start` is one process that owns
+every store, keeps them current as you save, and serves that page on
+`127.0.0.1` — which also ends the choice between a watcher keeping a store
+current and an agent being able to write to it.
+
+### Added
+
+- **A store home.** `semlith index` with no flags now creates
+  `~/.semlith/stores/<name>` and records the directory it indexed in
+  `~/.semlith/registry.json`. `SEMLITH_HOME` moves it; `--name` names a store
+  explicitly. A store can no longer land in a tracked tree by default.
+- **`semlith adopt <dir>`** moves an existing store into the home and registers
+  it — a rename where it can be, a verified copy where it cannot, and no
+  re-embedding either way. `--root` re-points a registered store whose corpus
+  moved.
+- **`semlith start`**: takes every registered store's write lock, runs the
+  watcher over their roots, and serves a portal on `127.0.0.1:7365`. `--port`
+  and `SEMLITH_PORT` change the port; nothing changes the address. If the port
+  is taken it exits saying so rather than picking another, because the URL is
+  meant to be a bookmark.
+- **The portal**, compiled into the binary: a first-run welcome screen, and
+  Stores, Files, Search, Index, Agents, Privacy and About. It shows each store's
+  counts and the watcher's live event feed, the indexed files with the CLI's
+  `path`/`ext`/`lang` filters and the reader that parsed each one, the same
+  fused search the CLI and the MCP tools run, a folder picker whose index run
+  streams progress as it happens, the client stanza for every documented agent,
+  and a Privacy page with a packet-capture recipe.
+- **`semlith mcp` forwards to a running daemon.** An agent's `semlith_index`
+  used to be refused for as long as a watcher held the store; now the daemon is
+  the writer and the agent is a client of it. Client configuration does not
+  change, and with no daemon running `semlith mcp` behaves exactly as 0.8.0 did.
+- **`--airgap`**, and `SEMLITH_AIRGAP=1`, on `index` and `start`: refuse to
+  download model weights and exit naming the cache path, so a machine that
+  pre-seeded `SEMLITH_MODEL_CACHE` can prove nothing was fetched.
+- **A token rotate route**, behind the Privacy page's button: the old token is
+  refused from the next request.
+
+### Changed
+
+- **Client stanzas lost their paths.** Every README stanza is now `semlith mcp`
+  with no arguments, because the server opens every registered store plus a
+  `.semlith` beside the working directory. Index a second repository and the
+  agent that is already configured can search it, with no file to edit.
+  `--store` still works and still wins when given.
+- `semlith mcp` with no flags opens every registered store rather than
+  `./.semlith` alone.
+- The out-of-scope note in `AGENTS.md` and `docs/architecture.md` now states the
+  loopback rule instead of forbidding a server, per
+  [#41](https://github.com/semlith/semlith/issues/41). A CLI command or MCP tool
+  is not done until its portal view exists, and `tests/portal.rs` is the gate.
+- `turbovec` 0.9.0 → 1.0.0: `search_with_allowlist` returns a `Result` instead
+  of panicking on an id the index does not hold, which is the better contract
+  for a shard that legitimately lacks an id its range covers.
+- `fastembed` 6.0.1 → 6.0.3.
+
+### Security
+
+- The portal binds `127.0.0.1` only, with no flag to change it. Every request
+  needs a per-run token carried in a `SameSite=Strict; HttpOnly` cookie — 401
+  and an empty body without it. The `Host` header must be `localhost`,
+  `127.0.0.1` or `::1`, or the request gets 400. Every response carries a
+  `Content-Security-Policy` allowing only `'self'`, and no CORS header is
+  emitted anywhere. Each of those is asserted by a test.
+
+### Dependencies
+
+- **No new crate.** The HTTP server, the HTTP client the proxy uses, and the
+  portal are all written against `std`, so the dependency count is unchanged at
+  14 direct dependencies plus one dev-dependency — the same list 0.8.0 shipped,
+  with `turbovec` and `fastembed` bumped. The portal adds 149 KB of embedded
+  assets — HTML, CSS, JavaScript and five IBM Plex latin faces under the SIL
+  OFL 1.1 — against a 1 MiB budget a test enforces.
+
 ## [0.8.0] - 2026-07-30
 
 The documents a corpus is actually made of. A notebook, a Word file, a slide
