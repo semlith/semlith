@@ -11,14 +11,8 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 You need a 64-bit machine and Rust 1.89 or newer. turbovec refuses to compile
 on 32-bit targets by design.
 
-**On Linux, install OpenBLAS first** — turbovec's build script emits
-`-lopenblas` there. macOS uses Accelerate, which is part of the OS.
-
-```sh
-sudo apt-get install libopenblas-dev     # Debian/Ubuntu
-sudo dnf install openblas-devel          # Fedora/RHEL
-sudo pacman -S openblas                  # Arch
-```
+Nothing else has to be installed first. turbovec 1.0.0 dropped its BLAS
+dependency, so the OpenBLAS step Linux used to need is gone.
 
 ```sh
 git clone https://github.com/semlith/semlith

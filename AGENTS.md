@@ -5,10 +5,13 @@ of truth; `CLAUDE.md` points here.
 
 ## Build and test
 
-Rust 1.89+, edition 2024, 64-bit only (turbovec refuses 32-bit). On Linux
-install OpenBLAS first (`libopenblas-dev` / `openblas-devel` / `openblas`);
-macOS uses Accelerate. First build compiles bundled SQLite and downloads ONNX
-Runtime — minutes.
+Rust 1.89+, edition 2024, 64-bit only (turbovec refuses 32-bit). Nothing has to
+be installed first: turbovec 1.0.0 dropped BLAS, so there is no OpenBLAS step on
+Linux any more, and the TLS stack is rustls rather than the system OpenSSL. The
+packaged Linux binary must keep needing nothing but glibc and libstdc++ —
+`release.yml` reads its `NEEDED` entries and fails on `libssl`, `libcrypto` or
+`libopenblas`. First build compiles bundled SQLite and downloads ONNX Runtime —
+minutes.
 
 ```sh
 cargo fmt --all -- --check
@@ -152,8 +155,12 @@ than stated, and that are not up for relaxation without an issue like
   no CORS header is emitted anywhere.
 - Every byte the portal loads is `include_bytes!`d into the binary. No CDN, no
   build step, no npm. The page loads with the cable unplugged.
-- No telemetry, no analytics, no update check. The one download that exists is
-  the embedding model, once, on first index — and `--airgap` refuses even that.
+- No telemetry, no analytics, and no update check semlith makes on its own.
+  `semlith upgrade` and `semlith upgrade --check` exist from 0.10.0 and reach
+  GitHub, but only in the second a user asks: there is no startup check, no
+  timer, and no banner that appears without a click. The other two downloads are
+  the embedding model, once, on first index, and `semlith setup`'s pre-fetch of
+  the same file — `--airgap` refuses all of it.
 
 Discuss in an issue before building: any other bind address, MCP over HTTP as an
 endpoint agents connect to directly, hosted embedding APIs, any outbound

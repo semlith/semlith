@@ -46,56 +46,77 @@ Think of it as a semantic cache for everything your agent needs to know.
 
 ## Install
 
-Requires a 64-bit machine. Prebuilt binaries cover Linux (x86_64, aarch64),
-Apple silicon macOS and Windows x86_64. Intel macOS is not supported: ONNX
-Runtime no longer publishes x86_64 macOS builds, so the embedding backend cannot
-link there.
+One command. No Rust toolchain, no package manager, nothing installed first.
 
-**On Linux, install OpenBLAS.** turbovec links against a system BLAS; macOS uses
-Apple's Accelerate framework, which ships with the OS, and Windows falls back to
-a pure-Rust implementation, so this step is Linux-only.
+<!-- install-oneliners:start -->
+**macOS and Linux**
 
 ```sh
-sudo apt-get install libopenblas-dev     # Debian/Ubuntu
-sudo dnf install openblas-devel          # Fedora/RHEL
-sudo pacman -S openblas                  # Arch
+curl -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh
 ```
 
-### From crates.io
+**Windows**
+
+```powershell
+irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
+```
+<!-- install-oneliners:end -->
+
+The script picks the release for your machine, checks the download against the
+release's `SHA256SUMS`, unpacks it into `~/.semlith/bin`, and hands off to
+`semlith setup`, which puts that directory on your `PATH`, pre-downloads the
+embedding model so your first `index` is not a silent wait, and registers
+semlith with the agents you say you use. Open a new shell and `semlith
+--version` works.
+
+`semlith setup` is also the repair command: run it again any time to fix `PATH`
+or add a client, and it reports every step that is already done rather than
+doing it twice. `semlith setup --yes` takes the default at every prompt, so a
+script or an agent can install semlith unattended.
+
+`SEMLITH_VERSION=v0.10.0` pins a release; `SEMLITH_HOME` moves where it lands.
+
+Later, `semlith upgrade` fetches the newest release, verifies it and swaps the
+binary in place; `semlith upgrade --check` only says whether one exists. Neither
+happens on its own — semlith has no startup check, no timer and no update
+banner.
+
+Requires a 64-bit machine. Prebuilt binaries cover Linux (x86_64, aarch64),
+Apple silicon macOS and Windows x86_64. The Linux binary needs nothing but
+glibc 2.28+ and libstdc++ — no OpenBLAS, no OpenSSL. Intel macOS is not
+supported: ONNX Runtime no longer publishes x86_64 macOS builds, so the
+embedding backend cannot link there.
+
+### Other ways
+
+Homebrew, winget and Scoop are coming. Until then:
+
+**From crates.io**, if you would rather build it yourself:
 
 ```sh
 cargo install semlith
 ```
 
-### From a release
-
-Grab the archive for your platform from the
-[latest release](https://github.com/semlith/semlith/releases/latest) and put the
-binary on your `PATH`:
+**From a release archive**, if you would rather place the binary by hand:
 
 ```sh
-VERSION=v0.1.0
+VERSION=v0.10.0
 TARGET=aarch64-apple-darwin        # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 curl -LO "https://github.com/semlith/semlith/releases/download/$VERSION/semlith-$VERSION-$TARGET.tar.gz"
+curl -LO "https://github.com/semlith/semlith/releases/download/$VERSION/SHA256SUMS"
+shasum -a 256 -c --ignore-missing SHA256SUMS
 tar xzf "semlith-$VERSION-$TARGET.tar.gz"
 sudo install "semlith-$VERSION-$TARGET/semlith" /usr/local/bin/
 semlith --version
 ```
 
-Each release ships a `SHA256SUMS` file; check your download against it before
-running it. On Windows, unpack the `.zip` and move `semlith.exe` somewhere on
-your `PATH`.
+On Windows, unpack the `.zip` and move `semlith.exe` somewhere on your `PATH`.
 
-### From source
-
-Needs a Rust toolchain (1.89+):
+**From source**, with a Rust toolchain (1.89+):
 
 ```sh
 cargo install --git https://github.com/semlith/semlith
 ```
-
-If the build fails with `unable to find library -lopenblas`, that is the
-OpenBLAS step above you missed.
 
 ## Quick start
 
@@ -143,6 +164,8 @@ just those lines instead of the whole file.
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
 | `semlith languages` | List the language names `--lang` accepts. |
+| `semlith setup [--yes]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register agent clients. Idempotent, so it is also the repair command. `--airgap` skips the model. |
+| `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
 Global: `--store <DIR>` picks the store directory, and `SEMLITH_STORE` does the
 same from the environment. `search`, `stats`, `files` and `mcp` read, so the
@@ -980,6 +1003,18 @@ Everyone participating is expected to follow the
 - Stores are named by path; there is no registry of named stores, and no
   discovery. A store is searched because it was named, and its label comes from
   the directory holding it.
+- The install scripts are the only packaged install. Homebrew, winget and Scoop
+  are not there yet, so the one-liner and `cargo install` are the two ways in.
+- Nothing is code-signed or notarized. A curl download carries no macOS
+  quarantine attribute and the Windows script calls `Unblock-File`, which is
+  enough for both to run — but neither binary is signed.
+- There is no native ARM64 Windows build and no Intel macOS build. ARM64 Windows
+  runs the x64 binary under emulation; Intel macOS has no option, because ONNX
+  Runtime no longer publishes `osx-x86_64`.
+- `semlith upgrade` only replaces a binary in `~/.semlith/bin`. A `cargo install`
+  or a hand-placed copy is left alone, with the matching upgrade command
+  printed instead — replacing a file this tool did not put there is not its
+  business.
 
 ## License
 

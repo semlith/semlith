@@ -802,6 +802,109 @@ async function indexView() {
   );
 }
 
+// The install one-liners, what `semlith setup` would report about this machine,
+// and the only two places semlith ever reaches out for a new version. It is
+// one card because the welcome screen and the Agents view owe the same answer,
+// and it reads `/api/setup`, which is `setup::status()` — the same function the
+// terminal prints, so the page cannot claim PATH is set up when it is not.
+function installPanel() {
+  const card = el("div", { class: "card pad" });
+  const head = () => el("strong", { text: "Install and setup" });
+  fill(card, head(), el("p", { class: "subtitle", text: "Checking this machine…" }));
+
+  const stateWord = {
+    done: "done",
+    "already-done": "already done",
+    skipped: "not done",
+    failed: "failed",
+  };
+
+  api("/api/setup")
+    .then((setup) => {
+      const result = el("p", { class: "subtitle" });
+
+      const check = el("button", {
+        class: "button secondary small",
+        type: "button",
+        text: "Check for updates",
+        onclick: async () => {
+          result.textContent = "Asking GitHub…";
+          try {
+            const found = await post("/api/upgrade", { action: "check" });
+            result.textContent = found.available
+              ? `${found.latest} is available; you are on ${found.installed}.`
+              : `Already on the newest release, ${found.installed}.`;
+            if (found.blocked) result.textContent += ` ${found.blocked}`;
+            install.disabled = !found.available || Boolean(found.blocked);
+          } catch (e) {
+            result.textContent = e.message;
+          }
+        },
+      });
+
+      const install = el("button", {
+        class: "button small",
+        type: "button",
+        text: "Install it",
+        onclick: async () => {
+          install.disabled = true;
+          result.textContent = "Downloading and verifying…";
+          try {
+            const done = await post("/api/upgrade", { action: "apply" });
+            result.textContent = done.restart;
+          } catch (e) {
+            result.textContent = e.message;
+          }
+        },
+      });
+      install.disabled = true;
+
+      fill(
+        card,
+        head(),
+        el("p", {
+          class: "subtitle",
+          text: "One command on a new machine. Nothing here runs until you click it.",
+        }),
+        el("div", { class: "eyebrow", style: "margin-top:12px", text: "macOS and Linux" }),
+        copyField(setup.install_sh),
+        el("div", { class: "eyebrow", style: "margin-top:12px", text: "Windows" }),
+        copyField(setup.install_ps1),
+        el("div", { class: "rule", style: "margin:14px 0" }),
+        el(
+          "div",
+          { class: "rows" },
+          setup.steps.map((step) =>
+            el(
+              "div",
+              { style: "display:flex;gap:10px;align-items:baseline" },
+              el("span", {
+                class: `pill ${step.state === "done" || step.state === "already-done" ? "good" : ""}`,
+                text: stateWord[step.state] || step.state,
+              }),
+              el("span", { style: "font-weight:600", text: step.name }),
+              el("span", { class: "mono muted", style: "font-size:12px", text: step.detail }),
+            ),
+          ),
+        ),
+        el("div", {
+          class: "subtitle",
+          style: "margin-top:10px",
+          text: setup.on_path
+            ? `${setup.bin_dir} is on PATH.`
+            : `${setup.bin_dir} is not on PATH — run \`semlith setup\` to add it.`,
+        }),
+        el("div", { class: "rule", style: "margin:14px 0" }),
+        el("div", { class: "eyebrow", text: `Installed version ${setup.version}` }),
+        el("div", { class: "buttons", style: "margin-top:8px" }, check, install),
+        result,
+      );
+    })
+    .catch((e) => fill(card, head(), error(e.message)));
+
+  return card;
+}
+
 async function agentsView() {
   const data = await api("/api/agents");
   const clients = data.clients;
@@ -883,6 +986,7 @@ async function agentsView() {
         }),
       ),
       body,
+      installPanel(),
     ),
   );
 }
@@ -1170,6 +1274,7 @@ function welcomeView() {
         ),
       ),
     ),
+    installPanel(),
     el("footer", { text: "127.0.0.1 · loopback only · no external asset" }),
   );
 }

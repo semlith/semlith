@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-12
+
+One command on a fresh machine. No Rust toolchain, no package manager, nothing
+installed first — and on Linux, no OpenBLAS and no OpenSSL either, because the
+binary no longer needs them.
+
+### Added
+
+- **`install.sh` and `install.ps1`**, at the root of the `main` branch and
+  reachable from `raw.githubusercontent.com`. Each detects the machine's
+  target, resolves the newest release through the `releases/latest` redirect
+  (`SEMLITH_VERSION` pins one instead), downloads the archive with a progress
+  bar, verifies it against the release's `SHA256SUMS` before writing anything,
+  unpacks into `~/.semlith/bin`, and hands off to `semlith setup`. A failed
+  download or a bad checksum leaves nothing behind: no bin directory, no
+  partial file outside a temp directory removed on exit. Intel macOS gets the
+  ONNX Runtime explanation and no partial install.
+- **`semlith setup [--yes]`**: a guided terminal flow that puts
+  `~/.semlith/bin` on `PATH` for your shell, pre-downloads the embedding model
+  so the first `index` is not a silent wait, registers semlith with the agents
+  you pick — Claude Code through its own CLI, every other client by printing
+  the stanza and the config path — and ends by running the installed binary's
+  `--version`. Every step is idempotent and reports what is already done, so it
+  is the repair command as well as the install one. `--yes` takes the default
+  at every prompt and needs no terminal, so a script or an agent can install
+  semlith unattended.
+- **`semlith upgrade [--check] [--version <tag>] [--airgap]`**: fetches the
+  newest release for this machine, verifies it against `SHA256SUMS`, and swaps
+  the binary by renaming the old one aside and the new one into place — the one
+  sequence that works on Linux, macOS and Windows alike. `--check` prints both
+  versions, changes nothing, and exits 10 when an upgrade exists. It refuses
+  under `--airgap` before opening a connection, refuses a binary it did not
+  install, and never runs unprompted: no startup check, no timer, no banner.
+- **Portal parity.** The welcome screen and the Agents view gain an "Install and
+  setup" panel: both one-liners with copy buttons, a row per setup step with
+  what it found, whether the bin directory is on `PATH`, the installed version,
+  and Check-for-updates and Install buttons that only ever fire on a click. The
+  panel reads `/api/setup`, which is `setup::status()` — the same function the
+  terminal prints — so the page cannot claim `PATH` is set up when it is not.
+
+### Changed
+
+- **The Linux binary needs nothing but glibc and libstdc++.** fastembed moves to
+  `ort-download-binaries-rustls-tls` and hf-hub to its ureq-only feature set,
+  which takes reqwest, tokio and native-tls out of the build entirely — 607
+  lines leave `Cargo.lock`. The release workflow now reads the built binary's
+  `NEEDED` entries with `readelf`, prints them, and fails on `libssl`,
+  `libcrypto` or `libopenblas`, so this cannot regress quietly.
+- **The OpenBLAS instruction is gone** from the README, `CONTRIBUTING.md`,
+  `AGENTS.md` and both workflows. turbovec 1.0.0 dropped its BLAS dependency and
+  the documentation had not caught up: the step had been unnecessary for a
+  release already.
+- **The README's Install section leads with the two one-liners.** Homebrew,
+  winget and Scoop are listed as coming; `cargo install` and the release archive
+  are kept below as alternatives. The release notes' install text is now lifted
+  out of the README between markers, so the two cannot drift apart.
+- **One new runtime crate**: cliclack 0.5.6, for the prompts, the spinner and
+  the progress bar. `sha2` and `ureq` are now named directly and were already in
+  the tree through hf-hub, so neither adds anything to the build.
+
+### Documentation
+
+- `docs/compatibility.md` now covers the install script URLs and the
+  environment variables they honour, the release archive layout both they and
+  `semlith upgrade` read, `semlith setup --yes`, and `semlith upgrade --check`'s
+  exit codes. `SEMLITH_RELEASES_ORIGIN` is listed as explicitly not covered: it
+  redirects the release lookup for the tests and is not a way to self-host.
+
 ## [0.9.0] - 2026-09-12
 
 A store no longer has to live inside the repository it indexes, and a portal in
@@ -635,7 +703,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/semlith/semlith/releases/tag/v0.10.0
 [0.9.0]: https://github.com/semlith/semlith/releases/tag/v0.9.0
 [0.8.0]: https://github.com/semlith/semlith/releases/tag/v0.8.0
 [0.7.0]: https://github.com/semlith/semlith/releases/tag/v0.7.0

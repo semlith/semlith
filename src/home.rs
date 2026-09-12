@@ -45,6 +45,13 @@ pub fn stores_root() -> PathBuf {
     home().join("stores")
 }
 
+/// Where the install scripts put the binary, and where `semlith setup` looks
+/// for it. Inside the home rather than beside it so that `SEMLITH_HOME` moves
+/// one directory and not two, and so an uninstall is one `rm -rf`.
+pub fn bin_dir() -> PathBuf {
+    home().join("bin")
+}
+
 /// The registry file. Model weights deliberately do not live under the home:
 /// a cache is deletable and a store is not, so weights stay in
 /// `~/.cache/semlith/models`.
