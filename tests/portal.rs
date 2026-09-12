@@ -40,6 +40,10 @@ const VIEWS: &[(&str, &str)] = &[
     ("adopt", "/api/adopt"),
     ("models", "/api/models"),
     ("languages", "/api/languages"),
+    ("setup", "/api/setup"),
+    // A check and an install both reach the network, so neither is something a
+    // route answers to a GET that a browser might replay.
+    ("upgrade", "/api/upgrade"),
 ];
 
 /// And the same for the MCP tool surface.
@@ -192,7 +196,10 @@ fn every_cli_command_has_a_portal_view() {
             });
 
         // GET for the read routes, POST for the ones that write.
-        let method = if matches!(route, "/api/index" | "/api/forget" | "/api/adopt") {
+        let method = if matches!(
+            route,
+            "/api/index" | "/api/forget" | "/api/adopt" | "/api/upgrade"
+        ) {
             "POST"
         } else {
             "GET"

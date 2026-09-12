@@ -987,3 +987,11 @@ pre.code {
     padding: 16px;
   }
 }
+
+/* The install panel on the welcome screen. The hero and the steps above it are
+   both capped at 640px; a card the full width of the viewport under them reads
+   as a different page. */
+.welcome .card {
+  width: 100%;
+  max-width: 640px;
+}

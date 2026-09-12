@@ -171,6 +171,11 @@ enum Command {
         /// Install this tag instead of the newest release, e.g. `v0.9.0`.
         #[arg(long)]
         version: Option<String>,
+
+        /// Refuse to reach the network. Every path below exits before opening
+        /// a connection, which is what an air-gapped machine needs to prove.
+        #[arg(long)]
+        airgap: bool,
     },
 
     /// List available embedding models.
@@ -190,8 +195,16 @@ fn main() -> Result<()> {
             semlith::setup::run(yes, airgap)?;
         }
 
-        Command::Upgrade { check, version } => {
+        Command::Upgrade {
+            check,
+            version,
+            airgap,
+        } => {
+            arm_airgap(airgap);
             if check {
+                if let Some(reason) = semlith::upgrade::offline() {
+                    bail!("{reason}");
+                }
                 let found = semlith::upgrade::check()?;
                 println!("installed {}", found.installed);
                 println!("latest    {}", found.latest.trim_start_matches('v'));

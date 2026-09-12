@@ -199,13 +199,23 @@ fn unpack(archive: &Path, into: &Path) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// The reason this machine must not be upgraded in place, if there is one.
+/// The reason this run must not reach the network at all. Public so `--check`
+/// can refuse before it opens a connection: an air-gapped machine's whole claim
+/// is that the process never reached the network, and a check that connects
+/// first has already broken it.
+///
+/// Deliberately narrower than [`blocked`]: a binary this command cannot replace
+/// is still a binary whose user deserves to be told a newer release exists.
+pub fn offline() -> Option<&'static str> {
+    embed::airgap().then_some(
+        "SEMLITH_AIRGAP is set, so this run will not reach the network. \
+         Upgrade on a connected machine and copy the binary across.",
+    )
+}
+
 fn blocked() -> Option<&'static str> {
-    if embed::airgap() {
-        return Some(
-            "SEMLITH_AIRGAP is set, so this run will not reach the network. \
-             Upgrade on a connected machine and copy the binary across.",
-        );
+    if let Some(reason) = offline() {
+        return Some(reason);
     }
     let Ok(current) = std::env::current_exe() else {
         return Some("the running binary could not be located");

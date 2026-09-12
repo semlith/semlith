@@ -50,12 +50,14 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/privacy") => privacy(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
+        (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
+        (_, true, "/api/upgrade") => upgrade(request),
 
         // A method that exists on another verb is worth telling apart from a
         // route that does not exist: one is a bug in the page, the other is a
@@ -369,7 +371,19 @@ fn agents(state: &Arc<State>) -> Response {
         "tools": ["semlith_search", "semlith_stats", "semlith_files", "semlith_index", "semlith_forget"],
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
+        "install": {
+            "sh": crate::setup::INSTALL_SH,
+            "ps1": crate::setup::INSTALL_PS1,
+        },
+        "setup": crate::setup::status(),
     }))
+}
+
+/// The same per-step answers `semlith setup` computes, from the same function,
+/// so the page and the terminal cannot disagree about what is set up. It is a
+/// read: nothing here installs anything.
+fn setup() -> Response {
+    Response::json(&json!(crate::setup::status()))
 }
 
 // ---------------------------------------------------------------- writes
@@ -395,6 +409,39 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     match state.index(&store, paths) {
         Ok(progress) => stream(progress),
         Err(e) => Response::error(409, &e.to_string()),
+    }
+}
+
+/// Check for a newer release, or install one. Both only on a click — the
+/// daemon never looks on its own, which is the rule in AGENTS.md and the reason
+/// this is a POST with an explicit action rather than something the page can
+/// trigger by being open.
+///
+/// An applied upgrade replaces the binary this daemon is running from. The
+/// rename-old, rename-new sequence leaves the running process on the old inode,
+/// so the answer says to restart rather than pretending the swap took effect.
+fn upgrade(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    match body.get("action").and_then(Value::as_str) {
+        Some("check") => match crate::upgrade::check() {
+            Ok(found) => Response::json(&json!(found)),
+            Err(e) => Response::error(502, &e.to_string()),
+        },
+        Some("apply") => match crate::upgrade::apply(
+            body.get("version")
+                .and_then(Value::as_str)
+                .map(String::from),
+        ) {
+            Ok(()) => Response::json(&json!({
+                "installed": true,
+                "restart": "semlith start is still running the old binary — restart it",
+            })),
+            Err(e) => Response::error(409, &e.to_string()),
+        },
+        _ => Response::error(400, "action must be \"check\" or \"apply\""),
     }
 }
 
