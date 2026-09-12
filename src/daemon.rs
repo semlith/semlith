@@ -435,7 +435,8 @@ pub fn run(
     // ends, so the ordinary exit has to be the safe one.
     watch::stop_on_signal();
 
-    let report = Arc::new(report);
+    let report_line = Arc::new(report);
+    let report = Arc::clone(&report_line);
     let mut watchers = Vec::new();
     for (store, lock) in state.stores.iter().cloned().zip(locks) {
         let report = Arc::clone(&report);
@@ -449,6 +450,23 @@ pub fn run(
             }
             store.watching.store(false, Ordering::Relaxed);
         }));
+    }
+
+    // Behind the URL, not in front of it: loading the model costs a second or
+    // two, and a developer staring at a blank terminal waiting for a link is
+    // paying that cost twice. The first search would otherwise pay it instead,
+    // which is worse — it looks like the search is slow.
+    {
+        let warming = Arc::clone(&state);
+        let report = report_line.clone();
+        std::thread::spawn(move || {
+            let mut fleet = warming.fleet.lock().expect("the fleet lock");
+            if let Some(fleet) = fleet.as_mut()
+                && let Err(e) = fleet.warm()
+            {
+                report(&format!("could not load the embedding model: {e}"));
+            }
+        });
     }
 
     // stdout, not stderr: the token is in this URL, and stderr is the log the

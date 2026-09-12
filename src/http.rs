@@ -69,6 +69,9 @@ const MAX_BODY: usize = 1024 * 1024;
 /// half-open socket cannot hold a worker forever.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Set when the accept loop should be woken so it can notice `stop`.
+static WAKE: AtomicBool = AtomicBool::new(false);
+
 /// Why a request was refused, for the one-line-per-class count the daemon logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Refusal {
@@ -276,18 +279,17 @@ impl Server {
 
     /// Serve until `stop` is set, calling `refused` once per refused request.
     ///
-    /// `stop` is checked between accepts, so shutdown waits at most one accept
-    /// timeout rather than for the next request to arrive.
+    /// `stop` is `'static` because a thread has to watch it: `accept` blocks,
+    /// and something has to notice the flag and wake it. Polling `accept`
+    /// instead would put the poll interval on the front of every request —
+    /// this server closes each connection after answering, so that is every
+    /// request, not every session.
     pub fn serve(
         &self,
         handler: Handler,
-        stop: &AtomicBool,
+        stop: &'static AtomicBool,
         refused: impl Fn(Refusal) + Send + Sync + 'static,
     ) -> Result<()> {
-        self.listener
-            .set_nonblocking(true)
-            .context("putting the listener in non-blocking mode")?;
-
         let (tx, rx) = mpsc::channel::<TcpStream>();
         let rx = Arc::new(Mutex::new(rx));
         let refused = Arc::new(refused);
@@ -315,22 +317,45 @@ impl Server {
             }));
         }
 
+        // The waker: four wakeups a second while idle, nothing per request.
+        // `WAKE` covers the case where the loop leaves for its own reasons, so
+        // this thread never outlives the server that started it.
+        let waker = {
+            let port = self.port;
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) && !WAKE.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                // One connection that goes nowhere, purely to return `accept`.
+                let _ = TcpStream::connect(("127.0.0.1", port));
+            })
+        };
+
         while !stop.load(Ordering::Relaxed) {
             match self.listener.accept() {
                 Ok((stream, _)) => {
+                    // The waker's own connection arrives here too; it carries
+                    // no request, so `answer` reads nothing and closes it.
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
                     if tx.send(stream).is_err() {
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e).context("accepting a connection"),
+                Err(e) => {
+                    WAKE.store(true, Ordering::Relaxed);
+                    let _ = waker.join();
+                    return Err(e).context("accepting a connection");
+                }
             }
         }
+
+        WAKE.store(true, Ordering::Relaxed);
+        let _ = waker.join();
 
         // Dropping the sender ends every worker's `recv`, so shutdown finishes
         // the requests in flight and starts no more.
