@@ -11,9 +11,13 @@ break, and is treated as one.
 
 | Surface | What is promised |
 |---|---|
-| CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, and what each one does. |
+| CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, `setup`, `upgrade`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
 | Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. |
+| The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME` and `SEMLITH_YES`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
+| Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. `semlith upgrade` and both scripts read that layout. |
+| `semlith setup --yes` | Runs every step with its default and no prompt, so a script or an agent can install semlith unattended. |
+| `semlith upgrade --check` | Exits 0 when the installed version is current and 10 when a newer release exists, and changes nothing either way. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
 | MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_forget`. |
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
@@ -37,6 +41,17 @@ opens unchanged wherever it sits — and the resolution order finds a `.semlith`
 beside the corpus before it looks at the home, so no existing setup moves until
 somebody runs `semlith adopt`. But *where a new store is created* is different
 from what it was, and that is the change to know about in this release.
+
+**`SEMLITH_RELEASES_ORIGIN`.** It points the release lookup, the archive and
+`SHA256SUMS` at a different host, and it exists so `tests/install.rs` and
+`tests/upgrade.rs` can drive the whole flow against a fixture server on
+loopback. It is not a way to self-host semlith releases and nothing is promised
+about it.
+
+**Which agents `semlith setup` can register for you.** Claude Code is wired up
+by running its own CLI; every other documented client gets its stanza and config
+path printed, because those file formats and locations move between versions.
+Which clients fall on which side of that line will change.
 
 **The daemon's HTTP routes.** Everything under `/api/` is how the portal talks
 to the process that serves it, and both halves ship in the same binary. Paths,
