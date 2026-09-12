@@ -38,7 +38,15 @@ case "$os" in
 esac
 
 if command -v curl >/dev/null 2>&1; then
-  fetch() { curl -fSL --progress-bar -o "$2" "$1"; }
+  # Resolve the redirect before downloading. `-L` draws a progress bar for
+  # every hop, and a hop carries no content length, so curl falls back to its
+  # bouncing `#=O=-` spinner — which on a GitHub release URL, which always
+  # redirects, makes a working download look like line noise. One request to a
+  # known size draws one clean bar.
+  fetch() {
+    u=$(final_url "$1" 2>/dev/null) || u=
+    curl -fSL --progress-bar -o "$2" "${u:-$1}"
+  }
   final_url() { curl -fsSLI -o /dev/null -w '%{url_effective}' "$1"; }
 elif command -v wget >/dev/null 2>&1; then
   fetch() { wget -q --show-progress -O "$2" "$1"; }
