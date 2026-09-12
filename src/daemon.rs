@@ -713,6 +713,24 @@ impl crate::mcp::Writer for Writer {
         Ok(text)
     }
 
+    fn add(&self, store: Option<&str>, url: &str) -> Result<String, String> {
+        let store = self.0.writable(store).map_err(|e| e.to_string())?.clone();
+
+        // The fetch happens here rather than in the writer thread: it is
+        // network work, and holding the store's write queue open for the
+        // length of a download would stall every other write behind it. Only
+        // the indexing of what landed goes through the queue, which is the
+        // part the one-writer rule is actually about.
+        let fetched = crate::add::fetch(url, &store.dir).map_err(|e| format!("{e:#}"))?;
+
+        let indexed = self.index(Some(&store.name), std::slice::from_ref(&fetched.path))?;
+        Ok(format!(
+            "Fetched {} into {}. {indexed}",
+            fetched.url,
+            fetched.path.display()
+        ))
+    }
+
     fn forget(&self, store: Option<&str>, path: &str) -> Result<String, String> {
         let store = self.0.writable(store).map_err(|e| e.to_string())?.clone();
         let progress = self
