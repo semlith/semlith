@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The install script's progress bar, properly this time.** 0.12.0 claimed to
+  have fixed this by resolving the release URL's redirect first. That was the
+  wrong diagnosis and the fix was close to a no-op: measured against the real
+  16 MB asset it took the bouncing `#=O=-` frames from 77 to 74. The cause is
+  not redirects. curl's `--progress-bar` draws that indicator for as long as it
+  does not know the transfer size, and over HTTPS that is the whole connect,
+  TLS and header phase — 72 of 100 frames on a request with no redirects at all
+  and a `Content-Length` present. So curl's meter is off now and the installer
+  draws its own bar from the size the `HEAD` already reports: zero bouncing
+  frames, a bar that moves from 0% to 100%, and a failed download still fails
+  the install rather than showing a finished bar over a truncated file.
+
 ## [0.12.0] - 2026-09-13
 
 The store learns the shape of the code in it, and search uses it.
