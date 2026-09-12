@@ -31,6 +31,17 @@ const FONT_LICENSE: &[u8] = include_bytes!("fonts/LICENSE.txt");
 const LOGO: &[u8] = include_bytes!("logo.svg");
 const LOGO_DARK: &[u8] = include_bytes!("logo-dark.svg");
 
+/// The tab and home-screen icons. Served from the binary like everything else,
+/// so a browser asking for `/favicon.ico` is answered without a network round
+/// trip and without the page carrying a data URI of its own.
+const FAVICON_ICO: &[u8] = include_bytes!("icons/favicon.ico");
+const FAVICON_16: &[u8] = include_bytes!("icons/favicon-16x16.png");
+const FAVICON_32: &[u8] = include_bytes!("icons/favicon-32x32.png");
+const APPLE_TOUCH: &[u8] = include_bytes!("icons/apple-touch-icon.png");
+const ANDROID_192: &[u8] = include_bytes!("icons/android-chrome-192x192.png");
+const ANDROID_512: &[u8] = include_bytes!("icons/android-chrome-512x512.png");
+const WEBMANIFEST: &[u8] = include_bytes!("icons/site.webmanifest");
+
 /// Everything served from the binary, as `(route, media type, bytes)`.
 ///
 /// One table rather than a match arm each, so [`asset`] and the size assertion
@@ -40,6 +51,25 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
     ("/app.js", "text/javascript; charset=utf-8", APP),
     ("/logo.svg", "image/svg+xml", LOGO),
     ("/logo-dark.svg", "image/svg+xml", LOGO_DARK),
+    ("/favicon.ico", "image/x-icon", FAVICON_ICO),
+    ("/icons/favicon-16x16.png", "image/png", FAVICON_16),
+    ("/icons/favicon-32x32.png", "image/png", FAVICON_32),
+    ("/icons/apple-touch-icon.png", "image/png", APPLE_TOUCH),
+    (
+        "/icons/android-chrome-192x192.png",
+        "image/png",
+        ANDROID_192,
+    ),
+    (
+        "/icons/android-chrome-512x512.png",
+        "image/png",
+        ANDROID_512,
+    ),
+    (
+        "/icons/site.webmanifest",
+        "application/manifest+json",
+        WEBMANIFEST,
+    ),
     ("/fonts/IBMPlexSans-Regular.woff2", "font/woff2", SANS_400),
     ("/fonts/IBMPlexSans-Medium.woff2", "font/woff2", SANS_500),
     ("/fonts/IBMPlexSans-SemiBold.woff2", "font/woff2", SANS_600),

@@ -1401,6 +1401,15 @@ pre.code {
   padding-top: 5px;
 }
 
+/* The hero's heading is the page's h1, but it is not a page title — it sits
+ * inside a card under the lockup, so it takes the card's size rather than the
+ * 21px every titled page uses. */
+.hero-title {
+  font-size: var(--t-title);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
 .welcome .hero {
   width: 100%;
   max-width: 640px;

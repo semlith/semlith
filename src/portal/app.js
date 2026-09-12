@@ -123,6 +123,7 @@ const ICONS = {
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z|M14 3v5h5",
   up: "M5 12h14|M11 6l-6 6 6 6",
   alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
+  moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -238,11 +239,21 @@ const VIEWS = [
   { group: "About", id: "about", label: "About", title: "About" },
 ];
 
+/** The sidebar's count, kept with the data it describes rather than with the
+ * render that happened to be running when it changed. */
+function paintStoreCount() {
+  const node = document.getElementById("daemon-stores");
+  if (!node) return;
+  const many = state.stores.length;
+  node.textContent = `${many} store${many === 1 ? "" : "s"}`;
+}
+
 /** Read the store list into `state`, so every view agrees on how many exist. */
 async function refreshStores() {
   try {
     const data = await api("/api/stores");
     state.stores = data.stores || [];
+    paintStoreCount();
   } catch (_) {
     // A failed refresh must not empty the list: `state.stores.length` decides
     // whether the app or the first-run screen is shown, and a dropped request
@@ -590,6 +601,7 @@ async function filesView() {
         e.currentTarget.setAttribute("aria-pressed", String(on));
         if (on) chosenExt.add(ext);
         else chosenExt.delete(ext);
+        clearTimeout(load.timer);
         load();
       },
     }),
@@ -814,6 +826,7 @@ async function searchView() {
     el(
       "div",
       { class: "search-band" },
+      el("h1", { class: "sr-only", text: "Search" }),
       el(
         "div",
         { class: "search-field" },
@@ -1579,7 +1592,7 @@ function welcomeView() {
       el(
         "div",
         { class: "titles" },
-        el("h2", { text: "No stores yet" }),
+        el("h1", { class: "hero-title", text: "No stores yet" }),
         el("p", {
           class: "subtitle",
           text: "The daemon is running and holds nothing. Point it at a folder and it indexes everything a person could read in there — code, Markdown, PDFs, Office files, notebooks, books and mail.",
@@ -1659,7 +1672,18 @@ const RENDER = {
 };
 
 function go(id) {
-  location.hash = `#${id}`;
+  // On a phone the drawer covers the page it is navigating to, so it closes on
+  // the way out. Done here rather than on each nav item because every route
+  // into a page goes through this — the rail, the drawer, the brand, the search
+  // launcher, the "Index a folder" button and the `/` shortcut.
+  if (shell.main && window.matchMedia(NARROW).matches && state.navOpen) {
+    setNav(false);
+  }
+  // Re-render even when the hash is already this page: clicking the nav item
+  // for the page you are on should still do something, and no hashchange
+  // fires for an unchanged hash.
+  if ((location.hash || "").slice(1) === id) render();
+  else location.hash = `#${id}`;
 }
 
 /** Whether dark is showing, whether by choice or by the OS. */
@@ -1691,6 +1715,17 @@ function theme(next) {
   for (const img of document.querySelectorAll("img.logo")) {
     img.src = next === "dark" ? "logo-dark.svg" : "logo.svg";
   }
+  paintThemeButton();
+}
+
+/** The toggle shows where it goes, not where you are. */
+function paintThemeButton() {
+  const button = shell.themeButton;
+  if (!button) return;
+  const toDark = !isDark();
+  fill(button, icon(toDark ? ICONS.moon : ICONS.sun));
+  button.setAttribute("aria-label", toDark ? "Switch to dark" : "Switch to light");
+  button.setAttribute("title", toDark ? "Switch to dark" : "Switch to light");
 }
 
 // ----------------------------------------------------------------- shell
@@ -1705,12 +1740,20 @@ function buildShell() {
       type: "button",
       "aria-label": "Toggle navigation",
       "aria-expanded": String(state.navOpen),
-      onclick: () => setNav(!state.navOpen),
+      onclick: () => setNav(!state.navOpen, true),
     },
     icon(ICONS.menu, 17),
   );
 
   const pageTitle = el("span", { class: "page-title" });
+
+  const themeButton = el("button", {
+    class: "icon-button",
+    type: "button",
+    onclick: () => theme(isDark() ? "light" : "dark"),
+  });
+  shell.themeButton = themeButton;
+  paintThemeButton();
 
   const topbar = el(
     "div",
@@ -1742,16 +1785,7 @@ function buildShell() {
       el("span", { class: "what", text: "Ask the index a question" }),
       el("span", { class: "key-hint", text: "/" }),
     ),
-    el(
-      "button",
-      {
-        class: "icon-button",
-        type: "button",
-        "aria-label": "Light or dark",
-        onclick: () => theme(isDark() ? "light" : "dark"),
-      },
-      icon(ICONS.sun),
-    ),
+    themeButton,
   );
 
   const groups = [];
@@ -1827,7 +1861,7 @@ function buildShell() {
     type: "button",
     "aria-label": "Close navigation",
     hidden: true,
-    onclick: () => setNav(false),
+    onclick: () => setNav(false, true),
   });
 
   const main = el("main", {});
@@ -1838,7 +1872,8 @@ function buildShell() {
 }
 
 /** Open or close the navigation without re-rendering the view inside it. */
-function setNav(open) {
+function setNav(open, fromUser) {
+  const was = state.navOpen;
   state.navOpen = open;
   const narrow = window.matchMedia(NARROW).matches;
   shell.hamburger.setAttribute("aria-expanded", String(open));
@@ -1847,6 +1882,17 @@ function setNav(open) {
   // screen CSS hides it outright, so it is only ever a wide-screen concern.
   shell.rail.hidden = open || narrow;
   shell.scrim.hidden = !(open && narrow);
+
+  // Over a page, the drawer is a cover — so the keyboard goes into it when it
+  // opens and comes back to the button that opened it when it closes. Only for
+  // a deliberate toggle: stealing focus on load or on a resize would be rude.
+  if (!fromUser || !narrow || open === was) return;
+  if (open) {
+    const first = shell.sidebar.querySelector(".nav-item");
+    if (first) first.focus();
+  } else {
+    shell.hamburger.focus();
+  }
 }
 
 function markCurrent(current) {
@@ -1880,10 +1926,7 @@ async function render() {
   document.title = `semlith · ${view.title}`;
   markCurrent(view.id);
 
-  const daemon = document.getElementById("daemon-stores");
-  if (daemon) {
-    daemon.textContent = `${state.stores.length} store${state.stores.length === 1 ? "" : "s"}`;
-  }
+  paintStoreCount();
 
   const mine = ++renderGeneration;
   fill(shell.main, el("div", { class: "view" }, el("p", { class: "subtitle", text: "Loading…" })));
@@ -1926,7 +1969,7 @@ async function boot() {
 
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && state.navOpen && window.matchMedia(NARROW).matches && shell.main) {
-      setNav(false);
+      setNav(false, true);
       return;
     }
     if (e.key !== "/" || e.target.matches("input, textarea, select")) return;

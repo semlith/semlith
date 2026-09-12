@@ -371,6 +371,12 @@ fn about(state: &Arc<State>) -> Response {
 }
 
 /// MCP status, and the stanza for every client the README documents.
+///
+/// Deliberately without `setup::status()`, which used to be embedded here.
+/// That function shells out to `claude mcp list` and waits for it, so carrying
+/// it made the Agents page block on a subprocess for a payload the page never
+/// read — it asks `/api/setup` separately, and renders that panel when the
+/// answer arrives rather than holding the whole page for it.
 fn agents(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
@@ -389,7 +395,6 @@ fn agents(state: &Arc<State>) -> Response {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,
         },
-        "setup": crate::setup::status(),
     }))
 }
 
