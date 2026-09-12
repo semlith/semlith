@@ -481,14 +481,18 @@ fn main() -> Result<()> {
         }
 
         Command::Languages => {
-            for (name, exts) in semlith::filter::LANGUAGES {
-                println!(
-                    "{name:<12} {}",
-                    exts.iter()
-                        .map(|e| format!(".{e}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
+            for entry in semlith::filter::LANGUAGES {
+                // Extensions print with their dot and filenames without one,
+                // which is the difference a reader has to see: `.mk` is an
+                // extension and `Makefile` is the whole name of the file.
+                let what = entry
+                    .extensions
+                    .iter()
+                    .map(|e| format!(".{e}"))
+                    .chain(entry.filenames.iter().map(|f| f.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                println!("{:<12} {what}", entry.name);
             }
         }
 

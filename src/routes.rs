@@ -261,7 +261,13 @@ fn models() -> Response {
 fn languages() -> Response {
     let out: Vec<Value> = LANGUAGES
         .iter()
-        .map(|(name, exts)| json!({ "name": name, "extensions": exts }))
+        .map(|entry| {
+            json!({
+                "name": entry.name,
+                "extensions": entry.extensions,
+                "filenames": entry.filenames,
+            })
+        })
         .collect();
     Response::json(&json!({ "languages": out }))
 }
@@ -573,17 +579,48 @@ fn strings(value: &Value, key: &str) -> Vec<String> {
     }
 }
 
-/// Which `--lang` name covers this file's extension, if any.
+/// Which `--lang` name covers this file, if any.
+///
+/// The extension answers for almost every file, and the filename answers for
+/// the ones that have no extension. Both are read out of the one [`LANGUAGES`]
+/// table the filter uses, so the Files view can never disagree with what
+/// `--lang` would actually have matched.
 fn language_of(path: &Path) -> &'static str {
-    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return "";
-    };
-    let ext = ext.to_ascii_lowercase();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
     LANGUAGES
         .iter()
-        .find(|(_, exts)| exts.contains(&ext.as_str()))
-        .map(|(name, _)| *name)
+        .find(|entry| {
+            (!ext.is_empty() && entry.extensions.contains(&ext.as_str()))
+                || entry
+                    .filenames
+                    .iter()
+                    .any(|pattern| matches(pattern, &name))
+        })
+        .map(|entry| entry.name)
         .unwrap_or("")
+}
+
+/// The one glob shape [`crate::filter::Language::filenames`] uses: a literal
+/// name, optionally ending in `*`.
+///
+/// Written out rather than reached for through SQLite because this runs per
+/// file in a listing of five hundred, and because the patterns are ours rather
+/// than a user's — a full glob engine here would be capability nobody can call.
+fn matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
 }
 
 /// The one place a route needs to know a [`Store`] by name for a test.
