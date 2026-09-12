@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-12
+
 A store no longer has to live inside the repository it indexes, and a portal in
 your browser shows you what is in it. `semlith start` is one process that owns
 every store, keeps them current as you save, and serves that page on
@@ -625,7 +627,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/semlith/semlith/releases/tag/v0.9.0
 [0.8.0]: https://github.com/semlith/semlith/releases/tag/v0.8.0
 [0.7.0]: https://github.com/semlith/semlith/releases/tag/v0.7.0
 [0.6.0]: https://github.com/semlith/semlith/releases/tag/v0.6.0
