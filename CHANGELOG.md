@@ -760,7 +760,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/semlith/semlith/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/semlith/semlith/releases/tag/v0.10.0
 [0.9.0]: https://github.com/semlith/semlith/releases/tag/v0.9.0
 [0.8.0]: https://github.com/semlith/semlith/releases/tag/v0.8.0
