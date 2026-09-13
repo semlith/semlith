@@ -115,14 +115,21 @@ pub fn status() -> Status {
         },
         Step {
             name: "path",
-            state: if path_has_bin {
+            // The rc file counts. A daemon started from a shell that predates
+            // the edit has the old `PATH` for as long as it runs, so asking
+            // only `on_path` reported "not done" immediately after the portal
+            // had just written the block — and the button looked broken.
+            state: if path_has_bin || block {
                 State::AlreadyDone
             } else {
                 State::Skipped
             },
-            detail: match &rc {
-                Some(p) => p.display().to_string(),
-                None => "no shell rc file found".into(),
+            detail: match (&rc, path_has_bin, block) {
+                (Some(p), false, true) => {
+                    format!("{} — a new shell picks it up", p.display())
+                }
+                (Some(p), _, _) => p.display().to_string(),
+                (None, _, _) => "no shell rc file found".into(),
             },
         },
         Step {

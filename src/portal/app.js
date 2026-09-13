@@ -497,7 +497,7 @@ function dataTable(spec) {
           changed();
         },
       }),
-      el("span", { class: "meta", text: `page ${n(view.page)} of ${n(pages())}` }),
+      el("span", { class: "meta", text: `Page ${n(view.page)} / ${n(pages())}` }),
       el("button", {
         class: "button ghost small",
         type: "button",
@@ -703,6 +703,11 @@ const state = {
   /** Carried from a search hit into the Graph page, or into Search. */
   pendingSymbol: "",
   pendingQuery: "",
+  /** The last search, kept so leaving the page and coming back does not throw
+   * the question away along with its answers. */
+  search: { query: "", stores: [] },
+  /** How many clients are talking to the daemon, for the sidebar card. */
+  agents: null,
 };
 
 /* Pages, in the design's grouping. The ones the roadmap puts in a later
@@ -728,7 +733,19 @@ function paintStoreCount() {
   const node = document.getElementById("daemon-stores");
   if (!node) return;
   const many = state.stores.length;
-  node.textContent = `${many} store${many === 1 ? "" : "s"}`;
+  const parts = [`${many} store${many === 1 ? "" : "s"}`];
+  // Only once the answer is known: "0 agents" while the route is still in
+  // flight reads as a fact rather than as a question nobody has asked yet.
+  if (state.agents !== null) {
+    parts.push(`${state.agents} agent${state.agents === 1 ? "" : "s"}`);
+  }
+  node.textContent = parts.join(" · ");
+}
+
+/** How many clients are connected, from whichever page last asked. */
+function noteAgents(data) {
+  state.agents = (data.connections || []).length;
+  paintStoreCount();
 }
 
 
@@ -794,11 +811,10 @@ function graphCanvas(options) {
   let frame = null;
   let running = true;
   let settled = false;
-  /* How much of the force is still applied. The layout cools: a graph that is
-   * still moving after ten seconds is not settling, it is oscillating, and
-   * watching a picture twitch while you read it is worse than a picture that
-   * stopped. Anything that changes the layout — a drag, a new scope, an
-   * edge-kind filter — re-heats it. */
+  /* How much of the force is still applied. The layout cools, but never to
+   * nothing: it bottoms out at `ALPHA_FLOOR`, so the springs keep holding the
+   * shape while the drift below moves it. Anything that changes the layout —
+   * a drag, a new scope, an edge-kind filter — re-heats it. */
   let alpha = 1;
   /* Springs are shared out by how many edges a node carries. A hub with forty
    * edges feels forty pulls where a leaf feels one, and at this node count that
@@ -824,8 +840,19 @@ function graphCanvas(options) {
    * spring drags it back, which is the bounce this cap exists to stop. */
   const MAX_STEP = 0.012;
 
+  /* The layout never freezes. Cooling to a standstill was what stopped the
+   * two-frame bounce, but a still picture is not what this view is for, so the
+   * heat bottoms out here and every node carries a slow wander on top of it.
+   *
+   * The wander is a sine of the clock and the node's own phase, not a random
+   * nudge: a random walk accumulates, drags nodes off their springs and is
+   * indistinguishable from the jitter this replaced. A smooth curve at this
+   * amplitude settles at under a pixel a frame, which reads as a drift. */
+  const ALPHA_FLOOR = 0;
+  const DRIFT = 0.00003;
+
   function step(w, h) {
-    if (alpha < 0.002 && !dragging) return false;
+    const clock = performance.now() * 0.00028;
     for (let i = 0; i < nodes.length; i++) {
       const a = nodes[i];
       for (let j = i + 1; j < nodes.length; j++) {
@@ -868,6 +895,8 @@ function graphCanvas(options) {
     for (const node of nodes) {
       node.vx += (0.5 - node.x) * 0.006 * alpha;
       node.vy += (0.5 - node.y) * 0.008 * alpha;
+      node.vx += Math.cos(clock + node.phase) * DRIFT;
+      node.vy += Math.sin(clock * 0.9 + node.phase * 1.7) * DRIFT;
       if (node === dragging) {
         node.vx = 0;
         node.vy = 0;
@@ -886,11 +915,8 @@ function graphCanvas(options) {
       node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
       node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
     }
-    alpha *= 0.985;
-    // Settled: every node is moving less than a pixel a frame, so there is
-    // nothing left to watch.
-    if (nodes.length && moved / nodes.length < 0.00015) alpha = 0;
-    return true;
+    alpha = Math.max(ALPHA_FLOOR, alpha * 0.985);
+    return moved;
   }
 
   /** Put the heat back in, for anything that changes the layout. */
@@ -1103,6 +1129,9 @@ function graphCanvas(options) {
           y: 0.5 + Math.sin(angle) * 0.28,
           vx: 0,
           vy: 0,
+          // Where this node is in its own wander, so forty nodes drift apart
+          // rather than sliding as one block.
+          phase: Math.random() * Math.PI * 2,
           hover: 0,
           callers: 0,
           callees: 0,
@@ -1599,6 +1628,7 @@ function agentsCard() {
 
   api("/api/agents")
     .then((data) => {
+      noteAgents(data);
       const live = data.connections || [];
       if (!live.length) {
         fill(
@@ -1756,7 +1786,7 @@ async function storesView() {
       {
         key: "roots",
         label: "Roots",
-        className: "meta",
+        className: "meta narrow-drop",
         sortable: false,
         render: (s) =>
           (s.roots || []).length
@@ -1784,7 +1814,7 @@ async function storesView() {
       {
         key: "chunks",
         label: "Chunks",
-        className: "num",
+        className: "num narrow-drop",
         value: (s) => s.chunks,
         render: (s) => n(s.chunks),
       },
@@ -1912,14 +1942,27 @@ async function filesView() {
         // makes every row a different height and the column unreadable.
         render: (f) => pathCell(f.path),
       },
-      { key: "store", label: "Store", className: "meta", sortable: false, render: (f) => f.store },
+      {
+        key: "store",
+        label: "Store",
+        className: "meta narrow-drop",
+        sortable: false,
+        render: (f) => f.store,
+      },
       {
         key: "reader",
         label: "Read as",
+        className: "narrow-drop",
         sortable: false,
         render: (f) => el("span", { class: "tag", text: f.reader }),
       },
-      { key: "lang", label: "Language", className: "meta", sortable: false, render: (f) => f.lang || "—" },
+      {
+        key: "lang",
+        label: "Language",
+        className: "meta narrow-drop",
+        sortable: false,
+        render: (f) => f.lang || "—",
+      },
       {
         key: "lines",
         label: "Lines",
@@ -1928,7 +1971,7 @@ async function filesView() {
         // which would read as a file that failed to parse.
         render: (f) => (f.reader === "image" ? "—" : n(f.lines)),
       },
-      { key: "chunks", label: "Chunks", className: "num", render: (f) => n(f.chunks) },
+      { key: "chunks", label: "Chunks", className: "num narrow-drop", render: (f) => n(f.chunks) },
       {
         key: "indexed",
         label: "Indexed",
@@ -2079,6 +2122,7 @@ async function languagesView() {
       {
         key: "filenames",
         label: "Filenames",
+        className: "narrow-drop",
         value: (l) => (l.filenames || []).length,
         render: (l) =>
           (l.filenames || []).length ? tags(l.filenames) : el("span", { class: "meta", text: "—" }),
@@ -2139,7 +2183,10 @@ async function searchView() {
 
   const results = el("div", { class: "results" });
   const meta = el("span", { class: "search-meta" });
-  const chosen = new Set();
+  // Restored rather than reset: the question and the store filter survive a
+  // trip to another page, because coming back to an empty box means typing it
+  // again.
+  const chosen = new Set(state.search.stores);
   let generation = 0;
 
   const input = el("input", {
@@ -2155,6 +2202,7 @@ async function searchView() {
 
   async function run() {
     const query = input.value.trim();
+    state.search = { query, stores: [...chosen] };
     if (!query) {
       fill(results, nothing());
       meta.textContent = "";
@@ -2255,12 +2303,18 @@ async function searchView() {
       },
     }),
   );
+  for (const chip of storeChips) {
+    chip.setAttribute("aria-pressed", String(chosen.has(chip.textContent)));
+  }
 
   fill(results, nothing());
   setTimeout(() => {
     if (state.pendingQuery) {
       input.value = state.pendingQuery;
       state.pendingQuery = "";
+      run();
+    } else if (state.search.query) {
+      input.value = state.search.query;
       run();
     }
     input.focus();
@@ -2723,6 +2777,7 @@ async function agentsView() {
     return el("div", { class: "view" }, pageHead("Agents"), error(e.message));
   }
 
+  noteAgents(data);
   const clients = data.clients || [];
   const tools = data.tools || [];
   const live = data.connections || [];
@@ -2799,7 +2854,7 @@ async function agentsView() {
         render: (c) => el("div", { class: "who" }, el("span", { class: "dot good" }), c.name),
       },
       { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
-      { key: "revision", label: "Revision", className: "meta", value: (c) => c.revision },
+      { key: "revision", label: "Revision", className: "meta narrow-drop", value: (c) => c.revision },
       {
         key: "queries",
         label: "Queries",
@@ -3490,7 +3545,9 @@ function buildShell() {
       "div",
       { class: "daemon-card" },
       el("div", { class: "who" }, el("span", { class: "live-dot" }), mono("semlith start")),
-      el("div", { class: "fact", text: "127.0.0.1 · sole writer" }),
+      // The address with its port: "127.0.0.1" alone does not tell you which
+      // of two daemons this tab is looking at.
+      el("div", { class: "fact", text: `${location.host} · sole writer` }),
       el("div", { class: "fact", id: "daemon-stores", text: "" }),
     ),
   );
@@ -3598,6 +3655,9 @@ async function boot() {
   wireTips();
 
   await refreshStores();
+  // Not awaited: the sidebar's agent count is a detail, and `claude mcp list`
+  // behind this route is slow on some machines. It fills itself in.
+  api("/api/agents").then(noteAgents).catch(() => {});
   await render();
 
   window.addEventListener("hashchange", render);

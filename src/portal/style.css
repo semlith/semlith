@@ -1298,12 +1298,23 @@ select.field:focus-visible {
 .copyfield {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-2);
   background: var(--bg);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-2);
-  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  /* The same height as the buttons it sits beside: a taller box next to a
+   * 36px button reads as a misalignment rather than as a field. */
+  height: 36px;
+  padding: 0 4px 0 var(--sp-3);
   min-width: 0;
+}
+/* In a field the copy control is the point of the field, so it is always
+ * visible. The fade-in is for a code block, where the control would otherwise
+ * sit over the text it copies. */
+.copyfield .copy {
+  opacity: 1;
+  width: 28px;
+  height: 28px;
 }
 .copyfield .text {
   font-family: var(--mono);
@@ -1604,6 +1615,32 @@ td.meta {
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
+}
+
+/* A pager is a row of controls, not a row of tags: the page sizes and the
+ * step buttons are square-cornered here so they read as buttons, which is
+ * what the design bundle draws. */
+.table-foot .chip {
+  height: 30px;
+  min-width: 34px;
+  justify-content: center;
+  padding: 0 var(--sp-2h);
+  border-radius: var(--r-2);
+  font-family: var(--mono);
+}
+.table-foot .button.ghost {
+  height: 30px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--panel);
+}
+.table-foot .button.ghost:hover:not([disabled]) {
+  border-color: var(--blue);
+  color: var(--blue-ink);
+}
+.table-foot .button.ghost[disabled] {
+  border-color: var(--line-soft);
 }
 
 .forget {
@@ -2313,6 +2350,18 @@ pre.code {
   gap: var(--sp-1);
 }
 
+/* A client's name and the sentence about it are one block, not a header row
+ * with its own 16px gap: laid out as a row they wrapped, and the wrap left a
+ * band of white space between the title and the paragraph. */
+.stanzas .head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+}
+.stanzas .head .meta {
+  line-height: var(--lh-prose);
+}
+
 .graph-selected .sym {
   margin: 0;
   font-family: var(--mono);
@@ -2401,6 +2450,16 @@ pre.code {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
+  /* Pinned to the foot of the rail while the callers and callees above it
+   * scroll: a symbol with thirty callers used to bury this button under them.
+   * The negative offset cancels the rail's own bottom padding, so the strip
+   * sits flush with the bottom edge. */
+  position: sticky;
+  bottom: calc(var(--sp-4h) * -1);
+  margin-top: auto;
+  padding: var(--sp-3) 0;
+  background: var(--panel);
+  box-shadow: 0 -1px 0 var(--line-soft);
 }
 
 /* Confidence, everywhere it appears. Never colour alone: an inferred edge
@@ -2603,6 +2662,46 @@ pre.code {
 
 /* --------------------------------------------------------------- narrow */
 
+
+/* A table's secondary columns, dropped where the table would otherwise be
+ * three screens wide. The rows that matter — what the file is, and what you do
+ * with it — stay; the store name, the reader, the chunk count and the like are
+ * a scroll away on a desktop and noise on a phone. The data is unchanged: this
+ * hides columns, it does not filter rows. */
+@media (max-width: 820px) {
+  .narrow-drop {
+    display: none;
+  }
+  /* With those columns gone the table fits the card, so the minimum that was
+   * holding the full set of them apart is what would keep it scrolling
+   * sideways. */
+  .w-stores,
+  .w-files,
+  .w-languages,
+  .w-models,
+  .w-agents {
+    min-width: 0;
+  }
+  /* A truncating cell still asks for the width of its longest path unless it
+   * is allowed to be narrower than its content, which `max-width: 0` on the
+   * cell is the standard way to say. The ellipsis then does the work it was
+   * added for at any width. */
+  td.path,
+  td.meta,
+  tbody td:first-child {
+    max-width: 0;
+  }
+  .one-line {
+    max-width: 100%;
+  }
+  /* The tool list scrolls inside a fixed-height card on the desktop grid.
+   * Stacked in one column there is no height to fit into, and the scrollport
+   * only cut the last row in half. */
+  .tool-grid {
+    max-height: none;
+    overflow-y: visible;
+  }
+}
 
 @media (max-width: 899px) {
   /* Type steps here rather than in each component: before this the only size
