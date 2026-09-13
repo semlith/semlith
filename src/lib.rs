@@ -279,6 +279,11 @@ pub enum Flow {
     Run,
     /// Hold here, and ask again shortly.
     Pause,
+    /// Stop here and keep what is done. The run reports what it did not reach,
+    /// and asking again continues from there — the same answer a time budget
+    /// gives. This is how the watcher's catch-up steps aside for a request
+    /// that arrived while it was working.
+    Yield,
     /// Give up, and undo what this run embedded.
     Stop,
 }
@@ -570,6 +575,17 @@ impl Semlith {
         self.index_set(walk(roots), true, Some(deadline), None, on_file)
     }
 
+    /// [`Semlith::index_walk`] under a control, so the catch-up a watcher runs
+    /// at startup can step aside the moment a request arrives.
+    pub(crate) fn index_walk_under(
+        &mut self,
+        roots: &[PathBuf],
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        self.index_set(walk(roots), true, None, Some(control), on_file)
+    }
+
     /// [`Semlith::index_within_held`] that can be paused and stopped from
     /// another thread.
     ///
@@ -653,6 +669,7 @@ impl Semlith {
             }
             if let Some(ask) = control {
                 let mut stop = false;
+                let mut yielded = false;
                 loop {
                     match ask() {
                         Flow::Run => break,
@@ -660,11 +677,19 @@ impl Semlith {
                         // store lock, so resuming is this loop waking up and
                         // not a second walk of the tree.
                         Flow::Pause => std::thread::sleep(PAUSE_TICK),
+                        Flow::Yield => {
+                            yielded = true;
+                            break;
+                        }
                         Flow::Stop => {
                             stop = true;
                             break;
                         }
                     }
+                }
+                if yielded {
+                    report.remaining = total - seen;
+                    break;
                 }
                 if stop {
                     report.remaining = total - seen;

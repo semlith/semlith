@@ -996,6 +996,9 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
             .paused
             .store(false, std::sync::atomic::Ordering::Relaxed),
         Some("stop") => {
+            // The queue first: a job that has not started is answered from
+            // here, immediately, because there is nothing of it to undo.
+            store.cancel_queued();
             store
                 .cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);

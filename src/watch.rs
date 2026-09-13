@@ -109,7 +109,16 @@ pub fn run(
     // Taken before anything is watched: if the store is busy, say so now
     // rather than after a catch-up pass has already embedded half a corpus.
     let _lock = lock::StoreLock::acquire(store.dir())?;
-    run_held(store, roots, debounce, stop, progress, |_| Ok(()))
+    // Nothing queues behind `semlith watch`: it is the only writer there is.
+    run_held(
+        store,
+        roots,
+        debounce,
+        stop,
+        &|| false,
+        progress,
+        |_| Ok(()),
+    )
 }
 
 /// [`run`] for a caller that already holds the store's write lock and has work
@@ -124,6 +133,9 @@ pub fn run_held(
     roots: &[PathBuf],
     debounce: Duration,
     stop: &AtomicBool,
+    // Asked between files during the catch-up, so a request that arrives while
+    // a cold store is being walked waits milliseconds rather than minutes.
+    waiting: &dyn Fn() -> bool,
     mut progress: impl FnMut(Progress),
     mut pump: impl FnMut(&mut Semlith) -> Result<()>,
 ) -> Result<()> {
@@ -146,7 +158,20 @@ pub fn run_held(
     // Catch up on whatever changed while nothing was watching. It is the same
     // incremental pass `semlith index` runs, so an unchanged tree costs a walk
     // and a hash per file, and nothing else.
-    let catch_up = store.index_walk(&roots, |path, _| progress(Progress::File(path)))?;
+    // Yielding keeps everything the pass already did: the loop below walks
+    // again once the queue is empty, and an unchanged file costs a hash.
+    let step_aside = || {
+        // Shutdown counts as something waiting: a catch-up that only looked at
+        // the queue kept the process alive until it had walked the whole tree.
+        if waiting() || stop.load(Ordering::Relaxed) {
+            crate::Flow::Yield
+        } else {
+            crate::Flow::Run
+        }
+    };
+    let catch_up = store.index_walk_under(&roots, &step_aside, |path, _| {
+        progress(Progress::File(path))
+    })?;
     let (files, chunks, _) = store.stats()?;
     progress(Progress::Ready {
         catch_up,
@@ -154,12 +179,27 @@ pub fn run_held(
         chunks,
     });
 
+    let mut behind = catch_up.remaining > 0;
     while !stop.load(Ordering::Relaxed) {
         // Before waiting on the filesystem, not after: a request that arrived
         // while the last batch was embedding should not sit for another idle
         // tick behind a tree nobody is editing.
         if let Err(e) = pump(store) {
             progress(Progress::Error(e.to_string()));
+        }
+
+        // Whatever the catch-up stepped aside from, once the queue is clear.
+        // Without this a store that was interrupted would only finish catching
+        // up when a file happened to change.
+        if behind && !waiting() {
+            let more = store.index_walk_under(&roots, &step_aside, |path, _| {
+                progress(Progress::File(path))
+            })?;
+            behind = more.remaining > 0;
+            if more.indexed > 0 || more.removed > 0 {
+                progress(Progress::Batch(more, Duration::ZERO));
+            }
+            continue;
         }
 
         let first = match rx.recv_timeout(IDLE_TICK) {

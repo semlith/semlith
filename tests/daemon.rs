@@ -1148,3 +1148,68 @@ fn a_stopped_index_run_undoes_itself() {
         daemon.get("/api/files").json()["total"]
     );
 }
+
+/// A job does not wait for the watcher's catch-up, and a stop asked for while
+/// it is still queued is answered at once.
+///
+/// The catch-up used to run to completion before the queue was looked at, so
+/// the first request after a daemon start on a cold store waited for the whole
+/// tree — and a stop in that window was cleared when the job finally began.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_queued_run_starts_at_once_and_stops_at_once() {
+    let (dir, home, work) = sandbox("queue-latency");
+    let root = work.join("api");
+    std::fs::create_dir_all(&root).unwrap();
+    for i in 0..40 {
+        let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(200));
+        std::fs::write(root.join(format!("n{i:03}.md")), body).unwrap();
+    }
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("one.md"), "# One\n\nA single file.\n").unwrap();
+
+    // Started against a corpus it has never seen, so the watcher's catch-up is
+    // real work rather than a walk of hashes.
+    let daemon = Daemon::start_in(dir, home, root, &[]);
+
+    // Two jobs, so the second is behind the first for certain rather than by
+    // timing: the first holds the writer, and the second is the queued one a
+    // stop has to answer without waiting for it.
+    let first = std::thread::spawn({
+        let token = daemon.token.clone();
+        let port = daemon.port;
+        let path = work.join("api").display().to_string();
+        move || {
+            let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
+            post_to(port, &token, "/api/index", &body)
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let port = daemon.port;
+    let token = daemon.token.clone();
+    let path = extra.display().to_string();
+    let queued = std::thread::spawn(move || {
+        let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
+        post_to(port, &token, "/api/index", &body)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let asked = std::time::Instant::now();
+    let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");
+    assert_eq!(stopped.status, 200, "{}", stopped.body);
+
+    let answer = queued.join().expect("the queued index request");
+    assert!(
+        answer.contains("\"stopped\":true"),
+        "the queued run was not stopped: {answer}"
+    );
+    // Nothing of it had run, so the answer does not wait for the writer.
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(10),
+        "the queued job took {:?} to answer a stop",
+        asked.elapsed()
+    );
+    let _ = first.join();
+}

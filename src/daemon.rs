@@ -182,6 +182,36 @@ impl Store {
     pub fn queue_depth(&self) -> usize {
         self.queue.lock().expect("the queue lock").len()
     }
+
+    /// Drop every index job that has not started, answering each as stopped.
+    ///
+    /// A stop asked for while the job is still waiting its turn used to sit
+    /// until the writer reached it and then be cleared, so the page said
+    /// "stopping…" for as long as the queue took. Nothing was embedded, so
+    /// there is nothing to undo and the answer is immediate.
+    pub fn cancel_queued(&self) -> usize {
+        let mut queue = self.queue.lock().expect("the queue lock");
+        let mut dropped = 0;
+        queue.retain(|queued| {
+            if !matches!(queued.job, Job::Index(_)) {
+                return true;
+            }
+            let _ = queued.report.send(serde_json::json!({
+                "event": "done",
+                "indexed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "removed": 0,
+                "chunks": 0,
+                "images": 0,
+                "remaining": 0,
+                "stopped": true,
+            }));
+            dropped += 1;
+            false
+        });
+        dropped
+    }
 }
 
 /// What every route is handed.
@@ -858,6 +888,8 @@ fn tend(
         &roots,
         debounce,
         stop,
+        // A queued job is what the catch-up steps aside for.
+        &|| store.queue_depth() > 0,
         |progress| {
             use watch::Progress;
             match progress {
@@ -919,10 +951,11 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
             let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
             say(serde_json::json!({ "event": "started", "paths": names }));
             let started_at = std::time::Instant::now();
-            // Cleared here rather than when the flag is set: a stop asked for
-            // while nothing was running must not cancel the next run.
+            // A pause belongs to the run that was on when it was asked for.
+            // A stop does not need clearing here: a job that was queued when
+            // one arrived has already been dropped from the queue, so reaching
+            // this line means the flag is for this run.
             store.paused.store(false, Ordering::Relaxed);
-            store.cancelled.store(false, Ordering::Relaxed);
             let control = {
                 let store = Arc::clone(store);
                 let told = std::sync::atomic::AtomicBool::new(false);
@@ -986,6 +1019,9 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
             }
+            // The flags belong to a run, and this one is over.
+            store.paused.store(false, Ordering::Relaxed);
+            store.cancelled.store(false, Ordering::Relaxed);
         }
         Job::Forget(path) => match writer.forget_held(&path) {
             // Counted apart, because an image has no chunks: a single number

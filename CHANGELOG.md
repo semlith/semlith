@@ -59,12 +59,19 @@ keep in a config file, and a query can find a picture.
   to be reported, so a re-index of an unchanged corpus said nothing at all
   between "started" and "done", which reads as a hang. The Index view shows
   the outcome, the running chunk count and the rate beside each path.
+- **A request no longer waits for the watcher.** The catch-up pass a store
+  runs when the daemon starts steps aside the moment anything is queued, and
+  finishes itself when the queue is empty again — so the first index from the
+  portal on a cold store begins in about 200ms rather than after the whole
+  tree. Shutdown interrupts it too.
 - **Pause and stop an index run.** Start becomes Pause while a run is on, and
   Stop asks first: stopping undoes everything the run embedded, so the store is
   exactly as it was before it started and the next attempt begins at 0%. A
   half-indexed corpus is worse than none, because nothing in the store says
   which half it is. `POST /api/index/control` takes `pause`, `resume` or
-  `stop`; the run is asked at each file boundary, never inside a file.
+  `stop`; the run is asked at each file boundary, never inside a file. A stop
+  asked for while the job is still queued is answered from the queue itself, in
+  about a millisecond, because nothing of it has run.
 - **An endpoint switch.** `semlith start --no-mcp-http` starts with `/mcp`
   closed, and the Agents page starts and stops it while the daemon runs.
   Closing it drops the route, not the daemon: the stores stay open, the watcher
