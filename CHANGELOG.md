@@ -117,10 +117,17 @@ keep in a config file, and a query can find a picture.
   is an identifier: every command, every MCP tool name, `~/.semlith`, the crate
   and the binary. A command inside a sentence is set in mono, which is what
   makes the difference read as a rule rather than as a typo.
-- **The Linux prebuilt binaries are built on 22.04 runners**, so they need
-  glibc 2.35 rather than 2.39 and run on Debian 12, Ubuntu 22.04 LTS, RHEL and
-  Rocky 9 and Amazon Linux 2023. The release build now asserts the floor, so it
-  cannot rise again without failing. Closes [#57](https://github.com/semlith/semlith/issues/57).
+- **The Linux prebuilt binaries print their glibc floor**, so the number is in
+  the build log and the release notes rather than discovered on someone's
+  server. Lowering that floor was attempted for this release and did not work:
+  building on a 22.04 runner fails to link, because the prebuilt ONNX Runtime
+  that `ort` downloads references `__isoc23_strtol` and
+  `std::__cxx11::basic_string<wchar_t>::_M_replace_cold` — glibc 2.38 and a
+  newer libstdc++. The floor is the vendored library's, not this crate's, so
+  only building ONNX Runtime from source can move it.
+  [#57](https://github.com/semlith/semlith/issues/57) stays open with that
+  evidence, and `cargo install semlith` builds against whatever glibc the
+  machine has in the meantime.
 - **`initialize`, `tools/list` and `ping` answer with no store open.** An agent
   connecting to a fresh install is told which tools exist rather than that the
   daemon has nothing to serve.
