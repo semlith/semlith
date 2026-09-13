@@ -630,10 +630,17 @@ impl Server {
         for worker in workers {
             let _ = worker.join();
         }
-        // The workers held the only other senders, so dropping this one ends
-        // the waiting room's `recv` — after it has answered whatever it still
-        // owes, which is what stops a shutdown looking like a dropped
-        // connection to whoever was being held.
+        // `spawn_worker` captured a sender of its own so it could hand one to
+        // each worker it makes, and it outlives the workers — so dropping the
+        // one below is not enough on its own. Both have to go before the
+        // waiting room's `recv` can end, and a shutdown that waits on a channel
+        // nothing will ever close is a daemon that does not exit when it is
+        // asked to.
+        drop(spawn_worker);
+        // Dropped after the workers have been joined, so the waiting room
+        // answers whatever it still owes before it ends. A shutdown that closed
+        // it first would look like a dropped connection to whoever was being
+        // held.
         drop(late_tx);
         let _ = waiting_room.join();
         Ok(())

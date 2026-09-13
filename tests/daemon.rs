@@ -888,7 +888,14 @@ fn the_files_route_reports_the_reader_and_honours_the_filters() {
 fn indexing_from_the_portal_streams_progress_and_then_lists_the_files() {
     let (dir, home, work) = sandbox("index-route");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
 
@@ -1232,7 +1239,14 @@ fn the_write_tools_work_through_the_proxy_while_the_daemon_holds_the_lock() {
     let (dir, home, work) = sandbox("proxy-writes");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
     let root = work.join("api");
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
 
@@ -1446,7 +1460,14 @@ fn a_stopped_index_run_undoes_itself() {
 
     // Outside the watched root, so the watcher cannot index it behind the
     // run's back and the count belongs to the run alone.
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     for i in 0..60 {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(120));
@@ -1513,7 +1534,14 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(200));
         std::fs::write(root.join(format!("n{i:03}.md")), body).unwrap();
     }
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("one.md"), "# One\n\nA single file.\n").unwrap();
 
@@ -1569,7 +1597,14 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
 fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
     let (dir, home, work) = sandbox("slices");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     for i in 0..12 {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(80));
@@ -1663,4 +1698,47 @@ fn a_session_id_is_sixteen_hex_characters_or_it_is_replaced() {
         );
         assert!(fresh.chars().all(|c| c.is_ascii_hexdigit()), "{fresh}");
     }
+}
+
+/// The other half of the index boundary: the portal and a forwarded
+/// `semlith_index` are held to it too, not only the stdio MCP server. A path
+/// outside the store's roots and outside the home is refused by name.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn the_index_boundary_holds_through_the_portal() {
+    let (dir, home, work) = sandbox("portal-boundary");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    // A sibling of the corpus: not under the store's root, not under HOME.
+    let outside = work.join("somebody-elses");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("notes.md"), "Ownership and borrowing.\n").unwrap();
+
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+
+    let body = format!(
+        "{{\"path\":{}}}",
+        serde_json::to_string(&outside.display().to_string()).unwrap()
+    );
+    let answer = daemon.post("/api/index", &body);
+    assert_eq!(answer.status, 200, "the route should stream, not fail");
+
+    // Refused by name, with the rule, in the stream the page reads.
+    assert!(
+        answer.body.contains("refused") && answer.body.contains("outside"),
+        "the run did not report the refusal:\n{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("somebody-elses"),
+        "the refusal does not name the path:\n{}",
+        answer.body
+    );
+
+    // And nothing from it reached the store.
+    let files = daemon.get("/api/files").json();
+    let listed = serde_json::to_string(&files).unwrap();
+    assert!(
+        !listed.contains("notes.md"),
+        "a refused file is in the store:\n{listed}"
+    );
 }

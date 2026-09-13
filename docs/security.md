@@ -91,8 +91,9 @@ The agent key opens `/mcp` and nothing else — it cannot rotate a token, adopt 
 store or start an upgrade. From 0.14.0 it is also bounded in what it can read.
 
 **Indexing happens inside a boundary.** `semlith_index` and the portal's index
-route accept a path only under the target store's registered roots or under your
-home directory. `/etc`, another user's home, a directory nobody told semlith
+route accept a path only under the target store's registered roots, under the
+store's own directory when it is a `.semlith` sitting beside its corpus, or under
+your home directory. `/etc`, another user's home, a directory nobody told semlith
 about: refused, by name, with the rule that refused it.
 
 **And never a credential.** Whatever the boundary, no path under `~/.ssh`,

@@ -170,8 +170,9 @@ here with the way back where there is one.
 #### `semlith_index` and the portal index inside a boundary
 
 - **What breaks.** The MCP tool `semlith_index`, `POST /api/index`, `/api/root`
-  and `/api/adopt` refuse a path outside the target store's registered roots and
-  outside the home directory, and refuse any path under `~/.ssh`, `~/.aws`,
+  and `/api/adopt` refuse a path outside the target store's registered roots,
+  outside the store's own directory when it is a `.semlith` beside its corpus,
+  and outside the home directory, and refuse any path under `~/.ssh`, `~/.aws`,
   `~/.gnupg`, `~/.kube`, `~/.config/gcloud`, `~/.azure`, `~/.docker`,
   `~/Library/Keychains`, `~/.password-store` or `~/.local/share/keyrings`, or
   named `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,

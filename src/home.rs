@@ -725,6 +725,39 @@ pub fn all_dirs(flags: &[PathBuf], cwd: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// The directories an agent may index into this store.
+///
+/// The roots the registry records for it, and — when the store is a `.semlith`
+/// beside its corpus — the directory it sits in. That second one matters
+/// because `--store` deliberately registers nothing (a path the user names
+/// every time is not a store the daemon should list), so without it a store
+/// created as `--store <corpus>/.semlith` has no roots at all and an agent
+/// cannot index the very corpus that store is about.
+///
+/// A `.semlith` directory's parent *is* its corpus by construction: it is the
+/// default root `semlith adopt` records for exactly that reason.
+pub fn index_roots(store_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Registry::load()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .name_of(store_dir)
+                .and_then(|name| registry.stores.get(name))
+                .map(|entry| entry.roots.clone())
+        })
+        .unwrap_or_default();
+
+    if store_dir.file_name().is_some_and(|n| n == LOCAL_DIR)
+        && let Some(corpus) = store_dir.parent()
+    {
+        let corpus = crate::canonical(corpus);
+        if !roots.contains(&corpus) {
+            roots.push(corpus);
+        }
+    }
+    roots
+}
+
 /// What to say about a store this user has not said may be opened.
 ///
 /// Both commands are named because they are different answers to the same

@@ -83,13 +83,19 @@ fn editing_a_row_breaks_the_chain_and_the_break_is_found() {
         "an untouched ledger must verify"
     );
 
-    // Somebody rewrites what the second query was.
+    // Somebody rewrites what the second query was. From 0.14.0 a store
+    // connection refuses writes until one of the three write paths asks, so the
+    // tamper is made through a connection put deliberately into the state a
+    // tamperer's own `sqlite3` would already be in — what is under test here is
+    // the hash chain noticing the edit, not who was able to make it.
+    semlith::store::read_only(s.db(), false).unwrap();
     s.db()
         .execute(
             "UPDATE retrievals SET query = 'something else' WHERE id = 2",
             [],
         )
         .unwrap();
+    semlith::store::read_only(s.db(), true).unwrap();
 
     assert_eq!(
         semlith::store::ledger_break(s.db()).unwrap(),

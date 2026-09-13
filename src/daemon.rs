@@ -1073,7 +1073,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
             // store's registered roots and the home directory, and never a
             // credential by name. The watcher's own re-embeds are inside those
             // roots by construction.
-            writer.boundary = crate::Boundary::within(store.roots.clone());
+            writer.boundary = crate::Boundary::within(crate::home::index_roots(&store.dir));
             // A pause belongs to the run that was on when it was asked for.
             // A stop does not need clearing here: a job that was queued when
             // one arrived has already been dropped from the queue, so reaching
