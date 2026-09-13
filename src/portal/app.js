@@ -371,7 +371,7 @@ function dataTable(spec) {
   // to be a table.
   const node = el(
     "div",
-    { class: spec.grow ? "card grow" : "card" },
+    { class: spec.grow ? "card table-card grow" : "card table-card" },
     el("div", { class: "table-wrap" }, table),
     foot,
   );
@@ -2744,12 +2744,17 @@ function installPanel() {
             pill(stateWord[step.state] || step.state, tone(step.state)),
             el("span", { class: "card-title", text: step.name }),
             lineCell(step.detail, "meta"),
-            // The one step this page can perform. The others are an install and
-            // a model download, which belong to the command that owns them.
-            step.name === "path" && !setup.on_path
+            // The one step this page can perform, and only while there is
+            // something to do: the step's own state is the answer, not the
+            // live PATH, which a daemon started before the edit never sees.
+            // The others are an install and a model download, which belong to
+            // the command that owns them.
+            step.name === "path" && step.state !== "already-done" && step.state !== "done"
               ? el("span", { class: "spacer" })
               : null,
-            step.name === "path" && !setup.on_path ? fixPath : null,
+            step.name === "path" && step.state !== "already-done" && step.state !== "done"
+              ? fixPath
+              : null,
           ),
         ),
       ),
@@ -3171,7 +3176,7 @@ async function aboutView() {
   const row = (key, value) =>
     el(
       "div",
-      { class: "kv" },
+      { class: "kv pair" },
       el("span", { class: "k", text: key }),
       el("span", { class: "v", text: value }),
     );

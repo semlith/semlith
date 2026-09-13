@@ -1005,6 +1005,18 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+/* A label and its value, as two columns. As a wrapping flex row a long value
+ * broke onto a new line at the left edge of the card, under the label rather
+ * than beside it; a grid keeps the second line in the value's own column. */
+.kv.pair {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: baseline;
+}
+.kv.pair .k {
+  width: auto;
+}
+
 /* -------------------------------------------------------------- components */
 
 .button {
@@ -1455,10 +1467,27 @@ select.field:focus-visible {
  *
  * The cap is in viewport units so the rows use the screen they are given, and
  * a table shorter than it simply ends. */
+/* A table and its pager. The rows take whatever height the card is given and
+ * the pager sits on the bottom edge of it — stretched by a grid row or by a
+ * taller sibling, the card used to end in a band of empty white below the
+ * pager. */
+.table-card {
+  display: flex;
+  flex-direction: column;
+  /* The cap lives on the card, not on the rows: capping the rows left the
+   * pager floating in the middle of a stretched card with white space under
+   * it. With the cap here the rows take the rest of the card and the pager is
+   * always on its bottom edge. */
+  max-height: 76dvh;
+}
+.table-card > .table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .table-wrap {
   overflow: auto;
   min-width: 0;
-  max-height: 62dvh;
 }
 
 /* Sticky, in every table. A column of figures scrolled past its heading is a
