@@ -124,6 +124,7 @@ const ICONS = {
   up: "M5 12h14|M11 6l-6 6 6 6",
   alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
   moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
+  copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -142,13 +143,18 @@ const NAV_ICONS = {
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
 };
 
-/** A button that copies text and says so for a moment. */
+/** A button that copies text and says so for a moment.
+ *
+ * Invisible until the pointer enters the block it belongs to — see `.copy` in
+ * the stylesheet — so a page never shows a column of copy buttons competing
+ * with the content they copy. */
 function copyButton(getText, label) {
   const was = label || "Copy";
   const button = el("button", {
-    class: "button secondary small",
+    class: "button secondary small copy",
     type: "button",
-    text: was,
+    "aria-label": was,
+    title: was,
     onclick: async () => {
       const text = typeof getText === "function" ? getText() : getText;
       try {
@@ -167,12 +173,15 @@ function copyButton(getText, label) {
         }
         area.remove();
       }
-      button.textContent = "Copied";
+      button.classList.add("done");
+      fill(button, "Copied");
       setTimeout(() => {
-        button.textContent = was;
+        button.classList.remove("done");
+        fill(button, icon(ICONS.copy, 14));
       }, 1400);
     },
   });
+  fill(button, icon(ICONS.copy, 14));
   return button;
 }
 
@@ -182,6 +191,16 @@ function copyField(command) {
     { class: "copyfield" },
     el("code", { class: "text", text: command }),
     copyButton(command),
+  );
+}
+
+/** A code block with its copy control over the top-right corner. */
+function codeBlock(text, label) {
+  return el(
+    "div",
+    { class: "code-block" },
+    el("pre", { class: "code", text }),
+    copyButton(text, label || "Copy"),
   );
 }
 
@@ -200,18 +219,340 @@ function empty(message) {
   return el("div", { class: "empty" }, message);
 }
 
+/* ------------------------------------------------------------------- tips */
+
+/* One tooltip for the whole portal.
+ *
+ * The element lives at the end of <body> and is positioned against the
+ * viewport, which is the whole point: the previous implementation was a
+ * `::after` on the element being described, and `.table-wrap` carries
+ * `overflow: auto`, so a scroll container clipped it. The Files page's path
+ * tip — the reason the feature exists — was the one that could not be read.
+ *
+ * `show` takes content and the rectangle to hang it off. It prefers to sit
+ * above and left-aligned, and flips or clamps when that would leave the
+ * viewport. The Graph canvas uses the same element for its richer card, so
+ * there is one implementation rather than two. */
+const tip = {
+  node: null,
+  owner: null,
+
+  ensure() {
+    if (!this.node) {
+      this.node = el("div", { class: "tip", role: "tooltip", "aria-hidden": "true" });
+      document.body.append(this.node);
+    }
+    return this.node;
+  },
+
+  /** `content` is a string or an element; `rect` is a viewport rectangle. */
+  show(content, rect, owner) {
+    const node = this.ensure();
+    this.owner = owner || null;
+    fill(node, content);
+    node.setAttribute("aria-hidden", "false");
+    // Measured after filling and before positioning: the size depends on the
+    // text, and a stale measurement puts the flip decision on the wrong side.
+    node.dataset.open = "true";
+    const box = node.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.left;
+    if (left + box.width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - margin - box.width);
+    }
+    let top = rect.top - box.height - 6;
+    // Above by default, below when there is no room — the flip the criterion
+    // asks for, and the reason this is measured against the viewport.
+    if (top < margin) top = rect.bottom + 6;
+    node.style.left = `${Math.max(margin, Math.round(left))}px`;
+    node.style.top = `${Math.round(top)}px`;
+  },
+
+  /** Hang a tip off an element. */
+  at(target, content) {
+    this.show(content || target.getAttribute("data-tip"), target.getBoundingClientRect(), target);
+  },
+
+  /** Hang a tip off a point, for the canvas, which has no elements to hang on. */
+  atPoint(x, y, content, owner) {
+    this.show(content, { left: x + 12, top: y - 8, bottom: y + 18 }, owner);
+  },
+
+  hide(owner) {
+    if (!this.node) return;
+    if (owner && this.owner !== owner) return;
+    this.node.dataset.open = "false";
+    this.node.setAttribute("aria-hidden", "true");
+    this.owner = null;
+  },
+};
+
+/* Delegated, so a tip costs nothing per row: every table in the portal renders
+ * its rows fresh, and binding two listeners to each of a thousand cells is how
+ * a scroll starts to stutter. */
+function wireTips() {
+  const find = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+
+  document.addEventListener("pointerover", (e) => {
+    const target = find(e.target);
+    if (target) tip.at(target);
+    else if (tip.owner && tip.owner.nodeType) tip.hide();
+  });
+  document.addEventListener("pointerout", (e) => {
+    const target = find(e.target);
+    if (target) tip.hide(target);
+  });
+  // Keyboard parity: focus shows the same label a hover does.
+  document.addEventListener("focusin", (e) => {
+    const target = find(e.target);
+    if (target) tip.at(target);
+  });
+  document.addEventListener("focusout", (e) => {
+    const target = find(e.target);
+    if (target) tip.hide(target);
+  });
+  // A fixed tip does not travel with the row it describes, so it leaves when
+  // the row does. Capture, because the scroll happens inside a card.
+  window.addEventListener("scroll", () => tip.hide(), true);
+  window.addEventListener("resize", () => tip.hide());
+}
+
+/* ----------------------------------------------------------------- table */
+
+/* One table for the whole portal: Stores, Files, Languages, the About model
+ * list and the Agents client list all render through this. Five hand-written
+ * tables is how one page gains sorting and the other four do not.
+ *
+ * Columns are `{ key, label, className, sortable, value, render }`. `value`
+ * pulls the sort key out of a row; `render` returns the cell's content. A
+ * table is client-side by default — its rows are already in hand — and
+ * `server: true` hands sorting and paging back to the caller instead, which is
+ * what the Files table needs: sorting has to order the whole store rather than
+ * the page of it that happens to be loaded.
+ */
+const PER_PAGE = [8, 15, 25, 50];
+
+function dataTable(spec) {
+  const columns = spec.columns;
+  const view = {
+    page: 1,
+    perPage: spec.perPage || 15,
+    sort: spec.sort || null,
+    dir: spec.dir || "asc",
+  };
+  let rows = spec.rows || [];
+  let total = spec.total === undefined ? rows.length : spec.total;
+
+  const headRow = el("tr", {});
+  const body = el("tbody", {});
+  const foot = el("div", { class: "table-foot" });
+  const table = el(
+    "table",
+    { class: spec.className || null },
+    el("thead", {}, headRow),
+    body,
+  );
+  const node = el(
+    "div",
+    { class: "card grow" },
+    el("div", { class: "table-wrap" }, table),
+    foot,
+  );
+
+  function pages() {
+    return Math.max(1, Math.ceil(total / view.perPage));
+  }
+
+  function sorted() {
+    if (!view.sort) return rows;
+    const column = columns.find((c) => c.key === view.sort);
+    if (!column || !column.value) return rows;
+    const sign = view.dir === "desc" ? -1 : 1;
+    // A copy: sorting the caller's array in place would reorder the data
+    // behind whatever else is reading it.
+    return [...rows].sort((a, b) => {
+      const x = column.value(a);
+      const y = column.value(b);
+      if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
+      return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
+    });
+  }
+
+  function shown() {
+    if (spec.server) return rows;
+    const from = (view.page - 1) * view.perPage;
+    return sorted().slice(from, from + view.perPage);
+  }
+
+  function changed() {
+    if (spec.server && spec.onChange) spec.onChange({ ...view });
+    else paint();
+  }
+
+  function sortBy(key) {
+    if (view.sort === key) view.dir = view.dir === "asc" ? "desc" : "asc";
+    else {
+      view.sort = key;
+      view.dir = "asc";
+    }
+    view.page = 1;
+    changed();
+  }
+
+  function paintHead() {
+    fill(
+      headRow,
+      columns.map((column) => {
+        const on = view.sort === column.key;
+        if (column.sortable === false) {
+          return el("th", { class: column.className || null, text: column.label });
+        }
+        return el(
+          "th",
+          {
+            class: column.className || null,
+            "aria-sort": on ? (view.dir === "asc" ? "ascending" : "descending") : "none",
+          },
+          el(
+            "button",
+            { class: "sort", type: "button", onclick: () => sortBy(column.key) },
+            column.label,
+            el("span", { class: "arrow", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+          ),
+        );
+      }),
+    );
+  }
+
+  function paintBody() {
+    const page = shown();
+    fill(
+      body,
+      page.map((row, i) =>
+        el(
+          "tr",
+          {},
+          columns.map((column) =>
+            el(
+              "td",
+              { class: column.className || null },
+              column.render ? column.render(row, i) : String(column.value ? column.value(row) : ""),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  function paintFoot() {
+    const from = total === 0 ? 0 : (view.page - 1) * view.perPage + 1;
+    const to = Math.min(total, view.page * view.perPage);
+    fill(
+      foot,
+      el("span", { class: "meta", text: `${n(from)}–${n(to)} of ${n(total)}` }),
+      el("span", { class: "divider-v" }),
+      el("span", { class: "eyebrow", text: "per page" }),
+      el(
+        "span",
+        { class: "chips" },
+        PER_PAGE.map((size) =>
+          el("button", {
+            class: "chip",
+            type: "button",
+            "aria-pressed": String(size === view.perPage),
+            text: String(size),
+            onclick: () => {
+              view.perPage = size;
+              view.page = 1;
+              changed();
+            },
+          }),
+        ),
+      ),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Prev",
+        disabled: view.page <= 1,
+        onclick: () => {
+          view.page -= 1;
+          changed();
+        },
+      }),
+      el("span", { class: "meta", text: `page ${n(view.page)} of ${n(pages())}` }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Next",
+        disabled: view.page >= pages(),
+        onclick: () => {
+          view.page += 1;
+          changed();
+        },
+      }),
+    );
+  }
+
+  function paint() {
+    paintHead();
+    paintBody();
+    paintFoot();
+  }
+
+  paint();
+
+  return {
+    node,
+    /** Replace the rows. `count` is the whole-store total in server mode. */
+    update(next, count) {
+      rows = next || [];
+      total = count === undefined ? rows.length : count;
+      if (view.page > pages()) view.page = pages();
+      paint();
+    },
+    /** What the server should sort and page by. */
+    query: () => ({ ...view }),
+  };
+}
+
 /** An input with a real label. A placeholder is not one: it leaves on typing. */
 function labelled(id, text, input) {
   input.id = id;
   return [el("label", { class: "sr-only", for: id, text }), input];
 }
 
-function pageHead(title, subtitle) {
+/* One page header for the whole portal.
+ *
+ * The title, its status pill immediately beside it, and any page actions at
+ * the end of that row; the subtitle on a row of its own at the page's full
+ * width. Every page uses it, so a pill is never floated to the far side of a
+ * header away from the title it describes, and a subtitle is never squeezed
+ * into a narrow column by a button sitting opposite it. */
+function pageHead(title, subtitle, extra) {
+  const { pill, actions } = extra || {};
   return el(
     "div",
-    { class: "titles" },
-    el("h1", { text: title }),
+    { class: "page-head" },
+    el(
+      "div",
+      { class: "line" },
+      el("h1", { text: title }),
+      pill || null,
+      actions ? el("span", { class: "spacer" }) : null,
+      actions ? el("div", { class: "actions" }, actions) : null,
+    ),
     subtitle ? el("p", { class: "subtitle", text: subtitle }) : null,
+  );
+}
+
+/** A status pill. One shape, and a dot only where it reports a state. */
+function pill(text, tone) {
+  return el(
+    "span",
+    { class: tone ? `pill ${tone}` : "pill" },
+    tone ? el("i", {}) : null,
+    text,
   );
 }
 
@@ -843,7 +1184,7 @@ async function graphView() {
     ),
     el(
       "div",
-      { class: "graph-body" },
+      { class: "graph-body grow" },
       el(
         "div",
         { class: "graph-frame" },
@@ -1212,19 +1553,10 @@ async function ledgerView() {
   return el(
     "div",
     { class: "view ledger-page" },
-    el(
-      "div",
-      { class: "impact-title" },
-      pageHead(
-        "Retrieval ledger",
-        "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
-      ),
-      el(
-        "span",
-        { class: `pill ${on ? "on" : "off"}` },
-        el("i", {}),
-        on ? "recording · opt-in" : "not recording",
-      ),
+    pageHead(
+      "Retrieval ledger",
+      "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
+      { pill: pill(on ? "recording · opt-in" : "not recording", on ? "on" : null) },
     ),
     el(
       "div",
@@ -1238,6 +1570,9 @@ async function ledgerView() {
         data.ratio ? "not a marketing claim" : "needs a recorded query",
       ),
     ),
+    el(
+      "div",
+      { class: "scroller" },
     copyField("semlith ledger --last 20"),
     el("div", {
       class: "rail-hint",
@@ -1247,7 +1582,7 @@ async function ledgerView() {
       ? null
       : el(
           "div",
-          { class: "note" },
+          { class: "notice" },
           el("div", { class: "what", text: "Recording is off" }),
           el("div", {
             text: "Start the daemon with --ledger to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
@@ -1260,6 +1595,7 @@ async function ledgerView() {
       el("div", {
         text: "Recording and the semlith ledger dump are free, permanently. The per-session table, the filters and CSV/JSON export are what 0.13.0 adds on top — they will not lock anything that works today.",
       }),
+    ),
     ),
   );
 }
@@ -1319,26 +1655,14 @@ async function storesView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Stores" }),
-        el("p", { class: "subtitle", text: "Everything indexed on this machine. Nothing leaves it." }),
+    pageHead("Stores", "Everything indexed on this machine. Nothing leaves it.", {
+      actions: el(
+        "button",
+        { class: "button", type: "button", onclick: () => go("index") },
+        icon(ICONS.plus),
+        "Index a folder",
       ),
-      el(
-        "div",
-        { class: "actions" },
-        el(
-          "button",
-          { class: "button", type: "button", onclick: () => go("index") },
-          icon(ICONS.plus),
-          "Index a folder",
-        ),
-      ),
-    ),
+    }),
     el(
       "div",
       { class: "strip" },
@@ -1347,6 +1671,9 @@ async function storesView() {
       stat("Chunks", n(totals.chunks), "embedded and searchable"),
       stat("On disk", bytes(totals.bytes), "vectors and text together"),
     ),
+    el(
+      "div",
+      { class: "scroller" },
     el(
       "div",
       { class: "card" },
@@ -1400,12 +1727,7 @@ async function storesView() {
                 el(
                   "td",
                   {},
-                  el(
-                    "span",
-                    { class: `pill ${s.watching ? "good" : "warn"}` },
-                    el("span", { class: "dot" }),
-                    s.watching ? when(s.last_write) : "not watching",
-                  ),
+                  pill(s.watching ? when(s.last_write) : "not watching", s.watching ? "good" : "warn"),
                 ),
                 el(
                   "td",
@@ -1472,6 +1794,7 @@ async function storesView() {
         }),
       ),
     ),
+    ),
   );
 }
 
@@ -1479,42 +1802,116 @@ async function storesView() {
 
 async function filesView() {
   const chosenExt = new Set();
-  const table = el("div", { class: "card" });
-  const count = el("span", { class: "meta" });
+  const summary = el("span", { class: "pill" });
+  const holder = el("div", { class: "grow" });
 
   const pathInput = el("input", {
     type: "text",
     placeholder: "path glob, e.g. src/**",
     oninput: () => {
       clearTimeout(load.timer);
-      load.timer = setTimeout(load, 200);
+      load.timer = setTimeout(() => load(true), 200);
     },
   });
 
   /** Which request is current, so a slow one cannot overwrite a fast one. */
   let generation = 0;
 
-  async function load() {
+  async function forget(path, row) {
+    try {
+      await post("/api/forget", { path });
+      // The row goes, and the page is reloaded behind it: with the server
+      // paging, the row that moves up into the gap is on the server.
+      row.remove();
+      load();
+    } catch (e) {
+      fill(holder, error(e.message));
+    }
+  }
+
+  const table = dataTable({
+    className: "w-files",
+    server: true,
+    sort: "path",
+    columns: [
+      {
+        key: "path",
+        label: "Path",
+        className: "path",
+        // One line, with the whole path on the shared tooltip: a wrapped path
+        // makes every row a different height and the column unreadable.
+        render: (f) => el("span", { class: "one-line", "data-tip": f.path, text: f.path }),
+      },
+      { key: "store", label: "Store", className: "meta", sortable: false, render: (f) => f.store },
+      {
+        key: "reader",
+        label: "Read as",
+        sortable: false,
+        render: (f) => el("span", { class: "tag", text: f.reader }),
+      },
+      { key: "lang", label: "Language", className: "meta", sortable: false, render: (f) => f.lang || "—" },
+      { key: "lines", label: "Lines", className: "num", render: (f) => n(f.lines) },
+      { key: "chunks", label: "Chunks", className: "num", render: (f) => n(f.chunks) },
+      {
+        key: "indexed",
+        label: "Indexed",
+        className: "meta",
+        render: (f) => when(f.indexed_at),
+      },
+      {
+        key: "forget",
+        label: "",
+        sortable: false,
+        render: (f) => {
+          const button = el("button", {
+            class: "forget",
+            type: "button",
+            text: "Forget",
+            onclick: () => {
+              button.disabled = true;
+              button.textContent = "Forgetting…";
+              forget(f.path, button.closest("tr"));
+            },
+          });
+          return button;
+        },
+      },
+    ],
+    rows: [],
+    total: 0,
+    onChange: () => load(),
+  });
+
+  async function load(reset) {
     const mine = ++generation;
+    const view = table.query();
+    if (reset) view.page = 1;
     const params = new URLSearchParams();
     if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
     for (const ext of chosenExt) params.append("ext", ext);
+    params.set("sort", view.sort || "path");
+    params.set("dir", view.dir);
+    params.set("limit", String(view.perPage));
+    params.set("offset", String((view.page - 1) * view.perPage));
 
     let data;
     try {
       data = await api(`/api/files?${params}`);
     } catch (e) {
       if (mine !== generation) return;
-      fill(table, el("div", { class: "card pad" }, error(e.message)));
-      count.textContent = "";
+      fill(holder, el("div", { class: "card pad" }, error(e.message)));
+      summary.textContent = "";
       return;
     }
     if (mine !== generation) return;
 
-    count.textContent = `${n(data.total)} files`;
-    if (!data.files.length) {
+    summary.textContent = `${n(data.total)} files · ${n(data.formats)} format${
+      data.formats === 1 ? "" : "s"
+    } · ${n(data.stores)} store${data.stores === 1 ? "" : "s"}`;
+
+    if (!data.total) {
       fill(
-        table,
+        holder,
         el(
           "div",
           { class: "card pad" },
@@ -1523,89 +1920,13 @@ async function filesView() {
       );
       return;
     }
-
-    let shown = data.files.length;
-    const rows = data.files.map((f) => {
-      const forget = el("button", {
-        class: "forget",
-        type: "button",
-        text: "Forget",
-        onclick: async () => {
-          forget.disabled = true;
-          forget.textContent = "Forgetting…";
-          try {
-            await post("/api/forget", { path: f.path });
-            // Drop the row rather than reloading the whole table: the answer is
-            // already known, and a reload throws away the scroll position.
-            row.remove();
-            shown -= 1;
-            count.textContent = `${n(Math.max(0, data.total - 1))} files`;
-            if (shown === 0) load();
-          } catch (e) {
-            forget.disabled = false;
-            forget.textContent = "Forget";
-            fill(last, error(e.message));
-          }
-        },
-      });
-
-      const last = el("td", {}, forget);
-      const row = el(
-        "tr",
-        {},
-        el("td", { class: "path", "data-tip": f.path, text: f.path }),
-        el("td", { class: "meta", text: f.store }),
-        el("td", {}, el("span", { class: "tag", text: f.reader })),
-        el("td", { class: "meta", text: f.lang || "—" }),
-        el("td", { class: "num", text: n(f.lines) }),
-        el("td", { class: "num", text: n(f.chunks) }),
-        last,
-      );
-      return row;
-    });
-
-    fill(
-      table,
-      el(
-        "div",
-        { class: "table-wrap" },
-        el(
-          "table",
-          { class: "w-files" },
-          el(
-            "thead",
-            {},
-            el(
-              "tr",
-              {},
-              el("th", { text: "Path" }),
-              el("th", { text: "Store" }),
-              el("th", { text: "Read as" }),
-              el("th", { text: "Language" }),
-              el("th", { class: "num", text: "Lines" }),
-              el("th", { class: "num", text: "Chunks" }),
-              el("th", { text: "" }),
-            ),
-          ),
-          el("tbody", {}, rows),
-        ),
-      ),
-      data.files.length < data.total
-        ? el(
-            "div",
-            { class: "table-foot" },
-            el("span", {
-              class: "meta",
-              text: `showing the first ${n(data.files.length)} of ${n(data.total)} — narrow the filter to see the rest`,
-            }),
-          )
-        : null,
-    );
+    table.update(data.files, data.total);
+    if (!holder.contains(table.node)) fill(holder, table.node);
   }
 
   // The formats this release added are on the list, so they are one click away
   // rather than something you have to know to type.
-  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "pdf", "docx", "epub", "rtf", "eml"];
+  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "pdf", "docx", "epub", "png", "jpg"];
   const extChips = EXTENSIONS.map((ext) =>
     el("button", {
       class: "chip",
@@ -1618,7 +1939,7 @@ async function filesView() {
         if (on) chosenExt.add(ext);
         else chosenExt.delete(ext);
         clearTimeout(load.timer);
-        load();
+        load(true);
       },
     }),
   );
@@ -1628,19 +1949,10 @@ async function filesView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Files" }),
-        el("p", {
-          class: "subtitle",
-          text: "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
-        }),
-      ),
-      count,
+    pageHead(
+      "Files",
+      "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
+      { pill: summary },
     ),
     el(
       "div",
@@ -1653,7 +1965,7 @@ async function filesView() {
       ),
       extChips,
     ),
-    table,
+    holder,
     el("p", {
       class: "subtitle",
       text: "Forget drops the file's chunks and vectors. The file on disk is untouched.",
@@ -1672,66 +1984,40 @@ async function languagesView() {
   }
   const languages = data.languages || [];
 
-  const tags = (list) =>
-    list.map((item) => el("span", { class: "tag wrapped", text: item }));
+  const tags = (list) => list.map((item) => el("span", { class: "tag wrapped", text: item }));
+
+  const table = dataTable({
+    className: "w-languages",
+    sort: "name",
+    perPage: 25,
+    rows: languages,
+    columns: [
+      { key: "name", label: "Name", className: "path", value: (l) => l.name },
+      {
+        key: "extensions",
+        label: "Extensions",
+        value: (l) => (l.extensions || []).length,
+        render: (l) => tags((l.extensions || []).map((e) => `.${e}`)),
+      },
+      {
+        key: "filenames",
+        label: "Filenames",
+        value: (l) => (l.filenames || []).length,
+        render: (l) =>
+          (l.filenames || []).length ? tags(l.filenames) : el("span", { class: "meta", text: "—" }),
+      },
+    ],
+  });
 
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Languages" }),
-        el("p", {
-          class: "subtitle",
-          text: "Every name --lang accepts, on the command line, in the MCP tools and in the search box.",
-        }),
-      ),
-      el("span", { class: "pill", text: `${languages.length} languages` }),
+    pageHead(
+      "Languages",
+      "Every name --lang accepts, on the command line, in the MCP tools and in the search box.",
+      { pill: pill(`${languages.length} languages`) },
     ),
-    languages.length
-      ? el(
-          "div",
-          { class: "card" },
-          el(
-            "div",
-            { class: "table-wrap" },
-            el(
-              "table",
-              { class: "w-languages" },
-              el(
-                "thead",
-                {},
-                el(
-                  "tr",
-                  {},
-                  el("th", { text: "Name" }),
-                  el("th", { text: "Extensions" }),
-                  el("th", { text: "Filenames" }),
-                ),
-              ),
-              el(
-                "tbody",
-                {},
-                languages.map((language) =>
-                  el(
-                    "tr",
-                    {},
-                    el("td", { class: "path", text: language.name }),
-                    el("td", {}, tags((language.extensions || []).map((e) => `.${e}`))),
-                    (language.filenames || []).length
-                      ? el("td", {}, tags(language.filenames))
-                      : el("td", { class: "meta", text: "—" }),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        )
-      : empty("The language table is empty, which should be impossible."),
+    languages.length ? table.node : empty("The language table is empty, which should be impossible."),
     el("p", {
       class: "subtitle",
       text: "Extension and filename decide the language; file contents are never read to guess it, because a store is searched far more often than it is built. The two names with no extension — dockerfile and makefile — match by filename instead.",
@@ -2149,14 +2435,9 @@ async function indexView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "titles" },
-      el("h1", { text: "Index" }),
-      el("p", {
-        class: "subtitle",
-        text: "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path semlith_index takes.",
-      }),
+    pageHead(
+      "Index",
+      "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path semlith_index takes.",
     ),
     el(
       "div",
@@ -2179,6 +2460,9 @@ async function indexView() {
       el("span", { class: "meta", text: "writer: daemon" }),
     ),
     note,
+    el(
+      "div",
+      { class: "scroller" },
     picker,
     el(
       "div",
@@ -2214,6 +2498,7 @@ async function indexView() {
       el("div", { class: "bar" }, bar),
     ),
     log,
+    ),
   );
 }
 
@@ -2300,10 +2585,10 @@ function installPanel() {
             el(
               "div",
               { class: "kv" },
-              el("span", {
-                class: `pill ${step.state === "done" || step.state === "already-done" ? "good" : ""}`,
-                text: stateWord[step.state] || step.state,
-              }),
+              pill(
+                stateWord[step.state] || step.state,
+                step.state === "done" || step.state === "already-done" ? "good" : "warn",
+              ),
               el("span", { class: "card-title", text: step.name }),
               el("span", { class: "meta", text: step.detail }),
             ),
@@ -2369,8 +2654,7 @@ async function agentsView() {
           "div",
           { class: "rows" },
           el("span", { class: "eyebrow", text: stanza.format }),
-          el("pre", { class: "code", text: stanza.text.trimEnd() }),
-          el("div", { class: "actions" }, copyButton(stanza.text.trimEnd(), "Copy stanza")),
+          codeBlock(stanza.text.trimEnd(), "Copy stanza"),
         ),
       ),
     );
@@ -2380,27 +2664,17 @@ async function agentsView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Agents" }),
-        el("p", { class: "subtitle", text: "One stanza, every store, no path to keep in step." }),
-      ),
-      el(
-        "span",
-        { class: `pill ${data.forwarding ? "good" : ""}` },
-        el("span", { class: "dot" }),
+    pageHead("Agents", "One stanza, every store, no path to keep in step.", {
+      pill: pill(
         data.forwarding
           ? `${data.connected} forwarding to this daemon`
           : "no client forwarding right now",
+        data.forwarding ? "good" : "warn",
       ),
-    ),
+    }),
     el(
       "div",
-      { class: "grid" },
+      { class: "grid scroller" },
       el(
         "div",
         { class: "card pad" },
@@ -2477,26 +2751,10 @@ async function privacyView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el(
-          "div",
-          { class: "actions" },
-          el("h1", { text: "Privacy" }),
-          el("span", {
-            class: `pill ${data.airgap ? "good" : ""}`,
-            text: data.airgap ? "airgap mode armed" : "airgap off",
-          }),
-        ),
-        el("p", {
-          class: "subtitle",
-          text: "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute.",
-        }),
-      ),
+    pageHead(
+      "Privacy",
+      "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute.",
+      { pill: pill(data.airgap ? "airgap mode armed" : "airgap off", data.airgap ? "good" : null) },
     ),
     el(
       "div",
@@ -2510,7 +2768,7 @@ async function privacyView() {
     ),
     el(
       "div",
-      { class: "grid" },
+      { class: "grid scroller" },
       el(
         "div",
         { class: "card pad" },
@@ -2545,7 +2803,7 @@ async function privacyView() {
         rotateNote,
         el("hr", { class: "rule" }),
         el("span", { class: "card-title", text: "Content-Security-Policy" }),
-        el("pre", { class: "code", text: data.csp }),
+        codeBlock(data.csp),
         el("p", {
           class: "subtitle",
           text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
@@ -2574,18 +2832,10 @@ async function aboutView() {
   return el(
     "div",
     { class: "view" },
+    pageHead("About", "One Rust binary. The portal you are reading is compiled into it."),
     el(
       "div",
-      { class: "titles" },
-      el("h1", { text: "About" }),
-      el("p", {
-        class: "subtitle",
-        text: "One Rust binary. The portal you are reading is compiled into it.",
-      }),
-    ),
-    el(
-      "div",
-      { class: "grid" },
+      { class: "grid scroller" },
       el(
         "div",
         { class: "card pad" },
@@ -3058,6 +3308,8 @@ async function boot() {
   } else {
     state.theme = isDark() ? "dark" : "light";
   }
+
+  wireTips();
 
   await refreshStores();
   await render();

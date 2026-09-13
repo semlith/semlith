@@ -81,16 +81,29 @@
   --shadow-nav: 0 18px 40px rgba(16, 26, 36, 0.14);
   --shadow-pop: 0 10px 28px rgba(16, 26, 36, 0.18), 0 1px 2px rgba(16, 26, 36, 0.12);
 
-  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The fallback families are metric-matched to Plex below, so `font-display:
+   * swap` swaps a face rather than a layout. */
+  --sans: "IBM Plex Sans", "Plex Sans Fallback", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", "Plex Mono Fallback", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Spacing. Six steps, and nothing between them. */
+  /* Spacing. Nine steps.
+   *
+   * The three middle ones (10, 14, 18) and the retuned top two are what took
+   * the density down to the design's: it never exceeds 20 for page rhythm and
+   * clusters its gaps at 8 to 18, where this scale's old top steps were 24 and
+   * 40. The small steps are deliberately untouched — a label and its value
+   * still sit at 4, items in a group at 8 to 10 — because tightening those
+   * would merge things that are not related, which is a different mistake from
+   * the one being fixed. */
   --sp-1: 4px;
   --sp-2: 8px;
+  --sp-2h: 10px;
   --sp-3: 12px;
+  --sp-3h: 14px;
   --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 40px;
+  --sp-4h: 18px;
+  --sp-5: 20px;
+  --sp-6: 24px;
 
   /* Radius. Four steps. */
   --r-1: 4px;
@@ -99,7 +112,10 @@
   --r-4: 10px;
   --r-pill: 999px;
 
-  /* Type. Every size in the product is one of these. */
+  /* Type. Every size in the product is one of these — there is no raw pixel
+   * font size anywhere below this block. The design bundle's half-pixel sizes
+   * (10.5, 12.5, 13.5) are artefacts of a mock with no scale; they snap to the
+   * nearest step here rather than being reproduced. */
   --t-micro: 10px;
   --t-tiny: 11px;
   --t-small: 12px;
@@ -109,14 +125,72 @@
   --t-title: 18px;
   --t-h1: 21px;
   --t-display: 24px;
+  /* Not a step of the scale and never stepped down: anything under 16px makes
+   * iOS Safari zoom the page when a field takes focus, which on a phone reads
+   * as the layout breaking when you tap a box. */
+  --t-field: 16px;
+
+  /* Line height, paired with the type steps. Before this the stylesheet had
+   * six line-height declarations in 2,283 lines, so almost everything
+   * inherited the body's 1.45 — including 12px mono in a table row, which the
+   * design sets at 1.6 because a dense monospace row needs the air. */
+  --lh-tight: 1.25;
+  --lh-heading: 1.3;
+  --lh-prose: 1.45;
+  --lh-code: 1.6;
+
+  /* Motion. One vocabulary, declared once: no rule below states a duration or
+   * a curve of its own. */
+  --d-quick: 120ms;
+  --d-fade: 130ms;
+  --d-hover: 140ms;
+  --d-pop: 150ms;
+  --d-rise: 160ms;
+  --d-slide: 170ms;
+  /* Deliberately linear, and deliberately slower: it reports real progress,
+   * and an eased progress bar lies about the rate. */
+  --d-bar: 0.4s;
+  /* The one looping animation in the portal: the daemon's status dot. */
+  --d-pulse: 2.4s;
+  --e-in-out: ease;
+  --e-out: ease-out;
+  --e-pop: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --e-linear: linear;
 
   /* One measure for prose, so a subtitle on a 1600px display does not run to
-   * 180 characters. */
+   * 180 characters. Page subtitles are exempt: they sit on their own row under
+   * the title and run the page's width, because capping them there is what
+   * wrapped them mid-sentence at 1440px. */
   --measure: 68ch;
 
   --topbar-h: 56px;
   --rail-w: 56px;
   --side-w: 236px;
+}
+
+/* Metric-matched fallbacks.
+ *
+ * The five Plex faces are inside the binary, so `font-display: swap` is a
+ * swap between two local fonts — but a swap between two fonts with different
+ * metrics still reflows the page, and the header and the stat strip are
+ * exactly where that shows. These override the fallback's metrics to Plex's,
+ * so the line count before the swap equals the line count after it. Nothing is
+ * fetched: the fallback families are system fonts. */
+@font-face {
+  font-family: "Plex Sans Fallback";
+  src: local("Helvetica Neue"), local("Arial"), local("Liberation Sans");
+  size-adjust: 100.6%;
+  ascent-override: 103%;
+  descent-override: 27%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Plex Mono Fallback";
+  src: local("Menlo"), local("Consolas"), local("DejaVu Sans Mono");
+  size-adjust: 99.4%;
+  ascent-override: 103%;
+  descent-override: 27%;
+  line-gap-override: 0%;
 }
 
 :root[data-theme="dark"] {
@@ -206,7 +280,7 @@ body {
 body {
   font-family: var(--sans);
   font-size: var(--t-body);
-  line-height: 1.45;
+  line-height: var(--lh-prose);
   color: var(--ink);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -302,7 +376,8 @@ table {
 
 .hamburger,
 .icon-button {
-  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    border-color var(--d-fade) var(--e-in-out);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -372,7 +447,8 @@ table {
 }
 
 .search-launcher {
-  transition: border-color 130ms ease, color 130ms ease, background 130ms ease;
+  transition: border-color var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    background var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: 9px;
@@ -402,7 +478,7 @@ table {
 
 .key-hint {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: var(--t-micro);
   padding: 2px 6px;
   border-radius: var(--r-1);
   background: var(--panel);
@@ -458,7 +534,7 @@ main {
 }
 
 .rail-item {
-  transition: background 130ms ease, color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
   position: relative;
   display: flex;
   align-items: center;
@@ -488,7 +564,7 @@ main {
   background: var(--green);
   display: inline-block;
   flex-shrink: 0;
-  animation: pulse 2.4s ease-in-out infinite;
+  animation: pulse var(--d-pulse) ease-in-out infinite;
 }
 
 .sidebar {
@@ -518,14 +594,14 @@ main {
 }
 
 .nav-item {
-  transition: background 130ms ease, color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-2);
   font-weight: 500;
-  font-size: 13.5px;
+  font-size: var(--t-body-sm);
   color: var(--ink-2);
   border: 0;
   background: none;
@@ -550,10 +626,10 @@ main {
 .daemon-card {
   border: 1px solid var(--line);
   border-radius: var(--r-3);
-  padding: 11px var(--sp-3);
+  padding: var(--sp-2h) var(--sp-3);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--sp-1);
   background: var(--soft);
 }
 .daemon-card .who {
@@ -585,17 +661,22 @@ main {
   }
 }
 
-/* The page scrolls; its sections do not shrink to make room. A flex item with
- * `overflow: hidden` — which every `.card` has, to keep tables from squaring
- * off the corner radius — gets an automatic `min-height` of zero, so in a
- * height-constrained column it collapses to a sliver instead of pushing the
- * page taller. That is exactly what happened to the stores table on a phone. */
+/* One scroll container per page, and it is never the window.
+ *
+ * The page is bounded to the viewport below the fixed header, every child is
+ * `flex-shrink: 0`, and exactly one child carries `.grow` and scrolls. Long
+ * content then scrolls where it lives — the model table inside its card, the
+ * event log inside its panel — so the page header and the stat strip stay put
+ * instead of scrolling away with it.
+ *
+ * `.view` used to scroll as a whole, which is what made a long model list grow
+ * a window-wide scrollbar and take the title with it. */
 .view > * {
   flex-shrink: 0;
 }
 
 .view {
-  animation: rise 160ms ease-out;
+  animation: rise var(--d-rise) var(--e-out);
   padding: var(--sp-5) var(--sp-5) var(--sp-6);
   display: flex;
   flex-direction: column;
@@ -603,7 +684,51 @@ main {
   flex-grow: 1;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
+}
+
+/* The one child that takes the remaining height and scrolls. Written as a
+ * class rather than as a child of `.view` because the growing element is
+ * sometimes a holder the view re-fills — the Files table is replaced whole on
+ * every query — and the card inside it is what has to carry the height. */
+.grow {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.grow > .table-wrap,
+.grow > .scroller,
+.view > .scroller {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.view > .scroller {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/* A page header, the same on every page: the title with its status pill beside
+ * it and any actions at the end of that row, then the subtitle on a row of its
+ * own at the page's full width. A pill floated to the far side of a header is
+ * a pill nobody reads as belonging to the title. */
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.page-head .line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 h1 {
@@ -637,8 +762,18 @@ h2 {
 .subtitle {
   margin: 0;
   color: var(--muted);
-  max-width: var(--measure);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
   text-wrap: pretty;
+}
+
+/* Inside a card, prose still wants a measure: a 900px-wide paragraph in a
+ * grid cell is unreadable for the same reason a 180-character page subtitle
+ * is. The page subtitle above is the exception, because it has a row of its
+ * own and wrapping it mid-sentence at 1440px is what the cap caused. */
+.card .subtitle,
+.hero .subtitle {
+  max-width: var(--measure);
 }
 
 .eyebrow {
@@ -686,10 +821,18 @@ h2 {
 }
 
 .card.pad {
-  padding: var(--sp-4) 18px;
+  padding: var(--sp-4) var(--sp-4h);
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  min-height: 0;
+}
+
+/* A card whose content is dense enough that the standard padding reads as
+ * dead space around it. */
+.card.pad.dense {
+  padding: var(--sp-3h) var(--sp-4);
+  gap: var(--sp-2h);
 }
 
 .grid {
@@ -713,21 +856,22 @@ h2 {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
-  padding: 14px var(--sp-4);
+  padding: var(--sp-3h) var(--sp-4);
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--sp-1);
 }
 .stat .value {
   font-family: var(--mono);
   font-size: var(--t-display);
   font-weight: 500;
-  line-height: 1.2;
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
 }
 .stat .sub {
   color: var(--muted);
   font-size: var(--t-small);
-  line-height: 1.4;
+  line-height: var(--lh-prose);
 }
 
 .rows {
@@ -760,7 +904,8 @@ h2 {
 /* -------------------------------------------------------------- components */
 
 .button {
-  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    border-color var(--d-fade) var(--e-in-out);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -777,8 +922,7 @@ h2 {
   white-space: nowrap;
 }
 .button:hover {
-  background: var(--accent-edge);
-  color: #fff;
+  filter: brightness(1.15);
 }
 .button svg {
   width: 16px;
@@ -809,6 +953,33 @@ h2 {
   background: var(--soft);
 }
 
+/* A dimmed accent action returns to full opacity and brightens a little less
+ * than a live one, so the two are distinguishable while both are under the
+ * pointer. */
+.button.dim {
+  opacity: 0.75;
+}
+.button.dim:hover {
+  opacity: 1;
+  filter: brightness(1.08);
+}
+
+/* Amber is the portal's one destructive treatment, and it is used nowhere
+ * else for a control: border, text and fill together, so "this removes
+ * something" is legible before it is clicked. */
+.button.danger {
+  background: var(--panel);
+  border-color: var(--amber-ink);
+  color: var(--amber-ink);
+  font-weight: 500;
+}
+.button.danger:hover {
+  background: var(--amber-soft);
+  border-color: var(--amber-ink);
+  color: var(--amber-ink);
+  filter: none;
+}
+
 .button.small {
   height: 32px;
   padding: 0 var(--sp-3);
@@ -822,7 +993,8 @@ h2 {
 }
 
 .chip {
-  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    border-color var(--d-fade) var(--e-in-out);
   display: inline-flex;
   align-items: center;
   height: 28px;
@@ -859,13 +1031,36 @@ h2 {
   gap: var(--sp-2);
   font-family: var(--mono);
   font-size: var(--t-tiny);
-  padding: 5px 11px;
+  line-height: var(--lh-prose);
+  padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
-  background: var(--soft);
+  background: var(--panel);
   color: var(--ink-2);
   white-space: nowrap;
 }
+
+/* A pill that reports a state carries a dot. One element, so a pill without a
+ * state cannot accidentally look like one with a state. */
+.pill i,
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.pill.on {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.pill.on i {
+  animation: pulse var(--d-pulse) ease-in-out infinite;
+}
+
 .pill.good {
   border-color: var(--green);
   background: var(--green-soft);
@@ -897,7 +1092,7 @@ h2 {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--green);
+  background: currentColor;
   display: inline-block;
   flex-shrink: 0;
 }
@@ -911,7 +1106,7 @@ h2 {
 }
 
 .field {
-  transition: border-color 130ms ease;
+  transition: border-color var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -948,9 +1143,7 @@ h2 {
   flex-grow: 1;
   min-width: 0;
   font-family: var(--mono);
-  /* 16px, not 13: anything smaller makes iOS Safari zoom the page on focus,
-   * which on a phone reads as the layout breaking when you tap a box. */
-  font-size: var(--t-lead);
+  font-size: var(--t-field);
 }
 
 select.chip {
@@ -984,12 +1177,82 @@ select.chip {
   flex-shrink: 0;
 }
 
+/* A copy control is a second-order action: it belongs to the thing beside it,
+ * and a page showing a column of permanently visible Copy buttons is a page
+ * competing with its own content. So it fades in when the pointer enters the
+ * block it copies — and appears immediately for a keyboard, which has no
+ * pointer to enter with. */
+.copy {
+  transition: opacity var(--d-quick) var(--e-in-out),
+    background var(--d-fade) var(--e-in-out), border-color var(--d-fade) var(--e-in-out),
+    color var(--d-fade) var(--e-in-out);
+  opacity: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.code-block .copy,
+.copy.block {
+  width: 28px;
+  height: 28px;
+}
+
+.copyfield:hover .copy,
+.copyfield:focus-within .copy,
+.code-block:hover .copy,
+.code-block:focus-within .copy,
+.copy:focus-visible {
+  opacity: 1;
+}
+
+/* Confirmed, for 1400ms, and wide enough to hold the word rather than
+ * clipping it. */
+.copy.done {
+  opacity: 1;
+  width: auto;
+  padding: 0 var(--sp-2);
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.copy svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* A code block with its copy control at the top right, over the block rather
+ * than under it. */
+.code-block {
+  position: relative;
+  min-width: 0;
+}
+
+.code-block .copy {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+}
+
 /* A message attached to the control that caused it, rather than an alert()
- * that steals focus and says nothing about where the problem is. */
+ * that steals focus and says nothing about where the problem is.
+ *
+ * Inline, with no chrome. This used to be declared twice — here, and again as
+ * a padded bordered card in the ledger section — and the later declaration won
+ * for every user of the class, which is why the Index page painted an empty
+ * bordered box under its controls whenever there was nothing to say. The card
+ * variant is `.notice` below; this one stays inline and disappears when it has
+ * no text. */
 .note {
   font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
   color: var(--muted);
   min-height: 18px;
+}
+.note:empty {
+  display: none;
 }
 .note.bad {
   color: var(--red-ink);
@@ -1036,19 +1299,21 @@ select.chip {
 th {
   text-align: left;
   font: 500 var(--t-tiny) var(--mono);
+  line-height: var(--lh-code);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
-  padding: 10px 14px;
+  padding: var(--sp-2h) var(--sp-3h);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   white-space: nowrap;
 }
 
 td {
-  padding: 11px 14px;
+  padding: var(--sp-3) var(--sp-3h);
   border-bottom: 1px solid var(--line-soft);
   vertical-align: top;
+  line-height: var(--lh-code);
 }
 
 tr:last-child td {
@@ -1056,10 +1321,50 @@ tr:last-child td {
 }
 
 tbody tr {
-  transition: background 110ms ease;
+  transition: background var(--d-quick) var(--e-in-out);
 }
 tbody tr:hover {
   background: var(--soft);
+}
+
+/* A sortable header. The whole label is the control, so the hit target is the
+ * column heading rather than a small arrow beside it. */
+th .sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color var(--d-hover) var(--e-in-out);
+}
+
+th .sort:hover {
+  color: var(--ink);
+}
+
+/* Reserved whether or not this column is the active one, so the header row
+ * does not shift sideways when the sort moves to another column. */
+th .arrow {
+  display: inline-block;
+  width: 9px;
+  color: var(--accent-edge);
+}
+
+/* A cell held to one line, with the whole value on the shared tooltip. A
+ * wrapped path makes every row a different height, which is what turns a file
+ * list into something you have to read rather than scan. */
+.one-line {
+  display: block;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 th.num,
@@ -1070,7 +1375,7 @@ td.num {
 
 td.path {
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: var(--t-small);
   overflow-wrap: anywhere;
 }
 
@@ -1103,7 +1408,7 @@ td.meta {
   flex-shrink: 0;
   border-top: 1px solid var(--line);
   background: var(--soft);
-  padding: 10px 14px;
+  padding: var(--sp-2h) var(--sp-3h);
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -1111,7 +1416,7 @@ td.meta {
 }
 
 .forget {
-  transition: color 110ms ease;
+  transition: color var(--d-quick) var(--e-in-out);
   border: 0;
   background: none;
   color: var(--amber-ink);
@@ -1137,7 +1442,7 @@ pre.code {
   padding: var(--sp-4);
   font-family: var(--mono);
   font-size: var(--t-small);
-  line-height: 1.6;
+  line-height: var(--lh-code);
   overflow: auto;
   white-space: pre;
 }
@@ -1181,7 +1486,7 @@ pre.code {
   height: 100%;
   background: var(--accent);
   border-radius: var(--r-1);
-  transition: width 180ms ease;
+  transition: width var(--d-bar) var(--e-linear);
 }
 
 .feed {
@@ -1236,7 +1541,7 @@ pre.code {
   overflow-y: auto;
 }
 .picker .entry {
-  transition: background 110ms ease;
+  transition: background var(--d-quick) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1298,7 +1603,7 @@ pre.code {
 }
 .search-field input {
   flex-grow: 1;
-  font-size: var(--t-lead);
+  font-size: var(--t-field);
   border: 0;
   outline: none;
   background: transparent;
@@ -1323,7 +1628,7 @@ pre.code {
 }
 
 .hit {
-  transition: border-color 130ms ease, box-shadow 130ms ease;
+  transition: border-color var(--d-fade) var(--e-in-out), box-shadow var(--d-fade) var(--e-in-out);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
@@ -1358,7 +1663,7 @@ pre.code {
   margin: 0;
   font-family: var(--mono);
   font-size: var(--t-small);
-  line-height: 1.55;
+  line-height: var(--lh-code);
   color: var(--ink-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1394,7 +1699,7 @@ pre.code {
   display: block;
 }
 .welcome .lockup .name {
-  font-size: 22px;
+  font-size: var(--t-display);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -1467,19 +1772,22 @@ pre.code {
 
 /* ----------------------------------------------------------------- tips */
 
-/* A hover label for text the layout had to truncate — a store directory, a
- * long path. Built on the design's popup: panel-coloured, lightly shadowed,
- * and it grows into place rather than appearing. */
-[data-tip] {
-  position: relative;
-}
-
-[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
+/* One hover label for the whole portal, drawn in a single fixed element that
+ * lives at the end of <body>.
+ *
+ * It used to be `[data-tip]::after`, positioned inside the element it
+ * described — which meant `.table-wrap`'s `overflow: auto` clipped it, and the
+ * Files page's whole reason for having a tip (a path too long for its column)
+ * was the one place it could not be read. A scroll container clips any
+ * positioned descendant, so the fix is to stop being a descendant.
+ *
+ * The same element carries the Graph canvas's richer card, so there is one
+ * tooltip implementation rather than two. */
+.tip {
+  position: fixed;
+  top: 0;
   left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 60;
+  z-index: 80;
   max-width: 320px;
   width: max-content;
   padding: 9px 11px;
@@ -1489,21 +1797,55 @@ pre.code {
   box-shadow: var(--shadow-pop);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 1.4;
+  font-size: var(--t-small);
+  line-height: var(--lh-code);
   white-space: normal;
   overflow-wrap: anywhere;
   opacity: 0;
   transform: scale(0.96);
-  transform-origin: 0 100%;
-  transition: opacity 130ms ease, transform 150ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  transition: opacity var(--d-fade) var(--e-in-out), transform var(--d-pop) var(--e-pop);
   pointer-events: none;
 }
 
-[data-tip]:hover::after,
-[data-tip]:focus-visible::after {
+.tip[data-open="true"] {
   opacity: 1;
   transform: none;
+}
+
+/* The Graph card: a coloured dot and a title, then label/value rows. */
+.tip .tip-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.tip .tip-head i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-edge);
+  flex-shrink: 0;
+}
+
+.tip .tip-row {
+  display: flex;
+  gap: var(--sp-3);
+  margin-top: var(--sp-1);
+  font-size: var(--t-tiny);
+}
+
+.tip .tip-row .k {
+  color: var(--muted);
+  width: 52px;
+  flex-shrink: 0;
+}
+
+.tip .tip-row .v {
+  color: var(--ink-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------- layout utilities */
@@ -1557,12 +1899,15 @@ pre.code {
 .fact-value {
   font-family: var(--mono);
   font-size: var(--t-body);
+  line-height: var(--lh-code);
+  font-variant-numeric: tabular-nums;
 }
 
 .pct {
   font-family: var(--mono);
-  font-size: 20px;
+  font-size: var(--t-h1);
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .search-page {
@@ -1608,7 +1953,7 @@ pre.code {
   border: 1px solid var(--line);
   border-radius: var(--r-3);
   color: var(--muted);
-  transition: border-color 140ms ease;
+  transition: border-color var(--d-hover) var(--e-in-out);
 }
 
 .graph-scope:focus-within {
@@ -1778,7 +2123,7 @@ pre.code {
   border-radius: var(--r-2);
   font-size: var(--t-body-sm);
   min-width: 0;
-  transition: background 140ms ease;
+  transition: background var(--d-hover) var(--e-in-out);
 }
 
 .rail-list li:hover {
@@ -1995,7 +2340,7 @@ pre.code {
   color: var(--ink);
   font: inherit;
   cursor: pointer;
-  transition: border-color 140ms ease;
+  transition: border-color var(--d-hover) var(--e-in-out);
 }
 
 .impact-controls select:hover {
@@ -2017,7 +2362,7 @@ pre.code {
   background: var(--soft);
   font: inherit;
   color: var(--ink);
-  transition: border-color 140ms ease;
+  transition: border-color var(--d-hover) var(--e-in-out);
 }
 
 .path-controls input:focus {
@@ -2056,59 +2401,24 @@ pre.code {
 
 /* ---------------------------------------------------------------- ledger */
 
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-3);
-  border-radius: var(--r-pill);
-  font-family: var(--mono);
-  font-size: var(--t-tiny);
-  background: var(--chip);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.pill i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.pill.on {
-  background: var(--green-soft);
-  color: var(--green-ink);
-}
-
-.pill.on i {
-  animation: pulse 2.4s ease-in-out infinite;
-}
-
-.note {
+/* A standing message with a heading, in a card of its own. Named apart from
+ * `.note` because the two are different things: this one has chrome and is
+ * meant to be read, that one is a line under a control and is usually empty. */
+.notice {
   padding: var(--sp-4);
   background: var(--soft);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
   font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
   color: var(--muted);
   text-wrap: pretty;
 }
 
-.note .what {
+.notice .what {
   font-weight: 600;
   color: var(--ink);
   margin-bottom: var(--sp-1);
-}
-
-.card-title {
-  margin: var(--sp-4) 0 var(--sp-2);
-  font-size: var(--t-body);
-  font-weight: 600;
-}
-
-.card-title:first-child {
-  margin-top: 0;
 }
 
 /* ----------------------------------------------------- fusion badges */
@@ -2157,7 +2467,7 @@ pre.code {
 .hit-actions .quiet {
   font-size: var(--t-tiny);
   color: var(--muted);
-  transition: color 140ms ease;
+  transition: color var(--d-hover) var(--e-in-out);
 }
 
 .hit-actions .quiet:hover {
@@ -2168,6 +2478,27 @@ pre.code {
 
 
 @media (max-width: 899px) {
+  /* Type steps here rather than in each component: before this the only size
+   * that changed at either breakpoint was the stat value, so a 24px figure sat
+   * beside a 21px heading that had not moved. */
+  :root {
+    --t-display: 21px;
+    --t-h1: 18px;
+    --t-title: 16px;
+    --t-lead: 14px;
+  }
+
+  /* Below the narrow breakpoint the page scrolls rather than trapping a
+   * stacked desktop layout in the viewport, which is worse than letting it
+   * scroll. Tables still scroll inside their own wrapper. */
+  .view {
+    overflow-y: auto;
+  }
+
+  .grow {
+    flex: 0 0 auto;
+  }
+
   /* The canvas pages are two columns of real content, so they stack rather
    * than squeeze: a 280px rail beside a 300px canvas is two unusable halves. */
   .graph-body,
@@ -2189,7 +2520,7 @@ pre.code {
   }
 
   .sidebar {
-    animation: slide-in 170ms cubic-bezier(0.2, 0.9, 0.3, 1);
+    animation: slide-in var(--d-slide) var(--e-pop);
     position: fixed;
     top: var(--topbar-h);
     bottom: 0;
@@ -2214,7 +2545,7 @@ pre.code {
   }
 
   .scrim {
-    animation: fade-in 170ms ease;
+    animation: fade-in var(--d-slide) var(--e-in-out);
     display: block;
     position: fixed;
     inset: var(--topbar-h) 0 0 0;
@@ -2256,6 +2587,14 @@ pre.code {
 }
 
 @media (max-width: 520px) {
+  :root {
+    --t-display: 18px;
+    --t-h1: 16px;
+    --t-title: 14px;
+    --t-lead: 13px;
+    --t-body: 13px;
+  }
+
   .graph-stage {
     height: 280px;
   }
@@ -2268,10 +2607,6 @@ pre.code {
   .impact-controls,
   .path-controls {
     gap: var(--sp-2);
-  }
-
-  .stat-value {
-    font-size: var(--t-h1);
   }
 
   .kv .k {

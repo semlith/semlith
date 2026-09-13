@@ -21,9 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-/// How many files one Files request returns before it starts counting instead.
-/// A corpus is tens of thousands of files and a browser table is not.
-const FILE_PAGE: usize = 500;
+/// The largest page the Files route will serve. A corpus is tens of thousands
+/// of files and a browser table is not; the portal asks for 8 to 50 and the
+/// cap is what stops a hand-written query asking for all of them.
+const FILE_PAGE: i64 = 500;
 
 pub fn handler(state: Arc<State>) -> Handler {
     Arc::new(move |request| route(&state, request))
@@ -153,38 +154,99 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         return Response::json(&json!({ "files": [], "total": 0 }));
     };
 
-    let mut rows = Vec::new();
-    let mut total = 0usize;
+    let sort = request
+        .query("sort")
+        .and_then(store::FileSort::parse)
+        .unwrap_or(store::FileSort::Path);
+    let desc = request.query("dir") == Some("desc");
+    let limit = request
+        .query("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(15)
+        .clamp(1, FILE_PAGE);
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        .clamp(0, i64::from(u32::MAX));
+
+    // Each store is asked for the first `offset + limit` rows in the requested
+    // order and the merge picks the page out of the union. Asking each store
+    // for the page directly would be wrong the moment two stores are open: the
+    // tenth row overall is not the tenth row of either of them.
+    let take = offset.saturating_add(limit);
+    let mut merged: Vec<(String, store::FileRow)> = Vec::new();
+    let mut total = 0i64;
+    let mut extensions: Vec<String> = Vec::new();
+    let mut stores = 0usize;
     for (label, opened) in fleet.each() {
         if !only.is_empty() && !only.iter().any(|n| n == label) {
             continue;
         }
-        let listed = match store::file_rows(opened.db(), filter.groups()) {
+        stores += 1;
+        match store::file_count(opened.db(), filter.groups()) {
+            Ok(count) => total += count,
+            Err(e) => return Response::error(500, &e.to_string()),
+        }
+        match store::file_facets(opened.db(), filter.groups()) {
+            Ok(facets) => extensions.extend(facets.extensions),
+            Err(e) => return Response::error(500, &e.to_string()),
+        }
+        let listed = match store::file_rows(opened.db(), filter.groups(), sort, desc, take) {
             Ok(r) => r,
             Err(e) => return Response::error(500, &e.to_string()),
         };
-        total += listed.len();
-        for (path, bytes, chunks, lines) in listed {
-            if rows.len() >= FILE_PAGE {
-                continue;
-            }
-            let as_path = Path::new(&path);
-            rows.push(json!({
+        merged.extend(listed.into_iter().map(|row| (label.to_string(), row)));
+    }
+
+    merged.sort_by(|(_, a), (_, b)| {
+        let order = match sort {
+            store::FileSort::Path => a.path.cmp(&b.path),
+            store::FileSort::Bytes => a.bytes.cmp(&b.bytes),
+            store::FileSort::Chunks => a.chunks.cmp(&b.chunks),
+            store::FileSort::Lines => a.lines.cmp(&b.lines),
+            store::FileSort::Indexed => a.indexed_at.cmp(&b.indexed_at),
+        };
+        let order = if desc { order.reverse() } else { order };
+        order.then_with(|| a.path.cmp(&b.path))
+    });
+
+    let rows: Vec<Value> = merged
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .map(|(label, row)| {
+            let as_path = Path::new(&row.path);
+            json!({
                 "store": label,
-                "path": path,
+                "path": row.path,
                 "ext": as_path.extension().and_then(|e| e.to_str()).unwrap_or(""),
                 "lang": language_of(as_path),
                 "reader": chunk::reader_of(as_path),
-                "bytes": bytes,
-                "chunks": chunks,
-                "lines": lines,
-            }));
-        }
-    }
+                "bytes": row.bytes,
+                "chunks": row.chunks,
+                "lines": row.lines,
+                "indexed_at": row.indexed_at,
+            })
+        })
+        .collect();
 
-    // A truncated list that does not say it is truncated is how somebody
-    // concludes a file was never indexed.
-    Response::json(&json!({ "files": rows, "total": total, "page": FILE_PAGE }))
+    extensions.sort();
+    extensions.dedup();
+
+    Response::json(&json!({
+        "files": rows,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "sort": request.query("sort").unwrap_or("path"),
+        "dir": if desc { "desc" } else { "asc" },
+        // The header states what the whole listing spans, not what the page
+        // happens to hold: "9 formats" read off fifteen rows is a number about
+        // the table rather than about the corpus.
+        "formats": extensions.len(),
+        "stores": stores,
+    }))
 }
 
 /// The same fused search the CLI and `semlith_search` run.

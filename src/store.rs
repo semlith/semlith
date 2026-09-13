@@ -438,24 +438,154 @@ pub fn chunk(db: &Connection, id: u64) -> Result<Option<ChunkRow>> {
         .optional()?)
 }
 
-/// One row per indexed file: path, bytes, chunks, and the last line any chunk
-/// of it covers.
+/// One row per indexed file: path, bytes, chunks, the last line any chunk of
+/// it covers, and when it was last indexed.
+#[derive(Debug, Clone)]
+pub struct FileRow {
+    pub path: String,
+    pub bytes: i64,
+    pub chunks: i64,
+    pub lines: i64,
+    pub indexed_at: i64,
+}
+
+/// The column a Files listing is ordered by.
+///
+/// An enum rather than a string spliced into the SQL: the sort column arrives
+/// from a query parameter, and the only safe way to put a caller's value in an
+/// `ORDER BY` — which cannot be bound as a parameter — is to never put their
+/// bytes there at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSort {
+    Path,
+    Bytes,
+    Chunks,
+    Lines,
+    Indexed,
+}
+
+impl FileSort {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "path" => Some(Self::Path),
+            "bytes" => Some(Self::Bytes),
+            "chunks" => Some(Self::Chunks),
+            "lines" => Some(Self::Lines),
+            "indexed" => Some(Self::Indexed),
+            _ => None,
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Path => "f.path",
+            Self::Bytes => "f.bytes",
+            Self::Chunks => "COUNT(c.id)",
+            Self::Lines => "COALESCE(MAX(c.end_line), 0)",
+            Self::Indexed => "f.indexed_at",
+        }
+    }
+}
+
+/// How many indexed files match `groups`.
+///
+/// Separate from the rows because the Files table pages: the page is bounded
+/// and the total is not, and returning every row to count them is what the old
+/// silent truncation was hiding.
+pub fn file_count(db: &Connection, groups: &[Vec<String>]) -> Result<i64> {
+    let (predicate, binds) = glob_predicate(groups);
+    let sql = format!("SELECT COUNT(*) FROM files f WHERE {predicate}");
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.into_iter().map(Value::Text);
+    Ok(stmt.query_row(rusqlite::params_from_iter(args), |r| r.get(0))?)
+}
+
+/// The first `take` matching files in the requested order.
 ///
 /// The Files view's row, in one query. Asking per file would be one statement
-/// per file, and a corpus is tens of thousands of them.
-pub fn file_rows(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<(String, i64, i64, i64)>> {
+/// per file, and a corpus is tens of thousands of them. The ordering is done
+/// here rather than in the browser so that sorting orders the whole store
+/// rather than the page of it that happens to be loaded — with several stores
+/// open the caller takes `offset + limit` from each and merges, which is why
+/// this takes a count rather than an offset.
+pub fn file_rows(
+    db: &Connection,
+    groups: &[Vec<String>],
+    sort: FileSort,
+    desc: bool,
+    take: i64,
+) -> Result<Vec<FileRow>> {
     let (predicate, binds) = glob_predicate(groups);
+    let direction = if desc { "DESC" } else { "ASC" };
     let sql = format!(
-        "SELECT f.path, f.bytes, COUNT(c.id), COALESCE(MAX(c.end_line), 0) \
+        "SELECT f.path, f.bytes, COUNT(c.id), COALESCE(MAX(c.end_line), 0), f.indexed_at \
          FROM files f LEFT JOIN chunks c ON c.file_id = f.id \
-         WHERE {predicate} GROUP BY f.id ORDER BY f.path"
+         WHERE {predicate} GROUP BY f.id ORDER BY {} {direction}, f.path ASC LIMIT ?",
+        sort.sql()
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut args: Vec<Value> = binds.into_iter().map(Value::Text).collect();
+    args.push(Value::Integer(take.max(0)));
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+        Ok(FileRow {
+            path: r.get(0)?,
+            bytes: r.get(1)?,
+            chunks: r.get(2)?,
+            lines: r.get(3)?,
+            indexed_at: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// What a listing spans: the distinct file extensions in it, and the total
+/// number of lines across every file.
+///
+/// Both are things the Stores and Files pages state and neither `stats()` nor
+/// a page of rows can answer — a page knows about its own rows, and a header
+/// that reports "9 formats" from the fifteen rows on screen is reporting the
+/// page rather than the store.
+#[derive(Debug, Default, Clone)]
+pub struct Facets {
+    pub extensions: Vec<String>,
+    pub lines: i64,
+}
+
+pub fn file_facets(db: &Connection, groups: &[Vec<String>]) -> Result<Facets> {
+    let (predicate, binds) = glob_predicate(groups);
+
+    // The extension is taken in Rust rather than in SQL. SQLite has no
+    // right-hand search, and the usual `rtrim`/`replace` idiom for it reads a
+    // dot in a directory name as the start of an extension — which is a wrong
+    // answer in a column that exists to say what the corpus is made of.
+    let sql = format!("SELECT f.path FROM files f WHERE {predicate}");
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.clone().into_iter().map(Value::Text);
+    let paths = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
+    let mut extensions: Vec<String> = paths
+        .collect::<Result<Vec<String>, _>>()?
+        .iter()
+        .filter_map(|p| {
+            std::path::Path::new(p)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase())
+        })
+        .collect();
+    extensions.sort();
+    extensions.dedup();
+
+    let sql = format!(
+        "SELECT COALESCE(SUM(n), 0) FROM ( \
+           SELECT COALESCE(MAX(c.end_line), 0) AS n \
+           FROM files f LEFT JOIN chunks c ON c.file_id = f.id \
+           WHERE {predicate} GROUP BY f.id)"
     );
     let mut stmt = db.prepare(&sql)?;
     let args = binds.into_iter().map(Value::Text);
-    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let lines: i64 = stmt.query_row(rusqlite::params_from_iter(args), |r| r.get(0))?;
+
+    Ok(Facets { extensions, lines })
 }
 
 pub fn all_paths(db: &Connection) -> Result<Vec<String>> {
