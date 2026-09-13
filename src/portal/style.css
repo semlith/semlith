@@ -706,10 +706,16 @@ main {
   overflow: auto;
 }
 
-.view > .scroller {
+.scroller {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+}
+
+/* A scroller that is also a grid stays a grid: the rule above would otherwise
+ * win on specificity and quietly stack two columns into one. */
+.scroller.grid {
+  display: grid;
 }
 
 /* A page header, the same on every page: the title with its status pill beside
@@ -835,6 +841,41 @@ h2 {
   gap: var(--sp-2h);
 }
 
+/* The numbered verification steps on the Privacy page. */
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.step-row {
+  display: flex;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.step-row .n {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--blue);
+  width: 16px;
+  flex-shrink: 0;
+}
+
+.step-row .what {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  flex-grow: 1;
+}
+
+.step-row .say {
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
+  text-wrap: pretty;
+}
+
 .grid {
   display: grid;
   /* 280px rather than 320: at 320 the track floor exceeded the container on a
@@ -842,6 +883,20 @@ h2 {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--sp-4);
   align-items: start;
+  min-height: 0;
+}
+
+/* Two columns that keep their proportions rather than wrapping at the first
+ * excuse: the About page's facts belong beside its model table, not under it. */
+.grid.two {
+  grid-template-columns: minmax(320px, 1fr) minmax(0, 1.1fr);
+  align-items: stretch;
+}
+
+/* A grid that is the page's scrolling child scrolls its columns rather than
+ * itself, so a long model table does not drag the fact cards up with it. */
+.grid.grow > * {
+  min-height: 0;
 }
 
 .strip {
@@ -2264,35 +2319,6 @@ pre.code {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--sp-3);
-}
-
-.stat {
-  padding: var(--sp-4);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-  min-width: 0;
-}
-
-.stat-label {
-  font-size: var(--t-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-}
-
-.stat-value {
-  margin-top: var(--sp-1);
-  font-size: var(--t-display);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat-note {
-  margin-top: var(--sp-1);
-  font-size: var(--t-tiny);
-  color: var(--muted);
-  text-wrap: pretty;
 }
 
 .impact-body {

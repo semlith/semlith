@@ -103,13 +103,40 @@ fn stores(state: &Arc<State>) -> Response {
                     s.dim(),
                     s.len(),
                     s.shards(),
+                    // What the store spans, which `stats` cannot answer: the
+                    // Stores page states lines of code and how many file types
+                    // and readers they run to, and a page that counts its own
+                    // rows to get there is describing the page.
+                    store::file_facets(s.db(), &[]).unwrap_or_default(),
                 )
             });
 
-        let (files, chunks, bytes, model, dim, vectors, shards) = match stats {
-            Some((Ok((f, c, b)), model, dim, len, shards)) => (f, c, b, model, dim, len, shards),
-            _ => (0, 0, 0, String::new(), 0, 0, None),
+        let (files, chunks, bytes, model, dim, vectors, shards, facets) = match stats {
+            Some((Ok((f, c, b)), model, dim, len, shards, facets)) => {
+                (f, c, b, model, dim, len, shards, facets)
+            }
+            _ => (
+                0,
+                0,
+                0,
+                String::new(),
+                0,
+                0,
+                None,
+                store::Facets::default(),
+            ),
         };
+
+        // The reader is a property of the code rather than a column, so it is
+        // derived from the extensions the store actually holds rather than
+        // stored a second time beside them.
+        let mut readers: Vec<&'static str> = facets
+            .extensions
+            .iter()
+            .map(|ext| chunk::reader_of(Path::new(&format!("x.{ext}"))))
+            .collect();
+        readers.sort_unstable();
+        readers.dedup();
 
         out.push(json!({
             "name": handle.name,
@@ -127,6 +154,9 @@ fn stores(state: &Arc<State>) -> Response {
             "dim": dim,
             "vectors": vectors,
             "shards": shards.map(|(n, max)| json!({ "count": n, "resident": max })),
+            "lines": facets.lines,
+            "formats": facets.extensions.len(),
+            "readers": readers.len(),
             "watching": handle.watching.load(Ordering::Relaxed),
             "queue": handle.queue_depth(),
             "last_write": handle.last_write.load(Ordering::Relaxed),
@@ -421,9 +451,59 @@ fn models() -> Response {
             "name": info.model.to_string(),
             "dim": info.dim,
             "description": info.description,
+            "code": info.model_code,
         }));
     }
+
+    // Size is reported for a model this machine has actually downloaded, and
+    // left blank for one it has not. fastembed's catalogue carries no size, and
+    // a number copied from a model card is a claim about somebody else's file.
+    let cached = cached_model_sizes();
+    for model in &mut out {
+        let code = model.get("code").and_then(Value::as_str).unwrap_or("");
+        let key = code.rsplit('/').next().unwrap_or(code).to_ascii_lowercase();
+        if let Some(bytes) = cached.get(&key) {
+            model["bytes"] = json!(bytes);
+        }
+    }
+
     Response::json(&json!({ "models": out }))
+}
+
+/// How many bytes each model in the cache occupies, by its directory name.
+fn cached_model_sizes() -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(crate::model_cache_dir()) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else { continue };
+        if !kind.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let total = walk_bytes(&entry.path());
+        if total > 0 {
+            // fastembed names a cache directory `models--<org>--<model>`.
+            let key = name.rsplit("--").next().unwrap_or(&name).to_string();
+            *out.entry(key).or_insert(0) += total;
+        }
+    }
+    out
+}
+
+fn walk_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => walk_bytes(&entry.path()),
+            Ok(_) => entry.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 fn languages() -> Response {
@@ -513,6 +593,11 @@ fn privacy(state: &Arc<State>) -> Response {
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
         "token_cookie": crate::http::TOKEN_COOKIE,
+        // Enough of the token to recognise the one this browser holds, and
+        // not enough to be one. The full value is in the cookie the browser
+        // already has and in the body of the rotate response, which sets the
+        // new cookie in the same breath — it is in no other response.
+        "token_preview": preview(&state.server.token()),
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
         "csp": "default-src 'self'",
         "cors": false,
@@ -520,12 +605,28 @@ fn privacy(state: &Arc<State>) -> Response {
     }))
 }
 
+/// The first sixteen characters of a secret, and an ellipsis.
+fn preview(secret: &str) -> String {
+    let head: String = secret.chars().take(16).collect();
+    if head.len() < secret.len() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 fn about(state: &Arc<State>) -> Response {
+    let binary = std::env::current_exe().unwrap_or_default();
     Response::json(&json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "binary": std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
+        "format_version": store::FORMAT_VERSION,
+        "binary": binary.display().to_string(),
+        // Measured rather than stated: the size of the file this process was
+        // started from.
+        "binary_bytes": std::fs::metadata(&binary).map(|m| m.len()).unwrap_or(0),
+        "target": format!("{} · {}", std::env::consts::ARCH, std::env::consts::OS),
+        "bind": format!("127.0.0.1:{}", state.server.port()),
+        "revisions": crate::mcp::SUPPORTED,
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),

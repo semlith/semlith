@@ -204,6 +204,21 @@ function codeBlock(text, label) {
   );
 }
 
+/* A command, a path or an identifier set inside a sentence.
+ *
+ * This is what makes the capitalisation rule read as a rule rather than as a
+ * typo: the product is "Semlith" in prose and `semlith` is a command, and the
+ * only thing that tells a reader which one they are looking at is that one of
+ * them is set in mono. */
+function mono(text) {
+  return el("code", { class: "mono", text });
+}
+
+/** A paragraph of prose, where any part may be a mono command. */
+function says(...parts) {
+  return el("p", { class: "subtitle" }, parts);
+}
+
 /** A failure. Coloured like a problem, because it is one. */
 function error(message) {
   return el(
@@ -352,9 +367,12 @@ function dataTable(spec) {
     el("thead", {}, headRow),
     body,
   );
+  // `grow: false` for a table that shares a page with other blocks: stretching
+  // a three-row table down a 900px page to fill it is empty space pretending
+  // to be a table.
   const node = el(
     "div",
-    { class: "card grow" },
+    { class: spec.grow === false ? "card" : "card grow" },
     el("div", { class: "table-wrap" }, table),
     foot,
   );
@@ -513,6 +531,101 @@ function dataTable(spec) {
     },
     /** What the server should sort and page by. */
     query: () => ({ ...view }),
+  };
+}
+
+/* The server-side folder picker.
+ *
+ * One component, used by the Index page to choose what to index and by the
+ * Stores page to choose a directory to adopt. It browses the daemon's
+ * filesystem rather than the browser's, because the daemon is what has to open
+ * the path — a `<input type=file webkitdirectory>` hands over a list of file
+ * objects and not the one thing needed, which is the path itself.
+ */
+function folderPicker(options) {
+  const { onChoose, choose, onError } = options || {};
+  const card = el("div", { class: "card picker", hidden: true });
+
+  async function open(path) {
+    let data;
+    try {
+      data = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
+    } catch (e) {
+      if (onError) onError(e.message);
+      return false;
+    }
+    card.hidden = false;
+    fill(
+      card,
+      el(
+        "div",
+        { class: "crumbs" },
+        el(
+          "button",
+          {
+            class: "button secondary small",
+            type: "button",
+            disabled: !data.parent,
+            onclick: () => open(data.parent),
+          },
+          icon(ICONS.up, 15),
+          "Up",
+        ),
+        el("span", { class: "where", text: data.path }),
+        el("span", { class: "spacer" }),
+        el("button", {
+          class: "button small",
+          type: "button",
+          text: choose || "Use this folder",
+          onclick: () => {
+            card.hidden = true;
+            if (onChoose) onChoose(data.path);
+          },
+        }),
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Close",
+          onclick: () => {
+            card.hidden = true;
+          },
+        }),
+      ),
+      el(
+        "div",
+        { class: "entries" },
+        data.entries.length
+          ? data.entries.map((entry) =>
+              el(
+                "button",
+                {
+                  class: "entry",
+                  type: "button",
+                  onclick: () => {
+                    if (entry.dir) open(entry.path);
+                    else {
+                      card.hidden = true;
+                      if (onChoose) onChoose(entry.path);
+                    }
+                  },
+                },
+                icon(entry.dir ? ICONS.folder : ICONS.file),
+                el("span", { class: "name", text: entry.name }),
+              ),
+            )
+          : el("div", { class: "card pad" }, empty("Nothing here that Semlith can index.")),
+      ),
+    );
+    return true;
+  }
+
+  return {
+    node: card,
+    open,
+    close: () => {
+      card.hidden = true;
+    },
+    isOpen: () => !card.hidden,
   };
 }
 
@@ -1603,9 +1716,9 @@ function stat(label, value, note) {
   return el(
     "div",
     { class: "stat" },
-    el("div", { class: "stat-label", text: label }),
-    el("div", { class: "stat-value", text: value }),
-    note ? el("div", { class: "stat-note", text: note }) : null,
+    el("span", { class: "eyebrow", text: label }),
+    el("span", { class: "value", text: value }),
+    note ? el("span", { class: "sub", text: note }) : null,
   );
 }
 
@@ -1622,7 +1735,7 @@ async function ledgerView() {
   const on = data.recording;
   return el(
     "div",
-    { class: "view ledger-page" },
+    { class: "view" },
     pageHead(
       "Retrieval ledger",
       "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
@@ -1630,7 +1743,7 @@ async function ledgerView() {
     ),
     el(
       "div",
-      { class: "stat-row wide" },
+      { class: "strip" },
       stat("Queries recorded", n(data.queries), `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`),
       stat("Excerpt tokens", n(data.excerpt_tokens), "what the agents actually read"),
       stat("Whole-file tokens", n(data.whole_file_tokens), "what a grep loop would have cost"),
@@ -1643,29 +1756,35 @@ async function ledgerView() {
     el(
       "div",
       { class: "scroller" },
-    copyField("semlith ledger --last 20"),
-    el("div", {
-      class: "rail-hint",
-      text: "Prints the ledger on the command line. Nothing here needs a key.",
-    }),
-    on
-      ? null
-      : el(
-          "div",
-          { class: "notice" },
-          el("div", { class: "what", text: "Recording is off" }),
-          el("div", {
-            text: "Start the daemon with --ledger to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
-          }),
-        ),
-    el(
-      "div",
-      { class: "note" },
-      el("div", { class: "what", text: "Per-session views arrive with the paid release" }),
-      el("div", {
-        text: "Recording and the semlith ledger dump are free, permanently. The per-session table, the filters and CSV/JSON export are what 0.13.0 adds on top — they will not lock anything that works today.",
-      }),
-    ),
+      el(
+        "div",
+        { class: "card pad dense" },
+        copyField("semlith ledger --last 20"),
+        el("p", { class: "subtitle", text: "Prints the ledger on the command line." }),
+      ),
+      on
+        ? null
+        : el(
+            "div",
+            { class: "notice" },
+            el("div", { class: "what", text: "Recording is off" }),
+            el(
+              "div",
+              {},
+              "Start the daemon with ",
+              mono("--ledger"),
+              " to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+            ),
+          ),
+      says(
+        "Stored in ",
+        mono("~/.semlith/stores/<name>/store.db"),
+        ", table ",
+        mono("retrievals"),
+        ". Off by default; deleting the rows is a ",
+        mono("DELETE"),
+        ".",
+      ),
     ),
   );
 }
@@ -1686,14 +1805,113 @@ async function refreshStores() {
 
 // ---------------------------------------------------------------- stores
 
+/* "Agents connected", on the Stores page.
+ *
+ * The same list the Agents page draws, read from the same route, because two
+ * readings of "which agents are talking to this daemon" is how one page says
+ * two and the other says none. */
+function agentsCard() {
+  const card = el("div", { class: "card pad dense" });
+  const body = el("div", { class: "rows" });
+  fill(
+    card,
+    el("span", { class: "card-title", text: "Agents connected" }),
+    body,
+    el("span", { class: "spacer" }),
+    el("button", {
+      class: "button ghost small",
+      type: "button",
+      text: "Copy config for another client",
+      onclick: () => go("agents"),
+    }),
+  );
+  fill(body, el("div", { class: "rail-hint", text: "Asking the daemon…" }));
+
+  api("/api/agents")
+    .then((data) => {
+      const live = data.connections || [];
+      if (!live.length) {
+        fill(
+          body,
+          el("div", {
+            class: "rail-hint",
+            text: "No client is talking to this daemon right now.",
+          }),
+        );
+        return;
+      }
+      fill(
+        body,
+        live.map((client) =>
+          el(
+            "div",
+            { class: "kv" },
+            el("span", { text: client.name }),
+            el("span", { class: "spacer" }),
+            el("span", {
+              class: "meta",
+              text: `${client.transport} · ${n(client.queries)} quer${
+                client.queries === 1 ? "y" : "ies"
+              }`,
+            }),
+          ),
+        ),
+      );
+    })
+    .catch((e) => fill(body, error(e.message)));
+
+  return card;
+}
+
 async function storesView() {
   const stores = await refreshStores();
+
+  const adoptNote = el("div", { class: "note" });
+  const picker = folderPicker({
+    choose: "Adopt this directory",
+    onError: (message) => {
+      adoptNote.className = "note bad";
+      adoptNote.textContent = message;
+    },
+    onChoose: async (path) => {
+      adoptNote.className = "note";
+      adoptNote.textContent = "Adopting…";
+      try {
+        const done = await post("/api/adopt", { path });
+        adoptNote.textContent =
+          done.message || `${path} is registered. It joins on the next daemon start.`;
+        await refreshStores();
+      } catch (e) {
+        adoptNote.className = "note bad";
+        adoptNote.textContent = e.message;
+      }
+    },
+  });
+
+  const head = pageHead("Stores", "Everything indexed on this machine. Nothing leaves it.", {
+    actions: [
+      el(
+        "button",
+        { class: "button secondary", type: "button", onclick: () => picker.open("") },
+        icon(ICONS.folder),
+        "Adopt existing .semlith",
+      ),
+      el(
+        "button",
+        { class: "button", type: "button", onclick: () => go("index") },
+        icon(ICONS.plus),
+        "Index a folder",
+      ),
+    ],
+  });
 
   if (!stores.length) {
     return el(
       "div",
       { class: "view" },
-      pageHead("Stores", "Everything indexed on this machine. Nothing leaves it."),
+      head,
+      picker.node,
+      adoptNote,
       empty("No store is open. Index a folder and it appears here."),
     );
   }
@@ -1703,19 +1921,81 @@ async function storesView() {
       files: sum.files + s.files,
       chunks: sum.chunks + s.chunks,
       bytes: sum.bytes + s.bytes,
+      lines: sum.lines + (s.lines || 0),
       watching: sum.watching + (s.watching ? 1 : 0),
+      formats: Math.max(sum.formats, s.formats || 0),
+      readers: Math.max(sum.readers, s.readers || 0),
     }),
-    { files: 0, chunks: 0, bytes: 0, watching: 0 },
+    { files: 0, chunks: 0, bytes: 0, lines: 0, watching: 0, formats: 0, readers: 0 },
   );
+  const dim = stores.find((s) => s.dim)?.dim;
 
-  const stat = (key, value, sub) =>
-    el(
-      "div",
-      { class: "stat" },
-      el("span", { class: "eyebrow", text: key }),
-      el("span", { class: "value", text: value }),
-      el("span", { class: "sub", text: sub }),
-    );
+  const table = dataTable({
+    className: "w-stores",
+    sort: "name",
+    grow: false,
+    perPage: 8,
+    rows: stores,
+    columns: [
+      {
+        key: "name",
+        label: "Store",
+        value: (s) => s.name,
+        render: (s) =>
+          el(
+            "div",
+            {},
+            el("div", { class: "name", text: s.name }),
+            el("div", { class: "meta", "data-tip": s.dir, text: s.dir }),
+            // The model per store, which the About page states only once for
+            // the machine. Two stores can have been built with two models and
+            // their vectors are not comparable, so it belongs beside the row.
+            el("div", { class: "meta", text: `${s.model} · ${s.dim} dims` }),
+          ),
+      },
+      {
+        key: "roots",
+        label: "Roots",
+        className: "meta",
+        sortable: false,
+        render: (s) =>
+          (s.roots || []).length
+            ? s.roots.map((r) =>
+                el("div", {
+                  class: r.present ? "" : "gone",
+                  text: r.present ? r.path : `${r.path} (missing)`,
+                }),
+              )
+            : "—",
+      },
+      { key: "files", label: "Files", className: "num", value: (s) => s.files, render: (s) => n(s.files) },
+      {
+        key: "chunks",
+        label: "Chunks",
+        className: "num",
+        value: (s) => s.chunks,
+        render: (s) => n(s.chunks),
+      },
+      {
+        key: "last_write",
+        label: "Last write",
+        value: (s) => s.last_write || 0,
+        render: (s) => pill(s.watching ? when(s.last_write) : "not watching", s.watching ? "good" : "warn"),
+      },
+      {
+        key: "open",
+        label: "",
+        sortable: false,
+        render: () =>
+          el("button", {
+            class: "button ghost small",
+            type: "button",
+            text: "Open",
+            onclick: () => go("files"),
+          }),
+      },
+    ],
+  });
 
   const feed = stores
     .flatMap((s) => (s.events || []).map((e) => ({ at: e.at, text: e.text })))
@@ -1725,145 +2005,51 @@ async function storesView() {
   return el(
     "div",
     { class: "view" },
-    pageHead("Stores", "Everything indexed on this machine. Nothing leaves it.", {
-      actions: el(
-        "button",
-        { class: "button", type: "button", onclick: () => go("index") },
-        icon(ICONS.plus),
-        "Index a folder",
-      ),
-    }),
+    head,
+    picker.node,
+    adoptNote,
     el(
       "div",
       { class: "strip" },
       stat("Stores", n(stores.length), `${totals.watching} being watched`),
-      stat("Files", n(totals.files), "readable by a person"),
-      stat("Chunks", n(totals.chunks), "embedded and searchable"),
-      stat("On disk", bytes(totals.bytes), "vectors and text together"),
+      stat("Files", n(totals.files), `${n(totals.formats)} formats`),
+      stat("Chunks", n(totals.chunks), dim ? `${dim}-dimension vectors` : "embedded and searchable"),
+      stat("Lines", n(totals.lines), `${n(totals.readers)} readers in use`),
+      stat("On disk", bytes(totals.bytes), "int8 quantised"),
     ),
     el(
       "div",
       { class: "scroller" },
-    el(
-      "div",
-      { class: "card" },
+      table.node,
       el(
         "div",
-        { class: "table-wrap" },
-        el(
-          "table",
-          { class: "w-stores" },
-          el(
-            "thead",
-            {},
-            el(
-              "tr",
-              {},
-              el("th", { text: "Store" }),
-              el("th", { text: "Roots" }),
-              el("th", { class: "num", text: "Files" }),
-              el("th", { class: "num", text: "Chunks" }),
-              el("th", { text: "Last write" }),
-              el("th", { text: "" }),
-            ),
-          ),
-          el(
-            "tbody",
-            {},
-            stores.map((s) =>
-              el(
-                "tr",
-                {},
-                el(
-                  "td",
-                  {},
-                  el("div", { class: "name", text: s.name }),
-                  el("div", { class: "meta", "data-tip": s.dir, text: s.dir }),
-                ),
-                el(
-                  "td",
-                  { class: "meta" },
-                  (s.roots || []).length
-                    ? s.roots.map((r) =>
-                        el("div", {
-                          class: r.present ? "" : "gone",
-                          text: r.present ? r.path : `${r.path} (missing)`,
-                        }),
-                      )
-                    : "—",
-                ),
-                el("td", { class: "num", text: n(s.files) }),
-                el("td", { class: "num", text: n(s.chunks) }),
-                el(
-                  "td",
-                  {},
-                  pill(s.watching ? when(s.last_write) : "not watching", s.watching ? "good" : "warn"),
-                ),
-                el(
-                  "td",
-                  {},
-                  el("button", {
-                    class: "button ghost small",
-                    type: "button",
-                    text: "Files",
-                    onclick: () => go("files"),
-                  }),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-    el(
-      "div",
-      { class: "grid" },
-      el(
-        "div",
-        { class: "card pad" },
+        { class: "grid" },
         el(
           "div",
-          { class: "head" },
-          el("span", { class: "card-title", text: "Watcher" }),
-          el("span", { class: "meta", text: "live" }),
-        ),
-        feed.length
-          ? el(
-              "div",
-              { class: "feed" },
-              feed.map((e) =>
-                el(
-                  "div",
-                  { class: "row" },
-                  el("span", { class: "at", text: clock(e.at) }),
-                  el("span", { class: "what", text: e.text }),
-                ),
-              ),
-            )
-          : empty("Nothing has changed on disk since the daemon started."),
-      ),
-      el(
-        "div",
-        { class: "card pad" },
-        el("span", { class: "card-title", text: "Model" }),
-        el(
-          "div",
-          { class: "rows" },
-          stores.map((s) =>
-            el(
-              "div",
-              { class: "kv" },
-              el("span", { class: "k", text: s.name }),
-              el("span", { class: "v", text: `${s.model} · ${s.dim} dims` }),
-            ),
+          { class: "card pad dense" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Watcher" }),
+            el("span", { class: "meta", text: "live" }),
           ),
+          feed.length
+            ? el(
+                "div",
+                { class: "feed" },
+                feed.map((e) =>
+                  el(
+                    "div",
+                    { class: "row" },
+                    el("span", { class: "at", text: clock(e.at) }),
+                    el("span", { class: "what", text: e.text }),
+                  ),
+                ),
+              )
+            : empty("Nothing has changed on disk since the daemon started."),
         ),
-        el("p", {
-          class: "subtitle",
-          text: "Fixed when the store was created. Vectors from two models are not comparable, so switching means indexing again.",
-        }),
+        agentsCard(),
       ),
-    ),
     ),
   );
 }
@@ -2294,7 +2480,12 @@ async function indexView() {
   bar.style.width = "0%";
   const pct = el("span", { class: "pct", text: "0%" });
   const status = el("span", { class: "meta", text: "idle" });
-  const picker = el("div", { class: "card picker", hidden: true });
+  const picker = folderPicker({
+    onChoose: (path) => {
+      field.value = path;
+    },
+    onError: (message) => complain(message),
+  });
   const note = el("div", { class: "note" });
   const urlCard = el("div", { class: "card pad", hidden: true });
   const urlNote = el("div", { class: "note" });
@@ -2303,11 +2494,11 @@ async function indexView() {
    * picker and a URL field at once offers two answers to one question. Both
    * start closed, so the page opens on the path field and its actions. */
   function reveal(which) {
-    const wantPicker = which === "picker" && picker.hidden;
+    const wantPicker = which === "picker" && !picker.isOpen();
     const wantUrl = which === "url" && urlCard.hidden;
-    picker.hidden = !wantPicker;
+    if (!wantPicker) picker.close();
     urlCard.hidden = !wantUrl;
-    if (wantPicker) browse("");
+    if (wantPicker) picker.open("");
     if (wantUrl) urlField.focus();
   }
 
@@ -2345,80 +2536,6 @@ async function indexView() {
     note.className = "note bad";
     note.textContent = message;
     if (focus) focus.focus();
-  }
-
-  async function browse(path) {
-    let data;
-    try {
-      data = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
-    } catch (e) {
-      complain(e.message);
-      return;
-    }
-    note.className = "note";
-    note.textContent = "";
-
-    fill(
-      picker,
-      el(
-        "div",
-        { class: "crumbs" },
-        el(
-          "button",
-          {
-            class: "button secondary small",
-            type: "button",
-            disabled: !data.parent,
-            onclick: () => browse(data.parent),
-          },
-          icon(ICONS.up, 15),
-          "Up",
-        ),
-        el("span", { class: "where", text: data.path }),
-        el("span", { class: "spacer" }),
-        el("button", {
-          class: "button small",
-          type: "button",
-          text: "Use this folder",
-          onclick: () => {
-            field.value = data.path;
-            picker.hidden = true;
-          },
-        }),
-        el("button", {
-          class: "button ghost small",
-          type: "button",
-          text: "Close",
-          onclick: () => {
-            picker.hidden = true;
-          },
-        }),
-      ),
-      el(
-        "div",
-        { class: "entries" },
-        data.entries.length
-          ? data.entries.map((entry) =>
-              el(
-                "button",
-                {
-                  class: "entry",
-                  type: "button",
-                  onclick: () => {
-                    if (entry.dir) browse(entry.path);
-                    else {
-                      field.value = entry.path;
-                      picker.hidden = true;
-                    }
-                  },
-                },
-                icon(entry.dir ? ICONS.folder : ICONS.file),
-                el("span", { class: "name", text: entry.name }),
-              ),
-            )
-          : el("div", { class: "card pad" }, empty("Nothing here that semlith can index.")),
-      ),
-    );
   }
 
   /* One reader for both buttons. /api/add fetches the URL and then hands what
@@ -2547,9 +2664,11 @@ async function indexView() {
   return el(
     "div",
     { class: "view" },
-    pageHead(
-      "Index",
-      "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path semlith_index takes.",
+    pageHead("Index"),
+    says(
+      "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path ",
+      mono("semlith_index"),
+      " takes.",
     ),
     // The path field has the row to itself, above the actions: sharing a row
     // with four buttons is what held it to 420px on a 1440px page.
@@ -2589,7 +2708,7 @@ async function indexView() {
     el(
       "div",
       { class: "scroller" },
-    picker,
+    picker.node,
     fill(
       urlCard,
       el("span", { class: "eyebrow", text: "Add from a URL" }),
@@ -2716,12 +2835,9 @@ function installPanel() {
             ),
           ),
         ),
-        el("p", {
-          class: "subtitle",
-          text: setup.on_path
-            ? `${setup.bin_dir} is on PATH.`
-            : `${setup.bin_dir} is not on PATH — run \`semlith setup\` to add it.`,
-        }),
+        setup.on_path
+          ? says(mono(setup.bin_dir), " is on PATH.")
+          : says(mono(setup.bin_dir), " is not on PATH — run ", mono("semlith setup"), " to add it."),
         el("hr", { class: "rule" }),
         el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
         el("div", { class: "actions" }, check, install),
@@ -2833,12 +2949,7 @@ async function privacyView() {
     return el("div", { class: "view" }, pageHead("Privacy"), error(e.message));
   }
 
-  const tokenBox = el("div", { class: "copyfield" });
-  function showToken(text) {
-    fill(tokenBox, el("code", { class: "text", text }));
-  }
-  showToken("held by this browser's cookie, not shown");
-
+  const tokenBox = el("code", { class: "text", text: data.token_preview || "—" });
   const rotateNote = el("div", { class: "note" });
   const rotate = el("button", {
     class: "button secondary small",
@@ -2850,8 +2961,13 @@ async function privacyView() {
       rotateNote.textContent = "Rotating…";
       try {
         const fresh = await post("/api/rotate", {});
-        showToken(fresh.token);
-        rotateNote.textContent = "Rotated. The old token stopped working immediately.";
+        // The rotate response is the one place the whole token appears, and it
+        // sets the new cookie in the same breath. What is shown is still the
+        // preview: a page that prints a live credential in full is a page
+        // someone screenshots.
+        tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
+        rotateNote.textContent =
+          "Rotated. The old token stopped working immediately; agents on the HTTP endpoint are unaffected.";
       } catch (e) {
         rotateNote.className = "note bad";
         rotateNote.textContent = e.message;
@@ -2870,6 +2986,22 @@ async function privacyView() {
       el("span", { class: "sub", text: why }),
     );
 
+  /* The four steps, numbered, each with its own copy button. A packet capture
+   * is the only one of them that proves anything on its own; the others are
+   * what make the first one quick to believe. */
+  const step = (number, what, command) =>
+    el(
+      "div",
+      { class: "step-row" },
+      el("span", { class: "n", text: number }),
+      el(
+        "div",
+        { class: "what" },
+        el("div", { class: "say", text: what }),
+        copyField(command),
+      ),
+    );
+
   return el(
     "div",
     { class: "view" },
@@ -2885,7 +3017,7 @@ async function privacyView() {
       fact("CORS", "none", "no origin may read this server's responses"),
       fact("Host check", "localhost only", "a foreign Host header gets 400 before anything runs"),
       fact("Assets", "include_bytes!", "the page you are reading is inside the binary"),
-      fact("Telemetry", "none", "no analytics, and no update check semlith makes on its own"),
+      fact("Telemetry", "none", "no analytics, and no update check Semlith makes on its own"),
       fact("Model cache", data.model_cached ? "cached" : "not downloaded", data.model_cache),
     ),
     el(
@@ -2894,42 +3026,76 @@ async function privacyView() {
       el(
         "div",
         { class: "card pad" },
-        el("span", { class: "card-title", text: "Verify it with a packet capture" }),
-        el("p", {
-          class: "subtitle",
-          text: "Watch every interface but loopback while you search. Nothing should appear.",
-        }),
-        copyField("sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'"),
-        el("p", {
-          class: "subtitle",
-          text: "Or pull the cable: the portal loads and searches with no network at all.",
-        }),
-        el("hr", { class: "rule" }),
-        el("span", { class: "card-title", text: "The outbound connections that exist" }),
-        el("p", {
-          class: "subtitle",
-          text: "The embedding model is downloaded once, on first index, and cached. semlith upgrade and semlith add reach the network only in the second you ask them to. --airgap refuses all three and exits naming what it refused.",
-        }),
-        copyField("semlith index . --airgap"),
+        el("span", { class: "card-title", text: "Verify it yourself" }),
+        el(
+          "div",
+          { class: "steps-list" },
+          step(
+            "1",
+            "Ask the operating system what this process has open. Only loopback should appear.",
+            "lsof -nP -p $(pgrep -f 'semlith start') -i",
+          ),
+          step(
+            "2",
+            "Watch every interface but loopback while you search. Nothing should appear.",
+            "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
+          ),
+          step(
+            "3",
+            "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
+            "semlith start --airgap",
+          ),
+          step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
+        ),
       ),
       el(
         "div",
-        { class: "card pad" },
-        el("span", { class: "card-title", text: "Session token" }),
-        el("p", {
-          class: "subtitle",
-          text: `One token per run of the daemon, held in a SameSite=Strict ${data.token_cookie} cookie. Rotating it invalidates the old one immediately.`,
-        }),
-        tokenBox,
-        el("div", { class: "actions" }, rotate),
-        rotateNote,
-        el("hr", { class: "rule" }),
-        el("span", { class: "card-title", text: "Content-Security-Policy" }),
-        codeBlock(data.csp),
-        el("p", {
-          class: "subtitle",
-          text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
-        }),
+        { class: "rows" },
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
+          says(
+            "The embedding model is downloaded once, on first index, and cached. ",
+            mono("semlith upgrade"),
+            " and ",
+            mono("semlith add"),
+            " reach the network only in the second you ask them to. ",
+            mono("--airgap"),
+            " refuses all three and exits naming what it refused.",
+          ),
+          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
+          el(
+            "div",
+            { class: "chips" },
+            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
+            el("span", {
+              class: "meta",
+              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
+            }),
+          ),
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Session token" }),
+          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
+          rotateNote,
+          says(
+            "Generated at start, held in a SameSite=Strict ",
+            mono(data.token_cookie),
+            " cookie, and required on every ",
+            mono("/api"),
+            " route. Shown truncated: no response carries it in full except the one that rotates it, which sets the new cookie in the same breath.",
+          ),
+          el("hr", { class: "rule" }),
+          el("span", { class: "card-title", text: "Content-Security-Policy" }),
+          codeBlock(data.csp),
+          el("p", {
+            class: "subtitle",
+            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
+          }),
+        ),
       ),
     ),
   );
@@ -2947,9 +3113,42 @@ async function aboutView() {
   }
 
   const row = (key, value) =>
-    el("div", { class: "kv" }, el("span", { class: "k", text: key }), el("span", { class: "v", text: value }));
+    el(
+      "div",
+      { class: "kv" },
+      el("span", { class: "k", text: key }),
+      el("span", { class: "v", text: value }),
+    );
 
   const list = (models && models.models) || [];
+  const table = dataTable({
+    className: "w-models",
+    sort: "name",
+    perPage: 15,
+    rows: list,
+    columns: [
+      {
+        key: "name",
+        label: "Model",
+        className: "path",
+        value: (m) => m.name,
+        // One line with the name on the tooltip: wrapped across two lines a
+        // model name reads as two models.
+        render: (m) => el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
+      },
+      { key: "dim", label: "Dims", className: "num", value: (m) => m.dim, render: (m) => String(m.dim) },
+      {
+        key: "bytes",
+        label: "Size",
+        className: "num",
+        value: (m) => m.bytes || 0,
+        // Blank rather than guessed: a model this machine has never fetched has
+        // no size here to measure, and fastembed's catalogue does not carry one.
+        render: (m) => (m.bytes ? bytes(m.bytes) : "—"),
+      },
+      { key: "description", label: "Note", className: "meta", value: (m) => m.description },
+    ],
+  });
 
   return el(
     "div",
@@ -2957,80 +3156,42 @@ async function aboutView() {
     pageHead("About", "One Rust binary. The portal you are reading is compiled into it."),
     el(
       "div",
-      { class: "grid scroller" },
+      { class: "grid two grow" },
       el(
         "div",
-        { class: "card pad" },
-        row("Version", about.version),
-        row("Binary", about.binary),
-        row("Port", String(about.port)),
-        row("PID", String(about.pid)),
-        row("Uptime", `${Math.floor(about.uptime / 60)}m`),
-        row("Store home", about.store_home),
-        row("Model cache", about.model_cache),
-        row("Languages", String(about.languages)),
-        row("Stores open", String(about.stores)),
-      ),
-      el(
-        "div",
-        { class: "card pad" },
-        el("h2", { class: "card-title", text: "Languages with graph edges" }),
+        { class: "rows" },
         el(
           "div",
-          { class: "chips" },
-          (about.graph_languages || []).map((lang) =>
-            el("span", { class: "chip static", text: lang }),
+          { class: "card pad" },
+          row("Version", `${about.version} · store format ${about.format_version}`),
+          row("Binary", `${about.binary} · ${bytes(about.binary_bytes)} · ${about.target}`),
+          row("Bound to", about.bind),
+          row("Store home", about.store_home),
+          row("Model cache", about.model_cache),
+          row("MCP revisions", (about.revisions || []).join(" · ")),
+          row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Languages with graph edges" }),
+          el(
+            "div",
+            { class: "chips" },
+            (about.graph_languages || []).map((lang) =>
+              el("span", { class: "chip static blue", text: lang }),
+            ),
+          ),
+          says(
+            "Everything else is indexed and searchable; it just has no edges yet. ",
+            mono("semlith languages"),
+            ` lists all ${about.languages} that `,
+            mono("--lang"),
+            " accepts.",
           ),
         ),
-        el("p", {
-          class: "subtitle",
-          text: `${(about.graph_languages || []).length} of ${about.languages} languages carry symbols and edges. The rest are searchable exactly as before, just without structure.`,
-        }),
-        el("h2", { class: "card-title", text: "Edge kinds" }),
-        el(
-          "div",
-          { class: "chips" },
-          (about.edge_kinds || []).map((kind) => el("span", { class: "chip static", text: kind })),
-        ),
       ),
-      el(
-        "div",
-        { class: "card" },
-        list.length
-          ? el(
-              "div",
-              { class: "table-wrap" },
-              el(
-                "table",
-                { class: "w-models" },
-                el(
-                  "thead",
-                  {},
-                  el(
-                    "tr",
-                    {},
-                    el("th", { text: "Model" }),
-                    el("th", { class: "num", text: "Dims" }),
-                    el("th", { text: "Note" }),
-                  ),
-                ),
-                el(
-                  "tbody",
-                  {},
-                  list.map((model) =>
-                    el(
-                      "tr",
-                      {},
-                      el("td", { class: "path", text: model.name }),
-                      el("td", { class: "num", text: String(model.dim) }),
-                      el("td", { class: "meta", text: model.description }),
-                    ),
-                  ),
-                ),
-              ),
-            )
-          : el("div", { class: "card pad" }, empty("No model is listed.")),
-      ),
+      list.length ? table.node : el("div", { class: "card pad" }, empty("No model is listed.")),
     ),
     el("p", {
       class: "subtitle",
@@ -3057,7 +3218,7 @@ function welcomeView() {
   return el(
     "div",
     { class: "welcome" },
-    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "semlith" })),
+    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "Semlith" })),
     el(
       "div",
       { class: "hero" },
@@ -3114,10 +3275,13 @@ function welcomeView() {
       el("hr", { class: "rule" }),
       el("span", { class: "eyebrow", text: "Or from a terminal" }),
       copyField("semlith index ~/Documents/work"),
-      el("p", {
-        class: "subtitle",
-        text: "No --store flag. It lands in ~/.semlith/stores/work and is registered against that root.",
-      }),
+      says(
+        "No ",
+        mono("--store"),
+        " flag. It lands in ",
+        mono("~/.semlith/stores/work"),
+        " and is registered against that root.",
+      ),
     ),
     el(
       "div",
@@ -3239,11 +3403,11 @@ function buildShell() {
       {
         class: "brand",
         type: "button",
-        "aria-label": "semlith — go to Stores",
+        "aria-label": "Semlith — go to Stores",
         onclick: () => go("stores"),
       },
       logoImage(26),
-      el("span", { class: "wordmark", text: "semlith" }),
+      el("span", { class: "wordmark", text: "Semlith" }),
     ),
     el("span", { class: "divider-v" }),
     pageTitle,
@@ -3325,7 +3489,7 @@ function buildShell() {
     el(
       "div",
       { class: "daemon-card" },
-      el("div", { class: "who" }, el("span", { class: "live-dot" }), "semlith start"),
+      el("div", { class: "who" }, el("span", { class: "live-dot" }), mono("semlith start")),
       el("div", { class: "fact", text: "127.0.0.1 · sole writer" }),
       el("div", { class: "fact", id: "daemon-stores", text: "" }),
     ),
@@ -3398,7 +3562,7 @@ async function render() {
 
   const view = VIEWS.find((v) => v.id === current) || VIEWS[0];
   shell.pageTitle.textContent = view.title;
-  document.title = `semlith · ${view.title}`;
+  document.title = `Semlith · ${view.title}`;
   markCurrent(view.id);
 
   paintStoreCount();
