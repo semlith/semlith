@@ -638,3 +638,57 @@ fn nothing_semlith_creates_is_readable_by_anybody_else() {
         "a narrower mode was widened back to 700"
     );
 }
+
+/// With neither variable set, semlith used to write its stores, its registry
+/// and its agent key into whatever directory the process happened to start in
+/// — which for a supervisor, a cron job or a container entrypoint is not a
+/// directory anybody chose.
+#[test]
+fn a_run_with_no_home_at_all_is_an_error_naming_both_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("stats")
+        .current_dir(dir.path())
+        .env_remove("HOME")
+        .env_remove("SEMLITH_HOME")
+        .env_remove("SEMLITH_STORE")
+        .output()
+        .expect("semlith runs");
+
+    assert!(!out.status.success(), "{}", text(&out));
+    let said = text(&out);
+    assert!(
+        said.contains("SEMLITH_HOME") && said.contains("HOME"),
+        "the error should name both variables:\n{said}"
+    );
+    assert!(
+        !dir.path().join(".semlith").exists(),
+        "a store was created in the working directory anyway"
+    );
+}
+
+/// A registry name becomes a directory under the home, so a name that is a
+/// path is a path this never follows.
+#[test]
+fn a_registry_name_cannot_name_a_directory_outside_the_home() {
+    use semlith::home::Registry;
+
+    let inside = Registry::dir_of("api");
+    assert!(inside.ends_with("stores/api"), "{}", inside.display());
+
+    for hostile in ["../../etc", "..", "a/b", "/etc/passwd"] {
+        let dir = Registry::dir_of(hostile);
+        let stores = semlith::home::stores_root();
+        assert!(
+            dir.starts_with(&stores),
+            "{hostile} escaped the store root: {}",
+            dir.display()
+        );
+        assert_eq!(
+            dir.components().count(),
+            stores.components().count() + 1,
+            "{hostile} named more than one directory: {}",
+            dir.display()
+        );
+    }
+}

@@ -12,6 +12,15 @@
 #>
 $ErrorActionPreference = 'Stop'
 
+# Before the first request. Windows PowerShell 5.1 — which is what ships in the
+# box and what `irm ... | iex` runs on most machines — defaults to SSL 3.0 and
+# TLS 1.0, and github.com has refused both for years: without this the script
+# fails with an unhelpful "could not create SSL/TLS secure channel" on exactly
+# the machines it is written for. PowerShell 7 negotiates this itself and is
+# unaffected by setting it.
+[Net.ServicePointManager]::SecurityProtocol =
+    [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 $repo = 'semlith/semlith'
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {

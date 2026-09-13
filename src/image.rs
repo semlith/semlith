@@ -114,13 +114,45 @@ pub fn is_image(path: &Path) -> bool {
         .is_some_and(|e| EXTENSIONS.contains(&e.as_str()))
 }
 
+/// The most pixels semlith will hand to a decoder.
+///
+/// A 64-megapixel image is a 40-megapixel photograph with room to spare. The
+/// number matters because a decoder allocates for the dimensions in the header
+/// before it has read the pixels: a PNG whose header claims 60,000 by 60,000 is
+/// a few hundred bytes on disk and fourteen gigabytes in memory, and the file
+/// that does it to you is one an agent asked to index.
+pub const MAX_PIXELS: u64 = 64_000_000;
+
 /// An image's pixel size, read from its header rather than by decoding it.
 pub fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    image::ImageReader::new(std::io::Cursor::new(bytes))
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .ok()?
-        .into_dimensions()
-        .ok()
+        .ok()?;
+    // Set explicitly rather than left at the crate's default, which is no
+    // limit at all. This bounds what `into_dimensions` itself will allocate
+    // while reading a header.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(u32::MAX);
+    limits.max_image_height = Some(u32::MAX);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    reader.into_dimensions().ok()
+}
+
+/// Whether this image is one semlith will decode, and why not when it is not.
+///
+/// The header is read; the pixels are not. That is the whole point — the
+/// decision has to be made before anything allocates for them.
+pub fn too_large(bytes: &[u8]) -> Option<String> {
+    let (width, height) = dimensions(bytes)?;
+    let pixels = u64::from(width) * u64::from(height);
+    (pixels > MAX_PIXELS).then(|| {
+        format!(
+            "is {width}×{height} — {pixels} pixels, past the {MAX_PIXELS} semlith \
+             will decode. A decoder allocates for the header before it reads the \
+             pixels, so this is refused rather than attempted."
+        )
+    })
 }
 
 /// The two halves of CLIP, loaded on first use.

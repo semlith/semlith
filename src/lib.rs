@@ -848,10 +848,14 @@ impl Semlith {
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
 
-            // Size check before the read, so a multi-gigabyte blob is never
-            // pulled into memory just to be rejected.
-            match std::fs::metadata(&path) {
-                Ok(m) if m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
+            // Opened once, and the size read off the open handle rather than
+            // off the name. Two `stat`s and a `read` of the same path are three
+            // answers about three moments: a file that grew between the check
+            // and the read was read in full anyway, so the cap was advisory.
+            let opened = std::fs::File::open(&path);
+            let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
+            match measured {
+                Some(m) if m.is_file() && m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
                 _ => {
                     // A batch of events can name a file that has just been
                     // deleted or renamed away. Evicting it here is what makes
@@ -892,20 +896,33 @@ impl Semlith {
                     continue;
                 }
             }
-            let Ok(bytes) = std::fs::read(&path) else {
-                report.skipped += 1;
-                on_file(
-                    &path,
-                    IndexProgress {
-                        outcome: FileOutcome::Skipped,
-                        scanned: report.scanned,
-                        indexed: report.indexed,
-                        chunks: report.chunks,
-                        total,
-                        symbols: report.symbols,
-                    },
-                );
-                continue;
+            // From the handle that was measured, through a reader that stops
+            // one byte past the cap: a file that grew between the two is
+            // refused by the `take` rather than read whole.
+            let read = opened.and_then(|file| {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                file.take(chunk::MAX_FILE_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map(|_| bytes)
+            });
+            let bytes = match read {
+                Ok(bytes) if bytes.len() as u64 <= chunk::MAX_FILE_BYTES => bytes,
+                _ => {
+                    report.skipped += 1;
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Skipped,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
+                    continue;
+                }
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -931,6 +948,25 @@ impl Semlith {
             // Handled before `chunk::extract`, which reads a PNG as binary and
             // rejects it.
             if image::is_image(&path) {
+                // Before the decoder sees it. A header claiming 60,000 by
+                // 60,000 pixels is a few hundred bytes on disk and fourteen
+                // gigabytes in memory, and the refusal says which file and how
+                // big it claimed to be.
+                if let Some(why) = image::too_large(&bytes) {
+                    report.refused.push((path.display().to_string(), why));
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Refused,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
+                    continue;
+                }
                 let Some((width, height)) = image::dimensions(&bytes) else {
                     report.skipped += 1;
                     on_file(

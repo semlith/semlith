@@ -1607,3 +1607,60 @@ fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
         "not every file was indexed"
     );
 }
+
+/// A session id arrives from a client and goes back out in a response header,
+/// so what a client may send is exactly what the server produces.
+#[test]
+fn a_session_id_is_sixteen_hex_characters_or_it_is_replaced() {
+    let daemon = Daemon::start("session", &[]);
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"#;
+
+    let send = |id: &str| -> Answer {
+        daemon.raw(&format!(
+            "POST /api/mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+             Mcp-Session-Id: {id}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{init}",
+            daemon.port,
+            daemon.token,
+            init.len()
+        ))
+    };
+
+    // A well-formed one is echoed back.
+    let good = send("0123456789abcdef");
+    assert_eq!(good.status, 200, "{}", good.body);
+    assert!(
+        good.headers.contains("Mcp-Session-Id: 0123456789abcdef"),
+        "a valid session id was not kept:\n{}",
+        good.headers
+    );
+
+    for bad in [
+        "not-hex-at-all!!",
+        "0123456789abcdefg",
+        "short",
+        "0123456789abcde\u{7f}",
+    ] {
+        let answer = send(bad);
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        assert!(
+            !answer.headers.contains(bad),
+            "a malformed session id was reflected into a response header:\n{}",
+            answer.headers
+        );
+        // Replaced rather than dropped: the client is told the id it will be
+        // known by, the same way it would be told a first one.
+        let line = answer
+            .headers
+            .lines()
+            .find(|l| l.starts_with("Mcp-Session-Id: "))
+            .unwrap_or_else(|| panic!("no session id was handed back:\n{}", answer.headers));
+        let fresh = line.trim_start_matches("Mcp-Session-Id: ").trim();
+        assert_eq!(
+            fresh.len(),
+            16,
+            "the replacement is not a session id: {fresh}"
+        );
+        assert!(fresh.chars().all(|c| c.is_ascii_hexdigit()), "{fresh}");
+    }
+}

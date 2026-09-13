@@ -587,10 +587,25 @@ fn walk_bytes(dir: &Path) -> u64 {
 /// file-read primitive behind a loopback port. The `images` table is the
 /// allowlist, so the only files this can serve are ones the user pointed
 /// semlith at.
+/// The largest image this route will read into memory.
+///
+/// A preview in a search result. The indexer's own cap is larger, and a file
+/// past this one is a file the page should not be trying to draw anyway.
+const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
 fn image_file(state: &Arc<State>, request: &Request) -> Response {
     let Some(want) = request.query("path") else {
         return Response::error(400, "missing path");
     };
+    // Resolved before it is looked up, and the resolved path is what is looked
+    // up. The store records canonical paths, so a name that now points
+    // somewhere else — an indexed `diagram.png` replaced by a symlink to
+    // `/etc/shadow` — resolves to a path the store has never heard of and is a
+    // 404 rather than a read. Checking the name and then opening it is the
+    // gap: the two are not the same file if anything moved in between.
+    let path = crate::canonical(Path::new(want));
+    let looked_up = path.to_string_lossy().into_owned();
+
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
@@ -604,7 +619,7 @@ fn image_file(state: &Arc<State>, request: &Request) -> Response {
             .db()
             .query_row(
                 "SELECT 1 FROM images i JOIN files f ON f.id = i.file_id WHERE f.path = ?1",
-                rusqlite::params![want],
+                rusqlite::params![&looked_up],
                 |_| Ok(()),
             )
             .is_ok()
@@ -613,11 +628,28 @@ fn image_file(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(404, "no such image");
     }
 
-    let path = Path::new(want);
-    let Ok(bytes) = std::fs::read(path) else {
+    // Opened once, and everything decided from the open handle: what is read is
+    // what was opened, whatever the name points at by the time it is read.
+    let Ok(file) = std::fs::File::open(&path) else {
         // Indexed once and gone since: the row is real and the file is not.
         return Response::error(404, "the file is no longer on disk");
     };
+    let Ok(meta) = file.metadata() else {
+        return Response::error(404, "the file is no longer on disk");
+    };
+    if !meta.is_file() {
+        return Response::error(404, "no such image");
+    }
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Response::error(413, "the image is larger than the portal will draw");
+    }
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    if file.take(MAX_IMAGE_BYTES).read_to_end(&mut bytes).is_err() {
+        return Response::error(404, "the file could not be read");
+    }
+
+    let path = path.as_path();
     let kind = match path
         .extension()
         .and_then(|e| e.to_str())
@@ -664,8 +696,14 @@ fn dirs(request: &Request) -> Response {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.clone());
     // Canonicalized first, so `..` and a symlink are both resolved before the
-    // containment check rather than after it.
-    let resolved = crate::canonical(&asked);
+    // containment check rather than after it — and through `std::fs` directly
+    // rather than through the helper, which returns the path unchanged when it
+    // cannot resolve one. A path that does not resolve is a path this route
+    // cannot say anything about, so it is refused rather than checked as
+    // written.
+    let Ok(resolved) = std::fs::canonicalize(&asked) else {
+        return Response::error(400, "that path cannot be resolved");
+    };
     if !resolved.starts_with(&home) {
         return Response::error(400, "outside the home directory");
     }
@@ -1375,8 +1413,15 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     let revision = params
         .and_then(|p| p.get("protocolVersion"))
         .and_then(Value::as_str);
+    // A session id arrives from a client and goes back out in a response
+    // header, so what a client may send is exactly what `new_session` produces:
+    // sixteen hex characters. Anything else — a header injection, a control
+    // character, a kilobyte of text — is replaced with a fresh id rather than
+    // reflected, and the client is told the new one in the `initialize`
+    // response the same way it would be told a first one.
     let session = request
         .header("mcp-session-id")
+        .filter(|id| is_session_id(id))
         .map(str::to_string)
         .or_else(|| proxy.map(|pid| pid.to_string()))
         .unwrap_or_else(|| {
@@ -1420,6 +1465,12 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         return response.header("Mcp-Session-Id", session);
     }
     response
+}
+
+/// The shape [`new_session`] produces, and the only shape accepted from a
+/// client.
+fn is_session_id(value: &str) -> bool {
+    value.len() == 16 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A session id, which identifies a client and guards nothing.

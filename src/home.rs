@@ -30,14 +30,31 @@ use std::path::{Path, PathBuf};
 pub const HOME_ENV: &str = "SEMLITH_HOME";
 
 /// Where stores live: `~/.semlith`, or whatever [`HOME_ENV`] names.
+///
+/// With neither variable set this used to fall back to `.` — so a semlith run
+/// by a daemon supervisor, a cron job or a container entrypoint with no
+/// environment created `./.semlith` in whatever directory it happened to start
+/// in, and wrote the registry and the agent key there. [`home_or_error`] is the
+/// form that says so; this one keeps the fallback for the callers that only
+/// want a path to show.
 pub fn home() -> PathBuf {
+    home_or_error().unwrap_or_else(|_| PathBuf::from(".").join(".semlith"))
+}
+
+/// The store home, or an error naming both variables.
+pub fn home_or_error() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".semlith")
+    match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        Some(base) => Ok(PathBuf::from(base).join(".semlith")),
+        None => bail!(
+            "neither {HOME_ENV} nor HOME is set, so semlith does not know where its \
+             stores live. Set {HOME_ENV} to the directory you want them in — \
+             writing them into the working directory would put a store, a registry \
+             and an agent key wherever this process happened to start."
+        ),
+    }
 }
 
 /// The directory holding one subdirectory per store.
@@ -352,17 +369,29 @@ impl Registry {
         let path = registry_path();
         let dir = path.parent().unwrap_or(Path::new("."));
         secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
-        let temp = path.with_extension("json.new");
+        // A name of this process's own. `registry.json.new` was one fixed name
+        // for every process on the machine, so two semliths saving at once
+        // wrote the same temporary file and one of them renamed the other's
+        // half-written bytes into place.
+        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
         let body = serde_json::to_string_pretty(self)? + "\n";
         write_private(&temp, body.as_bytes())
             .with_context(|| format!("writing {}", temp.display()))?;
-        std::fs::rename(&temp, &path).with_context(|| format!("writing {}", path.display()))?;
+        if let Err(e) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e).with_context(|| format!("writing {}", path.display()));
+        }
         Ok(())
     }
 
     /// Where a registered store's directory is.
+    ///
+    /// The name is sanitised here as well as where it is chosen: this is a
+    /// public function taking a string that becomes a path, and a registry
+    /// somebody edited by hand — which is not supported, and happens — should
+    /// not be able to name `../..`.
     pub fn dir_of(name: &str) -> PathBuf {
-        stores_root().join(name)
+        stores_root().join(sanitize(name))
     }
 
     /// Every registered store's directory, in name order.
@@ -573,6 +602,10 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
         }
     }
 
+    // Asked before anything resolves to a path under it, so a run with no
+    // environment is an error naming both variables rather than a store
+    // created in whatever directory it started in.
+    home_or_error()?;
     let anchor_dir = directory_of(anchor);
     let registry = Registry::load()?;
 

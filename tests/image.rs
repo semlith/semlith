@@ -282,3 +282,39 @@ fn a_file_that_is_not_an_image_is_skipped() {
         .unwrap();
     assert_eq!(semlith::image::dimensions(&png), Some((7, 11)));
 }
+
+/// A decoder allocates for the dimensions in the header before it has read the
+/// pixels, so a header claiming sixty thousand by sixty thousand is a few
+/// hundred bytes on disk and fourteen gigabytes in memory.
+#[test]
+fn an_image_whose_header_claims_too_many_pixels_is_refused_before_it_is_decoded() {
+    // A real GIF, rewritten so its logical screen claims a size nothing should
+    // decode. GIF rather than PNG because its header carries no checksum: the
+    // point is a file whose *header* lies, which a PNG cannot do without also
+    // failing its CRC and being rejected for the wrong reason.
+    let mut gif = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4))
+        .write_to(&mut std::io::Cursor::new(&mut gif), image::ImageFormat::Gif)
+        .unwrap();
+    // Bytes 6..10 are the logical screen width and height, little-endian.
+    let huge = 60_000u16.to_le_bytes();
+    gif[6..8].copy_from_slice(&huge);
+    gif[8..10].copy_from_slice(&huge);
+
+    let why = semlith::image::too_large(&gif)
+        .expect("a 60000x60000 header should be past the pixel budget");
+    assert!(
+        why.contains("60000") && why.contains("pixels"),
+        "the refusal does not say how big it claimed to be: {why}"
+    );
+
+    // And an ordinary image is not refused.
+    let mut small = Vec::new();
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(64, 64))
+        .write_to(
+            &mut std::io::Cursor::new(&mut small),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    assert_eq!(semlith::image::too_large(&small), None);
+}
