@@ -59,6 +59,133 @@ pub fn registry_path() -> PathBuf {
     home().join("registry.json")
 }
 
+/// Where the agent key lives.
+///
+/// Under the home rather than inside a store: it authorises the daemon's MCP
+/// endpoint, which serves every store the daemon opened, and a credential that
+/// moved when a store was adopted would be a credential every client had to be
+/// told about again.
+pub fn agent_key_path() -> PathBuf {
+    home().join("agent.key")
+}
+
+/// The prefix every agent key carries, so one is recognisable in a config file
+/// somebody is looking at six months later.
+pub const AGENT_KEY_PREFIX: &str = "sml_";
+
+/// The agent key, created on first read and never regenerated implicitly.
+///
+/// This is the whole point of the credential: a client's configuration is
+/// written once and stays valid across daemon restarts, upgrades and portal
+/// token rotations. A key that changed per run would make every stanza stale
+/// on every restart, with nothing able to repair the ones semlith did not
+/// write — `setup.rs` already records that only Claude Code's config is safe
+/// to write to.
+pub fn agent_key() -> Result<String> {
+    let path = agent_key_path();
+    if path.exists() {
+        let key = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading the agent key at {}", path.display()))?
+            .trim()
+            .to_string();
+        check_key_mode(&path)?;
+        if !is_agent_key(&key) {
+            bail!(
+                "{} does not hold an agent key. Delete it and start again, and a new key is                  written; every client then needs the new stanza.",
+                path.display()
+            );
+        }
+        return Ok(key);
+    }
+    let key = new_agent_key();
+    write_agent_key(&key)?;
+    Ok(key)
+}
+
+/// Mint a new key and replace the file, returning the new key.
+///
+/// Deliberately separate from [`agent_key`]: a key is only ever replaced
+/// because somebody asked for it to be, and a function that could do either
+/// depending on the state of the disk is one that rotates by accident.
+pub fn rotate_agent_key() -> Result<String> {
+    let key = new_agent_key();
+    write_agent_key(&key)?;
+    Ok(key)
+}
+
+pub fn is_agent_key(value: &str) -> bool {
+    let Some(body) = value.strip_prefix(AGENT_KEY_PREFIX) else {
+        return false;
+    };
+    body.len() == 64 && body.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn new_agent_key() -> String {
+    // The OS random source, not a hash of the clock and a pointer: this one is
+    // written to disk and lives for as long as the install does, so it has to
+    // be unguessable rather than merely unique. `getrandom` is already in the
+    // tree under fastembed; naming it adds no crate to the build.
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("the OS random source");
+    let mut out = String::with_capacity(AGENT_KEY_PREFIX.len() + 64);
+    out.push_str(AGENT_KEY_PREFIX);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn write_agent_key(key: &str) -> Result<()> {
+    let path = agent_key_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // The mode is set as the file is created rather than afterwards: a file
+    // that is world-readable for the microsecond between the two is still a
+    // file that was world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("writing the agent key to {}", path.display()))?;
+    use std::io::Write;
+    writeln!(file, "{key}")?;
+    Ok(())
+}
+
+/// Refuse a key file anyone else on the machine can read.
+///
+/// On Windows there is no mode to check: the home sits inside the user's
+/// profile, whose default ACL grants that user alone, and semlith does not
+/// carry an API to read or write an ACL. That is stated rather than silently
+/// assumed.
+#[cfg(unix)]
+fn check_key_mode(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        bail!(
+            "{} is mode {:o}; an agent key that other users on this machine can read is not one.              Run `chmod 600 {}` and start again.",
+            path.display(),
+            mode,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_key_mode(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// What a store directory is called when it sits beside its corpus.
 pub const LOCAL_DIR: &str = ".semlith";
 
@@ -661,5 +788,85 @@ mod tests {
     fn an_adopted_store_is_named_after_its_corpus() {
         assert_eq!(label_for(Path::new("/work/api/.semlith")), "api");
         assert_eq!(label_for(Path::new("/work/api-store")), "api-store");
+    }
+}
+
+#[cfg(test)]
+mod agent_key_tests {
+    use super::*;
+
+    /// A key is minted once and then read, rather than reminted on every start:
+    /// a client's configuration is written once and has to stay valid.
+    #[test]
+    fn a_key_is_created_once_and_then_read() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env(home.path(), || {
+            let first = agent_key().unwrap();
+            assert!(is_agent_key(&first), "{first} is not shaped like a key");
+            let second = agent_key().unwrap();
+            assert_eq!(first, second, "the key was reminted on the second read");
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_new_key_file_is_not_readable_by_anyone_else() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        temp_env(home.path(), || {
+            agent_key().unwrap();
+            let mode = std::fs::metadata(agent_key_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "the key file is mode {mode:o}");
+        });
+    }
+
+    /// A key file the rest of the machine can read is refused rather than used.
+    #[test]
+    #[cfg(unix)]
+    fn a_group_readable_key_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        temp_env(home.path(), || {
+            agent_key().unwrap();
+            let path = agent_key_path();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let refused = agent_key().unwrap_err().to_string();
+            assert!(refused.contains("is mode 644"), "{refused}");
+        });
+    }
+
+    /// Rotation replaces the key, and the replacement is a different one.
+    #[test]
+    fn rotation_writes_a_different_key() {
+        let home = tempfile::tempdir().unwrap();
+        temp_env(home.path(), || {
+            let first = agent_key().unwrap();
+            let second = rotate_agent_key().unwrap();
+            assert_ne!(first, second);
+            assert_eq!(
+                second,
+                agent_key().unwrap(),
+                "the new key was not persisted"
+            );
+        });
+    }
+
+    /// `SEMLITH_HOME` is process-wide, so these run one at a time.
+    fn temp_env(home: &Path, body: impl FnOnce()) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let was = std::env::var_os(HOME_ENV);
+        // SAFETY: the lock above makes this the only thread touching the
+        // variable, and the tests that read it hold the same lock.
+        unsafe { std::env::set_var(HOME_ENV, home) };
+        body();
+        match was {
+            Some(value) => unsafe { std::env::set_var(HOME_ENV, value) },
+            None => unsafe { std::env::remove_var(HOME_ENV) },
+        }
     }
 }

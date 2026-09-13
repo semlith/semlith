@@ -193,6 +193,12 @@ pub struct State {
     /// simply stop asking — so recency is the only honest answer to "how many
     /// are connected".
     pub proxies: Mutex<BTreeMap<u32, u64>>,
+    /// What each connected MCP client said it was, keyed by session.
+    ///
+    /// Held here and lost when the daemon exits, which is the honest lifetime:
+    /// there is no disconnect to observe over HTTP either, so a client is
+    /// "connected" for as long as it has been heard from recently.
+    pub clients: Mutex<BTreeMap<String, Client>>,
     /// A second reader, for forwarded MCP calls, opened on first use.
     ///
     /// Separate from `fleet` on purpose: a forwarded `semlith_index` blocks its
@@ -210,6 +216,20 @@ pub struct State {
 
 /// How recently a proxy must have called to count as connected.
 const PROXY_FRESH: u64 = 120;
+
+/// One MCP client, as the Agents page shows it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Client {
+    /// What the client called itself in `initialize`, or the transport when it
+    /// never said. Invented names are worse than an honest "unnamed client".
+    pub name: String,
+    pub transport: String,
+    /// The protocol revision that was negotiated, as the client asked for it.
+    pub revision: String,
+    /// How many tool calls it has made through this daemon.
+    pub queries: u64,
+    pub seen: u64,
+}
 
 impl State {
     /// Every open store, as a snapshot.
@@ -290,6 +310,57 @@ impl State {
             let _ = discovery(self.server.port(), &fresh).write(&store.dir);
         }
         fresh
+    }
+
+    /// Record what a client said about itself, and count its tool calls.
+    ///
+    /// `session` is how one client is told from another: over HTTP it is the
+    /// `Mcp-Session-Id` this daemon hands out at `initialize`, and for a
+    /// forwarding `semlith mcp` it is the proxy's pid. A client that echoes
+    /// neither is counted as one unnamed client per transport rather than as a
+    /// new one on every request.
+    pub fn note_client(
+        &self,
+        session: &str,
+        transport: &str,
+        name: Option<&str>,
+        revision: Option<&str>,
+        query: bool,
+    ) {
+        let now = now();
+        let mut clients = self.clients.lock().expect("the client lock");
+        let entry = clients
+            .entry(format!("{transport}:{session}"))
+            .or_insert_with(|| Client {
+                name: name.unwrap_or("unnamed client").to_string(),
+                transport: transport.to_string(),
+                revision: revision.unwrap_or("—").to_string(),
+                queries: 0,
+                seen: now,
+            });
+        if let Some(name) = name {
+            entry.name = name.to_string();
+        }
+        if let Some(revision) = revision {
+            entry.revision = revision.to_string();
+        }
+        if query {
+            entry.queries += 1;
+        }
+        entry.seen = now;
+        clients.retain(|_, client| now.saturating_sub(client.seen) <= PROXY_FRESH);
+    }
+
+    /// Every client heard from recently.
+    pub fn clients(&self) -> Vec<Client> {
+        let now = now();
+        self.clients
+            .lock()
+            .expect("the client lock")
+            .values()
+            .filter(|client| now.saturating_sub(client.seen) <= PROXY_FRESH)
+            .cloned()
+            .collect()
     }
 
     /// Note that a forwarding `semlith mcp` is alive.
@@ -502,6 +573,7 @@ pub fn run(
     debounce: Duration,
     airgap: bool,
     ledger: bool,
+    mcp_http: bool,
     report: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Arc<State>> {
     let registry = Registry::load()?;
@@ -524,6 +596,23 @@ pub fn run(
     // minute.
     let server = Arc::new(Server::bind(port)?);
     report(&format!("listening on 127.0.0.1:{}", server.port()));
+
+    // The agent key is read, or written if this machine has none. It survives
+    // restarts and upgrades on purpose: a client's configuration is written
+    // once and has to keep working, which the per-run session token can never
+    // do.
+    let key = crate::home::agent_key()?;
+    server.set_agent_key(&key);
+    server.set_mcp_open(mcp_http);
+    if mcp_http {
+        report(&format!(
+            "MCP over HTTP at http://127.0.0.1:{}{}",
+            server.port(),
+            crate::http::MCP_PATH
+        ));
+    } else {
+        report("MCP over HTTP is closed (--no-mcp-http); `semlith mcp` over stdio is unaffected");
+    }
 
     let mut stores = Vec::new();
     for (name, dir, roots) in opening {
@@ -580,6 +669,7 @@ pub fn run(
         report: Arc::clone(&report_line),
         refusals: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
+        clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
         ledger,
     });
@@ -956,6 +1046,7 @@ mod tests {
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
+            clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
             ledger: false,
         };

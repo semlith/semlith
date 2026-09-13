@@ -79,6 +79,11 @@ fn no_stanza_carries_a_store_path() {
     // The prose above the stanzas still explains `--store`, which is still a
     // supported flag. It is the pasteable blocks that must not carry one.
     for (language, body) in blocks(&section()) {
+        // An HTTP stanza launches nothing: it holds a URL and a header, and
+        // has no argument list to check. It is checked below instead.
+        if is_http(&body) {
+            continue;
+        }
         if !names_semlith(&body) {
             continue;
         }
@@ -95,6 +100,44 @@ fn no_stanza_carries_a_store_path() {
     }
 }
 
+/// The HTTP stanzas name the endpoint the daemon serves and carry a bearer
+/// credential, and nothing else in the section does.
+///
+/// From 0.13.0 `semlith start` answers MCP at `/mcp` as well as over stdio,
+/// and a stanza that named the wrong port or dropped the header would be a
+/// documented way to fail to connect.
+#[test]
+fn the_http_stanzas_name_the_endpoint_and_carry_a_credential() {
+    let http: Vec<(String, String)> = blocks(&section())
+        .into_iter()
+        .filter(|(_, body)| is_http(body))
+        .collect();
+    assert!(
+        http.len() >= 2,
+        "the HTTP section documents {} stanzas",
+        http.len()
+    );
+    for (language, body) in &http {
+        assert!(
+            body.contains("http://127.0.0.1:7365/mcp"),
+            "a {language} HTTP stanza does not name the endpoint:\n{body}"
+        );
+        assert!(
+            body.contains("Authorization") && body.contains("Bearer sml_"),
+            "a {language} HTTP stanza does not carry the agent key:\n{body}"
+        );
+        assert!(
+            !body.contains(NO_PATHS),
+            "a {language} HTTP stanza carries {NO_PATHS}:\n{body}"
+        );
+    }
+}
+
+/// Whether a block configures the HTTP endpoint rather than a subprocess.
+fn is_http(body: &str) -> bool {
+    body.contains("/mcp\"") || body.contains("--transport http")
+}
+
 /// Whatever the client's file format, the server it launches is semlith, and
 /// the command line it launches it with has to be one semlith answers — now
 /// with no store flag, against whatever the registry holds.
@@ -103,7 +146,10 @@ fn no_stanza_carries_a_store_path() {
 fn every_stanza_launches_a_server_that_answers() {
     let home = two_registered_stores();
 
-    let stanzas = blocks(&section());
+    let stanzas: Vec<(String, String)> = blocks(&section())
+        .into_iter()
+        .filter(|(_, body)| !is_http(body))
+        .collect();
     for (language, body) in &stanzas {
         assert!(
             names_semlith(body),

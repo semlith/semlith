@@ -269,12 +269,30 @@ fn tools(stores: &Fleet) -> Value {
 /// ends up served by the server and invisible in the portal, which the parity
 /// rule exists to prevent — so there is only one copy.
 pub fn tool_names() -> Vec<String> {
+    tool_list().into_iter().map(|(name, _)| name).collect()
+}
+
+/// Every tool, with the one-line purpose its definition advertises.
+///
+/// The Agents page lists these. Reading the description out of the definition
+/// rather than writing a second one beside it is what stops a tool being
+/// served with one description and documented with another — the title an
+/// annotation carries is the sentence a client shows a user, so it is the one
+/// the portal shows too.
+pub fn tool_list() -> Vec<(String, String)> {
     tool_defs("")
         .as_array()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .map(|defs| {
+            defs.iter()
+                .filter_map(|tool| {
+                    let name = tool["name"].as_str()?.to_string();
+                    let about = tool["annotations"]["title"]
+                        .as_str()
+                        .or_else(|| tool["description"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((name, about))
+                })
                 .collect()
         })
         .unwrap_or_default()

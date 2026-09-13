@@ -640,6 +640,8 @@ adopt ./.semlith` moves it into the home so these stanzas reach it.
 your `PATH` in a shell but often not in an editor launched from a desktop icon
 — those entries use the absolute path.
 
+#### Terminal
+
 **Claude Code** — `claude mcp add`, or a committed `.mcp.json` in the project
 root. The `--` matters: without it Claude Code reads anything starting with a
 dash as one of its own flags.
@@ -659,21 +661,6 @@ claude mcp add semlith -- semlith mcp
 }
 ```
 
-**Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →
-Developer → Edit Config opens it.
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
 **OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
 and the desktop app. TOML, and the table is `mcp_servers` with an underscore.
 
@@ -686,22 +673,6 @@ args = ["mcp"]
 `codex mcp add semlith -- semlith mcp` writes the same
 table.
 
-**GitHub Copilot in VS Code** — `.vscode/mcp.json` for a workspace, or the
-profile copy that `MCP: Open User Configuration` opens. The root key is
-`servers`, not `mcpServers`.
-
-```json
-{
-  "servers": {
-    "semlith": {
-      "type": "stdio",
-      "command": "semlith",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
 **GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
 session. Its name for a stdio server is `local`, not `stdio`.
 
@@ -713,6 +684,53 @@ session. Its name for a stdio server is `local`, not `stdio`.
       "command": "semlith",
       "args": ["mcp"],
       "tools": ["*"]
+    }
+  }
+}
+```
+
+**Gemini CLI** — `~/.gemini/settings.json`, or
+`gemini mcp add semlith semlith mcp`.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "semlith",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Goose** — `goose configure` → Add Extension → Command-line Extension, or
+`~/.config/goose/config.yaml`. Goose calls them extensions and spells the
+command `cmd`.
+
+```yaml
+extensions:
+  semlith:
+    type: stdio
+    name: semlith
+    enabled: true
+    cmd: semlith
+    args: ["mcp"]
+    timeout: 300
+```
+
+#### Editors
+
+**GitHub Copilot in VS Code** — `.vscode/mcp.json` for a workspace, or the
+profile copy that `MCP: Open User Configuration` opens. The root key is
+`servers`, not `mcpServers`.
+
+```json
+{
+  "servers": {
+    "semlith": {
+      "type": "stdio",
+      "command": "semlith",
+      "args": ["mcp"]
     }
   }
 }
@@ -759,20 +777,6 @@ servers, and keys them under `context_servers`.
 }
 ```
 
-**Gemini CLI** — `~/.gemini/settings.json`, or
-`gemini mcp add semlith semlith mcp`.
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "semlith",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
 **JetBrains** — Junie reads `~/.junie/mcp/mcp.json`, or `.junie/mcp/mcp.json`
 per project; AI Assistant takes the same JSON under Settings → Tools → AI
 Assistant → Model Context Protocol.
@@ -806,20 +810,55 @@ rather than guessing.
 }
 ```
 
-**Goose** — `goose configure` → Add Extension → Command-line Extension, or
-`~/.config/goose/config.yaml`. Goose calls them extensions and spells the
-command `cmd`.
+#### Desktop apps
 
-```yaml
-extensions:
-  semlith:
-    type: stdio
-    name: semlith
-    enabled: true
-    cmd: semlith
-    args: ["mcp"]
-    timeout: 300
+**Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →
+Developer → Edit Config opens it.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "/Users/you/.cargo/bin/semlith",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
+
+### Connecting over HTTP
+
+`semlith start` also answers MCP at `http://127.0.0.1:7365/mcp`, so a client
+that speaks the HTTP transport needs no subprocess and no path. The endpoint is
+authenticated by the agent key in `~/.semlith/agent.key`, which is created on
+first start and does not change when the daemon restarts, when semlith is
+upgraded, or when the portal's session token is rotated — so a stanza carrying
+it is written once and keeps working. `semlith key show` prints the live key
+and the stanza around it.
+
+```sh
+claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+The stdio stanzas above stay exactly as they are: `semlith mcp` forwards to a
+running daemon and falls back to opening the stores itself when none is
+running, which is what makes it work whether or not `semlith start` is up. The
+HTTP endpoint is for clients that would rather hold a URL than spawn a process.
+Close it with `semlith start --no-mcp-http`, or from the portal's Agents page,
+and nothing else about the daemon changes.
+
 
 ## What gets indexed
 

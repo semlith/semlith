@@ -2287,6 +2287,108 @@ pre.code {
   margin-bottom: var(--sp-1);
 }
 
+/* ---------------------------------------------------------------- agents */
+
+/* Group tabs over the client chips: which kind of thing you are configuring,
+ * then which one. */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.tab {
+  transition: color var(--d-hover) var(--e-in-out), border-color var(--d-hover) var(--e-in-out);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab[aria-pressed="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.tab .count {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.stanzas {
+  min-width: 0;
+}
+
+.stanza {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* Name and purpose in two columns, so a reader scans the names and reads
+ * across only where one of them is the answer. */
+.tool-grid {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-2h);
+  align-items: baseline;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tool-name {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  white-space: nowrap;
+}
+
+.tool-about {
+  color: var(--muted);
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
+  min-width: 0;
+  text-wrap: pretty;
+}
+
+.tools {
+  max-height: 330px;
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.dot.good {
+  color: var(--green);
+}
+
+.w-agents {
+  min-width: 420px;
+}
+
 /* ----------------------------------------------------- fusion badges */
 
 .badges {

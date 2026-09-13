@@ -2552,80 +2552,220 @@ async function agentsView() {
 
   const clients = data.clients || [];
   const tools = data.tools || [];
-  const revisions = data.revisions || [];
-  const body = el("div", { class: "card pad" });
+  const live = data.connections || [];
+  const endpoint = data.endpoint || { url: "", open: false };
 
-  function show(i) {
-    const client = clients[i];
+  // ---- the endpoint, in the page header
+  const address = el("code", { class: "text", text: endpoint.url });
+  const endpointNote = el("div", { class: "note" });
+  const toggle = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: endpoint.open ? "Stop" : "Start",
+    onclick: async () => {
+      toggle.disabled = true;
+      endpointNote.className = "note";
+      endpointNote.textContent = endpoint.open ? "Closing…" : "Opening…";
+      try {
+        const done = await post("/api/endpoint", { open: !endpoint.open });
+        endpoint.open = done.open;
+        toggle.textContent = done.open ? "Stop" : "Start";
+        endpointNote.textContent = done.open
+          ? "The endpoint is answering. A configured client reconnects on its next call."
+          : "The endpoint is closed. The daemon, the watcher and the portal are unaffected.";
+        fill(statePill, el("i", {}), done.open ? "answering" : "closed");
+        statePill.className = done.open ? "pill good" : "pill warn";
+      } catch (e) {
+        endpointNote.className = "note bad";
+        endpointNote.textContent = e.message;
+      } finally {
+        toggle.disabled = false;
+      }
+    },
+  });
+  const statePill = pill(endpoint.open ? "answering" : "closed", endpoint.open ? "good" : "warn");
+
+  // ---- rotation
+  const keyNote = el("div", { class: "note" });
+  const rotate = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Rotate key",
+    onclick: async () => {
+      rotate.disabled = true;
+      keyNote.className = "note";
+      keyNote.textContent = "Rotating…";
+      try {
+        const done = await post("/api/key", {});
+        stanzas.key = done.key;
+        showClient(chosen);
+        keyNote.textContent = done.previous_valid
+          ? "New key. The previous one keeps working until this daemon exits, so a session already open finishes — every client below needs the new stanza before then."
+          : "New key. The previous one is refused now; every client below needs the new stanza.";
+      } catch (e) {
+        keyNote.className = "note bad";
+        keyNote.textContent = e.message;
+      } finally {
+        rotate.disabled = false;
+      }
+    },
+  });
+
+  // ---- connected clients
+  const connected = dataTable({
+    className: "w-agents",
+    sort: "name",
+    grow: false,
+    perPage: 8,
+    rows: live,
+    columns: [
+      {
+        key: "name",
+        label: "Connected",
+        value: (c) => c.name,
+        render: (c) => el("div", { class: "who" }, el("span", { class: "dot good" }), c.name),
+      },
+      { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
+      { key: "revision", label: "Revision", className: "meta", value: (c) => c.revision },
+      {
+        key: "queries",
+        label: "Queries",
+        className: "num",
+        value: (c) => c.queries,
+        render: (c) => n(c.queries),
+      },
+    ],
+  });
+
+  // ---- stanzas, grouped
+  const GROUPS = [
+    ["terminal", "Terminal"],
+    ["editor", "Editors"],
+    ["desktop", "Desktop"],
+  ];
+  const stanzas = { key: data.key || "" };
+  let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
+  let chosen = clients.findIndex((c) => c.group === group);
+  const tabs = el("div", { class: "tabs" });
+  const chips = el("div", { class: "filters" });
+  const body = el("div", { class: "stanza" });
+
+  /** The HTTP form, built here from the key the route just handed back. */
+  function httpStanza() {
+    return `{\n  "mcpServers": {\n    "semlith": {\n      "url": "${endpoint.url}",\n      "headers": { "Authorization": "Bearer ${stanzas.key}" }\n    }\n  }\n}`;
+  }
+
+  function showGroup(id) {
+    group = id;
+    const first = clients.findIndex((c) => c.group === id);
+    showClient(first < 0 ? chosen : first);
+  }
+
+  function showClient(index) {
+    chosen = index;
+    const client = clients[index];
+    fill(
+      tabs,
+      GROUPS.map(([id, label]) => {
+        const count = clients.filter((c) => c.group === id).length;
+        return el(
+          "button",
+          {
+            class: "tab",
+            type: "button",
+            "aria-pressed": String(id === group),
+            onclick: () => showGroup(id),
+          },
+          label,
+          el("span", { class: "count", text: String(count) }),
+        );
+      }),
+    );
+    fill(
+      chips,
+      clients.map((c, i) =>
+        c.group === group
+          ? el("button", {
+              class: "chip",
+              type: "button",
+              "aria-pressed": String(i === chosen),
+              text: c.name,
+              onclick: () => showClient(i),
+            })
+          : null,
+      ),
+    );
     if (!client) {
       fill(body, empty("No client stanza is compiled into this build."));
       return;
     }
+    const stdio = (client.stanzas || []).map((s) => s.text.trimEnd());
     fill(
       body,
       el(
         "div",
-        { class: "filters" },
-        clients.map((c, j) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            "aria-pressed": String(j === i),
-            text: c.name,
-            onclick: () => show(j),
-          }),
-        ),
+        { class: "head" },
+        el("span", { class: "card-title", text: client.name }),
+        el("span", { class: "meta", text: client.note }),
       ),
-      el("span", { class: "card-title", text: client.name }),
-      el("p", { class: "subtitle", text: client.note }),
-      (client.stanzas || []).map((stanza) =>
-        el(
-          "div",
-          { class: "rows" },
-          el("span", { class: "eyebrow", text: stanza.format }),
-          codeBlock(stanza.text.trimEnd(), "Copy stanza"),
-        ),
-      ),
+      el("span", { class: "eyebrow", text: "Over HTTP — one endpoint, one key, no subprocess" }),
+      codeBlock(httpStanza(), "Copy stanza"),
+      el("span", { class: "eyebrow", text: "Or over stdio" }),
+      stdio.map((text) => codeBlock(text, "Copy stanza")),
     );
   }
-  show(0);
+  showClient(chosen);
 
   return el(
     "div",
     { class: "view" },
-    pageHead("Agents", "One stanza, every store, no path to keep in step.", {
-      pill: pill(
-        data.forwarding
-          ? `${data.connected} forwarding to this daemon`
-          : "no client forwarding right now",
-        data.forwarding ? "good" : "warn",
-      ),
+    pageHead("Agents", "One endpoint, every client, no per-client process.", {
+      pill: statePill,
+      actions: [el("div", { class: "copyfield" }, address, copyButton(endpoint.url)), toggle, rotate],
     }),
+    endpointNote,
+    keyNote,
     el(
       "div",
       { class: "grid scroller" },
       el(
         "div",
-        { class: "card pad" },
+        { class: "rows" },
+        live.length
+          ? connected.node
+          : el(
+              "div",
+              { class: "card pad dense" },
+              el("span", { class: "card-title", text: "Connected" }),
+              empty("No client is talking to this daemon right now."),
+            ),
         el(
           "div",
-          { class: "head" },
-          el("span", { class: "card-title", text: "Tools exposed" }),
-          el("span", { class: "meta", text: String(tools.length) }),
+          { class: "card pad dense tools" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Tools exposed" }),
+            el("span", { class: "meta", text: String(tools.length) }),
+          ),
+          el(
+            "div",
+            { class: "tool-grid" },
+            // The name and what it is for, both read from the tool's own
+            // definition: a second copy is how a tool ends up served with one
+            // description and documented with another.
+            tools.flatMap((tool) => [
+              el("span", { class: "tool-name", text: tool.name }),
+              el("span", { class: "tool-about", text: tool.about }),
+            ]),
+          ),
+          el("hr", { class: "rule" }),
+          el("span", { class: "eyebrow", text: "Protocol revisions" }),
+          el("span", { class: "meta", text: (data.revisions || []).join(" · ") || "none advertised" }),
         ),
-        tools.length
-          ? el(
-              "div",
-              { class: "rows" },
-              tools.map((tool) => el("span", { class: "path", text: tool })),
-            )
-          : empty("No tool is exposed, which should be impossible."),
-        el("hr", { class: "rule" }),
-        el("span", { class: "eyebrow", text: "Protocol revisions" }),
-        el("span", { class: "meta", text: revisions.join(" · ") || "none advertised" }),
+        installPanel(),
       ),
-      body,
-      installPanel(),
+      el("div", { class: "card pad stanzas" }, tabs, chips, body),
     ),
   );
 }

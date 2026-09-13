@@ -78,6 +78,17 @@ enum Command {
         /// Refuse to download model weights.
         #[arg(long)]
         airgap: bool,
+
+        /// Do not answer MCP over HTTP. The portal and `semlith mcp` over
+        /// stdio are unaffected; only the `/mcp` endpoint is closed.
+        #[arg(long)]
+        no_mcp_http: bool,
+    },
+
+    /// Show or rotate the agent key that authenticates the HTTP MCP endpoint.
+    Key {
+        #[command(subcommand)]
+        what: KeyCommand,
     },
 
     /// Move an existing store directory into the store home and register it,
@@ -265,6 +276,25 @@ enum Command {
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Print the agent key and the stanza that carries it.
+    Show {
+        /// Print the key alone, for a script.
+        #[arg(long)]
+        quiet: bool,
+    },
+
+    /// Mint a new agent key. Every client configured with the old one needs
+    /// the new stanza.
+    Rotate {
+        /// Stop accepting the previous key at once, rather than letting a
+        /// session that is already open finish.
+        #[arg(long)]
+        now: bool,
     },
 }
 
@@ -862,6 +892,7 @@ fn main() -> Result<()> {
             port,
             debounce,
             airgap,
+            no_mcp_http,
         } => {
             arm_airgap(airgap);
             let dirs = semlith::daemon::stores_to_open(&cli.store, &paths, &cwd)?;
@@ -877,9 +908,88 @@ fn main() -> Result<()> {
                 std::time::Duration::from_millis(debounce),
                 semlith::embed::airgap(),
                 ledger,
+                !no_mcp_http,
                 |line| eprintln!("semlith: {line}"),
             )?;
         }
+
+        Command::Key { what } => match what {
+            KeyCommand::Show { quiet } => {
+                let key = semlith::home::agent_key()?;
+                if quiet {
+                    println!("{key}");
+                } else {
+                    let port = semlith::daemon::port_of(None);
+                    println!("{}{key}{}", bold(), reset());
+                    println!("{}", semlith::home::agent_key_path().display());
+                    println!();
+                    println!("It authenticates the MCP endpoint and nothing else, and it does not");
+                    println!("change when the daemon restarts or the portal's token is rotated.");
+                    for stanza in semlith::clients::http_stanzas(&key) {
+                        println!();
+                        println!("{}{}{}", bold(), stanza.format, reset());
+                        print!("{}", stanza.text);
+                    }
+                    println!();
+                    println!("Endpoint: http://127.0.0.1:{port}/mcp");
+                }
+            }
+            KeyCommand::Rotate { now } => {
+                let fresh = semlith::home::rotate_agent_key()?;
+                let port = semlith::daemon::port_of(None);
+                let url = format!("http://127.0.0.1:{port}/mcp");
+
+                // A running daemon holds the key in memory, so it is told
+                // rather than left serving only the key it started with.
+                let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
+                let reached = match semlith::proxy::find(&dirs) {
+                    Some(upstream) => upstream.adopt_key(&fresh, now).is_ok(),
+                    None => false,
+                };
+
+                println!("{}{fresh}{}", bold(), reset());
+                if reached {
+                    if now {
+                        println!("The running daemon took it up; the previous key is refused now.");
+                    } else {
+                        println!(
+                            "The running daemon took it up. The previous key keeps working until \
+                             that daemon exits, so a session already open finishes."
+                        );
+                    }
+                } else {
+                    println!(
+                        "No daemon is running here; the next `semlith start` reads the new key."
+                    );
+                }
+
+                // Claude Code is the one client semlith writes a config for,
+                // because it has a CLI for it. Everything else is named.
+                if semlith::setup::claude_present() {
+                    if semlith::setup::register_claude_http(&fresh, &url) {
+                        println!("Claude Code was re-registered against {url}.");
+                    } else {
+                        println!(
+                            "Claude Code is installed but `claude mcp add` failed; paste the stanza below."
+                        );
+                    }
+                }
+                let others: Vec<&str> = semlith::clients::clients()
+                    .iter()
+                    .filter(|c| !c.name.eq_ignore_ascii_case("Claude Code"))
+                    .map(|c| c.name.as_str())
+                    .collect();
+                println!();
+                println!(
+                    "These need the new stanza pasted in: {}.",
+                    others.join(", ")
+                );
+                for stanza in semlith::clients::http_stanzas(&fresh) {
+                    println!();
+                    print!("{}", stanza.text);
+                }
+            }
+        },
 
         Command::Adopt {
             store_dir,

@@ -64,6 +64,12 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
+        // MCP over HTTP, on the path a client's configuration names. The
+        // credential is checked in `http`, which accepts the agent key here
+        // and nowhere else.
+        (_, true, crate::http::MCP_PATH) => mcp(state, request),
+        (_, true, "/api/endpoint") => endpoint(state, request),
+        (_, true, "/api/key") => key(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
         // A route that exists on another verb is worth telling apart from one
@@ -652,14 +658,30 @@ fn about(state: &Arc<State>) -> Response {
 /// read — it asks `/api/setup` separately, and renders that panel when the
 /// answer arrives rather than holding the whole page for it.
 fn agents(state: &Arc<State>) -> Response {
+    let connections = state.clients();
+    let key = state.server.agent_key();
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
-        "connected": state.proxy_count(),
+        "connected": connections.len(),
+        // Every client heard from recently, whichever transport it arrived on.
+        "connections": connections,
         // Read from the MCP server's own definitions rather than repeated
-        // here: a second copy is how a tool ends up served and invisible.
-        "tools": crate::mcp::tool_names(),
+        // here: a second copy is how a tool ends up served and invisible, and
+        // a second description is how it ends up documented as something else.
+        "tools": crate::mcp::tool_list()
+            .into_iter()
+            .map(|(name, about)| json!({ "name": name, "about": about }))
+            .collect::<Vec<_>>(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
+        "endpoint": {
+            "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
+            "open": state.server.mcp_open(),
+        },
+        // The live key, so the stanza the page shows is one that works. It is
+        // already on this machine in a file this user owns, and every stanza
+        // the page exists to hand out carries it.
+        "key": key,
         "install": {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,
@@ -985,29 +1007,133 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
 /// runs — which is what makes every supported protocol revision behave the
 /// same through the proxy as it does in process.
 fn mcp(state: &Arc<State>, request: &Request) -> Response {
-    if let Some(pid) = crate::proxy::proxy_pid(request.header("semlith-proxy")) {
+    let proxy = crate::proxy::proxy_pid(request.header("semlith-proxy"));
+    if let Some(pid) = proxy {
         state.saw_proxy(pid);
     }
     let body = match request.json() {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
-    if let Err(e) = state.open_mcp_fleet() {
+
+    // Who is asking. A client is told from another by its session: the id this
+    // daemon hands out at `initialize` over HTTP, or the proxy's pid for a
+    // forwarding `semlith mcp`. One that echoes neither is one unnamed client
+    // rather than a new one per request.
+    let transport = match proxy {
+        Some(_) => "stdio proxy",
+        None if request.path == crate::http::MCP_PATH => "http /mcp",
+        None => "portal",
+    };
+    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = body.get("params");
+    let name = params
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|c| c.get("name"))
+        .and_then(Value::as_str);
+    let revision = params
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(Value::as_str);
+    let session = request
+        .header("mcp-session-id")
+        .map(str::to_string)
+        .or_else(|| proxy.map(|pid| pid.to_string()))
+        .unwrap_or_else(|| {
+            if method == "initialize" {
+                new_session()
+            } else {
+                String::from("anonymous")
+            }
+        });
+    state.note_client(&session, transport, name, revision, method == "tools/call");
+    // A method that is about the server rather than about a corpus is answered
+    // whether or not anything is indexed: an agent connecting to a fresh
+    // install should be told which tools exist, not that the daemon is broken.
+    let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
+        || method.starts_with("notifications/");
+    if let Err(e) = state.open_mcp_fleet()
+        && !corpus_free
+    {
         return Response::error(409, &e.to_string());
     }
 
     let writer = daemon::Writer(Arc::clone(state));
     let mut fleet = state.mcp_fleet.lock().expect("the mcp fleet lock");
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::error(409, "this daemon has no store open");
+    let mut nothing = crate::fleet::Fleet::empty();
+    let fleet = match fleet.as_mut() {
+        Some(fleet) => fleet,
+        None if corpus_free => &mut nothing,
+        None => return Response::error(409, "this daemon has no store open"),
     };
 
-    match crate::mcp::answer(fleet, Some(&writer), &body) {
+    let response = match crate::mcp::answer(fleet, Some(&writer), &body) {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON
         // object, so the proxy writes nothing to a client that expects nothing.
         None => Response::new(200, "application/json; charset=utf-8", Vec::new()),
+    };
+    // The session id is handed back at `initialize`, which is where the MCP
+    // HTTP transport says a server may assign one. A client that echoes it is
+    // counted as itself on every later call; one that does not still works.
+    if method == "initialize" {
+        return response.header("Mcp-Session-Id", session);
     }
+    response
+}
+
+/// A session id, which identifies a client and guards nothing.
+fn new_session() -> String {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("the OS random source");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rotate the agent key, or take up one another process has just written.
+///
+/// The previous key stays valid until this daemon exits unless `now` is set,
+/// so a client mid-session finishes its work rather than failing on the call
+/// it happened to be making. It is not persisted: a restart is where the old
+/// key stops, which is the same moment every client had to be told anyway.
+fn key(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let now = body.get("now").and_then(Value::as_bool).unwrap_or(false);
+    let fresh = match body.get("key").and_then(Value::as_str) {
+        // A key another process has already written to disk.
+        Some(key) if crate::home::is_agent_key(key) => key.to_string(),
+        Some(_) => return Response::error(400, "that is not an agent key"),
+        None => match crate::home::rotate_agent_key() {
+            Ok(key) => key,
+            Err(e) => return Response::error(500, &e.to_string()),
+        },
+    };
+    state.server.rotate_agent(&fresh, now);
+    Response::json(&json!({
+        "key": fresh,
+        "previous_valid": !now,
+        "stanzas": crate::clients::http_stanzas(&fresh),
+    }))
+}
+
+/// Start or stop the MCP endpoint while the daemon runs.
+///
+/// Closing it drops the route and nothing else: the stores stay open, the
+/// watcher keeps running and the portal keeps working.
+fn endpoint(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(open) = body.get("open").and_then(Value::as_bool) else {
+        return Response::error(400, "missing open");
+    };
+    state.server.set_mcp_open(open);
+    Response::json(&json!({
+        "open": open,
+        "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
+    }))
 }
 
 fn rotate(state: &Arc<State>) -> Response {

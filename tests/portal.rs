@@ -49,6 +49,8 @@ const VIEWS: &[(&str, &str)] = &[
     ("neighbors", "/api/neighbors"),
     ("path", "/api/path"),
     ("ledger", "/api/ledger"),
+    // `semlith key` is the Agents page's Rotate button, which posts here.
+    ("key", "/api/key"),
 ];
 
 /// And the same for the MCP tool surface.
@@ -72,7 +74,8 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
 /// view.
 fn method_for(route: &str) -> &'static str {
     match route {
-        "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/upgrade" => "POST",
+        "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/upgrade" | "/api/key"
+        | "/api/endpoint" => "POST",
         _ => "GET",
     }
 }
@@ -250,11 +253,20 @@ fn every_mcp_tool_has_a_portal_view() {
             .unwrap()
     };
     let agents: serde_json::Value = serde_json::from_str(&body).expect("the agents route is JSON");
+    // Each entry is `{ name, about }` from 0.13.0: the page lists what each
+    // tool is for beside its name, read from the tool's own definition.
     let tools: Vec<String> = agents["tools"]
         .as_array()
         .expect("a tool list")
         .iter()
-        .map(|t| t.as_str().unwrap().to_string())
+        .map(|t| {
+            let name = t["name"].as_str().expect("a tool name").to_string();
+            assert!(
+                !t["about"].as_str().unwrap_or_default().is_empty(),
+                "the tool {name} is served with no description"
+            );
+            name
+        })
         .collect();
 
     assert!(!tools.is_empty(), "the daemon reports no tools at all");

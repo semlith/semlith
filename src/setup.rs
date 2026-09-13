@@ -509,6 +509,13 @@ fn step_agents(yes: bool) -> Result<Step> {
         });
     }
 
+    // The HTTP form carries the live agent key, so a stanza this prints is one
+    // that connects. Writing the placeholder would be handing someone a
+    // configuration file to go and edit, which is the thing the persisted key
+    // exists to stop.
+    let key = home::agent_key().unwrap_or_default();
+    let http = crate::clients::http_stanzas(&key);
+
     let mut wired = Vec::new();
     for i in picked {
         let client = &all[i];
@@ -516,12 +523,22 @@ fn step_agents(yes: bool) -> Result<Step> {
             wired.push(client.name.clone());
             continue;
         }
-        let body = client
+        let mut body = client
             .stanzas
             .iter()
             .map(|s| s.text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
+        if !key.is_empty() {
+            body.push_str("\n\nOr over HTTP, against a running `semlith start`:\n\n");
+            body.push_str(
+                &http
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
         let _ = cliclack::note(format!("{} — {}", client.name, client.note), body);
     }
 
@@ -543,11 +560,51 @@ fn step_agents(yes: bool) -> Result<Step> {
 /// `claude mcp add` has changed flags between Claude Code versions, so its exit
 /// status decides and nothing here parses its output. A non-zero exit falls
 /// back to the printed stanza; it never fails the install.
-fn register_claude() -> bool {
+pub fn register_claude() -> bool {
     Command::new("claude")
         .args([
             "mcp", "add", "--scope", "user", "semlith", "--", "semlith", "mcp",
         ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Re-register Claude Code against the HTTP endpoint with the current key.
+///
+/// This is the one client semlith writes a configuration for, because it has a
+/// CLI for it. Every other client is named and left to the user — a tool that
+/// edits a file it does not own is a tool that eventually corrupts one.
+pub fn register_claude_http(key: &str, url: &str) -> bool {
+    // Replaced rather than added beside: `claude mcp add` refuses a name that
+    // is already registered, so an existing entry is removed first. A missing
+    // one makes the remove fail, which is fine and is why its status is
+    // ignored.
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "--scope", "user", "semlith"])
+        .output();
+    Command::new("claude")
+        .args([
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "--transport",
+            "http",
+            "semlith",
+            url,
+            "--header",
+            &format!("Authorization: Bearer {key}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the Claude Code CLI is on this machine at all.
+pub fn claude_present() -> bool {
+    Command::new("claude")
+        .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
