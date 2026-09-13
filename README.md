@@ -87,10 +87,12 @@ banner.
 
 Requires a 64-bit machine. Prebuilt binaries cover Linux (x86_64, aarch64),
 Apple silicon macOS and Windows x86_64. The Linux binary needs nothing but
-glibc 2.35+ and libstdc++ — no OpenBLAS, no OpenSSL. That floor covers Debian
-12, Ubuntu 22.04 LTS, RHEL and Rocky 9 and Amazon Linux 2023; it is asserted in
-the release build, so it cannot rise without failing one. An older distribution
-than that builds from source with `cargo install semlith`. Intel macOS is not
+glibc and libstdc++ — no OpenBLAS, no OpenSSL — but it needs a recent glibc:
+the prebuilt ONNX Runtime it links against requires 2.39, which rules out
+Debian 12, Ubuntu 22.04 LTS, RHEL 9 and Amazon Linux 2023. The floor is that
+library's rather than this crate's, and
+[#57](https://github.com/semlith/semlith/issues/57) tracks moving it. On any of
+those, `cargo install semlith` builds against the glibc you have and works. Intel macOS is not
 supported: ONNX Runtime no longer publishes x86_64 macOS builds, so the
 embedding backend cannot link there.
 

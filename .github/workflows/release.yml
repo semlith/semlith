@@ -36,15 +36,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 22.04, not latest: a binary built on 24.04 carries a glibc 2.39
-          # floor and will not start on Debian 12, Ubuntu 22.04 LTS, RHEL 9 or
-          # Amazon Linux 2023 — every one of them current. 22.04 is glibc 2.35
-          # and is supported until 2027. See issue #57, which this closes: the
-          # prebuilt binary failed identically on three releases and nothing in
-          # CI ran it on an older distribution to notice.
-          - os: ubuntu-22.04
+          # `ubuntu-latest`, because the floor is not ours to choose. 0.13.0
+          # tried 22.04 to lower it and the link failed: the prebuilt ONNX
+          # Runtime that `ort` downloads references `__isoc23_strtol` and
+          # `std::__cxx11::basic_string<wchar_t>::_M_replace_cold`, which are
+          # glibc 2.38 and a newer libstdc++. The vendored library sets the
+          # floor, so building on an older runner cannot lower it — only
+          # building ONNX Runtime from source can. Issue #57 stays open with
+          # that evidence, and the step below records what the floor actually
+          # is rather than asserting one we cannot hold.
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -81,9 +84,13 @@ jobs:
           fi
 
       # The guard above says which libraries are needed and nothing about which
-      # *versions* of their symbols, which is exactly how the glibc floor rose
-      # to 2.39 across three releases without failing a single build. This
-      # asserts the floor itself.
+      # *versions* of their symbols, which is how the glibc floor rose across
+      # three releases without failing a single build. This prints the floor
+      # into the build log and writes it into the release notes, so it is a
+      # number somebody can read rather than a surprise on someone's server.
+      # It does not fail the build: the floor is the vendored ONNX Runtime's,
+      # and failing here would only stop us shipping the binary that is the
+      # best we can currently build. See issue #57.
       - name: glibc floor
         if: runner.os == 'Linux'
         run: |
@@ -91,12 +98,8 @@ jobs:
           floor=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1)
           cxx=$(objdump -T "$binary" | grep -o 'GLIBCXX_[0-9.]*' | sort -V -u | tail -1)
           echo "$binary requires up to $floor and $cxx"
-          want="GLIBC_2.35"
-          highest=$(printf '%s\n%s\n' "$floor" "$want" | sed 's/GLIBC_//' | sort -V | tail -1)
-          if [ "GLIBC_$highest" != "$want" ]; then
-            echo "::error::the binary requires $floor; the floor is $want (Debian 12, Ubuntu 22.04, RHEL 9)"
-            exit 1
-          fi
+          echo "::notice::${{ matrix.target }} requires $floor and $cxx"
+          echo "GLIBC_FLOOR=$floor" >> "$GITHUB_ENV"
 
       # turbovec requires a 64-bit target; every entry above is one.
       - name: Package
