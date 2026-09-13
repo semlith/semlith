@@ -290,6 +290,12 @@ impl Response {
 /// A handler: everything the daemon serves, behind one function.
 pub type Handler = Arc<dyn Fn(&Request) -> Response + Send + Sync>;
 
+/// A refused connection and the moment it may be told so.
+struct Late {
+    stream: TcpStream,
+    due: std::time::Instant,
+}
+
 /// The agent key, and the one it replaced.
 ///
 /// `previous` is kept valid until this process exits so that a session in
@@ -311,6 +317,8 @@ pub struct Server {
     agent: Arc<Mutex<Agent>>,
     /// Whether `/mcp` answers. Closing it drops the route, not the daemon.
     mcp_open: Arc<AtomicBool>,
+    /// What a refused request costs right now.
+    penalty: Arc<Mutex<Penalty>>,
 }
 
 impl Server {
@@ -334,6 +342,7 @@ impl Server {
             token: Arc::new(Mutex::new(new_token())),
             agent: Arc::new(Mutex::new(Agent::default())),
             mcp_open: Arc::new(AtomicBool::new(true)),
+            penalty: Arc::new(Mutex::new(Penalty::default())),
         })
     }
 
@@ -407,10 +416,28 @@ impl Server {
         let rx = Arc::new(Mutex::new(rx));
         let refused = Arc::new(refused);
 
+        // Refused requests are answered by a thread of their own. Holding a
+        // worker for the delay would mean eight wrong tokens at once could stop
+        // the portal answering anything, which would make the throttle a denial
+        // of service with extra steps.
+        let (late_tx, late_rx) = mpsc::channel::<Late>();
+        let waiting_room = std::thread::spawn(move || {
+            while let Ok(late) = late_rx.recv() {
+                let now = std::time::Instant::now();
+                if late.due > now {
+                    std::thread::sleep(late.due - now);
+                }
+                let mut stream = late.stream;
+                let _ = write_response(&mut stream, Response::new(401, "text/plain", Vec::new()));
+            }
+        });
+
         let mut workers = Vec::with_capacity(WORKERS);
         let port = self.port;
         for _ in 0..WORKERS {
             let rx = Arc::clone(&rx);
+            let late_tx = late_tx.clone();
+            let penalty = Arc::clone(&self.penalty);
             let handler = Arc::clone(&handler);
             let token = Arc::clone(&self.token);
             let agent = Arc::clone(&self.agent);
@@ -425,6 +452,13 @@ impl Server {
                         guard.recv()
                     };
                     let Ok(stream) = next else { return };
+                    let hold = |stream| {
+                        let delay = penalty.lock().unwrap_or_else(|e| e.into_inner()).charge();
+                        let _ = late_tx.send(Late {
+                            stream,
+                            due: std::time::Instant::now() + delay,
+                        });
+                    };
                     let auth = {
                         let agent = agent.lock().expect("the agent lock");
                         Auth {
@@ -435,7 +469,7 @@ impl Server {
                             port,
                         }
                     };
-                    if let Some(class) = answer(stream, &handler, &auth) {
+                    if let Some(class) = answer(stream, &handler, &auth, &hold) {
                         refused(class);
                     }
                 }
@@ -488,6 +522,12 @@ impl Server {
         for worker in workers {
             let _ = worker.join();
         }
+        // The workers held the only other senders, so dropping this one ends
+        // the waiting room's `recv` — after it has answered whatever it still
+        // owes, which is what stops a shutdown looking like a dropped
+        // connection to whoever was being held.
+        drop(late_tx);
+        let _ = waiting_room.join();
         Ok(())
     }
 }
@@ -522,7 +562,18 @@ impl Auth {
 }
 
 /// Answer one connection. Returns why it was refused, if it was.
-fn answer(mut stream: TcpStream, handler: &Handler, auth: &Auth) -> Option<Refusal> {
+///
+/// `hold` takes a connection whose credential was wrong and answers it later,
+/// off this thread. Everything else is answered here and now: a malformed
+/// request, a foreign `Host` and a cross-origin write are rule violations rather
+/// than guesses at a secret, and delaying them would only slow down the person
+/// who made a mistake.
+fn answer(
+    mut stream: TcpStream,
+    handler: &Handler,
+    auth: &Auth,
+    hold: &impl Fn(TcpStream),
+) -> Option<Refusal> {
     let request = match read_request(&mut stream) {
         Ok(Some(r)) => r,
         Ok(None) => return None,
@@ -588,9 +639,9 @@ fn answer(mut stream: TcpStream, handler: &Handler, auth: &Auth) -> Option<Refus
             .is_some_and(|t| same(t.trim(), want));
 
         if !by_header && !by_agent {
-            // Empty body on purpose: a prober learns that something refused it
-            // and nothing else.
-            let _ = write_response(&mut stream, Response::new(401, "text/plain", Vec::new()));
+            // Empty body, and not yet: a prober learns that something refused
+            // it, nothing else, and not quickly.
+            hold(stream);
             return Some(Refusal::Unauthorized);
         }
     }
@@ -847,23 +898,77 @@ fn reason(status: u16) -> &'static str {
 
 /// A 256-bit token, hex encoded.
 ///
-/// The bytes come from blake3 over the machine's clock, this process's id and
-/// the address of a fresh heap allocation — which is already a dependency, is
-/// not a predictable sequence, and needs no RNG crate. The token guards a
-/// loopback socket for one process's lifetime; it is not a long-lived secret.
+/// From the OS random source, the same construction `home::new_agent_key` uses.
+/// It was a blake3 hash of the clock, this process's id and the address of a
+/// fresh allocation until 0.14.0 — none of which is a secret. A clock is
+/// readable by anything on the machine, a pid is in `/proc`, and an allocator
+/// address under a defeated ASLR is a small space; a hash of three guessable
+/// things is a guessable thing, however long its output is.
 fn new_token() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let entropy = Box::new(0u8);
-    let address = &*entropy as *const u8 as usize;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&now.to_le_bytes());
-    hasher.update(&std::process::id().to_le_bytes());
-    hasher.update(&address.to_le_bytes());
-    hasher.update(&std::time::Instant::now().elapsed().as_nanos().to_le_bytes());
-    hasher.finalize().to_hex().to_string()
+    let mut bytes = [0u8; 32];
+    let filled = getrandom::fill(&mut bytes).map(|()| bytes);
+    token_from(filled)
+}
+
+/// The hex encoding, and the one place the random source failing is decided.
+///
+/// Split out so a test can hand it a failure: there is no way to make the OS
+/// refuse, and a token minted from a fallback nobody noticed is exactly the
+/// thing this function exists to prevent.
+fn token_from(filled: Result<[u8; 32], getrandom::Error>) -> String {
+    let bytes = filled.expect(
+        "the OS random source refused; semlith will not mint a session token without it",
+    );
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// What a refused request costs, and what a run of them costs.
+///
+/// A wrong token is answered late. The delay is what makes guessing a 256-bit
+/// token over a loopback socket pointless rather than merely impractical, and
+/// it grows with how many refusals this daemon has just answered, so a run of
+/// guesses gets slower while one mistyped URL costs a quarter of a second.
+///
+/// The window lives here and resets with the daemon, which is the honest
+/// lifetime: the token it guards resets then too.
+#[derive(Default)]
+struct Penalty {
+    /// When each refusal in the last minute was answered.
+    recent: std::collections::VecDeque<std::time::Instant>,
+}
+
+/// What one refusal costs before any escalation.
+const REFUSAL_DELAY: Duration = Duration::from_millis(250);
+
+/// The longest a refusal is ever held.
+const MAX_REFUSAL_DELAY: Duration = Duration::from_secs(4);
+
+/// How many refusals a minute may hold before each further block doubles it.
+const REFUSALS_PER_STEP: usize = 20;
+
+impl Penalty {
+    /// Record a refusal and say how long to hold it.
+    fn charge(&mut self) -> Duration {
+        let now = std::time::Instant::now();
+        while self
+            .recent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+        {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(now);
+        // Every further twenty in the window doubles it: 250 ms, then 500, then
+        // one second, two, and four.
+        let steps = (self.recent.len().saturating_sub(1)) / REFUSALS_PER_STEP;
+        let delay = REFUSAL_DELAY * 2u32.saturating_pow(steps.min(8) as u32);
+        delay.min(MAX_REFUSAL_DELAY)
+    }
 }
 
 #[cfg(test)]
@@ -1020,5 +1125,64 @@ mod tests {
         let b = new_token();
         assert_ne!(a, b);
         assert_eq!(a.len(), 64, "256 bits, hex encoded");
+        assert!(
+            a.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "not lowercase hex: {a}"
+        );
+    }
+
+    /// The OS random source is the only source. A token minted from a fallback
+    /// nobody noticed is the finding this replaced, so the failure is a panic
+    /// naming what refused rather than a weaker token.
+    #[test]
+    fn a_token_is_never_minted_without_the_os_random_source() {
+        let refused = std::panic::catch_unwind(|| token_from(Err(getrandom::Error::UNSUPPORTED)))
+            .expect_err("a failing random source minted a token anyway");
+        let message = refused
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| refused.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            message.contains("the OS random source refused"),
+            "the panic does not say what refused: {message}"
+        );
+
+        // The same bytes always encode the same way, so the hex half is not
+        // where the entropy is.
+        assert_eq!(token_from(Ok([0u8; 32])), "0".repeat(64));
+        assert_eq!(&token_from(Ok([0xab; 32]))[..4], "abab");
+    }
+
+    /// A mistyped URL costs a quarter of a second; a run of guesses costs more
+    /// each time, up to four seconds, and the window is a minute long.
+    #[test]
+    fn a_run_of_refusals_gets_slower() {
+        let mut penalty = Penalty::default();
+        assert_eq!(penalty.charge(), REFUSAL_DELAY, "the first refusal");
+        for _ in 1..REFUSALS_PER_STEP {
+            assert_eq!(penalty.charge(), REFUSAL_DELAY);
+        }
+        // The twenty-first in the window is where it starts doubling.
+        assert_eq!(penalty.charge(), REFUSAL_DELAY * 2);
+        for _ in 0..REFUSALS_PER_STEP {
+            penalty.charge();
+        }
+        assert_eq!(penalty.charge(), REFUSAL_DELAY * 4);
+
+        for _ in 0..200 {
+            penalty.charge();
+        }
+        assert_eq!(
+            penalty.charge(),
+            MAX_REFUSAL_DELAY,
+            "the delay is capped, because holding a connection forever is the \
+             other kind of denial of service"
+        );
+
+        // A refusal a minute ago is not part of this run.
+        let old = std::time::Instant::now() - Duration::from_secs(61);
+        penalty.recent = std::iter::repeat_n(old, 500).collect();
+        assert_eq!(penalty.charge(), REFUSAL_DELAY);
     }
 }

@@ -292,6 +292,98 @@ fn the_token_and_the_host_check_guard_every_route() {
     assert_eq!(allowed.status, 200);
 }
 
+/// Guessing costs time, and the cost grows with the run. The numbers come off
+/// the test's own clock rather than out of the constants, because a delay that
+/// is configured and never applied looks identical to one that works.
+#[test]
+#[ignore = "measures a real delay, so it takes the delay"]
+fn a_run_of_wrong_tokens_gets_slower_and_a_single_one_does_not() {
+    let daemon = Daemon::start("throttle", &[]);
+
+    let one = Instant::now();
+    let refused = daemon.raw(&format!(
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: not-it\r\nConnection: close\r\n\r\n",
+        daemon.port
+    ));
+    let single = one.elapsed();
+    assert_eq!(refused.status, 401);
+    assert!(
+        single >= Duration::from_millis(250),
+        "one wrong token was answered in {single:?}, so nothing is being held"
+    );
+    assert!(
+        single < Duration::from_millis(1200),
+        "one mistyped URL cost {single:?}; a single mistake must not be \
+         punished like a run of guesses"
+    );
+
+    // Sixty in a row: twenty at a quarter of a second, twenty at half, twenty
+    // at a second. Thirty-five seconds is the floor that arithmetic gives, and
+    // the first request above has already been charged to the same window.
+    let run = Instant::now();
+    for _ in 0..59 {
+        let answer = daemon.raw(&format!(
+            "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: not-it\r\n\
+             Connection: close\r\n\r\n",
+            daemon.port
+        ));
+        assert_eq!(answer.status, 401);
+        assert!(answer.body.is_empty(), "a refusal leaked a body");
+    }
+    let elapsed = run.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(34),
+        "sixty wrong tokens took {elapsed:?}; the delay is not escalating"
+    );
+}
+
+/// The throttle must not become the denial of service it exists to prevent: a
+/// connection being held costs the thread that holds it and nothing else.
+#[test]
+#[ignore = "measures a real delay, so it takes the delay"]
+fn a_held_refusal_does_not_delay_anybody_else() {
+    let daemon = Daemon::start("interleave", &[]);
+    let port = daemon.port;
+
+    // More wrong tokens at once than the server has workers. If the delay were
+    // answered on a worker, these would hold every one of them.
+    let floods: Vec<_> = (0..16)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut stream =
+                    TcpStream::connect(("127.0.0.1", port)).expect("the daemon listens");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let request = format!(
+                    "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Semlith-Token: not-it\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(request.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                let mut raw = Vec::new();
+                let _ = stream.read_to_end(&mut raw);
+            })
+        })
+        .collect();
+
+    // Long enough for all sixteen to be parsed, refused and put on hold.
+    std::thread::sleep(Duration::from_millis(120));
+
+    let good = Instant::now();
+    let answer = daemon.get("/api/stores");
+    let waited = good.elapsed();
+    assert_eq!(answer.status, 200);
+    assert!(
+        waited < Duration::from_millis(400),
+        "a correct request waited {waited:?} behind sixteen held refusals"
+    );
+
+    for flood in floods {
+        let _ = flood.join();
+    }
+}
+
 /// The printed URL hands the token to the page and sets nothing. The query form
 /// opens the page, which needs no credential anyway, and opens nothing else.
 #[test]
