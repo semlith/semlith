@@ -2943,16 +2943,20 @@ async function indexView() {
               `${event.indexed} indexed, ${event.unchanged} unchanged, ${event.skipped} skipped, ${event.removed} removed, ${event.chunks} chunks`,
               "done",
             );
-            if (event.remaining) {
-              say(
-                `${event.remaining} paths left after the time slice — start again to continue; nothing already indexed is redone`,
-                "note",
-              );
-            }
+
             // The store list has changed. Without this, a first index left
             // `state.stores` empty and the next visit to Stores bounced the
             // user to the first-run screen with their work apparently gone.
             await refreshStores();
+          } else if (event.event === "slice") {
+            // The writer handed itself back to the watcher and took the rest
+            // of this run back onto the queue. One run, one stream: there is
+            // nothing for the reader to do.
+            status.textContent = `${n(event.remaining)} left — yielding to the watcher`;
+            say(
+              `${n(event.remaining)} paths left; the writer is giving the watcher a turn and will carry on`,
+              "slice",
+            );
           } else if (event.event === "paused") {
             status.textContent = "paused";
             say("held between files — the writer is still this run's", "paused");

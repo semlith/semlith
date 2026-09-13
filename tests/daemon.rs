@@ -1213,3 +1213,49 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
     );
     let _ = first.join();
 }
+
+/// A run longer than one slice finishes on its own, on one stream, and a stop
+/// undoes every slice of it rather than the one that happened to be going.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
+    let (dir, home, work) = sandbox("slices");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    for i in 0..12 {
+        let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(80));
+        std::fs::write(extra.join(format!("n{i:03}.md")), body).unwrap();
+    }
+
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    let before = daemon.get("/api/files").json()["total"].as_i64().unwrap();
+
+    let body = format!(
+        "{{\"path\":{}}}",
+        serde_json::to_string(&extra.display().to_string()).unwrap()
+    );
+    let answer = daemon.post("/api/index", &body);
+    assert_eq!(answer.status, 200);
+
+    // One request, one answer: whatever the slice budget did in between, the
+    // caller is never asked to press the button again.
+    let events: Vec<serde_json::Value> = answer
+        .body
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    let done = events
+        .iter()
+        .find(|e| e["event"] == "done")
+        .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
+    assert_eq!(
+        done["remaining"], 0,
+        "the run handed work back to the reader: {done}"
+    );
+    assert_eq!(
+        daemon.get("/api/files").json()["total"].as_i64().unwrap(),
+        before + 12,
+        "not every file was indexed"
+    );
+}

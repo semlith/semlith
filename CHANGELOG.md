@@ -71,7 +71,11 @@ keep in a config file, and a query can find a picture.
   which half it is. `POST /api/index/control` takes `pause`, `resume` or
   `stop`; the run is asked at each file boundary, never inside a file. A stop
   asked for while the job is still queued is answered from the queue itself, in
-  about a millisecond, because nothing of it has run.
+  about a millisecond, because nothing of it has run. A run longer than the
+  writer's time slice is re-queued behind whatever the watcher had waiting and
+  carries on by itself, on the same stream: the reader is never asked to press
+  the button again, and a stop undoes every slice of the run rather than the
+  one that happened to be going.
 - **An endpoint switch.** `semlith start --no-mcp-http` starts with `/mcp`
   closed, and the Agents page starts and stops it while the daemon runs.
   Closing it drops the route, not the daemon: the stores stay open, the watcher

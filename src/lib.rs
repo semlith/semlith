@@ -247,7 +247,7 @@ pub struct IndexProgress {
     pub symbols: usize,
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct IndexReport {
     pub scanned: usize,
     pub indexed: usize,
@@ -263,9 +263,12 @@ pub struct IndexReport {
     pub edges: usize,
     /// Images embedded in this run.
     pub images: usize,
-    /// Whether the run was stopped rather than finished, and everything it had
-    /// embedded was rolled back.
+    /// Whether the run was stopped rather than finished.
     pub stopped: bool,
+    /// Every file this call embedded, in order. The caller keeps these across
+    /// the slices of one logical run, so stopping can undo the whole run
+    /// rather than only the slice that happened to be going.
+    pub written: Vec<String>,
 }
 
 /// What a controlled run should do at the next file boundary.
@@ -911,28 +914,10 @@ impl Semlith {
 
         self.flush(&mut pending)?;
 
-        // A stopped run leaves nothing behind. The vectors are already in the
-        // index and the rows already in the database — both were written as
-        // the run went — so undoing is the same eviction a forget performs,
-        // for exactly the files this run wrote.
-        if report.stopped {
-            for key in &written {
-                for id in store::image_ids_of(&self.db, key)? {
-                    self.images.remove(id as u64)?;
-                }
-                for id in store::delete_file(&self.db, key)? {
-                    self.index.remove(id)?;
-                }
-            }
-            completed.clear();
-            report.indexed = 0;
-            report.chunks = 0;
-            report.images = 0;
-            report.symbols = 0;
-            report.edges = 0;
-            self.save()?;
-            return Ok(report);
-        }
+        // A stopped slice still commits what it embedded. Undoing is the
+        // caller's, because one logical run is several slices and a stop has
+        // to undo all of them — see `Job::Index` in the daemon.
+        report.written = written;
 
         // Anything recorded but no longer on disk is dead weight.
         if sweep {

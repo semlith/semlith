@@ -173,13 +173,13 @@ pub fn run_held(
         progress(Progress::File(path))
     })?;
     let (files, chunks, _) = store.stats()?;
+    let mut behind = catch_up.remaining > 0;
     progress(Progress::Ready {
         catch_up,
         files,
         chunks,
     });
 
-    let mut behind = catch_up.remaining > 0;
     while !stop.load(Ordering::Relaxed) {
         // Before waiting on the filesystem, not after: a request that arrived
         // while the last batch was embedding should not sit for another idle

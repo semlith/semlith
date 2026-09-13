@@ -88,7 +88,12 @@ impl Discovery {
 
 /// Something the watcher thread should do next, on behalf of a request.
 enum Job {
-    Index(Vec<PathBuf>),
+    /// The paths to walk, and every file the earlier slices of this same run
+    /// already embedded. A slice yields the writer back to the watcher when
+    /// its budget runs out and the rest is re-queued behind whatever the
+    /// watcher had waiting, so one logical run is several `Index` jobs on one
+    /// report channel.
+    Index(Vec<PathBuf>, Vec<String>),
     Forget(PathBuf),
 }
 
@@ -183,6 +188,11 @@ impl Store {
         self.queue.lock().expect("the queue lock").len()
     }
 
+    /// Put a slice's remainder back, behind whatever is waiting.
+    fn requeue(&self, queued: Queued) {
+        self.queue.lock().expect("the queue lock").push_back(queued);
+    }
+
     /// Drop every index job that has not started, answering each as stopped.
     ///
     /// A stop asked for while the job is still waiting its turn used to sit
@@ -193,7 +203,7 @@ impl Store {
         let mut queue = self.queue.lock().expect("the queue lock");
         let mut dropped = 0;
         queue.retain(|queued| {
-            if !matches!(queued.job, Job::Index(_)) {
+            if !matches!(queued.job, Job::Index(..)) {
                 return true;
             }
             let _ = queued.report.send(serde_json::json!({
@@ -329,7 +339,7 @@ impl State {
         // shows nothing for a minute looks like a page that lost the request
         // rather than one waiting its turn.
         Ok(store.submit(
-            Job::Index(paths),
+            Job::Index(paths, Vec::new()),
             Some(serde_json::json!({ "event": "queued" })),
         ))
     }
@@ -940,6 +950,7 @@ fn tend(
 /// Run one queued job, reporting progress back to whoever asked for it.
 fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
     let Queued { job, report } = queued;
+    let back = report.clone();
     let say = |value: serde_json::Value| {
         // A closed receiver means the browser navigated away mid-run. The work
         // still finishes — it is the store's, not the request's.
@@ -947,9 +958,13 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
     };
 
     match job {
-        Job::Index(paths) => {
-            let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-            say(serde_json::json!({ "event": "started", "paths": names }));
+        Job::Index(paths, already) => {
+            // Only the first slice announces itself; the rest are the same run
+            // continuing, and a second "started" would read as a second run.
+            if already.is_empty() {
+                let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                say(serde_json::json!({ "event": "started", "paths": names }));
+            }
             let started_at = std::time::Instant::now();
             // A pause belongs to the run that was on when it was asked for.
             // A stop does not need clearing here: a job that was queued when
@@ -993,13 +1008,64 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                     }));
                 });
             match outcome {
-                Ok(done) => {
+                Ok(mut done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
-                    store.note(if done.stopped {
-                        "an index run was stopped; everything it had embedded was undone".into()
-                    } else {
-                        format!("{} indexed from the portal", done.indexed)
-                    });
+
+                    // Everything this run has embedded, across every slice of
+                    // it, so a stop undoes the run rather than the slice that
+                    // happened to be going.
+                    let mut written = already;
+                    written.append(&mut done.written);
+
+                    if done.stopped {
+                        // The same eviction a forget performs, for exactly the
+                        // files this run wrote. Done here rather than inside
+                        // the index pass because only this loop knows how many
+                        // slices the run has had.
+                        let mut undone = 0;
+                        for key in &written {
+                            if writer.forget_held(Path::new(key)).is_ok() {
+                                undone += 1;
+                            }
+                        }
+                        store.note(format!(
+                            "an index run was stopped; {undone} file(s) it had embedded were undone"
+                        ));
+                        say(serde_json::json!({
+                            "event": "done",
+                            "indexed": 0,
+                            "unchanged": 0,
+                            "skipped": 0,
+                            "removed": undone,
+                            "chunks": 0,
+                            "images": 0,
+                            "remaining": 0,
+                            "stopped": true,
+                        }));
+                        store.paused.store(false, Ordering::Relaxed);
+                        store.cancelled.store(false, Ordering::Relaxed);
+                        return;
+                    }
+
+                    // More to do: the rest goes back on the queue with the same
+                    // channel, so the watcher gets a turn between slices and
+                    // the reader keeps one stream rather than being asked to
+                    // press the button again.
+                    if done.remaining > 0 {
+                        store.requeue(Queued {
+                            job: Job::Index(paths, written),
+                            report: back,
+                        });
+                        say(serde_json::json!({
+                            "event": "slice",
+                            "remaining": done.remaining,
+                            "indexed": done.indexed,
+                            "chunks": done.chunks,
+                        }));
+                        return;
+                    }
+
+                    store.note(format!("{} indexed from the portal", done.indexed));
                     say(serde_json::json!({
                         "event": "done",
                         "indexed": done.indexed,
