@@ -14,7 +14,7 @@
 //! Nothing here writes outside the semlith home, the shell's rc file and the
 //! model cache, and nothing here uses `sudo`.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -357,6 +357,10 @@ fn step_path(yes: bool) -> Result<Step> {
         });
     }
 
+    // Built before the file is touched, so a home that cannot be written into a
+    // shell file leaves the rc exactly as it was rather than half-edited.
+    let line = path_line(&bin)?;
+
     if let Some(parent) = rc.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -370,7 +374,7 @@ fn step_path(yes: bool) -> Result<Step> {
     } else {
         "\n"
     };
-    write!(file, "{sep}\n{}\n{}\n{END}\n", BEGIN, path_line(&bin))
+    write!(file, "{sep}\n{}\n{}\n{END}\n", BEGIN, line)
         .with_context(|| format!("writing {}", rc.display()))?;
 
     Ok(Step {
@@ -381,15 +385,54 @@ fn step_path(yes: bool) -> Result<Step> {
 }
 
 /// fish is not POSIX and `export` is a syntax error in it.
-fn path_line(bin: &Path) -> String {
+fn path_line(bin: &Path) -> Result<String> {
+    let path = bin.display().to_string();
+    // A newline would end the line and start another one, which is a second
+    // command in a file the shell runs at every start. There is no quoting that
+    // survives it, so a store home containing one is refused rather than
+    // written. A NUL cannot reach a shell at all.
+    if path.contains('\n') || path.contains('\r') || path.contains('\0') {
+        bail!(
+            "{} contains a newline, so it cannot be written into a shell startup \
+             file. Point {} at a directory whose name is one line and run \
+             `semlith setup` again.",
+            path.escape_debug(),
+            home::HOME_ENV
+        );
+    }
+
     let is_fish = std::env::var("SHELL")
         .map(|s| s.ends_with("fish"))
         .unwrap_or(false);
-    if is_fish {
-        format!("set -gx PATH {} $PATH", bin.display())
+    Ok(if is_fish {
+        format!("set -gx PATH {} $PATH", fish_quote(&path))
     } else {
-        format!("export PATH=\"{}:$PATH\"", bin.display())
-    }
+        format!("export PATH={}:$PATH", posix_quote(&path))
+    })
+}
+
+/// A POSIX shell word that is exactly this string.
+///
+/// Single quotes, because inside them every character is itself — no variable
+/// expansion, no command substitution, no backslash escapes. The one character
+/// that cannot appear inside them is a single quote, which is closed, escaped
+/// and reopened in the usual way. It was double quotes before 0.14.0, which
+/// expand `$(…)`, backticks and `$VAR`, so a directory name could run a command
+/// on every shell start.
+fn posix_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', r"'\''"))
+}
+
+/// The same for fish, which has no `'\''` idiom: inside single quotes it
+/// recognises `\'` and `\\` and nothing else.
+fn fish_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\\', r"\\").replace('\'', r"\'"))
+}
+
+/// A PowerShell single-quoted string. Inside them the only special character
+/// is the single quote itself, which is written twice.
+fn powershell_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', "''"))
 }
 
 /// Windows has no rc file; the user `PATH` is a registry value, and PowerShell
@@ -411,11 +454,11 @@ fn step_path_windows(bin: &Path, yes: bool) -> Result<Step> {
     }
 
     let script = format!(
-        "$dir = '{}'; \
+        "$dir = {}; \
          $cur = [Environment]::GetEnvironmentVariable('Path','User'); \
          if ($cur -notlike \"*$dir*\") {{ \
            [Environment]::SetEnvironmentVariable('Path', \"$dir;$cur\", 'User') }}",
-        bin.display()
+        powershell_quote(&bin.display().to_string())
     );
     let out = Command::new("powershell")
         .args(["-ExecutionPolicy", "Bypass", "-NoProfile", "-Command"])
@@ -835,5 +878,50 @@ mod rotation_tests {
         assert!(recarry_key(&key, &key).is_empty());
         assert!(recarry_key("sml_YOURKEY", &key).is_empty());
         assert!(recarry_key(&key, "").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod quoting_tests {
+    use super::*;
+
+    /// Single quotes are the only POSIX construct in which every character is
+    /// itself. What it has to survive is a directory name, which can hold any
+    /// byte but a slash and a NUL.
+    #[test]
+    fn a_posix_word_is_exactly_the_path() {
+        assert_eq!(
+            posix_quote("/home/me/.semlith/bin"),
+            "'/home/me/.semlith/bin'"
+        );
+        assert_eq!(posix_quote("with space"), "'with space'");
+        assert_eq!(posix_quote("$(touch x)"), "'$(touch x)'");
+        assert_eq!(posix_quote("`touch x`"), "'`touch x`'");
+        assert_eq!(posix_quote("${HOME}"), "'${HOME}'");
+        assert_eq!(posix_quote(r#"a"b"#), r#"'a"b'"#);
+        assert_eq!(posix_quote(r"back\slash"), r"'back\slash'");
+        // The one character that cannot appear inside single quotes.
+        assert_eq!(posix_quote("it's"), r"'it'\''s'");
+    }
+
+    /// fish has no `'\''` idiom: inside single quotes it recognises a
+    /// backslash escape, so the backslash itself has to be escaped first.
+    #[test]
+    fn a_fish_word_escapes_what_fish_reads() {
+        assert_eq!(fish_quote("/home/me/bin"), "'/home/me/bin'");
+        assert_eq!(fish_quote("it's"), r"'it\'s'");
+        assert_eq!(fish_quote(r"back\slash"), r"'back\\slash'");
+        // Order matters: escaping the quote first would then escape its own
+        // backslash and end the string early.
+        assert_eq!(fish_quote(r"\'"), r"'\\\''");
+    }
+
+    /// PowerShell doubles the quote and treats nothing else as special inside
+    /// single quotes — `$dir` in the script is why this matters at all.
+    #[test]
+    fn a_powershell_word_doubles_its_quotes() {
+        assert_eq!(powershell_quote(r"C:\Users\me\bin"), r"'C:\Users\me\bin'");
+        assert_eq!(powershell_quote("it's"), "'it''s'");
+        assert_eq!(powershell_quote("$(pwd)"), "'$(pwd)'");
     }
 }

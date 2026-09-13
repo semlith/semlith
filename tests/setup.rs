@@ -257,3 +257,126 @@ fn an_unset_shell_still_gets_a_path_block() {
         "setup blamed a missing HOME when only SHELL was unset:\n{said}"
     );
 }
+
+/// A store home is a directory name, and a directory name can hold every
+/// character a shell treats as syntax. The rc file is run by the user's shell
+/// at every start, so what goes into it has to be a word rather than a
+/// fragment somebody's path chose.
+#[test]
+fn a_hostile_store_home_is_quoted_into_the_rc_file_or_refused() {
+    // Every character that used to expand inside the double quotes this wrote
+    // before 0.14.0, plus a space and a single quote to break the new ones.
+    let awkward = r#"se"m'l $(touch pwned) `touch also-pwned` ${HOME} \ith"#;
+
+    let dir = tempfile::tempdir().expect("a temp directory");
+    let home = dir.path().join("home");
+    let cache = dir.path().join("cache");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("seeded"), b"weights would be here").unwrap();
+    std::fs::write(home.join(".zshrc"), "# a shell rc somebody already owns\n").unwrap();
+    let store_home = dir.path().join(awkward);
+    std::fs::create_dir_all(store_home.join("bin")).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("setup")
+        .arg("--yes")
+        .arg("--airgap")
+        .env("HOME", &home)
+        .env("SHELL", "/bin/zsh")
+        .env("SEMLITH_HOME", &store_home)
+        .env("SEMLITH_MODEL_CACHE", &cache)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running semlith setup");
+    assert!(
+        out.status.success(),
+        "setup failed on an awkward home:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let rc = home.join(".zshrc");
+    let text = std::fs::read_to_string(&rc).expect("the rc file");
+    assert!(text.contains(BEGIN), "no block was written:\n{text}");
+
+    // The shell's own parser is the judge. A line that is syntactically wrong,
+    // or that swallows the rest of the file, fails here.
+    let checked = Command::new("sh")
+        .arg("-n")
+        .arg(&rc)
+        .output()
+        .expect("running sh -n");
+    assert!(
+        checked.status.success(),
+        "the rc file is not valid shell:\n{}\n---\n{}",
+        String::from_utf8_lossy(&checked.stderr),
+        text
+    );
+
+    // Nothing in the path ran while the file was being written or parsed.
+    assert!(!dir.path().join("pwned").exists(), "a substitution ran");
+    assert!(!dir.path().join("also-pwned").exists(), "a backtick ran");
+
+    // Sourced, the line puts exactly that directory's bin on PATH — not the
+    // expansion of ${HOME}, and not a truncation at the first space.
+    let sourced = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            ". {} >/dev/null 2>&1; printf %s \"$PATH\"",
+            shell_word(&rc)
+        ))
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &home)
+        .output()
+        .expect("sourcing the rc file");
+    let path = String::from_utf8_lossy(&sourced.stdout).into_owned();
+    let want = store_home.join("bin");
+    assert!(
+        path.split(':').any(|entry| Path::new(entry) == want),
+        "PATH does not carry {}:\n{path}",
+        want.display()
+    );
+    assert!(
+        !dir.path().join("pwned").exists(),
+        "a substitution ran on source"
+    );
+
+    // A newline cannot be quoted into a shell line at all, so it is refused
+    // rather than written.
+    let newline_home = dir.path().join("two\nlines");
+    std::fs::create_dir_all(newline_home.join("bin")).unwrap();
+    std::fs::write(&rc, "# a shell rc somebody already owns\n").unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("setup")
+        .arg("--yes")
+        .arg("--airgap")
+        .env("HOME", &home)
+        .env("SHELL", "/bin/zsh")
+        .env("SEMLITH_HOME", &newline_home)
+        .env("SEMLITH_MODEL_CACHE", &cache)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("running semlith setup");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        said.contains("newline") && said.contains("SEMLITH_HOME"),
+        "a newline in the home should be refused naming the variable:\n{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&rc).unwrap(),
+        "# a shell rc somebody already owns\n",
+        "the rc file was edited despite the refusal"
+    );
+}
+
+/// A POSIX shell word for a path, for the test's own `sh -c`.
+fn shell_word(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
+}
