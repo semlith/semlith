@@ -54,6 +54,10 @@ ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 # default feature set adds every compressor and cipher the format allows, none
 # of which semlith needs to read a document.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+# Already in the tree under zip; named here so `upgrade` can decompress the
+# release archive in this process rather than through whatever `tar` is on
+# PATH. `rust_backend` keeps it from linking a system zlib.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

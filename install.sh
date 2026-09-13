@@ -6,7 +6,12 @@
 # SEMLITH_YES=1            answer yes to every `semlith setup` prompt
 set -eu
 repo=semlith/semlith
-origin=${SEMLITH_RELEASES_ORIGIN:-https://github.com}  # redirected by the tests
+# One origin, over HTTPS, with no way to be told another. A script that took
+# its origin from the environment would install whatever a hostile shell
+# profile pointed it at, on a machine where the user typed `curl … | sh`.
+# `tests/install.rs` rewrites this line in a copy of the script rather than
+# setting a variable, so what it exercises is what ships.
+origin=https://github.com
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 

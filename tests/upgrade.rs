@@ -335,6 +335,169 @@ fn airgap_refuses_before_opening_a_connection() {
     );
 }
 
+/// An archive larger than the cap is refused before the checksum, because the
+/// refusal has to happen before the bytes are in memory — a checksum computed
+/// over a gigabyte has already cost the gigabyte.
+#[test]
+fn an_oversized_archive_is_refused_before_it_is_checksummed() {
+    let work = tempfile::tempdir().unwrap();
+    let release = build_release(work.path());
+
+    // Past the 256 MiB cap, and compressible, so the fixture holds it cheaply.
+    let mut oversized = release.archive.clone();
+    oversized.resize(257 * 1024 * 1024, 0);
+    let sums = format!("{}  {}\n", sha256(&oversized), release.archive_name);
+
+    let mut table = routes(&release, &sums);
+    table.insert(
+        format!(
+            "/semlith/semlith/releases/download/{NEWER}/{}",
+            release.archive_name
+        ),
+        oversized,
+    );
+    let fixture = Fixture::serve(table);
+    let installed = install();
+    let before = std::fs::read(&installed.binary).unwrap();
+
+    let out = run(&installed, &fixture.origin(), &[], false);
+    assert!(!out.status.success(), "an oversized archive was accepted");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("larger than") && said.contains("nothing was written"),
+        "the refusal should name the size, it said:\n{said}"
+    );
+    assert!(
+        !said.contains("checksum mismatch"),
+        "the size was found only after the checksum, which means it was all read first:\n{said}"
+    );
+    assert_eq!(std::fs::read(&installed.binary).unwrap(), before);
+}
+
+/// A tag reaches a URL and a path, so it is checked before it reaches either.
+/// `--version` is the one a user types; the redirect is the one a server
+/// chooses.
+#[test]
+fn a_malformed_tag_is_refused_before_any_request() {
+    let work = tempfile::tempdir().unwrap();
+    let release = build_release(work.path());
+    let fixture = Fixture::serve(routes(&release, &release.sums));
+    let installed = install();
+
+    for tag in [
+        "v9.9.9-/../x",
+        "v9.9.9/../../etc",
+        "../../etc/passwd",
+        "v9.9",
+        "v9.9.9.9",
+        "vx.y.z",
+        "v99.0.0 ",
+    ] {
+        let out = run(&installed, &fixture.origin(), &["--version", tag], false);
+        assert!(
+            !out.status.success(),
+            "`--version {tag}` was accepted as a version tag"
+        );
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            said.contains("not a version tag"),
+            "`--version {tag}` failed for some other reason:\n{said}"
+        );
+    }
+
+    assert_eq!(
+        fixture.hits.load(Ordering::SeqCst),
+        0,
+        "a malformed tag reached the network before it was refused"
+    );
+}
+
+/// A redirect that lands somewhere that is not a version tag is a redirect
+/// choosing a path inside this command, so it is refused where it lands.
+#[test]
+fn a_redirect_that_names_no_tag_is_refused() {
+    let work = tempfile::tempdir().unwrap();
+    let release = build_release(work.path());
+    let mut table = routes(&release, &release.sums);
+    // The fixture redirects `releases/latest` to a fixed tag; this one points
+    // it somewhere else entirely.
+    table.insert("/redirect-elsewhere".to_string(), Vec::new());
+    let fixture = Fixture::serve(table);
+    let installed = install();
+
+    let out = run(
+        &installed,
+        &format!("{}/redirect", fixture.origin()),
+        &[],
+        false,
+    );
+    assert!(
+        !out.status.success(),
+        "an unresolvable release was accepted"
+    );
+    assert!(
+        !std::fs::read(&installed.binary).unwrap().is_empty(),
+        "the binary was replaced from a release that could not be resolved"
+    );
+}
+
+/// The archive carries more than the binary from 0.14.0 — the Linux ones ship
+/// `libonnxruntime.so` beside it — so the reader extracts every file rather
+/// than picking one out.
+#[test]
+fn every_file_in_the_archive_is_unpacked_beside_the_binary() {
+    let work = tempfile::tempdir().unwrap();
+    let name = format!("semlith-{NEWER}-{}", target());
+    let staged = work.path().join(&name);
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::write(staged.join("semlith"), "#!/bin/sh\necho 'semlith 99.0.0'\n").unwrap();
+    chmod_755(&staged.join("semlith"));
+    std::fs::write(staged.join("libonnxruntime.so"), b"not really a library").unwrap();
+    std::fs::write(staged.join("README.md"), b"# semlith").unwrap();
+
+    let archive_name = format!("{name}.tar.gz");
+    let status = Command::new("tar")
+        .arg("czf")
+        .arg(work.path().join(&archive_name))
+        .arg("-C")
+        .arg(work.path())
+        .arg(&name)
+        .status()
+        .expect("running tar");
+    assert!(status.success());
+    let archive = std::fs::read(work.path().join(&archive_name)).unwrap();
+    let release = Release {
+        sums: format!("{}  {archive_name}\n", sha256(&archive)),
+        archive_name,
+        archive,
+    };
+
+    let fixture = Fixture::serve(routes(&release, &release.sums));
+    let installed = install();
+    let out = run(&installed, &fixture.origin(), &[], false);
+    assert!(
+        out.status.success(),
+        "the upgrade failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bin = installed.binary.parent().unwrap();
+    assert_eq!(
+        std::fs::read(bin.join("libonnxruntime.so")).unwrap(),
+        b"not really a library",
+        "the library beside the binary was not unpacked"
+    );
+    assert!(
+        !bin.join("README.md").exists(),
+        "the archive's documentation was installed into the bin directory"
+    );
+    let now = Command::new(&installed.binary).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&now.stdout).trim(),
+        "semlith 99.0.0"
+    );
+}
+
 /// `--check` is what a script runs, so its exit code is the answer: 0 when
 /// current, 10 when there is something newer, and the binary untouched either
 /// way.

@@ -2456,6 +2456,7 @@ dependencies = [
  "clap",
  "cliclack",
  "fastembed",
+ "flate2",
  "getrandom 0.3.4",
  "hf-hub",
  "ignore",

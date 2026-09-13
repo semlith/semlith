@@ -183,11 +183,30 @@ fn release(corrupt: bool) -> Release {
     }
 }
 
+/// The shipped script with its one origin rewritten to the fixture's.
+///
+/// The script takes no origin from the environment — a `curl … | sh` that read
+/// one would install whatever a hostile shell profile pointed it at — so the
+/// test edits a copy instead. Everything else about the copy is the shipped
+/// script, and the rewrite fails loudly if the line it is looking for moves.
+fn script_pointed_at(origin: &str, into: &Path) -> PathBuf {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let text = std::fs::read_to_string(&shipped).expect("reading install.sh");
+    assert!(
+        text.contains("origin=https://github.com"),
+        "install.sh no longer pins one origin; this test rewrites that line"
+    );
+    let redirected = text.replace("origin=https://github.com", &format!("origin={origin}"));
+    let copy = into.join("install.sh");
+    std::fs::write(&copy, redirected).expect("writing the redirected script");
+    copy
+}
+
 fn install(release: &Release) -> std::process::Output {
+    let script = script_pointed_at(&release.origin, &release.home);
     Command::new("sh")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+        .arg(&script)
         .env("SEMLITH_VERSION", TAG)
-        .env("SEMLITH_RELEASES_ORIGIN", &release.origin)
         .env("SEMLITH_HOME", &release.semlith_home)
         .env("HOME", &release.home)
         .output()
