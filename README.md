@@ -737,7 +737,11 @@ claude mcp add semlith -- semlith mcp
 **OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
 and the desktop app. TOML, and the table is `mcp_servers` with an underscore. A
 table with a `url` in it is a streamable-HTTP server; the header goes in an
-inline `http_headers` table.
+inline `http_headers` table. `codex mcp add` writes the same entry, but it has
+no flag for an arbitrary header: it takes the key from an environment variable
+instead, so `export SEMLITH_KEY=sml_YOURKEY` has to live in your shell profile
+rather than in the one command —
+`codex mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
 
 ```toml
 [mcp_servers.semlith]
@@ -762,6 +766,10 @@ http_headers = { Authorization = "Bearer sml_YOURKEY" }
 }
 ```
 
+```sh
+opencode mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer sml_YOURKEY"
+```
+
 **IO CLI** — `io.local.toml` in the project root. The servers are an array of
 tables rather than a map, so each one is its own `[[mcp]]` block and the name
 is a field inside it.
@@ -771,6 +779,10 @@ is a field inside it.
 id = "semlith"
 url = "http://127.0.0.1:7365/mcp"
 headers = { Authorization = "Bearer sml_YOURKEY" }
+```
+
+```sh
+io mcp add semlith --url http://127.0.0.1:7365/mcp --header 'Authorization=Bearer sml_YOURKEY'
 ```
 
 **GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
@@ -790,6 +802,10 @@ remote server is the ordinary `http`.
 }
 ```
 
+```sh
+copilot mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
 **Gemini CLI** — `~/.gemini/settings.json`. The key for a streamable-HTTP
 server is `httpUrl`, not `url`; a plain `url` is read as the older SSE
 transport and the connection fails.
@@ -803,6 +819,10 @@ transport and the connection fails.
     }
   }
 }
+```
+
+```sh
+gemini mcp add --transport http --header "Authorization: Bearer sml_YOURKEY" semlith http://127.0.0.1:7365/mcp
 ```
 
 **Qwen Code** — `~/.qwen/settings.json`, the same schema as Gemini CLI down to
@@ -819,6 +839,10 @@ transport and the connection fails.
 }
 ```
 
+```sh
+qwen mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
 **Amp** — `~/.config/amp/settings.json`, or the editor extension's own
 `settings.json`. The root key is the dotted string `amp.mcpServers`, which
 means the entry lives inside a wider settings file rather than in one of its
@@ -833,6 +857,10 @@ own.
     }
   }
 }
+```
+
+```sh
+amp mcp add semlith -- semlith mcp
 ```
 
 **Crush** — `crush.json` in the project root. The root key is `mcp`, not
@@ -868,6 +896,10 @@ one repository. `droid mcp add semlith http://127.0.0.1:7365/mcp --type http
 }
 ```
 
+```sh
+droid mcp add semlith http://127.0.0.1:7365/mcp --type http --header "Authorization: Bearer sml_YOURKEY"
+```
+
 **Goose** — `goose configure` → Add Extension → Remote Extension, or
 `~/.config/goose/config.yaml`. Goose calls them extensions, spells the
 transport `streamable_http` with an underscore, and takes the address as `uri`
@@ -901,6 +933,10 @@ form, which needs no key: `semlith mcp` proxies to the running daemon.
 }
 ```
 
+```sh
+q mcp add --name semlith --command semlith --args mcp
+```
+
 **OpenClaw** — `~/.openclaw/openclaw.json`. The servers are nested two deep
 under `mcp` then `servers`, and the transport field is called `transport`, not
 `type`.
@@ -919,10 +955,17 @@ under `mcp` then `servers`, and the transport field is called `transport`, not
 }
 ```
 
+```sh
+openclaw mcp add semlith --url http://127.0.0.1:7365/mcp --transport streamable-http --header "Authorization=Bearer sml_YOURKEY"
+```
+
 **DeepSeek** — `~/.deepseek/mcp.json`, read by DeepSeek-TUI, which has since
 renamed itself Codewhale and now looks in `~/.codewhale/mcp.json` first and
 falls back to the old path. Either file takes `servers` or `mcpServers` as the
-root key, and needs no transport field: a `url` is enough.
+root key, and needs no transport field: a `url` is enough. `codewhale mcp add`
+has no header flag, so the key goes in the environment:
+`export SEMLITH_KEY=sml_YOURKEY`, then
+`codewhale mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
 
 ```json
 {
@@ -967,6 +1010,10 @@ profile copy that `MCP: Open User Configuration` opens. The root key is
     }
   }
 }
+```
+
+```sh
+code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp","headers":{"Authorization":"Bearer sml_YOURKEY"}}'
 ```
 
 **Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one
@@ -1052,6 +1099,10 @@ falls back to SSE and the endpoint answers 405.
 }
 ```
 
+```sh
+cline mcp add semlith --transport http --header "Authorization: Bearer sml_YOURKEY" http://127.0.0.1:7365/mcp --yes
+```
+
 **Roo Code** — `.roo/mcp.json` in the project, or the global file the MCP
 Servers panel opens. Roo spells the same transport `streamable-http`, with the
 hyphen, which is the one thing that does not copy across from a Cline config.
@@ -1085,6 +1136,10 @@ SSE and the connection fails.
     }
   }
 }
+```
+
+```sh
+kilo mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer sml_YOURKEY"
 ```
 
 **Continue** — one block file per server at
@@ -1121,6 +1176,10 @@ the one you just edited.
     }
   }
 }
+```
+
+```sh
+kiro-cli mcp add --name semlith --command "semlith" --args "mcp" --scope global
 ```
 
 #### Desktop apps

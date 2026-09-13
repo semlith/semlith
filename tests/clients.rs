@@ -149,8 +149,13 @@ fn the_http_stanzas_name_the_endpoint_and_carry_a_credential() {
 }
 
 /// Whether a block configures the HTTP endpoint rather than a subprocess.
+///
+/// Naming the endpoint is what decides it. The earlier test for a quoted
+/// `/mcp"` read a `codeql`-style one-liner — `--url http://127.0.0.1:7365/mcp`
+/// with no quotes — as a subprocess stanza and then asked it what arguments it
+/// passed the binary.
 fn is_http(body: &str) -> bool {
-    body.contains("/mcp\"") || body.contains("--transport http")
+    body.contains("127.0.0.1:7365/mcp") || body.contains("--transport http")
 }
 
 /// Whatever the client's file format, the server it launches is semlith, and
@@ -334,9 +339,12 @@ fn args_of(body: &str) -> Vec<String> {
     tokens[binary + 1..=last]
         .iter()
         // Braces, `=`, `--` and YAML dashes are the config formats' own
-        // punctuation, and `args` is their word for "what follows". None of
-        // them is an argument the binary ever sees.
-        .filter(|t| t.chars().any(char::is_alphanumeric) && *t != "args")
+        // punctuation, and `args` is their word for "what follows" — spelled
+        // `args` in a JSON stanza and `--args` on a command line. None of them,
+        // and no other flag belonging to the client's own CLI, is an argument
+        // the binary ever sees. A `--store` would be caught by the check above
+        // this one rather than here.
+        .filter(|t| t.chars().any(char::is_alphanumeric) && !t.starts_with('-') && *t != "args")
         .cloned()
         .collect()
 }

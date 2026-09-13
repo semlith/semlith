@@ -2957,10 +2957,13 @@ async function agentsView() {
     // A one-line command belongs in a field with a Copy beside it, not in a
     // slab of dark code: it is a thing you paste into a shell, not a file you
     // are going to read.
-    // Shell one-liners for whichever transport the block above shows: a
-    // `--transport http` line under a subprocess stanza is a third answer.
-    const overTheWire = own.some((s) => s.format !== "sh" && overHttp(s.text));
-    const shells = own.filter((s) => s.format === "sh" && overHttp(s.text) === overTheWire);
+    // Shell one-liners, labelled by what they register rather than mixed in
+    // with the block above: several clients configure the endpoint in a file
+    // but can only add a subprocess from their CLI, and an unlabelled command
+    // under an HTTP stanza reads as a second way to do the same thing.
+    const shells = own.filter((s) => s.format === "sh");
+    const wired = shells.filter((s) => overHttp(s.text));
+    const spawned = shells.filter((s) => !overHttp(s.text));
     const blocks = own.filter((s) => s.format !== "sh");
     const http = blocks.filter((s) => overHttp(s.text));
     const stdio = blocks.filter((s) => !overHttp(s.text));
@@ -2991,8 +2994,12 @@ async function agentsView() {
       (config.length ? config.map((s) => s.text) : [httpStanza()]).map((text) =>
         codeBlock(text, "Copy stanza"),
       ),
-      shells.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
-      shells.map((s) => copyField(s.text, true)),
+      wired.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
+      wired.map((s) => copyField(s.text, true)),
+      spawned.length
+        ? el("span", { class: "eyebrow", text: "Or add the subprocess from a terminal" })
+        : null,
+      spawned.map((s) => copyField(s.text, true)),
     );
   }
   showClient(chosen);
