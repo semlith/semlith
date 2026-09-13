@@ -1068,6 +1068,12 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                 say(serde_json::json!({ "event": "started", "paths": names }));
             }
             let started_at = std::time::Instant::now();
+            // Every queued job arrived through the portal or through a
+            // forwarded `semlith_index`, so both are held to the boundary: this
+            // store's registered roots and the home directory, and never a
+            // credential by name. The watcher's own re-embeds are inside those
+            // roots by construction.
+            writer.boundary = crate::Boundary::within(store.roots.clone());
             // A pause belongs to the run that was on when it was asked for.
             // A stop does not need clearing here: a job that was queued when
             // one arrived has already been dropped from the queue, so reaching

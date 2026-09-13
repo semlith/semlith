@@ -20,7 +20,7 @@ use crate::fleet::Fleet;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The MCP revisions this server implements, newest first.
@@ -676,6 +676,14 @@ fn call_tool(
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
 
+            // The key that opens this tool lives in a config file on disk, so
+            // what it can reach is what a copied config file can reach. An
+            // agent may index this store's own roots and the home directory,
+            // and never a credential by name. `semlith index` on the command
+            // line is not held to the boundary — the person typing it is the
+            // owner of the machine.
+            store.boundary = crate::Boundary::within(registered_roots(store.dir()));
+
             match store.index_paths_within(&roots, index_budget(), |_, _| {}) {
                 // A store another process is writing is a conflict to report,
                 // not an error to fail the call with: the agent can wait, or
@@ -697,6 +705,11 @@ fn call_tool(
                              nothing already indexed is redone.",
                             report.remaining
                         ));
+                    }
+                    // Named, one per line, with the rule that refused each. A
+                    // refusal reported as a count is one an agent retries.
+                    for (path, why) in &report.refused {
+                        out.push_str(&format!("\nrefused: {path} — {why}"));
                     }
                     out
                 }
@@ -957,6 +970,23 @@ fn filter_of(args: &Value) -> Result<Filter, String> {
 
 /// One filter argument as strings. A bare string is accepted alongside an
 /// array, because that is what an agent produces about half the time.
+/// The roots the registry records for the store at this directory.
+///
+/// Empty for a store the registry does not know — a `--store` path or a trusted
+/// local `.semlith` — which leaves the home directory as the whole boundary.
+/// That is the right answer for a store nobody registered a root for: there is
+/// no corpus recorded, so there is nothing to widen the boundary to.
+fn registered_roots(dir: &Path) -> Vec<PathBuf> {
+    let Ok(registry) = crate::home::Registry::load() else {
+        return Vec::new();
+    };
+    registry
+        .name_of(dir)
+        .and_then(|name| registry.stores.get(name))
+        .map(|entry| entry.roots.clone())
+        .unwrap_or_default()
+}
+
 fn strings(args: &Value, key: &str) -> Vec<String> {
     match args.get(key) {
         Some(Value::String(s)) => vec![s.clone()],

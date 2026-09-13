@@ -210,6 +210,13 @@ pub enum FileOutcome {
     Skipped,
     /// Gone from disk, so its chunks were evicted.
     Removed,
+    /// Named a credential, or sat outside the boundary this caller may index.
+    ///
+    /// Told apart from `Skipped` because the two mean different things to
+    /// whoever reads the line: a skipped file is one semlith has no reader for,
+    /// and a refused one is a file semlith will not read. An agent that asked
+    /// for it needs to know which.
+    Refused,
 }
 
 impl FileOutcome {
@@ -220,7 +227,59 @@ impl FileOutcome {
             Self::Unchanged => "unchanged",
             Self::Skipped => "skipped",
             Self::Removed => "removed",
+            Self::Refused => "refused",
         }
+    }
+}
+
+/// What this caller is allowed to index.
+///
+/// Two different callers, two different answers. The person typing `semlith
+/// index` owns the machine: they are held to the deny-list, because indexing a
+/// private key by accident is a mistake rather than a decision, and
+/// `--include-secrets` is how they say they meant it. An agent holding the
+/// agent key is held to both the deny-list and a boundary, because the whole of
+/// what that key can reach is what a leaked key can reach — and "every file this
+/// user can read" is too much for a credential that lives in a config file.
+///
+/// The default is the CLI's: the deny-list, and no confinement.
+#[derive(Debug, Default, Clone)]
+pub struct Boundary {
+    /// Directories a path must be under. `None` means anywhere, which is what
+    /// the command line gets.
+    pub roots: Option<Vec<PathBuf>>,
+    /// Whether the deny-list is off for this run, which only the command line
+    /// can ask for.
+    pub allow_secrets: bool,
+}
+
+impl Boundary {
+    /// Confine to these roots, and to the home directory.
+    pub fn within(roots: Vec<PathBuf>) -> Self {
+        Self {
+            roots: Some(roots),
+            allow_secrets: false,
+        }
+    }
+
+    /// Why this path may not be indexed, in a line naming the rule.
+    pub fn refuses(&self, path: &Path) -> Option<String> {
+        if let Some(roots) = &self.roots
+            && !filter::within_boundary(path, roots)
+        {
+            return Some(
+                "is outside this store's roots and outside the home directory, so \
+                 semlith will not index it. Add it as a root first, or index it \
+                 from the command line."
+                    .to_string(),
+            );
+        }
+        if !self.allow_secrets
+            && let Some(why) = filter::denied(path)
+        {
+            return Some(why.reason());
+        }
+        None
     }
 }
 
@@ -258,6 +317,13 @@ pub struct IndexReport {
     /// Paths a time-bounded run never reached. Zero unless a budget cut the
     /// run short — an unbounded `index_paths` always finishes what it walked.
     pub remaining: usize,
+    /// Paths refused, each with the rule that refused it.
+    ///
+    /// Listed rather than counted: "three paths were refused" is not something
+    /// an agent or a person can act on, and a refusal that is not named reads
+    /// as a file that quietly failed to index.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<(String, String)>,
     /// Symbols extracted in this run, and the edges between them.
     pub symbols: usize,
     pub edges: usize,
@@ -316,6 +382,9 @@ pub struct Semlith {
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
+    /// What this caller may index. The default is the command line's: the
+    /// deny-list, and no confinement.
+    pub boundary: Boundary,
 }
 
 impl Semlith {
@@ -394,6 +463,7 @@ impl Semlith {
             clip: image::Clip::default(),
             generation,
             quiet: false,
+            boundary: Boundary::default(),
         })
     }
 
@@ -699,7 +769,41 @@ impl Semlith {
         let interval = checkpoint_interval();
         let mut last_checkpoint = std::time::Instant::now();
 
-        let total = paths.len();
+        // Refused before anything is read. A path that names a credential or
+        // sits outside this caller's boundary is reported by name with the rule
+        // that refused it, rather than dropped from the walk — an agent that
+        // asked for a file and got silence cannot tell that from a file that
+        // was not there.
+        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, String)>) = {
+            let mut allowed = Vec::with_capacity(paths.len());
+            let mut refused = Vec::new();
+            for path in paths {
+                match self.boundary.refuses(&path) {
+                    Some(why) => refused.push((path, why)),
+                    None => allowed.push(path),
+                }
+            }
+            (allowed, refused)
+        };
+        let total = paths.len() + refused.len();
+        for (path, why) in &refused {
+            report
+                .refused
+                .push((path.display().to_string(), why.clone()));
+            report.scanned += 1;
+            on_file(
+                path,
+                IndexProgress {
+                    outcome: FileOutcome::Refused,
+                    scanned: report.scanned,
+                    indexed: report.indexed,
+                    chunks: report.chunks,
+                    total,
+                    symbols: report.symbols,
+                },
+            );
+        }
+
         for (seen, path) in paths.into_iter().enumerate() {
             // Only ever after something was embedded: a budget too small for
             // any work at all must still make progress, or calling again is

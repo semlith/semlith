@@ -618,3 +618,138 @@ impl StoreDir {
         &self.0
     }
 }
+
+// ---------------------------------------------------------------- T10
+
+/// The whole of what the agent key can reach is what a copied config file can
+/// reach, so `semlith_index` is held to a boundary and to a deny-list. The
+/// person typing `semlith index` is the owner of the machine and is not.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn the_index_tool_refuses_a_credential_and_a_path_outside_the_boundary() {
+    let home = tempfile::Builder::new()
+        .prefix("mcp-boundary")
+        .tempdir()
+        .unwrap();
+    let work = home.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("ownership.md"), RUST).unwrap();
+    // A credential inside the corpus, which is the case a deny-list is for:
+    // the walker skips hidden files, and this one is not hidden.
+    fs::write(
+        work.join("service-account-credentials.json"),
+        r#"{"private_key":"-----BEGIN PRIVATE KEY-----"}"#,
+    )
+    .unwrap();
+    fs::write(work.join(".env"), "STRIPE_KEY=sk_live_pretend\n").unwrap();
+    // And the directory the finding is named for.
+    let ssh = home.path().join(".ssh");
+    fs::create_dir_all(&ssh).unwrap();
+    fs::write(ssh.join("id_ed25519"), "not really a key\n").unwrap();
+
+    // `semlith mcp` opens a store that already exists, so the corpus is indexed
+    // once from the command line first — which is also the asymmetry under
+    // test: the same directory, indexed by its owner, keeps the deny-list and
+    // loses the boundary.
+    let store = home.path().join("store");
+    let seeded = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", work.to_str().unwrap(), "--quiet"])
+        .arg("--store")
+        .arg(&store)
+        .env("HOME", home.path())
+        .env("SEMLITH_HOME", home.path().join("semlith-home"))
+        .env("SEMLITH_MODEL_CACHE", model_cache())
+        .output()
+        .expect("seeding the store");
+    assert!(
+        seeded.status.success(),
+        "seeding failed:\n{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+    // The command line applies the deny-list too, so the two credentials in the
+    // corpus were refused there as well.
+    let said = String::from_utf8_lossy(&seeded.stderr);
+    assert!(
+        said.contains("refused:") && said.contains("--include-secrets"),
+        "the command line did not apply the deny-list:\n{said}"
+    );
+
+    let mut server = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    server
+        .arg("--store")
+        .arg(&store)
+        .arg("mcp")
+        .env("HOME", home.path())
+        .env("SEMLITH_HOME", home.path().join("semlith-home"))
+        // HOME is moved so the deny-list's `~/.ssh` is this test's own, which
+        // also moves the model cache — so it is named back at the real one.
+        .env("SEMLITH_MODEL_CACHE", model_cache());
+    let mut child = server
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut s = Server {
+        child,
+        stdin,
+        stdout,
+        id: 0,
+    };
+    s.handshake();
+
+    // The corpus indexes, and the two credentials inside it are refused by
+    // name with the rule that refused each.
+    let indexed = s.tool("semlith_index", json!({ "path": [work.to_str().unwrap()] }));
+    assert!(
+        indexed.contains("refused:"),
+        "nothing was refused in a directory holding two credentials:\n{indexed}"
+    );
+    assert!(
+        indexed.contains("service-account-credentials.json") && indexed.contains("*credentials*"),
+        "the refusal does not name the file and the rule:\n{indexed}"
+    );
+
+    // A path outside the boundary, named explicitly, which is what the walker
+    // never saw.
+    let outside = s.tool("semlith_index", json!({ "path": ["/etc/hosts"] }));
+    assert!(
+        outside.contains("refused:") && outside.contains("outside"),
+        "/etc/hosts was not refused as outside the boundary:\n{outside}"
+    );
+
+    // And a key by name, under a denied directory.
+    let key = s.tool(
+        "semlith_index",
+        json!({ "path": [ssh.join("id_ed25519").to_str().unwrap()] }),
+    );
+    assert!(
+        key.contains("refused:") && key.contains(".ssh"),
+        "a key under ~/.ssh was not refused:\n{key}"
+    );
+
+    // Nothing refused reached the store.
+    let files = s.tool("semlith_files", json!({}));
+    assert!(
+        !files.contains("credentials") && !files.contains("id_ed25519") && !files.contains(".env"),
+        "a refused file is in the store:\n{files}"
+    );
+    assert!(
+        files.contains("ownership.md"),
+        "the corpus did not index:\n{files}"
+    );
+}
+
+/// The developer's real model cache, so a test that moves `HOME` does not make
+/// every run download 52 MB again.
+fn model_cache() -> String {
+    if let Ok(dir) = std::env::var("SEMLITH_MODEL_CACHE") {
+        return dir;
+    }
+    format!(
+        "{}/.cache/semlith/models",
+        std::env::var("HOME").unwrap_or_default()
+    )
+}

@@ -153,6 +153,108 @@ fn require_https(url: &str) -> Result<()> {
     bail!("{url} is not https; `semlith add` fetches over https only")
 }
 
+/// Opt back in to fetching an address that is not on the public internet.
+///
+/// For a developer whose documentation is on an intranet host. Off by default,
+/// because the default caller of this code is an agent holding a key from a
+/// config file, and "fetch this URL" with a private address is how a tool that
+/// runs on your machine becomes a way to read things only your machine can
+/// reach — a metadata service, a router, a service bound to loopback.
+pub const ALLOW_PRIVATE_ENV: &str = "SEMLITH_ADD_ALLOW_PRIVATE";
+
+fn private_allowed() -> bool {
+    std::env::var_os(ALLOW_PRIVATE_ENV).is_some_and(|v| v == "1" || v == "true")
+}
+
+/// Refuse a host that resolves to an address that is not on the public
+/// internet.
+///
+/// Checked per hop rather than once, because a redirect is the whole trick: a
+/// public host that answers 302 to `http://169.254.169.254/` is a public host
+/// asking this process to read a cloud instance's credentials. Every address
+/// the name resolves to has to pass, not just the first — a name that resolves
+/// to a public address and a loopback one is a name that can be raced.
+fn require_public(url: &str) -> Result<()> {
+    if private_allowed() {
+        return Ok(());
+    }
+    let Some(authority) = url
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+    else {
+        bail!("{url} is not a URL semlith can resolve");
+    };
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let (host, port) = match authority.rsplit_once(':') {
+        // An IPv6 literal is full of colons; the port is only after the bracket.
+        Some((h, p)) if !h.ends_with(']') && p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+        _ => (authority, "443"),
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+
+    use std::net::ToSocketAddrs;
+    let resolved: Vec<std::net::SocketAddr> = format!("{host}:{port}")
+        .to_socket_addrs()
+        .with_context(|| format!("resolving {host}"))?
+        .collect();
+    if resolved.is_empty() {
+        bail!("{host} resolves to nothing");
+    }
+    for address in resolved {
+        if !is_public(&address.ip()) {
+            bail!(
+                "{host} resolves to {}, which is not on the public internet. \
+                 `semlith add` fetches from the internet; set {ALLOW_PRIVATE_ENV}=1 \
+                 if you meant to reach an address only this machine or this network \
+                 can see.",
+                address.ip()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Whether an address is one the public internet routes to.
+///
+/// Everything a cloud metadata service, a container network, a home router or
+/// this machine itself sits on is refused. Written as a list of what is not
+/// public rather than what is, because the not-public list is the one that is
+/// closed.
+fn is_public(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                // Carrier-grade NAT, which a home router's own subnet often is.
+                || (a == 100 && (64..128).contains(&b))
+                // "This network", and the reserved block above the multicast
+                // range that includes 255.255.255.255.
+                || a == 0
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique local addresses, fc00::/7.
+                || (v6.octets()[0] & 0xfe) == 0xfc
+                // Link-local, fe80::/10.
+                || (v6.octets()[0] == 0xfe && (v6.octets()[1] & 0xc0) == 0x80)
+                // An IPv4 address wearing an IPv6 hat is judged as the IPv4 one.
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| !is_public(&IpAddr::V4(v4))))
+        }
+    }
+}
+
 /// Follow the chain to the document, returning where it ended, what the server
 /// said it was, and its bytes.
 fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
@@ -167,6 +269,7 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
         .new_agent();
 
     let mut current = url.to_string();
+    require_public(&current)?;
     for _ in 0..=MAX_REDIRECTS {
         let mut response = agent
             .get(&current)
@@ -183,6 +286,7 @@ fn get(url: &str) -> Result<(String, String, Vec<u8>)> {
                 .with_context(|| format!("{current} redirected without saying where"))?;
             current = absolute(&current, &location);
             require_https(&current)?;
+            require_public(&current)?;
             continue;
         }
         if status == 401 || status == 403 {

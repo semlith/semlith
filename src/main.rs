@@ -50,6 +50,14 @@ enum Command {
         /// prove this process never reached the network.
         #[arg(long)]
         airgap: bool,
+
+        /// Index files semlith otherwise refuses: `.env`, private keys,
+        /// anything under `~/.ssh` and the rest of the deny-list. Off by
+        /// default, because indexing a private key by accident is a mistake and
+        /// this flag is how you say you meant it. It has no effect on the MCP
+        /// tools or the portal, which are held to the boundary either way.
+        #[arg(long)]
+        include_secrets: bool,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -382,6 +390,7 @@ fn main() -> Result<()> {
             name,
             quiet,
             airgap,
+            include_secrets,
         } => {
             arm_airgap(airgap);
             let model = model
@@ -405,6 +414,13 @@ fn main() -> Result<()> {
             let dir = choice.one()?;
             let mut store = Semlith::open(&dir, model)?;
             store.quiet = quiet;
+            // No confinement on the command line: the person typing it owns the
+            // machine. The deny-list still applies, because indexing a private
+            // key by accident is a mistake rather than a decision.
+            store.boundary = semlith::Boundary {
+                roots: None,
+                allow_secrets: include_secrets,
+            };
 
             let started = Instant::now();
             // Throttled, not per file: a corpus large enough to need an
@@ -417,6 +433,9 @@ fn main() -> Result<()> {
                 }
                 if p.outcome == semlith::FileOutcome::Indexing {
                     eprintln!("  + {}", display(path));
+                }
+                if p.outcome == semlith::FileOutcome::Refused {
+                    eprintln!("  - {}", display(path));
                 }
                 if spoke.elapsed() >= PROGRESS_INTERVAL {
                     spoke = Instant::now();
@@ -439,6 +458,14 @@ fn main() -> Result<()> {
             } else {
                 String::new()
             };
+            // Named one per line. A refusal reported as a count is one the
+            // person retries with the same arguments.
+            for (path, why) in &report.refused {
+                eprintln!("refused: {path} — {why}");
+            }
+            if !report.refused.is_empty() && !include_secrets {
+                eprintln!("  `--include-secrets` indexes these anyway, if you meant to.");
+            }
             eprintln!(
                 "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped, {} removed",
                 report.indexed,
