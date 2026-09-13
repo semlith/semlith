@@ -7,6 +7,161 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-14
+
+Every finding of the security audit of 0.13.0, closed in one release, each with
+the test that would have caught it. The restrictions *are* the release:
+`docs/compatibility.md` records the four that break something 0.13.0 did, with
+the way back for each, and `docs/security.md` is the user-facing version of what
+semlith now refuses.
+
+The prebuilt Linux binary also starts on Debian 12 again, which it has not since
+0.10.0.
+
+### Nothing else on this machine can act as you
+
+- **H2, L6 — the portal session moved from a cookie to a request header.** Every
+  port on `localhost` is the same site, so `SameSite=Strict` never separated
+  semlith from a page served by anything else on `127.0.0.1`. The token now
+  travels as `Semlith-Token`, which a browser attaches only for this page and
+  cannot set on an `<img>`, a form or a stylesheet. The page takes it from the
+  printed URL, keeps it in `sessionStorage`, and removes it from the address bar.
+  A write additionally needs a JSON content type and, from any client that sends
+  fetch metadata, `Sec-Fetch-Site: same-origin`; both are checked before the
+  token, so a cross-origin page cannot tell a right guess from a wrong one. The
+  query-string token opens nothing. The page and its own static assets are now
+  served without a credential, because a browser attaches no header to a
+  stylesheet.
+- **M1 — the token comes from the OS random source.** It was a blake3 hash of
+  the clock, this process's id and the address of a fresh allocation, none of
+  which is a secret. A wrong token is answered after 250 ms, doubling to four
+  seconds past twenty refusals in a minute, on a thread of its own so the
+  throttle cannot become the denial of service it prevents.
+- **M9 — a panicking route costs one request.** It used to kill its worker
+  permanently and poison every lock it held. The handler is wrapped, a panic
+  answers 500, a worker that ends is replaced, and every lock on shared state
+  recovers rather than expecting.
+- **L1 — what one client can hold is bounded.** The request head is read on its
+  own and every refusal decided from it, so a refused request never has its body
+  read into memory; a thousand cross-origin attempts leave the daemon's resident
+  memory where it started. Connections are capped at 32, a request has ten
+  seconds to arrive in full, a streamed response leaves the worker pool, and the
+  Files route refuses an offset past ten thousand rather than allocating it.
+- **L2 — an `Mcp-Session-Id` from a client is accepted only as the sixteen hex
+  characters the server produces**, and anything else is replaced rather than
+  reflected into a response header.
+
+### Nothing you did not write decides what semlith answers with
+
+- **M2 — a store semlith did not create is opened only after `semlith trust`.**
+  A `.semlith` can arrive inside a repository, and a store is what semlith
+  answers from. The refusal names both `semlith trust` and `semlith adopt`;
+  `--store` still opens anything. `daemon.json` is read only from a trusted
+  store, only when it is mode `0600`, owned by you, naming a live process and
+  carrying a 64-hex token. Every connection opens with `trusted_schema` off and
+  SQLite's defensive mode on, and refuses writes until a write path asks.
+- **M7 — the model weights are pinned to a commit and a digest.** All three
+  repositories, sixteen files, recorded in `docs/models.md` with the commit URLs.
+  A file that does not match is refused by name with both digests printed. A
+  model cache another account owns or can write to is refused naming the fix.
+- **L3 — the parsers are bounded.** An image whose header claims more than 64
+  million pixels is refused before a decoder allocates for it, a tree-sitter
+  parse gives up after two seconds, and the index loop opens each file once and
+  reads through a capped reader from that handle.
+- **L4 — `/api/image` canonicalises before it looks up**, so an indexed name that
+  now points somewhere else is a 404 rather than a read, and everything after is
+  decided from one open handle.
+
+### What a leaked agent key gets
+
+- **M6 — the agent-facing index tools work inside a boundary**: the store's
+  registered roots or the home directory, never a credential directory and never
+  a file named like a credential. Ten directories, thirteen name patterns, one
+  table. The hidden-file rule now applies to an explicitly named path too, which
+  is how `~/.ssh/id_rsa` used to walk past every rule the walk applied. Every
+  refusal is named with the rule that refused it. `semlith index` on the command
+  line keeps the deny-list and loses the boundary, and `--include-secrets` turns
+  the deny-list off for that run.
+- **M6 — `semlith add` refuses an address that is not on the public internet**,
+  at every hop: loopback, RFC 1918, link-local, carrier-grade NAT, unique local.
+  `SEMLITH_ADD_ALLOW_PRIVATE=1` opts back in.
+- **M4 — the agent key stops travelling.** Every stanza names
+  `${SEMLITH_AGENT_KEY}`, which the shell block `semlith setup` writes exports by
+  reading `~/.semlith/agent.key` at shell start — so no configuration file
+  carries it and a rotation needs nothing rewritten. It never reaches a command
+  line, `/api/agents` no longer returns it, and `POST /api/agents/reveal` hands
+  it over once when somebody presses the button. A config file that still carries
+  an old key is rewritten through a temp file created with the original's mode. A
+  rotated key expires after fifteen minutes rather than when the daemon exits.
+
+### On disk
+
+- **M5 — what semlith writes is readable by its owner and nobody else.** Every
+  directory it owns is created `0700` and narrowed on every open if something
+  loosened it; `store.db`, the vector shards, `registry.json`, `agent.key` and
+  `daemon.json` are `0600`, created with their mode rather than chmod'ed after.
+  Nothing is ever widened. `semlith stats` and the Stores page report a store
+  other users can read.
+- **M3 — the PATH line `semlith setup` writes is a shell word.** It was inside
+  double quotes, which expand `$(…)`, backticks and `$VAR`, so a crafted
+  `SEMLITH_HOME` put a command in a file the shell runs at every start. Now
+  single-quoted for POSIX shells, escaped for fish, and doubled for PowerShell; a
+  home containing a newline is refused naming the variable.
+- **L5 — the registry's temp file carries this process's id**, `Registry::dir_of`
+  sanitises its argument, and a run with neither `HOME` nor `SEMLITH_HOME` is an
+  error naming both rather than a store written into the working directory.
+
+### The release itself
+
+- **#57 — the prebuilt Linux binary starts on Debian 12, Ubuntu 22.04 LTS, RHEL 9
+  and Amazon Linux 2023 again.** It needed glibc 2.39 since 0.10.0. The route
+  recorded in the workflow — build on an older runner — could not work: the ONNX
+  Runtime `ort` downloads references `__isoc23_strtol@GLIBC_2.38`, and a linker
+  cannot satisfy a reference to a symbol version the target libc does not have.
+  So the Linux binaries stop linking it: they load `libonnxruntime.so` from
+  beside themselves, and the release packs Microsoft's own ONNX Runtime — whose
+  floor is glibc 2.27 — into the archive, verified against the checksum GitHub
+  publishes with it. `install.sh` and `semlith upgrade` place both files. Every
+  other build, `cargo install` included, is unchanged. The floor is now asserted
+  over the packaged pair and the job fails above glibc 2.35.
+- **H1b — `semlith upgrade` has one origin and no way to be told another.** The
+  override is compiled out of every build without `debug_assertions`, and
+  `install.sh` pins the same origin with no variable at all.
+- **H1c, H1d — the download is bounded and the archive is unpacked in this
+  process.** The archive read stops one byte past 256 MiB and `SHA256SUMS` past
+  64 KiB; the tag is checked against the shape of a version before it reaches a
+  URL or a path, including whatever a redirect landed on; `flate2` and a tar
+  reader replace `Command::new("tar")`, which was a program chosen by `PATH` on
+  the one code path that replaces the running binary. `owned()` canonicalises
+  both sides and writability is `access(W_OK)` rather than the owner's bits.
+- **M8 — `release.yml` grants `contents: write` to the one job that uploads**,
+  and nothing at workflow level: the build jobs held a token with push rights
+  while compiling a dependency tree. CI gains a leg that builds the
+  `rust-version` the crate declares, which nothing had ever checked.
+- **L7 — `install.ps1` sets TLS 1.2 before its first request**, which is what
+  Windows PowerShell 5.1 needs to reach github.com at all.
+- **I1, I2, I3 — `SECURITY.md` describes the release that exists.** The
+  supported-versions table named a version two behind; the network section now
+  lists the four outbound requests semlith makes and names `cdn.pyke.io` as the
+  build-time ONNX Runtime source that `ort-sys` hash-pins. `/api/about` no longer
+  reports the pid. The `unsafe` inventory is in `AGENTS.md` with the reason for
+  each site.
+
+### Added
+
+- `semlith trust <dir>` records a store outside the store home as one you have
+  agreed to open, and `semlith trust --list` prints what is trusted. Nothing is
+  moved; `semlith adopt` is still the command that moves a store.
+- `semlith index --include-secrets` indexes what the deny-list otherwise refuses.
+- The portal's Privacy page carries a **Rules** section: one row per rule this
+  release adds, each with the daemon's own check of it. The Stores page offers
+  Trust beside a store that is open without having been trusted and reports one
+  other users can read; the Agents page shows the key masked behind Reveal; the
+  Index page lists refused paths with the rule that refused each.
+- `docs/security.md`, the user-facing version of what semlith refuses, and
+  `docs/models.md`, the pinned commits and digests with the commands to check
+  them yourself.
+
 ## [0.13.0] - 2026-09-13
 
 The portal becomes the product's own design, agents get an endpoint they can

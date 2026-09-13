@@ -13,11 +13,13 @@ break, and is treated as one.
 |---|---|
 | CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `add`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, `setup`, `upgrade`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
-| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. |
+| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. |
 | CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
+| CLI commands added in 0.14.0 | `trust <dir>` and `trust --list`, and `index --include-secrets`. |
+| The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
 | The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME` and `SEMLITH_YES`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
-| Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. `semlith upgrade` and both scripts read that layout. |
+| Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. `semlith upgrade` and both scripts read that layout. From 0.14.0 the Linux archives hold `libonnxruntime.so` beside the binary as well, and every file in the archive is unpacked. |
 | `semlith setup --yes` | Runs every step with its default and no prompt, so a script or an agent can install semlith unattended. |
 | `semlith upgrade --check` | Exits 0 when the installed version is current and 10 when a newer release exists, and changes nothing either way. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
@@ -138,6 +140,98 @@ advertised tool count drops from ten to nine.
   and callees, which is the one-hop answer, and `semlith path <from> <to>`
   answers whether one symbol reaches another. Both are unchanged, as are
   `semlith symbol` and the three MCP tools that carry them.
+
+### 0.14.0 narrows four things it used to do
+
+**Four breaks in the covered surface, all in the same direction.** The 0.13.0
+security audit found that a browser tab on any other local port, and a cloned
+repository, could each act as the user. Closing those meant refusing things
+0.13.0 did — so the restrictions *are* the release, and each of them is recorded
+here with the way back where there is one.
+
+#### An unregistered local `.semlith` is not opened without one command
+
+- **What breaks.** `semlith search`, `stats`, `files`, `forget` and `index` in a
+  directory holding a `.semlith` that semlith did not create exit non-zero,
+  naming the store and both ways forward. So does `semlith mcp` there, so an
+  agent pointed at such a directory reports the refusal rather than answering
+  from the store.
+- **Why.** A `.semlith` directory can arrive inside a repository somebody else
+  wrote, and a store is what semlith answers from: a cloned one is a corpus an
+  attacker chose, answering the questions an agent asks. Its `daemon.json` also
+  chose the port those questions travelled through.
+- **The way back.** `semlith trust <dir>` records it once and moves nothing;
+  `semlith adopt <dir>` moves it into the store home. `--store` and
+  `SEMLITH_STORE` are unchanged and still open anything, because naming a store
+  is an instruction rather than a discovery.
+- **Who is unaffected.** Every store `semlith index` made. They live under the
+  store home and are trusted by being there.
+
+#### `semlith_index` and the portal index inside a boundary
+
+- **What breaks.** The MCP tool `semlith_index`, `POST /api/index`, `/api/root`
+  and `/api/adopt` refuse a path outside the target store's registered roots and
+  outside the home directory, and refuse any path under `~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.kube`, `~/.config/gcloud`, `~/.azure`, `~/.docker`,
+  `~/Library/Keychains`, `~/.password-store` or `~/.local/share/keyrings`, or
+  named `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.jks`,
+  `id_rsa*`, `id_ed25519*`, `*credentials*`, `*secret*`, `*.tfstate` or
+  `*.kdbx`. The hidden-file rule the walker already applied now also applies to
+  a path named explicitly. Every refusal is reported per path with the rule that
+  refused it.
+- **Why.** The agent key lives in a config file on disk, so what it can reach is
+  what a copied config file can reach — and that was every file the user could
+  read.
+- **The way back.** `semlith index` on the command line keeps the deny-list and
+  is not confined to any root: the person typing it owns the machine.
+  `--include-secrets` turns the deny-list off for that run. There is no opt-out
+  for the agent-facing surface, by choice.
+
+#### `semlith add` refuses an address that is not on the public internet
+
+- **What breaks.** A URL whose host resolves — at any hop of a redirect — to
+  loopback, an RFC 1918 range, link-local (including `169.254.169.254`),
+  carrier-grade NAT, a unique local address or the unspecified address exits
+  non-zero naming the address it resolved to.
+- **Why.** "Fetch this URL" from a tool running on your machine is how that tool
+  becomes a way to read what only your machine can reach: a cloud metadata
+  service, a router, something bound to loopback.
+- **The way back.** `SEMLITH_ADD_ALLOW_PRIVATE=1`, for a developer indexing
+  documentation on an intranet host.
+
+#### The portal's session token is a header, and the cookie is gone
+
+- **What breaks.** A script that drove `/api/*` with a `Cookie:
+  semlith_token=…` header gets 401. A browser holding a 0.13.0 cookie is
+  answered 401 on its next request and reloads from the printed URL. The
+  query-string form (`/api/stores?token=…`) is no longer a credential on any
+  route.
+- **Why.** Every port on `localhost` is the same site, so `SameSite=Strict`
+  never separated this daemon from a page served by anything else on
+  `127.0.0.1`. A custom header is attached only by this page.
+- **The way back.** Send `Semlith-Token: <token>` instead of the cookie. A
+  non-GET request additionally needs a JSON content type, and — if it sends
+  fetch metadata at all — `Sec-Fetch-Site: same-origin`. A script that sends
+  neither `Sec-Fetch-Site` nor `Origin` is judged on the token alone, so `curl`
+  keeps working with one header changed.
+- **One thing widened rather than narrowed.** The page itself and its own static
+  assets are now served without a credential, because a browser attaches no
+  header to a stylesheet, a font or a favicon. They are the same bytes in every
+  copy of the binary. Everything that answers about this machine still needs the
+  token.
+
+#### Two smaller changes worth knowing
+
+- **The Linux release archive holds two files.** From 0.14.0 the prebuilt Linux
+  binaries load ONNX Runtime from `libonnxruntime.so` beside them rather than
+  linking it in, which is what lets them start on Debian 12, Ubuntu 22.04 LTS,
+  RHEL 9 and Amazon Linux 2023 (issue #57). `install.sh` and `semlith upgrade`
+  place both files; a binary copied out of the archive on its own reports the
+  missing library by name rather than failing on the first index. `cargo install
+  semlith`, macOS and Windows are unchanged.
+- **A rotated agent key expires fifteen minutes later**, rather than when the
+  daemon exits. On a machine somebody leaves running, "until this process exits"
+  was a second live credential rather than a grace period.
 
 ## The honest version of the promise
 

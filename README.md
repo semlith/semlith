@@ -164,7 +164,7 @@ just those lines instead of the whole file.
 
 | Command | What it does |
 |---|---|
-| `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. |
+| `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--include-secrets` indexes what the deny-list otherwise refuses. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
 | `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
@@ -178,6 +178,7 @@ just those lines instead of the whole file.
 | `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--ledger`, `--no-mcp-http`. |
 | `semlith key show` \| `rotate` | Print the agent key that opens the HTTP MCP endpoint, and the stanza around it, or mint a new one. `--now` on `rotate` drops the previous key immediately. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
+| `semlith trust <DIR>` | Say that a store outside the store home may be opened, once. Nothing is moved. `--list` prints what is trusted. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
 | `semlith languages` | List the language names `--lang` accepts. |
@@ -724,7 +725,11 @@ fails to connect rather than failing to find anything.
 `--store` still works and still wins when it is given: repeat it to open a
 chosen set of stores, or set `SEMLITH_STORE` to a path-separator-delimited
 list. A store that sits beside its corpus keeps working where it is, and
-`semlith adopt ./.semlith` moves it into the home so these stanzas reach it.
+`semlith trust ./.semlith` is enough to keep using it where it is — from 0.14.0
+a store semlith did not create is not opened until you have said so once,
+because a `.semlith` directory can arrive inside a repository you cloned.
+`semlith adopt ./.semlith` moves it into the home instead, so these stanzas
+reach it with no flags.
 
 `cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
 your `PATH` in a shell but often not in an editor launched from a desktop icon
