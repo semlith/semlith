@@ -255,7 +255,7 @@ fn step_binary(yes: bool) -> Result<Step> {
         });
     }
 
-    std::fs::create_dir_all(&bin).with_context(|| format!("creating {}", bin.display()))?;
+    home::secure_dir(&bin).with_context(|| format!("creating {}", bin.display()))?;
     std::fs::copy(&running, &target)
         .with_context(|| format!("copying {} to {}", running.display(), target.display()))?;
     Ok(Step {
@@ -540,7 +540,10 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
     }
 
     let _ = cliclack::log::step(format!("model: downloading into {}", cache.display()));
-    std::fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
+    // The model cache is weights, and weights are what every vector in every
+    // store is computed by. A cache another account can write to is a model
+    // another account chooses.
+    home::secure_dir(&cache).with_context(|| format!("creating {}", cache.display()))?;
     match embed::Model::default().load(cache.clone(), chunk::MAX_CHARS / 2, false) {
         Ok(_) => Ok(Step {
             name: "model",

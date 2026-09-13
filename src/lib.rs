@@ -40,7 +40,7 @@ pub mod store;
 pub mod upgrade;
 pub mod watch;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use embed::Model;
 use fastembed::TextEmbedding;
 use filter::Filter;
@@ -326,10 +326,19 @@ impl Semlith {
     /// comparable.
     pub fn open(dir: impl AsRef<Path>, model: Option<Model>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating store directory {}", dir.display()))?;
+        // Owner-only, and narrowed on every open rather than only at creation:
+        // a store holds the text of every file it indexed, and one made by an
+        // older semlith is already readable by everyone on the machine.
+        home::secure_dir(&dir)?;
 
-        let db = store::open(&dir.join("store.db"))?;
+        let db_path = dir.join("store.db");
+        let db = store::open(&db_path)?;
+        home::tighten_file(&db_path);
+        // The write-ahead log and its index carry the same rows as the database
+        // and are created by SQLite rather than by semlith.
+        for beside in ["store.db-wal", "store.db-shm"] {
+            home::tighten_file(&dir.join(beside));
+        }
 
         let model = match store::get_meta(&db, "model")? {
             Some(existing) => {

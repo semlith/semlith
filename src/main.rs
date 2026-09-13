@@ -826,6 +826,17 @@ fn main() -> Result<()> {
                 // The store's own directory, not the flag order: a store named
                 // twice was opened once.
                 println!("store    {}", store.dir().display());
+                // Said where somebody will see it. A store directory other
+                // accounts on this machine can read holds the text of every
+                // file it indexed, and one made before 0.14.0 is loose until
+                // this binary opens it.
+                if let Some(mode) = home::loose_mode(store.dir()) {
+                    println!(
+                        "warning  the store directory is mode {mode:o}; other users on this \
+                         machine can read what it indexed. Opening it with this semlith \
+                         narrows it to 700."
+                    );
+                }
                 println!("model    {} ({} dim)", store.model(), store.dim());
                 println!("files    {files}");
                 println!("chunks   {chunks}");

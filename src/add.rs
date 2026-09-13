@@ -78,7 +78,9 @@ pub fn fetch(url: &str, store_dir: &Path) -> Result<Fetched> {
     let path = destination(store_dir, &final_url, &extension)?;
 
     let parent = path.parent().unwrap_or(store_dir);
-    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    // The downloads directory sits inside the store, so it carries what the
+    // store carries: the bytes of whatever was fetched.
+    crate::home::secure_dir(parent)?;
     std::fs::write(&path, &body).with_context(|| format!("writing {}", path.display()))?;
 
     register_root(store_dir)?;

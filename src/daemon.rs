@@ -105,16 +105,26 @@ impl Discovery {
 
     fn write(&self, store_dir: &Path) -> Result<()> {
         let path = store_dir.join(DISCOVERY_FILE);
-        std::fs::write(&path, serde_json::to_string_pretty(self)? + "\n")
-            .with_context(|| format!("writing {}", path.display()))?;
-        // The token is in this file, so nobody else on a shared machine reads
-        // it. Best effort: a filesystem without modes is not a reason to fail
-        // to start.
+        // The mode is set as the file is created rather than afterwards. The
+        // session token is in this file, and a file that is world-readable for
+        // the microsecond between the two is a file that was world-readable —
+        // the same reason `home::write_agent_key` opens with a mode.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(home::FILE_MODE);
         }
+        let mut file = options
+            .open(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        use std::io::Write;
+        file.write_all((serde_json::to_string_pretty(self)? + "\n").as_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+        // An existing file keeps its own mode through `truncate`, so one left
+        // loose by an older semlith is narrowed here too.
+        home::tighten_file(&path);
         Ok(())
     }
 

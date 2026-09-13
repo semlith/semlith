@@ -169,6 +169,11 @@ fn stores(state: &Arc<State>) -> Response {
         out.push(json!({
             "name": handle.name,
             "dir": handle.dir.display().to_string(),
+            // A store made before 0.14.0 is readable by everyone on the machine
+            // until it is opened by this binary, and one somebody chmod'ed is
+            // readable until the next open too. Reported rather than silently
+            // fixed, so the row says what happened.
+            "loose_mode": home::loose_mode(&handle.dir).map(|m| format!("{m:o}")),
             // Told apart so the portal can show a root that is not there as a
             // problem rather than silently listing one fewer.
             "roots": handle.roots.iter().map(|r| json!({

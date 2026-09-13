@@ -139,8 +139,7 @@ fn new_agent_key() -> String {
 fn write_agent_key(key: &str) -> Result<()> {
     let path = agent_key_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        secure_dir(parent)?;
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -188,6 +187,105 @@ fn check_key_mode(_path: &Path) -> Result<()> {
 
 /// What a store directory is called when it sits beside its corpus.
 pub const LOCAL_DIR: &str = ".semlith";
+
+/// The mode every directory semlith creates gets, and keeps.
+pub const DIR_MODE: u32 = 0o700;
+
+/// The mode every file semlith creates that is worth reading gets.
+pub const FILE_MODE: u32 = 0o600;
+
+/// Create a directory nobody else on the machine can read, and keep it that way.
+///
+/// A store holds the text of every file it indexed. On a shared machine — a
+/// build box, a lab workstation, a container with more than one account — a
+/// directory created with the process umask is usually `0755`, so the corpus
+/// was readable by everyone. The tightening is applied on every open rather
+/// than only at creation, because a store made by an older semlith is already
+/// loose and its owner will never think to fix it by hand.
+///
+/// Only ever narrows. A directory somebody has deliberately opened up is not
+/// something this widens back, and nothing here touches a directory semlith did
+/// not make.
+pub fn secure_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    tighten_dir(path);
+    Ok(())
+}
+
+/// Narrow a directory to [`DIR_MODE`] if it is looser. Best effort: a
+/// filesystem without modes is not a reason to fail to open a store.
+pub fn tighten_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(DIR_MODE));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// The same for a file.
+pub fn tighten_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Write a file nobody else on the machine can read.
+///
+/// The mode is set as the file is created rather than afterwards: a file that
+/// is world-readable for the microsecond between the two is a file that was
+/// world-readable. The registry names every store on the machine and the roots
+/// each one covers, which is a map of what this user works on.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(FILE_MODE);
+    }
+    let mut file = options.open(path)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    // An existing file keeps its own mode through `truncate`, so one left loose
+    // by an older semlith is narrowed here too.
+    tighten_file(path);
+    Ok(())
+}
+
+/// Whether this directory is readable by anyone but its owner.
+///
+/// What `semlith stats` and the Stores page report, so a store that was made
+/// before 0.14.0 and has not been opened since says so rather than looking
+/// like every other row.
+pub fn loose_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        (mode & 0o077 != 0).then_some(mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
 
 /// One store's entry in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,11 +351,11 @@ impl Registry {
     pub fn save(&self) -> Result<()> {
         let path = registry_path();
         let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating the store home {}", dir.display()))?;
+        secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
         let temp = path.with_extension("json.new");
         let body = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
+        write_private(&temp, body.as_bytes())
+            .with_context(|| format!("writing {}", temp.display()))?;
         std::fs::rename(&temp, &path).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
@@ -654,8 +752,7 @@ pub fn adopt(source: &Path, root: Option<&Path>, name: Option<&str>) -> Result<(
     let name = registry.free_name(&stem);
     let target = Registry::dir_of(&name);
 
-    std::fs::create_dir_all(stores_root())
-        .with_context(|| format!("creating {}", stores_root().display()))?;
+    secure_dir(&stores_root())?;
     match std::fs::rename(&source, &target) {
         Ok(()) => {}
         Err(_) => {

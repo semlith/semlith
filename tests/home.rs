@@ -585,3 +585,56 @@ fn a_daemon_file_is_read_only_from_a_trusted_store_and_only_if_semlith_wrote_it(
         );
     }
 }
+
+/// A store holds the text of every file it indexed. On a shared machine — a
+/// build box, a lab workstation, a container with more than one account — a
+/// directory created with the process umask is readable by all of them.
+#[test]
+#[cfg(unix)]
+fn nothing_semlith_creates_is_readable_by_anybody_else() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let s = sandbox("modes");
+    let store = s.work.join(".semlith");
+    empty_store(&store);
+
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    assert_eq!(mode(&store), 0o700, "the store directory");
+    assert_eq!(mode(&store.join("store.db")), 0o600, "the database");
+
+    // The registry and the agent key live in the home, which is created by the
+    // first command that writes either.
+    assert!(s.run(&s.work, &["trust", ".semlith"]).status.success());
+    assert_eq!(mode(&s.home), 0o700, "the store home");
+    assert_eq!(
+        mode(&s.home.join("registry.json")) & 0o077,
+        0,
+        "the registry is readable by others"
+    );
+
+    // A directory left loose by an older semlith is narrowed on the next open,
+    // never widened.
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let reported = s.run(&s.work, &["stats"]);
+    assert!(reported.status.success(), "{}", text(&reported));
+    assert!(
+        text(&reported).contains("mode 755") || mode(&store) == 0o700,
+        "a loose store directory was neither reported nor tightened: {}",
+        text(&reported)
+    );
+    assert_eq!(
+        mode(&store),
+        0o700,
+        "the store directory was not narrowed on open"
+    );
+
+    // And a directory somebody deliberately narrowed further is left alone.
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let _ = s.run(&s.work, &["stats"]);
+    assert_eq!(
+        mode(&store),
+        0o500,
+        "a narrower mode was widened back to 700"
+    );
+}
