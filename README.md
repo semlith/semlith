@@ -708,22 +708,30 @@ your `PATH` in a shell but often not in an editor launched from a desktop icon
 #### Terminal
 
 **Claude Code** — `claude mcp add`, or a committed `.mcp.json` in the project
-root. The `--` matters: without it Claude Code reads anything starting with a
-dash as one of its own flags.
-
-```sh
-claude mcp add semlith -- semlith mcp
-```
+root. `--transport http` points it at the running daemon; without it, the `--`
+matters, because Claude Code reads anything starting with a dash as one of its
+own flags.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
-      "args": ["mcp"]
+      "type": "http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
     }
   }
 }
+```
+
+```sh
+claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
+Or as a subprocess, which needs no key:
+
+```sh
+claude mcp add semlith -- semlith mcp
 ```
 
 **OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension

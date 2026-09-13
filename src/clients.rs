@@ -103,7 +103,14 @@ fn parse(readme: &str) -> Vec<Client> {
         return Vec::new();
     };
     let rest = &readme[start + SECTION.len()..];
-    let section = match rest.find("\n## ") {
+    // The section ends at the next heading of its own level or above. Stopping
+    // only at `## ` swept in the `### Connecting over HTTP` section below it,
+    // and its example stanzas were then read as the last client's own.
+    let end = ["\n## ", "\n### "]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min();
+    let section = match end {
         Some(end) => &rest[..end],
         None => rest,
     };
@@ -290,9 +297,16 @@ mod tests {
         let first = &clients()[0];
         assert_eq!(first.name, "Claude Code");
         let formats: Vec<&str> = first.stanzas.iter().map(|s| s.format.as_str()).collect();
-        assert_eq!(formats, vec!["sh", "json"]);
+        // The endpoint first, as a committed file and as a command, then the
+        // subprocess form for anyone who wants no key at all.
+        assert_eq!(formats, vec!["json", "sh", "sh"]);
+        assert!(
+            first.stanzas[0].text.contains("http://127.0.0.1:7365/mcp"),
+            "the first stanza is not the endpoint:\n{}",
+            first.stanzas[0].text
+        );
         assert_eq!(
-            first.stanzas[0].text.trim(),
+            first.stanzas[2].text.trim(),
             "claude mcp add semlith -- semlith mcp"
         );
     }

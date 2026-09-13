@@ -147,8 +147,11 @@ const NAV_ICONS = {
  * Invisible until the pointer enters the block it belongs to — see `.copy` in
  * the stylesheet — so a page never shows a column of copy buttons competing
  * with the content they copy. */
-function copyButton(getText, label) {
+function copyButton(getText, label, word) {
   const was = label || "Copy";
+  // A field wide enough to hold a command has room for the word; the icon is
+  // for a code block, where the control sits over the text it copies.
+  const face = () => (word ? was : icon(ICONS.copy, 14));
   const button = el("button", {
     class: "button secondary small copy",
     type: "button",
@@ -176,20 +179,20 @@ function copyButton(getText, label) {
       fill(button, "Copied");
       setTimeout(() => {
         button.classList.remove("done");
-        fill(button, icon(ICONS.copy, 14));
+        fill(button, face());
       }, 1400);
     },
   });
-  fill(button, icon(ICONS.copy, 14));
+  fill(button, face());
   return button;
 }
 
-function copyField(command) {
+function copyField(command, word) {
   return el(
     "div",
-    { class: "copyfield" },
+    { class: word ? "copyfield worded" : "copyfield" },
     el("code", { class: "text", text: command }),
-    copyButton(command),
+    copyButton(command, "Copy", word),
   );
 }
 
@@ -2947,9 +2950,21 @@ async function agentsView() {
     // The documented stanzas, with this daemon's key in them: a reader who
     // copies one should not have to find `sml_YOURKEY` and paste the key over
     // it, and the page already knows the key.
-    const own = (client.stanzas || []).map((s) => s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key));
-    const http = own.filter(overHttp);
-    const stdio = own.filter((text) => !overHttp(text));
+    const own = (client.stanzas || []).map((s) => ({
+      format: s.format,
+      text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
+    }));
+    // A one-line command belongs in a field with a Copy beside it, not in a
+    // slab of dark code: it is a thing you paste into a shell, not a file you
+    // are going to read.
+    // Shell one-liners for whichever transport the block above shows: a
+    // `--transport http` line under a subprocess stanza is a third answer.
+    const overTheWire = own.some((s) => s.format !== "sh" && overHttp(s.text));
+    const shells = own.filter((s) => s.format === "sh" && overHttp(s.text) === overTheWire);
+    const blocks = own.filter((s) => s.format !== "sh");
+    const http = blocks.filter((s) => overHttp(s.text));
+    const stdio = blocks.filter((s) => !overHttp(s.text));
+    const config = http.length ? http : stdio;
     fill(
       body,
       el(
@@ -2962,10 +2977,22 @@ async function agentsView() {
       // the shape most schemas take. A client with one gets its own: `httpUrl`
       // for Gemini, `serverUrl` for Windsurf, TOML for Codex — a generic block
       // beside those is a second, wrong answer.
-      el("span", { class: "eyebrow", text: "Over HTTP — one endpoint, one key, no subprocess" }),
-      (http.length ? http : [httpStanza()]).map((text) => codeBlock(text, "Copy stanza")),
-      stdio.length ? el("span", { class: "eyebrow", text: "Or over stdio" }) : null,
-      stdio.map((text) => codeBlock(text, "Copy stanza")),
+      // One configuration block, not two. A client that can reach the
+      // endpoint is shown the endpoint; one that cannot — Zed, Claude Desktop,
+      // Amazon Q, which have nowhere to put a header — is shown the subprocess
+      // it can run. Printing both left a reader choosing between two answers
+      // with nothing to choose on.
+      el("span", {
+        class: "eyebrow",
+        text: config.length && config === http
+          ? "Over HTTP — one endpoint, one key, no subprocess"
+          : "As a subprocess — no key needed",
+      }),
+      (config.length ? config.map((s) => s.text) : [httpStanza()]).map((text) =>
+        codeBlock(text, "Copy stanza"),
+      ),
+      shells.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
+      shells.map((s) => copyField(s.text, true)),
     );
   }
   showClient(chosen);
@@ -2975,7 +3002,11 @@ async function agentsView() {
     { class: "view" },
     pageHead("Agents", "One endpoint, every client, no per-client process.", {
       pill: statePill,
-      actions: [el("div", { class: "copyfield" }, address, copyButton(endpoint.url)), toggle, rotate],
+      actions: [
+        el("div", { class: "copyfield worded" }, address, copyButton(endpoint.url, "Copy", true)),
+        toggle,
+        rotate,
+      ],
     }),
     endpointNote,
     keyNote,

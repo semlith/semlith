@@ -1343,6 +1343,14 @@ select.field:focus-visible {
   height: 28px;
   padding: 0 var(--sp-2h);
 }
+
+/* A field whose control says "Copy" rather than showing the icon, for a
+ * command a reader is about to paste into a shell. The word needs room, so
+ * the button sizes to its text. */
+.copyfield.worded .copy {
+  width: auto;
+  padding: 0 var(--sp-3);
+}
 .copyfield .actions {
   gap: 4px;
 }

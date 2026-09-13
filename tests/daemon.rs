@@ -714,7 +714,8 @@ fn the_agents_route_serves_the_readme_stanzas_verbatim() {
     assert!(clients.len() >= 12, "only {} clients", clients.len());
     assert_eq!(clients[0]["name"], "Claude Code");
 
-    let stanza = clients[0]["stanzas"][0]["text"].as_str().expect("a stanza");
+    // Claude Code leads with the endpoint; the subprocess form follows it.
+    let stanza = clients[0]["stanzas"][2]["text"].as_str().expect("a stanza");
     assert_eq!(stanza.trim(), "claude mcp add semlith -- semlith mcp");
 
     let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))

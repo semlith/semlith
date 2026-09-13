@@ -268,8 +268,12 @@ fn section() -> String {
         .find(SECTION)
         .unwrap_or_else(|| panic!("the README has no {SECTION:?} heading"));
     let rest = &README[start..];
-    let end = rest[SECTION.len()..]
-        .find("\n## ")
+    // Ends at the next heading of its own level or above: the
+    // `### Connecting over HTTP` section below it is not part of any client.
+    let end = ["\n## ", "\n### "]
+        .iter()
+        .filter_map(|marker| rest[SECTION.len()..].find(marker))
+        .min()
         .map(|i| i + SECTION.len())
         .unwrap_or(rest.len());
     rest[..end].to_string()
