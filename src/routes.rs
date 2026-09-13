@@ -1221,6 +1221,8 @@ fn key(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(400, &e.to_string()),
     };
     let now = body.get("now").and_then(Value::as_bool).unwrap_or(false);
+    // Read before it is replaced: it is what identifies the stanzas to rewrite.
+    let previous = crate::home::agent_key().unwrap_or_default();
     let fresh = match body.get("key").and_then(Value::as_str) {
         // A key another process has already written to disk.
         Some(key) if crate::home::is_agent_key(key) => key.to_string(),
@@ -1231,9 +1233,18 @@ fn key(state: &Arc<State>, request: &Request) -> Response {
         },
     };
     state.server.rotate_agent(&fresh, now);
+    // Every client whose configuration file already carried the old key is
+    // carried forward with it. A rotation that leaves twelve files
+    // authenticating with a refused key is a rotation that breaks the machine
+    // it was run on.
+    let updated: Vec<String> = crate::setup::recarry_key(&previous, &fresh)
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
     Response::json(&json!({
         "key": fresh,
         "previous_valid": !now,
+        "updated": updated,
         "stanzas": crate::clients::http_stanzas(&fresh),
     }))
 }

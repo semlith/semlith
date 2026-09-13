@@ -2841,9 +2841,18 @@ async function agentsView() {
         const done = await post("/api/key", {});
         stanzas.key = done.key;
         showClient(chosen);
+        const carried = done.updated || [];
+        // Said plainly, because the two halves have different consequences:
+        // what was rewritten needs nothing done to it, and what was not needs
+        // the stanza above pasted in before the old key stops working.
+        const rewrote = carried.length
+          ? `Carried the new key into ${carried.length} configuration file${
+              carried.length === 1 ? "" : "s"
+            }: ${carried.join(", ")}.`
+          : "No configuration file on this machine carried the old key.";
         keyNote.textContent = done.previous_valid
-          ? "New key. The previous one keeps working until this daemon exits, so a session already open finishes — every client below needs the new stanza before then."
-          : "New key. The previous one is refused now; every client below needs the new stanza.";
+          ? `New key. ${rewrote} The previous one keeps working until this daemon exits, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
+          : `New key. ${rewrote} The previous one is refused now; any client configured elsewhere needs the new stanza.`;
       } catch (e) {
         keyNote.className = "note bad";
         keyNote.textContent = e.message;
@@ -3087,7 +3096,7 @@ async function privacyView() {
         // someone screenshots.
         tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
         rotateNote.textContent =
-          "Rotated. The old token stopped working immediately; agents on the HTTP endpoint are unaffected.";
+          "Rotated. The old token stopped working immediately. This is the portal's own session token, not the agent key: no client stanza carries it, so nothing needs reconfiguring. The agent key is rotated on the Agents page.";
       } catch (e) {
         rotateNote.className = "note bad";
         rotateNote.textContent = e.message;

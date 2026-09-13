@@ -960,7 +960,11 @@ fn main() -> Result<()> {
                 }
             }
             KeyCommand::Rotate { now } => {
+                // Read before it is replaced: it is what identifies the
+                // stanzas to rewrite.
+                let previous = semlith::home::agent_key().unwrap_or_default();
                 let fresh = semlith::home::rotate_agent_key()?;
+                let carried = semlith::setup::recarry_key(&previous, &fresh);
                 let port = semlith::daemon::port_of(None);
                 let url = format!("http://127.0.0.1:{port}/mcp");
 
@@ -999,16 +1003,18 @@ fn main() -> Result<()> {
                         );
                     }
                 }
-                let others: Vec<&str> = semlith::clients::clients()
-                    .iter()
-                    .filter(|c| !c.name.eq_ignore_ascii_case("Claude Code"))
-                    .map(|c| c.name.as_str())
-                    .collect();
+                if carried.is_empty() {
+                    println!("No configuration file on this machine carried the old key.");
+                } else {
+                    println!();
+                    println!("Carried the new key into:");
+                    for path in &carried {
+                        println!("  {}", path.display());
+                    }
+                }
+
                 println!();
-                println!(
-                    "These need the new stanza pasted in: {}.",
-                    others.join(", ")
-                );
+                println!("Any client configured somewhere else needs the stanza below pasted in.");
                 for stanza in semlith::clients::http_stanzas(&fresh) {
                     println!();
                     print!("{}", stanza.text);

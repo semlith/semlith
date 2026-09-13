@@ -34,6 +34,15 @@ keep in a config file, and a query can find a picture.
   a session already open finishes, re-registers Claude Code through its own CLI
   and names every other client that needs the new stanza. `--now` drops the
   previous key immediately.
+- **A rotation carries the key into the files that hold it.** `semlith key
+  rotate` and the portal's Rotate key button rewrite every client
+  configuration file on this machine that already carried the old key — each
+  client's documented path, plus the project-scoped files beside wherever the
+  daemon was started — and both then list what they changed. A file is touched
+  only when the exact old key appears in it, it is replaced through a
+  neighbouring temporary file rather than in place, and no file is ever
+  created. Rotating used to leave every configured client authenticating with
+  a key the daemon had stopped accepting.
 - **An endpoint switch.** `semlith start --no-mcp-http` starts with `/mcp`
   closed, and the Agents page starts and stops it while the daemon runs.
   Closing it drops the route, not the daemon: the stores stay open, the watcher

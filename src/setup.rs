@@ -658,3 +658,182 @@ fn step_verify() -> Result<Step> {
         }),
     }
 }
+
+// ---------------------------------------------------------------- rotation
+
+/// Carry a rotated agent key into the client configuration files that already
+/// hold the old one.
+///
+/// Rotation used to leave every configured client authenticating with a key
+/// the daemon had stopped accepting, and the only repair was to open each file
+/// and paste. This edits the files that already carry the old key — nothing
+/// else. A file is rewritten only when the exact 68-character key appears in
+/// it, so a path that happens to exist but names a different server is left
+/// alone, and no file is ever created.
+///
+/// Returns the files that changed, in the order they were tried.
+pub fn recarry_key(previous: &str, fresh: &str) -> Vec<PathBuf> {
+    let mut done = Vec::new();
+    if previous == fresh || !home::is_agent_key(previous) || !home::is_agent_key(fresh) {
+        return done;
+    }
+    for path in client_configs() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !text.contains(previous) {
+            continue;
+        }
+        // Written through a neighbouring temporary file: a half-written
+        // `settings.json` is a client that will not start, and this runs
+        // across a dozen of them.
+        let swapped = text.replace(previous, fresh);
+        let temp = path.with_extension(format!(
+            "{}semlith-tmp",
+            path.extension()
+                .map(|e| format!("{}.", e.to_string_lossy()))
+                .unwrap_or_default()
+        ));
+        if std::fs::write(&temp, &swapped).is_ok() && std::fs::rename(&temp, &path).is_ok() {
+            done.push(path);
+        } else {
+            let _ = std::fs::remove_file(&temp);
+        }
+    }
+    done
+}
+
+/// Where the clients the README documents keep their configuration.
+///
+/// The user-level file for each, plus the project-level ones relative to
+/// wherever the daemon was started. It mirrors the paths in the README's
+/// client section; a path that is absent is simply skipped, so listing one
+/// costs nothing and missing one costs a manual edit after a rotation.
+fn client_configs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home_dir) = std::env::var_os("HOME").map(PathBuf::from) {
+        for rest in [
+            // Claude Code writes the user scope here, and `claude mcp add`
+            // does too.
+            ".claude.json",
+            ".codex/config.toml",
+            ".config/opencode/opencode.json",
+            ".copilot/mcp-config.json",
+            ".gemini/settings.json",
+            ".qwen/settings.json",
+            ".config/amp/settings.json",
+            ".factory/mcp.json",
+            ".config/goose/config.yaml",
+            ".aws/amazonq/mcp.json",
+            ".openclaw/openclaw.json",
+            ".codewhale/mcp.json",
+            ".deepseek/mcp.json",
+            ".warp/.mcp.json",
+            ".cursor/mcp.json",
+            ".codeium/windsurf/mcp_config.json",
+            ".config/zed/settings.json",
+            ".junie/mcp/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".lmstudio/mcp.json",
+            ".cache/lm-studio/mcp.json",
+            ".config/kilo/kilo.jsonc",
+            ".continue/config.yaml",
+            // The editors that keep their MCP file inside a per-platform
+            // application-support directory.
+            "Library/Application Support/Claude/claude_desktop_config.json",
+            "Library/Application Support/Code/User/mcp.json",
+            ".config/Code/User/mcp.json",
+        ] {
+            out.push(home_dir.join(rest));
+        }
+        // Continue keeps one file per server rather than one file.
+        if let Ok(entries) = std::fs::read_dir(home_dir.join(".continue/mcpServers")) {
+            out.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        out.push(appdata.join("Claude/claude_desktop_config.json"));
+        out.push(appdata.join("Code/User/mcp.json"));
+    }
+    // The project-scoped files, against wherever this process was started.
+    if let Ok(here) = std::env::current_dir() {
+        for rest in [
+            ".mcp.json",
+            ".vscode/mcp.json",
+            ".cursor/mcp.json",
+            ".roo/mcp.json",
+            ".kilocode/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".junie/mcp/mcp.json",
+            ".factory/mcp.json",
+            ".amazonq/mcp.json",
+            "opencode.json",
+            "crush.json",
+            "io.local.toml",
+        ] {
+            out.push(here.join(rest));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    /// The whole point: a file that carries the old key is rewritten, and a
+    /// file that does not is not touched at all.
+    #[test]
+    fn only_the_files_holding_the_old_key_are_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().join("home");
+        std::fs::create_dir_all(home_dir.join(".gemini")).unwrap();
+        std::fs::create_dir_all(home_dir.join(".cursor")).unwrap();
+
+        let previous = format!("sml_{}", "a".repeat(64));
+        let fresh = format!("sml_{}", "b".repeat(64));
+
+        let carries = home_dir.join(".gemini/settings.json");
+        std::fs::write(
+            &carries,
+            format!("{{\"mcpServers\":{{\"semlith\":{{\"headers\":{{\"Authorization\":\"Bearer {previous}\"}}}}}}}}"),
+        )
+        .unwrap();
+        let untouched = home_dir.join(".cursor/mcp.json");
+        std::fs::write(&untouched, "{\"mcpServers\":{\"other\":{}}}").unwrap();
+        let before = std::fs::read_to_string(&untouched).unwrap();
+
+        // `HOME` is process-wide, so this test is serialised with the others
+        // that set it by living in its own module and setting it back.
+        let was = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home_dir) };
+        let changed = recarry_key(&previous, &fresh);
+        match was {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert_eq!(changed, vec![carries.clone()], "{changed:?}");
+        let text = std::fs::read_to_string(&carries).unwrap();
+        assert!(
+            text.contains(&fresh),
+            "the new key is not in the file: {text}"
+        );
+        assert!(!text.contains(&previous), "the old key survived: {text}");
+        assert_eq!(std::fs::read_to_string(&untouched).unwrap(), before);
+        assert!(
+            !carries.with_extension("json.semlith-tmp").exists(),
+            "the temporary file was left behind"
+        );
+    }
+
+    /// Rotating to the same key, or passing something that is not a key, does
+    /// nothing rather than rewriting every file with a placeholder.
+    #[test]
+    fn a_non_rotation_changes_nothing() {
+        let key = format!("sml_{}", "c".repeat(64));
+        assert!(recarry_key(&key, &key).is_empty());
+        assert!(recarry_key("sml_YOURKEY", &key).is_empty());
+        assert!(recarry_key(&key, "").is_empty());
+    }
+}

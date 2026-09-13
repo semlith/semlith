@@ -1227,6 +1227,14 @@ it is written once and keeps working. The key is 32 bytes from the OS random
 source, written `sml_` and hex at mode 0600, and it is never reminted unless
 you ask. `semlith key show` prints the live key and the stanza around it.
 
+Rotating it carries it forward. `semlith key rotate`, and the portal's Rotate
+key button, rewrite every client configuration file on this machine that
+already held the old key — the documented path for each client above, plus the
+project-scoped files beside wherever the daemon was started. A file is only
+touched when the exact old key appears in it, nothing is ever created, and both
+the command and the page list what they changed. A client configured somewhere
+else still needs the new stanza pasted in.
+
 ```sh
 claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
 ```
