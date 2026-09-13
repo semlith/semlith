@@ -819,6 +819,15 @@ h2 {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
+  align-items: center;
+}
+
+/* A page header's controls are one row of one height. The small button is
+ * 32px, which sat 4px short of the field beside it and read as a row that had
+ * not been lined up. */
+.page-head .actions .button,
+.page-head .actions .button.small {
+  height: 36px;
 }
 
 .rule {
@@ -1353,14 +1362,17 @@ select.field:focus-visible {
 }
 /* A command wraps rather than scrolling sideways: a reader who cannot see the
  * end of it cannot check what they are about to paste, and a hidden scrollbar
- * does not tell them there is more. The field grows to hold it. */
-.copyfield.worded {
+ * does not tell them there is more. The field grows to hold it.
+ *
+ * Only in the stanza panel. The endpoint field in a page header holds one
+ * short URL and belongs to a row of 36px controls, so it keeps that height. */
+.stanzas .copyfield.worded {
   height: auto;
   min-height: 36px;
   padding-block: 4px;
   align-items: center;
 }
-.copyfield.worded .text {
+.stanzas .copyfield.worded .text {
   overflow-x: visible;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
