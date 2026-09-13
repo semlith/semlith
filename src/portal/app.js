@@ -608,109 +608,22 @@ function graphInk() {
   const style = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (style.getPropertyValue(name) || fallback).trim();
   return {
-    extracted: read("--green", "#3e9a6e"),
-    inferred: read("--amber-ink", "#7a4e0a"),
-    selected: read("--accent-edge", "#c97f14"),
-    line: read("--line", "#dce3e8"),
-    ink: read("--ink", "#1e2a35"),
+    edge: read("--line", "#dce3e8"),
+    hot: read("--blue", "#4c7088"),
+    node: read("--panel", "#ffffff"),
+    nodeLine: read("--line", "#dce3e8"),
+    text: read("--ink-2", "#3a4d5e"),
+    nearFill: read("--blue-soft", "#e3ecf2"),
+    nearLine: read("--blue", "#4c7088"),
+    nearText: read("--ink", "#1e2a35"),
+    sel: read("--accent", "#f0a43c"),
+    selLine: read("--accent-edge", "#c97f14"),
+    selText: read("--accent-ink", "#1e2a35"),
     muted: read("--muted", "#64778a"),
-    panel: read("--panel", "#ffffff"),
   };
 }
 
-/* A force layout, written out because the portal may not load a library: the
- * CSP allows only 'self' and every byte is compiled into the binary.
- *
- * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
- * so that is ~16k pairs — fine at 60fps. If the budget ever rises past a few
- * hundred, this wants a quadtree, not a faster loop.
- */
-function layout(nodes, edges, width, height) {
-  const cx = width / 2;
-  const cy = height / 2;
-  // Repulsion has to grow with the crowd. A constant that reads well at twenty
-  // nodes collapses a hundred into one ball, which is the hairball every graph
-  // view is accused of being.
-  const repulsion = 2200 + nodes.length * 90;
-  const pad = 26;
-  // The rest length grows with the crowd: forty nodes at ninety pixels apart
-  // need more room than eight do, and a constant here is what turns a dense
-  // neighbourhood into a knot.
-  const rest = 70 + nodes.length * 1.6;
-  // How many edges each node carries, so the springs can be shared out. A hub
-  // with forty edges would otherwise be dragged to the centre by forty pulls
-  // while a leaf feels one, and every graph would collapse to its hubs.
-  const load = nodes.map(() => 1);
-  for (const edge of edges) {
-    if (load[edge.from] !== undefined) load[edge.from]++;
-    if (load[edge.to] !== undefined) load[edge.to]++;
-  }
-  // Seeded on a circle rather than at random, so the same graph draws the same
-  // way twice. A layout that reshuffles on every visit is one nobody can learn.
-  nodes.forEach((node, i) => {
-    const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
-    const radius = Math.min(width, height) * 0.32;
-    node.x = cx + Math.cos(angle) * radius;
-    node.y = cy + Math.sin(angle) * radius;
-    node.vx = 0;
-    node.vy = 0;
-  });
-
-  return function step(alpha) {
-    for (let i = 0; i < nodes.length; i++) {
-      const a = nodes[i];
-      for (let j = i + 1; j < nodes.length; j++) {
-        const b = nodes[j];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 < 0.01) {
-          // Exactly coincident nodes have no direction to separate along.
-          dx = (i % 2 ? 1 : -1) * 0.5;
-          dy = 0.5;
-          d2 = 0.5;
-        }
-        const force = (repulsion / d2) * alpha;
-        const d = Math.sqrt(d2);
-        a.vx += (dx / d) * force;
-        a.vy += (dy / d) * force;
-        b.vx -= (dx / d) * force;
-        b.vy -= (dy / d) * force;
-      }
-    }
-    for (const edge of edges) {
-      const a = nodes[edge.from];
-      const b = nodes[edge.to];
-      if (!a || !b) continue;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const pull = ((d - rest) / d) * 0.06 * alpha;
-      a.vx += (dx * pull) / Math.sqrt(load[edge.from]);
-      a.vy += (dy * pull) / Math.sqrt(load[edge.from]);
-      b.vx -= (dx * pull) / Math.sqrt(load[edge.to]);
-      b.vy -= (dy * pull) / Math.sqrt(load[edge.to]);
-    }
-    for (const node of nodes) {
-      if (node.held) continue;
-      node.vx += (cx - node.x) * 0.0016 * alpha;
-      node.vy += (cy - node.y) * 0.0016 * alpha;
-      node.x += node.vx;
-      node.y += node.vy;
-      node.vx *= 0.84;
-      node.vy *= 0.84;
-      // Kept inside the frame. A node that drifts off-canvas is a node nobody
-      // can click, and the pan control is for choosing a view, not for going
-      // to fetch something that escaped.
-      node.x = Math.min(width - pad, Math.max(pad, node.x));
-      node.y = Math.min(height - pad, Math.max(pad, node.y));
-    }
-  };
-}
-
-/** The last two segments of a path: enough to recognise, short enough to read.
- * The whole path is on the element's title, which is where someone goes when
- * two files share a name. */
+/** The last two segments of a path: enough to recognise, short enough to read. */
 function shortPath(path) {
   const parts = String(path).split("/").filter(Boolean);
   return parts.slice(-2).join("/") || path;
@@ -721,255 +634,409 @@ function stillness() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-/* A pannable, zoomable canvas of nodes and edges.
+/* A force-directed canvas of labelled boxes.
  *
- * Returns the element plus `draw(data)` and `stop()`. The caller owns the data;
- * this owns the pixels. */
-function graphCanvas(onPick) {
+ * Positions are kept in 0..1 and multiplied by the canvas size on every frame,
+ * so a resize moves the graph rather than rebuilding it, and the constants
+ * below mean the same thing at any window width. They are the design bundle's:
+ * repulsion 5200 over distance squared, a spring at rest 138px, damping 0.86,
+ * and a weak pull to the centre.
+ *
+ * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
+ * so that is ~16k pairs — fine at 60fps. Past a few hundred this wants a
+ * quadtree, not a faster loop.
+ */
+function graphCanvas(options) {
+  const { onPick, onHover } = options || {};
   const canvas = el("canvas", { class: "graph-canvas" });
   const wrap = el("div", { class: "graph-stage" }, canvas);
-  const view = { x: 0, y: 0, scale: 1 };
   let nodes = [];
   let edges = [];
+  let drawn = [];
   let selected = null;
-  let step = null;
-  let alpha = 0;
+  let near = new Set();
+  let hovered = null;
+  let dragging = null;
+  let down = null;
   let frame = null;
   let running = true;
-  let dragging = null;
-  let panning = null;
+  let settled = false;
 
   function size() {
     const ratio = window.devicePixelRatio || 1;
     const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 320);
-    const h = Math.max(box.height, 320);
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 240);
     canvas.width = Math.round(w * ratio);
     canvas.height = Math.round(h * ratio);
-    return { w, h, ratio };
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return { w, h, ctx };
   }
 
-  function paint() {
-    const { w, h, ratio } = size();
-    const ink = graphInk();
-    const ctx = canvas.getContext("2d");
-    void h;
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    ctx.save();
-    ctx.translate(view.x, view.y);
-    ctx.scale(view.scale, view.scale);
-
-    for (const edge of edges) {
+  function step(w, h) {
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        let dx = (b.x - a.x) * w;
+        let dy = (b.y - a.y) * h;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) {
+          // Exactly coincident nodes have no direction to separate along.
+          d2 = 1;
+          dx = 0.6;
+          dy = 0.4;
+        }
+        const d = Math.sqrt(d2);
+        const force = 5200 / d2;
+        a.vx -= ((dx / d) * force) / w;
+        a.vy -= ((dy / d) * force) / h;
+        b.vx += ((dx / d) * force) / w;
+        b.vy += ((dy / d) * force) / h;
+      }
+    }
+    for (const edge of drawn) {
       const a = nodes[edge.from];
       const b = nodes[edge.to];
       if (!a || !b) continue;
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.strokeStyle = edge.confidence === "extracted" ? ink.extracted : ink.inferred;
-      // An inferred edge is drawn dashed as well as coloured: colour alone is
-      // not a distinction everyone can see.
-      ctx.setLineDash(edge.confidence === "extracted" ? [] : [4, 3]);
-      ctx.lineWidth = edge.confidence === "extracted" ? 1.2 : 1;
-      ctx.globalAlpha = selected && edge.from !== selected && edge.to !== selected ? 0.22 : 0.75;
-      ctx.stroke();
+      const dx = (b.x - a.x) * w;
+      const dy = (b.y - a.y) * h;
+      const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const pull = (d - 138) * 0.0025;
+      a.vx += (((dx / d) * pull * d) / w) * 0.02;
+      a.vy += (((dy / d) * pull * d) / h) * 0.02;
+      b.vx -= (((dx / d) * pull * d) / w) * 0.02;
+      b.vy -= (((dy / d) * pull * d) / h) * 0.02;
     }
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const on = i === selected;
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, on ? 8 : 5.5, 0, Math.PI * 2);
-      ctx.fillStyle = on ? ink.selected : ink.panel;
-      ctx.strokeStyle = on ? ink.selected : ink.muted;
-      ctx.lineWidth = on ? 2.5 : 1.4;
-      ctx.fill();
-      ctx.stroke();
-      // Labels only where they can be read. Every node labelled at once is a
-      // grey haze that makes the shape harder to see rather than easier, so
-      // this draws the selection, whatever it touches, and the busiest few —
-      // and everything only once the view is zoomed in far enough to have room.
-      // On a phone the frame is ~350px wide and a dozen labels is a smear, so
-      // there the selection and its neighbours carry names and nothing else
-      // does until the reader zooms in.
-      const roomy = w > 520;
-      if (on || node.near || (roomy && node.busy && view.scale > 0.75) || view.scale > 2) {
-        ctx.font = `${on ? 600 : 400} 11px "IBM Plex Mono", ui-monospace, monospace`;
-        ctx.fillStyle = on ? ink.ink : ink.muted;
-        ctx.textAlign = "center";
-        // Test names run to sixty characters and would cover their
-        // neighbours. The full name is in the rail the moment a node is
-        // picked, so the canvas shows as much as fits.
-        const label = node.name.length > 22 ? `${node.name.slice(0, 21)}…` : node.name;
-        ctx.fillText(label, node.x, node.y - (on ? 13 : 10));
+    for (const node of nodes) {
+      node.vx += (0.5 - node.x) * 0.006;
+      node.vy += (0.5 - node.y) * 0.008;
+      if (node === dragging) {
+        node.vx = 0;
+        node.vy = 0;
+        continue;
       }
+      node.vx *= 0.86;
+      node.vy *= 0.86;
+      // Kept inside the frame: a node that drifts off-canvas is a node nobody
+      // can click.
+      node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
+      node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
     }
-    ctx.restore();
+  }
+
+  /** A rounded rectangle, the shape every symbol is drawn as. */
+  function box(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function paint() {
+    const { w, h, ctx } = size();
+    const ink = graphInk();
+    ctx.clearRect(0, 0, w, h);
+
+    // Measured first: an edge stops at the box it points into, which means
+    // every box's size has to be known before the first edge is drawn.
+    ctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace';
+    for (const node of nodes) {
+      const ease = stillness() ? (node === hovered ? 1 : 0) : node.hover || 0;
+      node.hover = ease;
+      const text = ctx.measureText(node.label).width;
+      node.w = (text + 22) * (1 + 0.05 * ease);
+      node.h = 28 * (1 + 0.05 * ease);
+    }
+
+    for (const edge of drawn) {
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      if (!a || !b) continue;
+      const ax = a.x * w;
+      const ay = a.y * h;
+      const bx = b.x * w;
+      const by = b.y * h;
+      const hot = edge.from === selected || edge.to === selected;
+      const angle = Math.atan2(by - ay, bx - ax);
+      // To the edge of the box rather than to its centre, so the arrowhead
+      // lands where the reader sees the symbol begin.
+      const inset = Math.min(b.w / 2 + 6, Math.abs(b.h / 2 / Math.sin(angle) || b.w));
+      const ex = bx - Math.cos(angle) * Math.min(inset, b.w / 2 + 6);
+      const ey = by - Math.sin(angle) * (b.h / 2 + 3);
+      ctx.save();
+      ctx.strokeStyle = hot ? ink.hot : ink.edge;
+      ctx.fillStyle = hot ? ink.hot : ink.edge;
+      ctx.lineWidth = hot ? 1.7 : 1.1;
+      // An inferred edge is dashed as well as coloured: colour alone is not a
+      // distinction everyone can see.
+      ctx.setLineDash(edge.confidence === "extracted" ? [] : [4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - Math.cos(angle - 0.4) * 7, ey - Math.sin(angle - 0.4) * 7);
+      ctx.lineTo(ex - Math.cos(angle + 0.4) * 7, ey - Math.sin(angle + 0.4) * 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    nodes.forEach((node, i) => {
+      const on = i === selected;
+      const beside = near.has(i);
+      const x = node.x * w - node.w / 2;
+      const y = node.y * h - node.h / 2;
+      box(ctx, x, y, node.w, node.h, 8);
+      ctx.fillStyle = on ? ink.sel : beside ? ink.nearFill : ink.node;
+      ctx.save();
+      if (node.hover) {
+        ctx.shadowColor = ink.nearLine;
+        ctx.shadowBlur = 14 * node.hover;
+      }
+      ctx.fill();
+      ctx.restore();
+      ctx.lineWidth = (on ? 1.6 : 1) + 0.8 * node.hover;
+      ctx.strokeStyle = on ? ink.selLine : beside ? ink.nearLine : ink.nodeLine;
+      ctx.stroke();
+      ctx.fillStyle = on ? ink.selText : beside ? ink.nearText : ink.text;
+      ctx.fillText(node.label, x + 11, y + node.h / 2 + 4);
+    });
   }
 
   function tick() {
-    if (step && alpha > 0.005) {
-      step(alpha);
-      alpha *= 0.97;
+    const box = wrap.getBoundingClientRect();
+    if (running || dragging) step(Math.max(box.width, 240), Math.max(box.height, 240));
+    // Hover is eased rather than switched, so a fast pointer sweep across a
+    // crowded graph does not strobe.
+    for (const node of nodes) {
+      node.hover = (node.hover || 0) + ((node === hovered ? 1 : 0) - (node.hover || 0)) * 0.16;
+      if (node.hover < 0.002) node.hover = 0;
     }
     paint();
-    frame = running ? requestAnimationFrame(tick) : null;
+    frame = requestAnimationFrame(tick);
   }
 
   function at(event) {
     const box = canvas.getBoundingClientRect();
-    return {
-      x: (event.clientX - box.left - view.x) / view.scale,
-      y: (event.clientY - box.top - view.y) / view.scale,
-    };
+    return { x: event.clientX - box.left, y: event.clientY - box.top, w: box.width, h: box.height };
   }
 
-  function nearest(point) {
-    let best = null;
-    let bestD = 14 / view.scale;
-    nodes.forEach((node, i) => {
-      const d = Math.hypot(node.x - point.x, node.y - point.y);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
+  function hit(point) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const node = nodes[i];
+      const cx = node.x * point.w;
+      const cy = node.y * point.h;
+      if (
+        Math.abs(point.x - cx) < (node.w || 80) / 2 &&
+        Math.abs(point.y - cy) < (node.h || 28) / 2
+      ) {
+        return i;
       }
-    });
-    return best;
+    }
+    return null;
+  }
+
+  function selectAt(index) {
+    selected = index;
+    near = new Set();
+    for (const edge of drawn) {
+      if (edge.from === index) near.add(edge.to);
+      if (edge.to === index) near.add(edge.from);
+    }
   }
 
   canvas.addEventListener("pointerdown", (event) => {
-    const point = at(event);
-    const hit = nearest(point);
+    const index = hit(at(event));
+    if (index === null) return;
     canvas.setPointerCapture(event.pointerId);
-    if (hit === null) {
-      panning = { x: event.clientX - view.x, y: event.clientY - view.y };
-      return;
-    }
-    selected = hit;
-    for (const node of nodes) node.near = false;
-    for (const edge of edges) {
-      if (edge.from === hit && nodes[edge.to]) nodes[edge.to].near = true;
-      if (edge.to === hit && nodes[edge.from]) nodes[edge.from].near = true;
-    }
-    nodes[hit].held = true;
-    dragging = hit;
-    alpha = Math.max(alpha, 0.25);
-    if (onPick) onPick(nodes[hit]);
-    paint();
+    dragging = nodes[index];
+    down = { x: event.clientX, y: event.clientY, index };
+    canvas.classList.add("dragging");
+    event.preventDefault();
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (dragging !== null) {
-      const point = at(event);
-      nodes[dragging].x = point.x;
-      nodes[dragging].y = point.y;
-      paint();
-    } else if (panning) {
-      view.x = event.clientX - panning.x;
-      view.y = event.clientY - panning.y;
-      paint();
+    const point = at(event);
+    if (dragging) {
+      dragging.x = Math.min(0.94, Math.max(0.06, point.x / point.w));
+      dragging.y = Math.min(0.92, Math.max(0.08, point.y / point.h));
+      if (!frame) paint();
+      return;
     }
+    const index = hit(point);
+    const node = index === null ? null : nodes[index];
+    canvas.classList.toggle("over-node", Boolean(node));
+    if (node !== hovered) {
+      hovered = node;
+      if (!frame) paint();
+    }
+    if (onHover) onHover(node, event.clientX, event.clientY);
   });
 
-  const release = () => {
-    if (dragging !== null) nodes[dragging].held = false;
+  const release = (event) => {
+    if (down) {
+      // A drag that went nowhere is a click. Four pixels is the slack a
+      // pointer has on the way down.
+      const moved = Math.abs(event.clientX - down.x) + Math.abs(event.clientY - down.y);
+      if (moved < 4) {
+        selectAt(down.index);
+        if (onPick) onPick(nodes[down.index]);
+      }
+    }
     dragging = null;
-    panning = null;
+    down = null;
+    canvas.classList.remove("dragging");
+    if (!frame) paint();
   };
   canvas.addEventListener("pointerup", release);
   canvas.addEventListener("pointercancel", release);
-
-  canvas.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    const box = canvas.getBoundingClientRect();
-    const px = event.clientX - box.left;
-    const py = event.clientY - box.top;
-    const factor = Math.exp(-event.deltaY * 0.0015);
-    const next = Math.min(3, Math.max(0.3, view.scale * factor));
-    view.x = px - ((px - view.x) / view.scale) * next;
-    view.y = py - ((py - view.y) / view.scale) * next;
-    view.scale = next;
-    paint();
+  canvas.addEventListener("pointerleave", () => {
+    hovered = null;
+    dragging = null;
+    down = null;
+    canvas.classList.remove("dragging", "over-node");
+    if (onHover) onHover(null);
+    if (!frame) paint();
   });
+
+  // A canvas has no layout of its own to react to a resize with, and the
+  // stylesheet cannot repaint it.
+  const observer = new ResizeObserver(() => {
+    if (!frame) paint();
+  });
+  observer.observe(wrap);
 
   return {
     node: wrap,
-    draw(data) {
-      const { w, h } = size();
-      nodes = (data.nodes || []).map((row) => ({ ...row, degree: 0 }));
+    draw(data, kinds) {
+      nodes = (data.nodes || []).map((row, i) => {
+        const angle = (i / Math.max((data.nodes || []).length, 1)) * Math.PI * 2;
+        return {
+          ...row,
+          // Truncated for the canvas only. Test names run past sixty
+          // characters, and a box that wide covers its neighbours and pushes
+          // the layout off the frame; the whole name is in the hover card and
+          // in the rail the moment the node is picked.
+          label: row.name.length > 26 ? `${row.name.slice(0, 25)}…` : row.name,
+          x: 0.5 + Math.cos(angle) * 0.28,
+          y: 0.5 + Math.sin(angle) * 0.28,
+          vx: 0,
+          vy: 0,
+          hover: 0,
+          callers: 0,
+          callees: 0,
+        };
+      });
       edges = data.edges || [];
       for (const edge of edges) {
-        if (nodes[edge.from]) nodes[edge.from].degree++;
-        if (nodes[edge.to]) nodes[edge.to].degree++;
+        if (nodes[edge.from]) nodes[edge.from].callees += 1;
+        if (nodes[edge.to]) nodes[edge.to].callers += 1;
       }
-      // The dozen busiest nodes carry a label at moderate zoom: they are the
-      // ones a reader is orienting by.
-      const ranked = [...nodes].sort((a, b) => b.degree - a.degree).slice(0, 12);
-      for (const node of ranked) node.busy = true;
       selected = null;
-      step = layout(nodes, edges, w, h);
-      // Under reduced motion the layout is solved before the first paint, so
-      // the page arrives settled instead of animating into place.
-      if (stillness()) {
-        for (let i = 0; i < 420; i++) step(1);
-        step = null;
-        alpha = 0;
-      } else {
-        alpha = 1;
+      near = new Set();
+      hovered = null;
+      this.filter(kinds);
+      // Settled before the first painted frame, rather than exploding outward
+      // while the reader watches.
+      const box = wrap.getBoundingClientRect();
+      for (let i = 0; i < 220; i++) {
+        step(Math.max(box.width, 240), Math.max(box.height, 240));
       }
+      settled = true;
       paint();
+    },
+    /** Draw only the edge kinds asked for. Returns how many are drawn. */
+    filter(kinds) {
+      drawn = !kinds || !kinds.size ? edges : edges.filter((e) => kinds.has(e.kind));
+      if (selected !== null) selectAt(selected);
+      if (settled) paint();
+      return drawn.length;
     },
     /** Select a node by name, as though it had been clicked. */
     pick(name) {
       const index = nodes.findIndex((node) => node.name === name);
       if (index < 0) return false;
-      selected = index;
-      for (const node of nodes) node.near = false;
-      for (const edge of edges) {
-        if (edge.from === index && nodes[edge.to]) nodes[edge.to].near = true;
-        if (edge.to === index && nodes[edge.from]) nodes[edge.from].near = true;
-      }
+      selectAt(index);
       paint();
       if (onPick) onPick(nodes[index]);
       return true;
     },
+    counts: () => ({ nodes: nodes.length, edges: drawn.length }),
     running: () => running,
     toggle() {
       running = !running;
-      if (running) {
-        alpha = Math.max(alpha, 0.35);
-        tick();
-      } else if (frame) {
-        cancelAnimationFrame(frame);
-        frame = null;
-      }
       return running;
     },
     start() {
-      running = !stillness();
-      if (running) tick();
-      else paint();
+      // Under reduced motion the graph is solved once and then still: there is
+      // no loop to pause, and nothing moves unless the reader moves it.
+      if (stillness()) {
+        running = false;
+        paint();
+        return;
+      }
+      if (!frame) tick();
     },
     stop() {
       running = false;
       if (frame) cancelAnimationFrame(frame);
       frame = null;
+      observer.disconnect();
     },
     repaint: paint,
   };
 }
 
+const EDGE_KINDS = ["calls", "imports", "defines", "references"];
+
 async function graphView() {
   await refreshStores();
 
+  const kinds = new Set(EDGE_KINDS);
   const chosen = new Set();
-  const meta = el("span", { class: "graph-meta" });
+  const meta = el("span", { class: "graph-count" });
   const rail = el("div", { class: "graph-rail" });
 
-  const canvas = graphCanvas((node) => select(node));
+  const canvas = graphCanvas({
+    onPick: (node) => select(node),
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("graph");
+      tip.atPoint(
+        x,
+        y,
+        [
+          el(
+            "div",
+            { class: "tip-head" },
+            el("i", {}),
+            node.name,
+          ),
+          row("kind", node.kind),
+          row("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`),
+          row("store", node.store || (state.stores[0] && state.stores[0].name) || "—"),
+          row("calls", `${node.callers} in · ${node.callees} out`),
+        ],
+        "graph",
+      );
+    },
+  });
+
+  function row(key, value) {
+    return el(
+      "div",
+      { class: "tip-row" },
+      el("span", { class: "k", text: key }),
+      el("span", { class: "v", text: String(value) }),
+    );
+  }
 
   const pause = el("button", {
     class: "button secondary small",
@@ -987,6 +1054,11 @@ async function graphView() {
    * lie about which of the two is in charge. */
   function paintPause() {
     pause.textContent = canvas.running() ? "Pause" : "Settled";
+  }
+
+  function counts() {
+    const { nodes, edges } = canvas.counts();
+    meta.textContent = `${n(nodes)} symbols · ${n(edges)} edges`;
   }
 
   function blank(message) {
@@ -1041,32 +1113,24 @@ async function graphView() {
     } catch (e) {
       return fill(rail, error(e.message));
     }
-    const callers = data.callers.map((e) => ({
-      name: e.name,
-      kind: e.kind,
-      confidence: e.confidence,
-    }));
-    const callees = data.callees.map((e) => ({
-      name: e.name,
-      kind: e.kind,
-      confidence: e.confidence,
-    }));
+    const edge = (e) => ({ name: e.name, kind: e.kind, confidence: e.confidence });
 
     fill(
       rail,
       el(
         "div",
         { class: "graph-selected" },
+        el("span", { class: "eyebrow", text: "Selected symbol" }),
         el("h2", { class: "sym", text: node.name }),
         el("div", {
           class: "loc",
-          title: node.path,
+          "data-tip": node.path,
           text: `${shortPath(node.path)}:${node.start_line}-${node.end_line}`,
         }),
         el(
           "div",
           { class: "chips" },
-          el("span", { class: "chip static", text: node.kind }),
+          el("span", { class: "chip static blue", text: node.kind }),
           node.store ? el("span", { class: "chip static", text: node.store }) : null,
           el("span", {
             class: "chip static",
@@ -1074,29 +1138,19 @@ async function graphView() {
           }),
         ),
       ),
-      ends("Callers", callers, "Nothing in the graph calls this."),
-      ends("Callees", callees, "A leaf, as far as the extracted edges go."),
+      ends("Callers", data.callers.map(edge), "Nothing in the graph calls this."),
+      ends("Callees", data.callees.map(edge), "A leaf, as far as the extracted edges go."),
       el(
         "div",
         { class: "rail-actions" },
         el("a", {
           class: "button secondary small",
-          href: `#search`,
+          href: "#search",
           text: "Chunks it lives in",
           onclick: (e) => {
             e.preventDefault();
             state.pendingQuery = node.name;
             go("search");
-          },
-        }),
-        el("a", {
-          class: "button small",
-          href: `#impact`,
-          text: "Blast radius",
-          onclick: (e) => {
-            e.preventDefault();
-            state.pendingSymbol = node.name;
-            go("impact");
           },
         }),
       ),
@@ -1115,19 +1169,16 @@ async function graphView() {
       return fill(rail, error(e.message));
     }
     if (!data.nodes.length) {
-      meta.textContent = "";
-      canvas.draw({ nodes: [], edges: [] });
+      meta.textContent = "0 symbols";
+      canvas.draw({ nodes: [], edges: [] }, kinds);
       return blank(
         data.total === 0
           ? "This store has no symbols yet. The graph is built as files are indexed — run Index once, or leave the daemon watching."
           : "Nothing in this scope. Clear the filters, or pick a store.",
       );
     }
-    meta.textContent =
-      data.shown < data.total
-        ? `${n(data.shown)} of ${n(data.total)} symbols · ${n(data.edges.length)} edges drawn`
-        : `${n(data.shown)} symbols · ${n(data.edges.length)} edges`;
-    canvas.draw(data);
+    canvas.draw(data, kinds);
+    counts();
     // A focused view arrives with its centre chosen, so the rail says something
     // before the first click rather than asking for one.
     const centre = params && params.name;
@@ -1151,6 +1202,23 @@ async function graphView() {
     },
   });
 
+  const kindChips = EDGE_KINDS.map((kind) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": "true",
+      text: kind,
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+        e.currentTarget.setAttribute("aria-pressed", String(on));
+        if (on) kinds.add(kind);
+        else kinds.delete(kind);
+        canvas.filter(kinds);
+        counts();
+      },
+    }),
+  );
+
   const storeChips = state.stores.map((store) =>
     el("button", {
       class: "chip",
@@ -1169,38 +1237,42 @@ async function graphView() {
 
   const page = el(
     "div",
-    { class: "view graph-page" },
-    pageHead(
-      "Graph",
-      "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
+    { class: "graph-page" },
+    el(
+      "div",
+      { class: "graph-band" },
+      pageHead(
+        "Graph",
+        "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
+        { actions: [el("div", { class: "filters" }, kindChips), pause] },
+      ),
+      el(
+        "div",
+        { class: "graph-controls" },
+        el(
+          "div",
+          { class: "graph-scope" },
+          icon(ICONS.search, 16),
+          labelled("graph-scope", "Scope the graph", scopeInput),
+        ),
+        storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
+      ),
     ),
     el(
       "div",
-      { class: "graph-controls" },
-      el("div", { class: "graph-scope" }, icon(ICONS.search, 16), labelled("graph-scope", "Scope the graph", scopeInput)),
-      el("div", { class: "filters" }, storeChips.length > 1 ? storeChips : null),
-      el("span", { class: "spacer" }),
-      pause,
-    ),
-    el(
-      "div",
-      { class: "graph-body grow" },
+      { class: "graph-body" },
       el(
         "div",
         { class: "graph-frame" },
         canvas.node,
         el(
           "div",
-          { class: "graph-foot" },
-          el(
-            "div",
-            { class: "graph-legend" },
-            el("span", { class: "key extracted" }, el("i", {}), "extracted"),
-            el("span", { class: "key inferred" }, el("i", {}), "inferred"),
-            el("span", { class: "key selected" }, el("i", {}), "selected"),
-          ),
-          meta,
+          { class: "graph-legend" },
+          el("span", { class: "key extracted" }, el("i", {}), "extracted"),
+          el("span", { class: "key inferred" }, el("i", {}), "inferred"),
+          el("span", { class: "key selected" }, el("i", {}), "selected"),
         ),
+        meta,
       ),
       rail,
     ),
@@ -1215,10 +1287,8 @@ async function graphView() {
     state.pendingSymbol = "";
     if (pending) return load({ name: pending, limit: "45" });
     // Land on the busiest symbol's neighbourhood rather than on everything at
-    // once. The whole store drawn at once is honest and unreadable — hundreds
-    // of edges among the hubs is what the corpus actually looks like — and a
-    // reader arriving at a knot learns nothing. One symbol and what touches it
-    // is the view the rest of the page is about, and the scope box widens it.
+    // once. The whole store drawn at once is honest and unreadable, and a
+    // reader arriving at a knot learns nothing.
     try {
       const overview = await api("/api/graph?limit=1");
       const busiest = (overview.nodes || [])[0];
@@ -2215,7 +2285,9 @@ async function searchView() {
 async function indexView() {
   await refreshStores();
 
-  const log = el("div", { class: "log", "aria-live": "polite" });
+  // Hidden until there is something to say. An empty terminal-coloured slab
+  // under an idle page is a block of nothing pretending to be output.
+  const log = el("div", { class: "log", "aria-live": "polite", hidden: true });
   const bar = el("span", {});
   // Set through CSSOM rather than a style attribute: the CSP blocks the
   // attribute, and this is the one value that genuinely has to be dynamic.
@@ -2224,6 +2296,20 @@ async function indexView() {
   const status = el("span", { class: "meta", text: "idle" });
   const picker = el("div", { class: "card picker", hidden: true });
   const note = el("div", { class: "note" });
+  const urlCard = el("div", { class: "card pad", hidden: true });
+  const urlNote = el("div", { class: "note" });
+
+  /* The two ways to start a queue are mutually exclusive: showing a folder
+   * picker and a URL field at once offers two answers to one question. Both
+   * start closed, so the page opens on the path field and its actions. */
+  function reveal(which) {
+    const wantPicker = which === "picker" && picker.hidden;
+    const wantUrl = which === "url" && urlCard.hidden;
+    picker.hidden = !wantPicker;
+    urlCard.hidden = !wantUrl;
+    if (wantPicker) browse("");
+    if (wantUrl) urlField.focus();
+  }
 
   const field = el("input", {
     type: "text",
@@ -2243,6 +2329,7 @@ async function indexView() {
   );
 
   function say(text, key) {
+    log.hidden = false;
     log.append(
       el(
         "div",
@@ -2270,7 +2357,6 @@ async function indexView() {
     }
     note.className = "note";
     note.textContent = "";
-    picker.hidden = false;
 
     fill(
       picker,
@@ -2356,7 +2442,19 @@ async function indexView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, store: storeSelect.value || undefined }),
       });
-      if (!response.ok) throw new Error((await response.text()) || response.statusText);
+      if (!response.ok) {
+        // The body is the same `{"error": ...}` shape every other route
+        // answers with, and showing the JSON rather than the sentence inside
+        // it is how a clear message arrives looking like a fault.
+        const body = await response.text();
+        let detail = body;
+        try {
+          detail = JSON.parse(body).error || body;
+        } catch (_) {
+          /* a plain-text body is fine too */
+        }
+        throw new Error(detail || response.statusText);
+      }
 
       // The response is chunked and arrives while the writer works, so it is
       // read as it comes rather than awaited whole — the point of streaming it.
@@ -2408,10 +2506,12 @@ async function indexView() {
     } catch (e) {
       status.textContent = "failed";
       say(e.message, "error");
+      return e.message;
     } finally {
       start.disabled = false;
       addButton.disabled = false;
     }
+    return null;
   }
 
   start.addEventListener("click", () => {
@@ -2423,13 +2523,25 @@ async function indexView() {
     run("/api/index", { path });
   });
 
-  addButton.addEventListener("click", () => {
+  addButton.addEventListener("click", async () => {
     const url = urlField.value.trim();
     if (!url) {
-      complain("Give an https URL to fetch.", urlField);
+      urlNote.className = "note bad";
+      urlNote.textContent = "Give an https URL to fetch.";
+      urlField.focus();
       return;
     }
-    run("/api/add", { url });
+    urlNote.className = "note";
+    urlNote.textContent = "";
+    const failed = await run("/api/add", { url });
+    // A failed fetch leaves the card open with what went wrong on it. Closing
+    // it would take the message away with it and leave the page looking as
+    // though nothing had been asked for.
+    if (failed) {
+      urlNote.className = "note bad";
+      urlNote.textContent = failed;
+      urlCard.hidden = false;
+    }
   });
 
   return el(
@@ -2439,34 +2551,47 @@ async function indexView() {
       "Index",
       "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path semlith_index takes.",
     ),
+    // The path field has the row to itself, above the actions: sharing a row
+    // with four buttons is what held it to 420px on a 1440px page.
+    el(
+      "div",
+      { class: "field tall full" },
+      el("span", { class: "prefix", text: "path" }),
+      labelled("index-path", "Path to index", field),
+    ),
     el(
       "div",
       { class: "filters" },
       el(
-        "div",
-        { class: "field tall grow" },
-        el("span", { class: "prefix", text: "path" }),
-        labelled("index-path", "Path to index", field),
+        "button",
+        { class: "button secondary", type: "button", onclick: () => reveal("picker") },
+        icon(ICONS.folder),
+        "Choose folder…",
       ),
       el(
         "button",
-        { class: "button secondary", type: "button", onclick: () => browse("") },
-        icon(ICONS.folder),
-        "Choose folder…",
+        { class: "button secondary", type: "button", onclick: () => reveal("url") },
+        icon(ICONS.file),
+        "Add from a URL",
       ),
       state.stores.length > 1 ? storeSelect : null,
       start,
       el("span", { class: "spacer" }),
-      el("span", { class: "meta", text: "writer: daemon" }),
+      // What the queue actually holds, from /api/stores. The line it replaces
+      // said "writer: daemon", which named a process rather than telling
+      // anyone anything about their work.
+      el("span", {
+        class: "meta",
+        text: `queue depth ${state.stores.reduce((sum, store) => sum + (store.queue || 0), 0)}`,
+      }),
     ),
     note,
     el(
       "div",
       { class: "scroller" },
     picker,
-    el(
-      "div",
-      { class: "card pad" },
+    fill(
+      urlCard,
       el("span", { class: "eyebrow", text: "Add from a URL" }),
       el("p", {
         class: "subtitle",
@@ -2474,15 +2599,12 @@ async function indexView() {
       }),
       el(
         "div",
-        { class: "filters" },
-        el(
-          "div",
-          { class: "field tall grow" },
-          el("span", { class: "prefix", text: "url" }),
-          labelled("index-url", "URL to fetch and index", urlField),
-        ),
-        addButton,
+        { class: "field tall full" },
+        el("span", { class: "prefix", text: "url" }),
+        labelled("index-url", "URL to fetch and index", urlField),
       ),
+      el("div", { class: "actions" }, addButton),
+      urlNote,
     ),
     el(
       "div",

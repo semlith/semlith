@@ -1888,6 +1888,13 @@ pre.code {
   max-width: 420px;
 }
 
+/* A field that owns its row. The Index page's path is the reason: it shared a
+ * row with four buttons and a store picker, so on a 1440px page the thing the
+ * page is about was the narrowest control on it. */
+.field.full {
+  width: 100%;
+}
+
 .tag.wrapped {
   margin: 0 var(--sp-1) var(--sp-1) 0;
 }
@@ -1919,10 +1926,31 @@ pre.code {
 
 /* ----------------------------------------------------------------- graph */
 
-/* The canvas pages. Everything below uses the scales at the top of the file;
- * a value not in one of them does not belong here. */
+/* The graph is the one page that is a drawing rather than a document: a header
+ * band, then a canvas that fills everything left over beside a rail. It is
+ * full-bleed on purpose — page padding around a canvas is space the drawing
+ * could have used. */
 
-.graph-page,
+.graph-page {
+  animation: rise var(--d-rise) var(--e-out);
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.graph-band {
+  flex-shrink: 0;
+  padding: var(--sp-5) var(--sp-5) var(--sp-3h);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
 .impact-page,
 .ledger-page {
   display: flex;
@@ -1972,27 +2000,23 @@ pre.code {
 
 .graph-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  gap: var(--sp-4);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: stretch;
+  flex-grow: 1;
   min-width: 0;
+  min-height: 0;
 }
 
 .graph-frame {
   position: relative;
   min-width: 0;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
+  background: var(--soft);
   overflow: hidden;
 }
 
-.graph-stage,
-.rings {
-  position: relative;
-  width: 100%;
-  height: 460px;
-  min-width: 0;
+.graph-stage {
+  position: absolute;
+  inset: 0;
 }
 
 .graph-canvas {
@@ -2003,86 +2027,100 @@ pre.code {
   touch-action: none;
 }
 
-.graph-canvas:active {
+/* Said rather than left to the default, so the canvas answers the pointer the
+ * way every other draggable surface does. */
+.graph-canvas.over-node {
+  cursor: pointer;
+}
+
+.graph-canvas.dragging {
   cursor: grabbing;
 }
 
-/* A strip under the canvas rather than floating over it: a legend drawn on
- * top of the drawing is a legend sitting on a node. */
-.graph-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-  padding: var(--sp-2) var(--sp-4);
-  border-top: 1px solid var(--line-soft);
-  background: var(--soft);
-}
-
+/* Floating inside the canvas at its top-left, as the design draws it. */
 .graph-legend {
+  position: absolute;
+  left: var(--sp-4h);
+  top: var(--sp-4);
   display: flex;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2h) var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  font-family: var(--mono);
   font-size: var(--t-tiny);
-  color: var(--muted);
+  line-height: var(--lh-prose);
+  color: var(--ink-2);
+  pointer-events: none;
 }
 
 .graph-legend .key {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
 }
 
 .graph-legend i {
-  width: 14px;
+  width: 18px;
   height: 0;
-  border-top: 2px solid var(--muted);
+  border-top: 1.4px solid var(--blue);
   display: inline-block;
 }
 
-.graph-legend .extracted i {
-  border-top-color: var(--green);
-}
-
 .graph-legend .inferred i {
-  border-top: 2px dashed var(--amber-ink);
+  border-top-style: dashed;
 }
 
 .graph-legend .selected i {
-  border-top-color: var(--accent-edge);
-  border-top-width: 3px;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--accent-edge);
+  border-radius: 3px;
+  background: var(--accent);
 }
 
-.graph-meta {
+.graph-count {
+  position: absolute;
+  right: var(--sp-4h);
+  bottom: var(--sp-4);
   font-family: var(--mono);
   font-size: var(--t-tiny);
   color: var(--muted);
+  pointer-events: none;
 }
 
 .graph-rail {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-3h);
   min-width: 0;
-  padding: var(--sp-4);
+  min-height: 0;
+  padding: var(--sp-4h);
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.graph-selected {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
 }
 
 .graph-selected .sym {
   margin: 0;
   font-family: var(--mono);
   font-size: var(--t-lead);
-  font-weight: 600;
+  font-weight: 500;
+  line-height: var(--lh-heading);
   overflow-wrap: anywhere;
 }
 
 .graph-selected .loc {
-  margin-top: var(--sp-1);
   font-family: var(--mono);
-  font-size: var(--t-tiny);
+  font-size: var(--t-small);
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -2097,12 +2135,17 @@ pre.code {
   gap: var(--sp-2);
 }
 
+.chip.static.blue {
+  background: var(--blue-soft);
+  border-color: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
 .rail-group h3 {
   margin: 0 0 var(--sp-2);
-  font-size: var(--t-small);
-  font-weight: 600;
+  font: 500 var(--t-tiny) var(--mono);
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--muted);
 }
 
@@ -2112,26 +2155,28 @@ pre.code {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
 }
 
 .rail-list li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-2);
+  padding: 7px var(--sp-2h);
+  border: 1px solid var(--line-soft);
   border-radius: var(--r-2);
-  font-size: var(--t-body-sm);
+  font-size: var(--t-small);
   min-width: 0;
-  transition: background var(--d-hover) var(--e-in-out);
+  transition: border-color var(--d-hover) var(--e-in-out);
 }
 
 .rail-list li:hover {
-  background: var(--soft);
+  border-color: var(--blue);
 }
 
 .rail-list a {
   font-family: var(--mono);
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -2143,6 +2188,7 @@ pre.code {
 
 .rail-hint {
   font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
   color: var(--muted);
   text-wrap: pretty;
 }
@@ -2500,14 +2546,30 @@ pre.code {
   }
 
   /* The canvas pages are two columns of real content, so they stack rather
-   * than squeeze: a 280px rail beside a 300px canvas is two unusable halves. */
+   * than squeeze: a 300px rail beside a 300px canvas is two unusable halves. */
   .graph-body,
   .impact-body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .graph-stage {
+  /* Stacked, the canvas cannot fill the page any more, so it takes a stated
+   * height and the rail follows it down the page. */
+  .graph-page {
+    overflow-y: auto;
+  }
+
+  .graph-frame {
     height: 360px;
+  }
+
+  .graph-band {
+    padding: var(--sp-4) var(--sp-4) var(--sp-3);
+  }
+
+  .graph-rail {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    overflow: visible;
   }
 
   .rings {
@@ -2595,7 +2657,7 @@ pre.code {
     --t-body: 13px;
   }
 
-  .graph-stage {
+  .graph-frame {
     height: 280px;
   }
 
