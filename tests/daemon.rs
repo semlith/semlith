@@ -186,6 +186,20 @@ impl Daemon {
     fn store_dir(&self, name: &str) -> PathBuf {
         self.home.join("stores").join(name)
     }
+
+    /// The daemon's resident memory in bytes, read from the OS rather than
+    /// guessed at. `ps` is on every platform these tests run on.
+    fn rss(&self) -> Option<u64> {
+        let out = Command::new("ps")
+            .args(["-o", "rss=", "-p", &self.child.id().to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|kib| kib * 1024)
+    }
 }
 
 impl Drop for Daemon {
@@ -292,6 +306,65 @@ fn the_token_and_the_host_check_guard_every_route() {
     assert_eq!(allowed.status, 200);
 }
 
+/// A refused request must cost the daemon nothing that adds up. A thousand of
+/// them are answered from the head alone — no body is ever read — so the
+/// process is the size it was when it started.
+#[test]
+#[ignore = "makes a thousand requests and reads the process's memory, so it is slow"]
+fn a_thousand_refusals_do_not_grow_the_daemon() {
+    let daemon = Daemon::start("flood", &[]);
+
+    let idle = daemon.rss().expect("the daemon's resident memory");
+
+    // A megabyte of body on every one of them, declared and never sent: a
+    // server that allocated before it refused would be holding a gigabyte.
+    let body = "x".repeat(64 * 1024);
+    for _ in 0..1000 {
+        let answer = daemon.raw(&format!(
+            "POST /api/index HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+             Origin: http://127.0.0.1:{}\r\nSec-Fetch-Site: same-site\r\n\
+             Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            daemon.port,
+            daemon.token,
+            daemon.port + 1,
+            body.len()
+        ));
+        assert_eq!(answer.status, 403);
+    }
+
+    let after = daemon.rss().expect("the daemon's resident memory");
+    let grew = after.saturating_sub(idle);
+    assert!(
+        grew < 10 * 1024 * 1024,
+        "a thousand refusals grew the daemon by {} KiB, from {} to {}",
+        grew / 1024,
+        idle,
+        after
+    );
+}
+
+/// The Files route's offset is paid before the page is cut, so it is bounded
+/// rather than clamped: a number past the end is a mistake worth saying so.
+#[test]
+fn the_files_route_refuses_an_offset_it_would_have_to_allocate() {
+    let daemon = Daemon::start("offset", &[]);
+
+    let far = daemon.get("/api/files?offset=4000000000");
+    assert_eq!(far.status, 400);
+    assert!(
+        far.json()["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("10000"),
+        "the refusal does not say what the limit is: {}",
+        far.body
+    );
+
+    assert_eq!(daemon.get("/api/files?offset=-1").status, 400);
+    assert_eq!(daemon.get("/api/files?offset=10000").status, 200);
+    assert_eq!(daemon.get("/api/files?offset=10001").status, 400);
+}
+
 /// A panicking route used to cost a worker permanently and poison every lock
 /// it held, so one malformed request took an eighth of the server and eight of
 /// them took all of it. It now costs one 500 and nothing else.
@@ -315,7 +388,10 @@ fn a_panicking_route_costs_one_request_and_not_the_daemon() {
     // panicking one was holding when it died.
     assert_eq!(daemon.get("/api/panic").status, 500);
     let about = daemon.get("/api/about");
-    assert_eq!(about.status, 200, "the daemon stopped answering after a panic");
+    assert_eq!(
+        about.status, 200,
+        "the daemon stopped answering after a panic"
+    );
     assert_eq!(about.json()["version"], env!("CARGO_PKG_VERSION"));
 
     let stores = daemon.get("/api/stores");
@@ -326,7 +402,11 @@ fn a_panicking_route_costs_one_request_and_not_the_daemon() {
 
     // And a write, which takes more of the daemon's state than a read does.
     let endpoint = daemon.post("/api/endpoint", r#"{"open":false}"#);
-    assert_eq!(endpoint.status, 200, "a write after a panic: {}", endpoint.body);
+    assert_eq!(
+        endpoint.status, 200,
+        "a write after a panic: {}",
+        endpoint.body
+    );
 }
 
 /// Guessing costs time, and the cost grows with the run. The numbers come off

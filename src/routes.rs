@@ -26,6 +26,14 @@ use std::sync::atomic::Ordering;
 /// cap is what stops a hand-written query asking for all of them.
 const FILE_PAGE: i64 = 500;
 
+/// How deep the Files route will page.
+///
+/// The cost of an offset is paid before the page is cut: every open store is
+/// asked for `offset + limit` rows in the requested order and the merge picks
+/// the page out of the union, so the offset is what is allocated rather than
+/// what is returned.
+const FILE_OFFSET_MAX: i64 = 10_000;
+
 pub fn handler(state: Arc<State>) -> Handler {
     Arc::new(move |request| route(&state, request))
 }
@@ -194,6 +202,22 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    // Before anything is opened. An offset of four billion asks every open
+    // store for four billion rows in sorted order and merges them, which is a
+    // whole machine's memory for a page nobody is reading. The portal pages in
+    // fifteens; ten thousand is deeper than any table it draws, and a refusal
+    // past it is a clearer answer than a clamp that silently shows page one.
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if !(0..=FILE_OFFSET_MAX).contains(&offset) {
+        return Response::error(
+            400,
+            &format!("offset must be between 0 and {FILE_OFFSET_MAX}"),
+        );
+    }
+
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
@@ -212,11 +236,6 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(15)
         .clamp(1, FILE_PAGE);
-    let offset = request
-        .query("offset")
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0)
-        .clamp(0, i64::from(u32::MAX));
 
     // Each store is asked for the first `offset + limit` rows in the requested
     // order and the merge picks the page out of the union. Asking each store
@@ -312,6 +331,22 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(400, &e),
     };
     let only = request.query_all("store");
+
+    // Before anything is opened. An offset of four billion asks every open
+    // store for four billion rows in sorted order and merges them, which is a
+    // whole machine's memory for a page nobody is reading. The portal pages in
+    // fifteens; ten thousand is deeper than any table it draws, and a refusal
+    // past it is a clearer answer than a clamp that silently shows page one.
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if !(0..=FILE_OFFSET_MAX).contains(&offset) {
+        return Response::error(
+            400,
+            &format!("offset must be between 0 and {FILE_OFFSET_MAX}"),
+        );
+    }
 
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());

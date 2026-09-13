@@ -108,6 +108,24 @@ const MAX_BODY: usize = 1024 * 1024;
 /// half-open socket cannot hold a worker forever.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a whole request has to arrive once its connection is accepted.
+///
+/// The read timeout above catches a socket that goes quiet; this catches one
+/// that never does — a byte a second is not a stalled connection and would
+/// hold a worker for as long as the sender felt like. Ten seconds is far more
+/// than any request over loopback needs.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How many connections may be in hand at once.
+///
+/// Eight workers, a waiting room that can be holding refusals for up to four
+/// seconds, and streams that have left the pool: the cap is on all of them
+/// together, because what it is protecting against is memory and file
+/// descriptors rather than worker time. Past it the answer is 503 and the
+/// connection closes, which is what a local client should see from a daemon
+/// that is already at its limit.
+const MAX_CONNECTIONS: usize = 32;
+
 /// Set when the accept loop should be woken so it can notice `stop`.
 static WAKE: AtomicBool = AtomicBool::new(false);
 
@@ -293,6 +311,23 @@ pub type Handler = Arc<dyn Fn(&Request) -> Response + Send + Sync>;
 struct Late {
     stream: TcpStream,
     due: std::time::Instant,
+    /// Held for as long as the refusal is, so a connection waiting in the
+    /// waiting room still counts against [`MAX_CONNECTIONS`].
+    _in_flight: InFlight,
+}
+
+/// One connection's place in the count, given up when it is dropped.
+///
+/// A guard rather than a pair of increments, because this connection can leave
+/// by several doors — answered on a worker, held in the waiting room, or
+/// streaming on a thread of its own — and a count that is only right on the
+/// paths somebody remembered is a leak waiting for the one they did not.
+struct InFlight(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// The agent key, and the one it replaced.
@@ -415,9 +450,10 @@ impl Server {
         stop: &'static AtomicBool,
         refused: impl Fn(Refusal) + Send + Sync + 'static,
     ) -> Result<()> {
-        let (tx, rx) = mpsc::channel::<TcpStream>();
+        let (tx, rx) = mpsc::channel::<(TcpStream, InFlight)>();
         let rx = Arc::new(Mutex::new(rx));
         let refused = Arc::new(refused);
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         // Refused requests are answered by a thread of their own. Holding a
         // worker for the delay would mean eight wrong tokens at once could stop
@@ -469,12 +505,15 @@ impl Server {
                             let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
                             guard.recv()
                         };
-                        let Ok(stream) = next else { return };
-                        let hold = |stream| {
+                        let Ok((stream, in_flight)) = next else {
+                            return;
+                        };
+                        let hold = |stream, in_flight| {
                             let delay = penalty.lock().unwrap_or_else(|e| e.into_inner()).charge();
                             let _ = late_tx.send(Late {
                                 stream,
                                 due: std::time::Instant::now() + delay,
+                                _in_flight: in_flight,
                             });
                         };
                         let auth = {
@@ -487,7 +526,7 @@ impl Server {
                                 port,
                             }
                         };
-                        if let Some(class) = answer(stream, &handler, &auth, &hold) {
+                        if let Some(class) = answer(stream, in_flight, &handler, &auth, &hold) {
                             refused(class);
                         }
                     }
@@ -513,7 +552,7 @@ impl Server {
 
         while !stop.load(Ordering::Relaxed) {
             match self.listener.accept() {
-                Ok((stream, _)) => {
+                Ok((mut stream, _)) => {
                     // The waker's own connection arrives here too; it carries
                     // no request, so `answer` reads nothing and closes it.
                     if stop.load(Ordering::Relaxed) {
@@ -521,7 +560,22 @@ impl Server {
                     }
                     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-                    if tx.send(stream).is_err() {
+
+                    // Counted here rather than on a worker: a connection that
+                    // is still queued is still a connection this process is
+                    // holding open, and the flood that matters never reaches a
+                    // worker at all.
+                    let taken = live.fetch_add(1, Ordering::Relaxed);
+                    let in_flight = InFlight(Arc::clone(&live));
+                    if taken >= MAX_CONNECTIONS {
+                        let _ = write_response(
+                            &mut stream,
+                            Response::new(503, "text/plain", Vec::new()),
+                        );
+                        drop(in_flight);
+                        continue;
+                    }
+                    if tx.send((stream, in_flight)).is_err() {
                         break;
                     }
                     // A worker that ended for any reason is replaced here, so
@@ -601,11 +655,22 @@ impl Auth {
 /// who made a mistake.
 fn answer(
     mut stream: TcpStream,
+    in_flight: InFlight,
     handler: &Handler,
     auth: &Auth,
-    hold: &impl Fn(TcpStream),
+    hold: &impl Fn(TcpStream, InFlight),
 ) -> Option<Refusal> {
-    let request = match read_request(&mut stream) {
+    let started = std::time::Instant::now();
+    let mut reader = match stream.try_clone().map(BufReader::new) {
+        Ok(reader) => reader,
+        Err(_) => return Some(Refusal::Malformed),
+    };
+
+    // The head first, and only the head. Everything that can refuse this
+    // request is decided from it, so a request that is going to be refused
+    // never has its body read into memory — which is what keeps a thousand
+    // cross-origin attempts from costing a thousand bodies' worth of it.
+    let mut request = match read_head(&mut reader) {
         Ok(Some(r)) => r,
         Ok(None) => return None,
         Err(_) => {
@@ -617,6 +682,7 @@ fn answer(
     // Host first: a request from a foreign origin is refused before the token
     // is even compared, so a wrong guess and a right one cost the same.
     if !loopback_host(request.header("host")) {
+        drain_body(&mut reader, &request, started);
         let _ = write_response(&mut stream, Response::new(400, "text/plain", Vec::new()));
         return Some(Refusal::ForeignHost);
     }
@@ -628,6 +694,7 @@ fn answer(
     // looked at, so a client that was told to stop learns the same thing
     // whether or not it still holds a key.
     if for_mcp && !auth.mcp_open {
+        drain_body(&mut reader, &request, started);
         let _ = write_response(&mut stream, Response::error(404, "no such route"));
         return None;
     }
@@ -643,10 +710,12 @@ fn answer(
     // was right or wrong — and gets it without a handler having run.
     if !reading {
         if !same_origin(&request, auth.port) {
+            drain_body(&mut reader, &request, started);
             let _ = write_response(&mut stream, Response::new(403, "text/plain", Vec::new()));
             return Some(Refusal::CrossOrigin);
         }
         if !json_body(request.header("content-type")) {
+            drain_body(&mut reader, &request, started);
             let _ = write_response(&mut stream, Response::new(403, "text/plain", Vec::new()));
             return Some(Refusal::BadContentType);
         }
@@ -672,9 +741,24 @@ fn answer(
         if !by_header && !by_agent {
             // Empty body, and not yet: a prober learns that something refused
             // it, nothing else, and not quickly.
-            hold(stream);
+            drain_body(&mut reader, &request, started);
+            hold(stream, in_flight);
             return Some(Refusal::Unauthorized);
         }
+    }
+
+    // Allowed, so now the body — and now the clock matters, because from here
+    // the connection is one this server intends to do work for.
+    if read_body(&mut reader, &mut request).is_err() {
+        let _ = write_response(&mut stream, Response::new(400, "text/plain", Vec::new()));
+        return Some(Refusal::Malformed);
+    }
+    if started.elapsed() > REQUEST_DEADLINE {
+        // A request dribbled out one byte at a time holds a worker for as long
+        // as the sender likes. Ten seconds is far more than a loopback request
+        // needs and far less than a client can hold.
+        let _ = write_response(&mut stream, Response::new(408, "text/plain", Vec::new()));
+        return Some(Refusal::Malformed);
     }
 
     let request = if head_only {
@@ -704,6 +788,19 @@ fn answer(
     if head_only {
         response.body = Body::Bytes(Vec::new());
     }
+
+    // A streamed response leaves the pool. An index run holds its connection
+    // for as long as the run takes — minutes on a large corpus — and doing that
+    // on a worker means the portal is answering on seven threads while it runs,
+    // or on none at all once somebody starts eight.
+    if matches!(response.body, Body::Stream(_)) {
+        std::thread::spawn(move || {
+            let _in_flight = in_flight;
+            let _ = write_response(&mut stream, response);
+        });
+        return None;
+    }
+
     let _ = write_response(&mut stream, response);
     None
 }
@@ -775,9 +872,11 @@ fn same(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-
+/// The request line and the headers, with no body read yet.
+///
+/// Split from the body on purpose. Every rule that can refuse a request is
+/// decided from what is here, so a refusal costs the head and nothing more.
+fn read_head(reader: &mut BufReader<TcpStream>) -> Result<Option<Request>> {
     let mut head = String::new();
     let mut read = 0;
     loop {
@@ -814,21 +913,56 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
         None => (target.as_str(), ""),
     };
 
-    let mut body = Vec::new();
-    if let Some(len) = headers.get("content-length").and_then(|v| v.parse().ok()) {
-        let len: usize = len;
-        anyhow::ensure!(len <= MAX_BODY, "request body too large");
-        body.resize(len, 0);
-        reader.read_exact(&mut body)?;
-    }
-
     Ok(Some(Request {
         method,
         path: percent_decode(raw_path),
         query: parse_query(raw_query),
         headers,
-        body,
+        body: Vec::new(),
     }))
+}
+
+/// Read and throw away a declared body, so a refused peer can read its refusal.
+///
+/// A server that answers and closes while the client is still writing gives
+/// that client a reset connection rather than the status it was sent: the
+/// response is in the socket, and the reset takes it with it. So a refusal
+/// drains what the client said it was sending — through a small buffer, never
+/// into one the size of the body, which is the whole point of refusing before
+/// the body is read. Bounded by the same cap a real body has and by the
+/// request deadline, so draining cannot be the hold it prevents.
+fn drain_body(reader: &mut BufReader<TcpStream>, request: &Request, started: std::time::Instant) {
+    let Some(len) = request
+        .headers
+        .get("content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+    else {
+        return;
+    };
+    let mut left = len.min(MAX_BODY);
+    let mut sink = [0u8; 8 * 1024];
+    while left > 0 && started.elapsed() <= REQUEST_DEADLINE {
+        let want = left.min(sink.len());
+        match reader.read(&mut sink[..want]) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => left -= n,
+        }
+    }
+}
+
+/// The body, once the request has earned one.
+fn read_body(reader: &mut BufReader<TcpStream>, request: &mut Request) -> Result<()> {
+    let Some(len) = request
+        .headers
+        .get("content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+    else {
+        return Ok(());
+    };
+    anyhow::ensure!(len <= MAX_BODY, "request body too large");
+    request.body.resize(len, 0);
+    reader.read_exact(&mut request.body)?;
+    Ok(())
 }
 
 /// `a=1&b=2` to a map, with a repeated key's values joined by `\u{1}`.
