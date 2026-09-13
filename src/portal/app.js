@@ -95,13 +95,16 @@ function clock(unix) {
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** An inline icon. Decorative: the control around it carries the name. */
-function icon(d, size) {
+function icon(d, size, solid) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("width", String(size || 16));
   svg.setAttribute("height", String(size || 16));
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
+  // A shape that is a shape rather than a stroke — the three dots of a menu
+  // control. Drawn as strokes they are zero-length segments whose whole size
+  // is the line width, which is as faint as a mark can be.
+  svg.setAttribute("fill", solid ? "currentColor" : "none");
+  svg.setAttribute("stroke", solid ? "none" : "currentColor");
   svg.setAttribute("stroke-width", "1.7");
   svg.setAttribute("stroke-linecap", "round");
   svg.setAttribute("stroke-linejoin", "round");
@@ -125,7 +128,10 @@ const ICONS = {
   alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
   moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
   copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
-  more: "M12 5.5h.01|M12 12h.01|M12 18.5h.01",
+  // Three filled dots, as circles rather than as dotted strokes.
+  more:
+    "M12 4.1a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|"
+    + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -765,7 +771,7 @@ const menu = {
 /** The control that opens one, for the end of a table row. */
 function rowMenu(items) {
   const button = el("button", {
-    class: "button ghost small icon",
+    class: "button secondary small icon",
     type: "button",
     "aria-haspopup": "menu",
     "aria-expanded": "false",
@@ -773,7 +779,7 @@ function rowMenu(items) {
     title: "Actions",
     onclick: () => menu.open(button, items()),
   });
-  fill(button, icon(ICONS.more, 16));
+  fill(button, icon(ICONS.more, 18, true));
   return button;
 }
 

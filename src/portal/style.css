@@ -3034,3 +3034,23 @@ td.row-end {
   background: var(--red-soft);
   color: var(--ink);
 }
+
+/* The menu control: a bordered square, and dots dark enough to find. */
+.button.icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--ink-2);
+}
+.button.icon:hover,
+.button.icon[aria-expanded="true"] {
+  color: var(--ink);
+  border-color: var(--blue);
+}
+.button.icon[aria-expanded="true"] {
+  background: var(--chip);
+}
+.button.icon svg {
+  width: 18px;
+  height: 18px;
+}
