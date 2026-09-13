@@ -350,3 +350,76 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+/// The stamp that keeps a load from hashing 52 MB every time must not become a
+/// way to skip the check. A file that changed is a file whose size or age
+/// changed, so the stamp stops matching and the digests are read again.
+#[test]
+#[ignore = "copies the real model cache, so it needs one"]
+fn the_verification_stamp_does_not_outlive_the_bytes_it_is_about() {
+    let real = real_cache();
+    let snapshot = real
+        .join("models--onnx-community--granite-embedding-small-english-r2-ONNX")
+        .join("snapshots")
+        .join(semlith::embed::GRANITE_REVISION);
+    if !snapshot.is_dir() {
+        eprintln!("no cached granite snapshot; run the suite once first");
+        return;
+    }
+
+    let cache = tempfile::tempdir().unwrap();
+    let into = cache
+        .path()
+        .join("models--onnx-community--granite-embedding-small-english-r2-ONNX")
+        .join("snapshots")
+        .join(semlith::embed::GRANITE_REVISION);
+    copy_tree(&snapshot, &into);
+
+    let corpus = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "a.md",
+        "Ownership means each value has one owner.",
+    );
+
+    let index = |store: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(["index", corpus.path().to_str().unwrap(), "--quiet"])
+            .arg("--store")
+            .arg(store)
+            .env("SEMLITH_MODEL_CACHE", cache.path())
+            .output()
+            .expect("running semlith index")
+    };
+
+    // The first run verifies and leaves a stamp; the second trusts it.
+    let first = tempfile::tempdir().unwrap();
+    assert!(index(first.path()).status.success());
+    assert!(
+        into.join(".semlith-verified").exists(),
+        "the first load left no stamp, so every load pays for the digests"
+    );
+
+    let second = tempfile::tempdir().unwrap();
+    assert!(index(second.path()).status.success());
+
+    // Now change a file without touching the stamp. Its size and age move, so
+    // the stamp no longer describes it and the digest is read again.
+    let tokenizer = into.join("tokenizer.json");
+    let mut bytes = fs::read(&tokenizer).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0x01;
+    fs::write(&tokenizer, &bytes).unwrap();
+
+    let third = tempfile::tempdir().unwrap();
+    let out = index(third.path());
+    assert!(
+        !out.status.success(),
+        "the stamp let a changed file through"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("does not match the digest"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

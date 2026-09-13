@@ -196,6 +196,14 @@ const RUNTIME_FILE: &str = if cfg!(target_os = "macos") {
 fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<TextEmbedding> {
     link_runtime()?;
     check_cache_dir(&cache_dir)?;
+    let cache = cache_dir.clone();
+
+    // Whether this cache has already been checked against this pin, with every
+    // file still the size and age it was. Asked once here rather than per file,
+    // because the answer is about the set.
+    let checked = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION)
+        .is_some_and(|dir| already_verified(&dir, GRANITE_REVISION, GRANITE_FILES));
+
     // A revision rather than a branch. `main` is a name somebody else controls;
     // a commit is the bytes this release was built against.
     let repo = hf_hub::api::sync::ApiBuilder::new()
@@ -214,6 +222,9 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
             .get(name)
             .with_context(|| format!("fetching {name} from {GRANITE_REPO}"))?;
         let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        if checked {
+            return Ok(bytes);
+        }
         // Verified whether it was just fetched or was already in the cache: a
         // cache is a directory on disk, and the point of a digest is that it
         // does not matter how the bytes got there.
@@ -246,6 +257,13 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
                 .into_owned(),
             fetch(GRANITE_WEIGHTS)?,
         );
+
+    // Recorded after every file has been read and checked, and only when this
+    // run did the checking — the fetch above may have created the snapshot
+    // directory that did not exist when `checked` was read.
+    if !checked && let Some(dir) = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION) {
+        record_verified(&dir, GRANITE_REVISION, GRANITE_FILES);
+    }
 
     let opts = InitOptionsUserDefined::new()
         .with_max_length(max_length)
@@ -386,12 +404,24 @@ pub fn verify_cached(
         return Ok(());
     };
     for entry in entries.flatten() {
+        let dir = entry.path();
+        // The same stamp the text model uses: the CLIP weights are 350 MB and
+        // 254 MB, so hashing them on every load would cost more than loading
+        // them does.
+        if already_verified(&dir, revision, files) {
+            continue;
+        }
+        let mut read_all = true;
         for (name, expected) in files {
-            let path = entry.path().join(name);
+            let path = dir.join(name);
             let Ok(bytes) = std::fs::read(&path) else {
+                read_all = false;
                 continue;
             };
             verify(&format!("{repo}/{name}"), &bytes, expected)?;
+        }
+        if read_all {
+            record_verified(&dir, revision, files);
         }
     }
     Ok(())
@@ -479,6 +509,89 @@ pub const GRANITE_FILES: &[(&str, &str)] = &[
         "1f4cf47e4adec7f7ae09db03d071ba8667e07f9a4203142c7efa8d37fe453597",
     ),
 ];
+
+/// What a cache directory records about the files this release already verified.
+///
+/// Hashing every pinned file on every load is 52 MB of SHA-256 before a process
+/// can answer anything — measured at 276 ms on an M1, which is most of what a
+/// `semlith search` from the command line costs. So the digests are checked
+/// once and the result recorded here, keyed by the pin and by each file's size
+/// and modification time: if all three still match, the bytes are the ones that
+/// were verified.
+///
+/// This does not weaken the check it replaces. The attacker it would have to
+/// let through is one who can write this cache *and* preserve each file's size
+/// and mtime — and a cache anybody but this user can write to is already
+/// refused by [`check_cache_dir`], so that attacker is this user. What the
+/// digests are actually for — a corrupted download, and an upstream repository
+/// whose bytes changed — moves a file's size or mtime every time.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Verified {
+    revision: String,
+    /// File name to `(size, mtime nanoseconds, the digest it was checked
+    /// against)`.
+    files: std::collections::BTreeMap<String, (u64, u128, String)>,
+}
+
+const STAMP: &str = ".semlith-verified";
+
+/// What a file looks like on disk right now, for the stamp.
+fn fingerprint(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((meta.len(), modified))
+}
+
+/// Whether every pinned file was verified at this revision and has not moved.
+fn already_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(STAMP)) else {
+        return false;
+    };
+    let Ok(stamp) = serde_json::from_str::<Verified>(&text) else {
+        return false;
+    };
+    if stamp.revision != revision {
+        return false;
+    }
+    files.iter().all(|(name, expected)| {
+        stamp
+            .files
+            .get(*name)
+            .zip(fingerprint(&dir.join(name)))
+            .is_some_and(|((size, mtime, digest), (now_size, now_mtime))| {
+                digest == expected && *size == now_size && *mtime == now_mtime
+            })
+    })
+}
+
+/// Record that every pinned file has been checked, so the next process need not.
+fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
+    let mut stamp = Verified {
+        revision: revision.to_string(),
+        files: std::collections::BTreeMap::new(),
+    };
+    for (name, expected) in files {
+        let Some((size, mtime)) = fingerprint(&dir.join(name)) else {
+            // A file that cannot be measured is one the next run should check
+            // again, so the stamp is not written at all.
+            return;
+        };
+        stamp
+            .files
+            .insert((*name).to_string(), (size, mtime, (*expected).to_string()));
+    }
+    let Ok(body) = serde_json::to_vec(&stamp) else {
+        return;
+    };
+    // Best effort: a cache that cannot be written to is one that gets verified
+    // every time, which is slower and not wrong.
+    let _ = crate::home::write_private(&dir.join(STAMP), &body);
+}
 
 /// The SHA-256 of some bytes, as lowercase hex.
 pub fn digest(bytes: &[u8]) -> String {
