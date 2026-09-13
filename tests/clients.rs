@@ -174,10 +174,8 @@ fn every_stanza_launches_a_server_that_answers() {
         CLIENTS.len()
     );
 
-    let stanzas: Vec<(String, String)> = all
-        .into_iter()
-        .filter(|(_, body)| !is_http(body))
-        .collect();
+    let stanzas: Vec<(String, String)> =
+        all.into_iter().filter(|(_, body)| !is_http(body)).collect();
     for (language, body) in &stanzas {
         assert!(
             names_semlith(body),
