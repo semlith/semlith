@@ -2967,3 +2967,70 @@ input.pick {
   gap: var(--sp-2);
   justify-content: flex-end;
 }
+
+/* A row's actions, behind one control. The host is fixed to the viewport
+ * because a popup inside a table cell is clipped by the table's own scroll. */
+.menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 180px;
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  box-shadow: 0 10px 30px rgb(15 21 26 / 18%);
+}
+
+.menu-item {
+  transition: background var(--d-quick) var(--e-in-out);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-2);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-body-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.menu-item:hover {
+  background: var(--soft);
+}
+.menu-item.bad {
+  color: var(--red-ink);
+}
+.menu-item.bad:hover {
+  background: var(--red-soft);
+}
+
+/* The icon-only button the menu hangs off. */
+.button.icon {
+  width: 32px;
+  padding: 0;
+}
+
+th.row-end,
+td.row-end {
+  width: 44px;
+  text-align: right;
+}
+
+/* A question asked in the page: the line, then the way out, then the red one. */
+.note.asking {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  padding: var(--sp-2h) var(--sp-3h);
+  border: 1px solid var(--red);
+  border-radius: var(--r-3);
+  background: var(--red-soft);
+  color: var(--ink);
+}

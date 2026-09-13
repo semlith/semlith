@@ -125,6 +125,7 @@ const ICONS = {
   alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
   moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
   copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
+  more: "M12 5.5h.01|M12 12h.01|M12 18.5h.01",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -686,6 +687,94 @@ function pageHead(title, subtitle, extra) {
     ),
     subtitle ? el("p", { class: "subtitle", text: subtitle }) : null,
   );
+}
+
+/* A row's actions, behind one control.
+ *
+ * A column of buttons per row is a column of noise, and the destructive one
+ * sits a mis-aimed click away from the ordinary one. The menu is a single
+ * host appended to the body for the same reason the tooltip is: a popup
+ * inside a cell is clipped by the table's own `overflow: auto`. */
+const menu = {
+  node: null,
+  owner: null,
+
+  ensure() {
+    if (this.node) return this.node;
+    this.node = el("div", { class: "menu", role: "menu", hidden: true });
+    document.body.append(this.node);
+    // One listener each, not one per menu: the host outlives every row that
+    // opens it.
+    document.addEventListener("pointerdown", (e) => {
+      if (this.node.hidden) return;
+      if (this.node.contains(e.target) || (this.owner && this.owner.contains(e.target))) return;
+      this.close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this.close();
+    });
+    window.addEventListener("resize", () => this.close());
+    // A menu anchored to a row in a scrolling table has to go when the row
+    // moves, rather than hang over the wrong one.
+    window.addEventListener("scroll", () => this.close(), true);
+    return this.node;
+  },
+
+  /** `items` are `{ label, tone, onclick }`; `at` is the control it hangs off. */
+  open(at, items) {
+    const node = this.ensure();
+    if (this.owner === at && !node.hidden) return this.close();
+    this.owner = at;
+    at.setAttribute("aria-expanded", "true");
+    fill(
+      node,
+      items.map((item) =>
+        el("button", {
+          class: item.tone ? `menu-item ${item.tone}` : "menu-item",
+          type: "button",
+          role: "menuitem",
+          text: item.label,
+          onclick: () => {
+            this.close();
+            item.onclick();
+          },
+        }),
+      ),
+    );
+    node.hidden = false;
+    const box = node.getBoundingClientRect();
+    const rect = at.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.right - box.width;
+    left = Math.min(Math.max(margin, left), window.innerWidth - margin - box.width);
+    let top = rect.bottom + 6;
+    if (top + box.height > window.innerHeight - margin) top = rect.top - box.height - 6;
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(Math.max(margin, top))}px`;
+    node.querySelector(".menu-item")?.focus();
+  },
+
+  close() {
+    if (!this.node) return;
+    this.node.hidden = true;
+    if (this.owner) this.owner.setAttribute("aria-expanded", "false");
+    this.owner = null;
+  },
+};
+
+/** The control that opens one, for the end of a table row. */
+function rowMenu(items) {
+  const button = el("button", {
+    class: "button ghost small icon",
+    type: "button",
+    "aria-haspopup": "menu",
+    "aria-expanded": "false",
+    "aria-label": "Actions",
+    title: "Actions",
+    onclick: () => menu.open(button, items()),
+  });
+  fill(button, icon(ICONS.more, 16));
+  return button;
 }
 
 /** A status pill. One shape, and a dot only where it reports a state. */
@@ -1671,45 +1760,48 @@ function agentsCard() {
   return card;
 }
 
-/** The two-click delete for one store, and the note it leaves behind. */
-function deleteStore(name) {
-  const button = el("button", {
-    class: "button ghost small",
+/** Ask before deleting a store, in the page rather than in a browser dialog.
+ *
+ * A store is minutes of embedding, so the confirmation says what goes and what
+ * does not, and the button that does it is the red one. */
+function confirmDelete(name) {
+  const holder = document.querySelector(".view > .note.page-note");
+  if (!holder) return;
+  holder.className = "note page-note asking";
+  const go = el("button", {
+    class: "button danger small",
     type: "button",
-    text: "Delete",
+    text: `Delete ${name}`,
+    onclick: async () => {
+      go.disabled = true;
+      go.textContent = "Deleting…";
+      try {
+        const done = await post("/api/store/delete", { store: name });
+        note(done.message);
+        await refreshStores();
+        render();
+      } catch (e) {
+        note(e.message, true);
+      }
+    },
   });
-  let armed = false;
-  button.addEventListener("click", async () => {
-    if (!armed) {
-      armed = true;
-      button.classList.add("danger");
-      button.textContent = "Delete for good?";
-      button.title =
-        "Deletes this store's vectors, chunks, graph and ledger. The files it indexed are untouched.";
-      setTimeout(() => {
-        if (!armed) return;
-        armed = false;
-        button.classList.remove("danger");
-        button.textContent = "Delete";
-      }, 4000);
-      return;
-    }
-    button.disabled = true;
-    button.textContent = "Deleting…";
-    try {
-      const done = await post("/api/store/delete", { store: name });
-      note(done.message);
-      await refreshStores();
-      render();
-    } catch (e) {
-      button.disabled = false;
-      armed = false;
-      button.classList.remove("danger");
-      button.textContent = "Delete";
-      note(e.message, true);
-    }
-  });
-  return button;
+  fill(
+    holder,
+    el("span", {
+      text: `Delete ${name}? Its vectors, chunks, graph and ledger go. The files it indexed are untouched.`,
+    }),
+    el("span", { class: "spacer" }),
+    el("button", {
+      class: "button ghost small",
+      type: "button",
+      text: "Keep it",
+      onclick: () => {
+        holder.className = "note page-note";
+        holder.textContent = "";
+      },
+    }),
+    go,
+  );
 }
 
 /** A line under the page head, for something that just happened to the page. */
@@ -1890,23 +1982,19 @@ async function storesView() {
       {
         key: "open",
         label: "",
+        className: "row-end",
         sortable: false,
+        // One control rather than a button per action: the destructive one
+        // does not belong a mis-aimed click away from the ordinary one.
         render: (s) =>
-          el(
-            "div",
-            { class: "row-actions" },
-            el("button", {
-              class: "button ghost small",
-              type: "button",
-              text: "Open",
-              onclick: () => go("files"),
-            }),
-            // Two clicks, not a browser dialog: the second click is the
-            // confirmation, and it says what goes. A store is minutes of
-            // embedding, so deleting one by a mis-aimed click is not a thing
-            // this page should allow.
-            deleteStore(s.name),
-          ),
+          rowMenu(() => [
+            { label: "Open in Files", onclick: () => go("files") },
+            {
+              label: "Delete store…",
+              tone: "bad",
+              onclick: () => confirmDelete(s.name),
+            },
+          ]),
       },
     ],
   });
