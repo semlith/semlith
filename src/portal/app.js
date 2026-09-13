@@ -2048,12 +2048,16 @@ async function storesView() {
             ? el(
                 "div",
                 { class: "feed" },
+                // One line per event, with the whole of it on the tooltip. A
+                // line that wraps is three lines when it names a path, and
+                // forty of those grew the card until it pushed the table it
+                // sits under off the page.
                 feed.map((e) =>
                   el(
                     "div",
                     { class: "row" },
                     el("span", { class: "at", text: clock(e.at) }),
-                    el("span", { class: "what", text: e.text }),
+                    lineCell(e.text, "what"),
                   ),
                 ),
               )

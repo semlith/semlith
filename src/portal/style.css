@@ -1529,6 +1529,9 @@ select.field:focus-visible {
 .table-card {
   display: flex;
   flex-direction: column;
+  /* A floor, so a neighbour that grows cannot squeeze the rows down to a
+   * sliver of a single line. */
+  min-height: 168px;
   /* The cap lives on the card, not on the rows: capping the rows left the
    * pager floating in the middle of a stretched card with white space under
    * it. With the cap here the rows take the rest of the card and the pager is
@@ -1810,6 +1813,10 @@ pre.code {
   color: var(--ink-2);
   flex-grow: 1;
   min-height: 0;
+  /* Capped, not merely scrollable: the card is in a grid row that grows to
+   * its content, so an uncapped feed of forty events takes the height from
+   * the table above it. */
+  max-height: 232px;
   overflow-y: auto;
 }
 .feed .row {
@@ -1823,7 +1830,7 @@ pre.code {
 }
 .feed .what {
   min-width: 0;
-  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 .picker {
