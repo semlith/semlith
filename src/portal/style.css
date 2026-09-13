@@ -1182,7 +1182,15 @@ h2 {
   color: var(--green-ink);
 }
 
-.pill.on i {
+/* A green dot means something is live right now, and it beats wherever it
+ * appears: the sidebar's daemon dot, an open endpoint, a cached model, a
+ * connected client. A still dot beside a beating one reads as two different
+ * states of the same thing. The reduced-motion block at the top of this file
+ * stops all of them. */
+.pill.on i,
+.pill.good i,
+.pill.good .dot,
+.dot.good {
   animation: pulse var(--d-pulse) ease-in-out infinite;
 }
 
@@ -1327,6 +1335,16 @@ select.field:focus-visible {
   opacity: 1;
   width: 28px;
   height: 28px;
+}
+/* Any control inside the field is inset by the same 4px on all four sides as
+ * the copy button: a 32px button in a 36px box left 2px above and below and
+ * none at all beside it. */
+.copyfield .button {
+  height: 28px;
+  padding: 0 var(--sp-2h);
+}
+.copyfield .actions {
+  gap: 4px;
 }
 .copyfield .text {
   font-family: var(--mono);
@@ -2414,6 +2432,9 @@ pre.code {
 .chips {
   display: flex;
   flex-wrap: wrap;
+  /* Centred, so a line of prose beside a pill sits on the pill's centre line
+   * rather than at the top of the space the pill makes. */
+  align-items: center;
   gap: var(--sp-2);
 }
 

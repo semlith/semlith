@@ -1822,7 +1822,13 @@ async function storesView() {
         key: "last_write",
         label: "Last write",
         value: (s) => s.last_write || 0,
-        render: (s) => pill(s.watching ? when(s.last_write) : "not watching", s.watching ? "good" : "warn"),
+        // Green means a write landed. A store that is watched and has never
+        // been written to is neither good news nor a warning, so it carries a
+        // plain pill with no dot at all.
+        render: (s) => {
+          if (!s.watching) return pill("not watching", "warn");
+          return s.last_write ? pill(when(s.last_write), "good") : pill("never");
+        },
       },
       {
         key: "open",
@@ -2884,6 +2890,12 @@ async function agentsView() {
   const body = el("div", { class: "stanza" });
 
   /** The HTTP form, built here from the key the route just handed back. */
+  /** The placeholder the README prints where a real key goes. */
+  const KEY_SLOT = "sml_YOURKEY";
+
+  /** Whether a stanza configures the endpoint rather than a subprocess. */
+  const overHttp = (text) => text.includes("/mcp") || text.includes("--transport http");
+
   function httpStanza() {
     return `{\n  "mcpServers": {\n    "semlith": {\n      "url": "${endpoint.url}",\n      "headers": { "Authorization": "Bearer ${stanzas.key}" }\n    }\n  }\n}`;
   }
@@ -2932,7 +2944,12 @@ async function agentsView() {
       fill(body, empty("No client stanza is compiled into this build."));
       return;
     }
-    const stdio = (client.stanzas || []).map((s) => s.text.trimEnd());
+    // The documented stanzas, with this daemon's key in them: a reader who
+    // copies one should not have to find `sml_YOURKEY` and paste the key over
+    // it, and the page already knows the key.
+    const own = (client.stanzas || []).map((s) => s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key));
+    const http = own.filter(overHttp);
+    const stdio = own.filter((text) => !overHttp(text));
     fill(
       body,
       el(
@@ -2941,9 +2958,13 @@ async function agentsView() {
         el("span", { class: "card-title", text: client.name }),
         el("span", { class: "meta", text: client.note }),
       ),
+      // A client with no HTTP stanza of its own gets the generic one, which is
+      // the shape most schemas take. A client with one gets its own: `httpUrl`
+      // for Gemini, `serverUrl` for Windsurf, TOML for Codex — a generic block
+      // beside those is a second, wrong answer.
       el("span", { class: "eyebrow", text: "Over HTTP — one endpoint, one key, no subprocess" }),
-      codeBlock(httpStanza(), "Copy stanza"),
-      el("span", { class: "eyebrow", text: "Or over stdio" }),
+      (http.length ? http : [httpStanza()]).map((text) => codeBlock(text, "Copy stanza")),
+      stdio.length ? el("span", { class: "eyebrow", text: "Or over stdio" }) : null,
       stdio.map((text) => codeBlock(text, "Copy stanza")),
     );
   }
