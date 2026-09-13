@@ -106,6 +106,26 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
 
+-- Images, from 0.13.0. One row per indexed image file, with the pixel size the
+-- Search and Files pages show in place of a line range. The vector itself is in
+-- the store's second index, under `images/`, at CLIP's 512 dimensions.
+--
+-- Additive and `IF NOT EXISTS`, so `format_version` does not move: an older
+-- binary opens the store, never looks in here, and searches its text exactly as
+-- before. Same reasoning `docs/compatibility.md` records for the graph tables.
+--
+-- `id` is AUTOINCREMENT for the same reason chunks are: the id addresses a
+-- vector in a sharded index, and SQLite reissuing a deleted row's id would put
+-- one id inside two shards at once.
+CREATE TABLE IF NOT EXISTS images (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    width   INTEGER NOT NULL,
+    height  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS images_file_id ON images(file_id);
+
 -- The retrieval ledger, from 0.12.0. Additive and empty unless recording is
 -- switched on, which it is not by default.
 --
@@ -586,6 +606,77 @@ pub fn file_facets(db: &Connection, groups: &[Vec<String>]) -> Result<Facets> {
     let lines: i64 = stmt.query_row(rusqlite::params_from_iter(args), |r| r.get(0))?;
 
     Ok(Facets { extensions, lines })
+}
+
+/// An indexed image: its file's path and the pixel size.
+#[derive(Debug, Clone)]
+pub struct ImageRow {
+    pub id: i64,
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub fn insert_image(db: &Connection, file_id: i64, width: u32, height: u32) -> Result<i64> {
+    db.execute(
+        "INSERT INTO images (file_id, width, height) VALUES (?1, ?2, ?3)",
+        params![file_id, width, height],
+    )?;
+    Ok(db.last_insert_rowid())
+}
+
+/// One image row, joined with its file's path.
+pub fn image(db: &Connection, id: i64) -> Result<Option<ImageRow>> {
+    Ok(db
+        .query_row(
+            "SELECT i.id, f.path, i.width, i.height FROM images i \
+             JOIN files f ON f.id = i.file_id WHERE i.id = ?1",
+            params![id],
+            |r| {
+                Ok(ImageRow {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    width: r.get(2)?,
+                    height: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// The image ids belonging to `path`, before its row is deleted.
+///
+/// Read rather than returned by `delete_file`, because the cascade that removes
+/// them is what makes the ids unreadable — and the vectors they address still
+/// have to be evicted from the image index afterwards.
+pub fn image_ids_of(db: &Connection, path: &str) -> Result<Vec<i64>> {
+    let mut stmt =
+        db.prepare("SELECT i.id FROM images i JOIN files f ON f.id = i.file_id WHERE f.path = ?1")?;
+    let rows = stmt.query_map(params![path], |r| r.get::<_, i64>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// How many images this store holds.
+pub fn image_count(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))?)
+}
+
+/// Every image id, for the ids a filtered search may consider.
+pub fn image_ids(db: &Connection) -> Result<Vec<i64>> {
+    let mut stmt = db.prepare("SELECT id FROM images")?;
+    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The image ids whose file matches `groups`, for a filtered search.
+pub fn filtered_image_ids(db: &Connection, groups: &[Vec<String>]) -> Result<Vec<i64>> {
+    let (predicate, binds) = glob_predicate(groups);
+    let sql =
+        format!("SELECT i.id FROM images i JOIN files f ON f.id = i.file_id WHERE {predicate}");
+    let mut stmt = db.prepare(&sql)?;
+    let args = binds.into_iter().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, i64>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn all_paths(db: &Connection) -> Result<Vec<String>> {

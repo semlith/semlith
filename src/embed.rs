@@ -196,6 +196,49 @@ pub fn airgap() -> bool {
 /// the loader below fails with its own, far more specific error if what is
 /// cached is wrong, and duplicating its file list here would be a second
 /// definition of the model to keep in step.
+/// Refuse a model fetch on an airgapped machine, naming the model.
+///
+/// The same rule the text model is loaded under, in a form the image models can
+/// use: an airgapped run's whole claim is that this process cannot have been
+/// the one that reached the network, and a caller that fetches without asking
+/// is a caller that breaks the claim.
+///
+/// This one asks about *that* model rather than about the cache as a whole. A
+/// machine with the text model pre-seeded and no CLIP has a non-empty cache and
+/// still cannot fetch, so the coarse "is anything cached" test would have let
+/// the first image a store indexed open a socket on a machine whose whole point
+/// is that it does not.
+pub fn refuse_if_airgapped(model: &str) -> Result<()> {
+    let cache = crate::model_cache_dir();
+    if airgap() && !model_is_cached(&cache, model) {
+        bail!(
+            "{AIRGAP_ENV} is set and {model} is not cached at {} — \
+             pre-seed it with SEMLITH_MODEL_CACHE on a connected machine, \
+             or drop --airgap to let this run download it",
+            cache.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether one model's weights are already in the cache.
+///
+/// hf-hub names a model's directory `models--<org>--<name>`, so the repository
+/// id is matched against the directory name with the separators normalised
+/// rather than reconstructed — a naming change upstream should read as "not
+/// cached", which refuses, rather than as "cached", which would not.
+pub fn model_is_cached(cache_dir: &Path, model: &str) -> bool {
+    let want = model.replace('/', "--").to_ascii_lowercase();
+    std::fs::read_dir(cache_dir)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                name.ends_with(&want) && entry.path().join("snapshots").exists()
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub fn is_cached(cache_dir: &Path) -> bool {
     std::fs::read_dir(cache_dir)
         .map(|mut entries| entries.next().is_some())

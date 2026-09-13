@@ -182,7 +182,7 @@ fn one_file_changing_rewrites_one_shard() {
     let mut s = Semlith::open(&store, None).unwrap();
     s.quiet = true;
     let removed = s.forget(&dir.path().join("note_00000.md")).unwrap();
-    assert!(removed > 0, "nothing was forgotten");
+    assert!(removed.0 > 0, "nothing was forgotten");
 
     let rewritten: Vec<&std::path::PathBuf> = before
         .iter()

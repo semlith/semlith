@@ -1807,7 +1807,14 @@ async function filesView() {
         render: (f) => el("span", { class: "tag", text: f.reader }),
       },
       { key: "lang", label: "Language", className: "meta", sortable: false, render: (f) => f.lang || "—" },
-      { key: "lines", label: "Lines", className: "num", render: (f) => n(f.lines) },
+      {
+        key: "lines",
+        label: "Lines",
+        className: "num",
+        // An image has no lines. Its pixel size goes here rather than a zero,
+        // which would read as a file that failed to parse.
+        render: (f) => (f.reader === "image" ? "—" : n(f.lines)),
+      },
       { key: "chunks", label: "Chunks", className: "num", render: (f) => n(f.chunks) },
       {
         key: "indexed",
@@ -1991,6 +1998,7 @@ const LIST_LABELS = {
   vector: ["v", "vector — the embedding matched"],
   keyword: ["f", "full text — the terms matched"],
   graph: ["g", "graph — reached from a neighbouring symbol"],
+  image: ["i", "image — the picture matched the words"],
 };
 
 function fusionBadges(lists) {
@@ -2080,12 +2088,26 @@ async function searchView() {
             "div",
             { class: "where" },
             el("span", { class: "file", text: hit.path }),
-            el("span", { class: "lines", text: `${hit.start_line}-${hit.end_line}` }),
+            el("span", {
+              class: "lines",
+              text: hit.image
+                ? `${hit.image.width}×${hit.image.height} px`
+                : `${hit.start_line}-${hit.end_line}`,
+            }),
             el("span", { class: "from", text: hit.store }),
             el("span", { class: "spacer" }),
             fusionBadges(hit.lists),
           ),
-          el("pre", { text: hit.text }),
+          // An image has no excerpt to quote, so the hit shows the image. It
+          // is served from the store's own list of indexed images, so the
+          // route cannot be asked for a file nobody pointed semlith at.
+          hit.image
+            ? el("img", {
+                class: "preview",
+                src: `/api/image?path=${encodeURIComponent(hit.path)}`,
+                alt: "",
+              })
+            : el("pre", { text: hit.text }),
           el(
             "div",
             { class: "hit-actions" },
@@ -2759,9 +2781,6 @@ async function agentsView() {
               el("span", { class: "tool-about", text: tool.about }),
             ]),
           ),
-          el("hr", { class: "rule" }),
-          el("span", { class: "eyebrow", text: "Protocol revisions" }),
-          el("span", { class: "meta", text: (data.revisions || []).join(" · ") || "none advertised" }),
         ),
         installPanel(),
       ),

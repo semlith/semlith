@@ -522,6 +522,7 @@ mod tests {
             text: String::new(),
             store: None,
             lists: vec!["vector"],
+            image: None,
         }
     }
 

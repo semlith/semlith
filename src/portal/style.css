@@ -1714,6 +1714,20 @@ pre.code {
   font-size: var(--t-tiny);
   color: var(--muted);
 }
+/* An image hit shows the image. Bounded so a large screenshot does not take
+ * the whole results column, and on the page's own panel colour so a
+ * transparent PNG reads as a picture rather than as a hole. */
+.hit .preview {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  width: auto;
+  border-radius: var(--r-3);
+  border: 1px solid var(--line-soft);
+  background: var(--soft);
+  object-fit: contain;
+}
+
 .hit pre {
   margin: 0;
   font-family: var(--mono);

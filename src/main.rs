@@ -403,8 +403,16 @@ fn main() -> Result<()> {
             home::record(&choice, &roots, &model_name)?;
 
             let (files, chunks, bytes) = store.stats()?;
+            // Images are counted apart from chunks because they are not
+            // chunks: one image is one vector, and folding it into a chunk
+            // count would make the number mean two things.
+            let images = if report.images > 0 {
+                format!(", {} images", report.images)
+            } else {
+                String::new()
+            };
             eprintln!(
-                "indexed {} files ({} chunks) in {:.1}s — {} already indexed, {} skipped, {} removed",
+                "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped, {} removed",
                 report.indexed,
                 report.chunks,
                 started.elapsed().as_secs_f32(),
@@ -543,18 +551,23 @@ fn main() -> Result<()> {
                         .map(|l| match *l {
                             "vector" => 'v',
                             "keyword" => 'f',
+                            "image" => 'i',
                             _ => 'g',
                         })
                         .collect();
+                    // An image carries its pixel size where a chunk carries a
+                    // line range, and has no excerpt to print under it.
+                    let where_in = match h.image {
+                        Some(px) => format!("{}x{} px", px.width, px.height),
+                        None => format!("{}-{}", h.start_line, h.end_line),
+                    };
                     writeln!(
                         out,
-                        "{}{}. {:.3} {via:<3} {from}{}:{}-{}{}",
+                        "{}{}. {:.3} {via:<3} {from}{}:{where_in}{}",
                         bold(),
                         i + 1,
                         h.score,
                         display(std::path::Path::new(&h.path)),
-                        h.start_line,
-                        h.end_line,
                         reset()
                     )?;
                     for line in h.text.lines() {
@@ -788,6 +801,10 @@ fn main() -> Result<()> {
                 println!("model    {} ({} dim)", store.model(), store.dim());
                 println!("files    {files}");
                 println!("chunks   {chunks}");
+                let images = store.image_count()?;
+                if images > 0 {
+                    println!("images   {images}");
+                }
                 println!("vectors  {}", store.len());
                 if let Some((shards, max)) = store.shards() {
                     // What the store costs to search, before searching it.
@@ -882,8 +899,16 @@ fn main() -> Result<()> {
                 eprintln!("{hint}");
             }
             let mut store = Semlith::open(&choice.one()?, None)?;
-            let n = store.forget(&path)?;
-            eprintln!("removed {n} chunks for {}", path.display());
+            let (chunks, images) = store.forget(&path)?;
+            // An image has no chunks, so a message counting only chunks would
+            // report a successful forget as having done nothing.
+            let what = match (chunks, images) {
+                (0, 0) => "nothing — it was not indexed".to_string(),
+                (0, images) => format!("{images} image vector(s)"),
+                (chunks, 0) => format!("{chunks} chunks"),
+                (chunks, images) => format!("{chunks} chunks and {images} image vector(s)"),
+            };
+            eprintln!("removed {what} for {}", path.display());
         }
 
         Command::Start {

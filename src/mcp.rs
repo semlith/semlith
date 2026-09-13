@@ -782,8 +782,12 @@ fn call_tool(
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
             match store.forget(std::path::Path::new(&path)) {
-                Ok(0) => format!("{path} was not indexed; nothing removed."),
-                Ok(n) => format!("Removed {n} chunks for {path}."),
+                Ok((0, 0)) => format!("{path} was not indexed; nothing removed."),
+                Ok((0, images)) => format!("Removed {images} image vector(s) for {path}."),
+                Ok((chunks, 0)) => format!("Removed {chunks} chunks for {path}."),
+                Ok((chunks, images)) => {
+                    format!("Removed {chunks} chunks and {images} image vector(s) for {path}.")
+                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -988,6 +992,21 @@ fn render(hits: &[crate::Hit]) -> String {
         } else {
             format!(" via {}", h.lists.join("+"))
         };
+        // An image has no excerpt to quote: it is named, sized, and left for
+        // the agent to open. Saying "an image" outright matters more here than
+        // anywhere else — an agent handed a path with no text under it would
+        // otherwise read the silence as an empty file.
+        if let Some(px) = h.image {
+            out.push_str(&format!(
+                "[{}] {from}{} — image, {}x{} px (score {:.3}{via})\n\n",
+                i + 1,
+                h.path,
+                px.width,
+                px.height,
+                h.score,
+            ));
+            continue;
+        }
         out.push_str(&format!(
             "[{}] {from}{}:{}-{} (score {:.3}{via})\n{}\n\n",
             i + 1,

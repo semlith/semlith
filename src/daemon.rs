@@ -855,6 +855,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                         "skipped": done.skipped,
                         "removed": done.removed,
                         "chunks": done.chunks,
+                        "images": done.images,
                         // Above zero means the slice ran out of time, not that
                         // anything failed: asking again continues where it
                         // stopped and redoes nothing.

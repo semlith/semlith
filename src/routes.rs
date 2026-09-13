@@ -56,6 +56,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/path") => shortest_path(state, request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/ledger") => ledger(state),
+        (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
@@ -347,6 +348,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "text": h.text,
                 "store": h.store.clone().or_else(|| single.then(|| label.clone()).flatten()),
                 "lists": h.lists,
+                "image": h.image.map(|px| json!({ "width": px.width, "height": px.height })),
             })
         })
         .collect();
@@ -446,11 +448,22 @@ fn ledger(state: &Arc<State>) -> Response {
 }
 
 fn models() -> Response {
-    let mut out = vec![json!({
-        "name": embed::GRANITE_NAME,
-        "dim": 384,
-        "description": "default. IBM Granite R2 small, int8, English",
-    })];
+    let mut out = vec![
+        json!({
+            "name": embed::GRANITE_NAME,
+            "dim": 384,
+            "description": "default. IBM Granite R2 small, int8, English",
+        }),
+        // Not a choice, so it is listed apart from the models a store can be
+        // built with: both halves of it are loaded together, on the first
+        // image a store indexes, and nothing selects them.
+        json!({
+            "name": crate::image::MODEL_NAME,
+            "dim": crate::image::DIM,
+            "description": "images. CLIP ViT-B/32, vision and text, fixed",
+            "code": "Qdrant/clip-ViT-B-32-vision",
+        }),
+    ];
     for info in TextEmbedding::list_supported_models() {
         out.push(json!({
             "name": info.model.to_string(),
@@ -511,6 +524,59 @@ fn walk_bytes(dir: &Path) -> u64 {
             Err(_) => 0,
         })
         .sum()
+}
+
+/// One indexed image, served to the Search page's preview.
+///
+/// Bounded to files the store has actually indexed as images: the path arrives
+/// from the page, and a route that read whatever path it was handed would be a
+/// file-read primitive behind a loopback port. The `images` table is the
+/// allowlist, so the only files this can serve are ones the user pointed
+/// semlith at.
+fn image_file(state: &Arc<State>, request: &Request) -> Response {
+    let Some(want) = request.query("path") else {
+        return Response::error(400, "missing path");
+    };
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::error(404, "no such image");
+    };
+
+    let indexed = fleet.each().any(|(_, store)| {
+        store
+            .db()
+            .query_row(
+                "SELECT 1 FROM images i JOIN files f ON f.id = i.file_id WHERE f.path = ?1",
+                rusqlite::params![want],
+                |_| Ok(()),
+            )
+            .is_ok()
+    });
+    if !indexed {
+        return Response::error(404, "no such image");
+    }
+
+    let path = Path::new(want);
+    let Ok(bytes) = std::fs::read(path) else {
+        // Indexed once and gone since: the row is real and the file is not.
+        return Response::error(404, "the file is no longer on disk");
+    };
+    let kind = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => return Response::error(404, "no such image"),
+    };
+    Response::new(200, kind, bytes)
 }
 
 fn languages() -> Response {
