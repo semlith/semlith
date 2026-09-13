@@ -424,6 +424,11 @@ function dataTable(spec) {
       headRow,
       columns.map((column) => {
         const on = view.sort === column.key;
+        if (column.head) {
+          // A header that is a control rather than a label — the select-all
+          // box above a column of checkboxes.
+          return el("th", { class: column.className || null }, column.head());
+        }
         if (column.sortable === false) {
           return el("th", { class: column.className || null, text: column.label });
         }
@@ -1666,6 +1671,55 @@ function agentsCard() {
   return card;
 }
 
+/** The two-click delete for one store, and the note it leaves behind. */
+function deleteStore(name) {
+  const button = el("button", {
+    class: "button ghost small",
+    type: "button",
+    text: "Delete",
+  });
+  let armed = false;
+  button.addEventListener("click", async () => {
+    if (!armed) {
+      armed = true;
+      button.classList.add("danger");
+      button.textContent = "Delete for good?";
+      button.title =
+        "Deletes this store's vectors, chunks, graph and ledger. The files it indexed are untouched.";
+      setTimeout(() => {
+        if (!armed) return;
+        armed = false;
+        button.classList.remove("danger");
+        button.textContent = "Delete";
+      }, 4000);
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "Deleting…";
+    try {
+      const done = await post("/api/store/delete", { store: name });
+      note(done.message);
+      await refreshStores();
+      render();
+    } catch (e) {
+      button.disabled = false;
+      armed = false;
+      button.classList.remove("danger");
+      button.textContent = "Delete";
+      note(e.message, true);
+    }
+  });
+  return button;
+}
+
+/** A line under the page head, for something that just happened to the page. */
+function note(text, bad) {
+  const holder = document.querySelector(".view > .note.page-note");
+  if (!holder) return;
+  holder.className = bad ? "note page-note bad" : "note page-note";
+  holder.textContent = text;
+}
+
 async function storesView() {
   const stores = await refreshStores();
 
@@ -1837,13 +1891,22 @@ async function storesView() {
         key: "open",
         label: "",
         sortable: false,
-        render: () =>
-          el("button", {
-            class: "button ghost small",
-            type: "button",
-            text: "Open",
-            onclick: () => go("files"),
-          }),
+        render: (s) =>
+          el(
+            "div",
+            { class: "row-actions" },
+            el("button", {
+              class: "button ghost small",
+              type: "button",
+              text: "Open",
+              onclick: () => go("files"),
+            }),
+            // Two clicks, not a browser dialog: the second click is the
+            // confirmation, and it says what goes. A store is minutes of
+            // embedding, so deleting one by a mis-aimed click is not a thing
+            // this page should allow.
+            deleteStore(s.name),
+          ),
       },
     ],
   });
@@ -1861,6 +1924,7 @@ async function storesView() {
     adoptNote,
     rootPicker.node,
     rootNote,
+    el("div", { class: "note page-note" }),
     el(
       "div",
       { class: "strip" },
@@ -1932,9 +1996,72 @@ async function filesView() {
       // The row goes, and the page is reloaded behind it: with the server
       // paging, the row that moves up into the gap is on the server.
       row.remove();
+      picked.delete(path);
+      paintBulk();
       load();
     } catch (e) {
       fill(holder, error(e.message));
+    }
+  }
+
+  /* The rows ticked for a bulk forget, by path.
+   *
+   * Kept out here rather than in the table, because the table re-renders on
+   * every sort, page and filter and a selection that vanished when you sorted
+   * would be a selection nobody could trust. */
+  const picked = new Set();
+  const bulkNote = el("div", { class: "note" });
+  const bulkBar = el("div", { class: "bulk", hidden: true });
+
+  function paintBulk() {
+    bulkBar.hidden = picked.size === 0;
+    if (!picked.size) return;
+    const many = picked.size;
+    fill(
+      bulkBar,
+      el("span", {
+        class: "meta",
+        text: `${n(many)} file${many === 1 ? "" : "s"} selected`,
+      }),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          picked.clear();
+          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
+          paintBulk();
+        },
+      }),
+      el("button", {
+        class: "button danger small",
+        type: "button",
+        text: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
+        onclick: (e) => forgetPicked(e.currentTarget),
+      }),
+    );
+  }
+
+  async function forgetPicked(button) {
+    const paths = [...picked];
+    button.disabled = true;
+    button.textContent = "Forgetting…";
+    bulkNote.className = "note";
+    bulkNote.textContent = "";
+    try {
+      const done = await post("/api/forget", { paths });
+      picked.clear();
+      paintBulk();
+      bulkNote.textContent = done.not_indexed && done.not_indexed.length
+        ? `${done.message} ${n(done.not_indexed.length)} were not indexed and were left alone.`
+        : done.message;
+      load();
+    } catch (e) {
+      bulkNote.className = "note bad";
+      bulkNote.textContent = e.message;
+      button.disabled = false;
+      paintBulk();
     }
   }
 
@@ -1943,6 +2070,42 @@ async function filesView() {
     server: true,
     sort: "path",
     columns: [
+      {
+        key: "pick",
+        label: "",
+        className: "pick",
+        sortable: false,
+        // Selects every row on the page rather than every row in the store: a
+        // filter of ten thousand files behind one tick is a mistake nobody
+        // meant to make.
+        head: () => {
+          const all = el("input", {
+            type: "checkbox",
+            class: "pick all",
+            "aria-label": "Select every file on this page",
+            onchange: () => {
+              for (const box of table.node.querySelectorAll("tbody input.pick")) {
+                if (box.checked !== all.checked) box.click();
+              }
+            },
+          });
+          return all;
+        },
+        render: (f) => {
+          const box = el("input", {
+            type: "checkbox",
+            class: "pick",
+            "aria-label": `Select ${f.path}`,
+            onchange: () => {
+              if (box.checked) picked.add(f.path);
+              else picked.delete(f.path);
+              paintBulk();
+            },
+          });
+          box.checked = picked.has(f.path);
+          return box;
+        },
+      },
       {
         key: "path",
         label: "Path",
@@ -2094,6 +2257,8 @@ async function filesView() {
       ),
       extChips,
     ),
+    bulkBar,
+    bulkNote,
     holder,
     el("p", {
       class: "subtitle",

@@ -229,6 +229,20 @@ Checkpointing, the memory budget and shards are properties of the store layout,
 so a store written by an older release keeps its own and keeps working exactly
 as it did. [Compatibility](#compatibility) says which layout is which.
 
+### Forgetting files, and deleting a store
+
+`semlith forget <path>` drops one file's chunks and vectors. The portal's Files
+page does the same for a set: tick the rows and forget them in one call, which
+reports how many files and how many chunks went and names anything in the
+selection that was never indexed.
+
+`semlith drop <store>` deletes a store outright — its vectors, chunks, graph
+and ledger, and the registry entry naming it — and the Stores page has the same
+action behind a second click that says what goes. Neither touches the files
+that were indexed; they delete what semlith derived from them. When a daemon is
+holding the store, the delete goes through it, so the writer stops and releases
+its lock before anything is removed.
+
 ## Keeping the store current
 
 `semlith index` is a snapshot of the moment it ran. Leave `semlith watch`

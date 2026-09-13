@@ -2934,3 +2934,36 @@ pre.code {
     flex-basis: 100%;
   }
 }
+
+/* A column of checkboxes, and the bar that appears once one is ticked. */
+th.pick,
+td.pick {
+  width: 34px;
+  padding-right: 0;
+}
+
+input.pick {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.bulk {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2h) var(--sp-3h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--soft);
+}
+
+/* Two actions at the end of a row, on one line. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}

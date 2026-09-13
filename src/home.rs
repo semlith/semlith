@@ -627,6 +627,38 @@ pub fn repoint(name: &str, root: &Path) -> Result<()> {
     registry.save()
 }
 
+/// Unregister a store and delete everything it holds.
+///
+/// The vectors, the chunk text, the graph and the ledger for that corpus, and
+/// then the registry entry — in that order, so a delete interrupted halfway
+/// leaves a registered store with a missing directory, which the portal
+/// already reports and offers to re-point, rather than an unnamed directory
+/// nothing points at.
+///
+/// The files on disk that were indexed are not touched. This deletes what
+/// semlith derived from them.
+pub fn delete_store(name: &str) -> Result<PathBuf> {
+    let mut registry = Registry::load()?;
+    if !registry.stores.contains_key(name) {
+        bail!(
+            "no registered store called {name}; these are: {}",
+            registry
+                .stores
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let dir = Registry::dir_of(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+    }
+    registry.stores.remove(name);
+    registry.save()?;
+    Ok(dir)
+}
+
 /// What to call a store adopted from `dir`: the directory holding it, because
 /// almost every adopted store is a `.semlith` whose own name says nothing.
 fn label_for(dir: &Path) -> String {

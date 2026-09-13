@@ -954,3 +954,98 @@ fn a_stale_discovery_file_falls_back_to_opening_the_store() {
     );
     drop(dir);
 }
+
+// ---------------------------------------------------------------- T12
+
+/// The Files page selects rows and forgets the set in one call, and the answer
+/// says how many files and how many chunks went — not a stream a page has to
+/// parse to learn a number.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_set_of_files_is_forgotten_in_one_call() {
+    let (dir, home, work) = sandbox("bulk-forget");
+    corpus(
+        &home,
+        &work,
+        "api",
+        &[
+            ("fleet.rs", RUST),
+            ("notes.md", "# Notes\n\nOwnership.\n"),
+            ("keep.md", "# Keep\n\nThis one stays.\n"),
+        ],
+    );
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    assert_eq!(daemon.get("/api/files").json()["total"], 3);
+
+    let root = work.join("api");
+    let body = format!(
+        "{{\"paths\":[{},{},{}]}}",
+        serde_json::to_string(&root.join("fleet.rs").display().to_string()).unwrap(),
+        serde_json::to_string(&root.join("notes.md").display().to_string()).unwrap(),
+        // A path nobody indexed is reported rather than failing the batch: a
+        // selection made before a watcher pass can name a file that is gone.
+        serde_json::to_string(&root.join("never.md").display().to_string()).unwrap(),
+    );
+    let answer = daemon.post("/api/forget", &body);
+    assert_eq!(answer.status, 200);
+    let done = answer.json();
+    assert_eq!(done["asked"], 3, "{done}");
+    assert_eq!(done["files"], 2, "{done}");
+    assert!(done["forgot"].as_i64().unwrap() > 0, "{done}");
+    assert_eq!(
+        done["not_indexed"].as_array().map(Vec::len),
+        Some(1),
+        "the file that was never indexed is not named: {done}"
+    );
+
+    let left = daemon.get("/api/files").json();
+    assert_eq!(left["total"], 1, "{left}");
+    assert!(
+        left["files"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("keep.md"),
+        "the wrong file survived: {left}"
+    );
+}
+
+/// Deleting a store closes it, removes what semlith derived, and leaves the
+/// indexed files alone — while the daemon keeps answering.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_store_is_deleted_without_stopping_the_daemon() {
+    let (dir, home, work) = sandbox("delete-store");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let daemon = Daemon::start_in(dir, home.clone(), work.join("api"), &[]);
+    assert_eq!(daemon.get("/api/files").json()["total"], 1);
+
+    let store_dir = home.join("stores/api");
+    assert!(
+        store_dir.is_dir(),
+        "the store was not created where expected"
+    );
+
+    let answer = daemon.post("/api/store/delete", "{\"store\":\"api\"}");
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert!(
+        answer.json()["message"]
+            .as_str()
+            .unwrap()
+            .contains("untouched"),
+        "{}",
+        answer.body
+    );
+
+    assert!(!store_dir.exists(), "the store directory is still there");
+    let registry = std::fs::read_to_string(home.join("registry.json")).unwrap();
+    assert!(
+        !registry.contains("\"api\""),
+        "the registry still lists it: {registry}"
+    );
+    // The corpus itself is not semlith's to delete.
+    assert!(work.join("api/fleet.rs").exists(), "the corpus was deleted");
+
+    // Still serving: the daemon lost a store, not its life.
+    assert_eq!(daemon.get("/api/files").json()["total"], 0);
+    assert_eq!(daemon.get("/api/privacy").status, 200);
+}

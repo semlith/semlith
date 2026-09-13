@@ -51,6 +51,8 @@ const VIEWS: &[(&str, &str)] = &[
     ("ledger", "/api/ledger"),
     // `semlith key` is the Agents page's Rotate button, which posts here.
     ("key", "/api/key"),
+    // `semlith drop` is the Stores page's Delete, behind its second click.
+    ("drop", "/api/store/delete"),
 ];
 
 /// And the same for the MCP tool surface.
@@ -75,7 +77,7 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
 fn method_for(route: &str) -> &'static str {
     match route {
         "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/upgrade" | "/api/key"
-        | "/api/endpoint" => "POST",
+        | "/api/endpoint" | "/api/store/delete" => "POST",
         _ => "GET",
     }
 }

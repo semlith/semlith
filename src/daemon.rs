@@ -119,6 +119,10 @@ pub struct Store {
     /// False once the watcher thread has returned, so the portal can say a
     /// store stopped being kept current rather than showing a stale count.
     pub watching: AtomicBool,
+    /// Set to stop this store's watcher and release its lock, so the store can
+    /// be deleted while the daemon keeps running. The daemon's own shutdown
+    /// sets it on every open store alongside the global stop.
+    pub stop: AtomicBool,
     /// Unix seconds of the last write this daemon made to the store.
     pub last_write: AtomicUsize,
 }
@@ -284,6 +288,47 @@ impl State {
         Ok(store.submit(Job::Forget(path)))
     }
 
+    /// Close a store and delete everything it holds.
+    ///
+    /// The order is what makes this safe while the daemon runs: the watcher is
+    /// told to stop and its lock is released when the thread returns, the
+    /// store leaves the served set so no request can reach it, the readers are
+    /// dropped so no SQLite handle is still open on the files, and only then
+    /// is the directory removed and the registry entry dropped.
+    ///
+    /// The indexed files themselves are not touched — this deletes what
+    /// semlith derived from them.
+    pub fn delete_store(&self, name: &str) -> Result<PathBuf> {
+        let Some(store) = self.store(name) else {
+            anyhow::bail!("this daemon is not serving a store called {name}");
+        };
+
+        store.stop.store(true, Ordering::SeqCst);
+        // The watcher checks the flag between filesystem events, so this is a
+        // wait of one debounce, not of one filesystem event.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.watching.load(Ordering::Relaxed) {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "{name}'s watcher did not stop, so its lock is still held;                      nothing was deleted"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        self.stores
+            .write()
+            .expect("the stores lock")
+            .retain(|s| s.name != name);
+        // Before the files go: a reader holding this store open would keep its
+        // SQLite handles alive, and on Windows an open handle refuses the
+        // delete outright.
+        self.reopen_readers();
+        Discovery::remove(&store.dir);
+
+        crate::home::delete_store(name)
+    }
+
     /// Refuse to queue work for a store whose writer is gone.
     ///
     /// The queue is drained by the watcher thread and by nothing else, so a
@@ -431,6 +476,7 @@ impl State {
             queue: Mutex::new(VecDeque::new()),
             events: Mutex::new(VecDeque::new()),
             watching: AtomicBool::new(true),
+            stop: AtomicBool::new(false),
             last_write: AtomicUsize::new(0),
         });
 
@@ -448,7 +494,7 @@ impl State {
         let report = Arc::clone(&self.report);
         std::thread::spawn(move || {
             let _lock = lock;
-            if let Err(e) = tend(&watching, debounce, &watch::STOP, &*report) {
+            if let Err(e) = tend(&watching, debounce, &watching.stop, &*report) {
                 report(&format!("{}: watcher stopped: {e}", watching.name));
                 watching.note(format!("watcher stopped: {e}"));
             }
@@ -638,6 +684,7 @@ pub fn run(
             queue: Mutex::new(VecDeque::new()),
             events: Mutex::new(VecDeque::new()),
             watching: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
             last_write: AtomicUsize::new(0),
         }));
     }
@@ -691,7 +738,7 @@ pub fn run(
             // Moved in so the lock's life is the thread's life, which is what
             // makes "the daemon is the writer" true rather than intended.
             let _lock = lock;
-            if let Err(e) = tend(&store, debounce, &watch::STOP, &*report) {
+            if let Err(e) = tend(&store, debounce, &store.stop, &*report) {
                 report(&format!("{}: watcher stopped: {e}", store.name));
                 store.note(format!("watcher stopped: {e}"));
             }
@@ -734,6 +781,12 @@ pub fn run(
         // released when its thread joins, and the discovery file goes last so
         // nothing is pointed at a daemon that is no longer answering.
         watch::STOP.store(true, Ordering::SeqCst);
+        // Each watcher waits on its own store's flag now, so that a single
+        // store can be closed and deleted without stopping the daemon. A
+        // shutdown is every store at once.
+        for store in state.stores() {
+            store.stop.store(true, Ordering::SeqCst);
+        }
         for watcher in watchers {
             let _ = watcher.join();
         }
@@ -1045,6 +1098,7 @@ mod tests {
                             queue: Mutex::new(VecDeque::new()),
                             events: Mutex::new(VecDeque::new()),
                             watching: AtomicBool::new(false),
+                            stop: AtomicBool::new(false),
                             last_write: AtomicUsize::new(0),
                         })
                     })

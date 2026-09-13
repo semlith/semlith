@@ -43,6 +43,15 @@ keep in a config file, and a query can find a picture.
   neighbouring temporary file rather than in place, and no file is ever
   created. Rotating used to leave every configured client authenticating with
   a key the daemon had stopped accepting.
+- **Bulk forget, and deleting a store.** The Files page carries a checkbox per
+  row and forgets the selection in one call, reporting how many files and
+  chunks went and naming anything selected that was never indexed;
+  `/api/forget` takes `paths` as well as `path`, and one path answers exactly
+  as it did. `semlith drop <store>` and the Stores page's Delete remove a
+  store's vectors, chunks, graph, ledger and registry entry. The corpus is not
+  touched. A store held by a running daemon is closed through it: the watcher
+  stops and releases its lock, the readers are dropped, and only then are the
+  files removed — so the daemon loses a store rather than its life.
 - **An endpoint switch.** `semlith start --no-mcp-http` starts with `/mcp`
   closed, and the Agents page starts and stops it while the daemon runs.
   Closing it drops the route, not the daemon: the stores stay open, the watcher

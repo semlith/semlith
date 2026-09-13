@@ -160,6 +160,16 @@ enum Command {
     /// Remove a file from the store.
     Forget { path: PathBuf },
 
+    /// Delete a store: its vectors, chunks, graph and ledger, and the registry
+    /// entry naming it. The files it indexed are not touched.
+    Drop {
+        /// The registered store's name, as `semlith stats` prints it.
+        store: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Fetch one URL into the store and index it: a web page, a PDF such as an
     /// arXiv paper, or a file on GitHub. One request, for exactly the URL
     /// given — semlith never follows links, re-fetches, or sends a credential.
@@ -909,6 +919,39 @@ fn main() -> Result<()> {
                 (chunks, images) => format!("{chunks} chunks and {images} image vector(s)"),
             };
             eprintln!("removed {what} for {}", path.display());
+        }
+
+        Command::Drop { store, yes } => {
+            let dir = semlith::home::Registry::dir_of(&store);
+            if !semlith::home::Registry::load()?.stores.contains_key(&store) {
+                anyhow::bail!("no registered store called {store}");
+            }
+            if !yes {
+                let go = cliclack::confirm(format!(
+                    "Delete {store}? Its vectors, chunks, graph and ledger go;                      the files it indexed are untouched."
+                ))
+                .initial_value(false)
+                .interact()
+                .unwrap_or(false);
+                if !go {
+                    eprintln!("nothing was deleted");
+                    return Ok(());
+                }
+            }
+
+            // Through the daemon when one is holding it: it owns the lock, and
+            // deleting the files under an open writer is how half a store is
+            // left behind.
+            let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
+            let through_daemon = match semlith::proxy::find(&dirs) {
+                Some(upstream) => upstream.delete_store(&store).is_ok(),
+                None => false,
+            };
+            if !through_daemon {
+                semlith::home::delete_store(&store)?;
+            }
+            eprintln!("deleted {store} ({})", dir.display());
+            eprintln!("the files it indexed are untouched");
         }
 
         Command::Start {

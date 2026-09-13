@@ -93,6 +93,16 @@ impl Upstream {
         self.request("POST", "/api/key", Some(&body), CALL_TIMEOUT)
     }
 
+    /// Ask the daemon to close and delete a store.
+    ///
+    /// Through the daemon rather than behind its back: it is the process
+    /// holding the store's lock, and deleting the files under an open writer
+    /// is how a half-deleted store happens.
+    pub fn delete_store(&self, name: &str) -> Result<String> {
+        let body = serde_json::json!({ "store": name }).to_string();
+        self.request("POST", "/api/store/delete", Some(&body), CALL_TIMEOUT)
+    }
+
     /// One HTTP request over loopback, hand-written for the same reason the
     /// server is: this is the whole of the client semlith needs.
     fn request(

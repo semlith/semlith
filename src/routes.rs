@@ -73,6 +73,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/key") => key(state, request),
         (_, true, "/api/setup") => fix_setup(request),
         (_, true, "/api/root") => root(state, request),
+        (_, true, "/api/store/delete") => delete_store(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
         // A route that exists on another verb is worth telling apart from one
@@ -1070,23 +1071,95 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
-    let Some(path) = body.get("path").and_then(Value::as_str) else {
-        return Response::error(400, "no path given");
+    // One path or many. The Files page selects rows and forgets the set, and
+    // a set of one is the same statement as before.
+    let paths: Vec<String> = match (
+        body.get("path").and_then(Value::as_str),
+        body.get("paths").and_then(Value::as_array),
+    ) {
+        (Some(one), _) => vec![one.to_string()],
+        (None, Some(many)) => many
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        (None, None) => return Response::error(400, "no path given"),
     };
+    if paths.is_empty() {
+        return Response::error(400, "no path given");
+    }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
     // Not streamed: forgetting a file is one statement, and a client that has
-    // to parse a stream to learn a number is a client doing extra work.
-    let progress = match state.forget(&store, PathBuf::from(path)) {
-        Ok(p) => p,
-        Err(e) => return Response::error(409, &e.to_string()),
+    // to parse a stream to learn a number is a client doing extra work. A
+    // batch is those statements one after another, because the writer is one
+    // thread and running them together would not make it two.
+    let single = paths.len() == 1;
+    let mut forgot = 0_i64;
+    let mut images = 0_i64;
+    let mut missing: Vec<String> = Vec::new();
+    for path in &paths {
+        let progress = match state.forget(&store, PathBuf::from(path)) {
+            Ok(p) => p,
+            Err(e) => return Response::error(409, &e.to_string()),
+        };
+        let value = match progress.recv() {
+            Ok(v) => v,
+            Err(_) => return Response::error(500, "the writer stopped before answering"),
+        };
+        // One path keeps the answer it has always had, so the MCP tool and
+        // every existing caller read the same shape.
+        if single {
+            return Response::json(&value);
+        }
+        let chunks = value.get("forgot").and_then(Value::as_i64).unwrap_or(0);
+        if chunks == 0 && value.get("images").and_then(Value::as_i64).unwrap_or(0) == 0 {
+            missing.push(path.clone());
+        }
+        forgot += chunks;
+        images += value.get("images").and_then(Value::as_i64).unwrap_or(0);
+    }
+    let kept = paths.len() - missing.len();
+    Response::json(&json!({
+        "files": kept,
+        "asked": paths.len(),
+        "forgot": forgot,
+        "images": images,
+        "not_indexed": missing,
+        "message": format!(
+            "{kept} file{} forgotten, {forgot} chunk{} removed.",
+            if kept == 1 { "" } else { "s" },
+            if forgot == 1 { "" } else { "s" },
+        ),
+    }))
+}
+
+/// Delete a store: everything semlith derived from a corpus, and the registry
+/// entry naming it.
+///
+/// The files that were indexed are not touched, which is the line the portal
+/// says out loud before it asks for confirmation.
+fn delete_store(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
     };
-    match progress.recv() {
-        Ok(value) => Response::json(&value),
-        Err(_) => Response::error(500, "the writer stopped before answering"),
+    let Some(name) = body.get("store").and_then(Value::as_str) else {
+        return Response::error(400, "no store given");
+    };
+    match state.delete_store(name) {
+        Ok(dir) => Response::json(&json!({
+            "store": name,
+            "deleted": dir.display().to_string(),
+            "message": format!(
+                "{name} is gone: its vectors, chunks, graph and ledger were deleted and the \
+                 registry no longer lists it. The files it indexed are untouched."
+            ),
+        })),
+        Err(e) => Response::error(409, &e.to_string()),
     }
 }
 
