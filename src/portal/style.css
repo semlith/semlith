@@ -1351,6 +1351,20 @@ select.field:focus-visible {
   width: auto;
   padding: 0 var(--sp-3);
 }
+/* A command wraps rather than scrolling sideways: a reader who cannot see the
+ * end of it cannot check what they are about to paste, and a hidden scrollbar
+ * does not tell them there is more. The field grows to hold it. */
+.copyfield.worded {
+  height: auto;
+  min-height: 36px;
+  padding-block: 4px;
+  align-items: center;
+}
+.copyfield.worded .text {
+  overflow-x: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .copyfield .actions {
   gap: 4px;
 }
