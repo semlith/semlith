@@ -47,6 +47,37 @@ jobs:
 
       - run: cargo build --release
 
+  # The minimum Rust version the crate declares, built. `rust-version` in
+  # Cargo.toml is a promise to anybody on an older toolchain, and nothing ever
+  # checked it: every leg above is stable, so the declared floor could have
+  # stopped compiling releases ago and the first person to find out would have
+  # been somebody whose `cargo install` failed.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: The version Cargo.toml declares
+        id: floor
+        run: |
+          version=$(grep -m1 '^rust-version = ' Cargo.toml | cut -d'"' -f2)
+          echo "Cargo.toml declares rust-version $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ steps.floor.outputs.version }}
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: msrv
+
+      # Built, not tested: the promise is that the crate compiles on the
+      # declared floor. Running the suite there as well would double the
+      # slowest leg to re-prove what stable already proved.
+      - run: cargo build --all-targets --locked
+
   # The install scripts are the front door and nothing else compiles them, so
   # the linters are the only thing standing between a typo and a broken paste.
   scripts:
@@ -58,13 +89,17 @@ jobs:
       - name: shellcheck
         run: shellcheck install.sh
 
+      # The scripts are pasted into a shell by people who have not read them, so
+      # they stay short enough to read. Raised from 170 in 0.14.0, when
+      # install.sh took on placing the ONNX Runtime that ships beside the
+      # binary — a real second responsibility rather than a few more lines.
       - name: Line budget
         run: |
           for f in install.sh install.ps1; do
             lines=$(wc -l < "$f")
             echo "$f: $lines lines"
-            if [ "$lines" -ge 170 ]; then
-              echo "::error::$f is $lines lines; the budget is under 170"
+            if [ "$lines" -ge 185 ]; then
+              echo "::error::$f is $lines lines; the budget is under 185"
               exit 1
             fi
           done

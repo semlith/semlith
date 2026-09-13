@@ -115,6 +115,7 @@ impl Model {
         }
         match self {
             Model::Builtin(m) => {
+                link_runtime()?;
                 let opts = TextInitOptions::new(m.clone())
                     .with_show_download_progress(!quiet)
                     .with_max_length(max_length)
@@ -127,7 +128,73 @@ impl Model {
     }
 }
 
+/// Point ONNX Runtime at the library shipped beside this binary.
+///
+/// Only in a `dynamic-ort` build, which is the two Linux release binaries and
+/// nothing else. Every other build — `cargo install`, macOS, Windows, a
+/// developer's own `cargo build` — links the library `ort` downloads at build
+/// time and this function does nothing.
+///
+/// The reason the Linux artifacts differ is issue #57: the library `ort`
+/// downloads references glibc 2.38 symbols, so the binary built against it
+/// cannot start on Debian 12, Ubuntu 22.04 LTS, RHEL 9 or Amazon Linux 2023,
+/// and building on an older runner cannot lower a floor the vendored library
+/// sets. Microsoft's own ONNX Runtime release needs glibc 2.27, so the release
+/// jobs pack that beside the binary and this loads it.
+///
+/// Run once, before anything asks for a model.
+pub fn link_runtime() -> Result<()> {
+    #[cfg(feature = "dynamic-ort")]
+    {
+        use std::sync::OnceLock;
+        static ONCE: OnceLock<Result<(), String>> = OnceLock::new();
+        return ONCE
+            .get_or_init(|| {
+                let Ok(exe) = std::env::current_exe() else {
+                    return Err("the running binary could not be located".to_string());
+                };
+                let beside = exe
+                    .parent()
+                    .map(|dir| dir.join(RUNTIME_FILE))
+                    .unwrap_or_else(|| PathBuf::from(RUNTIME_FILE));
+                if !beside.exists() {
+                    return Err(format!(
+                        "{} is not beside the semlith binary. The Linux release \
+                         archive carries it next to `semlith`, and `install.sh` \
+                         puts both in the same directory — a binary copied out of \
+                         the archive on its own cannot embed anything. Unpack the \
+                         archive again, or install with the one-liner in the \
+                         README.",
+                        beside.display()
+                    ));
+                }
+                ort::init_from(beside.to_string_lossy().as_ref())
+                    .map_err(|e| format!("loading {}: {e}", beside.display()))?
+                    .commit();
+                // `commit` answers whether this call was the one that
+                // installed the environment; a second caller getting `false`
+                // is the OnceLock doing its job, not a failure.
+                Ok(())
+            })
+            .clone()
+            .map_err(anyhow::Error::msg);
+    }
+    #[cfg(not(feature = "dynamic-ort"))]
+    Ok(())
+}
+
+/// What a `dynamic-ort` build looks for beside itself.
+#[cfg(feature = "dynamic-ort")]
+const RUNTIME_FILE: &str = if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else if cfg!(windows) {
+    "onnxruntime.dll"
+} else {
+    "libonnxruntime.so"
+};
+
 fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<TextEmbedding> {
+    link_runtime()?;
     check_cache_dir(&cache_dir)?;
     // A revision rather than a branch. `main` is a name somebody else controls;
     // a commit is the bytes this release was built against.

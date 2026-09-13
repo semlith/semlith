@@ -5,8 +5,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-permissions:
-  contents: write
+# Nothing, by default. Every job below gets exactly what it needs, which for
+# all but one of them is nothing at all: a workflow-level `contents: write` is
+# a token with push rights handed to the build jobs, which download a
+# dependency tree and run a compiler over it.
+permissions: {}
 
 jobs:
   # A tag is the only thing that says which version this release is, and
@@ -36,19 +39,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `ubuntu-latest`, because the floor is not ours to choose. 0.13.0
-          # tried 22.04 to lower it and the link failed: the prebuilt ONNX
-          # Runtime that `ort` downloads references `__isoc23_strtol` and
-          # `std::__cxx11::basic_string<wchar_t>::_M_replace_cold`, which are
-          # glibc 2.38 and a newer libstdc++. The vendored library sets the
-          # floor, so building on an older runner cannot lower it — only
-          # building ONNX Runtime from source can. Issue #57 stays open with
-          # that evidence, and the step below records what the floor actually
-          # is rather than asserting one we cannot hold.
+          # The Linux targets build with `dynamic-ort` and ship Microsoft's own
+          # ONNX Runtime beside the binary, which is how issue #57 is closed.
+          #
+          # The floor was never the runner's to choose: 0.13.0 tried 22.04 and
+          # the link failed, because the prebuilt ONNX Runtime `ort` downloads
+          # references `__isoc23_strtol` and
+          # `std::__cxx11::basic_string<wchar_t>::_M_replace_cold` — glibc 2.38
+          # and a newer libstdc++. A linker cannot satisfy a reference to a
+          # symbol version the target libc does not have, so no older runner and
+          # no older container could have helped. What could, and does, is not
+          # linking that library at all: `dynamic-ort` links nothing and loads
+          # `libonnxruntime.so` from beside the binary, and Microsoft's release
+          # of the same library needs only glibc 2.27.
+          #
+          # `ubuntu-latest` is fine for the build now, because what the build
+          # links against is no longer what decides the floor. The step below
+          # asserts the floor over the packaged pair rather than recording it.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            runtime: onnxruntime-linux-x64-1.24.4
+            runtime_sha: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            runtime: onnxruntime-linux-aarch64-1.24.4
+            runtime_sha: 866109a9248d057671a039b9d725be4bd86888e3754140e6701ec621be9d4d7e
           - os: macos-latest
             target: aarch64-apple-darwin
           # No Intel macOS build: ONNX Runtime stopped publishing osx-x86_64
@@ -67,7 +82,40 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - run: cargo build --release --target ${{ matrix.target }}
+      # The one thing that differs between these binaries and the one on
+      # crates.io. Linux links nothing and loads the library packed beside it;
+      # macOS and Windows link what `ort` downloads, as they always have — the
+      # floor is not a problem on either.
+      - name: Build
+        run: |
+          if [ -n "${{ matrix.runtime }}" ]; then
+            cargo build --release --target ${{ matrix.target }} \
+              --no-default-features --features dynamic-ort
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      # Microsoft's own release of ONNX Runtime, verified against the checksum
+      # GitHub publishes with it. This is the library the binary loads at start,
+      # so it is fetched by digest rather than by name.
+      - name: ONNX Runtime
+        if: matrix.runtime != ''
+        run: |
+          url="https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/${{ matrix.runtime }}.tgz"
+          curl -fsSL -o runtime.tgz "$url"
+          echo "${{ matrix.runtime_sha }}  runtime.tgz" | sha256sum -c -
+          tar xzf runtime.tgz
+          mkdir -p runtime
+          cp "${{ matrix.runtime }}/lib/libonnxruntime.so"* runtime/
+          # The loader opens `libonnxruntime.so`; the release carries it as
+          # `libonnxruntime.so.1.24.4` with that name as a symlink, and a
+          # symlink does not survive a tarball the way a file does.
+          if [ ! -f runtime/libonnxruntime.so ] || [ -L runtime/libonnxruntime.so ]; then
+            rm -f runtime/libonnxruntime.so
+            cp "${{ matrix.runtime }}/lib/libonnxruntime.so.1.24.4" runtime/libonnxruntime.so
+          fi
+          ls -l runtime/
 
       # A binary that needs OpenSSL or OpenBLAS installed is not a binary you
       # can paste a one-liner for. Print every library the build ended up
@@ -91,15 +139,30 @@ jobs:
       # It does not fail the build: the floor is the vendored ONNX Runtime's,
       # and failing here would only stop us shipping the binary that is the
       # best we can currently build. See issue #57.
+      # Asserted over the pair that ships, not over the binary alone: what a
+      # user runs is `semlith` plus the library beside it, and the floor is
+      # whichever of the two needs more. It failed to be a number anybody
+      # checked for three releases, which is how it rose to 2.39 without
+      # failing a build — so this one exits non-zero.
       - name: glibc floor
         if: runner.os == 'Linux'
         run: |
           binary="target/${{ matrix.target }}/release/semlith"
-          floor=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1)
-          cxx=$(objdump -T "$binary" | grep -o 'GLIBCXX_[0-9.]*' | sort -V -u | tail -1)
-          echo "$binary requires up to $floor and $cxx"
+          floor=$(objdump -T "$binary" runtime/libonnxruntime.so \
+            | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1)
+          cxx=$(objdump -T "$binary" runtime/libonnxruntime.so \
+            | grep -o 'GLIBCXX_[0-9.]*' | sort -V -u | tail -1)
+          echo "the packaged pair requires up to $floor and $cxx"
           echo "::notice::${{ matrix.target }} requires $floor and $cxx"
           echo "GLIBC_FLOOR=$floor" >> "$GITHUB_ENV"
+          # Debian 12 is glibc 2.36 and Ubuntu 22.04 LTS is 2.35, which is the
+          # floor issue #57 is about. Anything above it is a release that does
+          # not start on a mainstream current distribution.
+          highest=$(printf '%s\n' "$floor" "GLIBC_2.35" | sort -V | tail -1)
+          if [ "$highest" != "GLIBC_2.35" ]; then
+            echo "::error::the packaged Linux binary requires $floor; the ceiling is GLIBC_2.35 (see issue #57)"
+            exit 1
+          fi
 
       # turbovec requires a 64-bit target; every entry above is one.
       - name: Package
@@ -111,6 +174,10 @@ jobs:
             cp "target/${{ matrix.target }}/release/semlith.exe" "dist/$name/"
           else
             cp "target/${{ matrix.target }}/release/semlith" "dist/$name/"
+          fi
+          # Beside the binary, because that is where it is loaded from.
+          if [ -d runtime ]; then
+            cp runtime/libonnxruntime.so "dist/$name/"
           fi
           cp README.md LICENSE CHANGELOG.md "dist/$name/"
           cd dist
@@ -130,6 +197,9 @@ jobs:
   release:
     needs: [verify, build]
     runs-on: ubuntu-latest
+    # The one job that writes: it creates the Release and uploads the assets.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 

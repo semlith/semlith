@@ -173,6 +173,7 @@ impl Clip {
         let vision = match self.vision.as_mut() {
             Some(model) => model,
             None => {
+                crate::embed::link_runtime()?;
                 crate::embed::refuse_if_airgapped(VISION_REPO)?;
                 let cache = crate::model_cache_dir();
                 crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
@@ -204,6 +205,7 @@ impl Clip {
         let text = match self.text.as_mut() {
             Some(model) => model,
             None => {
+                crate::embed::link_runtime()?;
                 crate::embed::refuse_if_airgapped(TEXT_REPO)?;
                 let cache = crate::model_cache_dir();
                 crate::embed::verify_cached(&cache, TEXT_REPO, TEXT_REVISION, TEXT_FILES)?;

@@ -20,7 +20,10 @@ clap = { version = "4.6.4", features = ["derive"] }
 cliclack = "0.5.6"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 libc = "0.2.189"
-fastembed = { version = "6.0.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub", "image-models"] }
+fastembed = { version = "6.0.3", default-features = false, features = ["hf-hub", "image-models"] }
+# ONNX Runtime, named here so it can be linked two ways. `ort` is fastembed's
+# dependency and is pinned to the exact version fastembed pins.
+ort = { version = "=2.0.0-rc.13", default-features = false, optional = true }
 # Already in the tree under fastembed's image feature; named here to read an
 # image's pixel size out of its header without decoding the whole thing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
@@ -58,6 +61,25 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 # release archive in this process rather than through whatever `tar` is on
 # PATH. `rust_backend` keeps it from linking a system zlib.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+
+[features]
+# How ONNX Runtime is linked, and the one thing that differs between the binary
+# on crates.io and the Linux binaries on the release page.
+#
+# `static-ort` (the default) links the prebuilt library `ort` downloads from
+# `cdn.pyke.io`. One file, nothing to install, and the floor it carries is
+# whatever that library was built against — currently glibc 2.38, which is why
+# the prebuilt Linux binary would not start on Debian 12, Ubuntu 22.04 LTS,
+# RHEL 9 or Amazon Linux 2023 (issue #57).
+#
+# `dynamic-ort` links nothing and loads `libonnxruntime.so` from beside the
+# binary at start. The Linux release jobs build with it and pack Microsoft's
+# own ONNX Runtime release into the tarball, whose floor is glibc 2.27. It is
+# not the default because a `cargo install semlith` built this way would have
+# no runtime at all and no tarball to have got one from.
+default = ["static-ort"]
+static-ort = ["fastembed/ort-download-binaries-rustls-tls"]
+dynamic-ort = ["fastembed/ort-load-dynamic", "dep:ort"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

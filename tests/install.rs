@@ -141,6 +141,15 @@ fn release(corrupt: bool) -> Release {
     // Non-zero exit for every argument, so install.sh's `setup --help` probe
     // fails and the script prints PATH instructions instead of running a setup.
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("make it executable");
+    // From 0.14.0 the Linux archives carry ONNX Runtime beside the binary,
+    // because that is where a `dynamic-ort` build loads it from. The fixture
+    // carries one on every platform: what is under test is that the script
+    // puts it next to the binary rather than leaving it in the tarball.
+    fs::write(
+        stage.join(&name).join("libonnxruntime.so"),
+        b"not really a library",
+    )
+    .expect("stage the runtime");
 
     let archive = root.join(&archive_name);
     let tar = Command::new("tar")
@@ -240,6 +249,35 @@ fn installs_a_verified_release() {
     assert!(
         printed.contains(MARKER),
         "the installed file is not the one from the archive; it printed {printed:?}"
+    );
+}
+
+/// A binary that loads its runtime from beside itself is a binary the installer
+/// has to put a second file next to. One without it cannot embed anything, and
+/// the failure would arrive on the first index rather than on the install.
+#[test]
+fn the_runtime_lands_beside_the_binary() {
+    let release = release(false);
+    let out = install(&release);
+    assert!(
+        out.status.success(),
+        "install.sh exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bin = release.semlith_home.join("bin");
+    assert!(bin.join("semlith").exists(), "the binary was not installed");
+    assert_eq!(
+        fs::read(bin.join("libonnxruntime.so")).expect("the runtime was not installed"),
+        b"not really a library",
+        "the runtime beside the binary is not the one the archive carried"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("libonnxruntime.so"),
+        "the install did not say it placed the runtime:\n{}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 
