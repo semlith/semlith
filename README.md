@@ -3,7 +3,7 @@
 <img src="https://raw.githubusercontent.com/semlith/semlith/main/assets/semlith-logo.png"
      alt="Semlith" width="128" height="128">
 
-# semlith
+# Semlith
 
 **A fast local vector store for AI agents** — index files once, keep it current
 as you save, and answer questions across all of it in milliseconds without
@@ -1036,8 +1036,34 @@ re-indexing.
 
 ## Performance
 
-Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM, over three corpora
-of mixed Rust, Markdown and TypeScript:
+Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM, and reproducible:
+
+```sh
+cargo test --release --test measure -- --ignored --nocapture
+```
+
+Every figure in the first four tables was taken for this release. The
+larger-corpus numbers below them are fixtures — building a
+hundred-thousand-chunk store takes over an hour of embedding — and are re-taken
+when the indexing or scan path changes rather than every release.
+
+### Answering a question
+
+Warm, server-side, as the daemon reports it. A query is embedded once per vector
+space the store holds, and that embedding is most of the cost at these sizes.
+
+| store | p50 | what is in it |
+|---|---|---|
+| text | **16.0 ms** | 2 220 chunks over 85 files |
+| images | **9.1 ms** | 120 images, no text |
+| a fleet of both kinds | **25.0 ms** | the text store above, beside one holding images |
+
+The two halves add rather than interfere, because each store embeds the query
+once for every vector space it holds. A store of source code never pays for the
+image space at all: it has no images to compare against, so that half is skipped
+before a model is loaded.
+
+Over three larger corpora of mixed Rust, Markdown and TypeScript:
 
 | store | warm query, p50 | p95 | indexing | peak RSS |
 |---|---|---|---|---|
@@ -1045,56 +1071,83 @@ of mixed Rust, Markdown and TypeScript:
 | 9.9k chunks | **5.4 ms** | 11.0 ms | 24.3 chunks/sec | 637 MB |
 | 105k chunks | **22.7 ms** | 67.4 ms | 23.5 chunks/sec | 595 MB |
 
-Re-indexing 8334 unchanged files takes 1.7 seconds, because content hashes
-match and the model is never loaded. Cold CLI start on the 105k store is about
-430 ms, most of it loading the model and the index.
+**Peak memory does not grow with the corpus** — 105k chunks is 85 times the work
+of 1.2k for slightly less memory, so the number to plan for is roughly 600 MB
+whatever you point it at. **Query latency does grow**, because the index scan is
+linear: budget a few milliseconds for a repository and a few tens for a very
+large corpus. This release did not touch either path; the recipe for rebuilding
+the fixture is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Two things are worth reading off that table. **Peak memory does not grow with
-the corpus** — 105k chunks is 85 times the work of 1.2k for slightly less
-memory, so the number to plan for is roughly 600 MB whatever you point it at.
-A store that holds images loads CLIP's two encoders as well, on the first image
-it indexes or is searched for; the table above is the text path, which is what
-every store pays.
-**Query latency does grow**, because the index scan is linear: budget a few
-milliseconds for a repository and a few tens for a very large corpus.
+### Keeping it current
+
+| what | measured |
+|---|---|
+| edit on disk to searchable | **1.24 s**, watcher running |
+| ten saves in six seconds | **1** index write of 638 KB |
+| re-indexing 120 unchanged files | **0.01 s** — content hashes match, no model is loaded |
+| idle daemon | **0.01 s** of CPU over 60 s, 10 MB resident |
+| 100 edits | 37 MB resident at start, 59 MB after |
+
+### Images
+
+| what | measured |
+|---|---|
+| indexing 120 images | **10.0 s**, including loading the vision encoder |
+| warm image query | **9.1 ms** p50 over 15 queries |
+| the image index | 600 KB for 120 images, beside the text index |
+| resident, after an image query | 191 MB |
+
+CLIP is fetched only when a store first indexes an image: 335 MB for the vision
+encoder and 244 MB for the text encoder, against 52 MB for the text model. A
+corpus with no pictures in it never downloads either.
+
+### What an agent pays
+
+| what | measured |
+|---|---|
+| `tools/call` over HTTP | **23.4 ms** p50 over 20 calls |
+| the same call through the stdio proxy | **20.9 ms** p50, same daemon, same query |
+| `tools/list` | 8 702 bytes on the wire for nine tools, about 2 176 tokens |
+| an MCP server open on one store | 131 MB; on three stores, 132 MB |
+| three same-model stores, one search | **1** query embed, +1.7 ms for the second store |
+
+The endpoint costs about what the proxy costs, and the difference is the
+client's connection setup rather than the route. Both talk to the same daemon
+and run the same search.
+
+### What sharding costs
+
+A store split into 16 shards answers with the same top ten as the same corpus in
+one shard **91.7%** of the time, measured over twelve questions about meaning
+rather than about an identifier. The shards are what keep peak memory flat, and
+that is the price.
+
+The binary is **45.6 MB**, up 1.8 MB from 0.12.0, which is the image support.
 
 ### What a store costs to hold
 
-Measured with an MCP server on one store, comparing 0.6.0 against 0.7.0 over the
-same three corpora. *Open* is the process after a handshake and `tools/list`,
-before any question has been asked; *searching* is the same process after
-twenty queries.
-
-| chunks | 0.6.0 open | 0.7.0 open | 0.6.0 searching | 0.7.0 searching | median query |
-|---|---|---|---|---|---|
-| 700 | 137 MB | 133 MB | 139 MB | 137 MB | 3.7 ms |
-| 7 000 | 141 MB | 133 MB | 144 MB | 144 MB | 7.5 ms |
-| 70 000 | 180 MB | **133 MB** | 185 MB | 179 MB | 52.6 ms |
-
-A hundredfold more corpus costs an open 0.7.0 store **0.8 MB**; the same corpus
-cost 0.6.0 **43 MB**, because it read every vector the moment the store was
-opened. An agent's server that is sitting there waiting to be asked something
-now holds a model and nothing else.
-
-Searching still holds the vectors it searches — 70 000 chunks is 43 MB and fits
-inside the 512 MB default with room to spare. Past that budget the store keeps
-what it can and reads the rest back per query, which is what makes a corpus
-larger than memory searchable at all, and it is not free: the same 70 000-chunk
-store squeezed into an 8 MB budget answered in 364 ms instead of 53 ms, holding
-110–126 MB across two hundred queries.
+An MCP server that is sitting there waiting to be asked something holds a model
+and nothing else: a hundredfold more corpus costs an open store **0.8 MB**,
+because the vectors are read when a question is asked rather than when the store
+is opened. Searching holds the vectors it searches — 70 000 chunks is 43 MB, and
+fits inside the 512 MB default with room to spare. Past that budget the store
+keeps what it can and reads the rest back per query, which is what makes a
+corpus larger than memory searchable at all, and it is not free: the same
+70 000-chunk store squeezed into an 8 MB budget answered in 364 ms instead of
+53 ms.
 
 Changing one file rewrites the shards it touches rather than the index. On a
-store of 14 shards, re-indexing one changed file wrote 176 KB of a 1436 KB
-index. Two shards, not one: the shard losing the old vector and the newest shard
-taking the new one — so the saving appears once a store is more than two shards,
-around 131 000 chunks at the default shard size.
+store of 14 shards, re-indexing one changed file wrote 176 KB of a 1 436 KB
+index — two shards, not one, because the shard losing the old vector and the
+newest shard taking the new one both change. The saving appears once a store is
+more than two shards, around 131 000 chunks at the default shard size.
 
-An index run killed eight seconds in, on a 6000-file corpus: 0.6.0 kept **0**
-chunks, 0.7.0 kept **1952**.
+An index run killed eight seconds into a 6 000-file corpus keeps what it had
+already embedded: **1 952** chunks, not zero. Vectors are made durable before
+the files they cover are marked indexed, so a kill is resumable and never leaves
+a file recorded as indexed that cannot be answered for.
 
-The numbers that matter for an agent are the query row and the re-index figure.
-`semlith mcp` loads the model once at startup, so every tool call costs the warm
-figure; and keeping a store current is nearly free.
+### Choosing a model
 
 Indexing is the slow half, and that cost is the embedding model, not the index
 — a transformer on CPU is simply not fast. If you have a large corpus and can
@@ -1110,7 +1163,10 @@ Thread count is chosen rather than left to ONNX Runtime. Its threads
 synchronise at every operator, so on a CPU with performance and efficiency
 cores a thread on a slow core paces the whole batch; Semlith uses the
 performance-core count on Apple silicon and the full count elsewhere. Override
-with `SEMLITH_EMBED_THREADS` if your machine disagrees.
+with `SEMLITH_EMBED_THREADS` if your machine disagrees. It is also what makes
+embedding reproducible: ONNX Runtime reduces across its threads in whatever
+order they finish, so the same text embedded twice differs in the last bits, and
+under int8 quantisation that is enough to swap two near-equal chunks.
 
 ## Compatibility
 
