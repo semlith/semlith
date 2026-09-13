@@ -266,20 +266,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-
-    /// Show what breaks if a symbol changes — its blast radius.
-    Impact {
-        /// The symbol's name, matched exactly.
-        name: String,
-
-        /// How many hops backwards to walk.
-        #[arg(long, short, default_value_t = semlith::graph::DEFAULT_DEPTH)]
-        depth: u32,
-
-        /// Emit JSON instead of formatted text.
-        #[arg(long)]
-        json: bool,
-    },
 }
 
 fn main() -> Result<()> {
@@ -736,63 +722,6 @@ fn main() -> Result<()> {
                         "no chain from {from} to {to} within {depth} hops \
                          (a longer --depth may find one)"
                     ),
-                }
-            }
-        }
-
-        Command::Impact { name, depth, json } => {
-            let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let reached = fleet.impact_in(None, &name, depth)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&reached)?);
-            } else if reached.is_empty() {
-                eprintln!("nothing in the graph reaches {name} within {depth} hops");
-            } else {
-                let mut out = std::io::stdout().lock();
-                let inferred = reached
-                    .iter()
-                    .filter(|r| r.confidence == semlith::graph::INFERRED)
-                    .count();
-                writeln!(
-                    out,
-                    "{}{} symbol{} {} {name} within {depth} hop{}{}",
-                    bold(),
-                    reached.len(),
-                    if reached.len() == 1 { "" } else { "s" },
-                    if reached.len() == 1 {
-                        "reaches"
-                    } else {
-                        "reach"
-                    },
-                    if depth == 1 { "" } else { "s" },
-                    reset(),
-                )?;
-                for r in &reached {
-                    writeln!(
-                        out,
-                        "  {} hop{}  {} via {} ({})  {}{}:{}",
-                        r.hops,
-                        if r.hops == 1 { " " } else { "s" },
-                        r.symbol.name,
-                        r.via,
-                        r.confidence,
-                        store_prefix(&r.symbol.store),
-                        display(std::path::Path::new(&r.symbol.path)),
-                        r.symbol.start_line,
-                    )?;
-                }
-                if inferred > 0 {
-                    writeln!(
-                        out,
-                        "{inferred} of these were matched by name, not resolved through an import."
-                    )?;
-                }
-                if reached.len() >= semlith::graph::MAX_NODES {
-                    writeln!(
-                        out,
-                        "Stopped at the {} symbol budget; the real radius is larger.",
-                        semlith::graph::MAX_NODES
-                    )?;
                 }
             }
         }

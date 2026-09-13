@@ -48,7 +48,6 @@ const VIEWS: &[(&str, &str)] = &[
     ("symbol", "/api/symbol"),
     ("neighbors", "/api/neighbors"),
     ("path", "/api/path"),
-    ("impact", "/api/impact"),
     ("ledger", "/api/ledger"),
 ];
 
@@ -63,7 +62,6 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_symbol", "/api/symbol"),
     ("semlith_neighbors", "/api/neighbors"),
     ("semlith_path", "/api/path"),
-    ("semlith_impact", "/api/impact"),
 ];
 
 /// Which verb a route answers on.

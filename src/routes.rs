@@ -54,7 +54,6 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/symbol") => symbol(state, request),
         (true, _, "/api/neighbors") => neighbors(state, request),
         (true, _, "/api/path") => shortest_path(state, request),
-        (true, _, "/api/impact") => impact(state, request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/ledger") => ledger(state),
         (true, _, "/api/setup") => setup(),
@@ -67,10 +66,19 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/mcp") => mcp(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
-        // A method that exists on another verb is worth telling apart from a
-        // route that does not exist: one is a bug in the page, the other is a
-        // typed URL.
-        (_, _, p) if p.starts_with("/api/") => Response::error(405, "wrong method for this route"),
+        // A route that exists on another verb is worth telling apart from one
+        // that does not exist at all: the first is a bug in the page, the
+        // second is a typed or stale URL. Only the write routes are listed,
+        // because a GET of one of them is the case that actually happens — a
+        // browser replaying a URL — and a path that is on no list at all, like
+        // a route a later release removed, is a 404 rather than an invitation
+        // to try another verb.
+        (
+            _,
+            _,
+            "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/rotate" | "/api/mcp"
+            | "/api/upgrade",
+        ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
     }
 }
@@ -115,16 +123,7 @@ fn stores(state: &Arc<State>) -> Response {
             Some((Ok((f, c, b)), model, dim, len, shards, facets)) => {
                 (f, c, b, model, dim, len, shards, facets)
             }
-            _ => (
-                0,
-                0,
-                0,
-                String::new(),
-                0,
-                0,
-                None,
-                store::Facets::default(),
-            ),
+            _ => (0, 0, 0, String::new(), 0, 0, None, store::Facets::default()),
         };
 
         // The reader is a property of the code rather than a column, so it is
@@ -477,7 +476,9 @@ fn cached_model_sizes() -> std::collections::HashMap<String, u64> {
         return out;
     };
     for entry in entries.flatten() {
-        let Ok(kind) = entry.file_type() else { continue };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
         if !kind.is_dir() {
             continue;
         }
@@ -751,26 +752,6 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
     with_fleet(state, json!({ "path": null }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         Ok(json!({ "path": fleet.path_in(only.as_deref(), &from, &to, depth)? }))
-    })
-}
-
-fn impact(state: &Arc<State>, request: &Request) -> Response {
-    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
-        return Response::error(400, "missing name");
-    };
-    let name = name.to_string();
-    let depth = request
-        .query("depth")
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(crate::graph::DEFAULT_DEPTH)
-        .clamp(1, 20);
-    let only = request.query_all("store");
-    let empty = json!({ "reached": [], "depth": depth, "truncated": false });
-    with_fleet(state, empty, move |fleet| {
-        let only = (!only.is_empty()).then_some(only);
-        let reached = fleet.impact_in(only.as_deref(), &name, depth)?;
-        let truncated = reached.len() >= crate::graph::MAX_NODES;
-        Ok(json!({ "reached": reached, "depth": depth, "truncated": truncated }))
     })
 }
 

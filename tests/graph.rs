@@ -284,11 +284,16 @@ fn an_edit_under_the_watcher_updates_the_graph_with_the_vectors() {
     handle.join().unwrap();
 }
 
-/// The four commands answer, and `impact` at depth 1 agrees with a full-text
+/// The three graph commands answer, and `neighbors` agrees with a full-text
 /// sweep of the corpus: every direct caller, and nothing a sweep does not find.
+///
+/// This asserted the same property through `impact` until 0.13.0 removed it
+/// from the free product. The property is the one that matters — that the
+/// graph's answer about who calls a symbol matches what is written in the
+/// file — and `neighbours` is where it now lives.
 #[test]
 #[ignore = "downloads an embedding model on first run"]
-fn the_four_commands_answer_and_impact_agrees_with_a_sweep() {
+fn the_three_commands_answer_and_neighbours_agrees_with_a_sweep() {
     let corpus = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     write(
@@ -329,16 +334,34 @@ fn the_four_commands_answer_and_impact_agrees_with_a_sweep() {
     assert_eq!(callers, ["hold"], "the sweep itself is wrong");
 
     let s = Semlith::open(store.path(), None).unwrap();
-    let reached = semlith::graph::impact(s.db(), "release", 1).unwrap();
-    let names: Vec<String> = reached.iter().map(|r| r.symbol.name.clone()).collect();
-    assert_eq!(names, ["hold"], "impact disagrees with a full-text sweep");
+    let around = semlith::graph::neighbours(s.db(), "release", &[]).unwrap();
+    let names: Vec<String> = around
+        .callers
+        .iter()
+        .map(|e| e.symbol.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        ["hold"],
+        "neighbours disagrees with a full-text sweep"
+    );
     drop(s);
+}
 
-    // And the count only ever grows with depth.
-    let out = cli(store.path(), &["impact", "release", "--depth", "2"]);
+/// `semlith impact` is gone from the free product, and says so rather than
+/// doing something else. Removed in 0.13.0; reverse reachability returns in
+/// 0.14.0 as a paid surface.
+#[test]
+fn the_impact_command_no_longer_exists() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["impact", "anything"])
+        .output()
+        .expect("the binary runs");
+    assert!(!out.status.success(), "`semlith impact` still succeeds");
+    let said = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
-        out.contains("acquire"),
-        "depth 2 lost the indirect caller: {out}"
+        said.contains("unrecognized subcommand") || said.contains("unrecognised subcommand"),
+        "an unknown command must say so: {said}"
     );
 }
 
@@ -353,9 +376,10 @@ fn the_json_output_matches_what_the_library_returns() {
     index(store.path(), corpus.path());
 
     let printed: serde_json::Value =
-        serde_json::from_str(&cli(store.path(), &["impact", "b", "--json"])).unwrap();
+        serde_json::from_str(&cli(store.path(), &["path", "a", "b", "--json"])).unwrap();
     let s = Semlith::open(store.path(), None).unwrap();
-    let direct = serde_json::to_value(semlith::graph::impact(s.db(), "b", 3).unwrap()).unwrap();
+    let direct =
+        serde_json::to_value(semlith::graph::shortest_path(s.db(), "a", "b", 6).unwrap()).unwrap();
     assert_eq!(printed, direct);
 }
 

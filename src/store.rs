@@ -814,7 +814,8 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
 
 /// What points at `name`: callers, importers, references in.
 ///
-/// The direction `impact` walks, and the reason `edges_dst` exists.
+/// The direction a reverse walk takes, and the reason `edges_dst` exists —
+/// `semlith neighbors` reads it to answer "what calls this".
 pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     let sql = format!(

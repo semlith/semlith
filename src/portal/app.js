@@ -136,7 +136,6 @@ const NAV_ICONS = {
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
   languages: "M4 6h9|M8 6v2c0 3-2 5-4 6|M7 11c1 2 3 3 5 3.5|M13 20l4-9 4 9|M14.6 17h4.8",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
-  impact: "M4 18l5-6 4 3 7-9|M20 6h-4|M20 6v4",
   ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
   privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
@@ -679,7 +678,7 @@ const state = {
   navOpen: !window.matchMedia(NARROW).matches,
   /** Carried from the welcome screen into the Index view's path field. */
   pendingPath: "",
-  /** Carried from a Graph selection into Impact, or into Search. */
+  /** Carried from a search hit into the Graph page, or into Search. */
   pendingSymbol: "",
   pendingQuery: "",
 };
@@ -694,7 +693,6 @@ const VIEWS = [
   { group: "Workspace", id: "index", label: "Index", title: "Index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
   { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
-  { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
   { group: "Explore", id: "languages", label: "Languages", title: "Languages" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
@@ -1414,303 +1412,6 @@ async function graphView() {
   return page;
 }
 
-// --------------------------------------------------------------- impact
-
-/** Reverse reachability drawn as rings, one ring per hop. */
-function ringCanvas() {
-  const canvas = el("canvas", { class: "graph-canvas" });
-  const wrap = el("div", { class: "rings" }, canvas);
-  let rows = [];
-  let centre = "";
-
-  function paint() {
-    const ratio = window.devicePixelRatio || 1;
-    const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 240);
-    const h = Math.max(box.height, 240);
-    canvas.width = Math.round(w * ratio);
-    canvas.height = Math.round(h * ratio);
-    const ink = graphInk();
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-
-    const cx = w / 2;
-    const cy = h / 2;
-    const hops = Math.max(1, ...rows.map((r) => r.hops));
-    const gap = Math.min(w, h) / 2 / (hops + 1);
-
-    for (let hop = 1; hop <= hops; hop++) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, gap * hop, 0, Math.PI * 2);
-      ctx.strokeStyle = ink.line;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-
-    const byHop = new Map();
-    for (const row of rows) {
-      if (!byHop.has(row.hops)) byHop.set(row.hops, []);
-      byHop.get(row.hops).push(row);
-    }
-    for (const [hop, list] of byHop) {
-      list.forEach((row, i) => {
-        const angle = (i / list.length) * Math.PI * 2 - Math.PI / 2;
-        const x = cx + Math.cos(angle) * gap * hop;
-        const y = cy + Math.sin(angle) * gap * hop;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(x, y);
-        ctx.strokeStyle = row.confidence === "extracted" ? ink.extracted : ink.inferred;
-        ctx.setLineDash(row.confidence === "extracted" ? [] : [4, 3]);
-        ctx.globalAlpha = 0.5;
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
-
-        ctx.beginPath();
-        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
-        ctx.fillStyle = ink.panel;
-        ctx.strokeStyle = row.confidence === "extracted" ? ink.extracted : ink.inferred;
-        ctx.lineWidth = 1.5;
-        ctx.fill();
-        ctx.stroke();
-      });
-    }
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, 9, 0, Math.PI * 2);
-    ctx.fillStyle = ink.selected;
-    ctx.fill();
-    ctx.font = '600 11px "IBM Plex Mono", ui-monospace, monospace';
-    ctx.fillStyle = ink.ink;
-    ctx.textAlign = "center";
-    ctx.fillText(centre, cx, cy - 15);
-  }
-
-  return {
-    node: wrap,
-    draw(name, list) {
-      centre = name;
-      rows = list;
-      paint();
-    },
-  };
-}
-
-async function impactView() {
-  const summary = el("div", { class: "impact-summary" });
-  const table = el("div", { class: "impact-table" });
-  const rings = ringCanvas();
-  const pathOut = el("div", { class: "path-steps" });
-
-  const name = el("input", {
-    type: "search",
-    placeholder: "A symbol you are about to change",
-    value: state.pendingSymbol || "",
-    onkeydown: (e) => {
-      if (e.key === "Enter") run();
-    },
-  });
-  state.pendingSymbol = "";
-
-  const depth = el("select", { onchange: () => run() }, [1, 2, 3, 4, 5].map((d) =>
-    el("option", { value: String(d), selected: d === 3, text: `${d} hop${d === 1 ? "" : "s"}` }),
-  ));
-
-  async function run() {
-    const symbol = name.value.trim();
-    if (!symbol) {
-      fill(summary, empty("Name a symbol. Its blast radius is what reaches it, not what it reaches."));
-      fill(table);
-      fill(pathOut);
-      rings.draw("", []);
-      return;
-    }
-    fill(summary, el("div", { class: "rail-hint", text: "Walking the edges…" }));
-    let data;
-    try {
-      data = await api(`/api/impact?name=${encodeURIComponent(symbol)}&depth=${depth.value}`);
-    } catch (e) {
-      return fill(summary, error(e.message));
-    }
-
-    const rows = data.reached || [];
-    const inferred = rows.filter((r) => r.confidence !== "extracted").length;
-    const files = new Set(rows.map((r) => r.path)).size;
-
-    fill(
-      summary,
-      el(
-        "div",
-        { class: "impact-head" },
-        el("span", { class: "label", text: "Changing" }),
-        el("span", { class: "sym", text: symbol }),
-        el("span", { class: "chip static amber", text: `${data.depth} hop${data.depth === 1 ? "" : "s"}` }),
-      ),
-      el(
-        "div",
-        { class: "stat-row" },
-        stat("Symbols reached", n(rows.length)),
-        stat("Files touched", n(files)),
-        stat("Matched by name", n(inferred), inferred ? "not resolved through an import" : "every edge resolved"),
-      ),
-      data.truncated
-        ? el("div", { class: "rail-hint", text: "Stopped at the node budget; the real radius is larger." })
-        : null,
-    );
-
-    if (!rows.length) {
-      fill(table, empty("Nothing in the graph reaches this. Either it is a leaf, or its callers are in a language that carries no edges."));
-      rings.draw(symbol, []);
-      return;
-    }
-
-    fill(
-      table,
-      el(
-        "table",
-        {},
-        el(
-          "thead",
-          {},
-          el(
-            "tr",
-            {},
-            el("th", { text: "Reached symbol" }),
-            el("th", { text: "Via" }),
-            el("th", { text: "Hops" }),
-            el("th", { text: "Where" }),
-          ),
-        ),
-        el(
-          "tbody",
-          {},
-          rows.map((row) =>
-            el(
-              "tr",
-              {},
-              el("td", { class: "mono", text: row.name }),
-              el(
-                "td",
-                {},
-                el("span", { text: row.via }),
-                el("span", { class: `conf ${row.confidence}`, text: row.confidence }),
-              ),
-              el("td", { text: String(row.hops) }),
-              el("td", {
-                class: "where",
-                title: row.path,
-                text: `${shortPath(row.path)}:${row.start_line}`,
-              }),
-            ),
-          ),
-        ),
-      ),
-    );
-    rings.draw(symbol, rows);
-  }
-
-  // ---- path finder
-  const from = el("input", { type: "search", placeholder: "from" });
-  const to = el("input", { type: "search", placeholder: "to" });
-
-  async function findPath() {
-    const a = from.value.trim();
-    const b = to.value.trim();
-    if (!a || !b) {
-      return fill(pathOut, empty("Name both ends."));
-    }
-    fill(pathOut, el("div", { class: "rail-hint", text: "Searching…" }));
-    let data;
-    try {
-      data = await api(`/api/path?from=${encodeURIComponent(a)}&to=${encodeURIComponent(b)}`);
-    } catch (e) {
-      return fill(pathOut, error(e.message));
-    }
-    const steps = data.path;
-    if (!steps) {
-      return fill(
-        pathOut,
-        empty(`No chain from ${a} to ${b}. They may be unconnected, or connected further than six hops.`),
-      );
-    }
-    if (!steps.length) {
-      return fill(pathOut, empty(`${a} is ${b}.`));
-    }
-    fill(
-      pathOut,
-      el(
-        "ol",
-        { class: "chain" },
-        steps.map((step) =>
-          el(
-            "li",
-            {},
-            el("span", { class: "mono", text: step.from }),
-            el("span", { class: "edge", text: step.kind }),
-            el("span", { class: "mono", text: step.to }),
-            el("span", { class: `conf ${step.confidence}`, text: step.confidence }),
-          ),
-        ),
-      ),
-      el("div", {
-        class: "rail-hint",
-        text: `${steps.length} hop${steps.length === 1 ? "" : "s"}, ${
-          steps.every((s) => s.confidence === "extracted") ? "all extracted" : "some matched by name"
-        }.`,
-      }),
-    );
-  }
-
-  from.addEventListener("keydown", (e) => e.key === "Enter" && findPath());
-  to.addEventListener("keydown", (e) => e.key === "Enter" && findPath());
-
-  const page = el(
-    "div",
-    { class: "view impact-page" },
-    el(
-      "div",
-      { class: "impact-title" },
-      pageHead(
-        "Impact",
-        "Reverse reachability. What breaks if this changes — before the edit, not after the test run.",
-      ),
-      el("span", { class: "tool-name", text: "semlith_impact" }),
-    ),
-    el(
-      "div",
-      { class: "impact-controls" },
-      el("div", { class: "graph-scope" }, icon(ICONS.search, 16), labelled("impact-name", "Symbol", name)),
-      labelled("impact-depth", "Hop depth", depth),
-      el("button", { class: "button small", type: "button", text: "Show", onclick: run }),
-    ),
-    summary,
-    el("div", { class: "impact-body" }, table, rings.node),
-    el(
-      "div",
-      { class: "path-finder" },
-      el("h2", { text: "Path finder" }),
-      el(
-        "div",
-        { class: "path-controls" },
-        labelled("path-from", "From symbol", from),
-        icon(ICONS.up, 16),
-        labelled("path-to", "To symbol", to),
-        el("button", { class: "button secondary small", type: "button", text: "Find", onclick: findPath }),
-      ),
-      pathOut,
-    ),
-  );
-
-  fill(pathOut, empty("Name two symbols to see the shortest chain of edges between them."));
-  setTimeout(() => {
-    if (name.value) run();
-    else fill(summary, empty("Name a symbol. Its blast radius is what reaches it, not what it reaches."));
-  }, 0);
-  return page;
-}
-
 /** One figure with its label, as the design draws them. */
 function stat(label, value, note) {
   return el(
@@ -2304,7 +2005,7 @@ function fusionBadges(lists) {
   );
 }
 
-/** The likeliest symbol name in a hit, for the graph and impact links. */
+/** The likeliest symbol name in a hit, for the link into the graph. */
 function symbolIn(hit) {
   const match = hit.text.match(
     /(?:fn|function|def|func|class|struct|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/,
@@ -2396,16 +2097,6 @@ async function searchView() {
                 e.preventDefault();
                 state.pendingSymbol = symbolIn(hit);
                 go("graph");
-              },
-            }),
-            el("a", {
-              href: "#impact",
-              class: "quiet",
-              text: "Blast radius",
-              onclick: (e) => {
-                e.preventDefault();
-                state.pendingSymbol = symbolIn(hit);
-                go("impact");
               },
             }),
           ),
@@ -3306,7 +2997,6 @@ const RENDER = {
   privacy: privacyView,
   about: aboutView,
   graph: graphView,
-  impact: impactView,
   ledger: ledgerView,
 };
 

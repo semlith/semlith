@@ -2006,17 +2006,7 @@ pre.code {
   gap: var(--sp-3);
 }
 
-.impact-page,
-.ledger-page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-4);
-  min-width: 0;
-}
-
-.graph-controls,
-.impact-controls,
-.path-controls {
+.graph-controls {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -2275,202 +2265,6 @@ pre.code {
   border: 1px dashed currentColor;
 }
 
-/* ---------------------------------------------------------------- impact */
-
-.impact-title,
-.ledger-page .impact-title {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-}
-
-.tool-name {
-  font-family: var(--mono);
-  font-size: var(--t-small);
-  color: var(--muted);
-}
-
-.impact-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-  margin-bottom: var(--sp-3);
-}
-
-.impact-head .label {
-  color: var(--muted);
-}
-
-.impact-head .sym {
-  font-family: var(--mono);
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.chip.static.amber {
-  background: var(--amber-soft);
-  color: var(--amber-ink);
-}
-
-.stat-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--sp-3);
-}
-
-.impact-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: var(--sp-4);
-  align-items: start;
-  min-width: 0;
-}
-
-.impact-table {
-  min-width: 0;
-  overflow-x: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-}
-
-.impact-table table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--t-body-sm);
-}
-
-.impact-table th {
-  text-align: left;
-  font-size: var(--t-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  padding: var(--sp-3) var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-.impact-table td {
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--line-soft);
-  vertical-align: top;
-}
-
-.impact-table td .conf {
-  margin-left: var(--sp-2);
-}
-
-.impact-table .mono {
-  font-family: var(--mono);
-  overflow-wrap: anywhere;
-}
-
-/* Truncated rather than broken mid-word: `corpus/route s.rs:274` across three
- * lines is worse than an ellipsis, and the full path is on the cell's title. */
-.impact-table .where {
-  font-size: var(--t-tiny);
-  color: var(--muted);
-  max-width: 26ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rings {
-  height: 320px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-  overflow: hidden;
-}
-
-.path-finder {
-  padding: var(--sp-4);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-  min-width: 0;
-}
-
-.path-finder h2 {
-  margin: 0 0 var(--sp-3);
-  font-size: var(--t-title);
-}
-
-/* The depth picker. A bare <select> is the one control a browser will not
- * theme for us, and an unstyled white box in a dark page is the tell. */
-.impact-controls select {
-  height: 36px;
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  background: var(--panel);
-  color: var(--ink);
-  font: inherit;
-  cursor: pointer;
-  transition: border-color var(--d-hover) var(--e-in-out);
-}
-
-.impact-controls select:hover {
-  border-color: var(--accent-edge);
-}
-
-.impact-controls select:focus-visible {
-  outline: 2px solid var(--accent-edge);
-  outline-offset: 2px;
-}
-
-.path-controls input {
-  flex: 1 1 160px;
-  min-width: 0;
-  height: 36px;
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  background: var(--soft);
-  font: inherit;
-  color: var(--ink);
-  transition: border-color var(--d-hover) var(--e-in-out);
-}
-
-.path-controls input:focus {
-  outline: none;
-  border-color: var(--accent-edge);
-}
-
-.chain {
-  margin: var(--sp-3) 0 var(--sp-2);
-  padding-left: var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.chain li {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-  font-size: var(--t-body-sm);
-}
-
-.chain .mono {
-  font-family: var(--mono);
-  overflow-wrap: anywhere;
-}
-
-.chain .edge {
-  font-size: var(--t-micro);
-  padding: 1px var(--sp-2);
-  border-radius: var(--r-pill);
-  background: var(--blue-soft);
-  color: var(--blue-ink);
-}
-
 /* ---------------------------------------------------------------- ledger */
 
 /* A standing message with a heading, in a card of its own. Named apart from
@@ -2573,8 +2367,7 @@ pre.code {
 
   /* The canvas pages are two columns of real content, so they stack rather
    * than squeeze: a 300px rail beside a 300px canvas is two unusable halves. */
-  .graph-body,
-  .impact-body {
+  .graph-body {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -2596,10 +2389,6 @@ pre.code {
     border-left: 0;
     border-top: 1px solid var(--line);
     overflow: visible;
-  }
-
-  .rings {
-    height: 280px;
   }
 
   /* The rail is navigation for a wide screen; on a phone the drawer is. */
@@ -2687,13 +2476,7 @@ pre.code {
     height: 280px;
   }
 
-  .rings {
-    height: 240px;
-  }
-
-  .graph-controls,
-  .impact-controls,
-  .path-controls {
+  .graph-controls {
     gap: var(--sp-2);
   }
 

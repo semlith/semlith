@@ -527,30 +527,6 @@ fn tool_defs(open: &str) -> Value {
                 "required": ["from", "to"]
             },
             "annotations": { "title": "Find the path between two symbols", "readOnlyHint": true }
-        },
-        {
-            "name": "semlith_impact",
-            "description":
-                "The blast radius of a change: everything that reaches this symbol, walking \
-                 calls, imports and references backwards to a hop depth. Call this BEFORE \
-                 editing a shared function. It is the direct fix for the most common editing \
-                 mistake — changing the one call site that was reported and leaving every \
-                 sibling caller broken.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
-                    "depth": {
-                        "type": "integer",
-                        "description":
-                            "How many hops backwards to walk. Default 3. Depth 1 is the direct \
-                             callers."
-                    },
-                    "store": { "type": "string", "description": store_arg }
-                },
-                "required": ["name"]
-            },
-            "annotations": { "title": "Find what a change would break", "readOnlyHint": true }
         }
     ])
 }
@@ -869,54 +845,6 @@ fn call_tool(
                     "No chain from {from} to {to} within {depth} hops. They may be \
                      unconnected, or connected only further than that."
                 ),
-                Err(e) => return Ok(tool_error(&e.to_string())),
-            }
-        }
-        "semlith_impact" => {
-            let Some(name) = args.get("name").and_then(Value::as_str) else {
-                return Err((-32602, "missing required argument: name".into(), None));
-            };
-            let depth = args
-                .get("depth")
-                .and_then(Value::as_u64)
-                .unwrap_or(crate::graph::DEFAULT_DEPTH as u64) as u32;
-            let only = strings(&args, "store");
-            match stores.impact_in(Some(&only), name, depth.clamp(1, 20)) {
-                Ok(reached) if reached.is_empty() => {
-                    format!("Nothing in the graph reaches {name} within {depth} hops.")
-                }
-                Ok(reached) => {
-                    let rows = reached
-                        .iter()
-                        .map(|r| {
-                            format!(
-                                "{} hop{}  {} via {} ({})  {}{}:{}",
-                                r.hops,
-                                if r.hops == 1 { "" } else { "s" },
-                                r.symbol.name,
-                                r.via,
-                                r.confidence,
-                                label_of(&r.symbol.store),
-                                r.symbol.path,
-                                r.symbol.start_line,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let truncated = if reached.len() >= crate::graph::MAX_NODES {
-                        format!(
-                            "\n\nStopped at the {} symbol budget; the real radius is larger.",
-                            crate::graph::MAX_NODES
-                        )
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "{} symbols reach {name} within {depth} hops. Check each before \
-                         changing its signature or behaviour.\n{rows}{truncated}",
-                        reached.len()
-                    )
-                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }

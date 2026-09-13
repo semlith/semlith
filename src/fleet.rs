@@ -257,16 +257,6 @@ impl Fleet {
         Ok(crate::graph::Neighbours { callers, callees })
     }
 
-    /// What reaches `name` within `depth` hops, across the chosen stores.
-    pub fn impact_in(
-        &self,
-        only: Option<&[String]>,
-        name: &str,
-        depth: u32,
-    ) -> Result<Vec<crate::graph::Reached>> {
-        self.graph_in(only, |s| crate::graph::impact(s.db(), name, depth))
-    }
-
     /// The shortest chain from `from` to `to`, in the first store that has one.
     ///
     /// A path that crossed two stores would be a path through two unrelated
@@ -499,12 +489,6 @@ impl Labelled for crate::store::SymbolRow {
 }
 
 impl Labelled for crate::store::EdgeEnd {
-    fn label(&mut self, store: &str) {
-        self.symbol.store = Some(store.to_string());
-    }
-}
-
-impl Labelled for crate::graph::Reached {
     fn label(&mut self, store: &str) {
         self.symbol.store = Some(store.to_string());
     }
