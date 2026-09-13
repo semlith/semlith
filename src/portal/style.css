@@ -81,16 +81,29 @@
   --shadow-nav: 0 18px 40px rgba(16, 26, 36, 0.14);
   --shadow-pop: 0 10px 28px rgba(16, 26, 36, 0.18), 0 1px 2px rgba(16, 26, 36, 0.12);
 
-  --sans: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* The fallback families are metric-matched to Plex below, so `font-display:
+   * swap` swaps a face rather than a layout. */
+  --sans: "IBM Plex Sans", "Plex Sans Fallback", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", "Plex Mono Fallback", ui-monospace, SFMono-Regular, Menlo, monospace;
 
-  /* Spacing. Six steps, and nothing between them. */
+  /* Spacing. Nine steps.
+   *
+   * The three middle ones (10, 14, 18) and the retuned top two are what took
+   * the density down to the design's: it never exceeds 20 for page rhythm and
+   * clusters its gaps at 8 to 18, where this scale's old top steps were 24 and
+   * 40. The small steps are deliberately untouched — a label and its value
+   * still sit at 4, items in a group at 8 to 10 — because tightening those
+   * would merge things that are not related, which is a different mistake from
+   * the one being fixed. */
   --sp-1: 4px;
   --sp-2: 8px;
+  --sp-2h: 10px;
   --sp-3: 12px;
+  --sp-3h: 14px;
   --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 40px;
+  --sp-4h: 18px;
+  --sp-5: 20px;
+  --sp-6: 24px;
 
   /* Radius. Four steps. */
   --r-1: 4px;
@@ -99,7 +112,10 @@
   --r-4: 10px;
   --r-pill: 999px;
 
-  /* Type. Every size in the product is one of these. */
+  /* Type. Every size in the product is one of these — there is no raw pixel
+   * font size anywhere below this block. The design bundle's half-pixel sizes
+   * (10.5, 12.5, 13.5) are artefacts of a mock with no scale; they snap to the
+   * nearest step here rather than being reproduced. */
   --t-micro: 10px;
   --t-tiny: 11px;
   --t-small: 12px;
@@ -109,14 +125,73 @@
   --t-title: 18px;
   --t-h1: 21px;
   --t-display: 24px;
+  /* What a field's text reads at. 13px on a pointer device, where it matches
+   * the prose around it; 16px under a coarse pointer, because anything smaller
+   * makes iOS Safari zoom the page when a field takes focus, and that reads as
+   * the layout breaking when you tap a box. */
+  --t-field: 13px;
+
+  /* Line height, paired with the type steps. Before this the stylesheet had
+   * six line-height declarations in 2,283 lines, so almost everything
+   * inherited the body's 1.45 — including 12px mono in a table row, which the
+   * design sets at 1.6 because a dense monospace row needs the air. */
+  --lh-tight: 1.25;
+  --lh-heading: 1.3;
+  --lh-prose: 1.45;
+  --lh-code: 1.6;
+
+  /* Motion. One vocabulary, declared once: no rule below states a duration or
+   * a curve of its own. */
+  --d-quick: 120ms;
+  --d-fade: 130ms;
+  --d-hover: 140ms;
+  --d-pop: 150ms;
+  --d-rise: 160ms;
+  --d-slide: 170ms;
+  /* Deliberately linear, and deliberately slower: it reports real progress,
+   * and an eased progress bar lies about the rate. */
+  --d-bar: 0.4s;
+  /* The one looping animation in the portal: the daemon's status dot. */
+  --d-pulse: 2.4s;
+  --e-in-out: ease;
+  --e-out: ease-out;
+  --e-pop: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --e-linear: linear;
 
   /* One measure for prose, so a subtitle on a 1600px display does not run to
-   * 180 characters. */
+   * 180 characters. Page subtitles are exempt: they sit on their own row under
+   * the title and run the page's width, because capping them there is what
+   * wrapped them mid-sentence at 1440px. */
   --measure: 68ch;
 
   --topbar-h: 56px;
   --rail-w: 56px;
   --side-w: 236px;
+}
+
+/* Metric-matched fallbacks.
+ *
+ * The five Plex faces are inside the binary, so `font-display: swap` is a
+ * swap between two local fonts — but a swap between two fonts with different
+ * metrics still reflows the page, and the header and the stat strip are
+ * exactly where that shows. These override the fallback's metrics to Plex's,
+ * so the line count before the swap equals the line count after it. Nothing is
+ * fetched: the fallback families are system fonts. */
+@font-face {
+  font-family: "Plex Sans Fallback";
+  src: local("Helvetica Neue"), local("Arial"), local("Liberation Sans");
+  size-adjust: 100.6%;
+  ascent-override: 103%;
+  descent-override: 27%;
+  line-gap-override: 0%;
+}
+@font-face {
+  font-family: "Plex Mono Fallback";
+  src: local("Menlo"), local("Consolas"), local("DejaVu Sans Mono");
+  size-adjust: 99.4%;
+  ascent-override: 103%;
+  descent-override: 27%;
+  line-gap-override: 0%;
 }
 
 :root[data-theme="dark"] {
@@ -154,6 +229,14 @@
 /* A machine set to dark should not be shown a white page and asked to find the
  * toggle. The explicit choice, when there is one, still wins: the toggle writes
  * data-theme, and both attribute blocks are more specific than this. */
+/* Touch. The zoom floor only applies where there is a touch keyboard to bring
+ * the page up to meet. */
+@media (pointer: coarse) {
+  :root {
+    --t-field: 16px;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f151a;
@@ -206,7 +289,7 @@ body {
 body {
   font-family: var(--sans);
   font-size: var(--t-body);
-  line-height: 1.45;
+  line-height: var(--lh-prose);
   color: var(--ink);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -302,7 +385,8 @@ table {
 
 .hamburger,
 .icon-button {
-  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    border-color var(--d-fade) var(--e-in-out);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -372,7 +456,8 @@ table {
 }
 
 .search-launcher {
-  transition: border-color 130ms ease, color 130ms ease, background 130ms ease;
+  transition: border-color var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    background var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: 9px;
@@ -402,7 +487,7 @@ table {
 
 .key-hint {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: var(--t-micro);
   padding: 2px 6px;
   border-radius: var(--r-1);
   background: var(--panel);
@@ -458,7 +543,7 @@ main {
 }
 
 .rail-item {
-  transition: background 130ms ease, color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
   position: relative;
   display: flex;
   align-items: center;
@@ -488,7 +573,7 @@ main {
   background: var(--green);
   display: inline-block;
   flex-shrink: 0;
-  animation: pulse 2.4s ease-in-out infinite;
+  animation: pulse var(--d-pulse) ease-in-out infinite;
 }
 
 .sidebar {
@@ -518,14 +603,14 @@ main {
 }
 
 .nav-item {
-  transition: background 130ms ease, color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-2);
   font-weight: 500;
-  font-size: 13.5px;
+  font-size: var(--t-body-sm);
   color: var(--ink-2);
   border: 0;
   background: none;
@@ -550,10 +635,10 @@ main {
 .daemon-card {
   border: 1px solid var(--line);
   border-radius: var(--r-3);
-  padding: 11px var(--sp-3);
+  padding: var(--sp-2h) var(--sp-3);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: var(--sp-1);
   background: var(--soft);
 }
 .daemon-card .who {
@@ -585,17 +670,23 @@ main {
   }
 }
 
-/* The page scrolls; its sections do not shrink to make room. A flex item with
- * `overflow: hidden` — which every `.card` has, to keep tables from squaring
- * off the corner radius — gets an automatic `min-height` of zero, so in a
- * height-constrained column it collapses to a sliver instead of pushing the
- * page taller. That is exactly what happened to the stores table on a phone. */
+/* The page scrolls as one thing.
+ *
+ * An earlier version bounded the page to the viewport and let exactly one child
+ * scroll inside it, which kept the title in place and moved everything under it
+ * — and reading a page where the top half is pinned and the bottom half slides
+ * is worse than reading a page that simply scrolls. The window still never
+ * scrolls: `#app` is the viewport and this is the one region inside it that
+ * moves.
+ *
+ * A table is the exception, below: its header stays while its rows move,
+ * because a column of numbers with no heading above it is unreadable. */
 .view > * {
   flex-shrink: 0;
 }
 
 .view {
-  animation: rise 160ms ease-out;
+  animation: rise var(--d-rise) var(--e-out);
   padding: var(--sp-5) var(--sp-5) var(--sp-6);
   display: flex;
   flex-direction: column;
@@ -604,6 +695,67 @@ main {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* A block that takes what height is left over rather than only what its content
+ * needs — a table on a page that is mostly that table, or the cards at the
+ * bottom of the Stores page, which would otherwise leave a band of empty page
+ * under them. */
+.grow {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.grow > .table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* A group of blocks that scroll with the page rather than inside it, and that
+ * takes the height left over so the cards at the bottom of a short page fill
+ * it instead of floating above a band of empty grey. */
+.scroller {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.scroller.grid {
+  display: grid;
+}
+
+/* Cards in a row fill the row rather than leaving the shorter one short. */
+.grid.fill {
+  flex: 1 1 auto;
+  align-items: stretch;
+}
+
+.grid.fill > * {
+  min-height: 0;
+}
+
+/* A page header, the same on every page: the title with its status pill beside
+ * it and any actions at the end of that row, then the subtitle on a row of its
+ * own at the page's full width. A pill floated to the far side of a header is
+ * a pill nobody reads as belonging to the title. */
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.page-head .line {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 h1 {
@@ -637,8 +789,18 @@ h2 {
 .subtitle {
   margin: 0;
   color: var(--muted);
-  max-width: var(--measure);
+  font-size: var(--t-body);
+  line-height: var(--lh-prose);
   text-wrap: pretty;
+}
+
+/* Inside a card, prose still wants a measure: a 900px-wide paragraph in a
+ * grid cell is unreadable for the same reason a 180-character page subtitle
+ * is. The page subtitle above is the exception, because it has a row of its
+ * own and wrapping it mid-sentence at 1440px is what the cap caused. */
+.card .subtitle,
+.hero .subtitle {
+  max-width: var(--measure);
 }
 
 .eyebrow {
@@ -657,6 +819,18 @@ h2 {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
+  align-items: center;
+}
+
+/* A page header's controls are one row of one height. The small button is
+ * 32px, which sat 4px short of the field beside it and read as a row that had
+ * not been lined up.
+ *
+ * Direct children only: a copy control lives inside a field in that same row,
+ * and a descendant selector grew it to the field's own height. */
+.page-head .actions > .button,
+.page-head .actions > .button.small {
+  height: 36px;
 }
 
 .rule {
@@ -686,10 +860,53 @@ h2 {
 }
 
 .card.pad {
-  padding: var(--sp-4) 18px;
+  padding: var(--sp-4) var(--sp-4h);
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  min-height: 0;
+}
+
+/* A card whose content is dense enough that the standard padding reads as
+ * dead space around it. */
+.card.pad.dense {
+  padding: var(--sp-3h) var(--sp-4);
+  gap: var(--sp-2h);
+}
+
+/* The numbered verification steps on the Privacy page. */
+.steps-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.step-row {
+  display: flex;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.step-row .n {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--blue);
+  width: 16px;
+  flex-shrink: 0;
+}
+
+.step-row .what {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  flex-grow: 1;
+}
+
+.step-row .say {
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
+  text-wrap: pretty;
 }
 
 .grid {
@@ -699,6 +916,20 @@ h2 {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--sp-4);
   align-items: start;
+  min-height: 0;
+}
+
+/* Two columns that keep their proportions rather than wrapping at the first
+ * excuse: the About page's facts belong beside its model table, not under it. */
+.grid.two {
+  grid-template-columns: minmax(320px, 1fr) minmax(0, 1.1fr);
+  align-items: stretch;
+}
+
+/* A grid that is the page's scrolling child scrolls its columns rather than
+ * itself, so a long model table does not drag the fact cards up with it. */
+.grid.grow > * {
+  min-height: 0;
 }
 
 .strip {
@@ -713,27 +944,56 @@ h2 {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
-  padding: 14px var(--sp-4);
+  padding: var(--sp-3h) var(--sp-4);
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--sp-1);
 }
 .stat .value {
   font-family: var(--mono);
   font-size: var(--t-display);
   font-weight: 500;
-  line-height: 1.2;
+  line-height: var(--lh-tight);
+  font-variant-numeric: tabular-nums;
 }
 .stat .sub {
   color: var(--muted);
   font-size: var(--t-small);
-  line-height: 1.4;
+  line-height: var(--lh-prose);
 }
 
 .rows {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
+}
+
+/* A stack of facts about one thing — a store's name over its directory over
+ * its model — where the gap between them is a hairline rather than a break. */
+.rows.tight {
+  gap: 2px;
+}
+
+/* A root the registry lists and the disk does not have, with the action that
+ * fixes it beside the path rather than in a command somewhere else. */
+.gone-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* One setup step: its state, what it is, where it is, and — for the one step
+ * this page can perform — the button that performs it. */
+.kv.step {
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--sp-2h);
+}
+
+.kv.step .card-title {
+  width: 62px;
+  flex-shrink: 0;
 }
 
 .kv {
@@ -757,10 +1017,23 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+/* A label and its value, as two columns. As a wrapping flex row a long value
+ * broke onto a new line at the left edge of the card, under the label rather
+ * than beside it; a grid keeps the second line in the value's own column. */
+.kv.pair {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: baseline;
+}
+.kv.pair .k {
+  width: auto;
+}
+
 /* -------------------------------------------------------------- components */
 
 .button {
-  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    border-color var(--d-fade) var(--e-in-out);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -777,8 +1050,7 @@ h2 {
   white-space: nowrap;
 }
 .button:hover {
-  background: var(--accent-edge);
-  color: #fff;
+  filter: brightness(1.15);
 }
 .button svg {
   width: 16px;
@@ -798,6 +1070,15 @@ h2 {
   background: var(--panel);
 }
 
+/* A button that opens something stays lit while it is open. Without this the
+ * only way to tell whether "Choose folder…" is showing its card is to look for
+ * the card. */
+.button.secondary[aria-pressed="true"] {
+  background: var(--blue-soft);
+  border-color: var(--blue);
+  color: var(--blue-ink);
+}
+
 .button.ghost {
   background: none;
   border-color: transparent;
@@ -807,6 +1088,33 @@ h2 {
 .button.ghost:hover {
   color: var(--ink);
   background: var(--soft);
+}
+
+/* A dimmed accent action returns to full opacity and brightens a little less
+ * than a live one, so the two are distinguishable while both are under the
+ * pointer. */
+.button.dim {
+  opacity: 0.75;
+}
+.button.dim:hover {
+  opacity: 1;
+  filter: brightness(1.08);
+}
+
+/* Amber is the portal's one destructive treatment, and it is used nowhere
+ * else for a control: border, text and fill together, so "this removes
+ * something" is legible before it is clicked. */
+.button.danger {
+  background: var(--panel);
+  border-color: var(--amber-ink);
+  color: var(--amber-ink);
+  font-weight: 500;
+}
+.button.danger:hover {
+  background: var(--amber-soft);
+  border-color: var(--amber-ink);
+  color: var(--amber-ink);
+  filter: none;
 }
 
 .button.small {
@@ -822,7 +1130,8 @@ h2 {
 }
 
 .chip {
-  transition: background 130ms ease, color 130ms ease, border-color 130ms ease;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out),
+    border-color var(--d-fade) var(--e-in-out);
   display: inline-flex;
   align-items: center;
   height: 28px;
@@ -859,13 +1168,44 @@ h2 {
   gap: var(--sp-2);
   font-family: var(--mono);
   font-size: var(--t-tiny);
-  padding: 5px 11px;
+  line-height: var(--lh-prose);
+  padding: var(--sp-1) var(--sp-3);
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
-  background: var(--soft);
+  background: var(--panel);
   color: var(--ink-2);
   white-space: nowrap;
 }
+
+/* A pill that reports a state carries a dot. One element, so a pill without a
+ * state cannot accidentally look like one with a state. */
+.pill i,
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.pill.on {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+/* A green dot means something is live right now, and it beats wherever it
+ * appears: the sidebar's daemon dot, an open endpoint, a cached model, a
+ * connected client. A still dot beside a beating one reads as two different
+ * states of the same thing. The reduced-motion block at the top of this file
+ * stops all of them. */
+.pill.on i,
+.pill.good i,
+.pill.good .dot,
+.dot.good {
+  animation: pulse var(--d-pulse) ease-in-out infinite;
+}
+
 .pill.good {
   border-color: var(--green);
   background: var(--green-soft);
@@ -897,7 +1237,7 @@ h2 {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--green);
+  background: currentColor;
   display: inline-block;
   flex-shrink: 0;
 }
@@ -911,7 +1251,7 @@ h2 {
 }
 
 .field {
-  transition: border-color 130ms ease;
+  transition: border-color var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -948,26 +1288,100 @@ h2 {
   flex-grow: 1;
   min-width: 0;
   font-family: var(--mono);
-  /* 16px, not 13: anything smaller makes iOS Safari zoom the page on focus,
-   * which on a phone reads as the layout breaking when you tap a box. */
-  font-size: var(--t-lead);
+  font-size: var(--t-field);
 }
 
-select.chip {
-  height: 34px;
-  font-family: inherit;
-  padding: 0 var(--sp-3);
+/* A select, shaped like the field beside it rather than like a pill. A
+ * 999px-radius dropdown next to an 8px-radius input reads as two different
+ * kinds of control for what is the same kind of choice. */
+select.chip,
+select.field {
+  appearance: none;
+  height: 40px;
+  min-width: 140px;
+  padding: 0 34px 0 var(--sp-3h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background-color: var(--panel);
+  /* The arrow, drawn rather than fetched: the CSP allows no external asset and
+   * the native one cannot be themed. */
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 18px center, right 13px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-body-sm);
+  cursor: pointer;
+  transition: border-color var(--d-hover) var(--e-in-out);
+}
+
+select.chip:hover,
+select.field:hover {
+  border-color: var(--blue);
+}
+
+select.chip:focus-visible,
+select.field:focus-visible {
+  border-color: var(--blue);
 }
 
 .copyfield {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-2);
   background: var(--bg);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-2);
-  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  /* The same height as the buttons it sits beside: a taller box next to a
+   * 36px button reads as a misalignment rather than as a field. */
+  height: 36px;
+  padding: 0 4px 0 var(--sp-3);
   min-width: 0;
+}
+/* In a field the copy control is the point of the field, so it is always
+ * visible. The fade-in is for a code block, where the control would otherwise
+ * sit over the text it copies. */
+.copyfield .copy {
+  opacity: 1;
+  width: 28px;
+  height: 28px;
+}
+/* Any control inside the field is inset by the same 4px on all four sides as
+ * the copy button: a 32px button in a 36px box left 2px above and below and
+ * none at all beside it. */
+.copyfield .button {
+  height: 28px;
+  padding: 0 var(--sp-2h);
+}
+
+/* A field whose control says "Copy" rather than showing the icon, for a
+ * command a reader is about to paste into a shell. The word needs room, so
+ * the button sizes to its text. */
+.copyfield.worded .copy {
+  width: auto;
+  padding: 0 var(--sp-3);
+}
+/* A command wraps rather than scrolling sideways: a reader who cannot see the
+ * end of it cannot check what they are about to paste, and a hidden scrollbar
+ * does not tell them there is more. The field grows to hold it.
+ *
+ * Only in the stanza panel. The endpoint field in a page header holds one
+ * short URL and belongs to a row of 36px controls, so it keeps that height. */
+.stanzas .copyfield.worded {
+  height: auto;
+  min-height: 36px;
+  padding-block: 4px;
+  align-items: center;
+}
+.stanzas .copyfield.worded .text {
+  overflow-x: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.copyfield .actions {
+  gap: 4px;
 }
 .copyfield .text {
   font-family: var(--mono);
@@ -984,12 +1398,82 @@ select.chip {
   flex-shrink: 0;
 }
 
+/* A copy control is a second-order action: it belongs to the thing beside it,
+ * and a page showing a column of permanently visible Copy buttons is a page
+ * competing with its own content. So it fades in when the pointer enters the
+ * block it copies — and appears immediately for a keyboard, which has no
+ * pointer to enter with. */
+.copy {
+  transition: opacity var(--d-quick) var(--e-in-out),
+    background var(--d-fade) var(--e-in-out), border-color var(--d-fade) var(--e-in-out),
+    color var(--d-fade) var(--e-in-out);
+  opacity: 0;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.code-block .copy,
+.copy.block {
+  width: 28px;
+  height: 28px;
+}
+
+.copyfield:hover .copy,
+.copyfield:focus-within .copy,
+.code-block:hover .copy,
+.code-block:focus-within .copy,
+.copy:focus-visible {
+  opacity: 1;
+}
+
+/* Confirmed, for 1400ms, and wide enough to hold the word rather than
+ * clipping it. */
+.copy.done {
+  opacity: 1;
+  width: auto;
+  padding: 0 var(--sp-2);
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+
+.copy svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* A code block with its copy control at the top right, over the block rather
+ * than under it. */
+.code-block {
+  position: relative;
+  min-width: 0;
+}
+
+.code-block .copy {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+}
+
 /* A message attached to the control that caused it, rather than an alert()
- * that steals focus and says nothing about where the problem is. */
+ * that steals focus and says nothing about where the problem is.
+ *
+ * Inline, with no chrome. This used to be declared twice — here, and again as
+ * a padded bordered card in the ledger section — and the later declaration won
+ * for every user of the class, which is why the Index page painted an empty
+ * bordered box under its controls whenever there was nothing to say. The card
+ * variant is `.notice` below; this one stays inline and disappears when it has
+ * no text. */
 .note {
   font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
   color: var(--muted);
   min-height: 18px;
+}
+.note:empty {
+  display: none;
 }
 .note.bad {
   color: var(--red-ink);
@@ -1028,27 +1512,73 @@ select.chip {
   overflow-wrap: anywhere;
 }
 
+/* A table scrolls inside its own card while the page scrolls around it.
+ *
+ * That split is deliberate: a sticky column heading can only stay put inside
+ * the box that scrolls it, so a table that flowed with the page would lose its
+ * heading the moment the rows went past — and a column of figures with no
+ * heading above it is unreadable. Everything that is not a table scrolls with
+ * the page.
+ *
+ * The cap is in viewport units so the rows use the screen they are given, and
+ * a table shorter than it simply ends. */
+/* A table and its pager. The rows take whatever height the card is given and
+ * the pager sits on the bottom edge of it — stretched by a grid row or by a
+ * taller sibling, the card used to end in a band of empty white below the
+ * pager. */
+.table-card {
+  display: flex;
+  flex-direction: column;
+  /* A floor, so a neighbour that grows cannot squeeze the rows down to a
+   * sliver of a single line. */
+  min-height: 168px;
+  /* The cap lives on the card, not on the rows: capping the rows left the
+   * pager floating in the middle of a stretched card with white space under
+   * it. With the cap here the rows take the rest of the card and the pager is
+   * always on its bottom edge. */
+  max-height: 76dvh;
+}
+.table-card > .table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .table-wrap {
   overflow: auto;
   min-width: 0;
 }
 
+/* Sticky, in every table. A column of figures scrolled past its heading is a
+ * column nobody can read, and the wrapper is the scroll container so this is
+ * where `top: 0` means the top of the visible rows. */
 th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   text-align: left;
   font: 500 var(--t-tiny) var(--mono);
+  line-height: var(--lh-code);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
-  padding: 10px 14px;
+  padding: var(--sp-2h) var(--sp-3h);
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   white-space: nowrap;
 }
 
+/* A sticky cell's border scrolls with the cell rather than staying at its
+ * edge, so the line under the heading is drawn as a shadow instead. */
+thead th {
+  box-shadow: inset 0 -1px 0 var(--line);
+  border-bottom: 0;
+}
+
 td {
-  padding: 11px 14px;
+  padding: var(--sp-3) var(--sp-3h);
   border-bottom: 1px solid var(--line-soft);
   vertical-align: top;
+  line-height: var(--lh-code);
 }
 
 tr:last-child td {
@@ -1056,10 +1586,66 @@ tr:last-child td {
 }
 
 tbody tr {
-  transition: background 110ms ease;
+  transition: background var(--d-quick) var(--e-in-out);
 }
 tbody tr:hover {
   background: var(--soft);
+}
+
+/* A sortable header. The whole label is the control, so the hit target is the
+ * column heading rather than a small arrow beside it. */
+th .sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border: 0;
+  padding: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color var(--d-hover) var(--e-in-out);
+}
+
+th .sort:hover {
+  color: var(--ink);
+}
+
+/* Reserved whether or not this column is the active one, so the header row
+ * does not shift sideways when the sort moves to another column. */
+th .arrow {
+  display: inline-block;
+  width: 9px;
+  color: var(--accent-edge);
+}
+
+/* A cell held to one line, with the whole value on the shared tooltip. A
+ * wrapped path makes every row a different height, which is what turns a file
+ * list into something you have to read rather than scan. */
+.one-line {
+  display: block;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Truncated at the start rather than the end, for a path. Every row on the
+ * Files page began `/Users/…/Documents/…` and ended in the one part that says
+ * which file it is, so cutting the end cut the only part worth reading.
+ *
+ * `direction: rtl` moves the ellipsis to the front; the text itself is wrapped
+ * in an isolate so the segments stay in their real order and a leading `/`
+ * does not jump to the other end. */
+.one-line.tail {
+  direction: rtl;
+  text-align: left;
+}
+
+.one-line.tail > bdi {
+  unicode-bidi: isolate;
 }
 
 th.num,
@@ -1070,7 +1656,7 @@ td.num {
 
 td.path {
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: var(--t-small);
   overflow-wrap: anywhere;
 }
 
@@ -1099,19 +1685,53 @@ td.meta {
   overflow-wrap: anywhere;
 }
 
+/* A stack of one-line facts under a name — a store's directory and its model.
+ * Wrapped, each of those took three lines and a table row became a paragraph. */
+.meta.one-line,
+.name.one-line {
+  max-width: 38ch;
+  overflow-wrap: normal;
+}
+
 .table-foot {
   flex-shrink: 0;
   border-top: 1px solid var(--line);
   background: var(--soft);
-  padding: 10px 14px;
+  padding: var(--sp-2h) var(--sp-3h);
   display: flex;
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
 }
 
+/* A pager is a row of controls, not a row of tags: the page sizes and the
+ * step buttons are square-cornered here so they read as buttons, which is
+ * what the design bundle draws. */
+.table-foot .chip {
+  height: 30px;
+  min-width: 34px;
+  justify-content: center;
+  padding: 0 var(--sp-2h);
+  border-radius: var(--r-2);
+  font-family: var(--mono);
+}
+.table-foot .button.ghost {
+  height: 30px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--panel);
+}
+.table-foot .button.ghost:hover:not([disabled]) {
+  border-color: var(--blue);
+  color: var(--blue-ink);
+}
+.table-foot .button.ghost[disabled] {
+  border-color: var(--line-soft);
+}
+
 .forget {
-  transition: color 110ms ease;
+  transition: color var(--d-quick) var(--e-in-out);
   border: 0;
   background: none;
   color: var(--amber-ink);
@@ -1137,7 +1757,7 @@ pre.code {
   padding: var(--sp-4);
   font-family: var(--mono);
   font-size: var(--t-small);
-  line-height: 1.6;
+  line-height: var(--lh-code);
   overflow: auto;
   white-space: pre;
 }
@@ -1153,9 +1773,20 @@ pre.code {
   font-family: var(--mono);
   font-size: var(--t-small);
   color: var(--code-ink);
-  min-height: 200px;
+  /* The log is what gives way. The folder picker, the URL card and the
+   * progress bar are each a fixed thing a reader is trying to use; the log is
+   * a tail of a run that is already scrolling. So it shrinks to its floor and
+   * the others keep their height. */
+  flex: 1 1 auto;
+  min-height: 120px;
   max-height: 340px;
   overflow-y: auto;
+}
+
+/* Everything above the log in the Index view keeps the height it asks for. */
+.scroller > .picker,
+.scroller > .card {
+  flex-shrink: 0;
 }
 .log .line {
   display: flex;
@@ -1164,6 +1795,27 @@ pre.code {
 .log .key {
   color: var(--code-key);
   flex-shrink: 0;
+  width: 68px;
+  text-align: right;
+}
+
+/* What happened to the file, in one word, in a fixed column so the paths
+ * beside them line up. A file being embedded is the line worth reading; the
+ * rest is the run showing that it is still moving. */
+.log .outcome {
+  flex-shrink: 0;
+  width: 76px;
+  color: var(--muted);
+}
+.log .line.indexing .outcome {
+  color: var(--accent-edge);
+}
+.log .line.unchanged,
+.log .line.skipped {
+  opacity: 0.62;
+}
+.log .line.removed .outcome {
+  color: var(--red);
 }
 .log .what {
   min-width: 0;
@@ -1181,7 +1833,7 @@ pre.code {
   height: 100%;
   background: var(--accent);
   border-radius: var(--r-1);
-  transition: width 180ms ease;
+  transition: width var(--d-bar) var(--e-linear);
 }
 
 .feed {
@@ -1193,6 +1845,10 @@ pre.code {
   color: var(--ink-2);
   flex-grow: 1;
   min-height: 0;
+  /* Capped, not merely scrollable: the card is in a grid row that grows to
+   * its content, so an uncapped feed of forty events takes the height from
+   * the table above it. */
+  max-height: 232px;
   overflow-y: auto;
 }
 .feed .row {
@@ -1206,19 +1862,24 @@ pre.code {
 }
 .feed .what {
   min-width: 0;
-  overflow-wrap: anywhere;
+  max-width: 100%;
 }
 
 .picker {
   display: flex;
   flex-direction: column;
 }
+.picker {
+  overflow: hidden;
+}
+
 .picker .crumbs {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  padding: 14px 18px;
+  gap: var(--sp-2h);
+  padding: var(--sp-3) var(--sp-3h);
   border-bottom: 1px solid var(--line);
+  background: var(--soft);
   flex-wrap: wrap;
 }
 .picker .where {
@@ -1231,17 +1892,21 @@ pre.code {
   white-space: nowrap;
 }
 .picker .entries {
-  max-height: 260px;
+  max-height: 320px;
   min-height: 84px;
   overflow-y: auto;
+  /* Two columns where there is room: a home directory is forty entries, and a
+   * single column of them is a page of scrolling to reach `work`. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
 }
 .picker .entry {
-  transition: background 110ms ease;
+  transition: background var(--d-quick) var(--e-in-out);
   display: flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: var(--sp-2) 14px;
+  gap: var(--sp-2h);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3h);
   border: 0;
   border-bottom: 1px solid var(--line-soft);
   background: none;
@@ -1298,7 +1963,7 @@ pre.code {
 }
 .search-field input {
   flex-grow: 1;
-  font-size: var(--t-lead);
+  font-size: var(--t-field);
   border: 0;
   outline: none;
   background: transparent;
@@ -1323,7 +1988,7 @@ pre.code {
 }
 
 .hit {
-  transition: border-color 130ms ease, box-shadow 130ms ease;
+  transition: border-color var(--d-fade) var(--e-in-out), box-shadow var(--d-fade) var(--e-in-out);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
@@ -1354,11 +2019,25 @@ pre.code {
   font-size: var(--t-tiny);
   color: var(--muted);
 }
+/* An image hit shows the image. Bounded so a large screenshot does not take
+ * the whole results column, and on the page's own panel colour so a
+ * transparent PNG reads as a picture rather than as a hole. */
+.hit .preview {
+  display: block;
+  max-width: 100%;
+  max-height: 260px;
+  width: auto;
+  border-radius: var(--r-3);
+  border: 1px solid var(--line-soft);
+  background: var(--soft);
+  object-fit: contain;
+}
+
 .hit pre {
   margin: 0;
   font-family: var(--mono);
   font-size: var(--t-small);
-  line-height: 1.55;
+  line-height: var(--lh-code);
   color: var(--ink-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1394,7 +2073,7 @@ pre.code {
   display: block;
 }
 .welcome .lockup .name {
-  font-size: 22px;
+  font-size: var(--t-display);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -1467,19 +2146,22 @@ pre.code {
 
 /* ----------------------------------------------------------------- tips */
 
-/* A hover label for text the layout had to truncate — a store directory, a
- * long path. Built on the design's popup: panel-coloured, lightly shadowed,
- * and it grows into place rather than appearing. */
-[data-tip] {
-  position: relative;
-}
-
-[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
+/* One hover label for the whole portal, drawn in a single fixed element that
+ * lives at the end of <body>.
+ *
+ * It used to be `[data-tip]::after`, positioned inside the element it
+ * described — which meant `.table-wrap`'s `overflow: auto` clipped it, and the
+ * Files page's whole reason for having a tip (a path too long for its column)
+ * was the one place it could not be read. A scroll container clips any
+ * positioned descendant, so the fix is to stop being a descendant.
+ *
+ * The same element carries the Graph canvas's richer card, so there is one
+ * tooltip implementation rather than two. */
+.tip {
+  position: fixed;
+  top: 0;
   left: 0;
-  bottom: calc(100% + 6px);
-  z-index: 60;
+  z-index: 80;
   max-width: 320px;
   width: max-content;
   padding: 9px 11px;
@@ -1489,21 +2171,55 @@ pre.code {
   box-shadow: var(--shadow-pop);
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 12.5px;
-  line-height: 1.4;
+  font-size: var(--t-small);
+  line-height: var(--lh-code);
   white-space: normal;
   overflow-wrap: anywhere;
   opacity: 0;
   transform: scale(0.96);
-  transform-origin: 0 100%;
-  transition: opacity 130ms ease, transform 150ms cubic-bezier(0.2, 0.9, 0.3, 1);
+  transition: opacity var(--d-fade) var(--e-in-out), transform var(--d-pop) var(--e-pop);
   pointer-events: none;
 }
 
-[data-tip]:hover::after,
-[data-tip]:focus-visible::after {
+.tip[data-open="true"] {
   opacity: 1;
   transform: none;
+}
+
+/* The Graph card: a coloured dot and a title, then label/value rows. */
+.tip .tip-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.tip .tip-head i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-edge);
+  flex-shrink: 0;
+}
+
+.tip .tip-row {
+  display: flex;
+  gap: var(--sp-3);
+  margin-top: var(--sp-1);
+  font-size: var(--t-tiny);
+}
+
+.tip .tip-row .k {
+  color: var(--muted);
+  width: 52px;
+  flex-shrink: 0;
+}
+
+.tip .tip-row .v {
+  color: var(--ink-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------- layout utilities */
@@ -1546,6 +2262,13 @@ pre.code {
   max-width: 420px;
 }
 
+/* A field that owns its row. The Index page's path is the reason: it shared a
+ * row with four buttons and a store picker, so on a 1440px page the thing the
+ * page is about was the narrowest control on it. */
+.field.full {
+  width: 100%;
+}
+
 .tag.wrapped {
   margin: 0 var(--sp-1) var(--sp-1) 0;
 }
@@ -1557,12 +2280,15 @@ pre.code {
 .fact-value {
   font-family: var(--mono);
   font-size: var(--t-body);
+  line-height: var(--lh-code);
+  font-variant-numeric: tabular-nums;
 }
 
 .pct {
   font-family: var(--mono);
-  font-size: 20px;
+  font-size: var(--t-h1);
   font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .search-page {
@@ -1574,21 +2300,32 @@ pre.code {
 
 /* ----------------------------------------------------------------- graph */
 
-/* The canvas pages. Everything below uses the scales at the top of the file;
- * a value not in one of them does not belong here. */
+/* The graph is the one page that is a drawing rather than a document: a header
+ * band, then a canvas that fills everything left over beside a rail. It is
+ * full-bleed on purpose — page padding around a canvas is space the drawing
+ * could have used. */
 
-.graph-page,
-.impact-page,
-.ledger-page {
+.graph-page {
+  animation: rise var(--d-rise) var(--e-out);
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  flex-grow: 1;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.graph-controls,
-.impact-controls,
-.path-controls {
+.graph-band {
+  flex-shrink: 0;
+  padding: var(--sp-5) var(--sp-5) var(--sp-3h);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.graph-controls {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
@@ -1608,7 +2345,7 @@ pre.code {
   border: 1px solid var(--line);
   border-radius: var(--r-3);
   color: var(--muted);
-  transition: border-color 140ms ease;
+  transition: border-color var(--d-hover) var(--e-in-out);
 }
 
 .graph-scope:focus-within {
@@ -1627,27 +2364,23 @@ pre.code {
 
 .graph-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  gap: var(--sp-4);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: stretch;
+  flex-grow: 1;
   min-width: 0;
+  min-height: 0;
 }
 
 .graph-frame {
   position: relative;
   min-width: 0;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
+  background: var(--soft);
   overflow: hidden;
 }
 
-.graph-stage,
-.rings {
-  position: relative;
-  width: 100%;
-  height: 460px;
-  min-width: 0;
+.graph-stage {
+  position: absolute;
+  inset: 0;
 }
 
 .graph-canvas {
@@ -1658,86 +2391,112 @@ pre.code {
   touch-action: none;
 }
 
-.graph-canvas:active {
+/* Said rather than left to the default, so the canvas answers the pointer the
+ * way every other draggable surface does. */
+.graph-canvas.over-node {
+  cursor: pointer;
+}
+
+.graph-canvas.dragging {
   cursor: grabbing;
 }
 
-/* A strip under the canvas rather than floating over it: a legend drawn on
- * top of the drawing is a legend sitting on a node. */
-.graph-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-  padding: var(--sp-2) var(--sp-4);
-  border-top: 1px solid var(--line-soft);
-  background: var(--soft);
-}
-
+/* Floating inside the canvas at its top-left, as the design draws it. */
 .graph-legend {
+  position: absolute;
+  left: var(--sp-4h);
+  top: var(--sp-4);
   display: flex;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2h) var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  font-family: var(--mono);
   font-size: var(--t-tiny);
-  color: var(--muted);
+  line-height: var(--lh-prose);
+  color: var(--ink-2);
+  pointer-events: none;
 }
 
 .graph-legend .key {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
 }
 
 .graph-legend i {
-  width: 14px;
+  width: 18px;
   height: 0;
-  border-top: 2px solid var(--muted);
+  border-top: 1.4px solid var(--blue);
   display: inline-block;
 }
 
-.graph-legend .extracted i {
-  border-top-color: var(--green);
-}
-
 .graph-legend .inferred i {
-  border-top: 2px dashed var(--amber-ink);
+  border-top-style: dashed;
 }
 
 .graph-legend .selected i {
-  border-top-color: var(--accent-edge);
-  border-top-width: 3px;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--accent-edge);
+  border-radius: 3px;
+  background: var(--accent);
 }
 
-.graph-meta {
+.graph-count {
+  position: absolute;
+  right: var(--sp-4h);
+  bottom: var(--sp-4);
   font-family: var(--mono);
   font-size: var(--t-tiny);
   color: var(--muted);
+  pointer-events: none;
 }
 
 .graph-rail {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-3h);
   min-width: 0;
-  padding: var(--sp-4);
+  min-height: 0;
+  padding: var(--sp-4h);
   background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
+  border-left: 1px solid var(--line);
+  overflow-y: auto;
+}
+
+.graph-selected {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+/* A client's name and the sentence about it are one block, not a header row
+ * with its own 16px gap: laid out as a row they wrapped, and the wrap left a
+ * band of white space between the title and the paragraph. */
+.stanzas .head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+}
+.stanzas .head .meta {
+  line-height: var(--lh-prose);
 }
 
 .graph-selected .sym {
   margin: 0;
   font-family: var(--mono);
   font-size: var(--t-lead);
-  font-weight: 600;
+  font-weight: 500;
+  line-height: var(--lh-heading);
   overflow-wrap: anywhere;
 }
 
 .graph-selected .loc {
-  margin-top: var(--sp-1);
   font-family: var(--mono);
-  font-size: var(--t-tiny);
+  font-size: var(--t-small);
   color: var(--muted);
   overflow-wrap: anywhere;
 }
@@ -1749,15 +2508,23 @@ pre.code {
 .chips {
   display: flex;
   flex-wrap: wrap;
+  /* Centred, so a line of prose beside a pill sits on the pill's centre line
+   * rather than at the top of the space the pill makes. */
+  align-items: center;
   gap: var(--sp-2);
+}
+
+.chip.static.blue {
+  background: var(--blue-soft);
+  border-color: var(--blue-soft);
+  color: var(--blue-ink);
 }
 
 .rail-group h3 {
   margin: 0 0 var(--sp-2);
-  font-size: var(--t-small);
-  font-weight: 600;
+  font: 500 var(--t-tiny) var(--mono);
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--muted);
 }
 
@@ -1767,26 +2534,28 @@ pre.code {
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: var(--sp-2);
 }
 
 .rail-list li {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-2);
+  padding: 7px var(--sp-2h);
+  border: 1px solid var(--line-soft);
   border-radius: var(--r-2);
-  font-size: var(--t-body-sm);
+  font-size: var(--t-small);
   min-width: 0;
-  transition: background 140ms ease;
+  transition: border-color var(--d-hover) var(--e-in-out);
 }
 
 .rail-list li:hover {
-  background: var(--soft);
+  border-color: var(--blue);
 }
 
 .rail-list a {
   font-family: var(--mono);
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -1798,6 +2567,7 @@ pre.code {
 
 .rail-hint {
   font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
   color: var(--muted);
   text-wrap: pretty;
 }
@@ -1806,6 +2576,16 @@ pre.code {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
+  /* Pinned to the foot of the rail while the callers and callees above it
+   * scroll: a symbol with thirty callers used to bury this button under them.
+   * The negative offset cancels the rail's own bottom padding, so the strip
+   * sits flush with the bottom edge. */
+  position: sticky;
+  bottom: calc(var(--sp-4h) * -1);
+  margin-top: auto;
+  padding: var(--sp-3) 0;
+  background: var(--panel);
+  box-shadow: 0 -1px 0 var(--line-soft);
 }
 
 /* Confidence, everywhere it appears. Never colour alone: an inferred edge
@@ -1829,286 +2609,128 @@ pre.code {
   border: 1px dashed currentColor;
 }
 
-/* ---------------------------------------------------------------- impact */
-
-.impact-title,
-.ledger-page .impact-title {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-3);
-  flex-wrap: wrap;
-}
-
-.tool-name {
-  font-family: var(--mono);
-  font-size: var(--t-small);
-  color: var(--muted);
-}
-
-.impact-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-  margin-bottom: var(--sp-3);
-}
-
-.impact-head .label {
-  color: var(--muted);
-}
-
-.impact-head .sym {
-  font-family: var(--mono);
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.chip.static.amber {
-  background: var(--amber-soft);
-  color: var(--amber-ink);
-}
-
-.stat-row {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: var(--sp-3);
-}
-
-.stat {
-  padding: var(--sp-4);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-  min-width: 0;
-}
-
-.stat-label {
-  font-size: var(--t-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-}
-
-.stat-value {
-  margin-top: var(--sp-1);
-  font-size: var(--t-display);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat-note {
-  margin-top: var(--sp-1);
-  font-size: var(--t-tiny);
-  color: var(--muted);
-  text-wrap: pretty;
-}
-
-.impact-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
-  gap: var(--sp-4);
-  align-items: start;
-  min-width: 0;
-}
-
-.impact-table {
-  min-width: 0;
-  overflow-x: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-}
-
-.impact-table table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--t-body-sm);
-}
-
-.impact-table th {
-  text-align: left;
-  font-size: var(--t-micro);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted);
-  padding: var(--sp-3) var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-
-.impact-table td {
-  padding: var(--sp-2) var(--sp-3);
-  border-bottom: 1px solid var(--line-soft);
-  vertical-align: top;
-}
-
-.impact-table td .conf {
-  margin-left: var(--sp-2);
-}
-
-.impact-table .mono {
-  font-family: var(--mono);
-  overflow-wrap: anywhere;
-}
-
-/* Truncated rather than broken mid-word: `corpus/route s.rs:274` across three
- * lines is worse than an ellipsis, and the full path is on the cell's title. */
-.impact-table .where {
-  font-size: var(--t-tiny);
-  color: var(--muted);
-  max-width: 26ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rings {
-  height: 320px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-  overflow: hidden;
-}
-
-.path-finder {
-  padding: var(--sp-4);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--r-4);
-  min-width: 0;
-}
-
-.path-finder h2 {
-  margin: 0 0 var(--sp-3);
-  font-size: var(--t-title);
-}
-
-/* The depth picker. A bare <select> is the one control a browser will not
- * theme for us, and an unstyled white box in a dark page is the tell. */
-.impact-controls select {
-  height: 36px;
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  background: var(--panel);
-  color: var(--ink);
-  font: inherit;
-  cursor: pointer;
-  transition: border-color 140ms ease;
-}
-
-.impact-controls select:hover {
-  border-color: var(--accent-edge);
-}
-
-.impact-controls select:focus-visible {
-  outline: 2px solid var(--accent-edge);
-  outline-offset: 2px;
-}
-
-.path-controls input {
-  flex: 1 1 160px;
-  min-width: 0;
-  height: 36px;
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-3);
-  background: var(--soft);
-  font: inherit;
-  color: var(--ink);
-  transition: border-color 140ms ease;
-}
-
-.path-controls input:focus {
-  outline: none;
-  border-color: var(--accent-edge);
-}
-
-.chain {
-  margin: var(--sp-3) 0 var(--sp-2);
-  padding-left: var(--sp-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.chain li {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-  font-size: var(--t-body-sm);
-}
-
-.chain .mono {
-  font-family: var(--mono);
-  overflow-wrap: anywhere;
-}
-
-.chain .edge {
-  font-size: var(--t-micro);
-  padding: 1px var(--sp-2);
-  border-radius: var(--r-pill);
-  background: var(--blue-soft);
-  color: var(--blue-ink);
-}
-
 /* ---------------------------------------------------------------- ledger */
 
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-3);
-  border-radius: var(--r-pill);
-  font-family: var(--mono);
-  font-size: var(--t-tiny);
-  background: var(--chip);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.pill i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.pill.on {
-  background: var(--green-soft);
-  color: var(--green-ink);
-}
-
-.pill.on i {
-  animation: pulse 2.4s ease-in-out infinite;
-}
-
-.note {
+/* A standing message with a heading, in a card of its own. Named apart from
+ * `.note` because the two are different things: this one has chrome and is
+ * meant to be read, that one is a line under a control and is usually empty. */
+.notice {
   padding: var(--sp-4);
   background: var(--soft);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
   font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
   color: var(--muted);
   text-wrap: pretty;
 }
 
-.note .what {
+.notice .what {
   font-weight: 600;
   color: var(--ink);
   margin-bottom: var(--sp-1);
 }
 
-.card-title {
-  margin: var(--sp-4) 0 var(--sp-2);
-  font-size: var(--t-body);
-  font-weight: 600;
+/* ---------------------------------------------------------------- agents */
+
+/* Group tabs over the client chips: which kind of thing you are configuring,
+ * then which one. */
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+  overflow-x: auto;
 }
 
-.card-title:first-child {
-  margin-top: 0;
+.tab {
+  transition: color var(--d-hover) var(--e-in-out), border-color var(--d-hover) var(--e-in-out);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--ink);
+}
+
+.tab[aria-pressed="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.tab .count {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.stanzas {
+  min-width: 0;
+}
+
+.stanza {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* Name and purpose in two columns, so a reader scans the names and reads
+ * across only where one of them is the answer. */
+.tool-grid {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-2h);
+  align-items: baseline;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tool-name {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  white-space: nowrap;
+}
+
+.tool-about {
+  color: var(--muted);
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
+  min-width: 0;
+  text-wrap: pretty;
+}
+
+.tools {
+  max-height: 330px;
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.dot.good {
+  color: var(--green);
+}
+
+.w-agents {
+  min-width: 420px;
 }
 
 /* ----------------------------------------------------- fusion badges */
@@ -2157,7 +2779,7 @@ pre.code {
 .hit-actions .quiet {
   font-size: var(--t-tiny);
   color: var(--muted);
-  transition: color 140ms ease;
+  transition: color var(--d-hover) var(--e-in-out);
 }
 
 .hit-actions .quiet:hover {
@@ -2167,20 +2789,92 @@ pre.code {
 /* --------------------------------------------------------------- narrow */
 
 
+/* A table's secondary columns, dropped where the table would otherwise be
+ * three screens wide. The rows that matter — what the file is, and what you do
+ * with it — stay; the store name, the reader, the chunk count and the like are
+ * a scroll away on a desktop and noise on a phone. The data is unchanged: this
+ * hides columns, it does not filter rows. */
+@media (max-width: 820px) {
+  .narrow-drop {
+    display: none;
+  }
+  /* With those columns gone the table fits the card, so the minimum that was
+   * holding the full set of them apart is what would keep it scrolling
+   * sideways. */
+  .w-stores,
+  .w-files,
+  .w-languages,
+  .w-models,
+  .w-agents {
+    min-width: 0;
+  }
+  /* A truncating cell still asks for the width of its longest path unless it
+   * is allowed to be narrower than its content, which `max-width: 0` on the
+   * cell is the standard way to say. The ellipsis then does the work it was
+   * added for at any width. */
+  td.path,
+  td.meta,
+  tbody td:first-child {
+    max-width: 0;
+  }
+  .one-line {
+    max-width: 100%;
+  }
+  /* The tool list scrolls inside a fixed-height card on the desktop grid.
+   * Stacked in one column there is no height to fit into, and the scrollport
+   * only cut the last row in half. */
+  .tool-grid {
+    max-height: none;
+    overflow-y: visible;
+  }
+}
+
 @media (max-width: 899px) {
+  /* Type steps here rather than in each component: before this the only size
+   * that changed at either breakpoint was the stat value, so a 24px figure sat
+   * beside a 21px heading that had not moved. */
+  :root {
+    --t-display: 21px;
+    --t-h1: 18px;
+    --t-title: 16px;
+    --t-lead: 14px;
+  }
+
+  /* Below the narrow breakpoint the page scrolls rather than trapping a
+   * stacked desktop layout in the viewport, which is worse than letting it
+   * scroll. Tables still scroll inside their own wrapper. */
+  .view {
+    overflow-y: auto;
+  }
+
+  .grow {
+    flex: 0 0 auto;
+  }
+
   /* The canvas pages are two columns of real content, so they stack rather
-   * than squeeze: a 280px rail beside a 300px canvas is two unusable halves. */
-  .graph-body,
-  .impact-body {
+   * than squeeze: a 300px rail beside a 300px canvas is two unusable halves. */
+  .graph-body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .graph-stage {
+  /* Stacked, the canvas cannot fill the page any more, so it takes a stated
+   * height and the rail follows it down the page. */
+  .graph-page {
+    overflow-y: auto;
+  }
+
+  .graph-frame {
     height: 360px;
   }
 
-  .rings {
-    height: 280px;
+  .graph-band {
+    padding: var(--sp-4) var(--sp-4) var(--sp-3);
+  }
+
+  .graph-rail {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    overflow: visible;
   }
 
   /* The rail is navigation for a wide screen; on a phone the drawer is. */
@@ -2189,7 +2883,7 @@ pre.code {
   }
 
   .sidebar {
-    animation: slide-in 170ms cubic-bezier(0.2, 0.9, 0.3, 1);
+    animation: slide-in var(--d-slide) var(--e-pop);
     position: fixed;
     top: var(--topbar-h);
     bottom: 0;
@@ -2214,7 +2908,7 @@ pre.code {
   }
 
   .scrim {
-    animation: fade-in 170ms ease;
+    animation: fade-in var(--d-slide) var(--e-in-out);
     display: block;
     position: fixed;
     inset: var(--topbar-h) 0 0 0;
@@ -2256,22 +2950,20 @@ pre.code {
 }
 
 @media (max-width: 520px) {
-  .graph-stage {
+  :root {
+    --t-display: 18px;
+    --t-h1: 16px;
+    --t-title: 14px;
+    --t-lead: 13px;
+    --t-body: 13px;
+  }
+
+  .graph-frame {
     height: 280px;
   }
 
-  .rings {
-    height: 240px;
-  }
-
-  .graph-controls,
-  .impact-controls,
-  .path-controls {
+  .graph-controls {
     gap: var(--sp-2);
-  }
-
-  .stat-value {
-    font-size: var(--t-h1);
   }
 
   .kv .k {
@@ -2280,4 +2972,156 @@ pre.code {
   .stat {
     flex-basis: 100%;
   }
+}
+
+/* A column of checkboxes, and the bar that appears once one is ticked. */
+th.pick,
+td.pick {
+  width: 34px;
+  padding-right: 0;
+}
+
+input.pick {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.bulk {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2h) var(--sp-3h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--soft);
+}
+
+/* Two actions at the end of a row, on one line. */
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}
+
+/* A row's actions, behind one control. The host is fixed to the viewport
+ * because a popup inside a table cell is clipped by the table's own scroll. */
+.menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 180px;
+  padding: var(--sp-1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  box-shadow: 0 10px 30px rgb(15 21 26 / 18%);
+}
+
+.menu-item {
+  transition: background var(--d-quick) var(--e-in-out);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-2);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-body-sm);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.menu-item:hover {
+  background: var(--soft);
+}
+.menu-item.bad {
+  color: var(--red-ink);
+}
+.menu-item.bad:hover {
+  background: var(--red-soft);
+}
+
+/* The icon-only button the menu hangs off. */
+.button.icon {
+  width: 32px;
+  padding: 0;
+}
+
+th.row-end,
+td.row-end {
+  width: 44px;
+  text-align: right;
+}
+
+/* A question that stops the page until it is answered. The element is a
+ * native `<dialog>`, so the centring, the focus trap and the backdrop are the
+ * browser's rather than three more things to get right here. */
+.modal {
+  width: min(440px, calc(100vw - 2 * var(--sp-4)));
+  padding: var(--sp-4h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 24px 60px rgb(15 21 26 / 22%);
+}
+.modal::backdrop {
+  background: rgb(15 21 26 / 45%);
+}
+.modal .card-title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--t-title);
+}
+.modal .subtitle {
+  margin: 0;
+  /* A path has no spaces in it, so without this the line cannot break and the
+   * dialog's own text pushes out past both its edges. */
+  overflow-wrap: anywhere;
+  max-height: 40dvh;
+  overflow-y: auto;
+}
+.modal .card-title {
+  overflow-wrap: anywhere;
+}
+.modal .actions {
+  margin-top: var(--sp-4);
+}
+/* The button that destroys something is red, not the amber of an action that
+ * merely needs care. */
+.modal .button.danger {
+  border-color: var(--red);
+  color: var(--red-ink);
+}
+.modal .button.danger:hover {
+  background: var(--red-soft);
+  border-color: var(--red);
+  color: var(--red-ink);
+}
+
+/* The menu control: a bordered square, and dots dark enough to find. */
+.button.icon {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--ink-2);
+}
+.button.icon:hover,
+.button.icon[aria-expanded="true"] {
+  color: var(--ink);
+  border-color: var(--blue);
+}
+.button.icon[aria-expanded="true"] {
+  background: var(--chip);
+}
+.button.icon svg {
+  width: 18px;
+  height: 18px;
 }

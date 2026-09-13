@@ -36,9 +36,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # 22.04, not latest: a binary built on 24.04 carries a glibc 2.39
+          # floor and will not start on Debian 12, Ubuntu 22.04 LTS, RHEL 9 or
+          # Amazon Linux 2023 — every one of them current. 22.04 is glibc 2.35
+          # and is supported until 2027. See issue #57, which this closes: the
+          # prebuilt binary failed identically on three releases and nothing in
+          # CI ran it on an older distribution to notice.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -71,6 +77,24 @@ jobs:
           readelf -d "$binary" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tee needed.txt
           if grep -Eq 'libssl|libcrypto|libopenblas' needed.txt; then
             echo "::error::the Linux binary still links a system library that has to be installed"
+            exit 1
+          fi
+
+      # The guard above says which libraries are needed and nothing about which
+      # *versions* of their symbols, which is exactly how the glibc floor rose
+      # to 2.39 across three releases without failing a single build. This
+      # asserts the floor itself.
+      - name: glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          binary="target/${{ matrix.target }}/release/semlith"
+          floor=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -V -u | tail -1)
+          cxx=$(objdump -T "$binary" | grep -o 'GLIBCXX_[0-9.]*' | sort -V -u | tail -1)
+          echo "$binary requires up to $floor and $cxx"
+          want="GLIBC_2.35"
+          highest=$(printf '%s\n%s\n' "$floor" "$want" | sed 's/GLIBC_//' | sort -V | tail -1)
+          if [ "GLIBC_$highest" != "$want" ]; then
+            echo "::error::the binary requires $floor; the floor is $want (Debian 12, Ubuntu 22.04, RHEL 9)"
             exit 1
           fi
 

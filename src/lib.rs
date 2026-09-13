@@ -28,6 +28,7 @@ mod formats;
 pub mod graph;
 pub mod home;
 pub mod http;
+pub mod image;
 pub mod index;
 pub mod lock;
 pub mod mcp;
@@ -89,6 +90,41 @@ const GENERATION: &str = "index_generation";
 /// flattens the curve enough that a result ranked third is not dismissed.
 const RRF_K: f32 = 60.0;
 
+/// One candidate in the fusion: which id space it is in, its id, the score it
+/// has accumulated, and which lists put it there.
+///
+/// A named type because the tuple had grown four deep and unreadable — two id
+/// spaces is what added the fourth.
+type Candidate = (((bool, u64), f32), Vec<&'static str>);
+
+/// How many ranked lists a text chunk can be found by: vector, keyword and
+/// graph. An image can be found by one, which is what
+/// [`Semlith::search_ranked`] weighs a confident image match against.
+const TEXT_LISTS: f32 = 3.0;
+
+/// The CLIP cosine above which an image match is treated as a confident one.
+///
+/// Measured rather than picked: against a fixture of four shapes, a query
+/// describing one of them scores 0.30 to 0.34 on the right image and 0.24 to
+/// 0.26 on the others, and a query about something else entirely tops out at
+/// 0.26. The floor sits between those, and a corpus whose images are all of one
+/// subject will want it moved — which is what [`IMAGE_FLOOR_ENV`] is for.
+///
+/// ponytail: one global floor for every corpus. A per-store calibration from
+/// the store's own score distribution would be better and needs a store's worth
+/// of queries to compute; this is the knob until then.
+const IMAGE_FLOOR: f32 = 0.28;
+
+/// Overrides [`IMAGE_FLOOR`].
+pub const IMAGE_FLOOR_ENV: &str = "SEMLITH_IMAGE_FLOOR";
+
+fn image_floor() -> f32 {
+    std::env::var(IMAGE_FLOOR_ENV)
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(IMAGE_FLOOR)
+}
+
 /// How much deeper than `k` to look in each ranking before fusing.
 const RANK_DEPTH: usize = 4;
 
@@ -143,16 +179,60 @@ pub struct Hit {
     /// sees the JSON it saw before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lists: Vec<&'static str>,
+    /// An image hit's pixel size, in place of a line range.
+    ///
+    /// `None` for a chunk, and skipped when it is, so every existing consumer
+    /// of `--json` and of the MCP output sees exactly the shape it saw before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<Pixels>,
 }
 
-/// Where an index run has got to, handed to the callback with each file it
-/// starts embedding.
+/// An image's pixel size.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Pixels {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// What the run decided about one file.
+///
+/// Reported for every file rather than only for the ones being embedded: a
+/// re-index of an unchanged corpus used to say nothing at all between "started"
+/// and "done", which looks identical to a run that has hung.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FileOutcome {
+    /// About to be read, chunked and embedded.
+    #[default]
+    Indexing,
+    /// The hash on disk matches the hash in the store.
+    Unchanged,
+    /// Empty, too large, unreadable, or a format with no reader.
+    Skipped,
+    /// Gone from disk, so its chunks were evicted.
+    Removed,
+}
+
+impl FileOutcome {
+    /// The word the portal and the CLI both label a line with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Indexing => "indexing",
+            Self::Unchanged => "unchanged",
+            Self::Skipped => "skipped",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// Where an index run has got to, handed to the callback once per file.
 ///
 /// `total` is what the walk found, so `scanned` against it is a real fraction
 /// rather than a spinner — which is the difference between a long wait and a
 /// wait a person is willing to sit through.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IndexProgress {
+    /// What this file is: being embedded, unchanged, skipped or removed.
+    pub outcome: FileOutcome,
     /// Files considered so far, including the unchanged and the skipped.
     pub scanned: usize,
     /// Files embedded so far in this run.
@@ -167,7 +247,7 @@ pub struct IndexProgress {
     pub symbols: usize,
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct IndexReport {
     pub scanned: usize,
     pub indexed: usize,
@@ -181,15 +261,55 @@ pub struct IndexReport {
     /// Symbols extracted in this run, and the edges between them.
     pub symbols: usize,
     pub edges: usize,
+    /// Images embedded in this run.
+    pub images: usize,
+    /// Whether the run was stopped rather than finished.
+    pub stopped: bool,
+    /// Every file this call embedded, in order. The caller keeps these across
+    /// the slices of one logical run, so stopping can undo the whole run
+    /// rather than only the slice that happened to be going.
+    pub written: Vec<String>,
 }
+
+/// What a controlled run should do at the next file boundary.
+///
+/// Asked between files, never inside one: a file half-written into the index
+/// is a file whose hash must not be committed, and the boundary is the one
+/// point in the loop where that cannot be true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    /// Keep going.
+    Run,
+    /// Hold here, and ask again shortly.
+    Pause,
+    /// Stop here and keep what is done. The run reports what it did not reach,
+    /// and asking again continues from there — the same answer a time budget
+    /// gives. This is how the watcher's catch-up steps aside for a request
+    /// that arrived while it was working.
+    Yield,
+    /// Give up, and undo what this run embedded.
+    Stop,
+}
+
+/// How long a paused run waits before asking again. Short enough that
+/// resuming feels immediate, long enough that a paused run costs nothing.
+const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
     index: VectorIndex,
+    /// The image vectors, in their own space at CLIP's 512 dimensions.
+    ///
+    /// A second index rather than a second kind of row in the first: vectors
+    /// from two models are not comparable, and one index holding both would
+    /// rank a picture against a paragraph by arithmetic that means nothing.
+    images: VectorIndex,
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// CLIP's two encoders, loaded on the first image indexed or searched for.
+    clip: image::Clip,
     /// The index generation this process has loaded. Compared against the
     /// store's on every search to notice another process's writes.
     generation: u64,
@@ -243,6 +363,10 @@ impl Semlith {
         // store's business, decided when it was created and never migrated.
         let sharded = store::format(&db)? >= store::SHARDED_FORMAT;
         let index = VectorIndex::open(&dir, dim, BIT_WIDTH, sharded)?;
+        // Beside the text index rather than inside it. Created lazily by
+        // `VectorIndex::open`, so a store that never holds an image never grows
+        // the directory.
+        let images = VectorIndex::open(&dir.join(image::INDEX_DIR), image::DIM, BIT_WIDTH, true)?;
 
         let generation = generation(&db)?;
 
@@ -250,9 +374,11 @@ impl Semlith {
             dir,
             db,
             index,
+            images,
             model,
             dim,
             embedder: None,
+            clip: image::Clip::default(),
             generation,
             quiet: false,
         })
@@ -449,7 +575,35 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
-        self.index_set(walk(roots), true, Some(deadline), on_file)
+        self.index_set(walk(roots), true, Some(deadline), None, on_file)
+    }
+
+    /// [`Semlith::index_walk`] under a control, so the catch-up a watcher runs
+    /// at startup can step aside the moment a request arrives.
+    pub(crate) fn index_walk_under(
+        &mut self,
+        roots: &[PathBuf],
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        self.index_set(walk(roots), true, None, Some(control), on_file)
+    }
+
+    /// [`Semlith::index_within_held`] that can be paused and stopped from
+    /// another thread.
+    ///
+    /// `control` is asked once per file. A stop undoes everything the run
+    /// embedded, so the corpus is exactly as it was before it started — which
+    /// is what makes stopping a real answer rather than a half-indexed store.
+    pub(crate) fn index_within_held_under(
+        &mut self,
+        roots: &[PathBuf],
+        budget: std::time::Duration,
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let deadline = std::time::Instant::now() + budget;
+        self.index_set(walk(roots), true, Some(deadline), Some(control), on_file)
     }
 
     /// `index_paths` without taking the lock, for a caller that already holds
@@ -459,7 +613,7 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(walk(roots), true, None, on_file)
+        self.index_set(walk(roots), true, None, None, on_file)
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -472,7 +626,7 @@ impl Semlith {
         paths: Vec<PathBuf>,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(paths, false, None, on_file)
+        self.index_set(paths, false, None, None, on_file)
     }
 
     /// The body both entry points share. `sweep` drops every recorded file
@@ -483,6 +637,7 @@ impl Semlith {
         paths: Vec<PathBuf>,
         sweep: bool,
         deadline: Option<std::time::Instant>,
+        control: Option<&dyn Fn() -> Flow>,
         mut on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         // A run killed mid-save leaves a temp index behind. Removing it here
@@ -492,6 +647,9 @@ impl Semlith {
 
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
+        // Every file this run embedded, so a stop can put the store back the
+        // way it found it rather than leaving half a corpus indexed.
+        let mut written: Vec<String> = Vec::new();
         // Files whose vectors are embedded but not yet durable. Their hash is
         // written only after the index lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
@@ -512,6 +670,36 @@ impl Semlith {
                 report.remaining = total - seen;
                 break;
             }
+            if let Some(ask) = control {
+                let mut stop = false;
+                let mut yielded = false;
+                loop {
+                    match ask() {
+                        Flow::Run => break,
+                        // Held here rather than returning: the run keeps the
+                        // store lock, so resuming is this loop waking up and
+                        // not a second walk of the tree.
+                        Flow::Pause => std::thread::sleep(PAUSE_TICK),
+                        Flow::Yield => {
+                            yielded = true;
+                            break;
+                        }
+                        Flow::Stop => {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                if yielded {
+                    report.remaining = total - seen;
+                    break;
+                }
+                if stop {
+                    report.remaining = total - seen;
+                    report.stopped = true;
+                    break;
+                }
+            }
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
 
@@ -530,21 +718,117 @@ impl Semlith {
                                 self.index.remove(id)?;
                             }
                             report.removed += 1;
+                            on_file(
+                                &path,
+                                IndexProgress {
+                                    outcome: FileOutcome::Removed,
+                                    scanned: report.scanned,
+                                    indexed: report.indexed,
+                                    chunks: report.chunks,
+                                    total,
+                                    symbols: report.symbols,
+                                },
+                            );
                             continue;
                         }
                     }
                     report.skipped += 1;
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Skipped,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
                     continue;
                 }
             }
             let Ok(bytes) = std::fs::read(&path) else {
                 report.skipped += 1;
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Skipped,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
                 continue;
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
             if store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
                 report.unchanged += 1;
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Unchanged,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
+                continue;
+            }
+
+            // An image is a different kind of content in the same pass: read
+            // for its pixels rather than for its text, embedded with CLIP's
+            // vision encoder, and recorded in the store's second vector space.
+            // Handled before `chunk::extract`, which reads a PNG as binary and
+            // rejects it.
+            if image::is_image(&path) {
+                let Some((width, height)) = image::dimensions(&bytes) else {
+                    report.skipped += 1;
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Skipped,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
+                    continue;
+                };
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Indexing,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
+                let vector = self.clip.embed_image(&path, self.quiet)?;
+                // Replacing an image: its old vector goes before the new one
+                // arrives, and the row goes with the file's cascade.
+                for id in store::image_ids_of(&self.db, &key)? {
+                    self.images.remove(id as u64)?;
+                }
+                for id in store::delete_file(&self.db, &key)? {
+                    self.index.remove(id)?;
+                }
+                let file_id =
+                    store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+                let image_id = store::insert_image(&self.db, file_id, width, height)?;
+                self.images.add(&vector, &[image_id as u64])?;
+                completed.push((file_id, hash));
+                written.push(key.clone());
+                report.indexed += 1;
+                report.images += 1;
                 continue;
             }
 
@@ -555,12 +839,24 @@ impl Semlith {
             let chunks = chunk::chunk_text(&text);
             if chunks.is_empty() {
                 report.skipped += 1;
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Skipped,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
                 continue;
             }
 
             on_file(
                 &path,
                 IndexProgress {
+                    outcome: FileOutcome::Indexing,
                     scanned: report.scanned,
                     indexed: report.indexed,
                     chunks: report.chunks,
@@ -602,6 +898,7 @@ impl Semlith {
             report.edges += edges;
 
             completed.push((file_id, hash));
+            written.push(key.clone());
             report.indexed += 1;
             report.chunks += chunks.len();
 
@@ -616,6 +913,11 @@ impl Semlith {
         }
 
         self.flush(&mut pending)?;
+
+        // A stopped slice still commits what it embedded. Undoing is the
+        // caller's, because one logical run is several slices and a stop has
+        // to undo all of them — see `Job::Index` in the daemon.
+        report.written = written;
 
         // Anything recorded but no longer on disk is dead weight.
         if sweep {
@@ -805,8 +1107,8 @@ impl Semlith {
         Ok(())
     }
 
-    /// Remove a single file from the store.
-    pub fn forget(&mut self, path: &Path) -> Result<usize> {
+    /// Remove a single file from the store. Returns `(chunks, images)`.
+    pub fn forget(&mut self, path: &Path) -> Result<(usize, usize)> {
         // Dropping a file rewrites `index.tv` exactly as indexing does, so it
         // is a writer and takes the writer's lock. Without it a `forget` that
         // lands while `semlith watch` is saving leaves the index and the
@@ -817,16 +1119,23 @@ impl Semlith {
 
     /// [`Semlith::forget`] without taking the lock, for a caller that already
     /// holds it.
-    pub(crate) fn forget_held(&mut self, path: &Path) -> Result<usize> {
+    pub(crate) fn forget_held(&mut self, path: &Path) -> Result<(usize, usize)> {
         let key = canonical(path).to_string_lossy().into_owned();
+        // Read before the delete: the cascade that removes the rows is what
+        // makes their ids unreadable, and the vectors they address still have
+        // to leave the image index.
+        let images = store::image_ids_of(&self.db, &key)?;
         let ids = store::delete_file(&self.db, &key)?;
         for id in &ids {
             self.index.remove(*id)?;
         }
-        if !ids.is_empty() {
+        for id in &images {
+            self.images.remove(*id as u64)?;
+        }
+        if !ids.is_empty() || !images.is_empty() {
             self.save()?;
         }
-        Ok(ids.len())
+        Ok((ids.len(), images.len()))
     }
 
     /// Top-`k` chunks for `query`, best first, over the whole store.
@@ -888,8 +1197,20 @@ impl Semlith {
     /// the subset is a minority of the corpus, which is the case the filter
     /// exists for.
     pub fn search_filtered(&mut self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Hit>> {
-        let vector = self.embed(vec![self.model.query_text(query)])?.remove(0);
+        let vector = self.embed_query(query)?;
         self.search_with_vector(query, &vector, k, filter)
+    }
+
+    /// The query, embedded with this store's model: the vector
+    /// [`Semlith::search_with_vector`] takes.
+    ///
+    /// Public because a caller comparing two stores has to be able to hold the
+    /// query vector still. Embedding the same text twice does not give the same
+    /// floats — ONNX Runtime reduces across its threads in whatever order they
+    /// finish — and under int8 quantisation that moves a ranking, which is
+    /// noise in a measurement that is about something else.
+    pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
+        Ok(self.embed(vec![self.model.query_text(query)])?.remove(0))
     }
 
     /// [`Semlith::search_filtered`] with the query already embedded.
@@ -936,7 +1257,10 @@ impl Semlith {
         // agent ends up quoting a function that no longer exists.
         self.refresh()?;
 
-        if k == 0 || self.is_empty() {
+        // `is_empty` is about the text index. A store holding only images has
+        // no chunks and is still searchable, so it is asked about separately
+        // rather than dismissed with the same test.
+        if k == 0 || (self.is_empty() && store::image_count(&self.db)? == 0) {
             return Ok(Vec::new());
         }
 
@@ -953,6 +1277,12 @@ impl Semlith {
         let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
+        // The image list. Only when the store actually holds an image: the
+        // query has to be embedded a second time, with CLIP's text encoder
+        // rather than the store's own model, and a store of source code should
+        // not pay for a model it has nothing to compare against.
+        let images = self.image_search(query, depth, filter)?;
+
         // The third list. The two lists above are what the query said; this is
         // what the code says about what they found — the symbols inside the top
         // hits, one hop out, and the chunks those neighbours live in. It costs
@@ -960,24 +1290,69 @@ impl Semlith {
         // concept spread across files that share no vocabulary.
         let graph_ids = self.graph_expansion(&dense_ids, &keyword_ids, depth, filter)?;
 
-        let mut fused: Vec<(u64, f32)> = Vec::new();
-        let mut seen: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+        // Two id spaces — a chunk id and an image id both count from one — so
+        // the fusion is keyed by which space an id belongs to as well as by the
+        // id. Everything else about reciprocal-rank fusion is unchanged: an
+        // image is a fourth list, ranked against the other three rather than
+        // appended after them.
+        let mut fused: Vec<((bool, u64), f32)> = Vec::new();
+        let mut seen: std::collections::HashMap<(bool, u64), usize> =
+            std::collections::HashMap::new();
         let mut lists: Vec<Vec<&'static str>> = Vec::new();
-        for (name, ranking) in [
-            ("vector", &dense_ids),
-            ("keyword", &keyword_ids),
-            ("graph", &graph_ids),
+        // The image list goes in first so that a tie resolves to the image.
+        // A tie means the two are equally ranked, and only one of them was
+        // found by a model that looked at the thing being asked about.
+        let image_list: Vec<(u64, f32)> = images
+            .iter()
+            .map(|(id, similarity)| {
+                // A confident image match stands in for the three lists a
+                // chunk can appear in: an image can only ever be found by this
+                // one, and the graph list is derived from the other two, so a
+                // chunk collects three contributions for what is really one
+                // match. Without this weight a picture could never place above
+                // a passing text match however well CLIP matched it.
+                //
+                // Below the floor the image is a weak candidate rather than a
+                // wrong one, so it keeps a single list's weight and sits where
+                // that puts it instead of being dropped.
+                let weight = if *similarity >= image_floor() {
+                    TEXT_LISTS
+                } else {
+                    1.0
+                };
+                (*id, weight)
+            })
+            .collect();
+
+        for (name, is_image, ranking) in [
+            ("image", true, image_list),
+            (
+                "vector",
+                false,
+                dense_ids.iter().map(|id| (*id, 1.0)).collect(),
+            ),
+            (
+                "keyword",
+                false,
+                keyword_ids.iter().map(|id| (*id, 1.0)).collect(),
+            ),
+            (
+                "graph",
+                false,
+                graph_ids.iter().map(|id| (*id, 1.0)).collect(),
+            ),
         ] {
-            for (rank, id) in ranking.iter().enumerate() {
-                let contribution = 1.0 / (RRF_K + rank as f32 + 1.0);
-                match seen.get(id) {
+            for (rank, (id, weight)) in ranking.iter().enumerate() {
+                let key = (is_image, *id);
+                let contribution = weight / (RRF_K + rank as f32 + 1.0);
+                match seen.get(&key) {
                     Some(&slot) => {
                         fused[slot].1 += contribution;
                         lists[slot].push(name);
                     }
                     None => {
-                        seen.insert(*id, fused.len());
-                        fused.push((*id, contribution));
+                        seen.insert(key, fused.len());
+                        fused.push((key, contribution));
                         lists.push(vec![name]);
                     }
                 }
@@ -985,13 +1360,35 @@ impl Semlith {
         }
         // Sorted together with their provenance, so a hit never carries the
         // badges of whichever chunk happened to land in its slot.
-        let mut ranked: Vec<((u64, f32), Vec<&'static str>)> =
-            fused.into_iter().zip(lists).collect();
+        let mut ranked: Vec<Candidate> = fused.into_iter().zip(lists).collect();
         ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1));
         ranked.truncate(k);
 
         let mut hits = Vec::with_capacity(ranked.len());
-        for ((id, score), found_by) in ranked {
+        for (((is_image, id), score), found_by) in ranked {
+            if is_image {
+                // An image hit carries its path and pixel size where a chunk
+                // carries a line range and its text.
+                if let Some(row) = store::image(&self.db, id as i64)? {
+                    hits.push((
+                        Hit {
+                            score,
+                            path: row.path,
+                            start_line: 0,
+                            end_line: 0,
+                            text: String::new(),
+                            store: None,
+                            lists: found_by,
+                            image: Some(Pixels {
+                                width: row.width,
+                                height: row.height,
+                            }),
+                        },
+                        0.0,
+                    ));
+                }
+                continue;
+            }
             // A dangling id means SQLite and the index drifted apart; skip it
             // rather than fail the whole query.
             if let Some(row) = store::chunk(&self.db, id)? {
@@ -1011,12 +1408,59 @@ impl Semlith {
                         // store to tell apart; a store cannot label itself.
                         store: None,
                         lists: found_by,
+                        image: None,
                     },
                     similarity,
                 ));
             }
         }
         Ok(hits)
+    }
+
+    /// The image half of a search: the query in CLIP's text space, against the
+    /// store's image vectors.
+    ///
+    /// Empty, and free, for a store that holds no image — which is every store
+    /// that has only ever been pointed at source code.
+    fn image_search(
+        &mut self,
+        query: &str,
+        depth: usize,
+        filter: &Filter,
+    ) -> Result<Vec<(u64, f32)>> {
+        if store::image_count(&self.db)? == 0 {
+            return Ok(Vec::new());
+        }
+        let allowlist = if filter.is_empty() {
+            index::Allowlist::All
+        } else {
+            let mut ids = Vec::new();
+            for id in store::filtered_image_ids(&self.db, filter.groups())? {
+                // Same guard the text half uses: turbovec panics on an id its
+                // index does not hold, and a run interrupted between the row
+                // and the vector leaves exactly that.
+                if self.images.contains(id as u64)? {
+                    ids.push(id as u64);
+                }
+            }
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            index::Allowlist::Subset(ids)
+        };
+
+        let mut vector = self.clip.embed_query(query, self.quiet)?;
+        normalize(&mut vector);
+        let (scores, ids) = self.images.search(&vector, depth, &allowlist)?;
+        Ok(ids
+            .into_iter()
+            .zip(scores.into_iter().chain(std::iter::repeat(0.0)))
+            .collect())
+    }
+
+    /// How many images this store holds.
+    pub fn image_count(&self) -> Result<i64> {
+        store::image_count(&self.db)
     }
 
     /// `(files, chunks, indexed bytes)`
@@ -1028,6 +1472,11 @@ impl Semlith {
     /// half-written index behind.
     pub fn save(&mut self) -> Result<()> {
         self.index.save()?;
+        // The second space is saved with the first: a run that embedded an
+        // image and did not write its vector would leave a row addressing
+        // nothing, which is the one inconsistency this store's whole design is
+        // arranged to prevent.
+        self.images.save()?;
 
         // Bumped after the rename, never before: a reader that sees the new
         // generation is guaranteed to find the new index behind it. Read back

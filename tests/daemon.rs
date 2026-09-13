@@ -578,6 +578,24 @@ fn indexing_from_the_portal_streams_progress_and_then_lists_the_files() {
         .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
     assert_eq!(done["indexed"], 1);
 
+    // The stream says something before the writer reaches the job, and then
+    // says what happened to every file rather than only to the ones it
+    // embedded. A run that speaks only about its own work is silent for a
+    // whole re-index of an unchanged corpus, which reads as a hang.
+    assert!(
+        events.iter().any(|e| e["event"] == "queued"),
+        "nothing was said while the job waited for the writer: {events:?}"
+    );
+    let outcomes: Vec<&str> = events
+        .iter()
+        .filter(|e| e["event"] == "file")
+        .filter_map(|e| e["outcome"].as_str())
+        .collect();
+    assert!(
+        outcomes.contains(&"indexing"),
+        "no file reported itself as being embedded: {events:?}"
+    );
+
     let files = daemon.get("/api/files").json();
     assert_eq!(files["total"], 2, "the new file is not listed: {files}");
 
@@ -714,7 +732,8 @@ fn the_agents_route_serves_the_readme_stanzas_verbatim() {
     assert!(clients.len() >= 12, "only {} clients", clients.len());
     assert_eq!(clients[0]["name"], "Claude Code");
 
-    let stanza = clients[0]["stanzas"][0]["text"].as_str().expect("a stanza");
+    // Claude Code leads with the endpoint; the subprocess form follows it.
+    let stanza = clients[0]["stanzas"][2]["text"].as_str().expect("a stanza");
     assert_eq!(stanza.trim(), "claude mcp add semlith -- semlith mcp");
 
     let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
@@ -952,4 +971,291 @@ fn a_stale_discovery_file_falls_back_to_opening_the_store() {
         "a stale discovery file broke the server instead of being ignored: {stats}"
     );
     drop(dir);
+}
+
+// ---------------------------------------------------------------- T12
+
+/// The Files page selects rows and forgets the set in one call, and the answer
+/// says how many files and how many chunks went — not a stream a page has to
+/// parse to learn a number.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_set_of_files_is_forgotten_in_one_call() {
+    let (dir, home, work) = sandbox("bulk-forget");
+    corpus(
+        &home,
+        &work,
+        "api",
+        &[
+            ("fleet.rs", RUST),
+            ("notes.md", "# Notes\n\nOwnership.\n"),
+            ("keep.md", "# Keep\n\nThis one stays.\n"),
+        ],
+    );
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    assert_eq!(daemon.get("/api/files").json()["total"], 3);
+
+    let root = work.join("api");
+    let body = format!(
+        "{{\"paths\":[{},{},{}]}}",
+        serde_json::to_string(&root.join("fleet.rs").display().to_string()).unwrap(),
+        serde_json::to_string(&root.join("notes.md").display().to_string()).unwrap(),
+        // A path nobody indexed is reported rather than failing the batch: a
+        // selection made before a watcher pass can name a file that is gone.
+        serde_json::to_string(&root.join("never.md").display().to_string()).unwrap(),
+    );
+    let answer = daemon.post("/api/forget", &body);
+    assert_eq!(answer.status, 200);
+    let done = answer.json();
+    assert_eq!(done["asked"], 3, "{done}");
+    assert_eq!(done["files"], 2, "{done}");
+    assert!(done["forgot"].as_i64().unwrap() > 0, "{done}");
+    assert_eq!(
+        done["not_indexed"].as_array().map(Vec::len),
+        Some(1),
+        "the file that was never indexed is not named: {done}"
+    );
+
+    let left = daemon.get("/api/files").json();
+    assert_eq!(left["total"], 1, "{left}");
+    assert!(
+        left["files"][0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("keep.md"),
+        "the wrong file survived: {left}"
+    );
+}
+
+/// Deleting a store closes it, removes what semlith derived, and leaves the
+/// indexed files alone — while the daemon keeps answering.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_store_is_deleted_without_stopping_the_daemon() {
+    let (dir, home, work) = sandbox("delete-store");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let daemon = Daemon::start_in(dir, home.clone(), work.join("api"), &[]);
+    assert_eq!(daemon.get("/api/files").json()["total"], 1);
+
+    let store_dir = home.join("stores/api");
+    assert!(
+        store_dir.is_dir(),
+        "the store was not created where expected"
+    );
+
+    let answer = daemon.post("/api/store/delete", "{\"store\":\"api\"}");
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert!(
+        answer.json()["message"]
+            .as_str()
+            .unwrap()
+            .contains("untouched"),
+        "{}",
+        answer.body
+    );
+
+    assert!(!store_dir.exists(), "the store directory is still there");
+    let registry = std::fs::read_to_string(home.join("registry.json")).unwrap();
+    assert!(
+        !registry.contains("\"api\""),
+        "the registry still lists it: {registry}"
+    );
+    // The corpus itself is not semlith's to delete.
+    assert!(work.join("api/fleet.rs").exists(), "the corpus was deleted");
+
+    // Still serving: the daemon lost a store, not its life.
+    assert_eq!(daemon.get("/api/files").json()["total"], 0);
+    assert_eq!(daemon.get("/api/privacy").status, 200);
+}
+
+// ---------------------------------------------------------------- T13
+
+/// One request off the `Daemon` handle, for a thread that cannot borrow it.
+fn post_to(port: u16, token: &str, path: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the daemon listens");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: semlith_token={token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// A run can be stopped, and stopping undoes it. A half-indexed corpus is
+/// worse than none, because nothing in the store says which half it is.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_stopped_index_run_undoes_itself() {
+    let (dir, home, work) = sandbox("stop-index");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+
+    // Outside the watched root, so the watcher cannot index it behind the
+    // run's back and the count belongs to the run alone.
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    for i in 0..60 {
+        let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(120));
+        std::fs::write(extra.join(format!("note{i:03}.md")), body).unwrap();
+    }
+
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    let before = daemon.get("/api/files").json()["total"].as_i64().unwrap();
+
+    let port = daemon.port;
+    let token = daemon.token.clone();
+    let path = extra.display().to_string();
+    let run = std::thread::spawn(move || {
+        let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
+        post_to(port, &token, "/api/index", &body)
+    });
+
+    // Stop it once it has written something, so the rollback has work to do.
+    let mut moved = false;
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if daemon.get("/api/files").json()["total"].as_i64().unwrap() > before {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "the run never indexed anything to roll back");
+
+    let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");
+    assert_eq!(stopped.status, 200, "{}", stopped.body);
+
+    let answer = run.join().expect("the index request");
+    assert!(
+        answer.contains("\"stopped\":true"),
+        "the run did not report itself stopped: {answer}"
+    );
+
+    // Back to exactly what was there before it started.
+    for _ in 0..100 {
+        if daemon.get("/api/files").json()["total"].as_i64() == Some(before) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!(
+        "the store kept what the stopped run embedded: {} files, was {before}",
+        daemon.get("/api/files").json()["total"]
+    );
+}
+
+/// A job does not wait for the watcher's catch-up, and a stop asked for while
+/// it is still queued is answered at once.
+///
+/// The catch-up used to run to completion before the queue was looked at, so
+/// the first request after a daemon start on a cold store waited for the whole
+/// tree — and a stop in that window was cleared when the job finally began.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_queued_run_starts_at_once_and_stops_at_once() {
+    let (dir, home, work) = sandbox("queue-latency");
+    let root = work.join("api");
+    std::fs::create_dir_all(&root).unwrap();
+    for i in 0..40 {
+        let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(200));
+        std::fs::write(root.join(format!("n{i:03}.md")), body).unwrap();
+    }
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("one.md"), "# One\n\nA single file.\n").unwrap();
+
+    // Started against a corpus it has never seen, so the watcher's catch-up is
+    // real work rather than a walk of hashes.
+    let daemon = Daemon::start_in(dir, home, root, &[]);
+
+    // Two jobs, so the second is behind the first for certain rather than by
+    // timing: the first holds the writer, and the second is the queued one a
+    // stop has to answer without waiting for it.
+    let first = std::thread::spawn({
+        let token = daemon.token.clone();
+        let port = daemon.port;
+        let path = work.join("api").display().to_string();
+        move || {
+            let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
+            post_to(port, &token, "/api/index", &body)
+        }
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let port = daemon.port;
+    let token = daemon.token.clone();
+    let path = extra.display().to_string();
+    let queued = std::thread::spawn(move || {
+        let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
+        post_to(port, &token, "/api/index", &body)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let asked = std::time::Instant::now();
+    let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");
+    assert_eq!(stopped.status, 200, "{}", stopped.body);
+
+    let answer = queued.join().expect("the queued index request");
+    assert!(
+        answer.contains("\"stopped\":true"),
+        "the queued run was not stopped: {answer}"
+    );
+    // Nothing of it had run, so the answer does not wait for the writer.
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(10),
+        "the queued job took {:?} to answer a stop",
+        asked.elapsed()
+    );
+    let _ = first.join();
+}
+
+/// A run longer than one slice finishes on its own, on one stream, and a stop
+/// undoes every slice of it rather than the one that happened to be going.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
+    let (dir, home, work) = sandbox("slices");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    for i in 0..12 {
+        let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(80));
+        std::fs::write(extra.join(format!("n{i:03}.md")), body).unwrap();
+    }
+
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    let before = daemon.get("/api/files").json()["total"].as_i64().unwrap();
+
+    let body = format!(
+        "{{\"path\":{}}}",
+        serde_json::to_string(&extra.display().to_string()).unwrap()
+    );
+    let answer = daemon.post("/api/index", &body);
+    assert_eq!(answer.status, 200);
+
+    // One request, one answer: whatever the slice budget did in between, the
+    // caller is never asked to press the button again.
+    let events: Vec<serde_json::Value> = answer
+        .body
+        .lines()
+        .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .collect();
+    let done = events
+        .iter()
+        .find(|e| e["event"] == "done")
+        .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
+    assert_eq!(
+        done["remaining"], 0,
+        "the run handed work back to the reader: {done}"
+    );
+    assert_eq!(
+        daemon.get("/api/files").json()["total"].as_i64().unwrap(),
+        before + 12,
+        "not every file was indexed"
+    );
 }

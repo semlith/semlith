@@ -269,12 +269,30 @@ fn tools(stores: &Fleet) -> Value {
 /// ends up served by the server and invisible in the portal, which the parity
 /// rule exists to prevent — so there is only one copy.
 pub fn tool_names() -> Vec<String> {
+    tool_list().into_iter().map(|(name, _)| name).collect()
+}
+
+/// Every tool, with the one-line purpose its definition advertises.
+///
+/// The Agents page lists these. Reading the description out of the definition
+/// rather than writing a second one beside it is what stops a tool being
+/// served with one description and documented with another — the title an
+/// annotation carries is the sentence a client shows a user, so it is the one
+/// the portal shows too.
+pub fn tool_list() -> Vec<(String, String)> {
     tool_defs("")
         .as_array()
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .map(|defs| {
+            defs.iter()
+                .filter_map(|tool| {
+                    let name = tool["name"].as_str()?.to_string();
+                    let about = tool["annotations"]["title"]
+                        .as_str()
+                        .or_else(|| tool["description"].as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((name, about))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -527,30 +545,6 @@ fn tool_defs(open: &str) -> Value {
                 "required": ["from", "to"]
             },
             "annotations": { "title": "Find the path between two symbols", "readOnlyHint": true }
-        },
-        {
-            "name": "semlith_impact",
-            "description":
-                "The blast radius of a change: everything that reaches this symbol, walking \
-                 calls, imports and references backwards to a hop depth. Call this BEFORE \
-                 editing a shared function. It is the direct fix for the most common editing \
-                 mistake — changing the one call site that was reported and leaving every \
-                 sibling caller broken.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
-                    "depth": {
-                        "type": "integer",
-                        "description":
-                            "How many hops backwards to walk. Default 3. Depth 1 is the direct \
-                             callers."
-                    },
-                    "store": { "type": "string", "description": store_arg }
-                },
-                "required": ["name"]
-            },
-            "annotations": { "title": "Find what a change would break", "readOnlyHint": true }
         }
     ])
 }
@@ -788,8 +782,12 @@ fn call_tool(
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
             match store.forget(std::path::Path::new(&path)) {
-                Ok(0) => format!("{path} was not indexed; nothing removed."),
-                Ok(n) => format!("Removed {n} chunks for {path}."),
+                Ok((0, 0)) => format!("{path} was not indexed; nothing removed."),
+                Ok((0, images)) => format!("Removed {images} image vector(s) for {path}."),
+                Ok((chunks, 0)) => format!("Removed {chunks} chunks for {path}."),
+                Ok((chunks, images)) => {
+                    format!("Removed {chunks} chunks and {images} image vector(s) for {path}.")
+                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -869,54 +867,6 @@ fn call_tool(
                     "No chain from {from} to {to} within {depth} hops. They may be \
                      unconnected, or connected only further than that."
                 ),
-                Err(e) => return Ok(tool_error(&e.to_string())),
-            }
-        }
-        "semlith_impact" => {
-            let Some(name) = args.get("name").and_then(Value::as_str) else {
-                return Err((-32602, "missing required argument: name".into(), None));
-            };
-            let depth = args
-                .get("depth")
-                .and_then(Value::as_u64)
-                .unwrap_or(crate::graph::DEFAULT_DEPTH as u64) as u32;
-            let only = strings(&args, "store");
-            match stores.impact_in(Some(&only), name, depth.clamp(1, 20)) {
-                Ok(reached) if reached.is_empty() => {
-                    format!("Nothing in the graph reaches {name} within {depth} hops.")
-                }
-                Ok(reached) => {
-                    let rows = reached
-                        .iter()
-                        .map(|r| {
-                            format!(
-                                "{} hop{}  {} via {} ({})  {}{}:{}",
-                                r.hops,
-                                if r.hops == 1 { "" } else { "s" },
-                                r.symbol.name,
-                                r.via,
-                                r.confidence,
-                                label_of(&r.symbol.store),
-                                r.symbol.path,
-                                r.symbol.start_line,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let truncated = if reached.len() >= crate::graph::MAX_NODES {
-                        format!(
-                            "\n\nStopped at the {} symbol budget; the real radius is larger.",
-                            crate::graph::MAX_NODES
-                        )
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "{} symbols reach {name} within {depth} hops. Check each before \
-                         changing its signature or behaviour.\n{rows}{truncated}",
-                        reached.len()
-                    )
-                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -1042,6 +992,21 @@ fn render(hits: &[crate::Hit]) -> String {
         } else {
             format!(" via {}", h.lists.join("+"))
         };
+        // An image has no excerpt to quote: it is named, sized, and left for
+        // the agent to open. Saying "an image" outright matters more here than
+        // anywhere else — an agent handed a path with no text under it would
+        // otherwise read the silence as an empty file.
+        if let Some(px) = h.image {
+            out.push_str(&format!(
+                "[{}] {from}{} — image, {}x{} px (score {:.3}{via})\n\n",
+                i + 1,
+                h.path,
+                px.width,
+                px.height,
+                h.score,
+            ));
+            continue;
+        }
         out.push_str(&format!(
             "[{}] {from}{}:{}-{} (score {:.3}{via})\n{}\n\n",
             i + 1,

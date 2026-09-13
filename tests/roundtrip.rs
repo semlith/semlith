@@ -82,8 +82,9 @@ fn index_search_update_forget() {
     assert_eq!(top(&mut s, "how do I bake bread"), "bread.md");
 
     // And an explicit forget removes it from both halves of the store.
-    let removed = s.forget(&corpus.path().join("bread.md")).unwrap();
+    let (removed, images) = s.forget(&corpus.path().join("bread.md")).unwrap();
     assert!(removed > 0);
+    assert_eq!(images, 0, "a markdown file has no image vectors");
     assert_eq!(s.len(), vectors - removed);
     let hits = s.search("sourdough flour water", 5).unwrap();
     assert!(!hits.iter().any(|h| h.path.ends_with("bread.md")));

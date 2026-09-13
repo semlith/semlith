@@ -17,6 +17,13 @@
 //!   required on every request as a `SameSite=Strict` cookie. A request without
 //!   it gets 401 and an empty body — not a login page, not an error object,
 //!   nothing that tells a prober what is here.
+//! - **A persisted agent key, and only for `/mcp`.** From 0.13.0 the daemon
+//!   also answers MCP over HTTP, and that endpoint needs a credential a client
+//!   can keep in a configuration file — which the session token can never be,
+//!   because it changes every run. The two have deliberately separate
+//!   lifetimes and separate reach: the agent key opens `/mcp` and nothing else,
+//!   so a key in a config file can never reach the rotate, adopt or upgrade
+//!   routes, and rotating the session token does not disconnect an agent.
 //! - **A `Host` header that is localhost.** A page on another origin cannot
 //!   read a cross-origin response, but it can *send* the request, and a DNS
 //!   name that resolves to 127.0.0.1 would otherwise reach this server with the
@@ -49,6 +56,9 @@ pub const PORT_ENV: &str = "SEMLITH_PORT";
 
 /// The cookie the token travels in.
 pub const TOKEN_COOKIE: &str = "semlith_token";
+
+/// The one path the agent key opens.
+pub const MCP_PATH: &str = "/mcp";
 
 /// Threads answering requests.
 ///
@@ -227,12 +237,27 @@ impl Response {
 /// A handler: everything the daemon serves, behind one function.
 pub type Handler = Arc<dyn Fn(&Request) -> Response + Send + Sync>;
 
+/// The agent key, and the one it replaced.
+///
+/// `previous` is kept valid until this process exits so that a session in
+/// flight when somebody rotated finishes rather than failing mid-answer. It is
+/// not persisted: a restart is where the old key stops being accepted, which
+/// is also the moment every client had to be told about the new one anyway.
+#[derive(Default)]
+struct Agent {
+    current: String,
+    previous: Option<String>,
+}
+
 pub struct Server {
     listener: TcpListener,
     port: u16,
     /// Behind a lock so the Privacy page's Rotate button can replace it while
     /// the server is running.
     token: Arc<Mutex<String>>,
+    agent: Arc<Mutex<Agent>>,
+    /// Whether `/mcp` answers. Closing it drops the route, not the daemon.
+    mcp_open: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -254,7 +279,42 @@ impl Server {
             listener,
             port,
             token: Arc::new(Mutex::new(new_token())),
+            agent: Arc::new(Mutex::new(Agent::default())),
+            mcp_open: Arc::new(AtomicBool::new(true)),
         })
+    }
+
+    /// Install the persisted agent key. Until this is called `/mcp` accepts
+    /// the session token alone, because an empty key matches nothing.
+    pub fn set_agent_key(&self, key: &str) {
+        self.agent.lock().expect("the agent lock").current = key.to_string();
+    }
+
+    pub fn agent_key(&self) -> String {
+        self.agent.lock().expect("the agent lock").current.clone()
+    }
+
+    /// Replace the agent key.
+    ///
+    /// `now` drops the previous key immediately; otherwise it stays valid
+    /// until this process exits, so a client mid-session finishes its work and
+    /// only then needs the new stanza.
+    pub fn rotate_agent(&self, key: &str, now: bool) {
+        let mut agent = self.agent.lock().expect("the agent lock");
+        let was = std::mem::replace(&mut agent.current, key.to_string());
+        agent.previous = if now || was.is_empty() {
+            None
+        } else {
+            Some(was)
+        };
+    }
+
+    pub fn mcp_open(&self) -> bool {
+        self.mcp_open.load(Ordering::Relaxed)
+    }
+
+    pub fn set_mcp_open(&self, open: bool) {
+        self.mcp_open.store(open, Ordering::Relaxed);
     }
 
     pub fn port(&self) -> u16 {
@@ -299,6 +359,8 @@ impl Server {
             let rx = Arc::clone(&rx);
             let handler = Arc::clone(&handler);
             let token = Arc::clone(&self.token);
+            let agent = Arc::clone(&self.agent);
+            let mcp_open = Arc::clone(&self.mcp_open);
             let refused = Arc::clone(&refused);
             workers.push(std::thread::spawn(move || {
                 loop {
@@ -309,8 +371,16 @@ impl Server {
                         guard.recv()
                     };
                     let Ok(stream) = next else { return };
-                    let want = token.lock().expect("the token lock").clone();
-                    if let Some(class) = answer(stream, &handler, &want) {
+                    let auth = {
+                        let agent = agent.lock().expect("the agent lock");
+                        Auth {
+                            token: token.lock().expect("the token lock").clone(),
+                            agent: agent.current.clone(),
+                            previous: agent.previous.clone(),
+                            mcp_open: mcp_open.load(Ordering::Relaxed),
+                        }
+                    };
+                    if let Some(class) = answer(stream, &handler, &auth) {
                         refused(class);
                     }
                 }
@@ -367,8 +437,34 @@ impl Server {
     }
 }
 
+/// The credentials in force for one request.
+struct Auth {
+    token: String,
+    agent: String,
+    previous: Option<String>,
+    mcp_open: bool,
+}
+
+impl Auth {
+    /// Whether a bearer credential opens the MCP endpoint.
+    ///
+    /// An empty configured key matches nothing: `same` compares lengths first,
+    /// and an empty bearer against an empty key would otherwise be a match.
+    fn is_agent(&self, bearer: &str) -> bool {
+        if bearer.is_empty() {
+            return false;
+        }
+        if !self.agent.is_empty() && same(bearer, &self.agent) {
+            return true;
+        }
+        self.previous
+            .as_deref()
+            .is_some_and(|previous| !previous.is_empty() && same(bearer, previous))
+    }
+}
+
 /// Answer one connection. Returns why it was refused, if it was.
-fn answer(mut stream: TcpStream, handler: &Handler, want: &str) -> Option<Refusal> {
+fn answer(mut stream: TcpStream, handler: &Handler, auth: &Auth) -> Option<Refusal> {
     let request = match read_request(&mut stream) {
         Ok(Some(r)) => r,
         Ok(None) => return None,
@@ -385,13 +481,32 @@ fn answer(mut stream: TcpStream, handler: &Handler, want: &str) -> Option<Refusa
         return Some(Refusal::ForeignHost);
     }
 
+    let want = auth.token.as_str();
+    let for_mcp = request.path == MCP_PATH;
+
+    // A closed endpoint is not a route. Answered before the credential is
+    // looked at, so a client that was told to stop learns the same thing
+    // whether or not it still holds a key.
+    if for_mcp && !auth.mcp_open {
+        let _ = write_response(&mut stream, Response::error(404, "no such route"));
+        return None;
+    }
+
     let from_cookie = cookie(request.header("cookie"), TOKEN_COOKIE);
     let by_cookie = from_cookie.as_deref().is_some_and(|t| same(t, want));
     // The URL the daemon prints carries the token in the query, and that is
     // the one request that may arrive without the cookie — it is what sets it.
     let by_query = request.query("token").is_some_and(|t| same(t, want));
+    // The agent key opens `/mcp` and nothing else. This is the whole reason
+    // there are two credentials: a key that a client keeps in a file on disk
+    // must not be able to rotate a token, adopt a store or start an upgrade.
+    let by_agent = for_mcp
+        && request
+            .header("authorization")
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|bearer| auth.is_agent(bearer.trim()));
 
-    if !by_cookie && !by_query {
+    if !by_cookie && !by_query && !by_agent {
         // Empty body on purpose: a prober learns that something refused it and
         // nothing else.
         let _ = write_response(&mut stream, Response::new(401, "text/plain", Vec::new()));

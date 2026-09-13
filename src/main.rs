@@ -78,6 +78,17 @@ enum Command {
         /// Refuse to download model weights.
         #[arg(long)]
         airgap: bool,
+
+        /// Do not answer MCP over HTTP. The portal and `semlith mcp` over
+        /// stdio are unaffected; only the `/mcp` endpoint is closed.
+        #[arg(long)]
+        no_mcp_http: bool,
+    },
+
+    /// Show or rotate the agent key that authenticates the HTTP MCP endpoint.
+    Key {
+        #[command(subcommand)]
+        what: KeyCommand,
     },
 
     /// Move an existing store directory into the store home and register it,
@@ -148,6 +159,16 @@ enum Command {
 
     /// Remove a file from the store.
     Forget { path: PathBuf },
+
+    /// Delete a store: its vectors, chunks, graph and ledger, and the registry
+    /// entry naming it. The files it indexed are not touched.
+    Drop {
+        /// The registered store's name, as `semlith stats` prints it.
+        store: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Fetch one URL into the store and index it: a web page, a PDF such as an
     /// arXiv paper, or a file on GitHub. One request, for exactly the URL
@@ -266,19 +287,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
 
-    /// Show what breaks if a symbol changes — its blast radius.
-    Impact {
-        /// The symbol's name, matched exactly.
-        name: String,
-
-        /// How many hops backwards to walk.
-        #[arg(long, short, default_value_t = semlith::graph::DEFAULT_DEPTH)]
-        depth: u32,
-
-        /// Emit JSON instead of formatted text.
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Print the agent key and the stanza that carries it.
+    Show {
+        /// Print the key alone, for a script.
         #[arg(long)]
-        json: bool,
+        quiet: bool,
+    },
+
+    /// Mint a new agent key. Every client configured with the old one needs
+    /// the new stanza.
+    Rotate {
+        /// Stop accepting the previous key at once, rather than letting a
+        /// session that is already open finish.
+        #[arg(long)]
+        now: bool,
     },
 }
 
@@ -373,7 +399,9 @@ fn main() -> Result<()> {
                 if quiet {
                     return;
                 }
-                eprintln!("  + {}", display(path));
+                if p.outcome == semlith::FileOutcome::Indexing {
+                    eprintln!("  + {}", display(path));
+                }
                 if spoke.elapsed() >= PROGRESS_INTERVAL {
                     spoke = Instant::now();
                     eprintln!("    {}", predict(p, started.elapsed()));
@@ -387,8 +415,16 @@ fn main() -> Result<()> {
             home::record(&choice, &roots, &model_name)?;
 
             let (files, chunks, bytes) = store.stats()?;
+            // Images are counted apart from chunks because they are not
+            // chunks: one image is one vector, and folding it into a chunk
+            // count would make the number mean two things.
+            let images = if report.images > 0 {
+                format!(", {} images", report.images)
+            } else {
+                String::new()
+            };
             eprintln!(
-                "indexed {} files ({} chunks) in {:.1}s — {} already indexed, {} skipped, {} removed",
+                "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped, {} removed",
                 report.indexed,
                 report.chunks,
                 started.elapsed().as_secs_f32(),
@@ -527,18 +563,23 @@ fn main() -> Result<()> {
                         .map(|l| match *l {
                             "vector" => 'v',
                             "keyword" => 'f',
+                            "image" => 'i',
                             _ => 'g',
                         })
                         .collect();
+                    // An image carries its pixel size where a chunk carries a
+                    // line range, and has no excerpt to print under it.
+                    let where_in = match h.image {
+                        Some(px) => format!("{}x{} px", px.width, px.height),
+                        None => format!("{}-{}", h.start_line, h.end_line),
+                    };
                     writeln!(
                         out,
-                        "{}{}. {:.3} {via:<3} {from}{}:{}-{}{}",
+                        "{}{}. {:.3} {via:<3} {from}{}:{where_in}{}",
                         bold(),
                         i + 1,
                         h.score,
                         display(std::path::Path::new(&h.path)),
-                        h.start_line,
-                        h.end_line,
                         reset()
                     )?;
                     for line in h.text.lines() {
@@ -740,63 +781,6 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Impact { name, depth, json } => {
-            let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let reached = fleet.impact_in(None, &name, depth)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&reached)?);
-            } else if reached.is_empty() {
-                eprintln!("nothing in the graph reaches {name} within {depth} hops");
-            } else {
-                let mut out = std::io::stdout().lock();
-                let inferred = reached
-                    .iter()
-                    .filter(|r| r.confidence == semlith::graph::INFERRED)
-                    .count();
-                writeln!(
-                    out,
-                    "{}{} symbol{} {} {name} within {depth} hop{}{}",
-                    bold(),
-                    reached.len(),
-                    if reached.len() == 1 { "" } else { "s" },
-                    if reached.len() == 1 {
-                        "reaches"
-                    } else {
-                        "reach"
-                    },
-                    if depth == 1 { "" } else { "s" },
-                    reset(),
-                )?;
-                for r in &reached {
-                    writeln!(
-                        out,
-                        "  {} hop{}  {} via {} ({})  {}{}:{}",
-                        r.hops,
-                        if r.hops == 1 { " " } else { "s" },
-                        r.symbol.name,
-                        r.via,
-                        r.confidence,
-                        store_prefix(&r.symbol.store),
-                        display(std::path::Path::new(&r.symbol.path)),
-                        r.symbol.start_line,
-                    )?;
-                }
-                if inferred > 0 {
-                    writeln!(
-                        out,
-                        "{inferred} of these were matched by name, not resolved through an import."
-                    )?;
-                }
-                if reached.len() >= semlith::graph::MAX_NODES {
-                    writeln!(
-                        out,
-                        "Stopped at the {} symbol budget; the real radius is larger.",
-                        semlith::graph::MAX_NODES
-                    )?;
-                }
-            }
-        }
-
         Command::Languages => {
             for entry in semlith::filter::LANGUAGES {
                 // Extensions print with their dot and filenames without one,
@@ -829,6 +813,10 @@ fn main() -> Result<()> {
                 println!("model    {} ({} dim)", store.model(), store.dim());
                 println!("files    {files}");
                 println!("chunks   {chunks}");
+                let images = store.image_count()?;
+                if images > 0 {
+                    println!("images   {images}");
+                }
                 println!("vectors  {}", store.len());
                 if let Some((shards, max)) = store.shards() {
                     // What the store costs to search, before searching it.
@@ -923,8 +911,49 @@ fn main() -> Result<()> {
                 eprintln!("{hint}");
             }
             let mut store = Semlith::open(&choice.one()?, None)?;
-            let n = store.forget(&path)?;
-            eprintln!("removed {n} chunks for {}", path.display());
+            let (chunks, images) = store.forget(&path)?;
+            // An image has no chunks, so a message counting only chunks would
+            // report a successful forget as having done nothing.
+            let what = match (chunks, images) {
+                (0, 0) => "nothing — it was not indexed".to_string(),
+                (0, images) => format!("{images} image vector(s)"),
+                (chunks, 0) => format!("{chunks} chunks"),
+                (chunks, images) => format!("{chunks} chunks and {images} image vector(s)"),
+            };
+            eprintln!("removed {what} for {}", path.display());
+        }
+
+        Command::Drop { store, yes } => {
+            let dir = semlith::home::Registry::dir_of(&store);
+            if !semlith::home::Registry::load()?.stores.contains_key(&store) {
+                anyhow::bail!("no registered store called {store}");
+            }
+            if !yes {
+                let go = cliclack::confirm(format!(
+                    "Delete {store}? Its vectors, chunks, graph and ledger go;                      the files it indexed are untouched."
+                ))
+                .initial_value(false)
+                .interact()
+                .unwrap_or(false);
+                if !go {
+                    eprintln!("nothing was deleted");
+                    return Ok(());
+                }
+            }
+
+            // Through the daemon when one is holding it: it owns the lock, and
+            // deleting the files under an open writer is how half a store is
+            // left behind.
+            let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
+            let through_daemon = match semlith::proxy::find(&dirs) {
+                Some(upstream) => upstream.delete_store(&store).is_ok(),
+                None => false,
+            };
+            if !through_daemon {
+                semlith::home::delete_store(&store)?;
+            }
+            eprintln!("deleted {store} ({})", dir.display());
+            eprintln!("the files it indexed are untouched");
         }
 
         Command::Start {
@@ -933,6 +962,7 @@ fn main() -> Result<()> {
             port,
             debounce,
             airgap,
+            no_mcp_http,
         } => {
             arm_airgap(airgap);
             let dirs = semlith::daemon::stores_to_open(&cli.store, &paths, &cwd)?;
@@ -948,9 +978,94 @@ fn main() -> Result<()> {
                 std::time::Duration::from_millis(debounce),
                 semlith::embed::airgap(),
                 ledger,
+                !no_mcp_http,
                 |line| eprintln!("semlith: {line}"),
             )?;
         }
+
+        Command::Key { what } => match what {
+            KeyCommand::Show { quiet } => {
+                let key = semlith::home::agent_key()?;
+                if quiet {
+                    println!("{key}");
+                } else {
+                    let port = semlith::daemon::port_of(None);
+                    println!("{}{key}{}", bold(), reset());
+                    println!("{}", semlith::home::agent_key_path().display());
+                    println!();
+                    println!("It authenticates the MCP endpoint and nothing else, and it does not");
+                    println!("change when the daemon restarts or the portal's token is rotated.");
+                    for stanza in semlith::clients::http_stanzas(&key) {
+                        println!();
+                        println!("{}{}{}", bold(), stanza.format, reset());
+                        print!("{}", stanza.text);
+                    }
+                    println!();
+                    println!("Endpoint: http://127.0.0.1:{port}/mcp");
+                }
+            }
+            KeyCommand::Rotate { now } => {
+                // Read before it is replaced: it is what identifies the
+                // stanzas to rewrite.
+                let previous = semlith::home::agent_key().unwrap_or_default();
+                let fresh = semlith::home::rotate_agent_key()?;
+                let carried = semlith::setup::recarry_key(&previous, &fresh);
+                let port = semlith::daemon::port_of(None);
+                let url = format!("http://127.0.0.1:{port}/mcp");
+
+                // A running daemon holds the key in memory, so it is told
+                // rather than left serving only the key it started with.
+                let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
+                let reached = match semlith::proxy::find(&dirs) {
+                    Some(upstream) => upstream.adopt_key(&fresh, now).is_ok(),
+                    None => false,
+                };
+
+                println!("{}{fresh}{}", bold(), reset());
+                if reached {
+                    if now {
+                        println!("The running daemon took it up; the previous key is refused now.");
+                    } else {
+                        println!(
+                            "The running daemon took it up. The previous key keeps working until \
+                             that daemon exits, so a session already open finishes."
+                        );
+                    }
+                } else {
+                    println!(
+                        "No daemon is running here; the next `semlith start` reads the new key."
+                    );
+                }
+
+                // Claude Code is the one client semlith writes a config for,
+                // because it has a CLI for it. Everything else is named.
+                if semlith::setup::claude_present() {
+                    if semlith::setup::register_claude_http(&fresh, &url) {
+                        println!("Claude Code was re-registered against {url}.");
+                    } else {
+                        println!(
+                            "Claude Code is installed but `claude mcp add` failed; paste the stanza below."
+                        );
+                    }
+                }
+                if carried.is_empty() {
+                    println!("No configuration file on this machine carried the old key.");
+                } else {
+                    println!();
+                    println!("Carried the new key into:");
+                    for path in &carried {
+                        println!("  {}", path.display());
+                    }
+                }
+
+                println!();
+                println!("Any client configured somewhere else needs the stanza below pasted in.");
+                for stanza in semlith::clients::http_stanzas(&fresh) {
+                    println!();
+                    print!("{}", stanza.text);
+                }
+            }
+        },
 
         Command::Adopt {
             store_dir,

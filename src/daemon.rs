@@ -88,7 +88,12 @@ impl Discovery {
 
 /// Something the watcher thread should do next, on behalf of a request.
 enum Job {
-    Index(Vec<PathBuf>),
+    /// The paths to walk, and every file the earlier slices of this same run
+    /// already embedded. A slice yields the writer back to the watcher when
+    /// its budget runs out and the rest is re-queued behind whatever the
+    /// watcher had waiting, so one logical run is several `Index` jobs on one
+    /// report channel.
+    Index(Vec<PathBuf>, Vec<String>),
     Forget(PathBuf),
 }
 
@@ -119,6 +124,14 @@ pub struct Store {
     /// False once the watcher thread has returned, so the portal can say a
     /// store stopped being kept current rather than showing a stale count.
     pub watching: AtomicBool,
+    /// Set to stop this store's watcher and release its lock, so the store can
+    /// be deleted while the daemon keeps running. The daemon's own shutdown
+    /// sets it on every open store alongside the global stop.
+    pub stop: AtomicBool,
+    /// A queued index run holds here between files while this is set.
+    pub paused: AtomicBool,
+    /// A queued index run gives up and undoes itself when this is set.
+    pub cancelled: AtomicBool,
     /// Unix seconds of the last write this daemon made to the store.
     pub last_write: AtomicUsize,
 }
@@ -146,18 +159,68 @@ impl Store {
     ///
     /// The receiver is what a streaming route writes chunks from, so the
     /// browser sees an index run while it is running rather than when it ends.
-    fn submit(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
+    /// Queue a job and hand back the channel its progress arrives on.
+    ///
+    /// `notice` is sent before the job is queued, for a caller that streams
+    /// and would otherwise hear nothing while the writer finishes what it is
+    /// doing. A caller that takes the first message as its answer — forget —
+    /// passes `None`, because a notice would be that answer.
+    fn submit(
+        &self,
+        job: Job,
+        notice: Option<serde_json::Value>,
+    ) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
-        self.queue
-            .lock()
-            .expect("the queue lock")
-            .push_back(Queued { job, report });
+        let mut queue = self.queue.lock().expect("the queue lock");
+        if let Some(mut notice) = notice {
+            if let Some(object) = notice.as_object_mut() {
+                object.insert("store".into(), serde_json::json!(self.name));
+                object.insert("ahead".into(), serde_json::json!(queue.len()));
+            }
+            let _ = report.send(notice);
+        }
+        queue.push_back(Queued { job, report });
         progress
     }
 
     /// Whether the writer has anything waiting — the Index view's queue depth.
     pub fn queue_depth(&self) -> usize {
         self.queue.lock().expect("the queue lock").len()
+    }
+
+    /// Put a slice's remainder back, behind whatever is waiting.
+    fn requeue(&self, queued: Queued) {
+        self.queue.lock().expect("the queue lock").push_back(queued);
+    }
+
+    /// Drop every index job that has not started, answering each as stopped.
+    ///
+    /// A stop asked for while the job is still waiting its turn used to sit
+    /// until the writer reached it and then be cleared, so the page said
+    /// "stopping…" for as long as the queue took. Nothing was embedded, so
+    /// there is nothing to undo and the answer is immediate.
+    pub fn cancel_queued(&self) -> usize {
+        let mut queue = self.queue.lock().expect("the queue lock");
+        let mut dropped = 0;
+        queue.retain(|queued| {
+            if !matches!(queued.job, Job::Index(..)) {
+                return true;
+            }
+            let _ = queued.report.send(serde_json::json!({
+                "event": "done",
+                "indexed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "removed": 0,
+                "chunks": 0,
+                "images": 0,
+                "remaining": 0,
+                "stopped": true,
+            }));
+            dropped += 1;
+            false
+        });
+        dropped
     }
 }
 
@@ -193,6 +256,12 @@ pub struct State {
     /// simply stop asking — so recency is the only honest answer to "how many
     /// are connected".
     pub proxies: Mutex<BTreeMap<u32, u64>>,
+    /// What each connected MCP client said it was, keyed by session.
+    ///
+    /// Held here and lost when the daemon exits, which is the honest lifetime:
+    /// there is no disconnect to observe over HTTP either, so a client is
+    /// "connected" for as long as it has been heard from recently.
+    pub clients: Mutex<BTreeMap<String, Client>>,
     /// A second reader, for forwarded MCP calls, opened on first use.
     ///
     /// Separate from `fleet` on purpose: a forwarded `semlith_index` blocks its
@@ -210,6 +279,20 @@ pub struct State {
 
 /// How recently a proxy must have called to count as connected.
 const PROXY_FRESH: u64 = 120;
+
+/// One MCP client, as the Agents page shows it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Client {
+    /// What the client called itself in `initialize`, or the transport when it
+    /// never said. Invented names are worse than an honest "unnamed client".
+    pub name: String,
+    pub transport: String,
+    /// The protocol revision that was negotiated, as the client asked for it.
+    pub revision: String,
+    /// How many tool calls it has made through this daemon.
+    pub queries: u64,
+    pub seen: u64,
+}
 
 impl State {
     /// Every open store, as a snapshot.
@@ -252,7 +335,13 @@ impl State {
         paths: Vec<PathBuf>,
     ) -> Result<mpsc::Receiver<serde_json::Value>> {
         Self::writer_alive(store)?;
-        Ok(store.submit(Job::Index(paths)))
+        // The writer is one thread and it may be mid-catch-up. A page that
+        // shows nothing for a minute looks like a page that lost the request
+        // rather than one waiting its turn.
+        Ok(store.submit(
+            Job::Index(paths, Vec::new()),
+            Some(serde_json::json!({ "event": "queued" })),
+        ))
     }
 
     pub fn forget(
@@ -261,7 +350,49 @@ impl State {
         path: PathBuf,
     ) -> Result<mpsc::Receiver<serde_json::Value>> {
         Self::writer_alive(store)?;
-        Ok(store.submit(Job::Forget(path)))
+        // No notice: this caller takes the first message as the answer.
+        Ok(store.submit(Job::Forget(path), None))
+    }
+
+    /// Close a store and delete everything it holds.
+    ///
+    /// The order is what makes this safe while the daemon runs: the watcher is
+    /// told to stop and its lock is released when the thread returns, the
+    /// store leaves the served set so no request can reach it, the readers are
+    /// dropped so no SQLite handle is still open on the files, and only then
+    /// is the directory removed and the registry entry dropped.
+    ///
+    /// The indexed files themselves are not touched — this deletes what
+    /// semlith derived from them.
+    pub fn delete_store(&self, name: &str) -> Result<PathBuf> {
+        let Some(store) = self.store(name) else {
+            anyhow::bail!("this daemon is not serving a store called {name}");
+        };
+
+        store.stop.store(true, Ordering::SeqCst);
+        // The watcher checks the flag between filesystem events, so this is a
+        // wait of one debounce, not of one filesystem event.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while store.watching.load(Ordering::Relaxed) {
+            if std::time::Instant::now() > deadline {
+                anyhow::bail!(
+                    "{name}'s watcher did not stop, so its lock is still held;                      nothing was deleted"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        self.stores
+            .write()
+            .expect("the stores lock")
+            .retain(|s| s.name != name);
+        // Before the files go: a reader holding this store open would keep its
+        // SQLite handles alive, and on Windows an open handle refuses the
+        // delete outright.
+        self.reopen_readers();
+        Discovery::remove(&store.dir);
+
+        crate::home::delete_store(name)
     }
 
     /// Refuse to queue work for a store whose writer is gone.
@@ -290,6 +421,57 @@ impl State {
             let _ = discovery(self.server.port(), &fresh).write(&store.dir);
         }
         fresh
+    }
+
+    /// Record what a client said about itself, and count its tool calls.
+    ///
+    /// `session` is how one client is told from another: over HTTP it is the
+    /// `Mcp-Session-Id` this daemon hands out at `initialize`, and for a
+    /// forwarding `semlith mcp` it is the proxy's pid. A client that echoes
+    /// neither is counted as one unnamed client per transport rather than as a
+    /// new one on every request.
+    pub fn note_client(
+        &self,
+        session: &str,
+        transport: &str,
+        name: Option<&str>,
+        revision: Option<&str>,
+        query: bool,
+    ) {
+        let now = now();
+        let mut clients = self.clients.lock().expect("the client lock");
+        let entry = clients
+            .entry(format!("{transport}:{session}"))
+            .or_insert_with(|| Client {
+                name: name.unwrap_or("unnamed client").to_string(),
+                transport: transport.to_string(),
+                revision: revision.unwrap_or("—").to_string(),
+                queries: 0,
+                seen: now,
+            });
+        if let Some(name) = name {
+            entry.name = name.to_string();
+        }
+        if let Some(revision) = revision {
+            entry.revision = revision.to_string();
+        }
+        if query {
+            entry.queries += 1;
+        }
+        entry.seen = now;
+        clients.retain(|_, client| now.saturating_sub(client.seen) <= PROXY_FRESH);
+    }
+
+    /// Every client heard from recently.
+    pub fn clients(&self) -> Vec<Client> {
+        let now = now();
+        self.clients
+            .lock()
+            .expect("the client lock")
+            .values()
+            .filter(|client| now.saturating_sub(client.seen) <= PROXY_FRESH)
+            .cloned()
+            .collect()
     }
 
     /// Note that a forwarding `semlith mcp` is alive.
@@ -360,6 +542,9 @@ impl State {
             queue: Mutex::new(VecDeque::new()),
             events: Mutex::new(VecDeque::new()),
             watching: AtomicBool::new(true),
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
             last_write: AtomicUsize::new(0),
         });
 
@@ -377,7 +562,7 @@ impl State {
         let report = Arc::clone(&self.report);
         std::thread::spawn(move || {
             let _lock = lock;
-            if let Err(e) = tend(&watching, debounce, &watch::STOP, &*report) {
+            if let Err(e) = tend(&watching, debounce, &watching.stop, &*report) {
                 report(&format!("{}: watcher stopped: {e}", watching.name));
                 watching.note(format!("watcher stopped: {e}"));
             }
@@ -502,6 +687,7 @@ pub fn run(
     debounce: Duration,
     airgap: bool,
     ledger: bool,
+    mcp_http: bool,
     report: impl Fn(&str) + Send + Sync + 'static,
 ) -> Result<Arc<State>> {
     let registry = Registry::load()?;
@@ -524,6 +710,23 @@ pub fn run(
     // minute.
     let server = Arc::new(Server::bind(port)?);
     report(&format!("listening on 127.0.0.1:{}", server.port()));
+
+    // The agent key is read, or written if this machine has none. It survives
+    // restarts and upgrades on purpose: a client's configuration is written
+    // once and has to keep working, which the per-run session token can never
+    // do.
+    let key = crate::home::agent_key()?;
+    server.set_agent_key(&key);
+    server.set_mcp_open(mcp_http);
+    if mcp_http {
+        report(&format!(
+            "MCP over HTTP at http://127.0.0.1:{}{}",
+            server.port(),
+            crate::http::MCP_PATH
+        ));
+    } else {
+        report("MCP over HTTP is closed (--no-mcp-http); `semlith mcp` over stdio is unaffected");
+    }
 
     let mut stores = Vec::new();
     for (name, dir, roots) in opening {
@@ -549,6 +752,9 @@ pub fn run(
             queue: Mutex::new(VecDeque::new()),
             events: Mutex::new(VecDeque::new()),
             watching: AtomicBool::new(false),
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
             last_write: AtomicUsize::new(0),
         }));
     }
@@ -580,6 +786,7 @@ pub fn run(
         report: Arc::clone(&report_line),
         refusals: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
+        clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
         ledger,
     });
@@ -601,7 +808,7 @@ pub fn run(
             // Moved in so the lock's life is the thread's life, which is what
             // makes "the daemon is the writer" true rather than intended.
             let _lock = lock;
-            if let Err(e) = tend(&store, debounce, &watch::STOP, &*report) {
+            if let Err(e) = tend(&store, debounce, &store.stop, &*report) {
                 report(&format!("{}: watcher stopped: {e}", store.name));
                 store.note(format!("watcher stopped: {e}"));
             }
@@ -644,6 +851,12 @@ pub fn run(
         // released when its thread joins, and the discovery file goes last so
         // nothing is pointed at a daemon that is no longer answering.
         watch::STOP.store(true, Ordering::SeqCst);
+        // Each watcher waits on its own store's flag now, so that a single
+        // store can be closed and deleted without stopping the daemon. A
+        // shutdown is every store at once.
+        for store in state.stores() {
+            store.stop.store(true, Ordering::SeqCst);
+        }
         for watcher in watchers {
             let _ = watcher.join();
         }
@@ -685,6 +898,8 @@ fn tend(
         &roots,
         debounce,
         stop,
+        // A queued job is what the catch-up steps aside for.
+        &|| store.queue_depth() > 0,
         |progress| {
             use watch::Progress;
             match progress {
@@ -735,6 +950,7 @@ fn tend(
 /// Run one queued job, reporting progress back to whoever asked for it.
 fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
     let Queued { job, report } = queued;
+    let back = report.clone();
     let say = |value: serde_json::Value| {
         // A closed receiver means the browser navigated away mid-run. The work
         // still finishes — it is the store's, not the request's.
@@ -742,21 +958,113 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
     };
 
     match job {
-        Job::Index(paths) => {
-            let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-            say(serde_json::json!({ "event": "started", "paths": names }));
-            let outcome = writer.index_within_held(&paths, SLICE, |path, progress| {
-                say(serde_json::json!({
-                    "event": "file",
-                    "path": path.display().to_string(),
-                    "scanned": progress.scanned,
-                    "total": progress.total,
-                    "chunks": progress.chunks,
-                }));
-            });
+        Job::Index(paths, already) => {
+            // Only the first slice announces itself; the rest are the same run
+            // continuing, and a second "started" would read as a second run.
+            if already.is_empty() {
+                let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                say(serde_json::json!({ "event": "started", "paths": names }));
+            }
+            let started_at = std::time::Instant::now();
+            // A pause belongs to the run that was on when it was asked for.
+            // A stop does not need clearing here: a job that was queued when
+            // one arrived has already been dropped from the queue, so reaching
+            // this line means the flag is for this run.
+            store.paused.store(false, Ordering::Relaxed);
+            let control = {
+                let store = Arc::clone(store);
+                let told = std::sync::atomic::AtomicBool::new(false);
+                move || {
+                    if store.cancelled.load(Ordering::Relaxed) {
+                        return crate::Flow::Stop;
+                    }
+                    if store.paused.load(Ordering::Relaxed) {
+                        // Once per pause, not once per tick.
+                        if !told.swap(true, Ordering::Relaxed) {
+                            say(serde_json::json!({ "event": "paused" }));
+                        }
+                        return crate::Flow::Pause;
+                    }
+                    if told.swap(false, Ordering::Relaxed) {
+                        say(serde_json::json!({ "event": "resumed" }));
+                    }
+                    crate::Flow::Run
+                }
+            };
+            let outcome =
+                writer.index_within_held_under(&paths, SLICE, &control, |path, progress| {
+                    say(serde_json::json!({
+                        "event": "file",
+                        "path": path.display().to_string(),
+                        // What is happening to this file, so a page can say
+                        // "unchanged" rather than showing nothing at all.
+                        "outcome": progress.outcome.as_str(),
+                        "scanned": progress.scanned,
+                        "total": progress.total,
+                        "indexed": progress.indexed,
+                        "chunks": progress.chunks,
+                        "symbols": progress.symbols,
+                        "elapsed_ms": started_at.elapsed().as_millis() as u64,
+                    }));
+                });
             match outcome {
-                Ok(done) => {
+                Ok(mut done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
+
+                    // Everything this run has embedded, across every slice of
+                    // it, so a stop undoes the run rather than the slice that
+                    // happened to be going.
+                    let mut written = already;
+                    written.append(&mut done.written);
+
+                    if done.stopped {
+                        // The same eviction a forget performs, for exactly the
+                        // files this run wrote. Done here rather than inside
+                        // the index pass because only this loop knows how many
+                        // slices the run has had.
+                        let mut undone = 0;
+                        for key in &written {
+                            if writer.forget_held(Path::new(key)).is_ok() {
+                                undone += 1;
+                            }
+                        }
+                        store.note(format!(
+                            "an index run was stopped; {undone} file(s) it had embedded were undone"
+                        ));
+                        say(serde_json::json!({
+                            "event": "done",
+                            "indexed": 0,
+                            "unchanged": 0,
+                            "skipped": 0,
+                            "removed": undone,
+                            "chunks": 0,
+                            "images": 0,
+                            "remaining": 0,
+                            "stopped": true,
+                        }));
+                        store.paused.store(false, Ordering::Relaxed);
+                        store.cancelled.store(false, Ordering::Relaxed);
+                        return;
+                    }
+
+                    // More to do: the rest goes back on the queue with the same
+                    // channel, so the watcher gets a turn between slices and
+                    // the reader keeps one stream rather than being asked to
+                    // press the button again.
+                    if done.remaining > 0 {
+                        store.requeue(Queued {
+                            job: Job::Index(paths, written),
+                            report: back,
+                        });
+                        say(serde_json::json!({
+                            "event": "slice",
+                            "remaining": done.remaining,
+                            "indexed": done.indexed,
+                            "chunks": done.chunks,
+                        }));
+                        return;
+                    }
+
                     store.note(format!("{} indexed from the portal", done.indexed));
                     say(serde_json::json!({
                         "event": "done",
@@ -765,22 +1073,32 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                         "skipped": done.skipped,
                         "removed": done.removed,
                         "chunks": done.chunks,
+                        "images": done.images,
                         // Above zero means the slice ran out of time, not that
                         // anything failed: asking again continues where it
                         // stopped and redoes nothing.
                         "remaining": done.remaining,
+                        // A stopped run undid itself: nothing it embedded is
+                        // in the store, so the next attempt starts from zero.
+                        "stopped": done.stopped,
                     }));
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
             }
+            // The flags belong to a run, and this one is over.
+            store.paused.store(false, Ordering::Relaxed);
+            store.cancelled.store(false, Ordering::Relaxed);
         }
         Job::Forget(path) => match writer.forget_held(&path) {
-            Ok(n) => {
+            // Counted apart, because an image has no chunks: a single number
+            // would report forgetting a picture as having done nothing.
+            Ok((chunks, images)) => {
                 store.last_write.store(now() as usize, Ordering::Relaxed);
                 store.note(format!("forgot {}", path.display()));
                 say(serde_json::json!({
                     "event": "done",
-                    "forgot": n,
+                    "forgot": chunks,
+                    "images": images,
                     "path": path.display().to_string(),
                 }));
             }
@@ -871,9 +1189,15 @@ impl crate::mcp::Writer for Writer {
         if let Some(error) = done["error"].as_str() {
             return Err(error.to_string());
         }
-        Ok(match done["forgot"].as_u64().unwrap_or(0) {
-            0 => format!("{path} was not indexed; nothing removed."),
-            n => format!("Removed {n} chunks for {path}."),
+        let chunks = done["forgot"].as_u64().unwrap_or(0);
+        let images = done["images"].as_u64().unwrap_or(0);
+        Ok(match (chunks, images) {
+            (0, 0) => format!("{path} was not indexed; nothing removed."),
+            (0, images) => format!("Removed {images} image vector(s) for {path}."),
+            (chunks, 0) => format!("Removed {chunks} chunks for {path}."),
+            (chunks, images) => {
+                format!("Removed {chunks} chunks and {images} image vector(s) for {path}.")
+            }
         })
     }
 }
@@ -945,6 +1269,9 @@ mod tests {
                             queue: Mutex::new(VecDeque::new()),
                             events: Mutex::new(VecDeque::new()),
                             watching: AtomicBool::new(false),
+                            stop: AtomicBool::new(false),
+                            paused: AtomicBool::new(false),
+                            cancelled: AtomicBool::new(false),
                             last_write: AtomicUsize::new(0),
                         })
                     })
@@ -956,6 +1283,7 @@ mod tests {
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
+            clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
             ledger: false,
         };

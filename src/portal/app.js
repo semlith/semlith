@@ -95,13 +95,16 @@ function clock(unix) {
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** An inline icon. Decorative: the control around it carries the name. */
-function icon(d, size) {
+function icon(d, size, solid) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("width", String(size || 16));
   svg.setAttribute("height", String(size || 16));
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
+  // A shape that is a shape rather than a stroke — the three dots of a menu
+  // control. Drawn as strokes they are zero-length segments whose whole size
+  // is the line width, which is as faint as a mark can be.
+  svg.setAttribute("fill", solid ? "currentColor" : "none");
+  svg.setAttribute("stroke", solid ? "none" : "currentColor");
   svg.setAttribute("stroke-width", "1.7");
   svg.setAttribute("stroke-linecap", "round");
   svg.setAttribute("stroke-linejoin", "round");
@@ -124,6 +127,11 @@ const ICONS = {
   up: "M5 12h14|M11 6l-6 6 6 6",
   alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
   moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
+  copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
+  // Three filled dots, as circles rather than as dotted strokes.
+  more:
+    "M12 4.1a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|"
+    + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -135,20 +143,27 @@ const NAV_ICONS = {
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
   languages: "M4 6h9|M8 6v2c0 3-2 5-4 6|M7 11c1 2 3 3 5 3.5|M13 20l4-9 4 9|M14.6 17h4.8",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
-  impact: "M4 18l5-6 4 3 7-9|M20 6h-4|M20 6v4",
   ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
   privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
 };
 
-/** A button that copies text and says so for a moment. */
-function copyButton(getText, label) {
+/** A button that copies text and says so for a moment.
+ *
+ * Invisible until the pointer enters the block it belongs to — see `.copy` in
+ * the stylesheet — so a page never shows a column of copy buttons competing
+ * with the content they copy. */
+function copyButton(getText, label, word) {
   const was = label || "Copy";
+  // A field wide enough to hold a command has room for the word; the icon is
+  // for a code block, where the control sits over the text it copies.
+  const face = () => (word ? was : icon(ICONS.copy, 14));
   const button = el("button", {
-    class: "button secondary small",
+    class: "button secondary small copy",
     type: "button",
-    text: was,
+    "aria-label": was,
+    title: was,
     onclick: async () => {
       const text = typeof getText === "function" ? getText() : getText;
       try {
@@ -167,22 +182,50 @@ function copyButton(getText, label) {
         }
         area.remove();
       }
-      button.textContent = "Copied";
+      button.classList.add("done");
+      fill(button, "Copied");
       setTimeout(() => {
-        button.textContent = was;
+        button.classList.remove("done");
+        fill(button, face());
       }, 1400);
     },
   });
+  fill(button, face());
   return button;
 }
 
-function copyField(command) {
+function copyField(command, word) {
   return el(
     "div",
-    { class: "copyfield" },
+    { class: word ? "copyfield worded" : "copyfield" },
     el("code", { class: "text", text: command }),
-    copyButton(command),
+    copyButton(command, "Copy", word),
   );
+}
+
+/** A code block with its copy control over the top-right corner. */
+function codeBlock(text, label) {
+  return el(
+    "div",
+    { class: "code-block" },
+    el("pre", { class: "code", text }),
+    copyButton(text, label || "Copy"),
+  );
+}
+
+/* A command, a path or an identifier set inside a sentence.
+ *
+ * This is what makes the capitalisation rule read as a rule rather than as a
+ * typo: the product is "Semlith" in prose and `semlith` is a command, and the
+ * only thing that tells a reader which one they are looking at is that one of
+ * them is set in mono. */
+function mono(text) {
+  return el("code", { class: "mono", text });
+}
+
+/** A paragraph of prose, where any part may be a mono command. */
+function says(...parts) {
+  return el("p", { class: "subtitle" }, parts);
 }
 
 /** A failure. Coloured like a problem, because it is one. */
@@ -200,18 +243,553 @@ function empty(message) {
   return el("div", { class: "empty" }, message);
 }
 
+/* ------------------------------------------------------------------- tips */
+
+/* One tooltip for the whole portal.
+ *
+ * The element lives at the end of <body> and is positioned against the
+ * viewport, which is the whole point: the previous implementation was a
+ * `::after` on the element being described, and `.table-wrap` carries
+ * `overflow: auto`, so a scroll container clipped it. The Files page's path
+ * tip — the reason the feature exists — was the one that could not be read.
+ *
+ * `show` takes content and the rectangle to hang it off. It prefers to sit
+ * above and left-aligned, and flips or clamps when that would leave the
+ * viewport. The Graph canvas uses the same element for its richer card, so
+ * there is one implementation rather than two. */
+const tip = {
+  node: null,
+  owner: null,
+
+  ensure() {
+    if (!this.node) {
+      this.node = el("div", { class: "tip", role: "tooltip", "aria-hidden": "true" });
+      document.body.append(this.node);
+    }
+    return this.node;
+  },
+
+  /** `content` is a string or an element; `rect` is a viewport rectangle. */
+  show(content, rect, owner) {
+    const node = this.ensure();
+    this.owner = owner || null;
+    fill(node, content);
+    node.setAttribute("aria-hidden", "false");
+    // Measured after filling and before positioning: the size depends on the
+    // text, and a stale measurement puts the flip decision on the wrong side.
+    node.dataset.open = "true";
+    const box = node.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.left;
+    if (left + box.width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - margin - box.width);
+    }
+    let top = rect.top - box.height - 6;
+    // Above by default, below when there is no room — the flip the criterion
+    // asks for, and the reason this is measured against the viewport.
+    if (top < margin) top = rect.bottom + 6;
+    node.style.left = `${Math.max(margin, Math.round(left))}px`;
+    node.style.top = `${Math.round(top)}px`;
+  },
+
+  /** Hang a tip off an element. */
+  at(target, content) {
+    this.show(content || target.getAttribute("data-tip"), target.getBoundingClientRect(), target);
+  },
+
+  /** Hang a tip off a point, for the canvas, which has no elements to hang on. */
+  atPoint(x, y, content, owner) {
+    this.show(content, { left: x + 12, top: y - 8, bottom: y + 18 }, owner);
+  },
+
+  hide(owner) {
+    if (!this.node) return;
+    if (owner && this.owner !== owner) return;
+    this.node.dataset.open = "false";
+    this.node.setAttribute("aria-hidden", "true");
+    this.owner = null;
+  },
+};
+
+/* Delegated, so a tip costs nothing per row: every table in the portal renders
+ * its rows fresh, and binding two listeners to each of a thousand cells is how
+ * a scroll starts to stutter. */
+function wireTips() {
+  const find = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+
+  document.addEventListener("pointerover", (e) => {
+    const target = find(e.target);
+    if (target) tip.at(target);
+    else if (tip.owner && tip.owner.nodeType) tip.hide();
+  });
+  document.addEventListener("pointerout", (e) => {
+    const target = find(e.target);
+    if (target) tip.hide(target);
+  });
+  // Keyboard parity: focus shows the same label a hover does.
+  document.addEventListener("focusin", (e) => {
+    const target = find(e.target);
+    if (target) tip.at(target);
+  });
+  document.addEventListener("focusout", (e) => {
+    const target = find(e.target);
+    if (target) tip.hide(target);
+  });
+  // A fixed tip does not travel with the row it describes, so it leaves when
+  // the row does. Capture, because the scroll happens inside a card.
+  window.addEventListener("scroll", () => tip.hide(), true);
+  window.addEventListener("resize", () => tip.hide());
+}
+
+/* ----------------------------------------------------------------- table */
+
+/* One table for the whole portal: Stores, Files, Languages, the About model
+ * list and the Agents client list all render through this. Five hand-written
+ * tables is how one page gains sorting and the other four do not.
+ *
+ * Columns are `{ key, label, className, sortable, value, render }`. `value`
+ * pulls the sort key out of a row; `render` returns the cell's content. A
+ * table is client-side by default — its rows are already in hand — and
+ * `server: true` hands sorting and paging back to the caller instead, which is
+ * what the Files table needs: sorting has to order the whole store rather than
+ * the page of it that happens to be loaded.
+ */
+const PER_PAGE = [5, 10, 25, 50];
+
+function dataTable(spec) {
+  const columns = spec.columns;
+  const view = {
+    page: 1,
+    perPage: spec.perPage || 10,
+    sort: spec.sort || null,
+    dir: spec.dir || "asc",
+  };
+  let rows = spec.rows || [];
+  let total = spec.total === undefined ? rows.length : spec.total;
+
+  const headRow = el("tr", {});
+  const body = el("tbody", {});
+  const foot = el("div", { class: "table-foot" });
+  const table = el(
+    "table",
+    { class: spec.className || null },
+    el("thead", {}, headRow),
+    body,
+  );
+  // `grow: false` for a table that shares a page with other blocks: stretching
+  // a three-row table down a 900px page to fill it is empty space pretending
+  // to be a table.
+  const node = el(
+    "div",
+    { class: spec.grow ? "card table-card grow" : "card table-card" },
+    el("div", { class: "table-wrap" }, table),
+    foot,
+  );
+
+  function pages() {
+    return Math.max(1, Math.ceil(total / view.perPage));
+  }
+
+  function sorted() {
+    if (!view.sort) return rows;
+    const column = columns.find((c) => c.key === view.sort);
+    if (!column || !column.value) return rows;
+    const sign = view.dir === "desc" ? -1 : 1;
+    // A copy: sorting the caller's array in place would reorder the data
+    // behind whatever else is reading it.
+    return [...rows].sort((a, b) => {
+      const x = column.value(a);
+      const y = column.value(b);
+      if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
+      return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
+    });
+  }
+
+  function shown() {
+    if (spec.server) return rows;
+    const from = (view.page - 1) * view.perPage;
+    return sorted().slice(from, from + view.perPage);
+  }
+
+  function changed() {
+    if (spec.server && spec.onChange) spec.onChange({ ...view });
+    else paint();
+  }
+
+  function sortBy(key) {
+    if (view.sort === key) view.dir = view.dir === "asc" ? "desc" : "asc";
+    else {
+      view.sort = key;
+      view.dir = "asc";
+    }
+    view.page = 1;
+    changed();
+  }
+
+  function paintHead() {
+    fill(
+      headRow,
+      columns.map((column) => {
+        const on = view.sort === column.key;
+        if (column.head) {
+          // A header that is a control rather than a label — the select-all
+          // box above a column of checkboxes.
+          return el("th", { class: column.className || null }, column.head());
+        }
+        if (column.sortable === false) {
+          return el("th", { class: column.className || null, text: column.label });
+        }
+        return el(
+          "th",
+          {
+            class: column.className || null,
+            "aria-sort": on ? (view.dir === "asc" ? "ascending" : "descending") : "none",
+          },
+          el(
+            "button",
+            { class: "sort", type: "button", onclick: () => sortBy(column.key) },
+            column.label,
+            el("span", { class: "arrow", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+          ),
+        );
+      }),
+    );
+  }
+
+  function paintBody() {
+    const page = shown();
+    fill(
+      body,
+      page.map((row, i) =>
+        el(
+          "tr",
+          {},
+          columns.map((column) =>
+            el(
+              "td",
+              { class: column.className || null },
+              column.render ? column.render(row, i) : String(column.value ? column.value(row) : ""),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  function paintFoot() {
+    const from = total === 0 ? 0 : (view.page - 1) * view.perPage + 1;
+    const to = Math.min(total, view.page * view.perPage);
+    fill(
+      foot,
+      el("span", { class: "meta", text: `${n(from)}–${n(to)} of ${n(total)}` }),
+      el("span", { class: "divider-v" }),
+      el("span", { class: "eyebrow", text: "per page" }),
+      el(
+        "span",
+        { class: "chips" },
+        PER_PAGE.map((size) =>
+          el("button", {
+            class: "chip",
+            type: "button",
+            "aria-pressed": String(size === view.perPage),
+            text: String(size),
+            onclick: () => {
+              view.perPage = size;
+              view.page = 1;
+              changed();
+            },
+          }),
+        ),
+      ),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Prev",
+        disabled: view.page <= 1,
+        onclick: () => {
+          view.page -= 1;
+          changed();
+        },
+      }),
+      el("span", { class: "meta", text: `Page ${n(view.page)} / ${n(pages())}` }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Next",
+        disabled: view.page >= pages(),
+        onclick: () => {
+          view.page += 1;
+          changed();
+        },
+      }),
+    );
+  }
+
+  function paint() {
+    paintHead();
+    paintBody();
+    paintFoot();
+  }
+
+  paint();
+
+  return {
+    node,
+    /** Replace the rows. `count` is the whole-store total in server mode. */
+    update(next, count) {
+      rows = next || [];
+      total = count === undefined ? rows.length : count;
+      if (view.page > pages()) view.page = pages();
+      paint();
+    },
+    /** What the server should sort and page by. */
+    query: () => ({ ...view }),
+  };
+}
+
+/* The server-side folder picker.
+ *
+ * One component, used by the Index page to choose what to index and by the
+ * Stores page to choose a directory to adopt. It browses the daemon's
+ * filesystem rather than the browser's, because the daemon is what has to open
+ * the path — a `<input type=file webkitdirectory>` hands over a list of file
+ * objects and not the one thing needed, which is the path itself.
+ */
+function folderPicker(options) {
+  const { onChoose, choose, onError } = options || {};
+  const card = el("div", { class: "card picker", hidden: true });
+
+  async function open(path) {
+    let data;
+    try {
+      data = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
+    } catch (e) {
+      if (onError) onError(e.message);
+      return false;
+    }
+    card.hidden = false;
+    fill(
+      card,
+      el(
+        "div",
+        { class: "crumbs" },
+        el(
+          "button",
+          {
+            class: "button secondary small",
+            type: "button",
+            disabled: !data.parent,
+            onclick: () => open(data.parent),
+          },
+          icon(ICONS.up, 15),
+          "Up",
+        ),
+        el("span", { class: "where", text: data.path }),
+        el("span", { class: "spacer" }),
+        el("button", {
+          class: "button small",
+          type: "button",
+          text: choose || "Use this folder",
+          onclick: () => {
+            card.hidden = true;
+            if (onChoose) onChoose(data.path);
+          },
+        }),
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Close",
+          onclick: () => {
+            card.hidden = true;
+          },
+        }),
+      ),
+      el(
+        "div",
+        { class: "entries" },
+        data.entries.length
+          ? data.entries.map((entry) =>
+              el(
+                "button",
+                {
+                  class: "entry",
+                  type: "button",
+                  onclick: () => {
+                    if (entry.dir) open(entry.path);
+                    else {
+                      card.hidden = true;
+                      if (onChoose) onChoose(entry.path);
+                    }
+                  },
+                },
+                icon(entry.dir ? ICONS.folder : ICONS.file),
+                el("span", { class: "name", text: entry.name }),
+              ),
+            )
+          : el("div", { class: "card pad" }, empty("Nothing here that Semlith can index.")),
+      ),
+    );
+    return true;
+  }
+
+  return {
+    node: card,
+    open,
+    close: () => {
+      card.hidden = true;
+    },
+    isOpen: () => !card.hidden,
+  };
+}
+
+/** A path on one line, truncated at the start, whole on hover.
+ *
+ * The end is the part that identifies a file: every row on the Files page
+ * begins with the same `/Users/...` and differs in its last segment, so cutting
+ * the end throws away the only part worth reading. */
+function pathCell(value, className) {
+  return el(
+    "span",
+    { class: className ? `one-line tail ${className}` : "one-line tail", "data-tip": value },
+    el("bdi", { text: value }),
+  );
+}
+
+/** A value on one line, truncated at the end, whole on hover. */
+function lineCell(value, className) {
+  return el("span", {
+    class: className ? `one-line ${className}` : "one-line",
+    "data-tip": value,
+    text: value,
+  });
+}
+
 /** An input with a real label. A placeholder is not one: it leaves on typing. */
 function labelled(id, text, input) {
   input.id = id;
   return [el("label", { class: "sr-only", for: id, text }), input];
 }
 
-function pageHead(title, subtitle) {
+/* One page header for the whole portal.
+ *
+ * The title, its status pill immediately beside it, and any page actions at
+ * the end of that row; the subtitle on a row of its own at the page's full
+ * width. Every page uses it, so a pill is never floated to the far side of a
+ * header away from the title it describes, and a subtitle is never squeezed
+ * into a narrow column by a button sitting opposite it. */
+function pageHead(title, subtitle, extra) {
+  const { pill, actions } = extra || {};
   return el(
     "div",
-    { class: "titles" },
-    el("h1", { text: title }),
+    { class: "page-head" },
+    el(
+      "div",
+      { class: "line" },
+      el("h1", { text: title }),
+      pill || null,
+      actions ? el("span", { class: "spacer" }) : null,
+      actions ? el("div", { class: "actions" }, actions) : null,
+    ),
     subtitle ? el("p", { class: "subtitle", text: subtitle }) : null,
+  );
+}
+
+/* A row's actions, behind one control.
+ *
+ * A column of buttons per row is a column of noise, and the destructive one
+ * sits a mis-aimed click away from the ordinary one. The menu is a single
+ * host appended to the body for the same reason the tooltip is: a popup
+ * inside a cell is clipped by the table's own `overflow: auto`. */
+const menu = {
+  node: null,
+  owner: null,
+
+  ensure() {
+    if (this.node) return this.node;
+    this.node = el("div", { class: "menu", role: "menu", hidden: true });
+    document.body.append(this.node);
+    // One listener each, not one per menu: the host outlives every row that
+    // opens it.
+    document.addEventListener("pointerdown", (e) => {
+      if (this.node.hidden) return;
+      if (this.node.contains(e.target) || (this.owner && this.owner.contains(e.target))) return;
+      this.close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this.close();
+    });
+    window.addEventListener("resize", () => this.close());
+    // A menu anchored to a row in a scrolling table has to go when the row
+    // moves, rather than hang over the wrong one.
+    window.addEventListener("scroll", () => this.close(), true);
+    return this.node;
+  },
+
+  /** `items` are `{ label, tone, onclick }`; `at` is the control it hangs off. */
+  open(at, items) {
+    const node = this.ensure();
+    if (this.owner === at && !node.hidden) return this.close();
+    this.owner = at;
+    at.setAttribute("aria-expanded", "true");
+    fill(
+      node,
+      items.map((item) =>
+        el("button", {
+          class: item.tone ? `menu-item ${item.tone}` : "menu-item",
+          type: "button",
+          role: "menuitem",
+          text: item.label,
+          onclick: () => {
+            this.close();
+            item.onclick();
+          },
+        }),
+      ),
+    );
+    node.hidden = false;
+    const box = node.getBoundingClientRect();
+    const rect = at.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.right - box.width;
+    left = Math.min(Math.max(margin, left), window.innerWidth - margin - box.width);
+    let top = rect.bottom + 6;
+    if (top + box.height > window.innerHeight - margin) top = rect.top - box.height - 6;
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(Math.max(margin, top))}px`;
+    node.querySelector(".menu-item")?.focus();
+  },
+
+  close() {
+    if (!this.node) return;
+    this.node.hidden = true;
+    if (this.owner) this.owner.setAttribute("aria-expanded", "false");
+    this.owner = null;
+  },
+};
+
+/** The control that opens one, for the end of a table row. */
+function rowMenu(items) {
+  const button = el("button", {
+    class: "button secondary small icon",
+    type: "button",
+    "aria-haspopup": "menu",
+    "aria-expanded": "false",
+    "aria-label": "Actions",
+    title: "Actions",
+    onclick: () => menu.open(button, items()),
+  });
+  fill(button, icon(ICONS.more, 18, true));
+  return button;
+}
+
+/** A status pill. One shape, and a dot only where it reports a state. */
+function pill(text, tone) {
+  return el(
+    "span",
+    { class: tone ? `pill ${tone}` : "pill" },
+    tone ? el("i", {}) : null,
+    text,
   );
 }
 
@@ -225,9 +803,14 @@ const state = {
   navOpen: !window.matchMedia(NARROW).matches,
   /** Carried from the welcome screen into the Index view's path field. */
   pendingPath: "",
-  /** Carried from a Graph selection into Impact, or into Search. */
+  /** Carried from a search hit into the Graph page, or into Search. */
   pendingSymbol: "",
   pendingQuery: "",
+  /** The last search, kept so leaving the page and coming back does not throw
+   * the question away along with its answers. */
+  search: { query: "", stores: [] },
+  /** How many clients are talking to the daemon, for the sidebar card. */
+  agents: null,
 };
 
 /* Pages, in the design's grouping. The ones the roadmap puts in a later
@@ -240,7 +823,6 @@ const VIEWS = [
   { group: "Workspace", id: "index", label: "Index", title: "Index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
   { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
-  { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
   { group: "Explore", id: "languages", label: "Languages", title: "Languages" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
@@ -254,7 +836,19 @@ function paintStoreCount() {
   const node = document.getElementById("daemon-stores");
   if (!node) return;
   const many = state.stores.length;
-  node.textContent = `${many} store${many === 1 ? "" : "s"}`;
+  const parts = [`${many} store${many === 1 ? "" : "s"}`];
+  // Only once the answer is known: "0 agents" while the route is still in
+  // flight reads as a fact rather than as a question nobody has asked yet.
+  if (state.agents !== null) {
+    parts.push(`${state.agents} agent${state.agents === 1 ? "" : "s"}`);
+  }
+  node.textContent = parts.join(" · ");
+}
+
+/** How many clients are connected, from whichever page last asked. */
+function noteAgents(data) {
+  state.agents = (data.connections || []).length;
+  paintStoreCount();
 }
 
 
@@ -267,109 +861,22 @@ function graphInk() {
   const style = getComputedStyle(document.documentElement);
   const read = (name, fallback) => (style.getPropertyValue(name) || fallback).trim();
   return {
-    extracted: read("--green", "#3e9a6e"),
-    inferred: read("--amber-ink", "#7a4e0a"),
-    selected: read("--accent-edge", "#c97f14"),
-    line: read("--line", "#dce3e8"),
-    ink: read("--ink", "#1e2a35"),
+    edge: read("--line", "#dce3e8"),
+    hot: read("--blue", "#4c7088"),
+    node: read("--panel", "#ffffff"),
+    nodeLine: read("--line", "#dce3e8"),
+    text: read("--ink-2", "#3a4d5e"),
+    nearFill: read("--blue-soft", "#e3ecf2"),
+    nearLine: read("--blue", "#4c7088"),
+    nearText: read("--ink", "#1e2a35"),
+    sel: read("--accent", "#f0a43c"),
+    selLine: read("--accent-edge", "#c97f14"),
+    selText: read("--accent-ink", "#1e2a35"),
     muted: read("--muted", "#64778a"),
-    panel: read("--panel", "#ffffff"),
   };
 }
 
-/* A force layout, written out because the portal may not load a library: the
- * CSP allows only 'self' and every byte is compiled into the binary.
- *
- * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
- * so that is ~16k pairs — fine at 60fps. If the budget ever rises past a few
- * hundred, this wants a quadtree, not a faster loop.
- */
-function layout(nodes, edges, width, height) {
-  const cx = width / 2;
-  const cy = height / 2;
-  // Repulsion has to grow with the crowd. A constant that reads well at twenty
-  // nodes collapses a hundred into one ball, which is the hairball every graph
-  // view is accused of being.
-  const repulsion = 2200 + nodes.length * 90;
-  const pad = 26;
-  // The rest length grows with the crowd: forty nodes at ninety pixels apart
-  // need more room than eight do, and a constant here is what turns a dense
-  // neighbourhood into a knot.
-  const rest = 70 + nodes.length * 1.6;
-  // How many edges each node carries, so the springs can be shared out. A hub
-  // with forty edges would otherwise be dragged to the centre by forty pulls
-  // while a leaf feels one, and every graph would collapse to its hubs.
-  const load = nodes.map(() => 1);
-  for (const edge of edges) {
-    if (load[edge.from] !== undefined) load[edge.from]++;
-    if (load[edge.to] !== undefined) load[edge.to]++;
-  }
-  // Seeded on a circle rather than at random, so the same graph draws the same
-  // way twice. A layout that reshuffles on every visit is one nobody can learn.
-  nodes.forEach((node, i) => {
-    const angle = (i / Math.max(nodes.length, 1)) * Math.PI * 2;
-    const radius = Math.min(width, height) * 0.32;
-    node.x = cx + Math.cos(angle) * radius;
-    node.y = cy + Math.sin(angle) * radius;
-    node.vx = 0;
-    node.vy = 0;
-  });
-
-  return function step(alpha) {
-    for (let i = 0; i < nodes.length; i++) {
-      const a = nodes[i];
-      for (let j = i + 1; j < nodes.length; j++) {
-        const b = nodes[j];
-        let dx = a.x - b.x;
-        let dy = a.y - b.y;
-        let d2 = dx * dx + dy * dy;
-        if (d2 < 0.01) {
-          // Exactly coincident nodes have no direction to separate along.
-          dx = (i % 2 ? 1 : -1) * 0.5;
-          dy = 0.5;
-          d2 = 0.5;
-        }
-        const force = (repulsion / d2) * alpha;
-        const d = Math.sqrt(d2);
-        a.vx += (dx / d) * force;
-        a.vy += (dy / d) * force;
-        b.vx -= (dx / d) * force;
-        b.vy -= (dy / d) * force;
-      }
-    }
-    for (const edge of edges) {
-      const a = nodes[edge.from];
-      const b = nodes[edge.to];
-      if (!a || !b) continue;
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const pull = ((d - rest) / d) * 0.06 * alpha;
-      a.vx += (dx * pull) / Math.sqrt(load[edge.from]);
-      a.vy += (dy * pull) / Math.sqrt(load[edge.from]);
-      b.vx -= (dx * pull) / Math.sqrt(load[edge.to]);
-      b.vy -= (dy * pull) / Math.sqrt(load[edge.to]);
-    }
-    for (const node of nodes) {
-      if (node.held) continue;
-      node.vx += (cx - node.x) * 0.0016 * alpha;
-      node.vy += (cy - node.y) * 0.0016 * alpha;
-      node.x += node.vx;
-      node.y += node.vy;
-      node.vx *= 0.84;
-      node.vy *= 0.84;
-      // Kept inside the frame. A node that drifts off-canvas is a node nobody
-      // can click, and the pan control is for choosing a view, not for going
-      // to fetch something that escaped.
-      node.x = Math.min(width - pad, Math.max(pad, node.x));
-      node.y = Math.min(height - pad, Math.max(pad, node.y));
-    }
-  };
-}
-
-/** The last two segments of a path: enough to recognise, short enough to read.
- * The whole path is on the element's title, which is where someone goes when
- * two files share a name. */
+/** The last two segments of a path: enough to recognise, short enough to read. */
 function shortPath(path) {
   const parts = String(path).split("/").filter(Boolean);
   return parts.slice(-2).join("/") || path;
@@ -380,255 +887,468 @@ function stillness() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-/* A pannable, zoomable canvas of nodes and edges.
+/* A force-directed canvas of labelled boxes.
  *
- * Returns the element plus `draw(data)` and `stop()`. The caller owns the data;
- * this owns the pixels. */
-function graphCanvas(onPick) {
+ * Positions are kept in 0..1 and multiplied by the canvas size on every frame,
+ * so a resize moves the graph rather than rebuilding it, and the constants
+ * below mean the same thing at any window width. They are the design bundle's:
+ * repulsion 5200 over distance squared, a spring at rest 138px, damping 0.86,
+ * and a weak pull to the centre.
+ *
+ * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
+ * so that is ~16k pairs — fine at 60fps. Past a few hundred this wants a
+ * quadtree, not a faster loop.
+ */
+function graphCanvas(options) {
+  const { onPick, onHover } = options || {};
   const canvas = el("canvas", { class: "graph-canvas" });
   const wrap = el("div", { class: "graph-stage" }, canvas);
-  const view = { x: 0, y: 0, scale: 1 };
   let nodes = [];
   let edges = [];
+  let drawn = [];
   let selected = null;
-  let step = null;
-  let alpha = 0;
+  let near = new Set();
+  let hovered = null;
+  let dragging = null;
+  let down = null;
   let frame = null;
   let running = true;
-  let dragging = null;
-  let panning = null;
+  let settled = false;
+  /* How much of the force is still applied. The layout cools, but never to
+   * nothing: it bottoms out at `ALPHA_FLOOR`, so the springs keep holding the
+   * shape while the drift below moves it. Anything that changes the layout —
+   * a drag, a new scope, an edge-kind filter — re-heats it. */
+  let alpha = 1;
+  /* Springs are shared out by how many edges a node carries. A hub with forty
+   * edges feels forty pulls where a leaf feels one, and at this node count that
+   * is what turns the simulation into a two-frame bounce: every node overshoots
+   * its rest position, and the next step overshoots back. Dividing by the
+   * square root of the degree is what keeps a dense neighbourhood stable. */
+  let load = [];
 
   function size() {
     const ratio = window.devicePixelRatio || 1;
     const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 320);
-    const h = Math.max(box.height, 320);
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 240);
     canvas.width = Math.round(w * ratio);
     canvas.height = Math.round(h * ratio);
-    return { w, h, ratio };
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return { w, h, ctx };
   }
 
-  function paint() {
-    const { w, h, ratio } = size();
-    const ink = graphInk();
-    const ctx = canvas.getContext("2d");
-    void h;
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    ctx.save();
-    ctx.translate(view.x, view.y);
-    ctx.scale(view.scale, view.scale);
+  /* The furthest a node may move in one step, in fractions of the canvas.
+   * Without it a single large force sends a node across the frame and the
+   * spring drags it back, which is the bounce this cap exists to stop. */
+  const MAX_STEP = 0.012;
 
-    for (const edge of edges) {
+  /* The layout never freezes. Cooling to a standstill was what stopped the
+   * two-frame bounce, but a still picture is not what this view is for, so the
+   * heat bottoms out here and every node carries a slow wander on top of it.
+   *
+   * The wander is a sine of the clock and the node's own phase, not a random
+   * nudge: a random walk accumulates, drags nodes off their springs and is
+   * indistinguishable from the jitter this replaced. A smooth curve at this
+   * amplitude settles at under a pixel a frame, which reads as a drift. */
+  const ALPHA_FLOOR = 0;
+  const DRIFT = 0.00003;
+
+  function step(w, h) {
+    const clock = performance.now() * 0.00028;
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        let dx = (b.x - a.x) * w;
+        let dy = (b.y - a.y) * h;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) {
+          // Exactly coincident nodes have no direction to separate along.
+          d2 = 1;
+          dx = 0.6;
+          dy = 0.4;
+        }
+        const d = Math.sqrt(d2);
+        const force = (5200 / d2) * alpha;
+        a.vx -= ((dx / d) * force) / w;
+        a.vy -= ((dy / d) * force) / h;
+        b.vx += ((dx / d) * force) / w;
+        b.vy += ((dy / d) * force) / h;
+      }
+    }
+    for (const edge of drawn) {
       const a = nodes[edge.from];
       const b = nodes[edge.to];
       if (!a || !b) continue;
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.strokeStyle = edge.confidence === "extracted" ? ink.extracted : ink.inferred;
-      // An inferred edge is drawn dashed as well as coloured: colour alone is
-      // not a distinction everyone can see.
-      ctx.setLineDash(edge.confidence === "extracted" ? [] : [4, 3]);
-      ctx.lineWidth = edge.confidence === "extracted" ? 1.2 : 1;
-      ctx.globalAlpha = selected && edge.from !== selected && edge.to !== selected ? 0.22 : 0.75;
-      ctx.stroke();
+      const dx = (b.x - a.x) * w;
+      const dy = (b.y - a.y) * h;
+      const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const pull = (d - 138) * 0.0025 * alpha;
+      // Shared out by degree at each end, so a hub is not dragged about by
+      // every edge it happens to carry.
+      const ax = Math.sqrt(load[edge.from] || 1);
+      const bx = Math.sqrt(load[edge.to] || 1);
+      a.vx += ((((dx / d) * pull * d) / w) * 0.02) / ax;
+      a.vy += ((((dy / d) * pull * d) / h) * 0.02) / ax;
+      b.vx -= ((((dx / d) * pull * d) / w) * 0.02) / bx;
+      b.vy -= ((((dy / d) * pull * d) / h) * 0.02) / bx;
     }
-    ctx.setLineDash([]);
-    ctx.globalAlpha = 1;
-
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
-      const on = i === selected;
-      ctx.beginPath();
-      ctx.arc(node.x, node.y, on ? 8 : 5.5, 0, Math.PI * 2);
-      ctx.fillStyle = on ? ink.selected : ink.panel;
-      ctx.strokeStyle = on ? ink.selected : ink.muted;
-      ctx.lineWidth = on ? 2.5 : 1.4;
-      ctx.fill();
-      ctx.stroke();
-      // Labels only where they can be read. Every node labelled at once is a
-      // grey haze that makes the shape harder to see rather than easier, so
-      // this draws the selection, whatever it touches, and the busiest few —
-      // and everything only once the view is zoomed in far enough to have room.
-      // On a phone the frame is ~350px wide and a dozen labels is a smear, so
-      // there the selection and its neighbours carry names and nothing else
-      // does until the reader zooms in.
-      const roomy = w > 520;
-      if (on || node.near || (roomy && node.busy && view.scale > 0.75) || view.scale > 2) {
-        ctx.font = `${on ? 600 : 400} 11px "IBM Plex Mono", ui-monospace, monospace`;
-        ctx.fillStyle = on ? ink.ink : ink.muted;
-        ctx.textAlign = "center";
-        // Test names run to sixty characters and would cover their
-        // neighbours. The full name is in the rail the moment a node is
-        // picked, so the canvas shows as much as fits.
-        const label = node.name.length > 22 ? `${node.name.slice(0, 21)}…` : node.name;
-        ctx.fillText(label, node.x, node.y - (on ? 13 : 10));
+    let moved = 0;
+    for (const node of nodes) {
+      node.vx += (0.5 - node.x) * 0.006 * alpha;
+      node.vy += (0.5 - node.y) * 0.008 * alpha;
+      node.vx += Math.cos(clock + node.phase) * DRIFT;
+      node.vy += Math.sin(clock * 0.9 + node.phase * 1.7) * DRIFT;
+      if (node === dragging) {
+        node.vx = 0;
+        node.vy = 0;
+        continue;
       }
+      node.vx *= 0.86;
+      node.vy *= 0.86;
+      // One step can only take a node so far. A force large enough to throw it
+      // across the frame is a force the spring will undo next step, which is
+      // the two-frame bounce rather than a layout.
+      node.vx = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vx));
+      node.vy = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vy));
+      moved += Math.abs(node.vx) + Math.abs(node.vy);
+      // Kept inside the frame: a node that drifts off-canvas is a node nobody
+      // can click.
+      node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
+      node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
     }
-    ctx.restore();
+    alpha = Math.max(ALPHA_FLOOR, alpha * 0.985);
+    return moved;
+  }
+
+  /** Put the heat back in, for anything that changes the layout. */
+  function reheat(to) {
+    alpha = Math.max(alpha, to === undefined ? 0.35 : to);
+  }
+
+  /** A rounded rectangle, the shape every symbol is drawn as. */
+  function box(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function paint() {
+    const { w, h, ctx } = size();
+    const ink = graphInk();
+    ctx.clearRect(0, 0, w, h);
+
+    // Measured first: an edge stops at the box it points into, which means
+    // every box's size has to be known before the first edge is drawn.
+    ctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace';
+    for (const node of nodes) {
+      const ease = stillness() ? (node === hovered ? 1 : 0) : node.hover || 0;
+      node.hover = ease;
+      const text = ctx.measureText(node.label).width;
+      node.w = (text + 22) * (1 + 0.05 * ease);
+      node.h = 28 * (1 + 0.05 * ease);
+    }
+
+    for (const edge of drawn) {
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      if (!a || !b) continue;
+      const ax = a.x * w;
+      const ay = a.y * h;
+      const bx = b.x * w;
+      const by = b.y * h;
+      const hot = edge.from === selected || edge.to === selected;
+      const angle = Math.atan2(by - ay, bx - ax);
+      // To the edge of the box rather than to its centre, so the arrowhead
+      // lands where the reader sees the symbol begin.
+      const inset = Math.min(b.w / 2 + 6, Math.abs(b.h / 2 / Math.sin(angle) || b.w));
+      const ex = bx - Math.cos(angle) * Math.min(inset, b.w / 2 + 6);
+      const ey = by - Math.sin(angle) * (b.h / 2 + 3);
+      ctx.save();
+      ctx.strokeStyle = hot ? ink.hot : ink.edge;
+      ctx.fillStyle = hot ? ink.hot : ink.edge;
+      ctx.lineWidth = hot ? 1.7 : 1.1;
+      // An inferred edge is dashed as well as coloured: colour alone is not a
+      // distinction everyone can see.
+      ctx.setLineDash(edge.confidence === "extracted" ? [] : [4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - Math.cos(angle - 0.4) * 7, ey - Math.sin(angle - 0.4) * 7);
+      ctx.lineTo(ex - Math.cos(angle + 0.4) * 7, ey - Math.sin(angle + 0.4) * 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    nodes.forEach((node, i) => {
+      const on = i === selected;
+      const beside = near.has(i);
+      const x = node.x * w - node.w / 2;
+      const y = node.y * h - node.h / 2;
+      box(ctx, x, y, node.w, node.h, 8);
+      ctx.fillStyle = on ? ink.sel : beside ? ink.nearFill : ink.node;
+      ctx.save();
+      if (node.hover) {
+        ctx.shadowColor = ink.nearLine;
+        ctx.shadowBlur = 14 * node.hover;
+      }
+      ctx.fill();
+      ctx.restore();
+      ctx.lineWidth = (on ? 1.6 : 1) + 0.8 * node.hover;
+      ctx.strokeStyle = on ? ink.selLine : beside ? ink.nearLine : ink.nodeLine;
+      ctx.stroke();
+      ctx.fillStyle = on ? ink.selText : beside ? ink.nearText : ink.text;
+      ctx.fillText(node.label, x + 11, y + node.h / 2 + 4);
+    });
   }
 
   function tick() {
-    if (step && alpha > 0.005) {
-      step(alpha);
-      alpha *= 0.97;
+    const box = wrap.getBoundingClientRect();
+    if (running || dragging) step(Math.max(box.width, 240), Math.max(box.height, 240));
+    // Hover is eased rather than switched, so a fast pointer sweep across a
+    // crowded graph does not strobe.
+    for (const node of nodes) {
+      node.hover = (node.hover || 0) + ((node === hovered ? 1 : 0) - (node.hover || 0)) * 0.16;
+      if (node.hover < 0.002) node.hover = 0;
     }
     paint();
-    frame = running ? requestAnimationFrame(tick) : null;
+    frame = requestAnimationFrame(tick);
   }
 
   function at(event) {
     const box = canvas.getBoundingClientRect();
-    return {
-      x: (event.clientX - box.left - view.x) / view.scale,
-      y: (event.clientY - box.top - view.y) / view.scale,
-    };
+    return { x: event.clientX - box.left, y: event.clientY - box.top, w: box.width, h: box.height };
   }
 
-  function nearest(point) {
-    let best = null;
-    let bestD = 14 / view.scale;
-    nodes.forEach((node, i) => {
-      const d = Math.hypot(node.x - point.x, node.y - point.y);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
+  function hit(point) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const node = nodes[i];
+      const cx = node.x * point.w;
+      const cy = node.y * point.h;
+      if (
+        Math.abs(point.x - cx) < (node.w || 80) / 2 &&
+        Math.abs(point.y - cy) < (node.h || 28) / 2
+      ) {
+        return i;
       }
-    });
-    return best;
+    }
+    return null;
+  }
+
+  function selectAt(index) {
+    selected = index;
+    near = new Set();
+    for (const edge of drawn) {
+      if (edge.from === index) near.add(edge.to);
+      if (edge.to === index) near.add(edge.from);
+    }
   }
 
   canvas.addEventListener("pointerdown", (event) => {
-    const point = at(event);
-    const hit = nearest(point);
+    const index = hit(at(event));
+    if (index === null) return;
     canvas.setPointerCapture(event.pointerId);
-    if (hit === null) {
-      panning = { x: event.clientX - view.x, y: event.clientY - view.y };
-      return;
-    }
-    selected = hit;
-    for (const node of nodes) node.near = false;
-    for (const edge of edges) {
-      if (edge.from === hit && nodes[edge.to]) nodes[edge.to].near = true;
-      if (edge.to === hit && nodes[edge.from]) nodes[edge.from].near = true;
-    }
-    nodes[hit].held = true;
-    dragging = hit;
-    alpha = Math.max(alpha, 0.25);
-    if (onPick) onPick(nodes[hit]);
-    paint();
+    dragging = nodes[index];
+    reheat();
+    down = { x: event.clientX, y: event.clientY, index };
+    canvas.classList.add("dragging");
+    event.preventDefault();
   });
 
   canvas.addEventListener("pointermove", (event) => {
-    if (dragging !== null) {
-      const point = at(event);
-      nodes[dragging].x = point.x;
-      nodes[dragging].y = point.y;
-      paint();
-    } else if (panning) {
-      view.x = event.clientX - panning.x;
-      view.y = event.clientY - panning.y;
-      paint();
+    const point = at(event);
+    if (dragging) {
+      dragging.x = Math.min(0.94, Math.max(0.06, point.x / point.w));
+      dragging.y = Math.min(0.92, Math.max(0.08, point.y / point.h));
+      if (!frame) paint();
+      return;
     }
+    const index = hit(point);
+    const node = index === null ? null : nodes[index];
+    canvas.classList.toggle("over-node", Boolean(node));
+    if (node !== hovered) {
+      hovered = node;
+      if (!frame) paint();
+    }
+    if (onHover) onHover(node, event.clientX, event.clientY);
   });
 
-  const release = () => {
-    if (dragging !== null) nodes[dragging].held = false;
+  const release = (event) => {
+    if (down) {
+      // A drag that went nowhere is a click. Four pixels is the slack a
+      // pointer has on the way down.
+      const moved = Math.abs(event.clientX - down.x) + Math.abs(event.clientY - down.y);
+      if (moved < 4) {
+        selectAt(down.index);
+        if (onPick) onPick(nodes[down.index]);
+      }
+    }
     dragging = null;
-    panning = null;
+    down = null;
+    canvas.classList.remove("dragging");
+    if (!frame) paint();
   };
   canvas.addEventListener("pointerup", release);
   canvas.addEventListener("pointercancel", release);
-
-  canvas.addEventListener("wheel", (event) => {
-    event.preventDefault();
-    const box = canvas.getBoundingClientRect();
-    const px = event.clientX - box.left;
-    const py = event.clientY - box.top;
-    const factor = Math.exp(-event.deltaY * 0.0015);
-    const next = Math.min(3, Math.max(0.3, view.scale * factor));
-    view.x = px - ((px - view.x) / view.scale) * next;
-    view.y = py - ((py - view.y) / view.scale) * next;
-    view.scale = next;
-    paint();
+  canvas.addEventListener("pointerleave", () => {
+    hovered = null;
+    dragging = null;
+    down = null;
+    canvas.classList.remove("dragging", "over-node");
+    if (onHover) onHover(null);
+    if (!frame) paint();
   });
+
+  // A canvas has no layout of its own to react to a resize with, and the
+  // stylesheet cannot repaint it.
+  const observer = new ResizeObserver(() => {
+    if (!frame) paint();
+  });
+  observer.observe(wrap);
 
   return {
     node: wrap,
-    draw(data) {
-      const { w, h } = size();
-      nodes = (data.nodes || []).map((row) => ({ ...row, degree: 0 }));
+    draw(data, kinds) {
+      nodes = (data.nodes || []).map((row, i) => {
+        const angle = (i / Math.max((data.nodes || []).length, 1)) * Math.PI * 2;
+        return {
+          ...row,
+          // Truncated for the canvas only. Test names run past sixty
+          // characters, and a box that wide covers its neighbours and pushes
+          // the layout off the frame; the whole name is in the hover card and
+          // in the rail the moment the node is picked.
+          label: row.name.length > 26 ? `${row.name.slice(0, 25)}…` : row.name,
+          x: 0.5 + Math.cos(angle) * 0.28,
+          y: 0.5 + Math.sin(angle) * 0.28,
+          vx: 0,
+          vy: 0,
+          // Where this node is in its own wander, so forty nodes drift apart
+          // rather than sliding as one block.
+          phase: Math.random() * Math.PI * 2,
+          hover: 0,
+          callers: 0,
+          callees: 0,
+        };
+      });
       edges = data.edges || [];
+      load = nodes.map(() => 1);
       for (const edge of edges) {
-        if (nodes[edge.from]) nodes[edge.from].degree++;
-        if (nodes[edge.to]) nodes[edge.to].degree++;
+        if (nodes[edge.from]) nodes[edge.from].callees += 1;
+        if (nodes[edge.to]) nodes[edge.to].callers += 1;
+        if (load[edge.from] !== undefined) load[edge.from] += 1;
+        if (load[edge.to] !== undefined) load[edge.to] += 1;
       }
-      // The dozen busiest nodes carry a label at moderate zoom: they are the
-      // ones a reader is orienting by.
-      const ranked = [...nodes].sort((a, b) => b.degree - a.degree).slice(0, 12);
-      for (const node of ranked) node.busy = true;
       selected = null;
-      step = layout(nodes, edges, w, h);
-      // Under reduced motion the layout is solved before the first paint, so
-      // the page arrives settled instead of animating into place.
-      if (stillness()) {
-        for (let i = 0; i < 420; i++) step(1);
-        step = null;
-        alpha = 0;
-      } else {
-        alpha = 1;
+      near = new Set();
+      hovered = null;
+      this.filter(kinds);
+      // Settled before the first painted frame, rather than exploding outward
+      // while the reader watches.
+      alpha = 1;
+      const box = wrap.getBoundingClientRect();
+      for (let i = 0; i < 220; i++) {
+        step(Math.max(box.width, 240), Math.max(box.height, 240));
       }
+      settled = true;
       paint();
+    },
+    /** Draw only the edge kinds asked for. Returns how many are drawn. */
+    filter(kinds) {
+      drawn = !kinds || !kinds.size ? edges : edges.filter((e) => kinds.has(e.kind));
+      if (selected !== null) selectAt(selected);
+      // Fewer edges is a different layout, so the springs get another go at it.
+      reheat(0.25);
+      if (settled) paint();
+      return drawn.length;
     },
     /** Select a node by name, as though it had been clicked. */
     pick(name) {
       const index = nodes.findIndex((node) => node.name === name);
       if (index < 0) return false;
-      selected = index;
-      for (const node of nodes) node.near = false;
-      for (const edge of edges) {
-        if (edge.from === index && nodes[edge.to]) nodes[edge.to].near = true;
-        if (edge.to === index && nodes[edge.from]) nodes[edge.from].near = true;
-      }
+      selectAt(index);
       paint();
       if (onPick) onPick(nodes[index]);
       return true;
     },
+    counts: () => ({ nodes: nodes.length, edges: drawn.length }),
     running: () => running,
     toggle() {
       running = !running;
-      if (running) {
-        alpha = Math.max(alpha, 0.35);
-        tick();
-      } else if (frame) {
-        cancelAnimationFrame(frame);
-        frame = null;
-      }
+      if (running) reheat(0.2);
       return running;
     },
     start() {
-      running = !stillness();
-      if (running) tick();
-      else paint();
+      // Under reduced motion the graph is solved once and then still: there is
+      // no loop to pause, and nothing moves unless the reader moves it.
+      if (stillness()) {
+        running = false;
+        paint();
+        return;
+      }
+      if (!frame) tick();
     },
     stop() {
       running = false;
       if (frame) cancelAnimationFrame(frame);
       frame = null;
+      observer.disconnect();
     },
     repaint: paint,
   };
 }
 
+const EDGE_KINDS = ["calls", "imports", "defines", "references"];
+
 async function graphView() {
   await refreshStores();
 
+  const kinds = new Set(EDGE_KINDS);
   const chosen = new Set();
-  const meta = el("span", { class: "graph-meta" });
+  const meta = el("span", { class: "graph-count" });
   const rail = el("div", { class: "graph-rail" });
 
-  const canvas = graphCanvas((node) => select(node));
+  const canvas = graphCanvas({
+    onPick: (node) => select(node),
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("graph");
+      tip.atPoint(
+        x,
+        y,
+        [
+          el(
+            "div",
+            { class: "tip-head" },
+            el("i", {}),
+            node.name,
+          ),
+          row("kind", node.kind),
+          row("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`),
+          row("store", node.store || (state.stores[0] && state.stores[0].name) || "—"),
+          row("calls", `${node.callers} in · ${node.callees} out`),
+        ],
+        "graph",
+      );
+    },
+  });
+
+  function row(key, value) {
+    return el(
+      "div",
+      { class: "tip-row" },
+      el("span", { class: "k", text: key }),
+      el("span", { class: "v", text: String(value) }),
+    );
+  }
 
   const pause = el("button", {
     class: "button secondary small",
@@ -646,6 +1366,11 @@ async function graphView() {
    * lie about which of the two is in charge. */
   function paintPause() {
     pause.textContent = canvas.running() ? "Pause" : "Settled";
+  }
+
+  function counts() {
+    const { nodes, edges } = canvas.counts();
+    meta.textContent = `${n(nodes)} symbols · ${n(edges)} edges`;
   }
 
   function blank(message) {
@@ -700,32 +1425,24 @@ async function graphView() {
     } catch (e) {
       return fill(rail, error(e.message));
     }
-    const callers = data.callers.map((e) => ({
-      name: e.name,
-      kind: e.kind,
-      confidence: e.confidence,
-    }));
-    const callees = data.callees.map((e) => ({
-      name: e.name,
-      kind: e.kind,
-      confidence: e.confidence,
-    }));
+    const edge = (e) => ({ name: e.name, kind: e.kind, confidence: e.confidence });
 
     fill(
       rail,
       el(
         "div",
         { class: "graph-selected" },
+        el("span", { class: "eyebrow", text: "Selected symbol" }),
         el("h2", { class: "sym", text: node.name }),
         el("div", {
           class: "loc",
-          title: node.path,
+          "data-tip": node.path,
           text: `${shortPath(node.path)}:${node.start_line}-${node.end_line}`,
         }),
         el(
           "div",
           { class: "chips" },
-          el("span", { class: "chip static", text: node.kind }),
+          el("span", { class: "chip static blue", text: node.kind }),
           node.store ? el("span", { class: "chip static", text: node.store }) : null,
           el("span", {
             class: "chip static",
@@ -733,29 +1450,19 @@ async function graphView() {
           }),
         ),
       ),
-      ends("Callers", callers, "Nothing in the graph calls this."),
-      ends("Callees", callees, "A leaf, as far as the extracted edges go."),
+      ends("Callers", data.callers.map(edge), "Nothing in the graph calls this."),
+      ends("Callees", data.callees.map(edge), "A leaf, as far as the extracted edges go."),
       el(
         "div",
         { class: "rail-actions" },
         el("a", {
           class: "button secondary small",
-          href: `#search`,
+          href: "#search",
           text: "Chunks it lives in",
           onclick: (e) => {
             e.preventDefault();
             state.pendingQuery = node.name;
             go("search");
-          },
-        }),
-        el("a", {
-          class: "button small",
-          href: `#impact`,
-          text: "Blast radius",
-          onclick: (e) => {
-            e.preventDefault();
-            state.pendingSymbol = node.name;
-            go("impact");
           },
         }),
       ),
@@ -774,19 +1481,16 @@ async function graphView() {
       return fill(rail, error(e.message));
     }
     if (!data.nodes.length) {
-      meta.textContent = "";
-      canvas.draw({ nodes: [], edges: [] });
+      meta.textContent = "0 symbols";
+      canvas.draw({ nodes: [], edges: [] }, kinds);
       return blank(
         data.total === 0
           ? "This store has no symbols yet. The graph is built as files are indexed — run Index once, or leave the daemon watching."
           : "Nothing in this scope. Clear the filters, or pick a store.",
       );
     }
-    meta.textContent =
-      data.shown < data.total
-        ? `${n(data.shown)} of ${n(data.total)} symbols · ${n(data.edges.length)} edges drawn`
-        : `${n(data.shown)} symbols · ${n(data.edges.length)} edges`;
-    canvas.draw(data);
+    canvas.draw(data, kinds);
+    counts();
     // A focused view arrives with its centre chosen, so the rail says something
     // before the first click rather than asking for one.
     const centre = params && params.name;
@@ -810,6 +1514,23 @@ async function graphView() {
     },
   });
 
+  const kindChips = EDGE_KINDS.map((kind) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": "true",
+      text: kind,
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+        e.currentTarget.setAttribute("aria-pressed", String(on));
+        if (on) kinds.add(kind);
+        else kinds.delete(kind);
+        canvas.filter(kinds);
+        counts();
+      },
+    }),
+  );
+
   const storeChips = state.stores.map((store) =>
     el("button", {
       class: "chip",
@@ -828,18 +1549,26 @@ async function graphView() {
 
   const page = el(
     "div",
-    { class: "view graph-page" },
-    pageHead(
-      "Graph",
-      "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
-    ),
+    { class: "graph-page" },
     el(
       "div",
-      { class: "graph-controls" },
-      el("div", { class: "graph-scope" }, icon(ICONS.search, 16), labelled("graph-scope", "Scope the graph", scopeInput)),
-      el("div", { class: "filters" }, storeChips.length > 1 ? storeChips : null),
-      el("span", { class: "spacer" }),
-      pause,
+      { class: "graph-band" },
+      pageHead(
+        "Graph",
+        "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
+        { actions: [el("div", { class: "filters" }, kindChips), pause] },
+      ),
+      el(
+        "div",
+        { class: "graph-controls" },
+        el(
+          "div",
+          { class: "graph-scope" },
+          icon(ICONS.search, 16),
+          labelled("graph-scope", "Scope the graph", scopeInput),
+        ),
+        storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
+      ),
     ),
     el(
       "div",
@@ -850,16 +1579,12 @@ async function graphView() {
         canvas.node,
         el(
           "div",
-          { class: "graph-foot" },
-          el(
-            "div",
-            { class: "graph-legend" },
-            el("span", { class: "key extracted" }, el("i", {}), "extracted"),
-            el("span", { class: "key inferred" }, el("i", {}), "inferred"),
-            el("span", { class: "key selected" }, el("i", {}), "selected"),
-          ),
-          meta,
+          { class: "graph-legend" },
+          el("span", { class: "key extracted" }, el("i", {}), "extracted"),
+          el("span", { class: "key inferred" }, el("i", {}), "inferred"),
+          el("span", { class: "key selected" }, el("i", {}), "selected"),
         ),
+        meta,
       ),
       rail,
     ),
@@ -874,10 +1599,8 @@ async function graphView() {
     state.pendingSymbol = "";
     if (pending) return load({ name: pending, limit: "45" });
     // Land on the busiest symbol's neighbourhood rather than on everything at
-    // once. The whole store drawn at once is honest and unreadable — hundreds
-    // of edges among the hubs is what the corpus actually looks like — and a
-    // reader arriving at a knot learns nothing. One symbol and what touches it
-    // is the view the rest of the page is about, and the scope box widens it.
+    // once. The whole store drawn at once is honest and unreadable, and a
+    // reader arriving at a knot learns nothing.
     try {
       const overview = await api("/api/graph?limit=1");
       const busiest = (overview.nodes || [])[0];
@@ -890,311 +1613,14 @@ async function graphView() {
   return page;
 }
 
-// --------------------------------------------------------------- impact
-
-/** Reverse reachability drawn as rings, one ring per hop. */
-function ringCanvas() {
-  const canvas = el("canvas", { class: "graph-canvas" });
-  const wrap = el("div", { class: "rings" }, canvas);
-  let rows = [];
-  let centre = "";
-
-  function paint() {
-    const ratio = window.devicePixelRatio || 1;
-    const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 240);
-    const h = Math.max(box.height, 240);
-    canvas.width = Math.round(w * ratio);
-    canvas.height = Math.round(h * ratio);
-    const ink = graphInk();
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-
-    const cx = w / 2;
-    const cy = h / 2;
-    const hops = Math.max(1, ...rows.map((r) => r.hops));
-    const gap = Math.min(w, h) / 2 / (hops + 1);
-
-    for (let hop = 1; hop <= hops; hop++) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, gap * hop, 0, Math.PI * 2);
-      ctx.strokeStyle = ink.line;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-
-    const byHop = new Map();
-    for (const row of rows) {
-      if (!byHop.has(row.hops)) byHop.set(row.hops, []);
-      byHop.get(row.hops).push(row);
-    }
-    for (const [hop, list] of byHop) {
-      list.forEach((row, i) => {
-        const angle = (i / list.length) * Math.PI * 2 - Math.PI / 2;
-        const x = cx + Math.cos(angle) * gap * hop;
-        const y = cy + Math.sin(angle) * gap * hop;
-        ctx.beginPath();
-        ctx.moveTo(cx, cy);
-        ctx.lineTo(x, y);
-        ctx.strokeStyle = row.confidence === "extracted" ? ink.extracted : ink.inferred;
-        ctx.setLineDash(row.confidence === "extracted" ? [] : [4, 3]);
-        ctx.globalAlpha = 0.5;
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
-
-        ctx.beginPath();
-        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
-        ctx.fillStyle = ink.panel;
-        ctx.strokeStyle = row.confidence === "extracted" ? ink.extracted : ink.inferred;
-        ctx.lineWidth = 1.5;
-        ctx.fill();
-        ctx.stroke();
-      });
-    }
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, 9, 0, Math.PI * 2);
-    ctx.fillStyle = ink.selected;
-    ctx.fill();
-    ctx.font = '600 11px "IBM Plex Mono", ui-monospace, monospace';
-    ctx.fillStyle = ink.ink;
-    ctx.textAlign = "center";
-    ctx.fillText(centre, cx, cy - 15);
-  }
-
-  return {
-    node: wrap,
-    draw(name, list) {
-      centre = name;
-      rows = list;
-      paint();
-    },
-  };
-}
-
-async function impactView() {
-  const summary = el("div", { class: "impact-summary" });
-  const table = el("div", { class: "impact-table" });
-  const rings = ringCanvas();
-  const pathOut = el("div", { class: "path-steps" });
-
-  const name = el("input", {
-    type: "search",
-    placeholder: "A symbol you are about to change",
-    value: state.pendingSymbol || "",
-    onkeydown: (e) => {
-      if (e.key === "Enter") run();
-    },
-  });
-  state.pendingSymbol = "";
-
-  const depth = el("select", { onchange: () => run() }, [1, 2, 3, 4, 5].map((d) =>
-    el("option", { value: String(d), selected: d === 3, text: `${d} hop${d === 1 ? "" : "s"}` }),
-  ));
-
-  async function run() {
-    const symbol = name.value.trim();
-    if (!symbol) {
-      fill(summary, empty("Name a symbol. Its blast radius is what reaches it, not what it reaches."));
-      fill(table);
-      fill(pathOut);
-      rings.draw("", []);
-      return;
-    }
-    fill(summary, el("div", { class: "rail-hint", text: "Walking the edges…" }));
-    let data;
-    try {
-      data = await api(`/api/impact?name=${encodeURIComponent(symbol)}&depth=${depth.value}`);
-    } catch (e) {
-      return fill(summary, error(e.message));
-    }
-
-    const rows = data.reached || [];
-    const inferred = rows.filter((r) => r.confidence !== "extracted").length;
-    const files = new Set(rows.map((r) => r.path)).size;
-
-    fill(
-      summary,
-      el(
-        "div",
-        { class: "impact-head" },
-        el("span", { class: "label", text: "Changing" }),
-        el("span", { class: "sym", text: symbol }),
-        el("span", { class: "chip static amber", text: `${data.depth} hop${data.depth === 1 ? "" : "s"}` }),
-      ),
-      el(
-        "div",
-        { class: "stat-row" },
-        stat("Symbols reached", n(rows.length)),
-        stat("Files touched", n(files)),
-        stat("Matched by name", n(inferred), inferred ? "not resolved through an import" : "every edge resolved"),
-      ),
-      data.truncated
-        ? el("div", { class: "rail-hint", text: "Stopped at the node budget; the real radius is larger." })
-        : null,
-    );
-
-    if (!rows.length) {
-      fill(table, empty("Nothing in the graph reaches this. Either it is a leaf, or its callers are in a language that carries no edges."));
-      rings.draw(symbol, []);
-      return;
-    }
-
-    fill(
-      table,
-      el(
-        "table",
-        {},
-        el(
-          "thead",
-          {},
-          el(
-            "tr",
-            {},
-            el("th", { text: "Reached symbol" }),
-            el("th", { text: "Via" }),
-            el("th", { text: "Hops" }),
-            el("th", { text: "Where" }),
-          ),
-        ),
-        el(
-          "tbody",
-          {},
-          rows.map((row) =>
-            el(
-              "tr",
-              {},
-              el("td", { class: "mono", text: row.name }),
-              el(
-                "td",
-                {},
-                el("span", { text: row.via }),
-                el("span", { class: `conf ${row.confidence}`, text: row.confidence }),
-              ),
-              el("td", { text: String(row.hops) }),
-              el("td", {
-                class: "where",
-                title: row.path,
-                text: `${shortPath(row.path)}:${row.start_line}`,
-              }),
-            ),
-          ),
-        ),
-      ),
-    );
-    rings.draw(symbol, rows);
-  }
-
-  // ---- path finder
-  const from = el("input", { type: "search", placeholder: "from" });
-  const to = el("input", { type: "search", placeholder: "to" });
-
-  async function findPath() {
-    const a = from.value.trim();
-    const b = to.value.trim();
-    if (!a || !b) {
-      return fill(pathOut, empty("Name both ends."));
-    }
-    fill(pathOut, el("div", { class: "rail-hint", text: "Searching…" }));
-    let data;
-    try {
-      data = await api(`/api/path?from=${encodeURIComponent(a)}&to=${encodeURIComponent(b)}`);
-    } catch (e) {
-      return fill(pathOut, error(e.message));
-    }
-    const steps = data.path;
-    if (!steps) {
-      return fill(
-        pathOut,
-        empty(`No chain from ${a} to ${b}. They may be unconnected, or connected further than six hops.`),
-      );
-    }
-    if (!steps.length) {
-      return fill(pathOut, empty(`${a} is ${b}.`));
-    }
-    fill(
-      pathOut,
-      el(
-        "ol",
-        { class: "chain" },
-        steps.map((step) =>
-          el(
-            "li",
-            {},
-            el("span", { class: "mono", text: step.from }),
-            el("span", { class: "edge", text: step.kind }),
-            el("span", { class: "mono", text: step.to }),
-            el("span", { class: `conf ${step.confidence}`, text: step.confidence }),
-          ),
-        ),
-      ),
-      el("div", {
-        class: "rail-hint",
-        text: `${steps.length} hop${steps.length === 1 ? "" : "s"}, ${
-          steps.every((s) => s.confidence === "extracted") ? "all extracted" : "some matched by name"
-        }.`,
-      }),
-    );
-  }
-
-  from.addEventListener("keydown", (e) => e.key === "Enter" && findPath());
-  to.addEventListener("keydown", (e) => e.key === "Enter" && findPath());
-
-  const page = el(
-    "div",
-    { class: "view impact-page" },
-    el(
-      "div",
-      { class: "impact-title" },
-      pageHead(
-        "Impact",
-        "Reverse reachability. What breaks if this changes — before the edit, not after the test run.",
-      ),
-      el("span", { class: "tool-name", text: "semlith_impact" }),
-    ),
-    el(
-      "div",
-      { class: "impact-controls" },
-      el("div", { class: "graph-scope" }, icon(ICONS.search, 16), labelled("impact-name", "Symbol", name)),
-      labelled("impact-depth", "Hop depth", depth),
-      el("button", { class: "button small", type: "button", text: "Show", onclick: run }),
-    ),
-    summary,
-    el("div", { class: "impact-body" }, table, rings.node),
-    el(
-      "div",
-      { class: "path-finder" },
-      el("h2", { text: "Path finder" }),
-      el(
-        "div",
-        { class: "path-controls" },
-        labelled("path-from", "From symbol", from),
-        icon(ICONS.up, 16),
-        labelled("path-to", "To symbol", to),
-        el("button", { class: "button secondary small", type: "button", text: "Find", onclick: findPath }),
-      ),
-      pathOut,
-    ),
-  );
-
-  fill(pathOut, empty("Name two symbols to see the shortest chain of edges between them."));
-  setTimeout(() => {
-    if (name.value) run();
-    else fill(summary, empty("Name a symbol. Its blast radius is what reaches it, not what it reaches."));
-  }, 0);
-  return page;
-}
-
 /** One figure with its label, as the design draws them. */
 function stat(label, value, note) {
   return el(
     "div",
     { class: "stat" },
-    el("div", { class: "stat-label", text: label }),
-    el("div", { class: "stat-value", text: value }),
-    note ? el("div", { class: "stat-note", text: note }) : null,
+    el("span", { class: "eyebrow", text: label }),
+    el("span", { class: "value", text: value }),
+    note ? el("span", { class: "sub", text: note }) : null,
   );
 }
 
@@ -1211,24 +1637,15 @@ async function ledgerView() {
   const on = data.recording;
   return el(
     "div",
-    { class: "view ledger-page" },
-    el(
-      "div",
-      { class: "impact-title" },
-      pageHead(
-        "Retrieval ledger",
-        "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
-      ),
-      el(
-        "span",
-        { class: `pill ${on ? "on" : "off"}` },
-        el("i", {}),
-        on ? "recording · opt-in" : "not recording",
-      ),
+    { class: "view" },
+    pageHead(
+      "Retrieval ledger",
+      "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
+      { pill: pill(on ? "recording · opt-in" : "not recording", on ? "on" : null) },
     ),
     el(
       "div",
-      { class: "stat-row wide" },
+      { class: "strip" },
       stat("Queries recorded", n(data.queries), `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`),
       stat("Excerpt tokens", n(data.excerpt_tokens), "what the agents actually read"),
       stat("Whole-file tokens", n(data.whole_file_tokens), "what a grep loop would have cost"),
@@ -1238,28 +1655,38 @@ async function ledgerView() {
         data.ratio ? "not a marketing claim" : "needs a recorded query",
       ),
     ),
-    copyField("semlith ledger --last 20"),
-    el("div", {
-      class: "rail-hint",
-      text: "Prints the ledger on the command line. Nothing here needs a key.",
-    }),
-    on
-      ? null
-      : el(
-          "div",
-          { class: "note" },
-          el("div", { class: "what", text: "Recording is off" }),
-          el("div", {
-            text: "Start the daemon with --ledger to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
-          }),
-        ),
     el(
       "div",
-      { class: "note" },
-      el("div", { class: "what", text: "Per-session views arrive with the paid release" }),
-      el("div", {
-        text: "Recording and the semlith ledger dump are free, permanently. The per-session table, the filters and CSV/JSON export are what 0.13.0 adds on top — they will not lock anything that works today.",
-      }),
+      { class: "scroller" },
+      el(
+        "div",
+        { class: "card pad dense" },
+        copyField("semlith ledger --last 20"),
+        el("p", { class: "subtitle", text: "Prints the ledger on the command line." }),
+      ),
+      on
+        ? null
+        : el(
+            "div",
+            { class: "notice" },
+            el("div", { class: "what", text: "Recording is off" }),
+            el(
+              "div",
+              {},
+              "Start the daemon with ",
+              mono("--ledger"),
+              " to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+            ),
+          ),
+      says(
+        "Stored in ",
+        mono("~/.semlith/stores/<name>/store.db"),
+        ", table ",
+        mono("retrievals"),
+        ". Off by default; deleting the rows is a ",
+        mono("DELETE"),
+        ".",
+      ),
     ),
   );
 }
@@ -1280,14 +1707,234 @@ async function refreshStores() {
 
 // ---------------------------------------------------------------- stores
 
+/* "Agents connected", on the Stores page.
+ *
+ * The same list the Agents page draws, read from the same route, because two
+ * readings of "which agents are talking to this daemon" is how one page says
+ * two and the other says none. */
+function agentsCard() {
+  const card = el("div", { class: "card pad dense" });
+  const body = el("div", { class: "rows" });
+  fill(
+    card,
+    el("span", { class: "card-title", text: "Agents connected" }),
+    body,
+    el("span", { class: "spacer" }),
+    el("button", {
+      class: "button ghost small",
+      type: "button",
+      text: "Copy config for another client",
+      onclick: () => go("agents"),
+    }),
+  );
+  fill(body, el("div", { class: "rail-hint", text: "Asking the daemon…" }));
+
+  api("/api/agents")
+    .then((data) => {
+      noteAgents(data);
+      const live = data.connections || [];
+      if (!live.length) {
+        fill(
+          body,
+          el("div", {
+            class: "rail-hint",
+            text: "No client is talking to this daemon right now.",
+          }),
+        );
+        return;
+      }
+      fill(
+        body,
+        live.map((client) =>
+          el(
+            "div",
+            { class: "kv" },
+            el("span", { text: client.name }),
+            el("span", { class: "spacer" }),
+            el("span", {
+              class: "meta",
+              text: `${client.transport} · ${n(client.queries)} quer${
+                client.queries === 1 ? "y" : "ies"
+              }`,
+            }),
+          ),
+        ),
+      );
+    })
+    .catch((e) => fill(body, error(e.message)));
+
+  return card;
+}
+
+/* A question that has to be answered before anything else happens.
+ *
+ * A native `<dialog>` rather than a div: the focus trap, the Escape key, the
+ * inert background and the backdrop are the platform's, and every one of them
+ * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
+ * it is pending the dialog says so, and an error is shown inside it rather
+ * than behind it. */
+function ask({ title, body, confirm, tone, run }) {
+  const dialog = el("dialog", { class: "modal" });
+  const problem = el("div", { class: "note" });
+  const go = el("button", {
+    class: tone === "bad" ? "button danger" : "button",
+    type: "button",
+    text: confirm,
+    onclick: async () => {
+      go.disabled = true;
+      const was = go.textContent;
+      go.textContent = "Working…";
+      problem.className = "note";
+      problem.textContent = "";
+      try {
+        await run();
+        dialog.close();
+      } catch (e) {
+        problem.className = "note bad";
+        problem.textContent = e.message;
+        go.disabled = false;
+        go.textContent = was;
+      }
+    },
+  });
+  fill(
+    dialog,
+    el("h2", { class: "card-title", text: title }),
+    el("p", { class: "subtitle", text: body }),
+    problem,
+    el(
+      "div",
+      { class: "actions" },
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button secondary",
+        type: "button",
+        text: "Cancel",
+        onclick: () => dialog.close(),
+      }),
+      go,
+    ),
+  );
+  // Removed on close, however it was closed — the button, Escape, or the
+  // backdrop — so the page never accumulates dialogs nobody can see.
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog) dialog.close();
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+/** Ask before deleting a store.
+ *
+ * A store is minutes of embedding, so the question says what goes and what
+ * does not, and the button that answers it is the red one. */
+function confirmDelete(name) {
+  ask({
+    title: `Delete ${name}?`,
+    body: "Its vectors, chunks, graph and ledger are deleted, and the registry stops listing it. The files it indexed are untouched.",
+    confirm: `Delete ${name}`,
+    tone: "bad",
+    run: async () => {
+      const done = await post("/api/store/delete", { store: name });
+      await refreshStores();
+      // After the re-render, not before: the render replaces the element the
+      // message would have been written into.
+      await render();
+      note(done.message);
+    },
+  });
+}
+
+/** A line under the page head, for something that just happened to the page. */
+function note(text, bad) {
+  const holder = document.querySelector(".view > .note.page-note");
+  if (!holder) return;
+  holder.className = bad ? "note page-note bad" : "note page-note";
+  holder.textContent = text;
+}
+
 async function storesView() {
   const stores = await refreshStores();
+
+  const rootNote = el("div", { class: "note" });
+  /* A root the registry lists and the disk no longer has. The picker is the
+   * same one the page already uses, and re-pointing is a registry edit: no
+   * re-embedding, nothing rewritten. */
+  const rootPicker = folderPicker({
+    choose: "Point the store here",
+    onError: (message) => {
+      rootNote.className = "note bad";
+      rootNote.textContent = message;
+    },
+    onChoose: async (path) => {
+      rootNote.className = "note";
+      rootNote.textContent = "Re-pointing…";
+      try {
+        const done = await post("/api/root", { store: rootPicker.store, root: path });
+        rootNote.textContent = done.message;
+        await refreshStores();
+      } catch (e) {
+        rootNote.className = "note bad";
+        rootNote.textContent = e.message;
+      }
+    },
+  });
+
+  function repoint(store, missing) {
+    rootPicker.store = store;
+    rootNote.className = "note";
+    rootNote.textContent = `Choose where ${missing.split("/").pop() || missing} lives now.`;
+    rootPicker.open("");
+  }
+
+  const adoptNote = el("div", { class: "note" });
+  const picker = folderPicker({
+    choose: "Adopt this directory",
+    onError: (message) => {
+      adoptNote.className = "note bad";
+      adoptNote.textContent = message;
+    },
+    onChoose: async (path) => {
+      adoptNote.className = "note";
+      adoptNote.textContent = "Adopting…";
+      try {
+        const done = await post("/api/adopt", { path });
+        adoptNote.textContent =
+          done.message || `${path} is registered. It joins on the next daemon start.`;
+        await refreshStores();
+      } catch (e) {
+        adoptNote.className = "note bad";
+        adoptNote.textContent = e.message;
+      }
+    },
+  });
+
+  const head = pageHead("Stores", "Everything indexed on this machine. Nothing leaves it.", {
+    actions: [
+      el(
+        "button",
+        { class: "button secondary", type: "button", onclick: () => picker.open("") },
+        icon(ICONS.folder),
+        "Adopt existing .semlith",
+      ),
+      el(
+        "button",
+        { class: "button", type: "button", onclick: () => go("index") },
+        icon(ICONS.plus),
+        "Index a folder",
+      ),
+    ],
+  });
 
   if (!stores.length) {
     return el(
       "div",
       { class: "view" },
-      pageHead("Stores", "Everything indexed on this machine. Nothing leaves it."),
+      head,
+      picker.node,
+      adoptNote,
       empty("No store is open. Index a folder and it appears here."),
     );
   }
@@ -1297,19 +1944,103 @@ async function storesView() {
       files: sum.files + s.files,
       chunks: sum.chunks + s.chunks,
       bytes: sum.bytes + s.bytes,
+      lines: sum.lines + (s.lines || 0),
       watching: sum.watching + (s.watching ? 1 : 0),
+      formats: Math.max(sum.formats, s.formats || 0),
+      readers: Math.max(sum.readers, s.readers || 0),
     }),
-    { files: 0, chunks: 0, bytes: 0, watching: 0 },
+    { files: 0, chunks: 0, bytes: 0, lines: 0, watching: 0, formats: 0, readers: 0 },
   );
+  const dim = stores.find((s) => s.dim)?.dim;
 
-  const stat = (key, value, sub) =>
-    el(
-      "div",
-      { class: "stat" },
-      el("span", { class: "eyebrow", text: key }),
-      el("span", { class: "value", text: value }),
-      el("span", { class: "sub", text: sub }),
-    );
+  const table = dataTable({
+    className: "w-stores",
+    sort: "name",
+    perPage: 10,
+    rows: stores,
+    columns: [
+      {
+        key: "name",
+        label: "Store",
+        value: (s) => s.name,
+        render: (s) =>
+          el(
+            "div",
+            { class: "rows tight" },
+            lineCell(s.name, "name"),
+            pathCell(s.dir, "meta"),
+            // The model per store, which the About page states only once for
+            // the machine. Two stores can have been built with two models and
+            // their vectors are not comparable, so it belongs beside the row.
+            lineCell(`${s.model} · ${s.dim} dims`, "meta"),
+          ),
+      },
+      {
+        key: "roots",
+        label: "Roots",
+        className: "meta narrow-drop",
+        sortable: false,
+        render: (s) =>
+          (s.roots || []).length
+            ? s.roots.map((r) =>
+                r.present
+                  ? pathCell(r.path)
+                  : el(
+                      "div",
+                      { class: "gone-row" },
+                      pathCell(r.path, "gone"),
+                      // A root the registry still lists and the disk no longer
+                      // has. Re-pointing it is one click rather than a command
+                      // with two paths in it.
+                      el("button", {
+                        class: "button danger small",
+                        type: "button",
+                        text: "Re-point",
+                        onclick: () => repoint(s.name, r.path),
+                      }),
+                    ),
+              )
+            : "—",
+      },
+      { key: "files", label: "Files", className: "num", value: (s) => s.files, render: (s) => n(s.files) },
+      {
+        key: "chunks",
+        label: "Chunks",
+        className: "num narrow-drop",
+        value: (s) => s.chunks,
+        render: (s) => n(s.chunks),
+      },
+      {
+        key: "last_write",
+        label: "Last write",
+        value: (s) => s.last_write || 0,
+        // Green means a write landed. A store that is watched and has never
+        // been written to is neither good news nor a warning, so it carries a
+        // plain pill with no dot at all.
+        render: (s) => {
+          if (!s.watching) return pill("not watching", "warn");
+          return s.last_write ? pill(when(s.last_write), "good") : pill("never");
+        },
+      },
+      {
+        key: "open",
+        label: "",
+        className: "row-end",
+        sortable: false,
+        // One control rather than a button per action: the destructive one
+        // does not belong a mis-aimed click away from the ordinary one.
+        render: (s) =>
+          rowMenu(() => [
+            { label: "Open in Files", onclick: () => go("files") },
+            {
+              label: "Delete store…",
+              tone: "bad",
+              onclick: () => confirmDelete(s.name),
+            },
+          ]),
+      },
+    ],
+  });
 
   const feed = stores
     .flatMap((s) => (s.events || []).map((e) => ({ at: e.at, text: e.text })))
@@ -1319,157 +2050,57 @@ async function storesView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Stores" }),
-        el("p", { class: "subtitle", text: "Everything indexed on this machine. Nothing leaves it." }),
-      ),
-      el(
-        "div",
-        { class: "actions" },
-        el(
-          "button",
-          { class: "button", type: "button", onclick: () => go("index") },
-          icon(ICONS.plus),
-          "Index a folder",
-        ),
-      ),
-    ),
+    head,
+    picker.node,
+    adoptNote,
+    rootPicker.node,
+    rootNote,
+    el("div", { class: "note page-note" }),
     el(
       "div",
       { class: "strip" },
       stat("Stores", n(stores.length), `${totals.watching} being watched`),
-      stat("Files", n(totals.files), "readable by a person"),
-      stat("Chunks", n(totals.chunks), "embedded and searchable"),
-      stat("On disk", bytes(totals.bytes), "vectors and text together"),
+      stat("Files", n(totals.files), `${n(totals.formats)} formats`),
+      stat("Chunks", n(totals.chunks), dim ? `${dim}-dimension vectors` : "embedded and searchable"),
+      stat("Lines", n(totals.lines), `${n(totals.readers)} readers in use`),
+      stat("On disk", bytes(totals.bytes), "int8 quantised"),
     ),
     el(
       "div",
-      { class: "card" },
+      { class: "scroller" },
+      table.node,
       el(
         "div",
-        { class: "table-wrap" },
+        { class: "grid fill" },
         el(
-          "table",
-          { class: "w-stores" },
+          "div",
+          { class: "card pad dense" },
           el(
-            "thead",
-            {},
-            el(
-              "tr",
-              {},
-              el("th", { text: "Store" }),
-              el("th", { text: "Roots" }),
-              el("th", { class: "num", text: "Files" }),
-              el("th", { class: "num", text: "Chunks" }),
-              el("th", { text: "Last write" }),
-              el("th", { text: "" }),
-            ),
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Watcher" }),
+            el("span", { class: "meta", text: "live" }),
           ),
-          el(
-            "tbody",
-            {},
-            stores.map((s) =>
-              el(
-                "tr",
-                {},
-                el(
-                  "td",
-                  {},
-                  el("div", { class: "name", text: s.name }),
-                  el("div", { class: "meta", "data-tip": s.dir, text: s.dir }),
-                ),
-                el(
-                  "td",
-                  { class: "meta" },
-                  (s.roots || []).length
-                    ? s.roots.map((r) =>
-                        el("div", {
-                          class: r.present ? "" : "gone",
-                          text: r.present ? r.path : `${r.path} (missing)`,
-                        }),
-                      )
-                    : "—",
-                ),
-                el("td", { class: "num", text: n(s.files) }),
-                el("td", { class: "num", text: n(s.chunks) }),
-                el(
-                  "td",
-                  {},
+          feed.length
+            ? el(
+                "div",
+                { class: "feed" },
+                // One line per event, with the whole of it on the tooltip. A
+                // line that wraps is three lines when it names a path, and
+                // forty of those grew the card until it pushed the table it
+                // sits under off the page.
+                feed.map((e) =>
                   el(
-                    "span",
-                    { class: `pill ${s.watching ? "good" : "warn"}` },
-                    el("span", { class: "dot" }),
-                    s.watching ? when(s.last_write) : "not watching",
+                    "div",
+                    { class: "row" },
+                    el("span", { class: "at", text: clock(e.at) }),
+                    lineCell(e.text, "what"),
                   ),
                 ),
-                el(
-                  "td",
-                  {},
-                  el("button", {
-                    class: "button ghost small",
-                    type: "button",
-                    text: "Files",
-                    onclick: () => go("files"),
-                  }),
-                ),
-              ),
-            ),
-          ),
+              )
+            : empty("Nothing has changed on disk since the daemon started."),
         ),
-      ),
-    ),
-    el(
-      "div",
-      { class: "grid" },
-      el(
-        "div",
-        { class: "card pad" },
-        el(
-          "div",
-          { class: "head" },
-          el("span", { class: "card-title", text: "Watcher" }),
-          el("span", { class: "meta", text: "live" }),
-        ),
-        feed.length
-          ? el(
-              "div",
-              { class: "feed" },
-              feed.map((e) =>
-                el(
-                  "div",
-                  { class: "row" },
-                  el("span", { class: "at", text: clock(e.at) }),
-                  el("span", { class: "what", text: e.text }),
-                ),
-              ),
-            )
-          : empty("Nothing has changed on disk since the daemon started."),
-      ),
-      el(
-        "div",
-        { class: "card pad" },
-        el("span", { class: "card-title", text: "Model" }),
-        el(
-          "div",
-          { class: "rows" },
-          stores.map((s) =>
-            el(
-              "div",
-              { class: "kv" },
-              el("span", { class: "k", text: s.name }),
-              el("span", { class: "v", text: `${s.model} · ${s.dim} dims` }),
-            ),
-          ),
-        ),
-        el("p", {
-          class: "subtitle",
-          text: "Fixed when the store was created. Vectors from two models are not comparable, so switching means indexing again.",
-        }),
+        agentsCard(),
       ),
     ),
   );
@@ -1479,42 +2110,285 @@ async function storesView() {
 
 async function filesView() {
   const chosenExt = new Set();
-  const table = el("div", { class: "card" });
-  const count = el("span", { class: "meta" });
+  const summary = el("span", { class: "pill" });
+  const holder = el("div", {});
 
   const pathInput = el("input", {
     type: "text",
     placeholder: "path glob, e.g. src/**",
     oninput: () => {
       clearTimeout(load.timer);
-      load.timer = setTimeout(load, 200);
+      load.timer = setTimeout(() => load(true), 200);
     },
   });
 
   /** Which request is current, so a slow one cannot overwrite a fast one. */
   let generation = 0;
 
-  async function load() {
+  async function forget(path, row, store) {
+    try {
+      // Named, always. The row knows which store holds the file, and a daemon
+      // serving two stores cannot guess — it refuses a write that names none,
+      // which is what the page used to send.
+      await post("/api/forget", { path, store });
+      // The row goes, and the page is reloaded behind it: with the server
+      // paging, the row that moves up into the gap is on the server.
+      row.remove();
+      picked.delete(path);
+      paintBulk();
+      load();
+    } catch (e) {
+      // In the note, not over the table: an error that replaces the rows
+      // takes away the thing the reader was working with. Rethrown so a
+      // dialog waiting on this stays open and shows it too.
+      bulkNote.className = "note bad";
+      bulkNote.textContent = e.message;
+      throw e;
+    }
+  }
+
+  /* The rows ticked for a bulk forget, by path.
+   *
+   * Kept out here rather than in the table, because the table re-renders on
+   * every sort, page and filter and a selection that vanished when you sorted
+   * would be a selection nobody could trust. */
+  const picked = new Map();
+  const bulkNote = el("div", { class: "note" });
+  const bulkBar = el("div", { class: "bulk", hidden: true });
+
+  function paintBulk() {
+    bulkBar.hidden = picked.size === 0;
+    if (!picked.size) return;
+    const many = picked.size;
+    fill(
+      bulkBar,
+      el("span", {
+        class: "meta",
+        text: `${n(many)} file${many === 1 ? "" : "s"} selected`,
+      }),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          picked.clear();
+          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
+          paintBulk();
+        },
+      }),
+      el("button", {
+        class: "button danger small",
+        type: "button",
+        text: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
+        onclick: (e) => {
+          const button = e.currentTarget;
+          const stores = [...new Set(picked.values())];
+          ask({
+            title: `Forget ${n(many)} file${many === 1 ? "" : "s"}?`,
+            body: `Their chunks and vectors are dropped from ${stores.join(
+              " and ",
+            )}. The files on disk are untouched, and indexing the folder again brings them back.`,
+            confirm: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
+            tone: "bad",
+            run: () => forgetPicked(button),
+          });
+        },
+      }),
+    );
+  }
+
+  async function forgetPicked(button) {
+    button.disabled = true;
+    button.textContent = "Forgetting…";
+    bulkNote.className = "note";
+    bulkNote.textContent = "";
+    // One call per store: a write names the store it is for, and a selection
+    // made across two of them is two writes, not an ambiguous one.
+    const byStore = new Map();
+    for (const [path, store] of picked) {
+      if (!byStore.has(store)) byStore.set(store, []);
+      byStore.get(store).push(path);
+    }
+    try {
+      let files = 0;
+      let forgot = 0;
+      let absent = 0;
+      for (const [store, paths] of byStore) {
+        const done = await post("/api/forget", { paths, store });
+        // One path in a store answers in the single-file shape.
+        files += done.files === undefined ? 1 : done.files;
+        forgot += done.forgot || 0;
+        absent += (done.not_indexed || []).length;
+      }
+      picked.clear();
+      paintBulk();
+      bulkNote.textContent = absent
+        ? `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
+            forgot === 1 ? "" : "s"
+          } removed. ${n(absent)} were not indexed and were left alone.`
+        : `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
+            forgot === 1 ? "" : "s"
+          } removed.`;
+      load();
+    } catch (e) {
+      bulkNote.className = "note bad";
+      bulkNote.textContent = e.message;
+      button.disabled = false;
+      paintBulk();
+      // Rethrown so the dialog that asked stays open and shows it too.
+      throw e;
+    }
+  }
+
+  const table = dataTable({
+    className: "w-files",
+    server: true,
+    sort: "path",
+    columns: [
+      {
+        key: "pick",
+        label: "",
+        className: "pick",
+        sortable: false,
+        // Selects every row on the page rather than every row in the store: a
+        // filter of ten thousand files behind one tick is a mistake nobody
+        // meant to make.
+        head: () => {
+          const all = el("input", {
+            type: "checkbox",
+            class: "pick all",
+            "aria-label": "Select every file on this page",
+            onchange: () => {
+              for (const box of table.node.querySelectorAll("tbody input.pick")) {
+                if (box.checked !== all.checked) box.click();
+              }
+            },
+          });
+          return all;
+        },
+        render: (f) => {
+          const box = el("input", {
+            type: "checkbox",
+            class: "pick",
+            "aria-label": `Select ${f.path}`,
+            onchange: () => {
+              if (box.checked) picked.set(f.path, f.store);
+              else picked.delete(f.path);
+              paintBulk();
+            },
+          });
+          box.checked = picked.has(f.path);
+          return box;
+        },
+      },
+      {
+        key: "path",
+        label: "Path",
+        className: "path",
+        // One line, with the whole path on the shared tooltip: a wrapped path
+        // makes every row a different height and the column unreadable.
+        render: (f) => pathCell(f.path),
+      },
+      {
+        key: "store",
+        label: "Store",
+        className: "meta narrow-drop",
+        sortable: false,
+        render: (f) => f.store,
+      },
+      {
+        key: "reader",
+        label: "Read as",
+        className: "narrow-drop",
+        sortable: false,
+        render: (f) => el("span", { class: "tag", text: f.reader }),
+      },
+      {
+        key: "lang",
+        label: "Language",
+        className: "meta narrow-drop",
+        sortable: false,
+        render: (f) => f.lang || "—",
+      },
+      {
+        key: "lines",
+        label: "Lines",
+        className: "num",
+        // An image has no lines. Its pixel size goes here rather than a zero,
+        // which would read as a file that failed to parse.
+        render: (f) => (f.reader === "image" ? "—" : n(f.lines)),
+      },
+      { key: "chunks", label: "Chunks", className: "num narrow-drop", render: (f) => n(f.chunks) },
+      {
+        key: "indexed",
+        label: "Indexed",
+        className: "meta",
+        render: (f) => when(f.indexed_at),
+      },
+      {
+        key: "forget",
+        label: "",
+        sortable: false,
+        render: (f) => {
+          const button = el("button", {
+            class: "forget",
+            type: "button",
+            text: "Forget",
+            onclick: () => {
+              const row = button.closest("tr");
+              ask({
+                title: "Forget this file?",
+                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched, and indexing the folder again brings it back.`,
+                confirm: "Forget it",
+                tone: "bad",
+                run: async () => {
+                  button.disabled = true;
+                  button.textContent = "Forgetting…";
+                  await forget(f.path, row, f.store);
+                },
+              });
+            },
+          });
+          return button;
+        },
+      },
+    ],
+    rows: [],
+    total: 0,
+    onChange: () => load(),
+  });
+
+  async function load(reset) {
     const mine = ++generation;
+    const view = table.query();
+    if (reset) view.page = 1;
     const params = new URLSearchParams();
     if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
     for (const ext of chosenExt) params.append("ext", ext);
+    params.set("sort", view.sort || "path");
+    params.set("dir", view.dir);
+    params.set("limit", String(view.perPage));
+    params.set("offset", String((view.page - 1) * view.perPage));
 
     let data;
     try {
       data = await api(`/api/files?${params}`);
     } catch (e) {
       if (mine !== generation) return;
-      fill(table, el("div", { class: "card pad" }, error(e.message)));
-      count.textContent = "";
+      fill(holder, el("div", { class: "card pad" }, error(e.message)));
+      summary.textContent = "";
       return;
     }
     if (mine !== generation) return;
 
-    count.textContent = `${n(data.total)} files`;
-    if (!data.files.length) {
+    summary.textContent = `${n(data.total)} files · ${n(data.formats)} format${
+      data.formats === 1 ? "" : "s"
+    } · ${n(data.stores)} store${data.stores === 1 ? "" : "s"}`;
+
+    if (!data.total) {
       fill(
-        table,
+        holder,
         el(
           "div",
           { class: "card pad" },
@@ -1523,89 +2397,13 @@ async function filesView() {
       );
       return;
     }
-
-    let shown = data.files.length;
-    const rows = data.files.map((f) => {
-      const forget = el("button", {
-        class: "forget",
-        type: "button",
-        text: "Forget",
-        onclick: async () => {
-          forget.disabled = true;
-          forget.textContent = "Forgetting…";
-          try {
-            await post("/api/forget", { path: f.path });
-            // Drop the row rather than reloading the whole table: the answer is
-            // already known, and a reload throws away the scroll position.
-            row.remove();
-            shown -= 1;
-            count.textContent = `${n(Math.max(0, data.total - 1))} files`;
-            if (shown === 0) load();
-          } catch (e) {
-            forget.disabled = false;
-            forget.textContent = "Forget";
-            fill(last, error(e.message));
-          }
-        },
-      });
-
-      const last = el("td", {}, forget);
-      const row = el(
-        "tr",
-        {},
-        el("td", { class: "path", "data-tip": f.path, text: f.path }),
-        el("td", { class: "meta", text: f.store }),
-        el("td", {}, el("span", { class: "tag", text: f.reader })),
-        el("td", { class: "meta", text: f.lang || "—" }),
-        el("td", { class: "num", text: n(f.lines) }),
-        el("td", { class: "num", text: n(f.chunks) }),
-        last,
-      );
-      return row;
-    });
-
-    fill(
-      table,
-      el(
-        "div",
-        { class: "table-wrap" },
-        el(
-          "table",
-          { class: "w-files" },
-          el(
-            "thead",
-            {},
-            el(
-              "tr",
-              {},
-              el("th", { text: "Path" }),
-              el("th", { text: "Store" }),
-              el("th", { text: "Read as" }),
-              el("th", { text: "Language" }),
-              el("th", { class: "num", text: "Lines" }),
-              el("th", { class: "num", text: "Chunks" }),
-              el("th", { text: "" }),
-            ),
-          ),
-          el("tbody", {}, rows),
-        ),
-      ),
-      data.files.length < data.total
-        ? el(
-            "div",
-            { class: "table-foot" },
-            el("span", {
-              class: "meta",
-              text: `showing the first ${n(data.files.length)} of ${n(data.total)} — narrow the filter to see the rest`,
-            }),
-          )
-        : null,
-    );
+    table.update(data.files, data.total);
+    if (!holder.contains(table.node)) fill(holder, table.node);
   }
 
   // The formats this release added are on the list, so they are one click away
   // rather than something you have to know to type.
-  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "pdf", "docx", "epub", "rtf", "eml"];
+  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "pdf", "docx", "epub", "png", "jpg"];
   const extChips = EXTENSIONS.map((ext) =>
     el("button", {
       class: "chip",
@@ -1618,7 +2416,7 @@ async function filesView() {
         if (on) chosenExt.add(ext);
         else chosenExt.delete(ext);
         clearTimeout(load.timer);
-        load();
+        load(true);
       },
     }),
   );
@@ -1628,19 +2426,10 @@ async function filesView() {
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Files" }),
-        el("p", {
-          class: "subtitle",
-          text: "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
-        }),
-      ),
-      count,
+    pageHead(
+      "Files",
+      "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
+      { pill: summary },
     ),
     el(
       "div",
@@ -1653,7 +2442,9 @@ async function filesView() {
       ),
       extChips,
     ),
-    table,
+    bulkBar,
+    bulkNote,
+    holder,
     el("p", {
       class: "subtitle",
       text: "Forget drops the file's chunks and vectors. The file on disk is untouched.",
@@ -1672,66 +2463,41 @@ async function languagesView() {
   }
   const languages = data.languages || [];
 
-  const tags = (list) =>
-    list.map((item) => el("span", { class: "tag wrapped", text: item }));
+  const tags = (list) => list.map((item) => el("span", { class: "tag wrapped", text: item }));
+
+  const table = dataTable({
+    className: "w-languages",
+    sort: "name",
+    perPage: 25,
+    rows: languages,
+    columns: [
+      { key: "name", label: "Name", className: "path", value: (l) => l.name },
+      {
+        key: "extensions",
+        label: "Extensions",
+        value: (l) => (l.extensions || []).length,
+        render: (l) => tags((l.extensions || []).map((e) => `.${e}`)),
+      },
+      {
+        key: "filenames",
+        label: "Filenames",
+        className: "narrow-drop",
+        value: (l) => (l.filenames || []).length,
+        render: (l) =>
+          (l.filenames || []).length ? tags(l.filenames) : el("span", { class: "meta", text: "—" }),
+      },
+    ],
+  });
 
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el("h1", { text: "Languages" }),
-        el("p", {
-          class: "subtitle",
-          text: "Every name --lang accepts, on the command line, in the MCP tools and in the search box.",
-        }),
-      ),
-      el("span", { class: "pill", text: `${languages.length} languages` }),
+    pageHead(
+      "Languages",
+      "Every name --lang accepts, on the command line, in the MCP tools and in the search box.",
+      { pill: pill(`${languages.length} languages`) },
     ),
-    languages.length
-      ? el(
-          "div",
-          { class: "card" },
-          el(
-            "div",
-            { class: "table-wrap" },
-            el(
-              "table",
-              { class: "w-languages" },
-              el(
-                "thead",
-                {},
-                el(
-                  "tr",
-                  {},
-                  el("th", { text: "Name" }),
-                  el("th", { text: "Extensions" }),
-                  el("th", { text: "Filenames" }),
-                ),
-              ),
-              el(
-                "tbody",
-                {},
-                languages.map((language) =>
-                  el(
-                    "tr",
-                    {},
-                    el("td", { class: "path", text: language.name }),
-                    el("td", {}, tags((language.extensions || []).map((e) => `.${e}`))),
-                    (language.filenames || []).length
-                      ? el("td", {}, tags(language.filenames))
-                      : el("td", { class: "meta", text: "—" }),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        )
-      : empty("The language table is empty, which should be impossible."),
+    languages.length ? table.node : empty("The language table is empty, which should be impossible."),
     el("p", {
       class: "subtitle",
       text: "Extension and filename decide the language; file contents are never read to guess it, because a store is searched far more often than it is built. The two names with no extension — dockerfile and makefile — match by filename instead.",
@@ -1748,6 +2514,7 @@ const LIST_LABELS = {
   vector: ["v", "vector — the embedding matched"],
   keyword: ["f", "full text — the terms matched"],
   graph: ["g", "graph — reached from a neighbouring symbol"],
+  image: ["i", "image — the picture matched the words"],
 };
 
 function fusionBadges(lists) {
@@ -1762,7 +2529,7 @@ function fusionBadges(lists) {
   );
 }
 
-/** The likeliest symbol name in a hit, for the graph and impact links. */
+/** The likeliest symbol name in a hit, for the link into the graph. */
 function symbolIn(hit) {
   const match = hit.text.match(
     /(?:fn|function|def|func|class|struct|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/,
@@ -1775,7 +2542,10 @@ async function searchView() {
 
   const results = el("div", { class: "results" });
   const meta = el("span", { class: "search-meta" });
-  const chosen = new Set();
+  // Restored rather than reset: the question and the store filter survive a
+  // trip to another page, because coming back to an empty box means typing it
+  // again.
+  const chosen = new Set(state.search.stores);
   let generation = 0;
 
   const input = el("input", {
@@ -1791,6 +2561,7 @@ async function searchView() {
 
   async function run() {
     const query = input.value.trim();
+    state.search = { query, stores: [...chosen] };
     if (!query) {
       fill(results, nothing());
       meta.textContent = "";
@@ -1837,12 +2608,26 @@ async function searchView() {
             "div",
             { class: "where" },
             el("span", { class: "file", text: hit.path }),
-            el("span", { class: "lines", text: `${hit.start_line}-${hit.end_line}` }),
+            el("span", {
+              class: "lines",
+              text: hit.image
+                ? `${hit.image.width}×${hit.image.height} px`
+                : `${hit.start_line}-${hit.end_line}`,
+            }),
             el("span", { class: "from", text: hit.store }),
             el("span", { class: "spacer" }),
             fusionBadges(hit.lists),
           ),
-          el("pre", { text: hit.text }),
+          // An image has no excerpt to quote, so the hit shows the image. It
+          // is served from the store's own list of indexed images, so the
+          // route cannot be asked for a file nobody pointed semlith at.
+          hit.image
+            ? el("img", {
+                class: "preview",
+                src: `/api/image?path=${encodeURIComponent(hit.path)}`,
+                alt: "",
+              })
+            : el("pre", { text: hit.text }),
           el(
             "div",
             { class: "hit-actions" },
@@ -1854,16 +2639,6 @@ async function searchView() {
                 e.preventDefault();
                 state.pendingSymbol = symbolIn(hit);
                 go("graph");
-              },
-            }),
-            el("a", {
-              href: "#impact",
-              class: "quiet",
-              text: "Blast radius",
-              onclick: (e) => {
-                e.preventDefault();
-                state.pendingSymbol = symbolIn(hit);
-                go("impact");
               },
             }),
           ),
@@ -1887,12 +2662,18 @@ async function searchView() {
       },
     }),
   );
+  for (const chip of storeChips) {
+    chip.setAttribute("aria-pressed", String(chosen.has(chip.textContent)));
+  }
 
   fill(results, nothing());
   setTimeout(() => {
     if (state.pendingQuery) {
       input.value = state.pendingQuery;
       state.pendingQuery = "";
+      run();
+    } else if (state.search.query) {
+      input.value = state.search.query;
       run();
     }
     input.focus();
@@ -1929,15 +2710,62 @@ async function searchView() {
 async function indexView() {
   await refreshStores();
 
-  const log = el("div", { class: "log", "aria-live": "polite" });
+  // Hidden until there is something to say. An empty terminal-coloured slab
+  // under an idle page is a block of nothing pretending to be output.
+  const log = el("div", { class: "log", "aria-live": "polite", hidden: true });
   const bar = el("span", {});
   // Set through CSSOM rather than a style attribute: the CSP blocks the
   // attribute, and this is the one value that genuinely has to be dynamic.
   bar.style.width = "0%";
   const pct = el("span", { class: "pct", text: "0%" });
   const status = el("span", { class: "meta", text: "idle" });
-  const picker = el("div", { class: "card picker", hidden: true });
+  const picker = folderPicker({
+    onChoose: (path) => {
+      field.value = path;
+    },
+    onError: (message) => complain(message),
+  });
   const note = el("div", { class: "note" });
+  const urlCard = el("div", { class: "card pad", hidden: true });
+  const urlNote = el("div", { class: "note" });
+
+  const folderButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("picker"),
+    },
+    icon(ICONS.folder),
+    "Choose folder…",
+  );
+  const urlButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("url"),
+    },
+    icon(ICONS.file),
+    "Add from a URL",
+  );
+
+  /* The two ways to start a queue are mutually exclusive: showing a folder
+   * picker and a URL field at once offers two answers to one question. Both
+   * start closed, so the page opens on the path field and its actions, and the
+   * button that opened one stays lit while it is open. */
+  function reveal(which) {
+    const wantPicker = which === "picker" && !picker.isOpen();
+    const wantUrl = which === "url" && urlCard.hidden;
+    if (!wantPicker) picker.close();
+    urlCard.hidden = !wantUrl;
+    if (wantPicker) picker.open("");
+    if (wantUrl) urlField.focus();
+    folderButton.setAttribute("aria-pressed", String(wantPicker));
+    urlButton.setAttribute("aria-pressed", String(wantUrl));
+  }
 
   const field = el("input", {
     type: "text",
@@ -1948,24 +2776,61 @@ async function indexView() {
   const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
 
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  /* While a run is on, Start becomes Pause and Stop appears beside it. A run
+   * holds the writer, so these are the only two things a reader can do about
+   * one that is taking longer than they expected. */
+  const stopButton = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Stop",
+    hidden: true,
+  });
+  let running = false;
+  let paused = false;
+
+  /** Send pause, resume or stop to the store the run is writing to. */
+  async function control(action) {
+    return post("/api/index/control", {
+      action,
+      store: storeSelect.value || undefined,
+    });
+  }
+
+  function showRunning(on) {
+    running = on;
+    paused = false;
+    stopButton.hidden = !on;
+    stopButton.disabled = false;
+    stopButton.textContent = "Stop";
+    start.textContent = on ? "Pause" : "Start indexing";
+    start.disabled = false;
+    addButton.disabled = on;
+  }
   const addButton = el("button", { class: "button secondary", type: "button", text: "Fetch and index" });
 
   const storeSelect = el(
     "select",
-    { class: "chip static", "aria-label": "Store to write to" },
+    { class: "field", "aria-label": "Store to write to" },
     state.stores.map((store) => el("option", { value: store.name, text: store.name })),
   );
 
-  function say(text, key) {
+  function say(text, key, outcome) {
+    log.hidden = false;
     log.append(
       el(
         "div",
-        { class: "line" },
+        // The outcome colours the line, so a wall of "unchanged" reads as
+        // background and the files actually being embedded stand out of it.
+        { class: outcome ? `line ${outcome}` : "line" },
         key ? el("span", { class: "key", text: key }) : null,
+        outcome ? el("span", { class: "outcome", text: outcome }) : null,
         el("span", { class: "what", text }),
       ),
     );
-    log.scrollTop = log.scrollHeight;
+    // Only while the reader is already at the end: scrolling back through a
+    // long run should not be yanked away by the next line.
+    const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    if (atEnd) log.scrollTop = log.scrollHeight;
   }
 
   function complain(message, focus) {
@@ -1974,87 +2839,11 @@ async function indexView() {
     if (focus) focus.focus();
   }
 
-  async function browse(path) {
-    let data;
-    try {
-      data = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
-    } catch (e) {
-      complain(e.message);
-      return;
-    }
-    note.className = "note";
-    note.textContent = "";
-    picker.hidden = false;
-
-    fill(
-      picker,
-      el(
-        "div",
-        { class: "crumbs" },
-        el(
-          "button",
-          {
-            class: "button secondary small",
-            type: "button",
-            disabled: !data.parent,
-            onclick: () => browse(data.parent),
-          },
-          icon(ICONS.up, 15),
-          "Up",
-        ),
-        el("span", { class: "where", text: data.path }),
-        el("span", { class: "spacer" }),
-        el("button", {
-          class: "button small",
-          type: "button",
-          text: "Use this folder",
-          onclick: () => {
-            field.value = data.path;
-            picker.hidden = true;
-          },
-        }),
-        el("button", {
-          class: "button ghost small",
-          type: "button",
-          text: "Close",
-          onclick: () => {
-            picker.hidden = true;
-          },
-        }),
-      ),
-      el(
-        "div",
-        { class: "entries" },
-        data.entries.length
-          ? data.entries.map((entry) =>
-              el(
-                "button",
-                {
-                  class: "entry",
-                  type: "button",
-                  onclick: () => {
-                    if (entry.dir) browse(entry.path);
-                    else {
-                      field.value = entry.path;
-                      picker.hidden = true;
-                    }
-                  },
-                },
-                icon(entry.dir ? ICONS.folder : ICONS.file),
-                el("span", { class: "name", text: entry.name }),
-              ),
-            )
-          : el("div", { class: "card pad" }, empty("Nothing here that semlith can index.")),
-      ),
-    );
-  }
-
   /* One reader for both buttons. /api/add fetches the URL and then hands what
    * landed to the same write queue a folder goes through, so it answers with
    * the same event stream and there is no second progress mechanism. */
   async function run(route, body) {
-    start.disabled = true;
-    addButton.disabled = true;
+    showRunning(true);
     note.className = "note";
     note.textContent = "";
     log.replaceChildren();
@@ -2070,7 +2859,19 @@ async function indexView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, store: storeSelect.value || undefined }),
       });
-      if (!response.ok) throw new Error((await response.text()) || response.statusText);
+      if (!response.ok) {
+        // The body is the same `{"error": ...}` shape every other route
+        // answers with, and showing the JSON rather than the sentence inside
+        // it is how a clear message arrives looking like a fault.
+        const body = await response.text();
+        let detail = body;
+        try {
+          detail = JSON.parse(body).error || body;
+        } catch (_) {
+          /* a plain-text body is fine too */
+        }
+        throw new Error(detail || response.statusText);
+      }
 
       // The response is chunked and arrives while the writer works, so it is
       // read as it comes rather than awaited whole — the point of streaming it.
@@ -2087,13 +2888,54 @@ async function indexView() {
           buffer = buffer.slice(cut + 1);
           if (!line) continue;
           const event = JSON.parse(line);
-          if (event.event === "file") {
+          if (event.event === "queued") {
+            // The writer is one thread. Saying so is the difference between a
+            // page that looks stuck and a page that is waiting its turn.
+            status.textContent = event.ahead
+              ? `queued — ${n(event.ahead)} ahead of it`
+              : "queued for the writer";
+            say(
+              event.ahead
+                ? `waiting for ${event.store}'s writer — ${n(event.ahead)} job${
+                    event.ahead === 1 ? "" : "s"
+                  } ahead of this one`
+                : `waiting for ${event.store}'s writer; it finishes what the watcher is doing first`,
+              "queued",
+            );
+          } else if (event.event === "started") {
+            status.textContent = "walking the tree";
+            say("walking the tree and hashing what it finds", "start");
+          } else if (event.event === "file") {
             const share = event.total ? (event.scanned / event.total) * 100 : 0;
             const shown = Math.min(100, share);
             bar.style.width = `${shown.toFixed(1)}%`;
             pct.textContent = `${Math.round(shown)}%`;
-            say(event.path, `${event.scanned}/${event.total}`);
+            // The same three facts the terminal prints: which file, what is
+            // happening to it, and the run's totals so far. Every file says
+            // something, so a re-index of an unchanged corpus is a list of
+            // "unchanged" rather than a bar that sits at nothing and then
+            // jumps to done.
+            const rate = event.elapsed_ms
+              ? Math.round((event.chunks / event.elapsed_ms) * 1000)
+              : 0;
+            status.textContent = `${event.scanned}/${event.total} files · ${n(
+              event.chunks,
+            )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
+            say(event.path, `${event.scanned}/${event.total}`, event.outcome);
           } else if (event.event === "done") {
+            if (event.stopped) {
+              // Not 100%: nothing was kept, and a full bar would say the
+              // opposite of what happened.
+              bar.style.width = "0%";
+              pct.textContent = "0%";
+              status.textContent = "stopped";
+              say(
+                "stopped — everything this run embedded was undone, so the store is as it was before it started",
+                "stopped",
+              );
+              await refreshStores();
+              continue;
+            }
             bar.style.width = "100%";
             pct.textContent = "100%";
             status.textContent = "done";
@@ -2101,16 +2943,26 @@ async function indexView() {
               `${event.indexed} indexed, ${event.unchanged} unchanged, ${event.skipped} skipped, ${event.removed} removed, ${event.chunks} chunks`,
               "done",
             );
-            if (event.remaining) {
-              say(
-                `${event.remaining} paths left after the time slice — start again to continue; nothing already indexed is redone`,
-                "note",
-              );
-            }
+
             // The store list has changed. Without this, a first index left
             // `state.stores` empty and the next visit to Stores bounced the
             // user to the first-run screen with their work apparently gone.
             await refreshStores();
+          } else if (event.event === "slice") {
+            // The writer handed itself back to the watcher and took the rest
+            // of this run back onto the queue. One run, one stream: there is
+            // nothing for the reader to do.
+            status.textContent = `${n(event.remaining)} left — yielding to the watcher`;
+            say(
+              `${n(event.remaining)} paths left; the writer is giving the watcher a turn and will carry on`,
+              "slice",
+            );
+          } else if (event.event === "paused") {
+            status.textContent = "paused";
+            say("held between files — the writer is still this run's", "paused");
+          } else if (event.event === "resumed") {
+            status.textContent = "working";
+            say("carrying on", "resumed");
           } else if (event.event === "error") {
             status.textContent = "failed";
             say(event.error, "error");
@@ -2122,13 +2974,46 @@ async function indexView() {
     } catch (e) {
       status.textContent = "failed";
       say(e.message, "error");
+      return e.message;
     } finally {
-      start.disabled = false;
-      addButton.disabled = false;
+      showRunning(false);
     }
+    return null;
   }
 
-  start.addEventListener("click", () => {
+  stopButton.addEventListener("click", () => {
+    ask({
+      title: "Stop this index run?",
+      body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. Indexing the same folder again begins at 0%.",
+      confirm: "Stop and undo",
+      tone: "bad",
+      run: async () => {
+        stopButton.disabled = true;
+        stopButton.textContent = "Stopping…";
+        status.textContent = "stopping — undoing what it embedded";
+        await control("stop");
+      },
+    });
+  });
+
+  start.addEventListener("click", async () => {
+    if (running) {
+      // Pause and resume are the same button: the run is the thing being
+      // toggled, and two buttons for one state is two things to read.
+      const want = paused ? "resume" : "pause";
+      start.disabled = true;
+      try {
+        await control(want);
+        paused = !paused;
+        start.textContent = paused ? "Resume" : "Pause";
+        status.textContent = paused ? "paused" : "working";
+      } catch (e) {
+        complain(e.message);
+      } finally {
+        start.disabled = false;
+      }
+      return;
+    }
     const path = field.value.trim();
     if (!path) {
       complain("Give a path to index, or choose a folder.", field);
@@ -2137,52 +3022,68 @@ async function indexView() {
     run("/api/index", { path });
   });
 
-  addButton.addEventListener("click", () => {
+  addButton.addEventListener("click", async () => {
     const url = urlField.value.trim();
     if (!url) {
-      complain("Give an https URL to fetch.", urlField);
+      urlNote.className = "note bad";
+      urlNote.textContent = "Give an https URL to fetch.";
+      urlField.focus();
       return;
     }
-    run("/api/add", { url });
+    urlNote.className = "note";
+    urlNote.textContent = "";
+    const failed = await run("/api/add", { url });
+    // A failed fetch leaves the card open with what went wrong on it. Closing
+    // it would take the message away with it and leave the page looking as
+    // though nothing had been asked for.
+    if (failed) {
+      urlNote.className = "note bad";
+      urlNote.textContent = failed;
+      urlCard.hidden = false;
+    }
   });
 
   return el(
     "div",
     { class: "view" },
+    pageHead("Index"),
+    says(
+      "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path ",
+      mono("semlith_index"),
+      " takes.",
+    ),
+    // The path field has the row to itself, above the actions: sharing a row
+    // with four buttons is what held it to 420px on a 1440px page.
     el(
       "div",
-      { class: "titles" },
-      el("h1", { text: "Index" }),
-      el("p", {
-        class: "subtitle",
-        text: "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path semlith_index takes.",
-      }),
+      { class: "field tall full" },
+      el("span", { class: "prefix", text: "path" }),
+      labelled("index-path", "Path to index", field),
     ),
     el(
       "div",
       { class: "filters" },
-      el(
-        "div",
-        { class: "field tall grow" },
-        el("span", { class: "prefix", text: "path" }),
-        labelled("index-path", "Path to index", field),
-      ),
-      el(
-        "button",
-        { class: "button secondary", type: "button", onclick: () => browse("") },
-        icon(ICONS.folder),
-        "Choose folder…",
-      ),
+      folderButton,
+      urlButton,
       state.stores.length > 1 ? storeSelect : null,
       start,
+      stopButton,
       el("span", { class: "spacer" }),
-      el("span", { class: "meta", text: "writer: daemon" }),
+      // What the queue actually holds, from /api/stores. The line it replaces
+      // said "writer: daemon", which named a process rather than telling
+      // anyone anything about their work.
+      el("span", {
+        class: "meta",
+        text: `queue depth ${state.stores.reduce((sum, store) => sum + (store.queue || 0), 0)}`,
+      }),
     ),
     note,
-    picker,
     el(
       "div",
-      { class: "card pad" },
+      { class: "scroller" },
+    picker.node,
+    fill(
+      urlCard,
       el("span", { class: "eyebrow", text: "Add from a URL" }),
       el("p", {
         class: "subtitle",
@@ -2190,15 +3091,12 @@ async function indexView() {
       }),
       el(
         "div",
-        { class: "filters" },
-        el(
-          "div",
-          { class: "field tall grow" },
-          el("span", { class: "prefix", text: "url" }),
-          labelled("index-url", "URL to fetch and index", urlField),
-        ),
-        addButton,
+        { class: "field tall full" },
+        el("span", { class: "prefix", text: "url" }),
+        labelled("index-url", "URL to fetch and index", urlField),
       ),
+      el("div", { class: "actions" }, addButton),
+      urlNote,
     ),
     el(
       "div",
@@ -2214,15 +3112,23 @@ async function indexView() {
       el("div", { class: "bar" }, bar),
     ),
     log,
+    ),
   );
 }
 
 // -------------------------------------------------------- install panel
 
+/* What this machine has set up, and the one thing the page can fix itself.
+ *
+ * The install commands that used to head this card belonged on a machine that
+ * does not have semlith yet — which is not the machine reading this page. What
+ * is useful here is the state of each step and a way to act on the one that is
+ * not done.
+ */
 function installPanel() {
   const card = el("div", { class: "card pad install-panel" });
-  const title = () => el("span", { class: "card-title", text: "Install and setup" });
-  fill(card, title(), el("p", { class: "subtitle", text: "Checking this machine…" }));
+  const title = () => el("span", { class: "card-title", text: "This machine" });
+  fill(card, title(), el("p", { class: "subtitle", text: "Checking…" }));
 
   const stateWord = {
     done: "done",
@@ -2230,97 +3136,114 @@ function installPanel() {
     skipped: "not done",
     failed: "failed",
   };
+  const tone = (state) =>
+    state === "done" || state === "already-done" ? "good" : state === "failed" ? "bad" : "warn";
 
-  api("/api/setup")
-    .then((setup) => {
-      const result = el("div", { class: "note" });
+  function paint(setup) {
+    const note = el("div", { class: "note" });
 
-      const install = el("button", {
-        class: "button small",
-        type: "button",
-        text: "Install it",
-        disabled: true,
-        onclick: async () => {
-          install.disabled = true;
-          check.disabled = true;
-          result.className = "note";
-          result.textContent = "Downloading and verifying…";
-          try {
-            const done = await post("/api/upgrade", { action: "apply" });
-            result.textContent = done.restart;
-          } catch (e) {
-            result.className = "note bad";
-            result.textContent = e.message;
-          } finally {
-            check.disabled = false;
-          }
-        },
-      });
+    const fixPath = el("button", {
+      class: "button small",
+      type: "button",
+      text: "Add it to PATH",
+      onclick: async () => {
+        fixPath.disabled = true;
+        note.className = "note";
+        note.textContent = "Editing your shell profile…";
+        try {
+          const done = await post("/api/setup", { step: "path" });
+          note.textContent = `${done.step.detail} — open a new terminal for it to take effect.`;
+          paint(done.status);
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+          fixPath.disabled = false;
+        }
+      },
+    });
 
-      const check = el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Check for updates",
-        onclick: async () => {
-          check.disabled = true;
-          result.className = "note";
-          result.textContent = "Asking GitHub…";
-          try {
-            const found = await post("/api/upgrade", { action: "check" });
-            result.textContent = found.available
-              ? `${found.latest} is available; you are on ${found.installed}.`
-              : `Already on the newest release, ${found.installed}.`;
-            if (found.blocked) result.textContent += ` ${found.blocked}`;
-            install.disabled = !found.available || Boolean(found.blocked);
-          } catch (e) {
-            result.className = "note bad";
-            result.textContent = e.message;
-          } finally {
-            check.disabled = false;
-          }
-        },
-      });
+    const install = el("button", {
+      class: "button small",
+      type: "button",
+      text: "Install it",
+      disabled: true,
+      onclick: async () => {
+        install.disabled = true;
+        check.disabled = true;
+        note.className = "note";
+        note.textContent = "Downloading and verifying…";
+        try {
+          const done = await post("/api/upgrade", { action: "apply" });
+          note.textContent = done.restart;
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      },
+    });
 
-      fill(
-        card,
-        title(),
-        el("p", {
-          class: "subtitle",
-          text: "One command on a new machine. Nothing here reaches the network until you click it.",
-        }),
-        el("span", { class: "eyebrow", text: "macOS and Linux" }),
-        copyField(setup.install_sh),
-        el("span", { class: "eyebrow", text: "Windows" }),
-        copyField(setup.install_ps1),
-        el("hr", { class: "rule" }),
-        el(
-          "div",
-          { class: "rows" },
-          (setup.steps || []).map((step) =>
-            el(
-              "div",
-              { class: "kv" },
-              el("span", {
-                class: `pill ${step.state === "done" || step.state === "already-done" ? "good" : ""}`,
-                text: stateWord[step.state] || step.state,
-              }),
-              el("span", { class: "card-title", text: step.name }),
-              el("span", { class: "meta", text: step.detail }),
-            ),
+    const check = el("button", {
+      class: "button secondary small",
+      type: "button",
+      text: "Check for updates",
+      onclick: async () => {
+        check.disabled = true;
+        note.className = "note";
+        note.textContent = "Asking GitHub…";
+        try {
+          const found = await post("/api/upgrade", { action: "check" });
+          note.textContent = found.available
+            ? `${found.latest} is available; you are on ${found.installed}.`
+            : `Already on the newest build, ${found.installed}.`;
+          if (found.blocked) note.textContent += ` ${found.blocked}`;
+          install.disabled = !found.available || Boolean(found.blocked);
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      },
+    });
+
+    fill(
+      card,
+      title(),
+      el(
+        "div",
+        { class: "rows" },
+        (setup.steps || []).map((step) =>
+          el(
+            "div",
+            { class: "kv step" },
+            pill(stateWord[step.state] || step.state, tone(step.state)),
+            el("span", { class: "card-title", text: step.name }),
+            lineCell(step.detail, "meta"),
+            // The one step this page can perform, and only while there is
+            // something to do: the step's own state is the answer, not the
+            // live PATH, which a daemon started before the edit never sees.
+            // The others are an install and a model download, which belong to
+            // the command that owns them.
+            step.name === "path" && step.state !== "already-done" && step.state !== "done"
+              ? el("span", { class: "spacer" })
+              : null,
+            step.name === "path" && step.state !== "already-done" && step.state !== "done"
+              ? fixPath
+              : null,
           ),
         ),
-        el("p", {
-          class: "subtitle",
-          text: setup.on_path
-            ? `${setup.bin_dir} is on PATH.`
-            : `${setup.bin_dir} is not on PATH — run \`semlith setup\` to add it.`,
-        }),
-        el("hr", { class: "rule" }),
-        el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
-        el("div", { class: "actions" }, check, install),
-        result,
-      );
-    })
+      ),
+      note,
+      el("hr", { class: "rule" }),
+      el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
+      el("div", { class: "actions" }, check, install),
+    );
+  }
+
+  api("/api/setup")
+    .then(paint)
     .catch((e) => fill(card, title(), error(e.message)));
 
   return card;
@@ -2336,93 +3259,279 @@ async function agentsView() {
     return el("div", { class: "view" }, pageHead("Agents"), error(e.message));
   }
 
+  noteAgents(data);
   const clients = data.clients || [];
   const tools = data.tools || [];
-  const revisions = data.revisions || [];
-  const body = el("div", { class: "card pad" });
+  const live = data.connections || [];
+  const endpoint = data.endpoint || { url: "", open: false };
 
-  function show(i) {
-    const client = clients[i];
+  // ---- the endpoint, in the page header
+  const address = el("code", { class: "text", text: endpoint.url });
+  const endpointNote = el("div", { class: "note" });
+  const toggle = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: endpoint.open ? "Stop" : "Start",
+    onclick: async () => {
+      toggle.disabled = true;
+      endpointNote.className = "note";
+      endpointNote.textContent = endpoint.open ? "Closing…" : "Opening…";
+      try {
+        const done = await post("/api/endpoint", { open: !endpoint.open });
+        endpoint.open = done.open;
+        toggle.textContent = done.open ? "Stop" : "Start";
+        endpointNote.textContent = done.open
+          ? "The endpoint is answering. A configured client reconnects on its next call."
+          : "The endpoint is closed. The daemon, the watcher and the portal are unaffected.";
+        fill(statePill, el("i", {}), done.open ? "answering" : "closed");
+        statePill.className = done.open ? "pill good" : "pill warn";
+      } catch (e) {
+        endpointNote.className = "note bad";
+        endpointNote.textContent = e.message;
+      } finally {
+        toggle.disabled = false;
+      }
+    },
+  });
+  const statePill = pill(endpoint.open ? "answering" : "closed", endpoint.open ? "good" : "warn");
+
+  // ---- rotation
+  const keyNote = el("div", { class: "note" });
+  const rotate = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Rotate key",
+    onclick: async () => {
+      rotate.disabled = true;
+      keyNote.className = "note";
+      keyNote.textContent = "Rotating…";
+      try {
+        const done = await post("/api/key", {});
+        stanzas.key = done.key;
+        showClient(chosen);
+        const carried = done.updated || [];
+        // Said plainly, because the two halves have different consequences:
+        // what was rewritten needs nothing done to it, and what was not needs
+        // the stanza above pasted in before the old key stops working.
+        const rewrote = carried.length
+          ? `Carried the new key into ${carried.length} configuration file${
+              carried.length === 1 ? "" : "s"
+            }: ${carried.join(", ")}.`
+          : "No configuration file on this machine carried the old key.";
+        keyNote.textContent = done.previous_valid
+          ? `New key. ${rewrote} The previous one keeps working until this daemon exits, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
+          : `New key. ${rewrote} The previous one is refused now; any client configured elsewhere needs the new stanza.`;
+      } catch (e) {
+        keyNote.className = "note bad";
+        keyNote.textContent = e.message;
+      } finally {
+        rotate.disabled = false;
+      }
+    },
+  });
+
+  // ---- connected clients
+  const connected = dataTable({
+    className: "w-agents",
+    sort: "name",
+    grow: false,
+    perPage: 10,
+    rows: live,
+    columns: [
+      {
+        key: "name",
+        label: "Connected",
+        value: (c) => c.name,
+        render: (c) => el("div", { class: "who" }, el("span", { class: "dot good" }), c.name),
+      },
+      { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
+      { key: "revision", label: "Revision", className: "meta narrow-drop", value: (c) => c.revision },
+      {
+        key: "queries",
+        label: "Queries",
+        className: "num",
+        value: (c) => c.queries,
+        render: (c) => n(c.queries),
+      },
+    ],
+  });
+
+  // ---- stanzas, grouped
+  const GROUPS = [
+    ["terminal", "Terminal"],
+    ["editor", "Editors"],
+    ["desktop", "Desktop"],
+  ];
+  const stanzas = { key: data.key || "" };
+  let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
+  let chosen = clients.findIndex((c) => c.group === group);
+  const tabs = el("div", { class: "tabs" });
+  const chips = el("div", { class: "filters" });
+  const body = el("div", { class: "stanza" });
+
+  /** The HTTP form, built here from the key the route just handed back. */
+  /** The placeholder the README prints where a real key goes. */
+  const KEY_SLOT = "sml_YOURKEY";
+
+  /** Whether a stanza configures the endpoint rather than a subprocess. */
+  const overHttp = (text) => text.includes("/mcp") || text.includes("--transport http");
+
+  function httpStanza() {
+    return `{\n  "mcpServers": {\n    "semlith": {\n      "url": "${endpoint.url}",\n      "headers": { "Authorization": "Bearer ${stanzas.key}" }\n    }\n  }\n}`;
+  }
+
+  function showGroup(id) {
+    group = id;
+    const first = clients.findIndex((c) => c.group === id);
+    showClient(first < 0 ? chosen : first);
+  }
+
+  function showClient(index) {
+    chosen = index;
+    const client = clients[index];
+    fill(
+      tabs,
+      GROUPS.map(([id, label]) => {
+        const count = clients.filter((c) => c.group === id).length;
+        return el(
+          "button",
+          {
+            class: "tab",
+            type: "button",
+            "aria-pressed": String(id === group),
+            onclick: () => showGroup(id),
+          },
+          label,
+          el("span", { class: "count", text: String(count) }),
+        );
+      }),
+    );
+    fill(
+      chips,
+      clients.map((c, i) =>
+        c.group === group
+          ? el("button", {
+              class: "chip",
+              type: "button",
+              "aria-pressed": String(i === chosen),
+              text: c.name,
+              onclick: () => showClient(i),
+            })
+          : null,
+      ),
+    );
     if (!client) {
       fill(body, empty("No client stanza is compiled into this build."));
       return;
     }
+    // The documented stanzas, with this daemon's key in them: a reader who
+    // copies one should not have to find `sml_YOURKEY` and paste the key over
+    // it, and the page already knows the key.
+    const own = (client.stanzas || []).map((s) => ({
+      format: s.format,
+      text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
+    }));
+    // A one-line command belongs in a field with a Copy beside it, not in a
+    // slab of dark code: it is a thing you paste into a shell, not a file you
+    // are going to read.
+    // Shell one-liners, labelled by what they register rather than mixed in
+    // with the block above: several clients configure the endpoint in a file
+    // but can only add a subprocess from their CLI, and an unlabelled command
+    // under an HTTP stanza reads as a second way to do the same thing.
+    const shells = own.filter((s) => s.format === "sh");
+    const wired = shells.filter((s) => overHttp(s.text));
+    const spawned = shells.filter((s) => !overHttp(s.text));
+    const blocks = own.filter((s) => s.format !== "sh");
+    const http = blocks.filter((s) => overHttp(s.text));
+    const stdio = blocks.filter((s) => !overHttp(s.text));
+    const config = http.length ? http : stdio;
     fill(
       body,
       el(
         "div",
-        { class: "filters" },
-        clients.map((c, j) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            "aria-pressed": String(j === i),
-            text: c.name,
-            onclick: () => show(j),
-          }),
-        ),
+        { class: "head" },
+        el("span", { class: "card-title", text: client.name }),
+        el("span", { class: "meta", text: client.note }),
       ),
-      el("span", { class: "card-title", text: client.name }),
-      el("p", { class: "subtitle", text: client.note }),
-      (client.stanzas || []).map((stanza) =>
-        el(
-          "div",
-          { class: "rows" },
-          el("span", { class: "eyebrow", text: stanza.format }),
-          el("pre", { class: "code", text: stanza.text.trimEnd() }),
-          el("div", { class: "actions" }, copyButton(stanza.text.trimEnd(), "Copy stanza")),
-        ),
+      // A client with no HTTP stanza of its own gets the generic one, which is
+      // the shape most schemas take. A client with one gets its own: `httpUrl`
+      // for Gemini, `serverUrl` for Windsurf, TOML for Codex — a generic block
+      // beside those is a second, wrong answer.
+      // One configuration block, not two. A client that can reach the
+      // endpoint is shown the endpoint; one that cannot — Zed, Claude Desktop,
+      // Amazon Q, which have nowhere to put a header — is shown the subprocess
+      // it can run. Printing both left a reader choosing between two answers
+      // with nothing to choose on.
+      el("span", {
+        class: "eyebrow",
+        text: config.length && config === http
+          ? "Over HTTP — one endpoint, one key, no subprocess"
+          : "As a subprocess — no key needed",
+      }),
+      (config.length ? config.map((s) => s.text) : [httpStanza()]).map((text) =>
+        codeBlock(text, "Copy stanza"),
       ),
+      wired.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
+      wired.map((s) => copyField(s.text, true)),
+      spawned.length
+        ? el("span", { class: "eyebrow", text: "Or add the subprocess from a terminal" })
+        : null,
+      spawned.map((s) => copyField(s.text, true)),
     );
   }
-  show(0);
+  showClient(chosen);
 
   return el(
     "div",
     { class: "view" },
+    pageHead("Agents", "One endpoint, every client, no per-client process.", {
+      pill: statePill,
+      actions: [
+        el("div", { class: "copyfield worded" }, address, copyButton(endpoint.url, "Copy", true)),
+        toggle,
+        rotate,
+      ],
+    }),
+    endpointNote,
+    keyNote,
     el(
       "div",
-      { class: "head" },
+      { class: "grid scroller" },
       el(
         "div",
-        { class: "titles" },
-        el("h1", { text: "Agents" }),
-        el("p", { class: "subtitle", text: "One stanza, every store, no path to keep in step." }),
-      ),
-      el(
-        "span",
-        { class: `pill ${data.forwarding ? "good" : ""}` },
-        el("span", { class: "dot" }),
-        data.forwarding
-          ? `${data.connected} forwarding to this daemon`
-          : "no client forwarding right now",
-      ),
-    ),
-    el(
-      "div",
-      { class: "grid" },
-      el(
-        "div",
-        { class: "card pad" },
+        { class: "rows" },
+        live.length
+          ? connected.node
+          : el(
+              "div",
+              { class: "card pad dense" },
+              el("span", { class: "card-title", text: "Connected" }),
+              empty("No client is talking to this daemon right now."),
+            ),
         el(
           "div",
-          { class: "head" },
-          el("span", { class: "card-title", text: "Tools exposed" }),
-          el("span", { class: "meta", text: String(tools.length) }),
+          { class: "card pad dense tools" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Tools exposed" }),
+            el("span", { class: "meta", text: String(tools.length) }),
+          ),
+          el(
+            "div",
+            { class: "tool-grid" },
+            // The name and what it is for, both read from the tool's own
+            // definition: a second copy is how a tool ends up served with one
+            // description and documented with another.
+            tools.flatMap((tool) => [
+              el("span", { class: "tool-name", text: tool.name }),
+              el("span", { class: "tool-about", text: tool.about }),
+            ]),
+          ),
         ),
-        tools.length
-          ? el(
-              "div",
-              { class: "rows" },
-              tools.map((tool) => el("span", { class: "path", text: tool })),
-            )
-          : empty("No tool is exposed, which should be impossible."),
-        el("hr", { class: "rule" }),
-        el("span", { class: "eyebrow", text: "Protocol revisions" }),
-        el("span", { class: "meta", text: revisions.join(" · ") || "none advertised" }),
+        installPanel(),
       ),
-      body,
-      installPanel(),
+      el("div", { class: "card pad stanzas" }, tabs, chips, body),
     ),
   );
 }
@@ -2437,12 +3546,7 @@ async function privacyView() {
     return el("div", { class: "view" }, pageHead("Privacy"), error(e.message));
   }
 
-  const tokenBox = el("div", { class: "copyfield" });
-  function showToken(text) {
-    fill(tokenBox, el("code", { class: "text", text }));
-  }
-  showToken("held by this browser's cookie, not shown");
-
+  const tokenBox = el("code", { class: "text", text: data.token_preview || "—" });
   const rotateNote = el("div", { class: "note" });
   const rotate = el("button", {
     class: "button secondary small",
@@ -2454,8 +3558,13 @@ async function privacyView() {
       rotateNote.textContent = "Rotating…";
       try {
         const fresh = await post("/api/rotate", {});
-        showToken(fresh.token);
-        rotateNote.textContent = "Rotated. The old token stopped working immediately.";
+        // The rotate response is the one place the whole token appears, and it
+        // sets the new cookie in the same breath. What is shown is still the
+        // preview: a page that prints a live credential in full is a page
+        // someone screenshots.
+        tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
+        rotateNote.textContent =
+          "Rotated. The old token stopped working immediately. This is the portal's own session token, not the agent key: no client stanza carries it, so nothing needs reconfiguring. The agent key is rotated on the Agents page.";
       } catch (e) {
         rotateNote.className = "note bad";
         rotateNote.textContent = e.message;
@@ -2474,29 +3583,29 @@ async function privacyView() {
       el("span", { class: "sub", text: why }),
     );
 
+  /* The four steps, numbered, each with its own copy button. A packet capture
+   * is the only one of them that proves anything on its own; the others are
+   * what make the first one quick to believe. */
+  const step = (number, what, command) =>
+    el(
+      "div",
+      { class: "step-row" },
+      el("span", { class: "n", text: number }),
+      el(
+        "div",
+        { class: "what" },
+        el("div", { class: "say", text: what }),
+        copyField(command),
+      ),
+    );
+
   return el(
     "div",
     { class: "view" },
-    el(
-      "div",
-      { class: "head" },
-      el(
-        "div",
-        { class: "titles" },
-        el(
-          "div",
-          { class: "actions" },
-          el("h1", { text: "Privacy" }),
-          el("span", {
-            class: `pill ${data.airgap ? "good" : ""}`,
-            text: data.airgap ? "airgap mode armed" : "airgap off",
-          }),
-        ),
-        el("p", {
-          class: "subtitle",
-          text: "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute.",
-        }),
-      ),
+    pageHead(
+      "Privacy",
+      "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute.",
+      { pill: pill(data.airgap ? "airgap mode armed" : "airgap off", data.airgap ? "good" : null) },
     ),
     el(
       "div",
@@ -2505,51 +3614,85 @@ async function privacyView() {
       fact("CORS", "none", "no origin may read this server's responses"),
       fact("Host check", "localhost only", "a foreign Host header gets 400 before anything runs"),
       fact("Assets", "include_bytes!", "the page you are reading is inside the binary"),
-      fact("Telemetry", "none", "no analytics, and no update check semlith makes on its own"),
+      fact("Telemetry", "none", "no analytics, and no update check Semlith makes on its own"),
       fact("Model cache", data.model_cached ? "cached" : "not downloaded", data.model_cache),
     ),
     el(
       "div",
-      { class: "grid" },
+      { class: "grid scroller" },
       el(
         "div",
         { class: "card pad" },
-        el("span", { class: "card-title", text: "Verify it with a packet capture" }),
-        el("p", {
-          class: "subtitle",
-          text: "Watch every interface but loopback while you search. Nothing should appear.",
-        }),
-        copyField("sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'"),
-        el("p", {
-          class: "subtitle",
-          text: "Or pull the cable: the portal loads and searches with no network at all.",
-        }),
-        el("hr", { class: "rule" }),
-        el("span", { class: "card-title", text: "The outbound connections that exist" }),
-        el("p", {
-          class: "subtitle",
-          text: "The embedding model is downloaded once, on first index, and cached. semlith upgrade and semlith add reach the network only in the second you ask them to. --airgap refuses all three and exits naming what it refused.",
-        }),
-        copyField("semlith index . --airgap"),
+        el("span", { class: "card-title", text: "Verify it yourself" }),
+        el(
+          "div",
+          { class: "steps-list" },
+          step(
+            "1",
+            "Ask the operating system what this process has open. Only loopback should appear.",
+            "lsof -nP -p $(pgrep -f 'semlith start') -i",
+          ),
+          step(
+            "2",
+            "Watch every interface but loopback while you search. Nothing should appear.",
+            "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
+          ),
+          step(
+            "3",
+            "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
+            "semlith start --airgap",
+          ),
+          step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
+        ),
       ),
       el(
         "div",
-        { class: "card pad" },
-        el("span", { class: "card-title", text: "Session token" }),
-        el("p", {
-          class: "subtitle",
-          text: `One token per run of the daemon, held in a SameSite=Strict ${data.token_cookie} cookie. Rotating it invalidates the old one immediately.`,
-        }),
-        tokenBox,
-        el("div", { class: "actions" }, rotate),
-        rotateNote,
-        el("hr", { class: "rule" }),
-        el("span", { class: "card-title", text: "Content-Security-Policy" }),
-        el("pre", { class: "code", text: data.csp }),
-        el("p", {
-          class: "subtitle",
-          text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
-        }),
+        { class: "rows" },
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
+          says(
+            "The embedding model is downloaded once, on first index, and cached. ",
+            mono("semlith upgrade"),
+            " and ",
+            mono("semlith add"),
+            " reach the network only in the second you ask them to. ",
+            mono("--airgap"),
+            " refuses all three and exits naming what it refused.",
+          ),
+          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
+          el(
+            "div",
+            { class: "chips" },
+            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
+            el("span", {
+              class: "meta",
+              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
+            }),
+          ),
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Session token" }),
+          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
+          rotateNote,
+          says(
+            "Generated at start, held in a SameSite=Strict ",
+            mono(data.token_cookie),
+            " cookie, and required on every ",
+            mono("/api"),
+            " route. Shown truncated: no response carries it in full except the one that rotates it, which sets the new cookie in the same breath.",
+          ),
+          el("hr", { class: "rule" }),
+          el("span", { class: "card-title", text: "Content-Security-Policy" }),
+          codeBlock(data.csp),
+          el("p", {
+            class: "subtitle",
+            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
+          }),
+        ),
       ),
     ),
   );
@@ -2567,98 +3710,85 @@ async function aboutView() {
   }
 
   const row = (key, value) =>
-    el("div", { class: "kv" }, el("span", { class: "k", text: key }), el("span", { class: "v", text: value }));
+    el(
+      "div",
+      { class: "kv pair" },
+      el("span", { class: "k", text: key }),
+      el("span", { class: "v", text: value }),
+    );
 
   const list = (models && models.models) || [];
+  const table = dataTable({
+    className: "w-models",
+    sort: "name",
+    perPage: 10,
+    rows: list,
+    columns: [
+      {
+        key: "name",
+        label: "Model",
+        className: "path",
+        value: (m) => m.name,
+        // One line with the name on the tooltip: wrapped across two lines a
+        // model name reads as two models.
+        render: (m) => el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
+      },
+      { key: "dim", label: "Dims", className: "num", value: (m) => m.dim, render: (m) => String(m.dim) },
+      {
+        key: "bytes",
+        label: "Size",
+        className: "num",
+        value: (m) => m.bytes || 0,
+        // Blank rather than guessed: a model this machine has never fetched has
+        // no size here to measure, and fastembed's catalogue does not carry one.
+        render: (m) => (m.bytes ? bytes(m.bytes) : "—"),
+      },
+      { key: "description", label: "Note", className: "meta", value: (m) => m.description },
+    ],
+  });
 
   return el(
     "div",
     { class: "view" },
+    pageHead("About", "One Rust binary. The portal you are reading is compiled into it."),
     el(
       "div",
-      { class: "titles" },
-      el("h1", { text: "About" }),
-      el("p", {
-        class: "subtitle",
-        text: "One Rust binary. The portal you are reading is compiled into it.",
-      }),
-    ),
-    el(
-      "div",
-      { class: "grid" },
+      { class: "grid two grow" },
       el(
         "div",
-        { class: "card pad" },
-        row("Version", about.version),
-        row("Binary", about.binary),
-        row("Port", String(about.port)),
-        row("PID", String(about.pid)),
-        row("Uptime", `${Math.floor(about.uptime / 60)}m`),
-        row("Store home", about.store_home),
-        row("Model cache", about.model_cache),
-        row("Languages", String(about.languages)),
-        row("Stores open", String(about.stores)),
-      ),
-      el(
-        "div",
-        { class: "card pad" },
-        el("h2", { class: "card-title", text: "Languages with graph edges" }),
+        { class: "rows" },
         el(
           "div",
-          { class: "chips" },
-          (about.graph_languages || []).map((lang) =>
-            el("span", { class: "chip static", text: lang }),
+          { class: "card pad" },
+          row("Version", `${about.version} · store format ${about.format_version}`),
+          row("Binary", `${about.binary} · ${bytes(about.binary_bytes)} · ${about.target}`),
+          row("Bound to", about.bind),
+          row("Store home", about.store_home),
+          row("Model cache", about.model_cache),
+          row("MCP revisions", (about.revisions || []).join(" · ")),
+          row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Languages with graph edges" }),
+          el(
+            "div",
+            { class: "chips" },
+            (about.graph_languages || []).map((lang) =>
+              el("span", { class: "chip static blue", text: lang }),
+            ),
+          ),
+          says(
+            "Everything else is indexed and searchable; it just has no edges yet. ",
+            mono("semlith languages"),
+            ` lists all ${about.languages} that `,
+            mono("--lang"),
+            " accepts.",
           ),
         ),
-        el("p", {
-          class: "subtitle",
-          text: `${(about.graph_languages || []).length} of ${about.languages} languages carry symbols and edges. The rest are searchable exactly as before, just without structure.`,
-        }),
-        el("h2", { class: "card-title", text: "Edge kinds" }),
-        el(
-          "div",
-          { class: "chips" },
-          (about.edge_kinds || []).map((kind) => el("span", { class: "chip static", text: kind })),
-        ),
       ),
-      el(
-        "div",
-        { class: "card" },
-        list.length
-          ? el(
-              "div",
-              { class: "table-wrap" },
-              el(
-                "table",
-                { class: "w-models" },
-                el(
-                  "thead",
-                  {},
-                  el(
-                    "tr",
-                    {},
-                    el("th", { text: "Model" }),
-                    el("th", { class: "num", text: "Dims" }),
-                    el("th", { text: "Note" }),
-                  ),
-                ),
-                el(
-                  "tbody",
-                  {},
-                  list.map((model) =>
-                    el(
-                      "tr",
-                      {},
-                      el("td", { class: "path", text: model.name }),
-                      el("td", { class: "num", text: String(model.dim) }),
-                      el("td", { class: "meta", text: model.description }),
-                    ),
-                  ),
-                ),
-              ),
-            )
-          : el("div", { class: "card pad" }, empty("No model is listed.")),
-      ),
+      list.length ? table.node : el("div", { class: "card pad" }, empty("No model is listed.")),
     ),
     el("p", {
       class: "subtitle",
@@ -2685,7 +3815,7 @@ function welcomeView() {
   return el(
     "div",
     { class: "welcome" },
-    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "semlith" })),
+    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "Semlith" })),
     el(
       "div",
       { class: "hero" },
@@ -2742,10 +3872,13 @@ function welcomeView() {
       el("hr", { class: "rule" }),
       el("span", { class: "eyebrow", text: "Or from a terminal" }),
       copyField("semlith index ~/Documents/work"),
-      el("p", {
-        class: "subtitle",
-        text: "No --store flag. It lands in ~/.semlith/stores/work and is registered against that root.",
-      }),
+      says(
+        "No ",
+        mono("--store"),
+        " flag. It lands in ",
+        mono("~/.semlith/stores/work"),
+        " and is registered against that root.",
+      ),
     ),
     el(
       "div",
@@ -2770,7 +3903,6 @@ const RENDER = {
   privacy: privacyView,
   about: aboutView,
   graph: graphView,
-  impact: impactView,
   ledger: ledgerView,
 };
 
@@ -2867,11 +3999,11 @@ function buildShell() {
       {
         class: "brand",
         type: "button",
-        "aria-label": "semlith — go to Stores",
+        "aria-label": "Semlith — go to Stores",
         onclick: () => go("stores"),
       },
       logoImage(26),
-      el("span", { class: "wordmark", text: "semlith" }),
+      el("span", { class: "wordmark", text: "Semlith" }),
     ),
     el("span", { class: "divider-v" }),
     pageTitle,
@@ -2953,8 +4085,10 @@ function buildShell() {
     el(
       "div",
       { class: "daemon-card" },
-      el("div", { class: "who" }, el("span", { class: "live-dot" }), "semlith start"),
-      el("div", { class: "fact", text: "127.0.0.1 · sole writer" }),
+      el("div", { class: "who" }, el("span", { class: "live-dot" }), mono("semlith start")),
+      // The address with its port: "127.0.0.1" alone does not tell you which
+      // of two daemons this tab is looking at.
+      el("div", { class: "fact", text: `${location.host} · sole writer` }),
       el("div", { class: "fact", id: "daemon-stores", text: "" }),
     ),
   );
@@ -3026,7 +4160,7 @@ async function render() {
 
   const view = VIEWS.find((v) => v.id === current) || VIEWS[0];
   shell.pageTitle.textContent = view.title;
-  document.title = `semlith · ${view.title}`;
+  document.title = `Semlith · ${view.title}`;
   markCurrent(view.id);
 
   paintStoreCount();
@@ -3059,7 +4193,12 @@ async function boot() {
     state.theme = isDark() ? "dark" : "light";
   }
 
+  wireTips();
+
   await refreshStores();
+  // Not awaited: the sidebar's agent count is a detail, and `claude mcp list`
+  // behind this route is slow on some machines. It fills itself in.
+  api("/api/agents").then(noteAgents).catch(() => {});
   await render();
 
   window.addEventListener("hashchange", render);

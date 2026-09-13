@@ -115,14 +115,21 @@ pub fn status() -> Status {
         },
         Step {
             name: "path",
-            state: if path_has_bin {
+            // The rc file counts. A daemon started from a shell that predates
+            // the edit has the old `PATH` for as long as it runs, so asking
+            // only `on_path` reported "not done" immediately after the portal
+            // had just written the block — and the button looked broken.
+            state: if path_has_bin || block {
                 State::AlreadyDone
             } else {
                 State::Skipped
             },
-            detail: match &rc {
-                Some(p) => p.display().to_string(),
-                None => "no shell rc file found".into(),
+            detail: match (&rc, path_has_bin, block) {
+                (Some(p), false, true) => {
+                    format!("{} — a new shell picks it up", p.display())
+                }
+                (Some(p), _, _) => p.display().to_string(),
+                (None, _, _) => "no shell rc file found".into(),
             },
         },
         Step {
@@ -290,6 +297,15 @@ fn rc_file() -> Option<PathBuf> {
 /// Step 2. The block is appended at the end and *prepends* the bin directory,
 /// so the binary this install put there wins over an older one somebody
 /// dropped in `/usr/local/bin` and forgot.
+/// Run the PATH step on its own, non-interactively.
+///
+/// The portal's setup panel reports this step as not done and then tells the
+/// reader to go and run a command; a panel that can see the problem can fix it.
+/// `yes` is forced, because a button press is the confirmation.
+pub fn run_path_step() -> Result<Step> {
+    step_path(true)
+}
+
 fn step_path(yes: bool) -> Result<Step> {
     let bin = home::bin_dir();
     if on_path(&bin) {
@@ -509,6 +525,13 @@ fn step_agents(yes: bool) -> Result<Step> {
         });
     }
 
+    // The HTTP form carries the live agent key, so a stanza this prints is one
+    // that connects. Writing the placeholder would be handing someone a
+    // configuration file to go and edit, which is the thing the persisted key
+    // exists to stop.
+    let key = home::agent_key().unwrap_or_default();
+    let http = crate::clients::http_stanzas(&key);
+
     let mut wired = Vec::new();
     for i in picked {
         let client = &all[i];
@@ -516,12 +539,22 @@ fn step_agents(yes: bool) -> Result<Step> {
             wired.push(client.name.clone());
             continue;
         }
-        let body = client
+        let mut body = client
             .stanzas
             .iter()
             .map(|s| s.text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
+        if !key.is_empty() {
+            body.push_str("\n\nOr over HTTP, against a running `semlith start`:\n\n");
+            body.push_str(
+                &http
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
         let _ = cliclack::note(format!("{} — {}", client.name, client.note), body);
     }
 
@@ -543,11 +576,51 @@ fn step_agents(yes: bool) -> Result<Step> {
 /// `claude mcp add` has changed flags between Claude Code versions, so its exit
 /// status decides and nothing here parses its output. A non-zero exit falls
 /// back to the printed stanza; it never fails the install.
-fn register_claude() -> bool {
+pub fn register_claude() -> bool {
     Command::new("claude")
         .args([
             "mcp", "add", "--scope", "user", "semlith", "--", "semlith", "mcp",
         ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Re-register Claude Code against the HTTP endpoint with the current key.
+///
+/// This is the one client semlith writes a configuration for, because it has a
+/// CLI for it. Every other client is named and left to the user — a tool that
+/// edits a file it does not own is a tool that eventually corrupts one.
+pub fn register_claude_http(key: &str, url: &str) -> bool {
+    // Replaced rather than added beside: `claude mcp add` refuses a name that
+    // is already registered, so an existing entry is removed first. A missing
+    // one makes the remove fail, which is fine and is why its status is
+    // ignored.
+    let _ = Command::new("claude")
+        .args(["mcp", "remove", "--scope", "user", "semlith"])
+        .output();
+    Command::new("claude")
+        .args([
+            "mcp",
+            "add",
+            "--scope",
+            "user",
+            "--transport",
+            "http",
+            "semlith",
+            url,
+            "--header",
+            &format!("Authorization: Bearer {key}"),
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the Claude Code CLI is on this machine at all.
+pub fn claude_present() -> bool {
+    Command::new("claude")
+        .arg("--version")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -583,5 +656,184 @@ fn step_verify() -> Result<Step> {
             state: State::Failed,
             detail: format!("{} would not run", which.display()),
         }),
+    }
+}
+
+// ---------------------------------------------------------------- rotation
+
+/// Carry a rotated agent key into the client configuration files that already
+/// hold the old one.
+///
+/// Rotation used to leave every configured client authenticating with a key
+/// the daemon had stopped accepting, and the only repair was to open each file
+/// and paste. This edits the files that already carry the old key — nothing
+/// else. A file is rewritten only when the exact 68-character key appears in
+/// it, so a path that happens to exist but names a different server is left
+/// alone, and no file is ever created.
+///
+/// Returns the files that changed, in the order they were tried.
+pub fn recarry_key(previous: &str, fresh: &str) -> Vec<PathBuf> {
+    let mut done = Vec::new();
+    if previous == fresh || !home::is_agent_key(previous) || !home::is_agent_key(fresh) {
+        return done;
+    }
+    for path in client_configs() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !text.contains(previous) {
+            continue;
+        }
+        // Written through a neighbouring temporary file: a half-written
+        // `settings.json` is a client that will not start, and this runs
+        // across a dozen of them.
+        let swapped = text.replace(previous, fresh);
+        let temp = path.with_extension(format!(
+            "{}semlith-tmp",
+            path.extension()
+                .map(|e| format!("{}.", e.to_string_lossy()))
+                .unwrap_or_default()
+        ));
+        if std::fs::write(&temp, &swapped).is_ok() && std::fs::rename(&temp, &path).is_ok() {
+            done.push(path);
+        } else {
+            let _ = std::fs::remove_file(&temp);
+        }
+    }
+    done
+}
+
+/// Where the clients the README documents keep their configuration.
+///
+/// The user-level file for each, plus the project-level ones relative to
+/// wherever the daemon was started. It mirrors the paths in the README's
+/// client section; a path that is absent is simply skipped, so listing one
+/// costs nothing and missing one costs a manual edit after a rotation.
+fn client_configs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(home_dir) = std::env::var_os("HOME").map(PathBuf::from) {
+        for rest in [
+            // Claude Code writes the user scope here, and `claude mcp add`
+            // does too.
+            ".claude.json",
+            ".codex/config.toml",
+            ".config/opencode/opencode.json",
+            ".copilot/mcp-config.json",
+            ".gemini/settings.json",
+            ".qwen/settings.json",
+            ".config/amp/settings.json",
+            ".factory/mcp.json",
+            ".config/goose/config.yaml",
+            ".aws/amazonq/mcp.json",
+            ".openclaw/openclaw.json",
+            ".codewhale/mcp.json",
+            ".deepseek/mcp.json",
+            ".warp/.mcp.json",
+            ".cursor/mcp.json",
+            ".codeium/windsurf/mcp_config.json",
+            ".config/zed/settings.json",
+            ".junie/mcp/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".lmstudio/mcp.json",
+            ".cache/lm-studio/mcp.json",
+            ".config/kilo/kilo.jsonc",
+            ".continue/config.yaml",
+            // The editors that keep their MCP file inside a per-platform
+            // application-support directory.
+            "Library/Application Support/Claude/claude_desktop_config.json",
+            "Library/Application Support/Code/User/mcp.json",
+            ".config/Code/User/mcp.json",
+        ] {
+            out.push(home_dir.join(rest));
+        }
+        // Continue keeps one file per server rather than one file.
+        if let Ok(entries) = std::fs::read_dir(home_dir.join(".continue/mcpServers")) {
+            out.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        out.push(appdata.join("Claude/claude_desktop_config.json"));
+        out.push(appdata.join("Code/User/mcp.json"));
+    }
+    // The project-scoped files, against wherever this process was started.
+    if let Ok(here) = std::env::current_dir() {
+        for rest in [
+            ".mcp.json",
+            ".vscode/mcp.json",
+            ".cursor/mcp.json",
+            ".roo/mcp.json",
+            ".kilocode/mcp.json",
+            ".kiro/settings/mcp.json",
+            ".junie/mcp/mcp.json",
+            ".factory/mcp.json",
+            ".amazonq/mcp.json",
+            "opencode.json",
+            "crush.json",
+            "io.local.toml",
+        ] {
+            out.push(here.join(rest));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+
+    /// The whole point: a file that carries the old key is rewritten, and a
+    /// file that does not is not touched at all.
+    #[test]
+    fn only_the_files_holding_the_old_key_are_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().join("home");
+        std::fs::create_dir_all(home_dir.join(".gemini")).unwrap();
+        std::fs::create_dir_all(home_dir.join(".cursor")).unwrap();
+
+        let previous = format!("sml_{}", "a".repeat(64));
+        let fresh = format!("sml_{}", "b".repeat(64));
+
+        let carries = home_dir.join(".gemini/settings.json");
+        std::fs::write(
+            &carries,
+            format!("{{\"mcpServers\":{{\"semlith\":{{\"headers\":{{\"Authorization\":\"Bearer {previous}\"}}}}}}}}"),
+        )
+        .unwrap();
+        let untouched = home_dir.join(".cursor/mcp.json");
+        std::fs::write(&untouched, "{\"mcpServers\":{\"other\":{}}}").unwrap();
+        let before = std::fs::read_to_string(&untouched).unwrap();
+
+        // `HOME` is process-wide, so this test is serialised with the others
+        // that set it by living in its own module and setting it back.
+        let was = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", &home_dir) };
+        let changed = recarry_key(&previous, &fresh);
+        match was {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+
+        assert_eq!(changed, vec![carries.clone()], "{changed:?}");
+        let text = std::fs::read_to_string(&carries).unwrap();
+        assert!(
+            text.contains(&fresh),
+            "the new key is not in the file: {text}"
+        );
+        assert!(!text.contains(&previous), "the old key survived: {text}");
+        assert_eq!(std::fs::read_to_string(&untouched).unwrap(), before);
+        assert!(
+            !carries.with_extension("json.semlith-tmp").exists(),
+            "the temporary file was left behind"
+        );
+    }
+
+    /// Rotating to the same key, or passing something that is not a key, does
+    /// nothing rather than rewriting every file with a placeholder.
+    #[test]
+    fn a_non_rotation_changes_nothing() {
+        let key = format!("sml_{}", "c".repeat(64));
+        assert!(recarry_key(&key, &key).is_empty());
+        assert!(recarry_key("sml_YOURKEY", &key).is_empty());
+        assert!(recarry_key(&key, "").is_empty());
     }
 }
