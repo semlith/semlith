@@ -284,7 +284,6 @@ impl Response {
         self.extra.push((name.to_string(), value.into()));
         self
     }
-
 }
 
 /// A handler: everything the daemon serves, behind one function.
@@ -349,11 +348,15 @@ impl Server {
     /// Install the persisted agent key. Until this is called `/mcp` accepts
     /// the session token alone, because an empty key matches nothing.
     pub fn set_agent_key(&self, key: &str) {
-        self.agent.lock().expect("the agent lock").current = key.to_string();
+        self.agent.lock().unwrap_or_else(|e| e.into_inner()).current = key.to_string();
     }
 
     pub fn agent_key(&self) -> String {
-        self.agent.lock().expect("the agent lock").current.clone()
+        self.agent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .clone()
     }
 
     /// Replace the agent key.
@@ -362,7 +365,7 @@ impl Server {
     /// until this process exits, so a client mid-session finishes its work and
     /// only then needs the new stanza.
     pub fn rotate_agent(&self, key: &str, now: bool) {
-        let mut agent = self.agent.lock().expect("the agent lock");
+        let mut agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
         let was = std::mem::replace(&mut agent.current, key.to_string());
         agent.previous = if now || was.is_empty() {
             None
@@ -384,13 +387,13 @@ impl Server {
     }
 
     pub fn token(&self) -> String {
-        self.token.lock().expect("the token lock").clone()
+        self.token.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Invalidate the current token and return the new one.
     pub fn rotate(&self) -> String {
         let fresh = new_token();
-        *self.token.lock().expect("the token lock") = fresh.clone();
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = fresh.clone();
         fresh
     }
 
@@ -432,9 +435,14 @@ impl Server {
             }
         });
 
-        let mut workers = Vec::with_capacity(WORKERS);
         let port = self.port;
-        for _ in 0..WORKERS {
+        // One worker, built the same way whether it is one of the first eight
+        // or the replacement for one that died. Every lock it takes is
+        // recovered rather than expected: a thread that panicked while holding
+        // one left the data behind it intact — `Response` and `Auth` are values,
+        // not half-written state — and refusing to look at it afterwards turns
+        // one panic into a dead server.
+        let spawn_worker = {
             let rx = Arc::clone(&rx);
             let late_tx = late_tx.clone();
             let penalty = Arc::clone(&self.penalty);
@@ -443,38 +451,51 @@ impl Server {
             let agent = Arc::clone(&self.agent);
             let mcp_open = Arc::clone(&self.mcp_open);
             let refused = Arc::clone(&refused);
-            workers.push(std::thread::spawn(move || {
-                loop {
-                    // The receiver is behind a mutex only for the recv; a
-                    // worker that took a connection does not hold up the next.
-                    let next = {
-                        let guard = rx.lock().expect("the queue lock");
-                        guard.recv()
-                    };
-                    let Ok(stream) = next else { return };
-                    let hold = |stream| {
-                        let delay = penalty.lock().unwrap_or_else(|e| e.into_inner()).charge();
-                        let _ = late_tx.send(Late {
-                            stream,
-                            due: std::time::Instant::now() + delay,
-                        });
-                    };
-                    let auth = {
-                        let agent = agent.lock().expect("the agent lock");
-                        Auth {
-                            token: token.lock().expect("the token lock").clone(),
-                            agent: agent.current.clone(),
-                            previous: agent.previous.clone(),
-                            mcp_open: mcp_open.load(Ordering::Relaxed),
-                            port,
+            move || {
+                let rx = Arc::clone(&rx);
+                let late_tx = late_tx.clone();
+                let penalty = Arc::clone(&penalty);
+                let handler = Arc::clone(&handler);
+                let token = Arc::clone(&token);
+                let agent = Arc::clone(&agent);
+                let mcp_open = Arc::clone(&mcp_open);
+                let refused = Arc::clone(&refused);
+                std::thread::spawn(move || {
+                    loop {
+                        // The receiver is behind a mutex only for the recv; a
+                        // worker that took a connection does not hold up the
+                        // next.
+                        let next = {
+                            let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.recv()
+                        };
+                        let Ok(stream) = next else { return };
+                        let hold = |stream| {
+                            let delay = penalty.lock().unwrap_or_else(|e| e.into_inner()).charge();
+                            let _ = late_tx.send(Late {
+                                stream,
+                                due: std::time::Instant::now() + delay,
+                            });
+                        };
+                        let auth = {
+                            let agent = agent.lock().unwrap_or_else(|e| e.into_inner());
+                            Auth {
+                                token: token.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+                                agent: agent.current.clone(),
+                                previous: agent.previous.clone(),
+                                mcp_open: mcp_open.load(Ordering::Relaxed),
+                                port,
+                            }
+                        };
+                        if let Some(class) = answer(stream, &handler, &auth, &hold) {
+                            refused(class);
                         }
-                    };
-                    if let Some(class) = answer(stream, &handler, &auth, &hold) {
-                        refused(class);
                     }
-                }
-            }));
-        }
+                })
+            }
+        };
+
+        let mut workers: Vec<_> = (0..WORKERS).map(|_| spawn_worker()).collect();
 
         // The waker: four wakeups a second while idle, nothing per request.
         // `WAKE` covers the case where the loop leaves for its own reasons, so
@@ -502,6 +523,16 @@ impl Server {
                     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
                     if tx.send(stream).is_err() {
                         break;
+                    }
+                    // A worker that ended for any reason is replaced here, so
+                    // the pool is eight threads for as long as the daemon runs
+                    // rather than eight minus however many requests have gone
+                    // wrong since it started. Checked on accept because that is
+                    // the only moment something is known to be happening.
+                    for worker in &mut workers {
+                        if worker.is_finished() {
+                            *worker = spawn_worker();
+                        }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -655,7 +686,21 @@ fn answer(
         request
     };
 
-    let mut response = handler(&request);
+    // A panicking route answers 500 and the daemon keeps serving. Before
+    // 0.14.0 it took the worker with it permanently and poisoned whatever locks
+    // it held, so one malformed request cost an eighth of the server until a
+    // restart — and eight of them cost all of it.
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&request)));
+    let mut response = match caught {
+        Ok(response) => response,
+        Err(_) => {
+            eprintln!(
+                "semlith: {} {} panicked; answered 500 and kept serving",
+                request.method, request.path
+            );
+            Response::new(500, "text/plain", Vec::new())
+        }
+    };
     if head_only {
         response.body = Body::Bytes(Vec::new());
     }
@@ -699,8 +744,7 @@ fn own_origin(origin: &str, port: u16) -> bool {
         return false;
     };
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    let loopback =
-        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
     loopback && stated.parse::<u16>() == Ok(port)
 }
 
@@ -916,9 +960,8 @@ fn new_token() -> String {
 /// refuse, and a token minted from a fallback nobody noticed is exactly the
 /// thing this function exists to prevent.
 fn token_from(filled: Result<[u8; 32], getrandom::Error>) -> String {
-    let bytes = filled.expect(
-        "the OS random source refused; semlith will not mint a session token without it",
-    );
+    let bytes = filled
+        .expect("the OS random source refused; semlith will not mint a session token without it");
     let mut out = String::with_capacity(64);
     for byte in bytes {
         use std::fmt::Write;
@@ -1015,9 +1058,18 @@ mod tests {
     /// exactly the case the cookie could not tell apart from this server.
     #[test]
     fn only_a_same_origin_write_is_accepted() {
-        assert!(same_origin(&write(&[("Sec-Fetch-Site", "same-origin")]), 7365));
-        assert!(!same_origin(&write(&[("Sec-Fetch-Site", "same-site")]), 7365));
-        assert!(!same_origin(&write(&[("Sec-Fetch-Site", "cross-site")]), 7365));
+        assert!(same_origin(
+            &write(&[("Sec-Fetch-Site", "same-origin")]),
+            7365
+        ));
+        assert!(!same_origin(
+            &write(&[("Sec-Fetch-Site", "same-site")]),
+            7365
+        ));
+        assert!(!same_origin(
+            &write(&[("Sec-Fetch-Site", "cross-site")]),
+            7365
+        ));
         assert!(!same_origin(&write(&[("Sec-Fetch-Site", "none")]), 7365));
 
         // A browser sends both; the fetch metadata decides, so an Origin a page
@@ -1033,7 +1085,10 @@ mod tests {
         // A client that is not a browser sends neither, and is judged on the
         // token alone — `curl` has to keep working.
         assert!(same_origin(&write(&[]), 7365));
-        assert!(same_origin(&write(&[("Origin", "http://localhost:7365")]), 7365));
+        assert!(same_origin(
+            &write(&[("Origin", "http://localhost:7365")]),
+            7365
+        ));
         assert!(!same_origin(
             &write(&[("Origin", "http://127.0.0.1:9999")]),
             7365
@@ -1126,7 +1181,8 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(a.len(), 64, "256 bits, hex encoded");
         assert!(
-            a.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            a.bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "not lowercase hex: {a}"
         );
     }

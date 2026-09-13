@@ -292,6 +292,43 @@ fn the_token_and_the_host_check_guard_every_route() {
     assert_eq!(allowed.status, 200);
 }
 
+/// A panicking route used to cost a worker permanently and poison every lock
+/// it held, so one malformed request took an eighth of the server and eight of
+/// them took all of it. It now costs one 500 and nothing else.
+///
+/// Only in a debug build: the route that panics is compiled out of the binary
+/// a user installs, so there is nothing to drive in a release run.
+#[test]
+#[cfg(debug_assertions)]
+fn a_panicking_route_costs_one_request_and_not_the_daemon() {
+    let daemon = Daemon::start("panic", &[]);
+
+    // More panics than the pool has workers, so a pool that lost one per panic
+    // would have none left.
+    for attempt in 0..12 {
+        let boom = daemon.get("/api/panic");
+        assert_eq!(boom.status, 500, "panic {attempt} answered {}", boom.status);
+        assert!(boom.body.is_empty(), "the 500 leaked a body: {}", boom.body);
+    }
+
+    // The same route, still answering. Then a route that reads the state the
+    // panicking one was holding when it died.
+    assert_eq!(daemon.get("/api/panic").status, 500);
+    let about = daemon.get("/api/about");
+    assert_eq!(about.status, 200, "the daemon stopped answering after a panic");
+    assert_eq!(about.json()["version"], env!("CARGO_PKG_VERSION"));
+
+    let stores = daemon.get("/api/stores");
+    assert_eq!(
+        stores.status, 200,
+        "the store locks did not survive the panics"
+    );
+
+    // And a write, which takes more of the daemon's state than a read does.
+    let endpoint = daemon.post("/api/endpoint", r#"{"open":false}"#);
+    assert_eq!(endpoint.status, 200, "a write after a panic: {}", endpoint.body);
+}
+
 /// Guessing costs time, and the cost grows with the run. The numbers come off
 /// the test's own clock rather than out of the constants, because a delay that
 /// is configured and never applied looks identical to one that works.
@@ -486,7 +523,10 @@ fn a_write_needs_same_origin_metadata_and_a_json_body() {
         daemon.port + 1,
         body.len()
     ));
-    assert_eq!(foreign_origin.status, 403, "another origin's write was read");
+    assert_eq!(
+        foreign_origin.status, 403,
+        "another origin's write was read"
+    );
 
     // curl: the token, a JSON body, and no fetch metadata.
     let script = daemon.post("/api/endpoint", body);

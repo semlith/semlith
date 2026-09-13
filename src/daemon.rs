@@ -138,7 +138,7 @@ pub struct Store {
 
 impl Store {
     fn note(&self, text: String) {
-        let mut events = self.events.lock().expect("the event lock");
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         if events.len() == EVENT_HISTORY {
             events.pop_front();
         }
@@ -149,7 +149,7 @@ impl Store {
     pub fn events(&self) -> Vec<Event> {
         self.events
             .lock()
-            .expect("the event lock")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect()
@@ -171,7 +171,7 @@ impl Store {
         notice: Option<serde_json::Value>,
     ) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
-        let mut queue = self.queue.lock().expect("the queue lock");
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut notice) = notice {
             if let Some(object) = notice.as_object_mut() {
                 object.insert("store".into(), serde_json::json!(self.name));
@@ -185,12 +185,15 @@ impl Store {
 
     /// Whether the writer has anything waiting — the Index view's queue depth.
     pub fn queue_depth(&self) -> usize {
-        self.queue.lock().expect("the queue lock").len()
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Put a slice's remainder back, behind whatever is waiting.
     fn requeue(&self, queued: Queued) {
-        self.queue.lock().expect("the queue lock").push_back(queued);
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(queued);
     }
 
     /// Drop every index job that has not started, answering each as stopped.
@@ -200,7 +203,7 @@ impl Store {
     /// "stopping…" for as long as the queue took. Nothing was embedded, so
     /// there is nothing to undo and the answer is immediate.
     pub fn cancel_queued(&self) -> usize {
-        let mut queue = self.queue.lock().expect("the queue lock");
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let mut dropped = 0;
         queue.retain(|queued| {
             if !matches!(queued.job, Job::Index(..)) {
@@ -439,7 +442,7 @@ impl State {
         query: bool,
     ) {
         let now = now();
-        let mut clients = self.clients.lock().expect("the client lock");
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let entry = clients
             .entry(format!("{transport}:{session}"))
             .or_insert_with(|| Client {
@@ -467,7 +470,7 @@ impl State {
         let now = now();
         self.clients
             .lock()
-            .expect("the client lock")
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|client| now.saturating_sub(client.seen) <= PROXY_FRESH)
             .cloned()
@@ -476,7 +479,7 @@ impl State {
 
     /// Note that a forwarding `semlith mcp` is alive.
     pub fn saw_proxy(&self, pid: u32) {
-        let mut proxies = self.proxies.lock().expect("the proxy lock");
+        let mut proxies = self.proxies.lock().unwrap_or_else(|e| e.into_inner());
         let now = now();
         proxies.insert(pid, now);
         proxies.retain(|_, seen| now.saturating_sub(*seen) <= PROXY_FRESH);
@@ -487,7 +490,7 @@ impl State {
         let now = now();
         self.proxies
             .lock()
-            .expect("the proxy lock")
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|seen| now.saturating_sub(**seen) <= PROXY_FRESH)
             .count()
@@ -495,7 +498,7 @@ impl State {
 
     /// The reader forwarded MCP calls answer from, opened on first use.
     pub fn open_mcp_fleet(&self) -> Result<()> {
-        let mut fleet = self.mcp_fleet.lock().expect("the mcp fleet lock");
+        let mut fleet = self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
         if fleet.is_some() {
             return Ok(());
         }
@@ -584,14 +587,14 @@ impl State {
     /// and doing that while holding the lock would stall whichever request
     /// happened to be next. The reader is opened on demand anyway.
     fn reopen_readers(&self) {
-        *self.fleet.lock().expect("the fleet lock") = None;
-        *self.mcp_fleet.lock().expect("the mcp fleet lock") = None;
+        *self.fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// The reader every read route answers from, opened on first use and
     /// reopened after a store joins.
     pub fn open_fleet(&self) -> Result<()> {
-        let mut fleet = self.fleet.lock().expect("the fleet lock");
+        let mut fleet = self.fleet.lock().unwrap_or_else(|e| e.into_inner());
         if fleet.is_some() {
             return Ok(());
         }
@@ -609,7 +612,7 @@ impl State {
         *self
             .refusals
             .lock()
-            .expect("the refusal lock")
+            .unwrap_or_else(|e| e.into_inner())
             .entry(class.as_str())
             .or_insert(0) += 1;
     }
@@ -824,7 +827,7 @@ pub fn run(
         let warming = Arc::clone(&state);
         let report = report_line.clone();
         std::thread::spawn(move || {
-            let mut fleet = warming.fleet.lock().expect("the fleet lock");
+            let mut fleet = warming.fleet.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(fleet) = fleet.as_mut()
                 && let Err(e) = fleet.warm()
             {
@@ -864,7 +867,11 @@ pub fn run(
             Discovery::remove(&store.dir);
         }
 
-        let refusals = state.refusals.lock().expect("the refusal lock").clone();
+        let refusals = state
+            .refusals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if !refusals.is_empty() {
             let counts: Vec<String> = refusals
                 .iter()
@@ -938,7 +945,12 @@ fn tend(
         |writer| {
             // The writer is this thread, so a queued job runs here or nowhere.
             loop {
-                let Some(next) = store.queue.lock().expect("the queue lock").pop_front() else {
+                let Some(next) = store
+                    .queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop_front()
+                else {
                     return Ok(());
                 };
                 perform(store, writer, next);

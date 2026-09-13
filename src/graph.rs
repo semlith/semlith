@@ -200,7 +200,7 @@ fn queries(lang: &'static str, language: &Language, tags: &str) -> &'static [Que
         std::sync::Mutex<std::collections::HashMap<&'static str, &'static [Query]>>,
     > = std::sync::LazyLock::new(Default::default);
 
-    let mut cache = CACHE.lock().expect("query cache is never poisoned");
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.entry(lang).or_insert_with(|| {
         let compiled: Vec<Query> = [tags, supplement(lang)]
             .iter()

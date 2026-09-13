@@ -42,6 +42,14 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
     match (get, post, path) {
         (true, _, "/") => crate::portal::page(),
 
+        // A route that panics, so the containment in `http::answer` is proved
+        // against a running daemon rather than against a unit test's handler.
+        // `debug_assertions` is off in a release build, so the binary a user
+        // installs does not have it: this is a test fixture that happens to
+        // live beside the routes it tests, not a hidden endpoint.
+        #[cfg(debug_assertions)]
+        (true, _, "/api/panic") => panic!("the route that exists to panic, panicking"),
+
         (true, _, "/api/stores") => stores(state),
         (true, _, "/api/files") => files(state, request),
         (true, _, "/api/search") => search(state, request),
@@ -104,7 +112,7 @@ fn stores(state: &Arc<State>) -> Response {
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
 
     for handle in state.stores() {
@@ -189,7 +197,7 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_mut() else {
         return Response::json(&json!({ "files": [], "total": 0 }));
     };
@@ -308,7 +316,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_mut() else {
         return Response::json(&json!({ "hits": [], "selected": 0 }));
     };
@@ -544,7 +552,7 @@ fn image_file(state: &Arc<State>, request: &Request) -> Response {
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_mut() else {
         return Response::error(404, "no such image");
     };
@@ -831,7 +839,7 @@ fn with_fleet(
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let fleet = state.fleet.lock().expect("the fleet lock");
+    let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_ref() else {
         return Response::json(&empty);
     };
@@ -1295,7 +1303,7 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     }
 
     let writer = daemon::Writer(Arc::clone(state));
-    let mut fleet = state.mcp_fleet.lock().expect("the mcp fleet lock");
+    let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
     let mut nothing = crate::fleet::Fleet::empty();
     let fleet = match fleet.as_mut() {
         Some(fleet) => fleet,
