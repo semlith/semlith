@@ -1766,48 +1766,85 @@ function agentsCard() {
   return card;
 }
 
-/** Ask before deleting a store, in the page rather than in a browser dialog.
+/* A question that has to be answered before anything else happens.
  *
- * A store is minutes of embedding, so the confirmation says what goes and what
- * does not, and the button that does it is the red one. */
-function confirmDelete(name) {
-  const holder = document.querySelector(".view > .note.page-note");
-  if (!holder) return;
-  holder.className = "note page-note asking";
+ * A native `<dialog>` rather than a div: the focus trap, the Escape key, the
+ * inert background and the backdrop are the platform's, and every one of them
+ * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
+ * it is pending the dialog says so, and an error is shown inside it rather
+ * than behind it. */
+function ask({ title, body, confirm, tone, run }) {
+  const dialog = el("dialog", { class: "modal" });
+  const problem = el("div", { class: "note" });
   const go = el("button", {
-    class: "button danger small",
+    class: tone === "bad" ? "button danger" : "button",
     type: "button",
-    text: `Delete ${name}`,
+    text: confirm,
     onclick: async () => {
       go.disabled = true;
-      go.textContent = "Deleting…";
+      const was = go.textContent;
+      go.textContent = "Working…";
+      problem.className = "note";
+      problem.textContent = "";
       try {
-        const done = await post("/api/store/delete", { store: name });
-        note(done.message);
-        await refreshStores();
-        render();
+        await run();
+        dialog.close();
       } catch (e) {
-        note(e.message, true);
+        problem.className = "note bad";
+        problem.textContent = e.message;
+        go.disabled = false;
+        go.textContent = was;
       }
     },
   });
   fill(
-    holder,
-    el("span", {
-      text: `Delete ${name}? Its vectors, chunks, graph and ledger go. The files it indexed are untouched.`,
-    }),
-    el("span", { class: "spacer" }),
-    el("button", {
-      class: "button ghost small",
-      type: "button",
-      text: "Keep it",
-      onclick: () => {
-        holder.className = "note page-note";
-        holder.textContent = "";
-      },
-    }),
-    go,
+    dialog,
+    el("h2", { class: "card-title", text: title }),
+    el("p", { class: "subtitle", text: body }),
+    problem,
+    el(
+      "div",
+      { class: "actions" },
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button secondary",
+        type: "button",
+        text: "Cancel",
+        onclick: () => dialog.close(),
+      }),
+      go,
+    ),
   );
+  // Removed on close, however it was closed — the button, Escape, or the
+  // backdrop — so the page never accumulates dialogs nobody can see.
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog) dialog.close();
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+/** Ask before deleting a store.
+ *
+ * A store is minutes of embedding, so the question says what goes and what
+ * does not, and the button that answers it is the red one. */
+function confirmDelete(name) {
+  ask({
+    title: `Delete ${name}?`,
+    body: "Its vectors, chunks, graph and ledger are deleted, and the registry stops listing it. The files it indexed are untouched.",
+    confirm: `Delete ${name}`,
+    tone: "bad",
+    run: async () => {
+      const done = await post("/api/store/delete", { store: name });
+      await refreshStores();
+      // After the re-render, not before: the render replaces the element the
+      // message would have been written into.
+      await render();
+      note(done.message);
+    },
+  });
 }
 
 /** A line under the page head, for something that just happened to the page. */
@@ -2102,9 +2139,11 @@ async function filesView() {
       load();
     } catch (e) {
       // In the note, not over the table: an error that replaces the rows
-      // takes away the thing the reader was working with.
+      // takes away the thing the reader was working with. Rethrown so a
+      // dialog waiting on this stays open and shows it too.
       bulkNote.className = "note bad";
       bulkNote.textContent = e.message;
+      throw e;
     }
   }
 
@@ -2142,7 +2181,19 @@ async function filesView() {
         class: "button danger small",
         type: "button",
         text: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
-        onclick: (e) => forgetPicked(e.currentTarget),
+        onclick: (e) => {
+          const button = e.currentTarget;
+          const stores = [...new Set(picked.values())];
+          ask({
+            title: `Forget ${n(many)} file${many === 1 ? "" : "s"}?`,
+            body: `Their chunks and vectors are dropped from ${stores.join(
+              " and ",
+            )}. The files on disk are untouched, and indexing the folder again brings them back.`,
+            confirm: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
+            tone: "bad",
+            run: () => forgetPicked(button),
+          });
+        },
       }),
     );
   }
@@ -2185,6 +2236,8 @@ async function filesView() {
       bulkNote.textContent = e.message;
       button.disabled = false;
       paintBulk();
+      // Rethrown so the dialog that asked stays open and shows it too.
+      throw e;
     }
   }
 
@@ -2283,9 +2336,18 @@ async function filesView() {
             type: "button",
             text: "Forget",
             onclick: () => {
-              button.disabled = true;
-              button.textContent = "Forgetting…";
-              forget(f.path, button.closest("tr"), f.store);
+              const row = button.closest("tr");
+              ask({
+                title: "Forget this file?",
+                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched, and indexing the folder again brings it back.`,
+                confirm: "Forget it",
+                tone: "bad",
+                run: async () => {
+                  button.disabled = true;
+                  button.textContent = "Forgetting…";
+                  await forget(f.path, row, f.store);
+                },
+              });
             },
           });
           return button;
