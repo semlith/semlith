@@ -2084,9 +2084,12 @@ async function filesView() {
   /** Which request is current, so a slow one cannot overwrite a fast one. */
   let generation = 0;
 
-  async function forget(path, row) {
+  async function forget(path, row, store) {
     try {
-      await post("/api/forget", { path });
+      // Named, always. The row knows which store holds the file, and a daemon
+      // serving two stores cannot guess — it refuses a write that names none,
+      // which is what the page used to send.
+      await post("/api/forget", { path, store });
       // The row goes, and the page is reloaded behind it: with the server
       // paging, the row that moves up into the gap is on the server.
       row.remove();
@@ -2094,7 +2097,10 @@ async function filesView() {
       paintBulk();
       load();
     } catch (e) {
-      fill(holder, error(e.message));
+      // In the note, not over the table: an error that replaces the rows
+      // takes away the thing the reader was working with.
+      bulkNote.className = "note bad";
+      bulkNote.textContent = e.message;
     }
   }
 
@@ -2103,7 +2109,7 @@ async function filesView() {
    * Kept out here rather than in the table, because the table re-renders on
    * every sort, page and filter and a selection that vanished when you sorted
    * would be a selection nobody could trust. */
-  const picked = new Set();
+  const picked = new Map();
   const bulkNote = el("div", { class: "note" });
   const bulkBar = el("div", { class: "bulk", hidden: true });
 
@@ -2138,18 +2144,37 @@ async function filesView() {
   }
 
   async function forgetPicked(button) {
-    const paths = [...picked];
     button.disabled = true;
     button.textContent = "Forgetting…";
     bulkNote.className = "note";
     bulkNote.textContent = "";
+    // One call per store: a write names the store it is for, and a selection
+    // made across two of them is two writes, not an ambiguous one.
+    const byStore = new Map();
+    for (const [path, store] of picked) {
+      if (!byStore.has(store)) byStore.set(store, []);
+      byStore.get(store).push(path);
+    }
     try {
-      const done = await post("/api/forget", { paths });
+      let files = 0;
+      let forgot = 0;
+      let absent = 0;
+      for (const [store, paths] of byStore) {
+        const done = await post("/api/forget", { paths, store });
+        // One path in a store answers in the single-file shape.
+        files += done.files === undefined ? 1 : done.files;
+        forgot += done.forgot || 0;
+        absent += (done.not_indexed || []).length;
+      }
       picked.clear();
       paintBulk();
-      bulkNote.textContent = done.not_indexed && done.not_indexed.length
-        ? `${done.message} ${n(done.not_indexed.length)} were not indexed and were left alone.`
-        : done.message;
+      bulkNote.textContent = absent
+        ? `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
+            forgot === 1 ? "" : "s"
+          } removed. ${n(absent)} were not indexed and were left alone.`
+        : `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
+            forgot === 1 ? "" : "s"
+          } removed.`;
       load();
     } catch (e) {
       bulkNote.className = "note bad";
@@ -2191,7 +2216,7 @@ async function filesView() {
             class: "pick",
             "aria-label": `Select ${f.path}`,
             onchange: () => {
-              if (box.checked) picked.add(f.path);
+              if (box.checked) picked.set(f.path, f.store);
               else picked.delete(f.path);
               paintBulk();
             },
@@ -2256,7 +2281,7 @@ async function filesView() {
             onclick: () => {
               button.disabled = true;
               button.textContent = "Forgetting…";
-              forget(f.path, button.closest("tr"));
+              forget(f.path, button.closest("tr"), f.store);
             },
           });
           return button;
