@@ -263,7 +263,29 @@ pub struct IndexReport {
     pub edges: usize,
     /// Images embedded in this run.
     pub images: usize,
+    /// Whether the run was stopped rather than finished, and everything it had
+    /// embedded was rolled back.
+    pub stopped: bool,
 }
+
+/// What a controlled run should do at the next file boundary.
+///
+/// Asked between files, never inside one: a file half-written into the index
+/// is a file whose hash must not be committed, and the boundary is the one
+/// point in the loop where that cannot be true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    /// Keep going.
+    Run,
+    /// Hold here, and ask again shortly.
+    Pause,
+    /// Give up, and undo what this run embedded.
+    Stop,
+}
+
+/// How long a paused run waits before asking again. Short enough that
+/// resuming feels immediate, long enough that a paused run costs nothing.
+const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
 pub struct Semlith {
     dir: PathBuf,
@@ -545,7 +567,24 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
-        self.index_set(walk(roots), true, Some(deadline), on_file)
+        self.index_set(walk(roots), true, Some(deadline), None, on_file)
+    }
+
+    /// [`Semlith::index_within_held`] that can be paused and stopped from
+    /// another thread.
+    ///
+    /// `control` is asked once per file. A stop undoes everything the run
+    /// embedded, so the corpus is exactly as it was before it started — which
+    /// is what makes stopping a real answer rather than a half-indexed store.
+    pub(crate) fn index_within_held_under(
+        &mut self,
+        roots: &[PathBuf],
+        budget: std::time::Duration,
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let deadline = std::time::Instant::now() + budget;
+        self.index_set(walk(roots), true, Some(deadline), Some(control), on_file)
     }
 
     /// `index_paths` without taking the lock, for a caller that already holds
@@ -555,7 +594,7 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(walk(roots), true, None, on_file)
+        self.index_set(walk(roots), true, None, None, on_file)
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -568,7 +607,7 @@ impl Semlith {
         paths: Vec<PathBuf>,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(paths, false, None, on_file)
+        self.index_set(paths, false, None, None, on_file)
     }
 
     /// The body both entry points share. `sweep` drops every recorded file
@@ -579,6 +618,7 @@ impl Semlith {
         paths: Vec<PathBuf>,
         sweep: bool,
         deadline: Option<std::time::Instant>,
+        control: Option<&dyn Fn() -> Flow>,
         mut on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         // A run killed mid-save leaves a temp index behind. Removing it here
@@ -588,6 +628,9 @@ impl Semlith {
 
         let mut report = IndexReport::default();
         let mut pending = Batch::default();
+        // Every file this run embedded, so a stop can put the store back the
+        // way it found it rather than leaving half a corpus indexed.
+        let mut written: Vec<String> = Vec::new();
         // Files whose vectors are embedded but not yet durable. Their hash is
         // written only after the index lands, so a crash re-indexes them.
         let mut completed: Vec<(i64, String)> = Vec::new();
@@ -607,6 +650,27 @@ impl Semlith {
             {
                 report.remaining = total - seen;
                 break;
+            }
+            if let Some(ask) = control {
+                let mut stop = false;
+                loop {
+                    match ask() {
+                        Flow::Run => break,
+                        // Held here rather than returning: the run keeps the
+                        // store lock, so resuming is this loop waking up and
+                        // not a second walk of the tree.
+                        Flow::Pause => std::thread::sleep(PAUSE_TICK),
+                        Flow::Stop => {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                if stop {
+                    report.remaining = total - seen;
+                    report.stopped = true;
+                    break;
+                }
             }
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
@@ -734,6 +798,7 @@ impl Semlith {
                 let image_id = store::insert_image(&self.db, file_id, width, height)?;
                 self.images.add(&vector, &[image_id as u64])?;
                 completed.push((file_id, hash));
+                written.push(key.clone());
                 report.indexed += 1;
                 report.images += 1;
                 continue;
@@ -805,6 +870,7 @@ impl Semlith {
             report.edges += edges;
 
             completed.push((file_id, hash));
+            written.push(key.clone());
             report.indexed += 1;
             report.chunks += chunks.len();
 
@@ -819,6 +885,29 @@ impl Semlith {
         }
 
         self.flush(&mut pending)?;
+
+        // A stopped run leaves nothing behind. The vectors are already in the
+        // index and the rows already in the database — both were written as
+        // the run went — so undoing is the same eviction a forget performs,
+        // for exactly the files this run wrote.
+        if report.stopped {
+            for key in &written {
+                for id in store::image_ids_of(&self.db, key)? {
+                    self.images.remove(id as u64)?;
+                }
+                for id in store::delete_file(&self.db, key)? {
+                    self.index.remove(id)?;
+                }
+            }
+            completed.clear();
+            report.indexed = 0;
+            report.chunks = 0;
+            report.images = 0;
+            report.symbols = 0;
+            report.edges = 0;
+            self.save()?;
+            return Ok(report);
+        }
 
         // Anything recorded but no longer on disk is dead weight.
         if sweep {

@@ -123,6 +123,10 @@ pub struct Store {
     /// be deleted while the daemon keeps running. The daemon's own shutdown
     /// sets it on every open store alongside the global stop.
     pub stop: AtomicBool,
+    /// A queued index run holds here between files while this is set.
+    pub paused: AtomicBool,
+    /// A queued index run gives up and undoes itself when this is set.
+    pub cancelled: AtomicBool,
     /// Unix seconds of the last write this daemon made to the store.
     pub last_write: AtomicUsize,
 }
@@ -499,6 +503,8 @@ impl State {
             events: Mutex::new(VecDeque::new()),
             watching: AtomicBool::new(true),
             stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
             last_write: AtomicUsize::new(0),
         });
 
@@ -707,6 +713,8 @@ pub fn run(
             events: Mutex::new(VecDeque::new()),
             watching: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
             last_write: AtomicUsize::new(0),
         }));
     }
@@ -911,25 +919,54 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
             let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
             say(serde_json::json!({ "event": "started", "paths": names }));
             let started_at = std::time::Instant::now();
-            let outcome = writer.index_within_held(&paths, SLICE, |path, progress| {
-                say(serde_json::json!({
-                    "event": "file",
-                    "path": path.display().to_string(),
-                    // What is happening to this file, so a page can say
-                    // "unchanged" rather than showing nothing at all.
-                    "outcome": progress.outcome.as_str(),
-                    "scanned": progress.scanned,
-                    "total": progress.total,
-                    "indexed": progress.indexed,
-                    "chunks": progress.chunks,
-                    "symbols": progress.symbols,
-                    "elapsed_ms": started_at.elapsed().as_millis() as u64,
-                }));
-            });
+            // Cleared here rather than when the flag is set: a stop asked for
+            // while nothing was running must not cancel the next run.
+            store.paused.store(false, Ordering::Relaxed);
+            store.cancelled.store(false, Ordering::Relaxed);
+            let control = {
+                let store = Arc::clone(store);
+                let told = std::sync::atomic::AtomicBool::new(false);
+                move || {
+                    if store.cancelled.load(Ordering::Relaxed) {
+                        return crate::Flow::Stop;
+                    }
+                    if store.paused.load(Ordering::Relaxed) {
+                        // Once per pause, not once per tick.
+                        if !told.swap(true, Ordering::Relaxed) {
+                            say(serde_json::json!({ "event": "paused" }));
+                        }
+                        return crate::Flow::Pause;
+                    }
+                    if told.swap(false, Ordering::Relaxed) {
+                        say(serde_json::json!({ "event": "resumed" }));
+                    }
+                    crate::Flow::Run
+                }
+            };
+            let outcome =
+                writer.index_within_held_under(&paths, SLICE, &control, |path, progress| {
+                    say(serde_json::json!({
+                        "event": "file",
+                        "path": path.display().to_string(),
+                        // What is happening to this file, so a page can say
+                        // "unchanged" rather than showing nothing at all.
+                        "outcome": progress.outcome.as_str(),
+                        "scanned": progress.scanned,
+                        "total": progress.total,
+                        "indexed": progress.indexed,
+                        "chunks": progress.chunks,
+                        "symbols": progress.symbols,
+                        "elapsed_ms": started_at.elapsed().as_millis() as u64,
+                    }));
+                });
             match outcome {
                 Ok(done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
-                    store.note(format!("{} indexed from the portal", done.indexed));
+                    store.note(if done.stopped {
+                        "an index run was stopped; everything it had embedded was undone".into()
+                    } else {
+                        format!("{} indexed from the portal", done.indexed)
+                    });
                     say(serde_json::json!({
                         "event": "done",
                         "indexed": done.indexed,
@@ -942,6 +979,9 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                         // anything failed: asking again continues where it
                         // stopped and redoes nothing.
                         "remaining": done.remaining,
+                        // A stopped run undid itself: nothing it embedded is
+                        // in the store, so the next attempt starts from zero.
+                        "stopped": done.stopped,
                     }));
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
@@ -1128,6 +1168,8 @@ mod tests {
                             events: Mutex::new(VecDeque::new()),
                             watching: AtomicBool::new(false),
                             stop: AtomicBool::new(false),
+                            paused: AtomicBool::new(false),
+                            cancelled: AtomicBool::new(false),
                             last_write: AtomicUsize::new(0),
                         })
                     })

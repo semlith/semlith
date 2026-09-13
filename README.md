@@ -229,6 +229,11 @@ Checkpointing, the memory budget and shards are properties of the store layout,
 so a store written by an older release keeps its own and keeps working exactly
 as it did. [Compatibility](#compatibility) says which layout is which.
 
+A run started from the portal can be paused and stopped. Pausing holds it
+between files, keeping the store lock, so resuming costs nothing. Stopping
+undoes everything that run embedded — the store is left exactly as it was
+before it started, and indexing the same folder again begins at zero.
+
 ### Forgetting files, and deleting a store
 
 `semlith forget <path>` drops one file's chunks and vectors. The portal's Files

@@ -1067,3 +1067,84 @@ fn a_store_is_deleted_without_stopping_the_daemon() {
     assert_eq!(daemon.get("/api/files").json()["total"], 0);
     assert_eq!(daemon.get("/api/privacy").status, 200);
 }
+
+// ---------------------------------------------------------------- T13
+
+/// One request off the `Daemon` handle, for a thread that cannot borrow it.
+fn post_to(port: u16, token: &str, path: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the daemon listens");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .unwrap();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: semlith_token={token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// A run can be stopped, and stopping undoes it. A half-indexed corpus is
+/// worse than none, because nothing in the store says which half it is.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_stopped_index_run_undoes_itself() {
+    let (dir, home, work) = sandbox("stop-index");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+
+    // Outside the watched root, so the watcher cannot index it behind the
+    // run's back and the count belongs to the run alone.
+    let extra = work.join("extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    for i in 0..60 {
+        let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(120));
+        std::fs::write(extra.join(format!("note{i:03}.md")), body).unwrap();
+    }
+
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    let before = daemon.get("/api/files").json()["total"].as_i64().unwrap();
+
+    let port = daemon.port;
+    let token = daemon.token.clone();
+    let path = extra.display().to_string();
+    let run = std::thread::spawn(move || {
+        let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
+        post_to(port, &token, "/api/index", &body)
+    });
+
+    // Stop it once it has written something, so the rollback has work to do.
+    let mut moved = false;
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if daemon.get("/api/files").json()["total"].as_i64().unwrap() > before {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "the run never indexed anything to roll back");
+
+    let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");
+    assert_eq!(stopped.status, 200, "{}", stopped.body);
+
+    let answer = run.join().expect("the index request");
+    assert!(
+        answer.contains("\"stopped\":true"),
+        "the run did not report itself stopped: {answer}"
+    );
+
+    // Back to exactly what was there before it started.
+    for _ in 0..100 {
+        if daemon.get("/api/files").json()["total"].as_i64() == Some(before) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!(
+        "the store kept what the stopped run embedded: {} files, was {before}",
+        daemon.get("/api/files").json()["total"]
+    );
+}

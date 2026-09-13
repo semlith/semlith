@@ -74,6 +74,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/setup") => fix_setup(request),
         (_, true, "/api/root") => root(state, request),
         (_, true, "/api/store/delete") => delete_store(state, request),
+        (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
         // A route that exists on another verb is worth telling apart from one
@@ -971,6 +972,45 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         Ok(progress) => stream(progress),
         Err(e) => Response::error(409, &e.to_string()),
     }
+}
+
+/// Pause, resume or stop the index run a store is working on.
+///
+/// Stopping undoes what the run embedded, so the store is as it was before it
+/// started — a half-indexed corpus is worse than none, because nothing says
+/// which half it is.
+fn index_control(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    match body.get("action").and_then(Value::as_str) {
+        Some("pause") => store
+            .paused
+            .store(true, std::sync::atomic::Ordering::Relaxed),
+        Some("resume") => store
+            .paused
+            .store(false, std::sync::atomic::Ordering::Relaxed),
+        Some("stop") => {
+            store
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // Released, so a paused run reaches the check that stops it.
+            store
+                .paused
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        _ => return Response::error(400, "action must be \"pause\", \"resume\" or \"stop\""),
+    }
+    Response::json(&json!({
+        "store": store.name,
+        "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
+        "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+    }))
 }
 
 /// Create the store `path` belongs in and open it in this daemon.

@@ -1773,9 +1773,20 @@ pre.code {
   font-family: var(--mono);
   font-size: var(--t-small);
   color: var(--code-ink);
-  min-height: 200px;
+  /* The log is what gives way. The folder picker, the URL card and the
+   * progress bar are each a fixed thing a reader is trying to use; the log is
+   * a tail of a run that is already scrolling. So it shrinks to its floor and
+   * the others keep their height. */
+  flex: 1 1 auto;
+  min-height: 120px;
   max-height: 340px;
   overflow-y: auto;
+}
+
+/* Everything above the log in the Index view keeps the height it asks for. */
+.scroller > .picker,
+.scroller > .card {
+  flex-shrink: 0;
 }
 .log .line {
   display: flex;

@@ -2776,6 +2776,36 @@ async function indexView() {
   const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
 
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  /* While a run is on, Start becomes Pause and Stop appears beside it. A run
+   * holds the writer, so these are the only two things a reader can do about
+   * one that is taking longer than they expected. */
+  const stopButton = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Stop",
+    hidden: true,
+  });
+  let running = false;
+  let paused = false;
+
+  /** Send pause, resume or stop to the store the run is writing to. */
+  async function control(action) {
+    return post("/api/index/control", {
+      action,
+      store: storeSelect.value || undefined,
+    });
+  }
+
+  function showRunning(on) {
+    running = on;
+    paused = false;
+    stopButton.hidden = !on;
+    stopButton.disabled = false;
+    stopButton.textContent = "Stop";
+    start.textContent = on ? "Pause" : "Start indexing";
+    start.disabled = false;
+    addButton.disabled = on;
+  }
   const addButton = el("button", { class: "button secondary", type: "button", text: "Fetch and index" });
 
   const storeSelect = el(
@@ -2813,8 +2843,7 @@ async function indexView() {
    * landed to the same write queue a folder goes through, so it answers with
    * the same event stream and there is no second progress mechanism. */
   async function run(route, body) {
-    start.disabled = true;
-    addButton.disabled = true;
+    showRunning(true);
     note.className = "note";
     note.textContent = "";
     log.replaceChildren();
@@ -2894,6 +2923,19 @@ async function indexView() {
             )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
             say(event.path, `${event.scanned}/${event.total}`, event.outcome);
           } else if (event.event === "done") {
+            if (event.stopped) {
+              // Not 100%: nothing was kept, and a full bar would say the
+              // opposite of what happened.
+              bar.style.width = "0%";
+              pct.textContent = "0%";
+              status.textContent = "stopped";
+              say(
+                "stopped — everything this run embedded was undone, so the store is as it was before it started",
+                "stopped",
+              );
+              await refreshStores();
+              continue;
+            }
             bar.style.width = "100%";
             pct.textContent = "100%";
             status.textContent = "done";
@@ -2911,6 +2953,12 @@ async function indexView() {
             // `state.stores` empty and the next visit to Stores bounced the
             // user to the first-run screen with their work apparently gone.
             await refreshStores();
+          } else if (event.event === "paused") {
+            status.textContent = "paused";
+            say("held between files — the writer is still this run's", "paused");
+          } else if (event.event === "resumed") {
+            status.textContent = "working";
+            say("carrying on", "resumed");
           } else if (event.event === "error") {
             status.textContent = "failed";
             say(event.error, "error");
@@ -2924,13 +2972,44 @@ async function indexView() {
       say(e.message, "error");
       return e.message;
     } finally {
-      start.disabled = false;
-      addButton.disabled = false;
+      showRunning(false);
     }
     return null;
   }
 
-  start.addEventListener("click", () => {
+  stopButton.addEventListener("click", () => {
+    ask({
+      title: "Stop this index run?",
+      body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. Indexing the same folder again begins at 0%.",
+      confirm: "Stop and undo",
+      tone: "bad",
+      run: async () => {
+        stopButton.disabled = true;
+        stopButton.textContent = "Stopping…";
+        status.textContent = "stopping — undoing what it embedded";
+        await control("stop");
+      },
+    });
+  });
+
+  start.addEventListener("click", async () => {
+    if (running) {
+      // Pause and resume are the same button: the run is the thing being
+      // toggled, and two buttons for one state is two things to read.
+      const want = paused ? "resume" : "pause";
+      start.disabled = true;
+      try {
+        await control(want);
+        paused = !paused;
+        start.textContent = paused ? "Resume" : "Pause";
+        status.textContent = paused ? "paused" : "working";
+      } catch (e) {
+        complain(e.message);
+      } finally {
+        start.disabled = false;
+      }
+      return;
+    }
     const path = field.value.trim();
     if (!path) {
       complain("Give a path to index, or choose a folder.", field);
@@ -2984,6 +3063,7 @@ async function indexView() {
       urlButton,
       state.stores.length > 1 ? storeSelect : null,
       start,
+      stopButton,
       el("span", { class: "spacer" }),
       // What the queue actually holds, from /api/stores. The line it replaces
       // said "writer: daemon", which named a process rather than telling
