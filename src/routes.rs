@@ -71,6 +71,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, crate::http::MCP_PATH) => mcp(state, request),
         (_, true, "/api/endpoint") => endpoint(state, request),
         (_, true, "/api/key") => key(state, request),
+        (_, true, "/api/setup") => fix_setup(request),
+        (_, true, "/api/root") => root(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
         // A route that exists on another verb is worth telling apart from one
@@ -760,6 +762,59 @@ fn agents(state: &Arc<State>) -> Response {
 /// read: nothing here installs anything.
 fn setup() -> Response {
     Response::json(&json!(crate::setup::status()))
+}
+
+/// Perform one setup step the page can see is not done.
+///
+/// A panel that reports "not on PATH" and then tells the reader to go and run a
+/// command is a panel that found the problem and declined to fix it. Only the
+/// steps that are safe without a prompt are here: PATH edits a shell rc file
+/// this tool owns a marked block in, and nothing else is offered.
+fn fix_setup(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    match body.get("step").and_then(Value::as_str) {
+        Some("path") => match crate::setup::run_path_step() {
+            Ok(step) => Response::json(&json!({ "step": step, "status": crate::setup::status() })),
+            Err(e) => Response::error(500, &e.to_string()),
+        },
+        Some(other) => Response::error(400, &format!("{other} is not a step this route runs")),
+        None => Response::error(400, "missing step"),
+    }
+}
+
+/// Point a registered store at another root.
+///
+/// For a corpus that moved: the registry still names the old directory and the
+/// portal shows the root as missing, so the fix is offered where the problem is
+/// visible. It rewrites the registry and nothing else — the store's vectors,
+/// chunks and graph are untouched, and the watcher picks the new root up on the
+/// next daemon start.
+fn root(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let (Some(store), Some(path)) = (
+        body.get("store").and_then(Value::as_str),
+        body.get("root").and_then(Value::as_str),
+    ) else {
+        return Response::error(400, "missing store or root");
+    };
+    match home::repoint(store, Path::new(path)) {
+        Ok(()) => Response::json(&json!({
+            "store": store,
+            "root": path,
+            "message": format!(
+                "{store} now covers {path}. It is watched from the next start of \
+                 the daemon; nothing was re-embedded."
+            ),
+            "restart": state.stores().iter().any(|s| s.name == store),
+        })),
+        Err(e) => Response::error(409, &e.to_string()),
+    }
 }
 
 // ----------------------------------------------------------------- graph

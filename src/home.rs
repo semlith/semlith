@@ -603,7 +603,14 @@ pub fn adopt(source: &Path, root: Option<&Path>, name: Option<&str>) -> Result<(
 }
 
 /// Re-point a registered store whose corpus moved.
+///
+/// A registry edit and nothing else: no re-embedding, no store rewritten. The
+/// portal offers it beside a root it can see is missing, so the directory is
+/// checked here rather than discovered by a watcher that finds nothing.
 pub fn repoint(name: &str, root: &Path) -> Result<()> {
+    if !root.is_dir() {
+        bail!("{} is not a directory", root.display());
+    }
     let mut registry = Registry::load()?;
     let Some(entry) = registry.stores.get_mut(name) else {
         bail!(

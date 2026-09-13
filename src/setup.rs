@@ -290,6 +290,15 @@ fn rc_file() -> Option<PathBuf> {
 /// Step 2. The block is appended at the end and *prepends* the bin directory,
 /// so the binary this install put there wins over an older one somebody
 /// dropped in `/usr/local/bin` and forgot.
+/// Run the PATH step on its own, non-interactively.
+///
+/// The portal's setup panel reports this step as not done and then tells the
+/// reader to go and run a command; a panel that can see the problem can fix it.
+/// `yes` is forced, because a button press is the confirmation.
+pub fn run_path_step() -> Result<Step> {
+    step_path(true)
+}
+
 fn step_path(yes: bool) -> Result<Step> {
     let bin = home::bin_dir();
     if on_path(&bin) {

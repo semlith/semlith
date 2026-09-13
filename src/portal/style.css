@@ -125,10 +125,11 @@
   --t-title: 18px;
   --t-h1: 21px;
   --t-display: 24px;
-  /* Not a step of the scale and never stepped down: anything under 16px makes
-   * iOS Safari zoom the page when a field takes focus, which on a phone reads
-   * as the layout breaking when you tap a box. */
-  --t-field: 16px;
+  /* What a field's text reads at. 13px on a pointer device, where it matches
+   * the prose around it; 16px under a coarse pointer, because anything smaller
+   * makes iOS Safari zoom the page when a field takes focus, and that reads as
+   * the layout breaking when you tap a box. */
+  --t-field: 13px;
 
   /* Line height, paired with the type steps. Before this the stylesheet had
    * six line-height declarations in 2,283 lines, so almost everything
@@ -228,6 +229,14 @@
 /* A machine set to dark should not be shown a white page and asked to find the
  * toggle. The explicit choice, when there is one, still wins: the toggle writes
  * data-theme, and both attribute blocks are more specific than this. */
+/* Touch. The zoom floor only applies where there is a touch keyboard to bring
+ * the page up to meet. */
+@media (pointer: coarse) {
+  :root {
+    --t-field: 16px;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0f151a;
@@ -661,16 +670,17 @@ main {
   }
 }
 
-/* One scroll container per page, and it is never the window.
+/* The page scrolls as one thing.
  *
- * The page is bounded to the viewport below the fixed header, every child is
- * `flex-shrink: 0`, and exactly one child carries `.grow` and scrolls. Long
- * content then scrolls where it lives — the model table inside its card, the
- * event log inside its panel — so the page header and the stat strip stay put
- * instead of scrolling away with it.
+ * An earlier version bounded the page to the viewport and let exactly one child
+ * scroll inside it, which kept the title in place and moved everything under it
+ * — and reading a page where the top half is pinned and the bottom half slides
+ * is worse than reading a page that simply scrolls. The window still never
+ * scrolls: `#app` is the viewport and this is the one region inside it that
+ * moves.
  *
- * `.view` used to scroll as a whole, which is what made a long model list grow
- * a window-wide scrollbar and take the title with it. */
+ * A table is the exception, below: its header stays while its rows move,
+ * because a column of numbers with no heading above it is unreadable. */
 .view > * {
   flex-shrink: 0;
 }
@@ -684,13 +694,13 @@ main {
   flex-grow: 1;
   min-width: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
-/* The one child that takes the remaining height and scrolls. Written as a
- * class rather than as a child of `.view` because the growing element is
- * sometimes a holder the view re-fills — the Files table is replaced whole on
- * every query — and the card inside it is what has to carry the height. */
+/* A block that takes what height is left over rather than only what its content
+ * needs — a table on a page that is mostly that table, or the cards at the
+ * bottom of the Stores page, which would otherwise leave a band of empty page
+ * under them. */
 .grow {
   flex: 1 1 auto;
   min-height: 0;
@@ -698,24 +708,35 @@ main {
   flex-direction: column;
 }
 
-.grow > .table-wrap,
-.grow > .scroller,
-.view > .scroller {
+.grow > .table-wrap {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
 }
 
+/* A group of blocks that scroll with the page rather than inside it, and that
+ * takes the height left over so the cards at the bottom of a short page fill
+ * it instead of floating above a band of empty grey. */
 .scroller {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
+  min-height: 0;
+  flex: 1 1 auto;
 }
 
-/* A scroller that is also a grid stays a grid: the rule above would otherwise
- * win on specificity and quietly stack two columns into one. */
 .scroller.grid {
   display: grid;
+}
+
+/* Cards in a row fill the row rather than leaving the shorter one short. */
+.grid.fill {
+  flex: 1 1 auto;
+  align-items: stretch;
+}
+
+.grid.fill > * {
+  min-height: 0;
 }
 
 /* A page header, the same on every page: the title with its status pill beside
@@ -935,6 +956,34 @@ h2 {
   gap: var(--sp-2);
 }
 
+/* A stack of facts about one thing — a store's name over its directory over
+ * its model — where the gap between them is a hairline rather than a break. */
+.rows.tight {
+  gap: 2px;
+}
+
+/* A root the registry lists and the disk does not have, with the action that
+ * fixes it beside the path rather than in a command somewhere else. */
+.gone-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* One setup step: its state, what it is, where it is, and — for the one step
+ * this page can perform — the button that performs it. */
+.kv.step {
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: var(--sp-2h);
+}
+
+.kv.step .card-title {
+  width: 62px;
+  flex-shrink: 0;
+}
+
 .kv {
   display: flex;
   align-items: baseline;
@@ -995,6 +1044,15 @@ h2 {
   border-color: var(--blue);
   color: var(--blue-ink);
   background: var(--panel);
+}
+
+/* A button that opens something stays lit while it is open. Without this the
+ * only way to tell whether "Choose folder…" is showing its card is to look for
+ * the card. */
+.button.secondary[aria-pressed="true"] {
+  background: var(--blue-soft);
+  border-color: var(--blue);
+  color: var(--blue-ink);
 }
 
 .button.ghost {
@@ -1201,10 +1259,40 @@ h2 {
   font-size: var(--t-field);
 }
 
-select.chip {
-  height: 34px;
-  font-family: inherit;
-  padding: 0 var(--sp-3);
+/* A select, shaped like the field beside it rather than like a pill. A
+ * 999px-radius dropdown next to an 8px-radius input reads as two different
+ * kinds of control for what is the same kind of choice. */
+select.chip,
+select.field {
+  appearance: none;
+  height: 40px;
+  min-width: 140px;
+  padding: 0 34px 0 var(--sp-3h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background-color: var(--panel);
+  /* The arrow, drawn rather than fetched: the CSP allows no external asset and
+   * the native one cannot be themed. */
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 18px center, right 13px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-body-sm);
+  cursor: pointer;
+  transition: border-color var(--d-hover) var(--e-in-out);
+}
+
+select.chip:hover,
+select.field:hover {
+  border-color: var(--blue);
+}
+
+select.chip:focus-visible,
+select.field:focus-visible {
+  border-color: var(--blue);
 }
 
 .copyfield {
@@ -1346,12 +1434,29 @@ select.chip {
   overflow-wrap: anywhere;
 }
 
+/* A table scrolls inside its own card while the page scrolls around it.
+ *
+ * That split is deliberate: a sticky column heading can only stay put inside
+ * the box that scrolls it, so a table that flowed with the page would lose its
+ * heading the moment the rows went past — and a column of figures with no
+ * heading above it is unreadable. Everything that is not a table scrolls with
+ * the page.
+ *
+ * The cap is in viewport units so the rows use the screen they are given, and
+ * a table shorter than it simply ends. */
 .table-wrap {
   overflow: auto;
   min-width: 0;
+  max-height: 62dvh;
 }
 
+/* Sticky, in every table. A column of figures scrolled past its heading is a
+ * column nobody can read, and the wrapper is the scroll container so this is
+ * where `top: 0` means the top of the visible rows. */
 th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   text-align: left;
   font: 500 var(--t-tiny) var(--mono);
   line-height: var(--lh-code);
@@ -1362,6 +1467,13 @@ th {
   border-bottom: 1px solid var(--line);
   background: var(--panel);
   white-space: nowrap;
+}
+
+/* A sticky cell's border scrolls with the cell rather than staying at its
+ * edge, so the line under the heading is drawn as a shadow instead. */
+thead th {
+  box-shadow: inset 0 -1px 0 var(--line);
+  border-bottom: 0;
 }
 
 td {
@@ -1422,6 +1534,22 @@ th .arrow {
   white-space: nowrap;
 }
 
+/* Truncated at the start rather than the end, for a path. Every row on the
+ * Files page began `/Users/…/Documents/…` and ended in the one part that says
+ * which file it is, so cutting the end cut the only part worth reading.
+ *
+ * `direction: rtl` moves the ellipsis to the front; the text itself is wrapped
+ * in an isolate so the segments stay in their real order and a leading `/`
+ * does not jump to the other end. */
+.one-line.tail {
+  direction: rtl;
+  text-align: left;
+}
+
+.one-line.tail > bdi {
+  unicode-bidi: isolate;
+}
+
 th.num,
 td.num {
   text-align: right;
@@ -1457,6 +1585,14 @@ td.meta {
   font-size: var(--t-tiny);
   color: var(--muted);
   overflow-wrap: anywhere;
+}
+
+/* A stack of one-line facts under a name — a store's directory and its model.
+ * Wrapped, each of those took three lines and a table row became a paragraph. */
+.meta.one-line,
+.name.one-line {
+  max-width: 38ch;
+  overflow-wrap: normal;
 }
 
 .table-foot {
@@ -1573,12 +1709,17 @@ pre.code {
   display: flex;
   flex-direction: column;
 }
+.picker {
+  overflow: hidden;
+}
+
 .picker .crumbs {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  padding: 14px 18px;
+  gap: var(--sp-2h);
+  padding: var(--sp-3) var(--sp-3h);
   border-bottom: 1px solid var(--line);
+  background: var(--soft);
   flex-wrap: wrap;
 }
 .picker .where {
@@ -1591,17 +1732,21 @@ pre.code {
   white-space: nowrap;
 }
 .picker .entries {
-  max-height: 260px;
+  max-height: 320px;
   min-height: 84px;
   overflow-y: auto;
+  /* Two columns where there is room: a home directory is forty entries, and a
+   * single column of them is a page of scrolling to reach `work`. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
 }
 .picker .entry {
   transition: background var(--d-quick) var(--e-in-out);
   display: flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: var(--sp-2) 14px;
+  gap: var(--sp-2h);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-3h);
   border: 0;
   border-bottom: 1px solid var(--line-soft);
   background: none;

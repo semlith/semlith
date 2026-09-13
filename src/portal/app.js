@@ -344,13 +344,13 @@ function wireTips() {
  * what the Files table needs: sorting has to order the whole store rather than
  * the page of it that happens to be loaded.
  */
-const PER_PAGE = [8, 15, 25, 50];
+const PER_PAGE = [5, 10, 25, 50];
 
 function dataTable(spec) {
   const columns = spec.columns;
   const view = {
     page: 1,
-    perPage: spec.perPage || 15,
+    perPage: spec.perPage || 10,
     sort: spec.sort || null,
     dir: spec.dir || "asc",
   };
@@ -371,7 +371,7 @@ function dataTable(spec) {
   // to be a table.
   const node = el(
     "div",
-    { class: spec.grow === false ? "card" : "card grow" },
+    { class: spec.grow ? "card grow" : "card" },
     el("div", { class: "table-wrap" }, table),
     foot,
   );
@@ -628,6 +628,28 @@ function folderPicker(options) {
   };
 }
 
+/** A path on one line, truncated at the start, whole on hover.
+ *
+ * The end is the part that identifies a file: every row on the Files page
+ * begins with the same `/Users/...` and differs in its last segment, so cutting
+ * the end throws away the only part worth reading. */
+function pathCell(value, className) {
+  return el(
+    "span",
+    { class: className ? `one-line tail ${className}` : "one-line tail", "data-tip": value },
+    el("bdi", { text: value }),
+  );
+}
+
+/** A value on one line, truncated at the end, whole on hover. */
+function lineCell(value, className) {
+  return el("span", {
+    class: className ? `one-line ${className}` : "one-line",
+    "data-tip": value,
+    text: value,
+  });
+}
+
 /** An input with a real label. A placeholder is not one: it leaves on typing. */
 function labelled(id, text, input) {
   input.id = id;
@@ -772,6 +794,18 @@ function graphCanvas(options) {
   let frame = null;
   let running = true;
   let settled = false;
+  /* How much of the force is still applied. The layout cools: a graph that is
+   * still moving after ten seconds is not settling, it is oscillating, and
+   * watching a picture twitch while you read it is worse than a picture that
+   * stopped. Anything that changes the layout — a drag, a new scope, an
+   * edge-kind filter — re-heats it. */
+  let alpha = 1;
+  /* Springs are shared out by how many edges a node carries. A hub with forty
+   * edges feels forty pulls where a leaf feels one, and at this node count that
+   * is what turns the simulation into a two-frame bounce: every node overshoots
+   * its rest position, and the next step overshoots back. Dividing by the
+   * square root of the degree is what keeps a dense neighbourhood stable. */
+  let load = [];
 
   function size() {
     const ratio = window.devicePixelRatio || 1;
@@ -785,7 +819,13 @@ function graphCanvas(options) {
     return { w, h, ctx };
   }
 
+  /* The furthest a node may move in one step, in fractions of the canvas.
+   * Without it a single large force sends a node across the frame and the
+   * spring drags it back, which is the bounce this cap exists to stop. */
+  const MAX_STEP = 0.012;
+
   function step(w, h) {
+    if (alpha < 0.002 && !dragging) return false;
     for (let i = 0; i < nodes.length; i++) {
       const a = nodes[i];
       for (let j = i + 1; j < nodes.length; j++) {
@@ -800,7 +840,7 @@ function graphCanvas(options) {
           dy = 0.4;
         }
         const d = Math.sqrt(d2);
-        const force = 5200 / d2;
+        const force = (5200 / d2) * alpha;
         a.vx -= ((dx / d) * force) / w;
         a.vy -= ((dy / d) * force) / h;
         b.vx += ((dx / d) * force) / w;
@@ -814,15 +854,20 @@ function graphCanvas(options) {
       const dx = (b.x - a.x) * w;
       const dy = (b.y - a.y) * h;
       const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-      const pull = (d - 138) * 0.0025;
-      a.vx += (((dx / d) * pull * d) / w) * 0.02;
-      a.vy += (((dy / d) * pull * d) / h) * 0.02;
-      b.vx -= (((dx / d) * pull * d) / w) * 0.02;
-      b.vy -= (((dy / d) * pull * d) / h) * 0.02;
+      const pull = (d - 138) * 0.0025 * alpha;
+      // Shared out by degree at each end, so a hub is not dragged about by
+      // every edge it happens to carry.
+      const ax = Math.sqrt(load[edge.from] || 1);
+      const bx = Math.sqrt(load[edge.to] || 1);
+      a.vx += ((((dx / d) * pull * d) / w) * 0.02) / ax;
+      a.vy += ((((dy / d) * pull * d) / h) * 0.02) / ax;
+      b.vx -= ((((dx / d) * pull * d) / w) * 0.02) / bx;
+      b.vy -= ((((dy / d) * pull * d) / h) * 0.02) / bx;
     }
+    let moved = 0;
     for (const node of nodes) {
-      node.vx += (0.5 - node.x) * 0.006;
-      node.vy += (0.5 - node.y) * 0.008;
+      node.vx += (0.5 - node.x) * 0.006 * alpha;
+      node.vy += (0.5 - node.y) * 0.008 * alpha;
       if (node === dragging) {
         node.vx = 0;
         node.vy = 0;
@@ -830,11 +875,27 @@ function graphCanvas(options) {
       }
       node.vx *= 0.86;
       node.vy *= 0.86;
+      // One step can only take a node so far. A force large enough to throw it
+      // across the frame is a force the spring will undo next step, which is
+      // the two-frame bounce rather than a layout.
+      node.vx = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vx));
+      node.vy = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vy));
+      moved += Math.abs(node.vx) + Math.abs(node.vy);
       // Kept inside the frame: a node that drifts off-canvas is a node nobody
       // can click.
       node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
       node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
     }
+    alpha *= 0.985;
+    // Settled: every node is moving less than a pixel a frame, so there is
+    // nothing left to watch.
+    if (nodes.length && moved / nodes.length < 0.00015) alpha = 0;
+    return true;
+  }
+
+  /** Put the heat back in, for anything that changes the layout. */
+  function reheat(to) {
+    alpha = Math.max(alpha, to === undefined ? 0.35 : to);
   }
 
   /** A rounded rectangle, the shape every symbol is drawn as. */
@@ -969,6 +1030,7 @@ function graphCanvas(options) {
     if (index === null) return;
     canvas.setPointerCapture(event.pointerId);
     dragging = nodes[index];
+    reheat();
     down = { x: event.clientX, y: event.clientY, index };
     canvas.classList.add("dragging");
     event.preventDefault();
@@ -1047,9 +1109,12 @@ function graphCanvas(options) {
         };
       });
       edges = data.edges || [];
+      load = nodes.map(() => 1);
       for (const edge of edges) {
         if (nodes[edge.from]) nodes[edge.from].callees += 1;
         if (nodes[edge.to]) nodes[edge.to].callers += 1;
+        if (load[edge.from] !== undefined) load[edge.from] += 1;
+        if (load[edge.to] !== undefined) load[edge.to] += 1;
       }
       selected = null;
       near = new Set();
@@ -1057,6 +1122,7 @@ function graphCanvas(options) {
       this.filter(kinds);
       // Settled before the first painted frame, rather than exploding outward
       // while the reader watches.
+      alpha = 1;
       const box = wrap.getBoundingClientRect();
       for (let i = 0; i < 220; i++) {
         step(Math.max(box.width, 240), Math.max(box.height, 240));
@@ -1068,6 +1134,8 @@ function graphCanvas(options) {
     filter(kinds) {
       drawn = !kinds || !kinds.size ? edges : edges.filter((e) => kinds.has(e.kind));
       if (selected !== null) selectAt(selected);
+      // Fewer edges is a different layout, so the springs get another go at it.
+      reheat(0.25);
       if (settled) paint();
       return drawn.length;
     },
@@ -1084,6 +1152,7 @@ function graphCanvas(options) {
     running: () => running,
     toggle() {
       running = !running;
+      if (running) reheat(0.2);
       return running;
     },
     start() {
@@ -1567,6 +1636,37 @@ function agentsCard() {
 async function storesView() {
   const stores = await refreshStores();
 
+  const rootNote = el("div", { class: "note" });
+  /* A root the registry lists and the disk no longer has. The picker is the
+   * same one the page already uses, and re-pointing is a registry edit: no
+   * re-embedding, nothing rewritten. */
+  const rootPicker = folderPicker({
+    choose: "Point the store here",
+    onError: (message) => {
+      rootNote.className = "note bad";
+      rootNote.textContent = message;
+    },
+    onChoose: async (path) => {
+      rootNote.className = "note";
+      rootNote.textContent = "Re-pointing…";
+      try {
+        const done = await post("/api/root", { store: rootPicker.store, root: path });
+        rootNote.textContent = done.message;
+        await refreshStores();
+      } catch (e) {
+        rootNote.className = "note bad";
+        rootNote.textContent = e.message;
+      }
+    },
+  });
+
+  function repoint(store, missing) {
+    rootPicker.store = store;
+    rootNote.className = "note";
+    rootNote.textContent = `Choose where ${missing.split("/").pop() || missing} lives now.`;
+    rootPicker.open("");
+  }
+
   const adoptNote = el("div", { class: "note" });
   const picker = folderPicker({
     choose: "Adopt this directory",
@@ -1634,8 +1734,7 @@ async function storesView() {
   const table = dataTable({
     className: "w-stores",
     sort: "name",
-    grow: false,
-    perPage: 8,
+    perPage: 10,
     rows: stores,
     columns: [
       {
@@ -1645,13 +1744,13 @@ async function storesView() {
         render: (s) =>
           el(
             "div",
-            {},
-            el("div", { class: "name", text: s.name }),
-            el("div", { class: "meta", "data-tip": s.dir, text: s.dir }),
+            { class: "rows tight" },
+            lineCell(s.name, "name"),
+            pathCell(s.dir, "meta"),
             // The model per store, which the About page states only once for
             // the machine. Two stores can have been built with two models and
             // their vectors are not comparable, so it belongs beside the row.
-            el("div", { class: "meta", text: `${s.model} · ${s.dim} dims` }),
+            lineCell(`${s.model} · ${s.dim} dims`, "meta"),
           ),
       },
       {
@@ -1662,10 +1761,22 @@ async function storesView() {
         render: (s) =>
           (s.roots || []).length
             ? s.roots.map((r) =>
-                el("div", {
-                  class: r.present ? "" : "gone",
-                  text: r.present ? r.path : `${r.path} (missing)`,
-                }),
+                r.present
+                  ? pathCell(r.path)
+                  : el(
+                      "div",
+                      { class: "gone-row" },
+                      pathCell(r.path, "gone"),
+                      // A root the registry still lists and the disk no longer
+                      // has. Re-pointing it is one click rather than a command
+                      // with two paths in it.
+                      el("button", {
+                        class: "button danger small",
+                        type: "button",
+                        text: "Re-point",
+                        onclick: () => repoint(s.name, r.path),
+                      }),
+                    ),
               )
             : "—",
       },
@@ -1709,6 +1820,8 @@ async function storesView() {
     head,
     picker.node,
     adoptNote,
+    rootPicker.node,
+    rootNote,
     el(
       "div",
       { class: "strip" },
@@ -1724,7 +1837,7 @@ async function storesView() {
       table.node,
       el(
         "div",
-        { class: "grid" },
+        { class: "grid fill" },
         el(
           "div",
           { class: "card pad dense" },
@@ -1760,7 +1873,7 @@ async function storesView() {
 async function filesView() {
   const chosenExt = new Set();
   const summary = el("span", { class: "pill" });
-  const holder = el("div", { class: "grow" });
+  const holder = el("div", {});
 
   const pathInput = el("input", {
     type: "text",
@@ -1797,7 +1910,7 @@ async function filesView() {
         className: "path",
         // One line, with the whole path on the shared tooltip: a wrapped path
         // makes every row a different height and the column unreadable.
-        render: (f) => el("span", { class: "one-line", "data-tip": f.path, text: f.path }),
+        render: (f) => pathCell(f.path),
       },
       { key: "store", label: "Store", className: "meta", sortable: false, render: (f) => f.store },
       {
@@ -2203,9 +2316,33 @@ async function indexView() {
   const urlCard = el("div", { class: "card pad", hidden: true });
   const urlNote = el("div", { class: "note" });
 
+  const folderButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("picker"),
+    },
+    icon(ICONS.folder),
+    "Choose folder…",
+  );
+  const urlButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("url"),
+    },
+    icon(ICONS.file),
+    "Add from a URL",
+  );
+
   /* The two ways to start a queue are mutually exclusive: showing a folder
    * picker and a URL field at once offers two answers to one question. Both
-   * start closed, so the page opens on the path field and its actions. */
+   * start closed, so the page opens on the path field and its actions, and the
+   * button that opened one stays lit while it is open. */
   function reveal(which) {
     const wantPicker = which === "picker" && !picker.isOpen();
     const wantUrl = which === "url" && urlCard.hidden;
@@ -2213,6 +2350,8 @@ async function indexView() {
     urlCard.hidden = !wantUrl;
     if (wantPicker) picker.open("");
     if (wantUrl) urlField.focus();
+    folderButton.setAttribute("aria-pressed", String(wantPicker));
+    urlButton.setAttribute("aria-pressed", String(wantUrl));
   }
 
   const field = el("input", {
@@ -2228,7 +2367,7 @@ async function indexView() {
 
   const storeSelect = el(
     "select",
-    { class: "chip static", "aria-label": "Store to write to" },
+    { class: "field", "aria-label": "Store to write to" },
     state.stores.map((store) => el("option", { value: store.name, text: store.name })),
   );
 
@@ -2394,18 +2533,8 @@ async function indexView() {
     el(
       "div",
       { class: "filters" },
-      el(
-        "button",
-        { class: "button secondary", type: "button", onclick: () => reveal("picker") },
-        icon(ICONS.folder),
-        "Choose folder…",
-      ),
-      el(
-        "button",
-        { class: "button secondary", type: "button", onclick: () => reveal("url") },
-        icon(ICONS.file),
-        "Add from a URL",
-      ),
+      folderButton,
+      urlButton,
       state.stores.length > 1 ? storeSelect : null,
       start,
       el("span", { class: "spacer" }),
@@ -2458,10 +2587,17 @@ async function indexView() {
 
 // -------------------------------------------------------- install panel
 
+/* What this machine has set up, and the one thing the page can fix itself.
+ *
+ * The install commands that used to head this card belonged on a machine that
+ * does not have semlith yet — which is not the machine reading this page. What
+ * is useful here is the state of each step and a way to act on the one that is
+ * not done.
+ */
 function installPanel() {
   const card = el("div", { class: "card pad install-panel" });
-  const title = () => el("span", { class: "card-title", text: "Install and setup" });
-  fill(card, title(), el("p", { class: "subtitle", text: "Checking this machine…" }));
+  const title = () => el("span", { class: "card-title", text: "This machine" });
+  fill(card, title(), el("p", { class: "subtitle", text: "Checking…" }));
 
   const stateWord = {
     done: "done",
@@ -2469,94 +2605,109 @@ function installPanel() {
     skipped: "not done",
     failed: "failed",
   };
+  const tone = (state) =>
+    state === "done" || state === "already-done" ? "good" : state === "failed" ? "bad" : "warn";
 
-  api("/api/setup")
-    .then((setup) => {
-      const result = el("div", { class: "note" });
+  function paint(setup) {
+    const note = el("div", { class: "note" });
 
-      const install = el("button", {
-        class: "button small",
-        type: "button",
-        text: "Install it",
-        disabled: true,
-        onclick: async () => {
-          install.disabled = true;
-          check.disabled = true;
-          result.className = "note";
-          result.textContent = "Downloading and verifying…";
-          try {
-            const done = await post("/api/upgrade", { action: "apply" });
-            result.textContent = done.restart;
-          } catch (e) {
-            result.className = "note bad";
-            result.textContent = e.message;
-          } finally {
-            check.disabled = false;
-          }
-        },
-      });
+    const fixPath = el("button", {
+      class: "button small",
+      type: "button",
+      text: "Add it to PATH",
+      onclick: async () => {
+        fixPath.disabled = true;
+        note.className = "note";
+        note.textContent = "Editing your shell profile…";
+        try {
+          const done = await post("/api/setup", { step: "path" });
+          note.textContent = `${done.step.detail} — open a new terminal for it to take effect.`;
+          paint(done.status);
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+          fixPath.disabled = false;
+        }
+      },
+    });
 
-      const check = el("button", {
-        class: "button secondary small",
-        type: "button",
-        text: "Check for updates",
-        onclick: async () => {
-          check.disabled = true;
-          result.className = "note";
-          result.textContent = "Asking GitHub…";
-          try {
-            const found = await post("/api/upgrade", { action: "check" });
-            result.textContent = found.available
-              ? `${found.latest} is available; you are on ${found.installed}.`
-              : `Already on the newest release, ${found.installed}.`;
-            if (found.blocked) result.textContent += ` ${found.blocked}`;
-            install.disabled = !found.available || Boolean(found.blocked);
-          } catch (e) {
-            result.className = "note bad";
-            result.textContent = e.message;
-          } finally {
-            check.disabled = false;
-          }
-        },
-      });
+    const install = el("button", {
+      class: "button small",
+      type: "button",
+      text: "Install it",
+      disabled: true,
+      onclick: async () => {
+        install.disabled = true;
+        check.disabled = true;
+        note.className = "note";
+        note.textContent = "Downloading and verifying…";
+        try {
+          const done = await post("/api/upgrade", { action: "apply" });
+          note.textContent = done.restart;
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      },
+    });
 
-      fill(
-        card,
-        title(),
-        el("p", {
-          class: "subtitle",
-          text: "One command on a new machine. Nothing here reaches the network until you click it.",
-        }),
-        el("span", { class: "eyebrow", text: "macOS and Linux" }),
-        copyField(setup.install_sh),
-        el("span", { class: "eyebrow", text: "Windows" }),
-        copyField(setup.install_ps1),
-        el("hr", { class: "rule" }),
-        el(
-          "div",
-          { class: "rows" },
-          (setup.steps || []).map((step) =>
-            el(
-              "div",
-              { class: "kv" },
-              pill(
-                stateWord[step.state] || step.state,
-                step.state === "done" || step.state === "already-done" ? "good" : "warn",
-              ),
-              el("span", { class: "card-title", text: step.name }),
-              el("span", { class: "meta", text: step.detail }),
-            ),
+    const check = el("button", {
+      class: "button secondary small",
+      type: "button",
+      text: "Check for updates",
+      onclick: async () => {
+        check.disabled = true;
+        note.className = "note";
+        note.textContent = "Asking GitHub…";
+        try {
+          const found = await post("/api/upgrade", { action: "check" });
+          note.textContent = found.available
+            ? `${found.latest} is available; you are on ${found.installed}.`
+            : `Already on the newest build, ${found.installed}.`;
+          if (found.blocked) note.textContent += ` ${found.blocked}`;
+          install.disabled = !found.available || Boolean(found.blocked);
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      },
+    });
+
+    fill(
+      card,
+      title(),
+      el(
+        "div",
+        { class: "rows" },
+        (setup.steps || []).map((step) =>
+          el(
+            "div",
+            { class: "kv step" },
+            pill(stateWord[step.state] || step.state, tone(step.state)),
+            el("span", { class: "card-title", text: step.name }),
+            lineCell(step.detail, "meta"),
+            // The one step this page can perform. The others are an install and
+            // a model download, which belong to the command that owns them.
+            step.name === "path" && !setup.on_path
+              ? el("span", { class: "spacer" })
+              : null,
+            step.name === "path" && !setup.on_path ? fixPath : null,
           ),
         ),
-        setup.on_path
-          ? says(mono(setup.bin_dir), " is on PATH.")
-          : says(mono(setup.bin_dir), " is not on PATH — run ", mono("semlith setup"), " to add it."),
-        el("hr", { class: "rule" }),
-        el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
-        el("div", { class: "actions" }, check, install),
-        result,
-      );
-    })
+      ),
+      note,
+      el("hr", { class: "rule" }),
+      el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
+      el("div", { class: "actions" }, check, install),
+    );
+  }
+
+  api("/api/setup")
+    .then(paint)
     .catch((e) => fill(card, title(), error(e.message)));
 
   return card;
@@ -2638,7 +2789,7 @@ async function agentsView() {
     className: "w-agents",
     sort: "name",
     grow: false,
-    perPage: 8,
+    perPage: 10,
     rows: live,
     columns: [
       {
@@ -2974,7 +3125,7 @@ async function aboutView() {
   const table = dataTable({
     className: "w-models",
     sort: "name",
-    perPage: 15,
+    perPage: 10,
     rows: list,
     columns: [
       {
