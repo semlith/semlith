@@ -108,7 +108,7 @@ impl Daemon {
         self.send(
             method,
             path,
-            &format!("Cookie: semlith_token={}\r\n", self.token),
+            &format!("Semlith-Token: {}\r\n", self.token),
             body,
         )
     }

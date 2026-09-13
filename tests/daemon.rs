@@ -152,17 +152,33 @@ impl Daemon {
 
     fn get(&self, path: &str) -> Answer {
         self.raw(&format!(
-            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={}\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
             self.port, self.token
         ))
     }
 
     fn post(&self, path: &str, body: &str) -> Answer {
         self.raw(&format!(
-            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={}\r\n\
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.port,
             self.token,
+            body.len()
+        ))
+    }
+
+    /// A POST exactly as a page on another 127.0.0.1 port would make it: the
+    /// fetch metadata a browser attaches for a same-site-but-not-same-origin
+    /// request, and whatever credential the attacker guessed at.
+    fn cross_origin(&self, path: &str, token: &str) -> Answer {
+        let body = "{}";
+        self.raw(&format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {token}\r\n\
+             Origin: http://127.0.0.1:{}\r\nSec-Fetch-Site: same-site\r\n\
+             Content-Type: text/plain;charset=UTF-8\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            self.port,
+            self.port + 1,
             body.len()
         ))
     }
@@ -243,32 +259,44 @@ fn the_token_and_the_host_check_guard_every_route() {
     );
 
     let wrong_token = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token=not-it\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: not-it\r\nConnection: close\r\n\r\n",
         daemon.port
     ));
     assert_eq!(wrong_token.status, 401);
 
+    // The cookie is gone from 0.14.0, so a request carrying one is a request
+    // carrying no credential at all.
+    let by_cookie = daemon.raw(&format!(
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={}\r\n\
+         Connection: close\r\n\r\n",
+        daemon.port, daemon.token
+    ));
+    assert_eq!(
+        by_cookie.status, 401,
+        "a cookie still opened a route: the session is header-borne"
+    );
+
     // A page on another origin cannot read a cross-origin response, but it can
-    // send the request — with this browser's cookies attached. The Host check
-    // is what stops that reaching a route at all.
+    // send the request. The Host check is what stops a name that resolves to
+    // 127.0.0.1 reaching a route at all.
     let foreign = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: evil.example\r\nCookie: semlith_token={}\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: evil.example\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
         daemon.token
     ));
     assert_eq!(foreign.status, 400);
 
     let allowed = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: localhost:{}\r\nCookie: semlith_token={}\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: localhost:{}\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
         daemon.port, daemon.token
     ));
     assert_eq!(allowed.status, 200);
 }
 
-/// The URL the daemon prints is the one request allowed to carry the token in
-/// the query, because it is the request that turns it into a cookie.
+/// The printed URL hands the token to the page and sets nothing. The query form
+/// opens the page, which needs no credential anyway, and opens nothing else.
 #[test]
-fn the_printed_url_sets_the_cookie_and_nothing_else_needs_to() {
-    let daemon = Daemon::start("cookie", &[]);
+fn the_printed_url_hands_the_token_over_and_sets_no_cookie() {
+    let daemon = Daemon::start("bootstrap", &[]);
 
     let first = daemon.raw(&format!(
         "GET /?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
@@ -276,12 +304,116 @@ fn the_printed_url_sets_the_cookie_and_nothing_else_needs_to() {
     ));
     assert_eq!(first.status, 200);
     assert!(
-        first.headers.contains("Set-Cookie: semlith_token=")
-            && first.headers.contains("SameSite=Strict")
-            && first.headers.contains("HttpOnly"),
-        "the first request did not hand over a strict cookie:\n{}",
+        !first.headers.contains("Set-Cookie"),
+        "the bootstrap set a cookie:\n{}",
         first.headers
     );
+
+    // The same token in the query of a route that answers about this machine is
+    // not a credential. This is the form a link, a bookmark or a referrer leaks.
+    let by_query = daemon.raw(&format!(
+        "GET /api/stores?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        daemon.token, daemon.port
+    ));
+    assert_eq!(by_query.status, 401);
+
+    let by_header = daemon.get("/api/stores");
+    assert_eq!(by_header.status, 200);
+
+    // A reload carries no token anywhere: the page comes back and asks for its
+    // data with the header it kept.
+    let reload = daemon.raw(&format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        daemon.port
+    ));
+    assert_eq!(reload.status, 200);
+}
+
+/// The whole of H2, from the attacker's side: a page served by anything else on
+/// 127.0.0.1 sends what a browser would send for it, and every write is refused
+/// before a handler runs.
+#[test]
+fn a_page_on_another_local_port_cannot_write() {
+    let daemon = Daemon::start("cross-origin", &[]);
+
+    for route in [
+        "/api/index",
+        "/api/add",
+        "/api/forget",
+        "/api/adopt",
+        "/api/rotate",
+        "/api/mcp",
+        "/api/endpoint",
+        "/api/key",
+        "/api/root",
+        "/api/store/delete",
+        "/api/index/control",
+        "/api/upgrade",
+    ] {
+        // Even with the right token — which it cannot have, but the refusal
+        // must not be what tells it so.
+        let guessed = daemon.cross_origin(route, &daemon.token);
+        assert_eq!(guessed.status, 403, "{route} answered a cross-origin write");
+        assert!(
+            guessed.body.is_empty(),
+            "{route} leaked a body to a cross-origin write: {}",
+            guessed.body
+        );
+
+        let blind = daemon.cross_origin(route, "not-it");
+        assert_eq!(
+            blind.status, 403,
+            "{route} told a guess apart from a right answer"
+        );
+    }
+}
+
+/// The three things a write must carry, taken away one at a time. A script is
+/// not a browser and keeps working: it sends no fetch metadata at all.
+#[test]
+fn a_write_needs_same_origin_metadata_and_a_json_body() {
+    let daemon = Daemon::start("writes", &[]);
+    let body = r#"{"open":true}"#;
+
+    let wrong_type = daemon.raw(&format!(
+        "POST /api/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+         Sec-Fetch-Site: same-origin\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        daemon.port,
+        daemon.token,
+        body.len()
+    ));
+    assert_eq!(wrong_type.status, 403, "a text/plain body was read");
+
+    let foreign_origin = daemon.raw(&format!(
+        "POST /api/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+         Origin: http://127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        daemon.port,
+        daemon.token,
+        daemon.port + 1,
+        body.len()
+    ));
+    assert_eq!(foreign_origin.status, 403, "another origin's write was read");
+
+    // curl: the token, a JSON body, and no fetch metadata.
+    let script = daemon.post("/api/endpoint", body);
+    assert_eq!(
+        script.status, 200,
+        "a script with the token was refused: {}",
+        script.body
+    );
+
+    let page = daemon.raw(&format!(
+        "POST /api/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+         Origin: http://127.0.0.1:{}\r\nSec-Fetch-Site: same-origin\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        daemon.port,
+        daemon.token,
+        daemon.port,
+        body.len()
+    ));
+    assert_eq!(page.status, 200, "the portal's own write was refused");
 }
 
 /// Every response carries a policy that allows only `'self'`, and no CORS
@@ -671,7 +803,7 @@ fn rotating_the_token_invalidates_the_old_one_immediately() {
     assert_eq!(daemon.get("/api/stores").status, 401);
 
     let with_new = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={fresh}\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {fresh}\r\nConnection: close\r\n\r\n",
         daemon.port
     ));
     assert_eq!(with_new.status, 200);
@@ -715,7 +847,11 @@ fn the_privacy_route_reports_what_this_process_actually_does() {
     assert_eq!(privacy["cors"], serde_json::json!(false));
     assert_eq!(privacy["airgap"], serde_json::json!(true));
     assert_eq!(privacy["csp"], "default-src 'self'");
-    assert_eq!(privacy["token_cookie"], "semlith_token");
+    assert_eq!(privacy["token_header"], "Semlith-Token");
+    assert!(
+        privacy.get("token_cookie").is_none(),
+        "the Privacy page still describes a cookie"
+    );
 }
 
 // ---------------------------------------------------------------- T11
@@ -1077,7 +1213,7 @@ fn post_to(port: u16, token: &str, path: &str, body: &str) -> String {
         .set_read_timeout(Some(Duration::from_secs(120)))
         .unwrap();
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: semlith_token={token}\r\n\
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nSemlith-Token: {token}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );

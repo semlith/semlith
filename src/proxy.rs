@@ -122,13 +122,13 @@ impl Upstream {
         let head = format!(
             "{method} {path} HTTP/1.1\r\n\
              Host: 127.0.0.1:{}\r\n\
-             Cookie: {}={}\r\n\
+             {}: {}\r\n\
              Semlith-Proxy: {}\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
              Connection: close\r\n\r\n",
             self.port,
-            crate::http::TOKEN_COOKIE,
+            crate::http::TOKEN_HEADER,
             self.token,
             std::process::id(),
             body.len(),

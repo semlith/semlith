@@ -42,8 +42,91 @@ function fill(node, ...kids) {
   return node;
 }
 
+/* The session token.
+ *
+ * It arrives once, in the query of the URL the daemon printed, and from then on
+ * it lives in this page and in sessionStorage — never in a cookie. A cookie
+ * would be attached to a request any page on any other 127.0.0.1 port made,
+ * because every port on localhost is the same site; a header is attached only
+ * by this page.
+ *
+ * The token is taken out of the address bar as soon as it is read, so it is not
+ * in the history, not in a bookmark, and not in what someone screenshots. The
+ * reload path is why sessionStorage is here at all: refreshing the page sends a
+ * request this script did not make, so the URL it reloads must not need to
+ * carry the token.
+ */
+const TOKEN_HEADER = "Semlith-Token";
+
+const session = (() => {
+  const KEY = "semlith.token";
+  let token = "";
+  try {
+    const fromUrl = new URLSearchParams(location.search).get("token");
+    if (fromUrl) {
+      token = fromUrl;
+      sessionStorage.setItem(KEY, token);
+      const clean = location.pathname + location.hash;
+      history.replaceState(null, "", clean || "/");
+    } else {
+      token = sessionStorage.getItem(KEY) || "";
+    }
+  } catch (_) {
+    /* A browser with storage disabled still works for as long as this document
+     * lives; only the reload stops surviving. */
+  }
+  return {
+    get: () => token,
+    set(fresh) {
+      token = fresh;
+      try {
+        sessionStorage.setItem(KEY, fresh);
+      } catch (_) {
+        /* as above */
+      }
+    },
+  };
+})();
+
+/** The headers every request to this daemon carries. */
+function authed(extra) {
+  return { ...(extra || {}), [TOKEN_HEADER]: session.get() };
+}
+
+/* An image the store indexed, fetched rather than linked.
+ *
+ * A browser attaches no header to an `<img src>`, and since 0.14.0 the token is
+ * a header, so the bytes are read through `fetch` and handed to the element as
+ * an object URL. The URL is revoked once the image has decoded: a search that
+ * returns forty pictures would otherwise hold forty blobs for the life of the
+ * page. */
+function imagePreview(path) {
+  const img = el("img", { class: "preview", alt: "" });
+  fetch(`/api/image?path=${encodeURIComponent(path)}`, {
+    credentials: "omit",
+    headers: authed(),
+  })
+    .then((response) => (response.ok ? response.blob() : Promise.reject(response.statusText)))
+    .then((blob) => {
+      const url = URL.createObjectURL(blob);
+      img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+      img.src = url;
+    })
+    .catch(() => {
+      img.replaceWith(el("pre", { class: "muted", text: `${path} could not be read` }));
+    });
+  return img;
+}
+
 async function api(path, options) {
-  const response = await fetch(path, { credentials: "same-origin", ...options });
+  const options_ = options || {};
+  const response = await fetch(path, {
+    // No cookie is sent because there is none to send, and saying so keeps a
+    // future one from being attached by accident.
+    credentials: "omit",
+    ...options_,
+    headers: authed(options_.headers),
+  });
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -2621,13 +2704,7 @@ async function searchView() {
           // An image has no excerpt to quote, so the hit shows the image. It
           // is served from the store's own list of indexed images, so the
           // route cannot be asked for a file nobody pointed semlith at.
-          hit.image
-            ? el("img", {
-                class: "preview",
-                src: `/api/image?path=${encodeURIComponent(hit.path)}`,
-                alt: "",
-              })
-            : el("pre", { text: hit.text }),
+          hit.image ? imagePreview(hit.path) : el("pre", { text: hit.text }),
           el(
             "div",
             { class: "hit-actions" },
@@ -2855,8 +2932,8 @@ async function indexView() {
     try {
       const response = await fetch(route, {
         method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        credentials: "omit",
+        headers: authed({ "Content-Type": "application/json" }),
         body: JSON.stringify({ ...body, store: storeSelect.value || undefined }),
       });
       if (!response.ok) {
@@ -3558,10 +3635,12 @@ async function privacyView() {
       rotateNote.textContent = "Rotating…";
       try {
         const fresh = await post("/api/rotate", {});
-        // The rotate response is the one place the whole token appears, and it
-        // sets the new cookie in the same breath. What is shown is still the
-        // preview: a page that prints a live credential in full is a page
+        // The rotate response is the one place the whole token appears after
+        // the printed URL, and this page has to take the new one before its
+        // next request: nothing else will tell it. What is shown is still the
+        // preview — a page that prints a live credential in full is a page
         // someone screenshots.
+        session.set(String(fresh.token));
         tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
         rotateNote.textContent =
           "Rotated. The old token stopped working immediately. This is the portal's own session token, not the agent key: no client stanza carries it, so nothing needs reconfiguring. The agent key is rotated on the Agents page.";
@@ -3679,11 +3758,11 @@ async function privacyView() {
           el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
           rotateNote,
           says(
-            "Generated at start, held in a SameSite=Strict ",
-            mono(data.token_cookie),
-            " cookie, and required on every ",
+            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
+            mono(data.token_header),
+            " header on every ",
             mono("/api"),
-            " route. Shown truncated: no response carries it in full except the one that rotates it, which sets the new cookie in the same breath.",
+            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
           ),
           el("hr", { class: "rule" }),
           el("span", { class: "card-title", text: "Content-Security-Policy" }),

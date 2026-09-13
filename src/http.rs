@@ -13,10 +13,30 @@
 //!
 //! - **Loopback only.** [`Server::bind`] binds `127.0.0.1` and there is no flag
 //!   to change it.
-//! - **A per-run token.** Generated at start, printed once in the URL, and
-//!   required on every request as a `SameSite=Strict` cookie. A request without
-//!   it gets 401 and an empty body — not a login page, not an error object,
-//!   nothing that tells a prober what is here.
+//! - **A per-run token, carried in a request header.** Generated at start,
+//!   printed once in the URL, handed to the page from that URL, and sent back
+//!   as `Semlith-Token` on every API request. A request without it gets 401 and
+//!   an empty body — not a login page, not an error object, nothing that tells a
+//!   prober what is here.
+//!
+//!   It was a cookie until 0.14.0, and a cookie is the wrong container for it:
+//!   `localhost` is one site however many ports are listening on it, so
+//!   `SameSite=Strict` never separated this server from a page served by
+//!   anything else on 127.0.0.1. A header the browser will not attach
+//!   cross-origin does separate them. The cost is that a browser attaches no
+//!   header to a stylesheet, a font, a favicon or an `<img src>`, so the page
+//!   and its own static assets are served without a credential — they are the
+//!   same bytes in every copy of the binary — and everything that answers about
+//!   this machine is not.
+//!
+//! - **A write has to come from this origin.** Every request that is not a GET
+//!   or a HEAD must carry `Sec-Fetch-Site: same-origin`, or — for a client that
+//!   sends no fetch metadata at all, which is every client that is not a
+//!   browser — an `Origin` matching this server or no `Origin`. It must also
+//!   carry a JSON content type, because a body a browser can send with no
+//!   preflight is a body this server will not read. Both are checked before the
+//!   token, so a cross-origin page learns nothing from the difference between a
+//!   right and a wrong guess.
 //! - **A persisted agent key, and only for `/mcp`.** From 0.13.0 the daemon
 //!   also answers MCP over HTTP, and that endpoint needs a credential a client
 //!   can keep in a configuration file — which the session token can never be,
@@ -54,8 +74,17 @@ pub const DEFAULT_PORT: u16 = 7365;
 /// Overrides [`DEFAULT_PORT`].
 pub const PORT_ENV: &str = "SEMLITH_PORT";
 
-/// The cookie the token travels in.
-pub const TOKEN_COOKIE: &str = "semlith_token";
+/// The header the session token travels in.
+///
+/// A custom header is the point rather than a detail: a browser will not attach
+/// one to a request a page on another origin made, and it cannot set one at all
+/// on an `<img>`, a form or a stylesheet. That is the whole separation a cookie
+/// could not give, because every port on `localhost` is the same site.
+pub const TOKEN_HEADER: &str = "Semlith-Token";
+
+/// [`TOKEN_HEADER`] as the map holds it. Header names are lowercased on the way
+/// in so a lookup never depends on a client's casing.
+const TOKEN_HEADER_KEY: &str = "semlith-token";
 
 /// The one path the agent key opens.
 pub const MCP_PATH: &str = "/mcp";
@@ -91,6 +120,16 @@ pub enum Refusal {
     ForeignHost,
     /// Malformed, oversized, or a method this server does not answer.
     Malformed,
+    /// A write that did not come from this origin.
+    CrossOrigin,
+    /// A write whose body was not offered as JSON.
+    BadContentType,
+    /// An index or a fetch for a path outside the store's boundary.
+    OutsideBoundary,
+    /// An index for a path the deny-list names.
+    DeniedPath,
+    /// A fetch for an address that is not on the public internet.
+    PrivateAddress,
 }
 
 impl Refusal {
@@ -99,6 +138,11 @@ impl Refusal {
             Refusal::Unauthorized => "unauthorized",
             Refusal::ForeignHost => "foreign host",
             Refusal::Malformed => "malformed",
+            Refusal::CrossOrigin => "cross-origin",
+            Refusal::BadContentType => "bad-content-type",
+            Refusal::OutsideBoundary => "outside-boundary",
+            Refusal::DeniedPath => "denied-path",
+            Refusal::PrivateAddress => "private-address",
         }
     }
 }
@@ -134,9 +178,30 @@ impl Request {
         self.headers.get(name).map(String::as_str)
     }
 
+    /// The body as JSON, and the only place a body is read.
+    ///
+    /// The content type is checked here as well as in [`answer`], so a route
+    /// that grew a second body reader would still be refusing the one thing a
+    /// cross-origin form can send without a preflight.
     pub fn json(&self) -> Result<serde_json::Value> {
+        anyhow::ensure!(
+            json_body(self.header("content-type")),
+            "this route reads JSON; send Content-Type: application/json"
+        );
         Ok(serde_json::from_slice(&self.body)?)
     }
+}
+
+/// Whether a `Content-Type` offers a JSON body.
+///
+/// `application/json` and nothing else. The three types a browser will post
+/// from a form without asking anybody's permission first — `text/plain`,
+/// `application/x-www-form-urlencoded`, `multipart/form-data` — are exactly the
+/// ones this refuses.
+fn json_body(content_type: Option<&str>) -> bool {
+    content_type
+        .map(|value| value.split(';').next().unwrap_or("").trim())
+        .is_some_and(|media| media.eq_ignore_ascii_case("application/json"))
 }
 
 /// What a handler writes a streaming body through.
@@ -220,18 +285,6 @@ impl Response {
         self
     }
 
-    /// Hand the browser the token, so the URL is the only place it appears.
-    ///
-    /// `SameSite=Strict` means a page on any other origin cannot cause the
-    /// browser to attach it, `HttpOnly` keeps it out of reach of script, and
-    /// `Path=/` covers every route. No `Secure`: this is `http://127.0.0.1`
-    /// by design, and `Secure` would stop the cookie being set at all.
-    pub fn with_token(self, token: &str) -> Self {
-        self.header(
-            "Set-Cookie",
-            format!("{TOKEN_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"),
-        )
-    }
 }
 
 /// A handler: everything the daemon serves, behind one function.
@@ -355,6 +408,7 @@ impl Server {
         let refused = Arc::new(refused);
 
         let mut workers = Vec::with_capacity(WORKERS);
+        let port = self.port;
         for _ in 0..WORKERS {
             let rx = Arc::clone(&rx);
             let handler = Arc::clone(&handler);
@@ -378,6 +432,7 @@ impl Server {
                             agent: agent.current.clone(),
                             previous: agent.previous.clone(),
                             mcp_open: mcp_open.load(Ordering::Relaxed),
+                            port,
                         }
                     };
                     if let Some(class) = answer(stream, &handler, &auth) {
@@ -443,6 +498,9 @@ struct Auth {
     agent: String,
     previous: Option<String>,
     mcp_open: bool,
+    /// The port this server answers on, so an `Origin` header can be compared
+    /// against the origin it actually names.
+    port: u16,
 }
 
 impl Auth {
@@ -492,31 +550,51 @@ fn answer(mut stream: TcpStream, handler: &Handler, auth: &Auth) -> Option<Refus
         return None;
     }
 
-    let from_cookie = cookie(request.header("cookie"), TOKEN_COOKIE);
-    let by_cookie = from_cookie.as_deref().is_some_and(|t| same(t, want));
-    // The URL the daemon prints carries the token in the query, and that is
-    // the one request that may arrive without the cookie — it is what sets it.
-    let by_query = request.query("token").is_some_and(|t| same(t, want));
-    // The agent key opens `/mcp` and nothing else. This is the whole reason
-    // there are two credentials: a key that a client keeps in a file on disk
-    // must not be able to rotate a token, adopt a store or start an upgrade.
-    let by_agent = for_mcp
-        && request
-            .header("authorization")
-            .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|bearer| auth.is_agent(bearer.trim()));
-
-    if !by_cookie && !by_query && !by_agent {
-        // Empty body on purpose: a prober learns that something refused it and
-        // nothing else.
-        let _ = write_response(&mut stream, Response::new(401, "text/plain", Vec::new()));
-        return Some(Refusal::Unauthorized);
-    }
-
     // HEAD is GET without the body. Answered by running the handler and
     // dropping what it produced, so a probe sees the real status and the real
     // headers rather than the 404 an unhandled method would give it.
     let head_only = request.method == "HEAD";
+    let reading = head_only || request.method == "GET";
+
+    // A write proves where it came from before anything else looks at it, so a
+    // page on another local port gets the same answer whether its token guess
+    // was right or wrong — and gets it without a handler having run.
+    if !reading {
+        if !same_origin(&request, auth.port) {
+            let _ = write_response(&mut stream, Response::new(403, "text/plain", Vec::new()));
+            return Some(Refusal::CrossOrigin);
+        }
+        if !json_body(request.header("content-type")) {
+            let _ = write_response(&mut stream, Response::new(403, "text/plain", Vec::new()));
+            return Some(Refusal::BadContentType);
+        }
+    }
+
+    // The page and the bytes it loads carry no credential, because a browser
+    // attaches no header to a stylesheet, a font or a favicon. They are the
+    // same bytes in every copy of this binary; everything that answers about
+    // this machine is below and needs the token.
+    if !public(&request, reading) {
+        // The agent key opens `/mcp` and nothing else. This is the whole reason
+        // there are two credentials: a key that a client keeps in a file on disk
+        // must not be able to rotate a token, adopt a store or start an upgrade.
+        let by_agent = for_mcp
+            && request
+                .header("authorization")
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .is_some_and(|bearer| auth.is_agent(bearer.trim()));
+        let by_header = request
+            .header(TOKEN_HEADER_KEY)
+            .is_some_and(|t| same(t.trim(), want));
+
+        if !by_header && !by_agent {
+            // Empty body on purpose: a prober learns that something refused it
+            // and nothing else.
+            let _ = write_response(&mut stream, Response::new(401, "text/plain", Vec::new()));
+            return Some(Refusal::Unauthorized);
+        }
+    }
+
     let request = if head_only {
         Request {
             method: "GET".to_string(),
@@ -527,14 +605,52 @@ fn answer(mut stream: TcpStream, handler: &Handler, auth: &Auth) -> Option<Refus
     };
 
     let mut response = handler(&request);
-    if by_query && !by_cookie {
-        response = response.with_token(want);
-    }
     if head_only {
         response.body = Body::Bytes(Vec::new());
     }
     let _ = write_response(&mut stream, response);
     None
+}
+
+/// Whether this request may be answered without a credential.
+///
+/// The page itself and the files it loads, and nothing else. The token in the
+/// printed URL's query is never read here: it is handed to the page, which
+/// sends it back in a header, so a reload with no token in the address bar
+/// still gets the page and a request for data still does not.
+fn public(request: &Request, reading: bool) -> bool {
+    reading && (request.path == "/" || crate::portal::asset(&request.path).is_some())
+}
+
+/// Whether a write came from this server's own origin.
+///
+/// `Sec-Fetch-Site` is the browser's own statement and cannot be set by script,
+/// so when it is present it decides — and `same-site` is a refusal, because
+/// every other port on `localhost` is same-site and none of them is this
+/// server. A client that sends no fetch metadata is not a browser; it is judged
+/// on `Origin` if it sent one and on the token alone if it did not.
+fn same_origin(request: &Request, port: u16) -> bool {
+    if let Some(site) = request.header("sec-fetch-site") {
+        return site.trim().eq_ignore_ascii_case("same-origin");
+    }
+    match request.header("origin") {
+        Some(origin) => own_origin(origin.trim(), port),
+        None => true,
+    }
+}
+
+/// Whether an `Origin` names this server: loopback, over http, on this port.
+fn own_origin(origin: &str, port: u16) -> bool {
+    let Some(authority) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    let Some((host, stated)) = authority.rsplit_once(':') else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback =
+        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    loopback && stated.parse::<u16>() == Ok(port)
 }
 
 /// Whether `Host` is this machine talking to itself.
@@ -546,14 +662,6 @@ fn loopback_host(host: Option<&str>) -> bool {
     let name = host.rsplit_once(':').map_or(host, |(n, _)| n);
     let name = name.trim_start_matches('[').trim_end_matches(']');
     name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
-}
-
-/// One cookie's value out of a `Cookie` header.
-fn cookie(header: Option<&str>, name: &str) -> Option<String> {
-    header?.split(';').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        (key.trim() == name).then(|| value.trim().to_string())
-    })
 }
 
 /// Compare in time that does not depend on where the first wrong byte is.
@@ -784,14 +892,89 @@ mod tests {
         assert!(!loopback_host(None));
     }
 
+    fn write(headers: &[(&str, &str)]) -> Request {
+        Request {
+            method: "POST".into(),
+            path: "/api/index".into(),
+            query: BTreeMap::new(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    /// The rule that replaces the cookie. A page on another port of the same
+    /// host is `same-site`, which is why `same-site` has to be a refusal: it is
+    /// exactly the case the cookie could not tell apart from this server.
     #[test]
-    fn a_cookie_is_read_out_of_a_header_with_others_in_it() {
-        let header = Some("theme=dark; semlith_token=abc123; other=1");
-        assert_eq!(cookie(header, TOKEN_COOKIE), Some("abc123".to_string()));
-        assert_eq!(cookie(Some("theme=dark"), TOKEN_COOKIE), None);
-        assert_eq!(cookie(None, TOKEN_COOKIE), None);
-        // A token that is a prefix of the cookie name must not match.
-        assert_eq!(cookie(Some("semlith_tokens=x"), TOKEN_COOKIE), None);
+    fn only_a_same_origin_write_is_accepted() {
+        assert!(same_origin(&write(&[("Sec-Fetch-Site", "same-origin")]), 7365));
+        assert!(!same_origin(&write(&[("Sec-Fetch-Site", "same-site")]), 7365));
+        assert!(!same_origin(&write(&[("Sec-Fetch-Site", "cross-site")]), 7365));
+        assert!(!same_origin(&write(&[("Sec-Fetch-Site", "none")]), 7365));
+
+        // A browser sends both; the fetch metadata decides, so an Origin a page
+        // could have lied about never rescues a cross-site write.
+        assert!(!same_origin(
+            &write(&[
+                ("Sec-Fetch-Site", "same-site"),
+                ("Origin", "http://127.0.0.1:7365"),
+            ]),
+            7365
+        ));
+
+        // A client that is not a browser sends neither, and is judged on the
+        // token alone — `curl` has to keep working.
+        assert!(same_origin(&write(&[]), 7365));
+        assert!(same_origin(&write(&[("Origin", "http://localhost:7365")]), 7365));
+        assert!(!same_origin(
+            &write(&[("Origin", "http://127.0.0.1:9999")]),
+            7365
+        ));
+        assert!(!same_origin(&write(&[("Origin", "null")]), 7365));
+        assert!(!same_origin(
+            &write(&[("Origin", "https://127.0.0.1:7365")]),
+            7365
+        ));
+    }
+
+    /// The three types a form can post with no preflight are the three this
+    /// refuses, which is what makes a cross-origin form useless against a route.
+    #[test]
+    fn only_a_json_body_is_read() {
+        assert!(json_body(Some("application/json")));
+        assert!(json_body(Some("application/json; charset=utf-8")));
+        assert!(json_body(Some("Application/JSON")));
+
+        assert!(!json_body(Some("text/plain")));
+        assert!(!json_body(Some("application/x-www-form-urlencoded")));
+        assert!(!json_body(Some("multipart/form-data; boundary=x")));
+        assert!(!json_body(Some("application/json-patch+json")));
+        assert!(!json_body(None));
+    }
+
+    /// The page and its own bytes are public; anything that answers about this
+    /// machine is not, however it is asked for.
+    #[test]
+    fn only_the_page_and_its_assets_are_public() {
+        let get = |path: &str| Request {
+            method: "GET".into(),
+            path: path.into(),
+            query: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+        };
+        assert!(public(&get("/"), true));
+        assert!(public(&get("/app.js"), true));
+        assert!(public(&get("/style.css"), true));
+
+        assert!(!public(&get("/api/stores"), true));
+        assert!(!public(&get("/api/image"), true));
+        assert!(!public(&get(MCP_PATH), true));
+        // A write is never public, whatever it names.
+        assert!(!public(&get("/"), false));
     }
 
     #[test]

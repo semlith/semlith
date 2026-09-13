@@ -669,11 +669,11 @@ fn privacy(state: &Arc<State>) -> Response {
         "model_cache": cache.display().to_string(),
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
-        "token_cookie": crate::http::TOKEN_COOKIE,
+        "token_header": crate::http::TOKEN_HEADER,
         // Enough of the token to recognise the one this browser holds, and
-        // not enough to be one. The full value is in the cookie the browser
-        // already has and in the body of the rotate response, which sets the
-        // new cookie in the same breath — it is in no other response.
+        // not enough to be one. The full value reaches the page once, in the
+        // printed URL, and once more in the body of the rotate response — it is
+        // in no other response, and it is in no cookie at all.
         "token_preview": preview(&state.server.token()),
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
         "csp": "default-src 'self'",
@@ -1386,9 +1386,10 @@ fn endpoint(state: &Arc<State>, request: &Request) -> Response {
 
 fn rotate(state: &Arc<State>) -> Response {
     let fresh = state.rotate();
-    // Returned once, and set as the cookie in the same response, so the page
-    // that asked keeps working and the old token stops.
-    Response::json(&json!({ "token": fresh, "url": daemon::url(state) })).with_token(&fresh)
+    // Returned once, to the page that asked and holds the old one. It keeps
+    // working because it puts this value in the header from here on; every
+    // other holder of the old token stops at the next request.
+    Response::json(&json!({ "token": fresh, "url": daemon::url(state) }))
 }
 
 // ---------------------------------------------------------------- helpers
