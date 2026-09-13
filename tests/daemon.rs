@@ -578,6 +578,24 @@ fn indexing_from_the_portal_streams_progress_and_then_lists_the_files() {
         .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
     assert_eq!(done["indexed"], 1);
 
+    // The stream says something before the writer reaches the job, and then
+    // says what happened to every file rather than only to the ones it
+    // embedded. A run that speaks only about its own work is silent for a
+    // whole re-index of an unchanged corpus, which reads as a hang.
+    assert!(
+        events.iter().any(|e| e["event"] == "queued"),
+        "nothing was said while the job waited for the writer: {events:?}"
+    );
+    let outcomes: Vec<&str> = events
+        .iter()
+        .filter(|e| e["event"] == "file")
+        .filter_map(|e| e["outcome"].as_str())
+        .collect();
+    assert!(
+        outcomes.contains(&"indexing"),
+        "no file reported itself as being embedded: {events:?}"
+    );
+
     let files = daemon.get("/api/files").json();
     assert_eq!(files["total"], 2, "the new file is not listed: {files}");
 

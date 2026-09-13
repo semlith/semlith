@@ -194,14 +194,45 @@ pub struct Pixels {
     pub height: u32,
 }
 
-/// Where an index run has got to, handed to the callback with each file it
-/// starts embedding.
+/// What the run decided about one file.
+///
+/// Reported for every file rather than only for the ones being embedded: a
+/// re-index of an unchanged corpus used to say nothing at all between "started"
+/// and "done", which looks identical to a run that has hung.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FileOutcome {
+    /// About to be read, chunked and embedded.
+    #[default]
+    Indexing,
+    /// The hash on disk matches the hash in the store.
+    Unchanged,
+    /// Empty, too large, unreadable, or a format with no reader.
+    Skipped,
+    /// Gone from disk, so its chunks were evicted.
+    Removed,
+}
+
+impl FileOutcome {
+    /// The word the portal and the CLI both label a line with.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Indexing => "indexing",
+            Self::Unchanged => "unchanged",
+            Self::Skipped => "skipped",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// Where an index run has got to, handed to the callback once per file.
 ///
 /// `total` is what the walk found, so `scanned` against it is a real fraction
 /// rather than a spinner — which is the difference between a long wait and a
 /// wait a person is willing to sit through.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IndexProgress {
+    /// What this file is: being embedded, unchanged, skipped or removed.
+    pub outcome: FileOutcome,
     /// Files considered so far, including the unchanged and the skipped.
     pub scanned: usize,
     /// Files embedded so far in this run.
@@ -595,21 +626,65 @@ impl Semlith {
                                 self.index.remove(id)?;
                             }
                             report.removed += 1;
+                            on_file(
+                                &path,
+                                IndexProgress {
+                                    outcome: FileOutcome::Removed,
+                                    scanned: report.scanned,
+                                    indexed: report.indexed,
+                                    chunks: report.chunks,
+                                    total,
+                                    symbols: report.symbols,
+                                },
+                            );
                             continue;
                         }
                     }
                     report.skipped += 1;
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Skipped,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
                     continue;
                 }
             }
             let Ok(bytes) = std::fs::read(&path) else {
                 report.skipped += 1;
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Skipped,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
                 continue;
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
             if store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
                 report.unchanged += 1;
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Unchanged,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
                 continue;
             }
 
@@ -621,11 +696,23 @@ impl Semlith {
             if image::is_image(&path) {
                 let Some((width, height)) = image::dimensions(&bytes) else {
                     report.skipped += 1;
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Skipped,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
                     continue;
                 };
                 on_file(
                     &path,
                     IndexProgress {
+                        outcome: FileOutcome::Indexing,
                         scanned: report.scanned,
                         indexed: report.indexed,
                         chunks: report.chunks,
@@ -659,12 +746,24 @@ impl Semlith {
             let chunks = chunk::chunk_text(&text);
             if chunks.is_empty() {
                 report.skipped += 1;
+                on_file(
+                    &path,
+                    IndexProgress {
+                        outcome: FileOutcome::Skipped,
+                        scanned: report.scanned,
+                        indexed: report.indexed,
+                        chunks: report.chunks,
+                        total,
+                        symbols: report.symbols,
+                    },
+                );
                 continue;
             }
 
             on_file(
                 &path,
                 IndexProgress {
+                    outcome: FileOutcome::Indexing,
                     scanned: report.scanned,
                     indexed: report.indexed,
                     chunks: report.chunks,

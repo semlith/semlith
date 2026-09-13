@@ -1784,6 +1784,27 @@ pre.code {
 .log .key {
   color: var(--code-key);
   flex-shrink: 0;
+  width: 68px;
+  text-align: right;
+}
+
+/* What happened to the file, in one word, in a fixed column so the paths
+ * beside them line up. A file being embedded is the line worth reading; the
+ * rest is the run showing that it is still moving. */
+.log .outcome {
+  flex-shrink: 0;
+  width: 76px;
+  color: var(--muted);
+}
+.log .line.indexing .outcome {
+  color: var(--accent-edge);
+}
+.log .line.unchanged,
+.log .line.skipped {
+  opacity: 0.62;
+}
+.log .line.removed .outcome {
+  color: var(--red);
 }
 .log .what {
   min-width: 0;

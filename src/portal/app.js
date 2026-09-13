@@ -2784,17 +2784,23 @@ async function indexView() {
     state.stores.map((store) => el("option", { value: store.name, text: store.name })),
   );
 
-  function say(text, key) {
+  function say(text, key, outcome) {
     log.hidden = false;
     log.append(
       el(
         "div",
-        { class: "line" },
+        // The outcome colours the line, so a wall of "unchanged" reads as
+        // background and the files actually being embedded stand out of it.
+        { class: outcome ? `line ${outcome}` : "line" },
         key ? el("span", { class: "key", text: key }) : null,
+        outcome ? el("span", { class: "outcome", text: outcome }) : null,
         el("span", { class: "what", text }),
       ),
     );
-    log.scrollTop = log.scrollHeight;
+    // Only while the reader is already at the end: scrolling back through a
+    // long run should not be yanked away by the next line.
+    const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+    if (atEnd) log.scrollTop = log.scrollHeight;
   }
 
   function complain(message, focus) {
@@ -2853,12 +2859,40 @@ async function indexView() {
           buffer = buffer.slice(cut + 1);
           if (!line) continue;
           const event = JSON.parse(line);
-          if (event.event === "file") {
+          if (event.event === "queued") {
+            // The writer is one thread. Saying so is the difference between a
+            // page that looks stuck and a page that is waiting its turn.
+            status.textContent = event.ahead
+              ? `queued — ${n(event.ahead)} ahead of it`
+              : "queued for the writer";
+            say(
+              event.ahead
+                ? `waiting for ${event.store}'s writer — ${n(event.ahead)} job${
+                    event.ahead === 1 ? "" : "s"
+                  } ahead of this one`
+                : `waiting for ${event.store}'s writer; it finishes what the watcher is doing first`,
+              "queued",
+            );
+          } else if (event.event === "started") {
+            status.textContent = "walking the tree";
+            say("walking the tree and hashing what it finds", "start");
+          } else if (event.event === "file") {
             const share = event.total ? (event.scanned / event.total) * 100 : 0;
             const shown = Math.min(100, share);
             bar.style.width = `${shown.toFixed(1)}%`;
             pct.textContent = `${Math.round(shown)}%`;
-            say(event.path, `${event.scanned}/${event.total}`);
+            // The same three facts the terminal prints: which file, what is
+            // happening to it, and the run's totals so far. Every file says
+            // something, so a re-index of an unchanged corpus is a list of
+            // "unchanged" rather than a bar that sits at nothing and then
+            // jumps to done.
+            const rate = event.elapsed_ms
+              ? Math.round((event.chunks / event.elapsed_ms) * 1000)
+              : 0;
+            status.textContent = `${event.scanned}/${event.total} files · ${n(
+              event.chunks,
+            )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
+            say(event.path, `${event.scanned}/${event.total}`, event.outcome);
           } else if (event.event === "done") {
             bar.style.width = "100%";
             pct.textContent = "100%";

@@ -150,12 +150,27 @@ impl Store {
     ///
     /// The receiver is what a streaming route writes chunks from, so the
     /// browser sees an index run while it is running rather than when it ends.
-    fn submit(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
+    /// Queue a job and hand back the channel its progress arrives on.
+    ///
+    /// `notice` is sent before the job is queued, for a caller that streams
+    /// and would otherwise hear nothing while the writer finishes what it is
+    /// doing. A caller that takes the first message as its answer — forget —
+    /// passes `None`, because a notice would be that answer.
+    fn submit(
+        &self,
+        job: Job,
+        notice: Option<serde_json::Value>,
+    ) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
-        self.queue
-            .lock()
-            .expect("the queue lock")
-            .push_back(Queued { job, report });
+        let mut queue = self.queue.lock().expect("the queue lock");
+        if let Some(mut notice) = notice {
+            if let Some(object) = notice.as_object_mut() {
+                object.insert("store".into(), serde_json::json!(self.name));
+                object.insert("ahead".into(), serde_json::json!(queue.len()));
+            }
+            let _ = report.send(notice);
+        }
+        queue.push_back(Queued { job, report });
         progress
     }
 
@@ -276,7 +291,13 @@ impl State {
         paths: Vec<PathBuf>,
     ) -> Result<mpsc::Receiver<serde_json::Value>> {
         Self::writer_alive(store)?;
-        Ok(store.submit(Job::Index(paths)))
+        // The writer is one thread and it may be mid-catch-up. A page that
+        // shows nothing for a minute looks like a page that lost the request
+        // rather than one waiting its turn.
+        Ok(store.submit(
+            Job::Index(paths),
+            Some(serde_json::json!({ "event": "queued" })),
+        ))
     }
 
     pub fn forget(
@@ -285,7 +306,8 @@ impl State {
         path: PathBuf,
     ) -> Result<mpsc::Receiver<serde_json::Value>> {
         Self::writer_alive(store)?;
-        Ok(store.submit(Job::Forget(path)))
+        // No notice: this caller takes the first message as the answer.
+        Ok(store.submit(Job::Forget(path), None))
     }
 
     /// Close a store and delete everything it holds.
@@ -888,13 +910,20 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
         Job::Index(paths) => {
             let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
             say(serde_json::json!({ "event": "started", "paths": names }));
+            let started_at = std::time::Instant::now();
             let outcome = writer.index_within_held(&paths, SLICE, |path, progress| {
                 say(serde_json::json!({
                     "event": "file",
                     "path": path.display().to_string(),
+                    // What is happening to this file, so a page can say
+                    // "unchanged" rather than showing nothing at all.
+                    "outcome": progress.outcome.as_str(),
                     "scanned": progress.scanned,
                     "total": progress.total,
+                    "indexed": progress.indexed,
                     "chunks": progress.chunks,
+                    "symbols": progress.symbols,
+                    "elapsed_ms": started_at.elapsed().as_millis() as u64,
                 }));
             });
             match outcome {

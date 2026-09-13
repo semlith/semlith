@@ -52,6 +52,13 @@ keep in a config file, and a query can find a picture.
   touched. A store held by a running daemon is closed through it: the watcher
   stops and releases its lock, the readers are dropped, and only then are the
   files removed — so the daemon loses a store rather than its life.
+- **An index run says what it is doing.** The stream carries a line before the
+  writer reaches the job — it is one thread, and it finishes what the watcher
+  is doing first — and then a line per file with what happened to it:
+  indexing, unchanged, skipped or removed. Only the files being embedded used
+  to be reported, so a re-index of an unchanged corpus said nothing at all
+  between "started" and "done", which reads as a hang. The Index view shows
+  the outcome, the running chunk count and the rate beside each path.
 - **An endpoint switch.** `semlith start --no-mcp-http` starts with `/mcp`
   closed, and the Agents page starts and stops it while the daemon runs.
   Closing it drops the route, not the daemon: the stores stay open, the watcher

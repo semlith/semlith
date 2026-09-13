@@ -399,7 +399,9 @@ fn main() -> Result<()> {
                 if quiet {
                     return;
                 }
-                eprintln!("  + {}", display(path));
+                if p.outcome == semlith::FileOutcome::Indexing {
+                    eprintln!("  + {}", display(path));
+                }
                 if spoke.elapsed() >= PROGRESS_INTERVAL {
                     spoke = Instant::now();
                     eprintln!("    {}", predict(p, started.elapsed()));
