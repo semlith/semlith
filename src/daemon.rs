@@ -61,9 +61,46 @@ pub struct Discovery {
 }
 
 impl Discovery {
+    /// The daemon to forward to, if this file names one and is one semlith
+    /// wrote.
+    ///
+    /// This file decides where `semlith mcp` sends every call, so a repository
+    /// that carried one would be choosing the port an agent's questions and
+    /// answers travel through. Four things have to hold, and each of them is a
+    /// way the file could have come from somewhere else:
+    ///
+    /// - the store it sits in is one this user trusts, so a cloned `.semlith`
+    ///   never gets this far;
+    /// - on unix it is mode `0600` and owned by this user, so another account
+    ///   on the machine did not write it;
+    /// - the pid it names is alive, so a stale file from a dead daemon is
+    ///   ignored rather than followed to whatever now holds that port;
+    /// - the token is 64 hex characters, so what is about to be put in a header
+    ///   is a token rather than whatever was in the file.
+    ///
+    /// Every failure falls back to opening the store directly, which is what
+    /// this function's `None` has always meant.
     pub fn read(store_dir: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(store_dir.join(DISCOVERY_FILE)).ok()?;
-        serde_json::from_str(&text).ok()
+        if !home::Registry::load().ok()?.trusts(store_dir) {
+            return None;
+        }
+        let path = store_dir.join(DISCOVERY_FILE);
+        if !owner_only(&path) {
+            eprintln!(
+                "semlith: ignoring {} — it is not a file this user wrote privately",
+                path.display()
+            );
+            return None;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let found: Self = serde_json::from_str(&text).ok()?;
+        if found.token.len() != 64 || !found.token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        if !alive(found.pid) {
+            return None;
+        }
+        Some(found)
     }
 
     fn write(&self, store_dir: &Path) -> Result<()> {
@@ -84,6 +121,49 @@ impl Discovery {
     fn remove(store_dir: &Path) {
         let _ = std::fs::remove_file(store_dir.join(DISCOVERY_FILE));
     }
+}
+
+/// Whether a file is one this user wrote and nobody else can read.
+///
+/// On Windows there is no mode to read: the home sits inside the user's
+/// profile, whose default ACL grants that user alone, and semlith carries no
+/// API for reading an ACL. Stated rather than silently assumed, as
+/// `home::check_key_mode` already does for the agent key.
+#[cfg(unix)]
+fn owner_only(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    // SAFETY: `getuid` reads this process's own id and cannot fail.
+    let me = unsafe { libc::getuid() };
+    meta.uid() == me && meta.permissions().mode() & 0o177 == 0
+}
+
+#[cfg(not(unix))]
+fn owner_only(path: &Path) -> bool {
+    path.exists()
+}
+
+/// Whether a process id names something running.
+///
+/// `kill(pid, 0)` asks the kernel without sending anything. A pid this user
+/// does not own answers `EPERM`, which still means it is alive — and a daemon
+/// belonging to somebody else is one this file should not have named, which
+/// `owner_only` has already decided.
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    // SAFETY: signal 0 delivers nothing; this is the documented liveness probe.
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn alive(_pid: u32) -> bool {
+    true
 }
 
 /// Something the watcher thread should do next, on behalf of a request.

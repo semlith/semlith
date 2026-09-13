@@ -39,6 +39,9 @@ const VIEWS: &[(&str, &str)] = &[
     ("files", "/api/files"),
     ("forget", "/api/forget"),
     ("adopt", "/api/adopt"),
+    // `semlith trust` is the Stores page's "Trust this store", beside a store
+    // the daemon can see but has not been told to open.
+    ("trust", "/api/trust"),
     ("models", "/api/models"),
     ("languages", "/api/languages"),
     ("setup", "/api/setup"),
@@ -76,8 +79,8 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
 /// view.
 fn method_for(route: &str) -> &'static str {
     match route {
-        "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/upgrade" | "/api/key"
-        | "/api/endpoint" | "/api/store/delete" => "POST",
+        "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/trust"
+        | "/api/upgrade" | "/api/key" | "/api/endpoint" | "/api/store/delete" => "POST",
         _ => "GET",
     }
 }

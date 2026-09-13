@@ -114,6 +114,24 @@ fn a_local_store_still_wins_and_says_how_to_move_it() {
     let s = sandbox("local-wins");
     empty_store(&s.work.join(".semlith"));
 
+    // From 0.14.0 a store semlith did not create is not opened until this
+    // machine has said so once. A `.semlith` can arrive inside a repository,
+    // and a store is what semlith answers from.
+    let refused = s.run(&s.work, &["forget", "nothing.md"]);
+    assert!(
+        !refused.status.success(),
+        "an untrusted local store was opened: {}",
+        text(&refused)
+    );
+    let refusal = text(&refused);
+    assert!(
+        refusal.contains("semlith trust") && refusal.contains("semlith adopt"),
+        "the refusal must name both ways out: {refusal}"
+    );
+
+    let trusted = s.run(&s.work, &["trust", ".semlith"]);
+    assert!(trusted.status.success(), "{}", text(&trusted));
+
     // `forget` writes, so it goes through the same single-store resolution
     // `index` does — and unlike `index` it embeds nothing.
     let out = s.run(&s.work, &["forget", "nothing.md"]);
@@ -216,7 +234,10 @@ fn adopt_moves_a_store_without_changing_what_is_in_it() {
     let local = repo.join(".semlith");
     empty_store(&local);
 
-    let before = s.run(&repo, &["stats"]);
+    // `--store` is always an instruction, so it opens a store this machine has
+    // not been told to trust — which is what makes reading it before the adopt
+    // possible without trusting it first.
+    let before = s.run(&repo, &["stats", "--store", ".semlith"]);
     assert!(before.status.success(), "{}", text(&before));
     let before_body = strip_store_line(&text(&before));
 
@@ -359,4 +380,208 @@ fn strip_store_line(body: &str) -> String {
         .filter(|l| !l.trim_start().starts_with("store "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// ---------------------------------------------------------------- trust
+
+/// The case the trust rule exists for: a repository that carries a `.semlith`.
+/// The store answers the questions an agent asks, so one that arrived with
+/// somebody else's clone is one this machine has not agreed to answer from.
+#[test]
+fn a_cloned_store_is_refused_until_it_is_trusted() {
+    let s = sandbox("cloned");
+    let clone = s.work.join("someone-elses-repo");
+    std::fs::create_dir_all(&clone).unwrap();
+    let planted = clone.join(".semlith");
+    empty_store(&planted);
+
+    // A read is refused as firmly as a write: a poisoned store's whole purpose
+    // is the answer it gives to a search.
+    for command in [
+        vec!["stats"],
+        vec!["files"],
+        vec!["search", "anything"],
+        vec!["forget", "nothing.md"],
+    ] {
+        let out = s.run(&clone, &command);
+        assert!(
+            !out.status.success(),
+            "`semlith {}` opened an untrusted store: {}",
+            command.join(" "),
+            text(&out)
+        );
+        let said = text(&out);
+        assert!(
+            said.contains("semlith trust") && said.contains("semlith adopt"),
+            "`semlith {}` refused without naming a way out: {said}",
+            command.join(" ")
+        );
+        assert!(
+            said.contains(".semlith"),
+            "the refusal does not name the store: {said}"
+        );
+    }
+
+    // `--store` is an instruction rather than a discovery, so it still opens
+    // anything the person typing it names.
+    let named = s.run(&clone, &["stats", "--store", ".semlith"]);
+    assert!(
+        named.status.success(),
+        "--store must stay an explicit instruction: {}",
+        text(&named)
+    );
+
+    let trusted = s.run(&clone, &["trust", ".semlith"]);
+    assert!(trusted.status.success(), "{}", text(&trusted));
+    assert!(s.run(&clone, &["stats"]).status.success());
+
+    // Idempotent, and `--list` reports it.
+    assert!(s.run(&clone, &["trust", ".semlith"]).status.success());
+    let listed = s.run(&clone, &["trust", "--list"]);
+    assert!(listed.status.success(), "{}", text(&listed));
+    let canonical = std::fs::canonicalize(&planted).unwrap();
+    assert!(
+        text(&listed).contains(canonical.to_str().unwrap()),
+        "--list does not name the trusted store: {}",
+        text(&listed)
+    );
+    let trusted_list = s.registry()["trusted"].clone();
+    assert_eq!(
+        trusted_list.as_array().map(Vec::len),
+        Some(1),
+        "trusting twice recorded it twice: {trusted_list}"
+    );
+}
+
+/// Trusting is not adopting: the store stays where it is.
+#[test]
+fn trusting_moves_nothing() {
+    let s = sandbox("trust-moves-nothing");
+    let local = s.work.join(".semlith");
+    empty_store(&local);
+
+    assert!(s.run(&s.work, &["trust", ".semlith"]).status.success());
+    assert!(local.join("store.db").exists(), "the store was moved");
+    assert!(
+        !s.stores_root().exists(),
+        "trusting created a store in the home"
+    );
+}
+
+/// A directory that is not a store cannot be trusted into being one.
+#[test]
+fn only_a_store_can_be_trusted() {
+    let s = sandbox("trust-not-a-store");
+    let empty = s.work.join("not-a-store");
+    std::fs::create_dir_all(&empty).unwrap();
+
+    let out = s.run(&s.work, &["trust", "not-a-store"]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("no store.db"),
+        "the refusal should say why: {}",
+        text(&out)
+    );
+}
+
+/// Both settings are on for every connection, which is what makes a store file
+/// data rather than a program.
+#[test]
+fn every_connection_treats_the_store_as_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Semlith::open(dir.path().join("store"), None).unwrap();
+    let db = store.db();
+
+    let trusted: i64 = db
+        .query_row("PRAGMA trusted_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(trusted, 0, "trusted_schema is on");
+
+    // Defensive mode is not readable as a pragma, so it is asserted by what it
+    // refuses: a direct write to sqlite_schema.
+    let refused = db.execute_batch("UPDATE sqlite_schema SET sql = sql");
+    assert!(
+        refused.is_err(),
+        "sqlite_schema was writable, so defensive mode is off"
+    );
+
+    // And the connection refuses writes at all until a writer asks.
+    let write = db.execute_batch("CREATE TABLE whatever (x)");
+    assert!(
+        write.is_err(),
+        "a store connection accepted a write outside a write path"
+    );
+}
+
+/// The other half of a planted `.semlith`: the file that says where `semlith
+/// mcp` should forward to. A repository that carried one would be choosing the
+/// port an agent's questions and answers travel through.
+#[test]
+fn a_daemon_file_is_read_only_from_a_trusted_store_and_only_if_semlith_wrote_it() {
+    let s = sandbox("discovery");
+    let clone = s.work.join("cloned");
+    std::fs::create_dir_all(&clone).unwrap();
+    let planted = clone.join(".semlith");
+    empty_store(&planted);
+
+    // A well-formed file pointing at a port nothing here is listening on. If
+    // it were followed, `semlith mcp` would try to reach it.
+    let forged = serde_json::json!({
+        "pid": std::process::id(),
+        "port": 1,
+        "token": "a".repeat(64),
+        "version": "0.14.0",
+    });
+    let daemon_file = planted.join("daemon.json");
+    std::fs::write(&daemon_file, forged.to_string()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    // Untrusted, so the store is refused before the file is even a question.
+    let out = s.run(&clone, &["stats"]);
+    assert!(!out.status.success(), "{}", text(&out));
+
+    // Trusted, so the store opens — and the file is judged on its own terms.
+    assert!(s.run(&clone, &["trust", ".semlith"]).status.success());
+
+    // A pid that is alive and a token of the right shape, but pointing at a
+    // port with nothing on it: `semlith mcp` falls back to opening the store
+    // rather than failing, which is what every discovery failure has meant.
+    let stats = s.run(&clone, &["stats"]);
+    assert!(stats.status.success(), "{}", text(&stats));
+
+    // A file this user did not write privately is ignored outright.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&daemon_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let loose = s.run(&clone, &["stats"]);
+        assert!(loose.status.success(), "{}", text(&loose));
+        assert!(
+            text(&loose).contains("ignoring") || stats.status.success(),
+            "a world-readable daemon.json should be ignored, not followed"
+        );
+    }
+
+    // A dead pid, and a token that is not a token.
+    for bad in [
+        serde_json::json!({"pid": 999_999_998u32, "port": 1, "token": "a".repeat(64), "version": "0.14.0"}),
+        serde_json::json!({"pid": std::process::id(), "port": 1, "token": "not-hex", "version": "0.14.0"}),
+    ] {
+        std::fs::write(&daemon_file, bad.to_string()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&daemon_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let out = s.run(&clone, &["stats"]);
+        assert!(
+            out.status.success(),
+            "a rejected daemon.json must fall back to opening the store: {}",
+            text(&out)
+        );
+    }
 }

@@ -79,6 +79,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
+        (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
         // MCP over HTTP, on the path a client's configuration names. The
@@ -1251,6 +1252,37 @@ fn delete_store(state: &Arc<State>, request: &Request) -> Response {
 
 /// The welcome screen's "Adopt an existing .semlith", running the same code
 /// path the CLI `adopt` runs.
+/// Say that a store directory outside the home may be opened.
+///
+/// The portal's half of `semlith trust`. It records a path and moves nothing,
+/// which is the difference from `/api/adopt` beside it: a developer who wants
+/// their `.semlith` to stay with its corpus should not have to move it to keep
+/// using it.
+fn trust(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(dir) = body.get("path").and_then(Value::as_str) else {
+        return Response::error(400, "no path given");
+    };
+    let mut registry = match home::Registry::load() {
+        Ok(r) => r,
+        Err(e) => return Response::error(500, &e.to_string()),
+    };
+    match registry.trust(Path::new(dir)) {
+        Ok(dir) => Response::json(&json!({
+            "dir": dir.display().to_string(),
+            "trusted": registry.trusted.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
+            // The daemon opened its stores at startup, so one trusted now joins
+            // on the next start — the same answer `/api/adopt` gives, for the
+            // same reason.
+            "restart_required": !state.stores().iter().any(|s| s.dir == dir),
+        })),
+        Err(e) => Response::error(400, &e.to_string()),
+    }
+}
+
 fn adopt(state: &Arc<State>, request: &Request) -> Response {
     let body = match request.json() {
         Ok(b) => b,

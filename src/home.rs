@@ -208,6 +208,20 @@ pub struct Entry {
 pub struct Registry {
     #[serde(default)]
     pub stores: BTreeMap<String, Entry>,
+    /// Store directories outside the home that this user has said may be
+    /// opened, canonical.
+    ///
+    /// A `.semlith` beside a corpus is a store somebody put there, and from
+    /// 0.14.0 that somebody has to have been this user: a repository can carry
+    /// one, and a cloned store is a corpus an attacker chose, answering the
+    /// questions an agent asks. `semlith adopt` moves such a store into the
+    /// home and `semlith trust` records it where it is; either is a deliberate
+    /// act, which is the whole difference.
+    ///
+    /// A registry written by an older semlith has no such field and loads as an
+    /// empty list, which is why the first interactive run offers to fill it.
+    #[serde(default)]
+    pub trusted: Vec<PathBuf>,
 }
 
 impl Registry {
@@ -312,6 +326,39 @@ impl Registry {
             entry.roots.sort();
         }
         self.save()
+    }
+
+    /// Whether this store directory may be opened without being named.
+    ///
+    /// Anything under the store home is trusted by being there — semlith put it
+    /// there. Anything else has to be in the list.
+    pub fn trusts(&self, dir: &Path) -> bool {
+        let dir = crate::canonical(dir);
+        if dir.starts_with(crate::canonical(&home())) {
+            return true;
+        }
+        self.trusted.iter().any(|t| crate::canonical(t) == dir)
+    }
+
+    /// Record a store directory as one this user has chosen to open.
+    ///
+    /// Idempotent, and it moves nothing: `adopt` is the command that moves a
+    /// store, and somebody who wants their `.semlith` to stay beside its corpus
+    /// should not have to move it to keep using it.
+    pub fn trust(&mut self, dir: &Path) -> Result<PathBuf> {
+        let dir = crate::canonical(dir);
+        if !dir.join("store.db").exists() {
+            bail!(
+                "{} is not a semlith store — no store.db in it",
+                dir.display()
+            );
+        }
+        if !self.trusted.iter().any(|t| t == &dir) {
+            self.trusted.push(dir.clone());
+            self.trusted.sort();
+            self.save()?;
+        }
+        Ok(dir)
     }
 
     /// A store name that is free, derived from `stem`.
@@ -449,6 +496,9 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
 
     let local = anchor_dir.join(LOCAL_DIR);
     if local.join("store.db").exists() {
+        if !registry.trusts(&local) {
+            bail!("{}", untrusted(&local));
+        }
         return Ok(Choice::Local(local));
     }
 
@@ -525,17 +575,44 @@ pub fn all_dirs(flags: &[PathBuf], cwd: &Path) -> Result<Vec<PathBuf>> {
         }
     }
 
+    let registry = Registry::load()?;
     let mut out = Vec::new();
     let local = cwd.join(LOCAL_DIR);
     if local.join("store.db").exists() {
+        // A read is not safer than a write here: the answer a search gives is
+        // the whole of what a poisoned store is for.
+        if !registry.trusts(&local) {
+            bail!("{}", untrusted(&local));
+        }
         out.push(local);
     }
-    for dir in Registry::load()?.dirs() {
+    for dir in registry.dirs() {
         if dir.join("store.db").exists() {
             out.push(dir);
         }
     }
     Ok(out)
+}
+
+/// What to say about a store this user has not said may be opened.
+///
+/// Both commands are named because they are different answers to the same
+/// question: `trust` leaves the store where it is, `adopt` moves it into the
+/// home. Somebody who cloned a repository and does not recognise the store is
+/// being told, in the same sentence, that there is one.
+fn untrusted(dir: &Path) -> String {
+    format!(
+        "{} is a semlith store this machine has not been told to open.\n\
+         A `.semlith` directory can arrive inside a repository, and a store is \
+         what semlith answers from, so it is opened only once you have said so:\n\
+         \n    semlith trust {}      keep it where it is\n\
+         \n    semlith adopt {}      move it into {}\n\
+         \nOr name it explicitly with --store, which is always an instruction.",
+        dir.display(),
+        dir.display(),
+        dir.display(),
+        stores_root().display(),
+    )
 }
 
 /// Move an existing store directory into the home and register it.

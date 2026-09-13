@@ -137,8 +137,18 @@ impl Upstream {
         stream.write_all(body.as_bytes())?;
         stream.flush()?;
 
+        // Capped, because the other end of this socket is whatever the
+        // discovery file named. `Discovery::read` checks that it named a live
+        // daemon this user started, and this is what keeps a mistake there from
+        // being a machine's worth of memory: a JSON-RPC answer over loopback is
+        // kilobytes, and 16 MiB is a search result far larger than any tool
+        // returns.
+        const MAX_ANSWER: u64 = 16 * 1024 * 1024;
         let mut raw = Vec::new();
-        stream.read_to_end(&mut raw)?;
+        stream.take(MAX_ANSWER + 1).read_to_end(&mut raw)?;
+        if raw.len() as u64 > MAX_ANSWER {
+            bail!("the daemon's answer was larger than semlith will read from it");
+        }
         let text = String::from_utf8_lossy(&raw).into_owned();
         let (headers, payload) = text
             .split_once("\r\n\r\n")

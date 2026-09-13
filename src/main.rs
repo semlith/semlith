@@ -109,6 +109,22 @@ enum Command {
         name: Option<String>,
     },
 
+    /// Say that a store directory outside the store home may be opened.
+    ///
+    /// A `.semlith` directory can arrive inside a repository somebody else
+    /// wrote, and a store is what semlith answers from — so one that semlith
+    /// did not create is opened only after you have said so, once. Nothing is
+    /// moved and nothing is re-embedded; `semlith adopt` is the command that
+    /// moves a store into the home.
+    Trust {
+        /// The store directory to trust — usually `./.semlith`.
+        store_dir: Option<PathBuf>,
+
+        /// Print what is trusted and change nothing.
+        #[arg(long)]
+        list: bool,
+    },
+
     /// Keep the store current: re-embed files as they are saved. Runs until
     /// interrupted, and holds the store's write lock while it does.
     Watch {
@@ -1066,6 +1082,38 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Command::Trust { store_dir, list } => {
+            let mut registry = home::Registry::load()?;
+            if list || store_dir.is_none() {
+                if registry.trusted.is_empty() {
+                    eprintln!(
+                        "no store outside {} is trusted. Every store semlith made is \
+                         opened without asking; a `.semlith` that arrived some other \
+                         way needs `semlith trust <dir>` once.",
+                        home::home().display()
+                    );
+                } else {
+                    for dir in &registry.trusted {
+                        let missing = if dir.join("store.db").exists() {
+                            ""
+                        } else {
+                            "  (gone)"
+                        };
+                        println!("{}{missing}", dir.display());
+                    }
+                }
+                return Ok(());
+            }
+            let dir = registry.trust(store_dir.as_deref().expect("checked above"))?;
+            eprintln!(
+                "{} is trusted. semlith will open it from this directory without \
+                 --store; `semlith adopt` moves it into {} if you would rather it \
+                 lived with the others.",
+                dir.display(),
+                home::stores_root().display()
+            );
+        }
 
         Command::Adopt {
             store_dir,

@@ -347,6 +347,10 @@ impl Semlith {
             }
             None => {
                 let m = model.unwrap_or_else(default_model);
+                // Creating a store is a write, and it is the one write that
+                // happens before there is a `Semlith` to ask for permission
+                // through. See `store::read_only`.
+                let _writing = store::Writing::begin(&db)?;
                 store::set_meta(&db, "model", &m.to_string())?;
                 // Only here, where a store is being created. Stamping it on
                 // open would rewrite every store this binary ever reads, and
@@ -633,6 +637,34 @@ impl Semlith {
     /// that is no longer on disk — right for a full walk, wrong for a batch of
     /// events, which only knows about the paths in it.
     fn index_set(
+        &mut self,
+        paths: Vec<PathBuf>,
+        sweep: bool,
+        deadline: Option<std::time::Instant>,
+        control: Option<&dyn Fn() -> Flow>,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        // Every path that writes to this store funnels through here, so this is
+        // where the connection stops refusing writes — and, when this returns,
+        // starts refusing them again. See `store::Writing` and `writing` below.
+        self.writing(move |me| me.index_set_writing(paths, sweep, deadline, control, on_file))
+    }
+
+    /// Do something that writes, with the connection's refusal lifted for
+    /// exactly as long as it takes.
+    ///
+    /// A closure rather than a guard because the body needs `&mut self` and a
+    /// guard would be holding `&self.db` for its whole life. The restore runs
+    /// whether the body succeeded or not: a store left writable after a failed
+    /// run is the state this is here to prevent.
+    fn writing<T>(&mut self, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        store::read_only(&self.db, false)?;
+        let out = body(self);
+        let _ = store::read_only(&self.db, true);
+        out
+    }
+
+    fn index_set_writing(
         &mut self,
         paths: Vec<PathBuf>,
         sweep: bool,
@@ -1120,6 +1152,10 @@ impl Semlith {
     /// [`Semlith::forget`] without taking the lock, for a caller that already
     /// holds it.
     pub(crate) fn forget_held(&mut self, path: &Path) -> Result<(usize, usize)> {
+        self.writing(|me| me.forget_writing(path))
+    }
+
+    fn forget_writing(&mut self, path: &Path) -> Result<(usize, usize)> {
         let key = canonical(path).to_string_lossy().into_owned();
         // Read before the delete: the cascade that removes the rows is what
         // makes their ids unreadable, and the vectors they address still have
