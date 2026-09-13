@@ -744,7 +744,14 @@ fn measure_what_sharding_costs_recall() {
     // working tree twice would let a file written between the two runs move a
     // ranking and be read as a cost of sharding.
     let snapshot = tempfile::tempdir().unwrap();
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The repository, unless `SEMLITH_MEASURE_CORPUS` names another tree. The
+    // override exists because this number moves with the corpus as well as with
+    // the code, so comparing two releases means holding one of them still —
+    // which is how the jitter above was found rather than argued about.
+    let repo = std::env::var_os("SEMLITH_MEASURE_CORPUS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf());
+    let repo = repo.as_path();
     let corpus = snapshot.path();
     for name in ["src", "tests", "docs"] {
         copy_tree(&repo.join(name), &corpus.join(name));
@@ -835,6 +842,16 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// Index `corpus` into `store` through the binary, so the shard size is in
 /// force for the whole run.
+///
+/// One embedding thread, deliberately. ONNX Runtime reduces across its intra-op
+/// threads in whatever order they finish, so the same text embedded twice on
+/// several threads differs in the last bits — and int8 quantisation turns a
+/// last-bit difference into a rank flip between two near-equal chunks. With the
+/// default thread count this test measured that jitter as well as the sharding
+/// it is about: the same code and the same corpus scored 0.875 on one run and
+/// 0.917 on the next, which is a wider spread than the floor it asserts.
+/// Pinned to one thread, the only difference between the two stores is the
+/// split, which is the whole claim.
 fn index_with(store: &Path, corpus: &Path, shard_vectors: &str) {
     let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
         .arg("--store")
@@ -843,6 +860,7 @@ fn index_with(store: &Path, corpus: &Path, shard_vectors: &str) {
         .arg(corpus)
         .arg("--quiet")
         .env("SEMLITH_SHARD_VECTORS", shard_vectors)
+        .env("SEMLITH_EMBED_THREADS", "1")
         .output()
         .unwrap();
     assert!(

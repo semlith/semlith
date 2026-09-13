@@ -334,7 +334,15 @@ fn the_three_commands_answer_and_neighbours_agrees_with_a_sweep() {
     assert_eq!(callers, ["hold"], "the sweep itself is wrong");
 
     let s = Semlith::open(store.path(), None).unwrap();
-    let around = semlith::graph::neighbours(s.db(), "release", &[]).unwrap();
+    // The dependency kinds, as `path` and the sweep mean them. Passing no
+    // kinds asks for every edge, which includes the structural `defines` from
+    // the file the symbol lives in — true, and not what "who calls this" is
+    // asking.
+    let kinds: Vec<String> = semlith::graph::DEPENDENCY_KINDS
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    let around = semlith::graph::neighbours(s.db(), "release", &kinds).unwrap();
     let names: Vec<String> = around
         .callers
         .iter()

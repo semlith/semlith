@@ -866,12 +866,15 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
             }
         }
         Job::Forget(path) => match writer.forget_held(&path) {
-            Ok(n) => {
+            // Counted apart, because an image has no chunks: a single number
+            // would report forgetting a picture as having done nothing.
+            Ok((chunks, images)) => {
                 store.last_write.store(now() as usize, Ordering::Relaxed);
                 store.note(format!("forgot {}", path.display()));
                 say(serde_json::json!({
                     "event": "done",
-                    "forgot": n,
+                    "forgot": chunks,
+                    "images": images,
                     "path": path.display().to_string(),
                 }));
             }
@@ -962,9 +965,15 @@ impl crate::mcp::Writer for Writer {
         if let Some(error) = done["error"].as_str() {
             return Err(error.to_string());
         }
-        Ok(match done["forgot"].as_u64().unwrap_or(0) {
-            0 => format!("{path} was not indexed; nothing removed."),
-            n => format!("Removed {n} chunks for {path}."),
+        let chunks = done["forgot"].as_u64().unwrap_or(0);
+        let images = done["images"].as_u64().unwrap_or(0);
+        Ok(match (chunks, images) {
+            (0, 0) => format!("{path} was not indexed; nothing removed."),
+            (0, images) => format!("Removed {images} image vector(s) for {path}."),
+            (chunks, 0) => format!("Removed {chunks} chunks for {path}."),
+            (chunks, images) => {
+                format!("Removed {chunks} chunks and {images} image vector(s) for {path}.")
+            }
         })
     }
 }
