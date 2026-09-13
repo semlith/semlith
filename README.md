@@ -3,7 +3,7 @@
 <img src="https://raw.githubusercontent.com/semlith/semlith/main/assets/semlith-logo.png"
      alt="Semlith" width="128" height="128">
 
-# semlith
+# Semlith
 
 **A fast local vector store for AI agents** — index files once, keep it current
 as you save, and answer questions across all of it in milliseconds without
@@ -21,12 +21,13 @@ leaving the machine.
 
 </div>
 
-Point it at your notes, code, PDFs, Office documents and notebooks. semlith
+Point it at your notes, code, PDFs, Office documents and notebooks. Semlith
 reads each of them as the text a person would see, chunks it, embeds it, and
 keeps a quantized vector index next to a SQLite database — all on your machine,
-nothing sent anywhere. An agent then asks a question in plain English and gets
-back the handful of excerpts that actually matter, with file paths and line
-numbers, instead of reading whole files and burning tokens on the way.
+nothing sent anywhere. Screenshots and diagrams go in too, matched by what they
+depict. An agent then asks a question in plain English and gets back the handful
+of excerpts that actually matter, with file paths and line numbers, instead of
+reading whole files and burning tokens on the way.
 
 Think of it as a semantic cache for everything your agent needs to know.
 
@@ -36,10 +37,12 @@ Think of it as a semantic cache for everything your agent needs to know.
   (Google Research's TurboQuant, 4 bits per coordinate, SIMD scan).
 - **Hybrid.** Every query searches meaning *and* literal terms, so
   `retry backoff` and `EMBED_BATCH` both land on the right chunk.
+- **Visual.** Images are embedded with CLIP alongside the text, so a sentence
+  finds the diagram it describes — the one thing in a folder no grep reaches.
 - **Incremental.** Re-running `index` only re-embeds files whose contents
   changed, and drops files that disappeared.
-- **Agent-native.** Ships an MCP server, so any MCP-capable agent can call it
-  as a tool.
+- **Agent-native.** Ships an MCP server, over stdio or over HTTP, so any
+  MCP-capable agent can call it as a tool.
 - **Visible.** `semlith start` keeps every store current and serves a portal on
   `127.0.0.1` — your corpus, your searches and your agents' config, in a page
   that is compiled into the binary and loads with the cable unplugged.
@@ -66,24 +69,28 @@ The script picks the release for your machine, checks the download against the
 release's `SHA256SUMS`, unpacks it into `~/.semlith/bin`, and hands off to
 `semlith setup`, which puts that directory on your `PATH`, pre-downloads the
 embedding model so your first `index` is not a silent wait, and registers
-semlith with the agents you say you use. Open a new shell and `semlith
+Semlith with the agents you say you use. Open a new shell and `semlith
 --version` works.
 
 `semlith setup` is also the repair command: run it again any time to fix `PATH`
 or add a client, and it reports every step that is already done rather than
 doing it twice. `semlith setup --yes` takes the default at every prompt, so a
-script or an agent can install semlith unattended.
+script or an agent can install Semlith unattended.
 
-`SEMLITH_VERSION=v0.10.0` pins a release; `SEMLITH_HOME` moves where it lands.
+`SEMLITH_VERSION` pins a release by its tag; `SEMLITH_HOME` moves where it
+lands.
 
 Later, `semlith upgrade` fetches the newest release, verifies it and swaps the
 binary in place; `semlith upgrade --check` only says whether one exists. Neither
-happens on its own — semlith has no startup check, no timer and no update
+happens on its own — Semlith has no startup check, no timer and no update
 banner.
 
 Requires a 64-bit machine. Prebuilt binaries cover Linux (x86_64, aarch64),
 Apple silicon macOS and Windows x86_64. The Linux binary needs nothing but
-glibc 2.28+ and libstdc++ — no OpenBLAS, no OpenSSL. Intel macOS is not
+glibc 2.35+ and libstdc++ — no OpenBLAS, no OpenSSL. That floor covers Debian
+12, Ubuntu 22.04 LTS, RHEL and Rocky 9 and Amazon Linux 2023; it is asserted in
+the release build, so it cannot rise without failing one. An older distribution
+than that builds from source with `cargo install semlith`. Intel macOS is not
 supported: ONNX Runtime no longer publishes x86_64 macOS builds, so the
 embedding backend cannot link there.
 
@@ -100,7 +107,9 @@ cargo install semlith
 **From a release archive**, if you would rather place the binary by hand:
 
 ```sh
-VERSION=v0.10.0
+# The newest release, resolved rather than written down: a version in an
+# example is a version that goes stale between releases.
+VERSION=$(curl -fsSL https://api.github.com/repos/semlith/semlith/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
 TARGET=aarch64-apple-darwin        # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 curl -LO "https://github.com/semlith/semlith/releases/download/$VERSION/semlith-$VERSION-$TARGET.tar.gz"
 curl -LO "https://github.com/semlith/semlith/releases/download/$VERSION/SHA256SUMS"
@@ -156,16 +165,16 @@ just those lines instead of the whole file.
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
-| `semlith stats` | File count, chunk count, model, shard count and memory budget, index size. |
+| `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
 | `semlith files` | List indexed files. |
 | `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
 | `semlith forget <PATH>` | Drop one file from the store. |
 | `semlith symbol <NAME>` | Where a symbol is defined, by exact name, from the parsed syntax tree rather than a grep for `fn name`. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
-| `semlith impact <NAME>` | What breaks if this changes: everything that reaches it, walking edges backwards. `--depth N`, default 3. |
 | `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`. Needs no key. |
-| `semlith start [PATHS...]` | Own every registered store, keep them current, and serve the portal on `127.0.0.1:7365`. `--port`, `--debounce`, `--airgap`, `--ledger`. |
+| `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--ledger`, `--no-mcp-http`. |
+| `semlith key show` \| `rotate` | Print the agent key that opens the HTTP MCP endpoint, and the stanza around it, or mint a new one. `--now` on `rotate` drops the previous key immediately. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
@@ -178,7 +187,7 @@ same from the environment. `search`, `stats`, `files` and `mcp` read, so the
 flag is repeatable and they cover every store named; `index`, `watch` and
 `forget` write, so they take exactly one.
 
-With no flag, semlith resolves a store itself, in this order: an existing
+With no flag, Semlith resolves a store itself, in this order: an existing
 `.semlith` beside the directory in question; a registered store whose root is
 that directory or an ancestor of it; otherwise a new store under
 `~/.semlith/stores/`, registered against that directory. `semlith mcp` and
@@ -216,10 +225,28 @@ A store that fits searches at full speed; a store past its budget pays to read
 shards back on each query and says so on stderr rather than looking mysteriously
 slower. `semlith stats` shows both numbers before you spend an hour finding out.
 
-Checkpointing, the memory budget and shards are all properties of the store
-layout introduced in 0.7.0, so they apply to stores created by 0.7.0 or later.
-A store you already have keeps working exactly as it did; see
-[Compatibility](#compatibility).
+Checkpointing, the memory budget and shards are properties of the store layout,
+so a store written by an older release keeps its own and keeps working exactly
+as it did. [Compatibility](#compatibility) says which layout is which.
+
+A run started from the portal can be paused and stopped. Pausing holds it
+between files, keeping the store lock, so resuming costs nothing. Stopping
+undoes everything that run embedded — the store is left exactly as it was
+before it started, and indexing the same folder again begins at zero.
+
+### Forgetting files, and deleting a store
+
+`semlith forget <path>` drops one file's chunks and vectors. The portal's Files
+page does the same for a set: tick the rows and forget them in one call, which
+reports how many files and how many chunks went and names anything in the
+selection that was never indexed.
+
+`semlith drop <store>` deletes a store outright — its vectors, chunks, graph
+and ledger, and the registry entry naming it — and the Stores page has the same
+action behind a second click that says what goes. Neither touches the files
+that were indexed; they delete what semlith derived from them. When a daemon is
+holding the store, the delete goes through it, so the writer stops and releases
+its lock before anything is removed.
 
 ## Keeping the store current
 
@@ -285,20 +312,35 @@ semlith: opened api at /Users/you/.semlith/stores/api — watching 1 root(s)
 That one URL is printed once, on stdout. Everything else the daemon says goes
 to stderr, and the token never appears there.
 
-The page has the stores with their counts and the watcher's live event feed,
-the indexed files with the same `path`/`ext`/`lang` filters the CLI has and the
-reader that parsed each one, a search box running the same fused search the CLI
-and the MCP tools run, a folder picker that indexes into a store with progress
-streaming as it goes, a URL field beside it that fetches one page or paper into
-the store and indexes it the same way, every language `--lang` accepts with the
-extensions and filenames that make it up, the client stanzas for every agent, a
-Privacy page, and an About page. With no store yet it opens on a welcome screen
-instead.
+Nine pages, and each one is the same answer the terminal gives:
+
+- **Stores** — what is indexed, with the watcher's live feed beside it.
+- **Files** — every indexed file with the `path`/`ext`/`lang` filters the CLI
+  has, the reader that parsed each one, and when it was last indexed. Sorted and
+  paged by the server, so ordering a column orders the store rather than the
+  page.
+- **Index** — a folder picker that indexes into a store with progress streaming
+  as it goes, and a URL field that fetches one page or paper into the store.
+- **Search** — the same fused search the CLI and the MCP tools run, previewing an
+  image hit inline.
+- **Graph** — the symbols and edges as a drawing: pick one and see what calls it
+  and what it calls.
+- **Languages** — every name `--lang` accepts, with the extensions and filenames
+  that make it up.
+- **Agents** — who is connected, the tools they can call, the stanza for every
+  documented client, and the switch that opens and closes the HTTP endpoint.
+- **Ledger** — what agents retrieved, when recording is on.
+- **Privacy** and **About** — the claims below, and how to check them yourself.
+
+With no store yet it opens on a welcome screen instead.
 
 **It is not on the network.** `127.0.0.1` is the only address it binds and there
-is no flag to change that. Every request needs the per-run token, held in a
-`SameSite=Strict; HttpOnly` cookie — without it, 401 and an empty body. The
-`Host` header must be `localhost`, `127.0.0.1` or `::1`; anything else gets 400.
+is no flag to change that. Every page and every `/api/` route needs the per-run
+token, held in a `SameSite=Strict; HttpOnly` cookie — without it, 401 and an
+empty body. The one other credential is the agent key, and it opens `/mcp` and
+nothing else: a key sitting in a client's configuration file cannot rotate a
+token, adopt a store or start an upgrade. Either way the `Host` header must be
+`localhost`, `127.0.0.1` or `::1`; anything else gets 400.
 Every response carries a `Content-Security-Policy` allowing only `'self'`, and
 no CORS header is sent anywhere. Every byte the page loads — the script, the
 stylesheet, the IBM Plex faces — is compiled into the binary, so it opens with
@@ -311,9 +353,9 @@ machine that pre-seeded `SEMLITH_MODEL_CACHE` can prove nothing was fetched.
 
 ### One writer, and why that stopped being a problem
 
-A store has one writer. Before 0.9.0 that meant choosing: `semlith watch`
-holding the lock so your store stayed current, *or* an agent able to call
-`semlith_index`. The second one was refused for as long as the first ran.
+A store has one writer, which used to mean choosing: a watcher holding the lock
+so your store stayed current, *or* an agent able to call `semlith_index`. The
+second was refused for as long as the first ran.
 
 The daemon ends that without weakening the rule. It *is* the writer, and
 everything else is a client of it: when a daemon is running, `semlith mcp`
@@ -333,7 +375,7 @@ is not a bookmark. `--port` or `SEMLITH_PORT` changes it deliberately.
 
 ## Where stores live
 
-Since 0.9.0 a new store goes in `~/.semlith/stores/<name>`, and
+A new store goes in `~/.semlith/stores/<name>`, and
 `~/.semlith/registry.json` records which directories it covers:
 
 ```sh
@@ -345,13 +387,13 @@ semlith mcp                          # serves both, with no path anywhere
 `SEMLITH_HOME` moves the home. `--name` names a store explicitly; two
 directories called `api` get `api` and `api-2` rather than being merged.
 
-With no `--store` flag, semlith resolves a store in this order:
+With no `--store` flag, Semlith resolves a store in this order:
 
 1. `--store` or `SEMLITH_STORE`, which always win.
-2. A `.semlith` directory beside the corpus, if there is one. **This is what
-   keeps every setup written before 0.9.0 working unchanged** — a local store
-   still wins, and the only difference you see is a line on stderr saying
-   `adopt` would move it into the home.
+2. A `.semlith` directory beside the corpus, if there is one. **A local store
+   always wins**, which is what keeps a setup that predates the store home
+   working untouched; the only difference is a line on stderr saying `adopt`
+   would move it into the home.
 3. A registered store whose root is this directory or an ancestor of it, so
    running from `src/` reaches the store that covers the repository.
 4. Otherwise a new store in the home, registered against this directory.
@@ -470,8 +512,8 @@ holding 137 MB on one store and 137 MB on three — one loaded model, not three.
 
 ## The code graph
 
-From 0.12.0 a store knows the structure of the code in it, not only its text.
-Indexing extracts symbols and the edges between them with tree-sitter — for
+A store knows the structure of the code in it, not only its text. Indexing
+extracts symbols and the edges between them with tree-sitter — for
 Rust, TypeScript, Python, Go, Java and C — on the same changed-file path that
 drives re-embedding. So a file saved under `semlith start` updates its edges in
 the same pass that updates its vectors, and there is no build step and no
@@ -488,22 +530,21 @@ callers (2)
 callees (3)
   ...
 
-$ semlith impact acquire --depth 2
-4 symbols reach acquire within 2 hops
-  1 hop   run_held via calls (inferred)  src/watch.rs:122
-  2 hops  run via calls (inferred)  src/watch.rs:102
+$ semlith path run acquire
+1. run --calls--> run_held  (inferred)
+2. run_held --calls--> acquire  (inferred)
+2 hops, some inferred by name
 ```
 
-`semlith impact` before an edit is the point. The most expensive mistake an
-agent makes on a real codebase is changing the call site it was told about and
-leaving every sibling caller broken; this is the one call that answers "who else
-does this touch" without a grep chain that stops when the agent decides it has
-seen enough.
+**Reverse reachability is not currently part of the product.** `neighbors`
+answers what calls a symbol one hop back; walking every caller of every caller
+to a depth is not a question any command here answers. The
+[changelog](CHANGELOG.md) says when that changed and what replaced it.
 
 **Extracted or inferred.** Every edge says how it was resolved. A call whose
 name the file also imports was resolved by the file itself and is marked
 `extracted`; a bare name match is `inferred`. Two functions called `new` in
-different modules is the normal case in real code, so semlith records which kind
+different modules is the normal case in real code, so Semlith records which kind
 of edge it has and never shows one as the other. Treat an inferred edge as a
 strong hint, not a fact.
 
@@ -517,6 +558,38 @@ rather than as a match.
 
 Six languages carry edges. Everything else is searchable exactly as it was, with
 no symbols; the portal's About page lists the six that carry edges.
+
+## Finding an image
+
+A store holds pictures as well as text. `.png`, `.jpg`, `.jpeg`, `.webp` and
+`.gif` are embedded with CLIP ViT-B/32's vision encoder into a
+second vector space inside the store, and a text query is embedded with the
+matching CLIP text encoder — that pairing is the whole trick, and it is why
+there is one fixed pair here rather than a choice of image model.
+
+```console
+$ semlith search "the architecture diagram with the queue in it"
+1. 0.331  i   docs/design/pipeline.png:1280x720 px
+```
+
+An image hit carries its path and its pixel size where a text hit carries a line
+range — in the terminal, in `--json` and over MCP — because there is no excerpt
+to print under it. The Files page lists it with `image` as its reader, and
+`semlith forget docs/design/pipeline.png` takes away its row and its vector the
+same way it takes away a file's chunks.
+
+**It is not OCR.** An image is matched by what it depicts, so a photograph of a
+whiteboard finds "a whiteboard covered in boxes and arrows" and a screenshot
+dense with text ranks poorly against the words in it. CLIP has no text
+recognition to fall back on; that is a limit to know rather than one to work
+around.
+
+The two model files are fetched on the first image a store indexes, never at
+start, and they go to the same model cache the text model uses — so a store
+that never holds an image never downloads them, and `--airgap` refuses each by
+name before a socket is opened. Nothing about the store format moves: the table and the
+`images/` directory are additive, and a binary that predates them reads such a
+store as the text corpus it already was.
 
 ## The retrieval ledger
 
@@ -536,16 +609,20 @@ Nothing is sent anywhere, and the command needs no licence key, now or ever.
 
 ## Using it from an agent
 
-`semlith mcp` speaks MCP over stdio and exposes five tools:
+`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same nine
+tools over HTTP:
 
 | Tool | What it does |
 | --- | --- |
-| `semlith_search` | Ranked excerpts with file and line range, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. |
+| `semlith_search` | Ranked excerpts with file and line range, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. An image hit carries its pixel size in place of the line range. |
 | `semlith_stats` | What each open store holds, and the names the other tools accept. |
 | `semlith_files` | Which files are indexed — so "not indexed" and "not discussed" stop looking the same. |
 | `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
 | `semlith_add` | Fetch one https URL into a store and index it, so a page or a paper joins the corpus mid-conversation. |
 | `semlith_forget` | Drop one file from a store. The file on disk is untouched. |
+| `semlith_symbol` | Where a symbol is defined, read off the parsed syntax tree rather than matched in a comment or a string. |
+| `semlith_neighbors` | What calls a symbol and what it calls, one hop each way, each edge saying whether it was extracted or inferred. |
+| `semlith_path` | The shortest chain of edges between two symbols, or nothing when they are unconnected within the depth searched. |
 
 The two write tools take the store's lock for the call and give it back. A store
 another process is writing — `semlith watch`, say — comes back as a tool error
@@ -572,7 +649,7 @@ subsystem instead of the whole repository:
 ```
 
 One server can hold several stores, which is how an agent working across
-repositories asks one question instead of one per repository. Since 0.9.0 that
+repositories asks one question instead of one per repository. That
 is what a bare `semlith mcp` already does — it opens every store in the
 registry — so indexing a second repository needs no edit to any client's
 configuration:
@@ -611,11 +688,11 @@ names come from.
 
 ### Which protocol revisions
 
-semlith implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and
+Semlith implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and
 `2024-11-05`, and every one of them has a session in `tests/mcp.rs` proving it.
 Clients built on `2026-07-28` — the revision that removed the `initialize`
 handshake — get `server/discover` and per-request versions; every client
-shipping today gets the handshake it expects. A revision semlith does not
+shipping today gets the handshake it expects. A revision Semlith does not
 implement is answered with one it does, rather than echoed back.
 
 `2025-03-26` is deliberately not advertised. It is the one revision that
@@ -624,29 +701,245 @@ required JSON-RPC batching, and a client pinned to it is answered with
 
 ### Setting it up in your client
 
-Every snippet below runs `semlith mcp`, with no path in it. The server opens
-every store registered in `~/.semlith/registry.json` — which is every store
-`semlith index` has made since 0.9.0 — plus a `.semlith` beside the directory
-the agent was started in, if there is one. Index another repository and the
-agent that is already configured can search it, with no edit to any of these
-files.
+No snippet below names a store. Most of them hand the client the HTTP endpoint
+`semlith start` serves; the rest run `semlith mcp`, which proxies to the same
+daemon. Either way the server opens every store registered in
+`~/.semlith/registry.json` — which is every store `semlith index` has made —
+plus a `.semlith` beside the directory the agent was started in, if there is
+one. Index another repository and the agent that is already configured can
+search it, with no edit to any of these files.
+
+Wherever a stanza carries `sml_YOURKEY`, paste the agent key in its place.
+`semlith key show` prints it, and the next section explains where it comes from
+and how to rotate it. The endpoint answers a request without that header with
+401 and nothing else, so a stanza that drops it fails to connect rather than
+failing to find anything.
 
 `--store` still works and still wins when it is given: repeat it to open a
 chosen set of stores, or set `SEMLITH_STORE` to a path-separator-delimited
-list. A store written before 0.9.0 keeps working where it is, and `semlith
-adopt ./.semlith` moves it into the home so these stanzas reach it.
+list. A store that sits beside its corpus keeps working where it is, and
+`semlith adopt ./.semlith` moves it into the home so these stanzas reach it.
 
 `cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
 your `PATH` in a shell but often not in an editor launched from a desktop icon
-— those entries use the absolute path.
+— the editor and desktop entries below use the absolute path.
+
+#### Terminal
 
 **Claude Code** — `claude mcp add`, or a committed `.mcp.json` in the project
-root. The `--` matters: without it Claude Code reads anything starting with a
-dash as one of its own flags.
+root. `--transport http` points it at the running daemon; without it, the `--`
+matters, because Claude Code reads anything starting with a dash as one of its
+own flags.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+```sh
+claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
+Or as a subprocess, which needs no key:
 
 ```sh
 claude mcp add semlith -- semlith mcp
 ```
+
+**OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
+and the desktop app. TOML, and the table is `mcp_servers` with an underscore. A
+table with a `url` in it is a streamable-HTTP server; the header goes in an
+inline `http_headers` table. `codex mcp add` writes the same entry, but it has
+no flag for an arbitrary header: it takes the key from an environment variable
+instead, so `export SEMLITH_KEY=sml_YOURKEY` has to live in your shell profile
+rather than in the one command —
+`codex mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
+
+```toml
+[mcp_servers.semlith]
+url = "http://127.0.0.1:7365/mcp"
+http_headers = { Authorization = "Bearer sml_YOURKEY" }
+```
+
+**OpenCode** — `opencode.json` in the project root, or the same file under
+`~/.config/opencode/`. The root key is `mcp`, the transport is spelled
+`remote`, and an entry is ignored until `enabled` is true.
+
+```json
+{
+  "mcp": {
+    "semlith": {
+      "type": "remote",
+      "url": "http://127.0.0.1:7365/mcp",
+      "enabled": true,
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+```sh
+opencode mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer sml_YOURKEY"
+```
+
+**IO CLI** — `io.local.toml` in the project root. The servers are an array of
+tables rather than a map, so each one is its own `[[mcp]]` block and the name
+is a field inside it.
+
+```toml
+[[mcp]]
+id = "semlith"
+url = "http://127.0.0.1:7365/mcp"
+headers = { Authorization = "Bearer sml_YOURKEY" }
+```
+
+```sh
+io mcp add semlith --url http://127.0.0.1:7365/mcp --header 'Authorization=Bearer sml_YOURKEY'
+```
+
+**GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
+session. Its name for a subprocess is `local` rather than `stdio`, but a
+remote server is the ordinary `http`.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+```sh
+copilot mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
+**Gemini CLI** — `~/.gemini/settings.json`. The key for a streamable-HTTP
+server is `httpUrl`, not `url`; a plain `url` is read as the older SSE
+transport and the connection fails.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "httpUrl": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+```sh
+gemini mcp add --transport http --header "Authorization: Bearer sml_YOURKEY" semlith http://127.0.0.1:7365/mcp
+```
+
+**Qwen Code** — `~/.qwen/settings.json`, the same schema as Gemini CLI down to
+`httpUrl` winning over `url` when both are present.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "httpUrl": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+```sh
+qwen mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
+**Amp** — `~/.config/amp/settings.json`, or the editor extension's own
+`settings.json`. The root key is the dotted string `amp.mcpServers`, which
+means the entry lives inside a wider settings file rather than in one of its
+own.
+
+```json
+{
+  "amp.mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+```sh
+amp mcp add semlith -- semlith mcp
+```
+
+**Crush** — `crush.json` in the project root. The root key is `mcp`, not
+`mcpServers`, and the TUI reads the file once at start, so relaunch it after
+editing.
+
+```json
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "semlith": {
+      "type": "http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+**Droid** — `~/.factory/mcp.json` for every project, or `.factory/mcp.json` in
+one repository. `droid mcp add semlith http://127.0.0.1:7365/mcp --type http
+--header "Authorization: Bearer sml_YOURKEY"` writes the same object.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+```sh
+droid mcp add semlith http://127.0.0.1:7365/mcp --type http --header "Authorization: Bearer sml_YOURKEY"
+```
+
+**Goose** — `goose configure` → Add Extension → Remote Extension, or
+`~/.config/goose/config.yaml`. Goose calls them extensions, spells the
+transport `streamable_http` with an underscore, and takes the address as `uri`
+rather than `url`.
+
+```yaml
+extensions:
+  semlith:
+    type: streamable_http
+    name: semlith
+    enabled: true
+    uri: "http://127.0.0.1:7365/mcp"
+    headers:
+      Authorization: "Bearer sml_YOURKEY"
+    timeout: 300
+```
+
+**Amazon Q Developer CLI** — `~/.aws/amazonq/mcp.json` for every workspace, or
+`.amazonq/mcp.json` in one. A remote entry takes only `type` and `url` and
+authenticates over OAuth, with nowhere to put a header, so this is the stdio
+form, which needs no key: `semlith mcp` proxies to the running daemon.
 
 ```json
 {
@@ -659,32 +952,68 @@ claude mcp add semlith -- semlith mcp
 }
 ```
 
-**Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →
-Developer → Edit Config opens it.
+```sh
+q mcp add --name semlith --command semlith --args mcp
+```
+
+**OpenClaw** — `~/.openclaw/openclaw.json`. The servers are nested two deep
+under `mcp` then `servers`, and the transport field is called `transport`, not
+`type`.
 
 ```json
 {
-  "mcpServers": {
-    "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["mcp"]
+  "mcp": {
+    "servers": {
+      "semlith": {
+        "transport": "streamable-http",
+        "url": "http://127.0.0.1:7365/mcp",
+        "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      }
     }
   }
 }
 ```
 
-**OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
-and the desktop app. TOML, and the table is `mcp_servers` with an underscore.
-
-```toml
-[mcp_servers.semlith]
-command = "semlith"
-args = ["mcp"]
+```sh
+openclaw mcp add semlith --url http://127.0.0.1:7365/mcp --transport streamable-http --header "Authorization=Bearer sml_YOURKEY"
 ```
 
-`codex mcp add semlith -- semlith mcp` writes the same
-table.
+**DeepSeek** — `~/.deepseek/mcp.json`, read by DeepSeek-TUI, which has since
+renamed itself Codewhale and now looks in `~/.codewhale/mcp.json` first and
+falls back to the old path. Either file takes `servers` or `mcpServers` as the
+root key, and needs no transport field: a `url` is enough. `codewhale mcp add`
+has no header flag, so the key goes in the environment:
+`export SEMLITH_KEY=sml_YOURKEY`, then
+`codewhale mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+**Warp** — `~/.warp/.mcp.json`, or Settings → AI → MCP servers → + Add, which
+writes it for you. An entry carries exactly one of `command` or `url` and Warp
+rejects one holding both.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "start_on_launch": true
+    }
+  }
+}
+```
+
+#### Editors
 
 **GitHub Copilot in VS Code** — `.vscode/mcp.json` for a workspace, or the
 profile copy that `MCP: Open User Configuration` opens. The root key is
@@ -694,79 +1023,59 @@ profile copy that `MCP: Open User Configuration` opens. The root key is
 {
   "servers": {
     "semlith": {
-      "type": "stdio",
-      "command": "semlith",
-      "args": ["mcp"]
+      "type": "http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
     }
   }
 }
 ```
 
-**GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
-session. Its name for a stdio server is `local`, not `stdio`.
+```sh
+code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp","headers":{"Authorization":"Bearer sml_YOURKEY"}}'
+```
+
+**Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one
+repo. Cursor infers the transport from the presence of `url` and has no `type`
+field of its own; adding one copied from another client confuses it.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
-      "type": "local",
-      "command": "semlith",
-      "args": ["mcp"],
-      "tools": ["*"]
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
     }
   }
 }
 ```
 
-**Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one repo.
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`. The address key is
+`serverUrl`, not `url`, and Windsurf reloads MCP servers only on a full
+restart, not on a window reload.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
-      "type": "stdio",
-      "command": "semlith",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-**Windsurf** — `~/.codeium/windsurf/mcp_config.json`.
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["mcp"]
+      "serverUrl": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
     }
   }
 }
 ```
 
 **Zed** — the `zed: open settings file` command. Zed calls MCP servers context
-servers, and keys them under `context_servers`.
+servers and keys them under `context_servers`. Its remote support has moved
+between versions and older builds start local processes only, so this is the
+stdio form, which needs no key: `semlith mcp` proxies to the running daemon.
 
 ```json
 {
   "context_servers": {
     "semlith": {
+      "source": "custom",
       "command": "/Users/you/.cargo/bin/semlith",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-**Gemini CLI** — `~/.gemini/settings.json`, or
-`gemini mcp add semlith semlith mcp`.
-
-```json
-{
-  "mcpServers": {
-    "semlith": {
-      "command": "semlith",
       "args": ["mcp"]
     }
   }
@@ -775,30 +1084,33 @@ servers, and keys them under `context_servers`.
 
 **JetBrains** — Junie reads `~/.junie/mcp/mcp.json`, or `.junie/mcp/mcp.json`
 per project; AI Assistant takes the same JSON under Settings → Tools → AI
-Assistant → Model Context Protocol.
+Assistant → Model Context Protocol. The transport is spelled `streamable-http`
+with a hyphen.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
-      "args": ["mcp"]
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
     }
   }
 }
 ```
 
 **Cline** — the MCP Servers panel, Configure. Cline's own documentation gives
-two different paths for the file it writes (`~/.cline/mcp.json` and
-`~/.cline/data/settings/cline_mcp_settings.json`), so let the panel open it
-rather than guessing.
+two different paths for the file it writes, so let the panel open it rather
+than guessing. The transport is `streamableHttp` in camel case; anything else
+falls back to SSE and the endpoint answers 405.
 
 ```json
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
-      "args": ["mcp"],
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" },
       "disabled": false,
       "autoApprove": []
     }
@@ -806,27 +1118,179 @@ rather than guessing.
 }
 ```
 
-**Goose** — `goose configure` → Add Extension → Command-line Extension, or
-`~/.config/goose/config.yaml`. Goose calls them extensions and spells the
-command `cmd`.
+```sh
+cline mcp add semlith --transport http --header "Authorization: Bearer sml_YOURKEY" http://127.0.0.1:7365/mcp --yes
+```
+
+**Roo Code** — `.roo/mcp.json` in the project, or the global file the MCP
+Servers panel opens. Roo spells the same transport `streamable-http`, with the
+hyphen, which is the one thing that does not copy across from a Cline config.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "alwaysAllow": ["semlith_search"]
+    }
+  }
+}
+```
+
+**Kilo Code** — `.kilocode/mcp.json` in the project, or the global file from
+the MCP Servers panel. The `type` is required here: without it Kilo Code picks
+SSE and the connection fails.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "type": "streamable-http",
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "alwaysAllow": ["semlith_search"],
+      "disabled": false
+    }
+  }
+}
+```
+
+```sh
+kilo mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer sml_YOURKEY"
+```
+
+**Continue** — one block file per server at
+`~/.continue/mcpServers/semlith.yaml`, or the same entry inlined in
+`config.yaml`. The headers hang off `requestOptions`, not off the server
+itself.
 
 ```yaml
-extensions:
-  semlith:
-    type: stdio
-    name: semlith
-    enabled: true
-    cmd: semlith
-    args: ["mcp"]
-    timeout: 300
+name: Semlith
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: semlith
+    type: streamable-http
+    url: "http://127.0.0.1:7365/mcp"
+    requestOptions:
+      headers:
+        Authorization: "Bearer sml_YOURKEY"
 ```
+
+**Kiro** — `.kiro/settings/mcp.json` in the workspace, or
+`~/.kiro/settings/mcp.json` for every workspace. The workspace file wins where
+both name the same server, so an old copy in the repository quietly overrides
+the one you just edited.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "disabled": false,
+      "autoApprove": ["semlith_search"]
+    }
+  }
+}
+```
+
+```sh
+kiro-cli mcp add --name semlith --command "semlith" --args "mcp" --scope global
+```
+
+#### Desktop apps
+
+**LM Studio** — `~/.lmstudio/mcp.json`, reached from the Program tab → Install
+→ Edit `mcp.json`. LM Studio follows Cursor's notation, so there is no
+transport field and a `url` is enough.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+**Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
+on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows. Settings →
+Developer → Edit Config opens it. Desktop starts local processes only and has
+nowhere to put a header, so this is the stdio form and needs no key: `semlith
+mcp` proxies to the running daemon. Quit and reopen the app after editing.
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "command": "/Users/you/.cargo/bin/semlith",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Connecting over HTTP
+
+`semlith start` also answers MCP at `http://127.0.0.1:7365/mcp`, so a client
+that speaks the HTTP transport needs no subprocess and no path. The endpoint is
+authenticated by the agent key in `~/.semlith/agent.key`, which is created on
+first start and does not change when the daemon restarts, when Semlith is
+upgraded, or when the portal's session token is rotated — so a stanza carrying
+it is written once and keeps working. The key is 32 bytes from the OS random
+source, written `sml_` and hex at mode 0600, and it is never reminted unless
+you ask. `semlith key show` prints the live key and the stanza around it.
+
+Rotating it carries it forward. `semlith key rotate`, and the portal's Rotate
+key button, rewrite every client configuration file on this machine that
+already held the old key — the documented path for each client above, plus the
+project-scoped files beside wherever the daemon was started. A file is only
+touched when the exact old key appears in it, nothing is ever created, and both
+the command and the page list what they changed. A client configured somewhere
+else still needs the new stanza pasted in.
+
+```sh
+claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+```
+
+```json
+{
+  "mcpServers": {
+    "semlith": {
+      "url": "http://127.0.0.1:7365/mcp",
+      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+    }
+  }
+}
+```
+
+`semlith key rotate` mints a new one. The previous key keeps working until the
+running daemon exits, so a session already open finishes rather than dying
+mid-call; `--now` drops it immediately. Claude Code is re-registered through its
+own CLI, because it is the one client Semlith has a supported way to write a
+config for, and every other client that holds the old key is named so you know
+what to paste the new stanza into.
+
+The stdio stanzas above stay exactly as they are: `semlith mcp` forwards to a
+running daemon and falls back to opening the stores itself when none is
+running, which is what makes it work whether or not `semlith start` is up. The
+HTTP endpoint is for clients that would rather hold a URL than spawn a process.
+Close it with `semlith start --no-mcp-http`, or from the portal's Agents page
+while the daemon runs — closing it drops the route, not the daemon.
+
 
 ## What gets indexed
 
 Everything under the given paths, except:
 
 - files ignored by `.gitignore` (and hidden files)
-- binaries — detected by a NUL byte in the first 8 KiB
+- binaries — detected by a NUL byte in the first 8 KiB, except the five image
+  formats, which are read as pictures rather than as text
 - files larger than 8 MiB
 - an archive that decompresses to more than 32 MiB of text
 - anything under a `.semlith` directory
@@ -857,13 +1321,14 @@ or which cell it came from.
 | `.rtf` | The document's text. Font and colour tables, style sheets, embedded pictures and revision metadata are skipped whole; `\'hh` and `\uN` escapes are decoded. | — |
 | `.eml` | `From`, `To`, `Cc`, `Date` and `Subject`, then the body: the `text/plain` part of a multipart, or its HTML part when there is no plain one. | `# Attachment: manifest.txt` |
 | `.mbox` | Every message in the file, each read as an `.eml`. | `# Message 2: Inventaire de l'entrepôt` |
+| `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | Nothing textual. The picture itself, embedded with CLIP — see [Finding an image](#finding-an-image). | — |
 
 Two details worth knowing:
 
 - **HTML keeps its line numbers.** Every newline in the source survives,
   including the ones inside the tags that were removed, so a hit's
   `file:line` range still points at the line of the file on disk where that
-  sentence lives. An entity semlith does not recognise is left as it was
+  sentence lives. An entity Semlith does not recognise is left as it was
   written, since `&thing;` is likelier to be text about an entity than one.
 - **A spreadsheet is indexed as its cached values.** Formulas are not
   evaluated; what is searched is what the last program to save the file wrote
@@ -902,10 +1367,13 @@ Two things live in the store directory:
   rebuild as the corpus grows: add vectors, they are searchable. Splitting the
   index is what lets a search hold a few shards instead of the whole corpus, a
   save rewrite one shard instead of everything, and a long index run checkpoint
-  as it goes. Stores created before 0.7.0 have a single `index.tv` instead and
+  as it goes. An older store has a single `index.tv` instead and
   keep it.
 - **`store.db`** — SQLite. Holds the chunk text, its file, and its line span,
   plus the content hash that makes re-indexing incremental.
+
+A store that holds images grows a third: **`images/`**, the same shard layout at
+CLIP's 512 dimensions. It is created on the first image and is absent otherwise.
 
 A search embeds the query, gets ids from the shards it needs, merges their
 rankings, and resolves the result with one SQLite lookup each. Nothing is read
@@ -919,7 +1387,7 @@ the store is created, since vectors from two models are not comparable — to
 switch, delete the store and re-index.
 
 A store built by an earlier version keeps the model it was built with, so
-upgrading semlith never silently re-embeds a corpus.
+upgrading Semlith never silently re-embeds a corpus.
 
 Searches consult the vector index and SQLite's FTS5 keyword index together,
 fusing the two rankings by position. Dense vectors alone are weak at exact
@@ -931,13 +1399,39 @@ SQLite query against the stored file paths. That set becomes an allowlist the
 vector index scans inside, and the same predicate goes into the FTS5 query, so
 both halves rank within the subset and fusion never sees a chunk one half was
 forbidden to return. Nothing is stored for it: the file path has been in the
-database since 0.1.0, so filtering works on an existing store with no
+database from the beginning, so filtering works on an existing store with no
 re-indexing.
 
 ## Performance
 
-Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM, over three corpora
-of mixed Rust, Markdown and TypeScript:
+Measured on a 4P+4E Apple Silicon laptop with 8 GB of RAM, and reproducible:
+
+```sh
+cargo test --release --test measure -- --ignored --nocapture
+```
+
+Every figure in the first four tables was taken for this release. The
+larger-corpus numbers below them are fixtures — building a
+hundred-thousand-chunk store takes over an hour of embedding — and are re-taken
+when the indexing or scan path changes rather than every release.
+
+### Answering a question
+
+Warm, server-side, as the daemon reports it. A query is embedded once per vector
+space the store holds, and that embedding is most of the cost at these sizes.
+
+| store | p50 | what is in it |
+|---|---|---|
+| text | **16.0 ms** | 2 220 chunks over 85 files |
+| images | **9.1 ms** | 120 images, no text |
+| a fleet of both kinds | **25.0 ms** | the text store above, beside one holding images |
+
+The two halves add rather than interfere, because each store embeds the query
+once for every vector space it holds. A store of source code never pays for the
+image space at all: it has no images to compare against, so that half is skipped
+before a model is loaded.
+
+Over three larger corpora of mixed Rust, Markdown and TypeScript:
 
 | store | warm query, p50 | p95 | indexing | peak RSS |
 |---|---|---|---|---|
@@ -945,53 +1439,90 @@ of mixed Rust, Markdown and TypeScript:
 | 9.9k chunks | **5.4 ms** | 11.0 ms | 24.3 chunks/sec | 637 MB |
 | 105k chunks | **22.7 ms** | 67.4 ms | 23.5 chunks/sec | 595 MB |
 
-Re-indexing 8334 unchanged files takes 1.7 seconds, because content hashes
-match and the model is never loaded. Cold CLI start on the 105k store is about
-430 ms, most of it loading the model and the index.
+**Peak memory does not grow with the corpus** — 105k chunks is 85 times the work
+of 1.2k for slightly less memory, so the number to plan for is roughly 600 MB
+whatever you point it at. **Query latency does grow**, because the index scan is
+linear: budget a few milliseconds for a repository and a few tens for a very
+large corpus. This release did not touch either path; the recipe for rebuilding
+the fixture is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Two things are worth reading off that table. **Peak memory does not grow with
-the corpus** — 105k chunks is 85 times the work of 1.2k for slightly less
-memory, so the number to plan for is roughly 600 MB whatever you point it at.
-**Query latency does grow**, because the index scan is linear: budget a few
-milliseconds for a repository and a few tens for a very large corpus.
+### Keeping it current
+
+| what | measured |
+|---|---|
+| edit on disk to searchable | **1.24 s**, watcher running |
+| ten saves in six seconds | **1** index write of 638 KB |
+| re-indexing 120 unchanged files | **0.01 s** — content hashes match, no model is loaded |
+| idle daemon | **0.01 s** of CPU over 60 s, 10 MB resident |
+| 100 edits | 37 MB resident at start, 59 MB after |
+
+### Images
+
+| what | measured |
+|---|---|
+| indexing 120 images | **10.0 s**, including loading the vision encoder |
+| warm image query | **9.1 ms** p50 over 15 queries |
+| the image index | 600 KB for 120 images, beside the text index |
+| resident, after an image query | 191 MB |
+
+CLIP is fetched only when a store first indexes an image: 335 MB for the vision
+encoder and 244 MB for the text encoder, against 52 MB for the text model. A
+corpus with no pictures in it never downloads either.
+
+### What an agent pays
+
+| what | measured |
+|---|---|
+| `tools/call` over HTTP | **23.4 ms** p50 over 20 calls |
+| the same call through the stdio proxy | **20.9 ms** p50, same daemon, same query |
+| `tools/list` | 8 702 bytes on the wire for nine tools, about 2 176 tokens |
+| an MCP server open on one store | 131 MB; on three stores, 132 MB |
+| three same-model stores, one search | **1** query embed, +1.7 ms for the second store |
+
+The endpoint costs about what the proxy costs, and the difference is the
+client's connection setup rather than the route. Both talk to the same daemon
+and run the same search.
+
+### What sharding costs
+
+A store split into 16 shards answers with the same top ten as the same corpus in
+one shard **about 90%** of the time, measured over twelve questions about meaning
+rather than about an identifier. The shards are what keep peak memory flat, and
+that is the price.
+
+The figure moves between 0.88 and 0.98 from run to run, and the reason is worth
+knowing: ONNX Runtime reduces across its threads in whatever order they finish,
+so the same question does not embed to exactly the same vector twice, and a
+vector that lands nearer a tie changes which of two near-equal chunks comes
+back. It is the same effect that makes `SEMLITH_EMBED_THREADS` worth pinning
+when you want a reproducible index.
+
+The binary is **45.6 MB**, of which 1.8 MB is the image support.
 
 ### What a store costs to hold
 
-Measured with an MCP server on one store, comparing 0.6.0 against 0.7.0 over the
-same three corpora. *Open* is the process after a handshake and `tools/list`,
-before any question has been asked; *searching* is the same process after
-twenty queries.
-
-| chunks | 0.6.0 open | 0.7.0 open | 0.6.0 searching | 0.7.0 searching | median query |
-|---|---|---|---|---|---|
-| 700 | 137 MB | 133 MB | 139 MB | 137 MB | 3.7 ms |
-| 7 000 | 141 MB | 133 MB | 144 MB | 144 MB | 7.5 ms |
-| 70 000 | 180 MB | **133 MB** | 185 MB | 179 MB | 52.6 ms |
-
-A hundredfold more corpus costs an open 0.7.0 store **0.8 MB**; the same corpus
-cost 0.6.0 **43 MB**, because it read every vector the moment the store was
-opened. An agent's server that is sitting there waiting to be asked something
-now holds a model and nothing else.
-
-Searching still holds the vectors it searches — 70 000 chunks is 43 MB and fits
-inside the 512 MB default with room to spare. Past that budget the store keeps
-what it can and reads the rest back per query, which is what makes a corpus
-larger than memory searchable at all, and it is not free: the same 70 000-chunk
-store squeezed into an 8 MB budget answered in 364 ms instead of 53 ms, holding
-110–126 MB across two hundred queries.
+An MCP server that is sitting there waiting to be asked something holds a model
+and nothing else: a hundredfold more corpus costs an open store **0.8 MB**,
+because the vectors are read when a question is asked rather than when the store
+is opened. Searching holds the vectors it searches — 70 000 chunks is 43 MB, and
+fits inside the 512 MB default with room to spare. Past that budget the store
+keeps what it can and reads the rest back per query, which is what makes a
+corpus larger than memory searchable at all, and it is not free: the same
+70 000-chunk store squeezed into an 8 MB budget answered in 364 ms instead of
+53 ms.
 
 Changing one file rewrites the shards it touches rather than the index. On a
-store of 14 shards, re-indexing one changed file wrote 176 KB of a 1436 KB
-index. Two shards, not one: the shard losing the old vector and the newest shard
-taking the new one — so the saving appears once a store is more than two shards,
-around 131 000 chunks at the default shard size.
+store of 14 shards, re-indexing one changed file wrote 176 KB of a 1 436 KB
+index — two shards, not one, because the shard losing the old vector and the
+newest shard taking the new one both change. The saving appears once a store is
+more than two shards, around 131 000 chunks at the default shard size.
 
-An index run killed eight seconds in, on a 6000-file corpus: 0.6.0 kept **0**
-chunks, 0.7.0 kept **1952**.
+An index run killed eight seconds into a 6 000-file corpus keeps what it had
+already embedded: **1 952** chunks, not zero. Vectors are made durable before
+the files they cover are marked indexed, so a kill is resumable and never leaves
+a file recorded as indexed that cannot be answered for.
 
-The numbers that matter for an agent are the query row and the re-index figure.
-`semlith mcp` loads the model once at startup, so every tool call costs the warm
-figure; and keeping a store current is nearly free.
+### Choosing a model
 
 Indexing is the slow half, and that cost is the embedding model, not the index
 — a transformer on CPU is simply not fast. If you have a large corpus and can
@@ -1005,13 +1536,16 @@ whether int8 wins depends on the model's graph, not on the architecture alone.
 
 Thread count is chosen rather than left to ONNX Runtime. Its threads
 synchronise at every operator, so on a CPU with performance and efficiency
-cores a thread on a slow core paces the whole batch; semlith uses the
+cores a thread on a slow core paces the whole batch; Semlith uses the
 performance-core count on Apple silicon and the full count elsewhere. Override
-with `SEMLITH_EMBED_THREADS` if your machine disagrees.
+with `SEMLITH_EMBED_THREADS` if your machine disagrees. It is also what makes
+embedding reproducible: ONNX Runtime reduces across its threads in whatever
+order they finish, so the same text embedded twice differs in the last bits, and
+under int8 quantisation that is enough to swap two near-equal chunks.
 
 ## Compatibility
 
-[`docs/compatibility.md`](docs/compatibility.md) says which parts of semlith are
+[`docs/compatibility.md`](docs/compatibility.md) says which parts of Semlith are
 a contract — the CLI commands and flags, the MCP tool names and schemas, the
 protocol revisions, the store on disk, the Rust API — and which parts are free
 to change under you, such as ranking scores and the text printed for a person to
@@ -1028,6 +1562,11 @@ nothing. Going the other way is the break: a 0.6.0 binary refuses a format 2
 store, and a 0.5.0 binary, which predates the key, would read one as an empty
 corpus. To move an existing store onto the new layout, delete it and index
 again; there is no migration that would not re-embed the corpus anyway.
+
+0.13.0 does not move the format again. The images table and the `images/`
+directory are additive, and a binary that knows nothing about either ignores
+both — so a store indexed with images is still a text store to 0.12.0, and the
+images come back the moment a 0.13.0 binary opens it.
 
 ## Contributing
 
@@ -1069,16 +1608,22 @@ Everyone participating is expected to follow the
   every query, so the memory bound is bought with latency. The bound is the
   point — a corpus that does not fit in memory is searchable at all — but if
   your store fits comfortably, raising the budget is free speed.
-- Checkpointing, the memory budget and one-shard saves need the 0.7.0 store
-  layout. A store created by an earlier version keeps its single index file and
-  behaves exactly as it did, which also means an interrupted index run on one
-  still loses the run.
+- Checkpointing, the memory budget and one-shard saves need the sharded store
+  layout. A store written before it keeps its single index file and behaves
+  exactly as it did, which also means an interrupted index run on one still
+  loses the run. [Compatibility](#compatibility) says which is which.
 - The default model is English-only. `semlith models` lists multilingual
   alternatives, which must be chosen when the store is created.
+- Image search is not OCR, and the CLIP pair behind it is fixed — there is no
+  `--model` for the image half. A screenshot of a wall of text is matched on
+  looking like a wall of text, not on the words in it, and a store that indexes
+  its first image downloads two more model files to do so.
+- Reverse reachability over the code graph is not part of the product.
+  `neighbors` goes one hop back and no command walks further.
 - Search filters are SQLite `GLOB` patterns, so `*` crosses `/` and there is no
   distinct `**`, no regex, and no way to express "not this path". `--lang` maps
   a fixed table of extensions and never reads file contents, so a Perl script
-  named `build` is not Perl as far as semlith is concerned.
+  named `build` is not Perl as far as Semlith is concerned.
 - Results are not reranked. A cross-encoder over the top results would improve
   ordering, at a cost per query that a local tool should not pay by default.
 - Multi-store search is a merge, not a joint ranking. Each store ranks its own
@@ -1087,9 +1632,9 @@ Everyone participating is expected to follow the
   is measured against the store's own model — across two models that comparison
   is approximate, and it only ever decides between hits the rank evidence has
   already called equal.
-- Stores are named by path; there is no registry of named stores, and no
-  discovery. A store is searched because it was named, and its label comes from
-  the directory holding it.
+- There is no discovery: a store is searched because the registry lists it or
+  because `--store` named it, and nothing goes looking for stores on the
+  filesystem. Adopting one is an action you point at a directory.
 - The install scripts are the only packaged install. Homebrew, winget and Scoop
   are not there yet, so the one-liner and `cargo install` are the two ways in.
 - Nothing is code-signed or notarized. A curl download carries no macOS
@@ -1107,6 +1652,7 @@ Everyone participating is expected to follow the
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Note that semlith downloads embedding model weights at runtime; those are
+Note that Semlith downloads embedding model weights at runtime; those are
 covered by their own licenses. The default,
-ibm-granite/granite-embedding-small-english-r2, is Apache-2.0.
+ibm-granite/granite-embedding-small-english-r2, is Apache-2.0. The CLIP ViT-B/32
+pair a store fetches once it holds an image carries its own licence too.

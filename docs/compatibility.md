@@ -14,12 +14,14 @@ break, and is treated as one.
 | CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `add`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, `setup`, `upgrade`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
 | Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. |
+| CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
+| The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
 | The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME` and `SEMLITH_YES`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
 | Release archives | One archive per target, named `semlith-<tag>-<target>`, holding a directory of that name with the binary in it, and a `SHA256SUMS` asset beside them in GNU `sha256sum` format. `semlith upgrade` and both scripts read that layout. |
 | `semlith setup --yes` | Runs every step with its default and no prompt, so a script or an agent can install semlith unattended. |
 | `semlith upgrade --check` | Exits 0 when the installed version is current and 10 when a newer release exists, and changes nothing either way. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
-| MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`. |
+| MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`, `semlith_symbol`, `semlith_neighbors`, `semlith_path`. `semlith_impact` was on this list until 0.13.0 removed it; see the break below. |
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
 | MCP protocol revisions | The list the server advertises: `2026-07-28`, `2025-11-25`, `2025-06-18`, `2024-11-05`. Dropping one is a break. |
 | Where the daemon binds | `127.0.0.1`, and only that. Widening it would be a break in the direction that matters, and is not something a flag will ever do. |
@@ -116,6 +118,27 @@ their columns, the FTS5 configuration and the index layout are not. They are
 implementation, they have already changed within 0.x, and reading them directly
 is reading past the API. Use the `store` module or the CLI.
 
+### 0.13.0 removes a tool and a command
+
+**This is a break in the covered surface, and is recorded as one.** `semlith
+impact`, the `semlith_impact` MCP tool and `GET /api/impact` are gone. The
+advertised tool count drops from ten to nine.
+
+- **What breaks.** An agent with `semlith_impact` in a saved prompt, a
+  committed `.mcp.json` or a tool allow-list gets an unknown-tool error on
+  upgrade. A script calling `semlith impact` exits non-zero with an
+  unrecognised-subcommand message. There is no shim and no deprecation period,
+  by choice: a tool that answers with an apology is a tool an agent keeps
+  calling.
+- **Why.** Reverse reachability returns in 0.14.0 as a paid surface. Leaving
+  half of it in the free product — the command without the page, or the page
+  without the command — would have made 0.14.0 a decision half-made across two
+  releases.
+- **What to do instead.** `semlith neighbors <symbol>` gives the direct callers
+  and callees, which is the one-hop answer, and `semlith path <from> <to>`
+  answers whether one symbol reaches another. Both are unchanged, as are
+  `semlith symbol` and the three MCP tools that carry them.
+
 ## The honest version of the promise
 
 semlith is 0.x. Under SemVer, a 0.x minor bump is permitted to break anything,
@@ -202,6 +225,22 @@ because symbols cannot be recovered from chunk text alone. A store written by
 0.12.0 opens under 0.11.0 and searches exactly as it did before; the extra
 tables sit there unread. Both directions were run against the released 0.11.0
 binary rather than asserted here.
+
+### 0.13.0 adds an images table and a second vector directory
+
+Same reasoning, same answer: `format_version` stays **2**.
+
+0.13.0 records one row per indexed image in an `images` table inside
+`store.db`, and writes those vectors into an `images/` directory inside the
+store, beside the text index. Both are additive, the table is applied with the
+same `CREATE TABLE IF NOT EXISTS` batch every open already runs, and an older
+binary reads neither — so a store written by 0.13.0 opens under 0.12.0 and
+searches its text exactly as before, with the image rows sitting there unread.
+
+There is no backfill, and there cannot be a useful one: an image vector needs
+the file's bytes, which the database does not hold. A store written before
+0.13.0 opens with no images and honestly reports none until its next `index`
+pass, which re-reads the files.
 
 The internal table layout is [not a covered surface](#what-is-not-covered), and
 this does not change that. It is described because people plan around it, not

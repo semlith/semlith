@@ -7,8 +7,157 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-13
+
+The portal becomes the product's own design, agents get an endpoint they can
+keep in a config file, and a query can find a picture.
+
+### Added
+
+- **MCP over HTTP, at `http://127.0.0.1:7365/mcp`.** A client that would rather
+  hold a URL than spawn a process now can. The same `mcp::answer` the stdio
+  server runs answers it, behind the same loopback bind, `Host` allow-list and
+  absent CORS the portal enforces, and `semlith mcp` over stdio keeps working
+  exactly as it did.
+- **A persisted agent key, in `~/.semlith/agent.key`.** 32 bytes from the OS
+  random source, written once with mode 0600 and never reminted implicitly, so
+  a stanza carrying it is written once and keeps working across daemon
+  restarts, upgrades and portal token rotations. It authenticates `/mcp` and
+  nothing else: every `/api/*` route still requires the per-run session token,
+  so a credential sitting in a client's configuration file cannot reach the
+  rotate, adopt or upgrade routes. Pressing Rotate on the Privacy page no longer
+  disconnects a connected agent, because the two credentials have separate
+  lifetimes and separate reach.
+- **`semlith key show` and `semlith key rotate`.** Show prints the key and the
+  stanza around it. Rotate mints a new key, tells a running daemon so the
+  endpoint takes it up, keeps the previous key valid until that daemon exits so
+  a session already open finishes, re-registers Claude Code through its own CLI
+  and names every other client that needs the new stanza. `--now` drops the
+  previous key immediately.
+- **A rotation carries the key into the files that hold it.** `semlith key
+  rotate` and the portal's Rotate key button rewrite every client
+  configuration file on this machine that already carried the old key — each
+  client's documented path, plus the project-scoped files beside wherever the
+  daemon was started — and both then list what they changed. A file is touched
+  only when the exact old key appears in it, it is replaced through a
+  neighbouring temporary file rather than in place, and no file is ever
+  created. Rotating used to leave every configured client authenticating with
+  a key the daemon had stopped accepting.
+- **Bulk forget, and deleting a store.** The Files page carries a checkbox per
+  row and forgets the selection in one call, reporting how many files and
+  chunks went and naming anything selected that was never indexed;
+  `/api/forget` takes `paths` as well as `path`, and one path answers exactly
+  as it did. `semlith drop <store>` and the Stores page's Delete remove a
+  store's vectors, chunks, graph, ledger and registry entry. The corpus is not
+  touched. A store held by a running daemon is closed through it: the watcher
+  stops and releases its lock, the readers are dropped, and only then are the
+  files removed — so the daemon loses a store rather than its life.
+- **An index run says what it is doing.** The stream carries a line before the
+  writer reaches the job — it is one thread, and it finishes what the watcher
+  is doing first — and then a line per file with what happened to it:
+  indexing, unchanged, skipped or removed. Only the files being embedded used
+  to be reported, so a re-index of an unchanged corpus said nothing at all
+  between "started" and "done", which reads as a hang. The Index view shows
+  the outcome, the running chunk count and the rate beside each path.
+- **A request no longer waits for the watcher.** The catch-up pass a store
+  runs when the daemon starts steps aside the moment anything is queued, and
+  finishes itself when the queue is empty again — so the first index from the
+  portal on a cold store begins in about 200ms rather than after the whole
+  tree. Shutdown interrupts it too.
+- **Pause and stop an index run.** Start becomes Pause while a run is on, and
+  Stop asks first: stopping undoes everything the run embedded, so the store is
+  exactly as it was before it started and the next attempt begins at 0%. A
+  half-indexed corpus is worse than none, because nothing in the store says
+  which half it is. `POST /api/index/control` takes `pause`, `resume` or
+  `stop`; the run is asked at each file boundary, never inside a file. A stop
+  asked for while the job is still queued is answered from the queue itself, in
+  about a millisecond, because nothing of it has run. A run longer than the
+  writer's time slice is re-queued behind whatever the watcher had waiting and
+  carries on by itself, on the same stream: the reader is never asked to press
+  the button again, and a stop undoes every slice of the run rather than the
+  one that happened to be going.
+- **An endpoint switch.** `semlith start --no-mcp-http` starts with `/mcp`
+  closed, and the Agents page starts and stops it while the daemon runs.
+  Closing it drops the route, not the daemon: the stores stay open, the watcher
+  keeps running and the portal is unaffected.
+- **Image search.** `.png`, `.jpg`, `.jpeg`, `.webp` and `.gif` files are
+  embedded locally with CLIP ViT-B/32 into a second vector space beside the text
+  index, and a text query is embedded with the matching text encoder, so a
+  sentence such as "the architecture diagram with the queue" finds the picture.
+  An image hit carries its path and pixel size where a chunk carries a line
+  range, in the CLI, in `--json`, over MCP and in the portal, which previews it
+  inline. It is not OCR: an image is matched by what it depicts, and a dense
+  text screenshot ranks poorly. The two model files are fetched on the first
+  image a store indexes rather than at start, go to the same cache as the text
+  model, and `--airgap` refuses them by name — a store that never holds an image
+  never downloads them.
+- **Sorting and pagination on every table the portal renders.** One component
+  behind all of them, so a table cannot gain sorting on one page and not
+  another. The Files table sorts and pages on the server, so ordering a column
+  orders the whole store rather than the rows that happened to be loaded, and
+  the silent truncation at 500 files is gone.
+- **An `indexed` column on the Files page**, and a header that states files,
+  formats and stores from the store's own queries rather than from the rows on
+  screen. The Stores page gains the same kind of measured totals: lines across
+  every indexed file, how many formats they span and how many readers are in
+  use.
+
+### Changed
+
+- **The portal is rebuilt against its design.** The Graph page draws symbols as
+  labelled rounded boxes on a full-bleed canvas with arrowheads, solid edges for
+  extracted and dashed for inferred, the selection in accent with its
+  neighbours lifted, a floating legend, edge-kind filters and a hover card
+  naming a symbol's kind, file, store and caller and callee counts. Stores,
+  Index, Agents, Ledger, Privacy and About are rebuilt to match. Type, spacing,
+  line height, motion, hover and focus all come from one token block rather
+  than from each component, and every page has one scrolling region, so a
+  header no longer scrolls away with the content under it.
+- **The product is written "Semlith" in prose**, and stays lowercase wherever it
+  is an identifier: every command, every MCP tool name, `~/.semlith`, the crate
+  and the binary. A command inside a sentence is set in mono, which is what
+  makes the difference read as a rule rather than as a typo.
+- **The Linux prebuilt binaries are built on 22.04 runners**, so they need
+  glibc 2.35 rather than 2.39 and run on Debian 12, Ubuntu 22.04 LTS, RHEL and
+  Rocky 9 and Amazon Linux 2023. The release build now asserts the floor, so it
+  cannot rise again without failing. Closes [#57](https://github.com/semlith/semlith/issues/57).
+- **`initialize`, `tools/list` and `ping` answer with no store open.** An agent
+  connecting to a fresh install is told which tools exist rather than that the
+  daemon has nothing to serve.
+
+### Removed
+
+- **`semlith impact`, the `semlith_impact` MCP tool and `GET /api/impact`.**
+  Reverse reachability leaves the free product whole rather than in pieces — the
+  Impact page, the Graph rail's blast-radius action, the Search page's link to
+  it, `Fleet::impact_in` and `graph::impact` go with them, and the advertised
+  tool count drops from ten to nine. It returns in 0.14.0 as a paid surface.
+
+  **This is a break in the agent-facing surface.** An agent with
+  `semlith_impact` in a saved prompt or a committed `.mcp.json` breaks on
+  upgrade, and there is no shim. `semlith symbol`, `semlith neighbors`,
+  `semlith path` and their three MCP tools are unchanged.
+
 ### Fixed
 
+- **A tooltip inside a table was unreadable.** It was drawn as a `::after` on
+  the element it described, and `.table-wrap` carries `overflow: auto`, so a
+  scroll container clipped it — the Files page's path tip, which is the reason
+  the feature exists, was the one that could not be read. There is now one
+  tooltip for the whole portal, in a fixed element outside every scroll
+  container, which flips rather than overflowing the viewport and answers
+  keyboard focus as well as the pointer.
+- **The Index page painted an empty bordered box.** `.note` was declared twice
+  — inline in one place and as a padded card in another — and the later
+  declaration won for every user of the class. `.pill` had the same defect. Both
+  are now declared once.
+- **`--airgap` could have fetched a model.** The check asked whether the model
+  cache held anything rather than whether *that* model was in it, so a machine
+  with the text model pre-seeded would have downloaded CLIP on the first image
+  it indexed. It now asks about the model it is being asked to load.
+- **A route that no longer exists answers 404** rather than 405. A removed
+  route reading as "wrong method" is an invitation to go looking for the right
+  one.
 - **The install script's progress bar, properly this time.** 0.12.0 claimed to
   have fixed this by resolving the release URL's redirect first. That was the
   wrong diagnosis and the fix was close to a no-op: measured against the real
@@ -849,7 +998,9 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/semlith/semlith/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/semlith/semlith/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/semlith/semlith/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/semlith/semlith/releases/tag/v0.10.0
 [0.9.0]: https://github.com/semlith/semlith/releases/tag/v0.9.0

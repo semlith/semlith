@@ -82,6 +82,27 @@ impl Upstream {
         self.request("POST", "/api/mcp", Some(request), CALL_TIMEOUT)
     }
 
+    /// Tell a running daemon to take up a key that has just been written.
+    ///
+    /// The daemon holds the key in memory, so a rotation performed by another
+    /// process has to reach it or the running endpoint would keep accepting
+    /// only the old one — and the point of the grace period is that it accepts
+    /// both until it exits.
+    pub fn adopt_key(&self, key: &str, now: bool) -> Result<String> {
+        let body = serde_json::json!({ "key": key, "now": now }).to_string();
+        self.request("POST", "/api/key", Some(&body), CALL_TIMEOUT)
+    }
+
+    /// Ask the daemon to close and delete a store.
+    ///
+    /// Through the daemon rather than behind its back: it is the process
+    /// holding the store's lock, and deleting the files under an open writer
+    /// is how a half-deleted store happens.
+    pub fn delete_store(&self, name: &str) -> Result<String> {
+        let body = serde_json::json!({ "store": name }).to_string();
+        self.request("POST", "/api/store/delete", Some(&body), CALL_TIMEOUT)
+    }
+
     /// One HTTP request over loopback, hand-written for the same reason the
     /// server is: this is the whole of the client semlith needs.
     fn request(

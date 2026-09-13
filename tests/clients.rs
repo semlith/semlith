@@ -22,19 +22,34 @@ const README: &str = include_str!("../README.md");
 const SECTION: &str = "### Setting it up in your client";
 
 /// Every client the release promises a stanza for.
-const CLIENTS: [&str; 12] = [
+const CLIENTS: [&str; 27] = [
     "Claude Code",
-    "Claude Desktop",
     "OpenAI Codex",
-    "GitHub Copilot in VS Code",
+    "OpenCode",
+    "IO CLI",
     "GitHub Copilot CLI",
+    "Gemini CLI",
+    "Qwen Code",
+    "Amp",
+    "Crush",
+    "Droid",
+    "Goose",
+    "Amazon Q Developer CLI",
+    "OpenClaw",
+    "DeepSeek",
+    "Warp",
+    "GitHub Copilot in VS Code",
     "Cursor",
     "Windsurf",
     "Zed",
-    "Gemini CLI",
     "JetBrains",
     "Cline",
-    "Goose",
+    "Roo Code",
+    "Kilo Code",
+    "Continue",
+    "Kiro",
+    "LM Studio",
+    "Claude Desktop",
 ];
 
 /// Since 0.9.0 a stanza carries no path at all: the server resolves its own
@@ -79,6 +94,11 @@ fn no_stanza_carries_a_store_path() {
     // The prose above the stanzas still explains `--store`, which is still a
     // supported flag. It is the pasteable blocks that must not carry one.
     for (language, body) in blocks(&section()) {
+        // An HTTP stanza launches nothing: it holds a URL and a header, and
+        // has no argument list to check. It is checked below instead.
+        if is_http(&body) {
+            continue;
+        }
         if !names_semlith(&body) {
             continue;
         }
@@ -95,6 +115,49 @@ fn no_stanza_carries_a_store_path() {
     }
 }
 
+/// The HTTP stanzas name the endpoint the daemon serves and carry a bearer
+/// credential, and nothing else in the section does.
+///
+/// From 0.13.0 `semlith start` answers MCP at `/mcp` as well as over stdio,
+/// and a stanza that named the wrong port or dropped the header would be a
+/// documented way to fail to connect.
+#[test]
+fn the_http_stanzas_name_the_endpoint_and_carry_a_credential() {
+    let http: Vec<(String, String)> = blocks(&section())
+        .into_iter()
+        .filter(|(_, body)| is_http(body))
+        .collect();
+    assert!(
+        http.len() >= 2,
+        "the HTTP section documents {} stanzas",
+        http.len()
+    );
+    for (language, body) in &http {
+        assert!(
+            body.contains("http://127.0.0.1:7365/mcp"),
+            "a {language} HTTP stanza does not name the endpoint:\n{body}"
+        );
+        assert!(
+            body.contains("Authorization") && body.contains("Bearer sml_"),
+            "a {language} HTTP stanza does not carry the agent key:\n{body}"
+        );
+        assert!(
+            !body.contains(NO_PATHS),
+            "a {language} HTTP stanza carries {NO_PATHS}:\n{body}"
+        );
+    }
+}
+
+/// Whether a block configures the HTTP endpoint rather than a subprocess.
+///
+/// Naming the endpoint is what decides it. The earlier test for a quoted
+/// `/mcp"` read a `codeql`-style one-liner — `--url http://127.0.0.1:7365/mcp`
+/// with no quotes — as a subprocess stanza and then asked it what arguments it
+/// passed the binary.
+fn is_http(body: &str) -> bool {
+    body.contains("127.0.0.1:7365/mcp") || body.contains("--transport http")
+}
+
 /// Whatever the client's file format, the server it launches is semlith, and
 /// the command line it launches it with has to be one semlith answers — now
 /// with no store flag, against whatever the registry holds.
@@ -103,20 +166,32 @@ fn no_stanza_carries_a_store_path() {
 fn every_stanza_launches_a_server_that_answers() {
     let home = two_registered_stores();
 
-    let stanzas = blocks(&section());
+    let all = blocks(&section());
+    // Every client has a stanza, and several have two — so the section can
+    // never quietly shrink to one example that happens to still work. Most of
+    // them are HTTP since 0.13.0; those are asserted by
+    // `the_http_stanzas_name_the_endpoint_and_carry_a_credential`, and only
+    // the subprocess ones can be launched here.
+    assert!(
+        all.len() >= CLIENTS.len(),
+        "{} stanzas for {} clients",
+        all.len(),
+        CLIENTS.len()
+    );
+
+    let stanzas: Vec<(String, String)> =
+        all.into_iter().filter(|(_, body)| !is_http(body)).collect();
     for (language, body) in &stanzas {
         assert!(
             names_semlith(body),
             "a {language} stanza does not name the semlith binary:\n{body}"
         );
     }
-    // Every client has a stanza, and several have two — so the section can
-    // never quietly shrink to one example that happens to still work.
     assert!(
-        stanzas.len() >= CLIENTS.len(),
-        "{} stanzas for {} clients",
-        stanzas.len(),
-        CLIENTS.len()
+        stanzas.len() >= 4,
+        "the section documents {} subprocess stanzas; the stdio path is no \
+         longer exercised",
+        stanzas.len()
     );
 
     let named = answers(&home, &["mcp".to_string()]);
@@ -198,8 +273,12 @@ fn section() -> String {
         .find(SECTION)
         .unwrap_or_else(|| panic!("the README has no {SECTION:?} heading"));
     let rest = &README[start..];
-    let end = rest[SECTION.len()..]
-        .find("\n## ")
+    // Ends at the next heading of its own level or above: the
+    // `### Connecting over HTTP` section below it is not part of any client.
+    let end = ["\n## ", "\n### "]
+        .iter()
+        .filter_map(|marker| rest[SECTION.len()..].find(marker))
+        .min()
         .map(|i| i + SECTION.len())
         .unwrap_or(rest.len());
     rest[..end].to_string()
@@ -260,9 +339,12 @@ fn args_of(body: &str) -> Vec<String> {
     tokens[binary + 1..=last]
         .iter()
         // Braces, `=`, `--` and YAML dashes are the config formats' own
-        // punctuation, and `args` is their word for "what follows". None of
-        // them is an argument the binary ever sees.
-        .filter(|t| t.chars().any(char::is_alphanumeric) && *t != "args")
+        // punctuation, and `args` is their word for "what follows" — spelled
+        // `args` in a JSON stanza and `--args` on a command line. None of them,
+        // and no other flag belonging to the client's own CLI, is an argument
+        // the binary ever sees. A `--store` would be caught by the check above
+        // this one rather than here.
+        .filter(|t| t.chars().any(char::is_alphanumeric) && !t.starts_with('-') && *t != "args")
         .cloned()
         .collect()
 }

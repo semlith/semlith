@@ -576,33 +576,19 @@ fn trim_literal(raw: &str) -> &str {
 /// truncated answer says it was truncated rather than pretending to be whole.
 pub const MAX_NODES: usize = 2000;
 
-/// Hops `impact` walks when nobody says otherwise.
-pub const DEFAULT_DEPTH: u32 = 3;
-
-/// The edge kinds that mean "depends on", which are the only ones a blast
-/// radius or a path is about.
+/// The edge kinds that mean "depends on", which are the only ones a path is
+/// about.
 ///
 /// `defines` and `contains` are structural: they say a symbol sits inside a
 /// file or another symbol. True, and useless here — every symbol is reached in
-/// one hop from the file it lives in, so including them makes the blast radius
-/// of anything at least its whole file, and makes a path between two unrelated
-/// functions in one file look like a two-hop dependency. Neighbours still show
-/// them, because "what is in this" is a question someone asks.
+/// one hop from the file it lives in, so including them would make a path
+/// between two unrelated functions in one file look like a two-hop
+/// dependency. Neighbours still show them, because "what is in this" is a
+/// question someone asks.
 pub const DEPENDENCY_KINDS: [&str; 3] = ["calls", "imports", "references"];
 
 fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
-}
-
-/// A symbol a traversal reached, and how it got there.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Reached {
-    #[serde(flatten)]
-    pub symbol: crate::store::SymbolRow,
-    /// The edge kind that reached it.
-    pub via: String,
-    pub confidence: String,
-    pub hops: u32,
 }
 
 /// One edge of a path, as the path finder renders it.
@@ -627,46 +613,6 @@ pub fn neighbours(db: &rusqlite::Connection, name: &str, kinds: &[String]) -> Re
         callers: crate::store::edges_in(db, name, kinds)?,
         callees: crate::store::edges_out(db, name, kinds)?,
     })
-}
-
-/// Everything that reaches `name` within `depth` hops, walking edges backwards.
-///
-/// The blast radius: what breaks if this changes. Bounded by `depth` and by
-/// [`MAX_NODES`], and a name already seen is never expanded twice, so a cycle
-/// terminates rather than looping.
-pub fn impact(db: &rusqlite::Connection, name: &str, depth: u32) -> Result<Vec<Reached>> {
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    seen.insert(name.to_string());
-
-    let mut reached: Vec<Reached> = Vec::new();
-    let mut frontier = vec![name.to_string()];
-    let kinds = dependency_kinds();
-
-    for hop in 1..=depth {
-        let mut next = Vec::new();
-        for current in &frontier {
-            for edge in crate::store::edges_in(db, current, &kinds)? {
-                if !seen.insert(edge.symbol.name.clone()) {
-                    continue;
-                }
-                next.push(edge.symbol.name.clone());
-                reached.push(Reached {
-                    symbol: edge.symbol,
-                    via: edge.kind,
-                    confidence: edge.confidence,
-                    hops: hop,
-                });
-                if reached.len() >= MAX_NODES {
-                    return Ok(reached);
-                }
-            }
-        }
-        if next.is_empty() {
-            break;
-        }
-        frontier = next;
-    }
-    Ok(reached)
 }
 
 /// The shortest chain of edges from `from` to `to`, if there is one.
@@ -1035,28 +981,8 @@ mod tests {
         assert!(n.callees.is_empty(), "d calls nothing");
     }
 
-    /// The count grows with depth and never shrinks, and the walk is backwards:
-    /// changing `d` reaches `c`, then `b`, then `a`.
-    #[test]
-    fn impact_grows_monotonically_with_depth() {
-        let db = chain();
-        let sizes: Vec<usize> = (1..=4)
-            .map(|depth| impact(&db, "d", depth).unwrap().len())
-            .collect();
-        assert_eq!(sizes, [2, 3, 4, 4], "c and e, then b, then a, then nothing");
-
-        let one = impact(&db, "d", 1).unwrap();
-        assert!(one.iter().all(|r| r.hops == 1));
-        assert!(one.iter().any(|r| r.symbol.name == "c"));
-    }
-
-    /// A symbol nothing calls has an empty blast radius rather than an error.
-    #[test]
-    fn impact_of_something_nothing_calls_is_empty() {
-        let db = chain();
-        assert!(impact(&db, "lonely", 5).unwrap().is_empty());
-    }
-
+    /// A cycle terminates rather than looping: the traversal marks a name seen
+    /// before it expands it, so d -> a -> b -> c -> d ends.
     #[test]
     fn a_cycle_terminates_instead_of_looping() {
         let db = chain();
@@ -1071,10 +997,11 @@ mod tests {
         let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
         crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED).unwrap();
         // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
-        let reached = impact(&db, "d", 50).unwrap();
+        let path = shortest_path(&db, "a", "d", 50).unwrap();
+        assert!(path.is_some(), "a still reaches d");
         assert!(
-            reached.len() <= 5,
-            "a cycle inflated the answer: {reached:?}"
+            path.unwrap().len() <= 4,
+            "a cycle inflated the shortest path"
         );
     }
 

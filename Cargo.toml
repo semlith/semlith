@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.89"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -20,7 +20,13 @@ clap = { version = "4.6.4", features = ["derive"] }
 cliclack = "0.5.6"
 hf-hub = { version = "0.5.0", default-features = false, features = ["ureq"] }
 libc = "0.2.189"
-fastembed = { version = "6.0.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub"] }
+fastembed = { version = "6.0.3", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub", "image-models"] }
+# Already in the tree under fastembed's image feature; named here to read an
+# image's pixel size out of its header without decoding the whole thing.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Already in the tree under fastembed; named here because the agent key must
+# come from the OS random source rather than from a hash of the clock.
+getrandom = "0.3.4"
 ignore = "0.4.31"
 pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }

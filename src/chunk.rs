@@ -81,6 +81,11 @@ pub fn reader_of(path: &Path) -> &'static str {
         Some("epub") => "epub",
         Some("rtf") => "rtf",
         Some("eml" | "mbox") => "mail",
+        // Not a reader at all in the sense the others are: an image is not
+        // turned into text, it is embedded as a picture. The Files page says
+        // `image` so that a row with no lines and no chunks reads as a
+        // deliberate kind of file rather than as one that failed to parse.
+        Some(ext) if crate::image::EXTENSIONS.contains(&ext) => "image",
         _ => "text",
     }
 }

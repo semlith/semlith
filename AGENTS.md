@@ -17,6 +17,7 @@ minutes.
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test                    # offline default set — this is what CI runs
+cargo test --test endpoint    # the HTTP MCP endpoint; no model, so it is in that set
 cargo build --release
 ```
 
@@ -27,9 +28,15 @@ embedding model on first run:
 cargo test -- --ignored                              # everything, incl. round trip
 cargo test --test mcp -- --ignored                   # one file
 cargo test --test mcp -- --ignored some_test_name    # one test
+cargo test --test image -- --ignored                 # images; downloads CLIP as well
 cargo test --release --test measure -- --ignored --nocapture   # perf claims; needs --release
 cargo test --release --test shards -- --ignored --nocapture
 ```
+
+`tests/endpoint.rs` is the exception in the other direction: it drives the
+daemon's `/mcp` route and its credential, neither of which needs an embedding
+model, so it runs in the default set and a break in the agent key's reach fails
+CI rather than an `--ignored` run somebody remembered to do.
 
 `tests/measure.rs` and `tests/shards.rs` are `#![cfg(unix)]` and assert real
 thresholds — run them in `--release` or the numbers fail honestly.
@@ -52,6 +59,10 @@ A store directory holds two pieces of state that must agree:
   stores (pre-0.7.0) keep a single `index.tv` and are never migrated.
 - **`store.db`** — SQLite: chunk text, file path, line span, content hash.
 
+A store that has indexed an image holds a third, `images/`, in the same shard
+layout at CLIP's 512 dimensions. It is opened lazily, so a store that never
+meets an image never grows the directory.
+
 `chunks.id` is `AUTOINCREMENT` specifically so SQLite cannot reissue a deleted
 row's id — a reused id would fall inside two shards' ranges at once. Do not
 change that.
@@ -64,7 +75,10 @@ FTS5 as bare terms, never as typed, because `MATCH` is a query language.
 
 `index.rs` reads nothing from disk until a caller asks something only vectors
 can answer, so `stats`, `files`, and an idle MCP server cost no vectors. Peak
-RSS is ~600 MB regardless of corpus size; keep it that way.
+RSS is ~600 MB regardless of corpus size; keep it that way. A store that holds
+images loads CLIP's two encoders on top of that, on the first image it indexes
+or is searched for — measured per store rather than folded into the number
+above, which is about the text path.
 
 Module responsibilities:
 
@@ -79,6 +93,7 @@ Module responsibilities:
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/graph.rs` | tree-sitter extraction, and the bounded traversals over the edges |
+| `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
 | `src/mcp.rs` | Hand-rolled stdio JSON-RPC MCP server |
@@ -134,12 +149,34 @@ Module responsibilities:
   in different modules is the normal case, so nothing that renders an edge may
   present the second as the first.
 - **Traversal is bounded and reads one hop at a time.** No `petgraph`, no
-  in-memory whole-graph structure: `graph::impact` and `graph::shortest_path`
-  walk the indexed `edges(src)`/`edges(dst)` columns under a depth limit and
-  `graph::MAX_NODES`, which is what keeps peak RSS flat as the corpus grows.
-  `impact` and `path` follow `DEPENDENCY_KINDS` only — the structural edges are
-  true and useless for a blast radius, since every symbol is one hop from the
-  file that defines it.
+  in-memory whole-graph structure: `graph::neighbours` and
+  `graph::shortest_path` walk the indexed `edges(src)`/`edges(dst)` columns
+  under a depth limit and `graph::MAX_NODES`, which is what keeps peak RSS flat
+  as the corpus grows. `shortest_path` follows `DEPENDENCY_KINDS` only — the
+  structural edges are true and useless for reachability, since every symbol is
+  one hop from the file that defines it.
+- **Reverse reachability left the free product in 0.13.0.** `semlith impact`,
+  `semlith_impact` and `/api/impact` are gone, with no shim: an agent carrying
+  `semlith_impact` in a saved prompt or a committed `.mcp.json` breaks on
+  upgrade, deliberately, because a stub answering a graph question wrongly is
+  worse than a tool that is not there. The `edges_dst` index stays — it is what
+  `graph::neighbours` reads to answer the callers half — and the traversal
+  returns in 0.14.0 as a paid surface. Do not reintroduce it here.
+- **An image is embedded in the same `index_set` pass that embeds text**, inside
+  the same held lock, on the same changed-file path. There is no image build
+  step and there must not be one, for the reason there is no `graph build`: the
+  pass that re-reads a file is the pass that re-embeds it, so no artifact can go
+  stale. `forget` takes the row and the vector away together.
+- **The query for the image half goes through CLIP's text encoder**, never the
+  store's own model. A granite vector and a CLIP vector are numbers of different
+  lengths about different things, and comparing them returns whatever the
+  arithmetic happens to produce — which is why the two CLIP repositories in
+  `image.rs` are fixed as a pair rather than selectable.
+- **The images table and `images/` are additive, so `FORMAT_VERSION` does not
+  move.** Both are `IF NOT EXISTS`, and a binary that knows nothing about either
+  reads such a store as the text corpus it already was. Anything that would make
+  an older binary misread a store is a format bump instead; adding a table it
+  ignores is not.
 - **The ledger is off unless asked for**, and its rows are hash-chained: each
   carries the hash of the one before it, so `store::ledger_break` finds an edited
   or deleted row. Recording and `semlith ledger` are free on every tier,
@@ -147,6 +184,21 @@ Module responsibilities:
 - **`mcp::tool_names` is the one tool list.** `routes::agents` reads it rather
   than repeating it, because two hand-written copies is how a tool ends up served
   by the server and invisible in the portal.
+- **Two credentials, and their reach is what separates them.** The per-run
+  session token opens the portal and every `/api/*` route; the agent key opens
+  `http::MCP_PATH` and nothing else. That asymmetry is the whole design: a key
+  that sits in a client's config file on disk must not be able to rotate a
+  token, adopt a store or start an upgrade, so no route outside `/mcp` may ever
+  learn to accept one. `tests/endpoint.rs` asserts it.
+- **The agent key is persisted, and never reminted implicitly.**
+  `home::agent_key` creates it on first read and returns it forever after;
+  `home::rotate_agent_key` is a separate function precisely so nothing can
+  rotate by accident from the state of the disk. A key that changed per run
+  would make every stanza stale on every restart, and `setup.rs` can only repair
+  Claude Code's config — everything else would need a human. Rotating the
+  session token therefore does not disconnect agents, and `/mcp` keeps serving
+  the previous key until the daemon that held it exits, so an open session
+  finishes.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
 - **`add` is the only command that reaches the network besides `upgrade` and
@@ -183,37 +235,47 @@ contract lives in `docs/compatibility.md`.
   — build it once (recipe in `CONTRIBUTING.md`), not per release.
 - Public surface changes must land in `docs/compatibility.md`; README client
   stanzas are executed by `tests/clients.rs`, so a renamed flag breaks there.
+  `clients.rs` also parses the README's structure, not only its fences: the
+  stdio stanzas are read from under `### Setting it up in your client` and
+  grouped by `#### Terminal`, `#### Editors` and `#### Desktop apps`, and the
+  HTTP ones from under `### Connecting over HTTP`. Reword any of those five
+  headings and the portal's Agents page silently empties — change the prose
+  around them, not them.
 
 ## Deliberately out of scope
 
-**Local means local, and it is checkable.** Since 0.9.0 semlith does listen on a
-port — `semlith start` serves the portal — under rules that are tested rather
-than stated, and that are not up for relaxation without an issue like
+**Local means local, and it is checkable.** Since 0.9.0 Semlith does listen on a
+port — `semlith start` serves the portal, and from 0.13.0 MCP at `/mcp` as well
+— under rules that are tested rather than stated, and that are not up for
+relaxation without an issue like
 [#41](https://github.com/semlith/semlith/issues/41):
 
 - `127.0.0.1` is the only bind address, and there is no flag to change it.
-- Every request needs the per-run token, as a `SameSite=Strict; HttpOnly`
-  cookie. Without it: 401 and an empty body.
+- The portal and every `/api/*` route need the per-run token, as a
+  `SameSite=Strict; HttpOnly` cookie. Without it: 401 and an empty body. `/mcp`
+  takes the agent key as a bearer instead, and is the only route that does.
 - The `Host` header must be `localhost`, `127.0.0.1` or `::1`. Otherwise: 400.
 - Every response carries a `Content-Security-Policy` allowing only `'self'`, and
   no CORS header is emitted anywhere.
 - Every byte the portal loads is `include_bytes!`d into the binary. No CDN, no
   build step, no npm. The page loads with the cable unplugged.
-- No telemetry, no analytics, and no update check semlith makes on its own.
+- No telemetry, no analytics, and no update check Semlith makes on its own.
   `semlith upgrade` and `semlith upgrade --check` exist from 0.10.0 and reach
   GitHub, but only in the second a user asks: there is no startup check, no
   timer, and no banner that appears without a click. `semlith add` is the same
   shape from 0.11.0 — one request, for one URL, because somebody asked for it,
-  with no crawling and no re-fetching. The other two downloads are the embedding
-  model, once, on first index, and `semlith setup`'s pre-fetch of the same file
-  — `--airgap` refuses all of it.
+  with no crawling and no re-fetching. The other downloads are all model
+  weights: the embedding model, once, on first index; `semlith setup`'s
+  pre-fetch of the same file; and CLIP's two halves, on the first image a store
+  indexes and never at start — `--airgap` refuses all of it, naming the model it
+  would have fetched.
 
-Discuss in an issue before building: any other bind address, MCP over HTTP as an
-endpoint agents connect to directly, hosted embedding APIs, any outbound
-connection, or a user-editable config file. `~/.semlith/registry.json` is not
-one: it is tool-written state, like `store.db` and the lock file. semlith writes
-it, nothing documents a way to hand-edit it, and `--store`/`SEMLITH_STORE`
-remain the only way a user names a store.
+Discuss in an issue before building: any other bind address, hosted embedding
+APIs, any outbound connection, or a user-editable config file.
+`~/.semlith/registry.json` is not one: it is tool-written state, like
+`store.db`, `agent.key` and the lock file. Semlith writes it, nothing documents
+a way to hand-edit it, and `--store`/`SEMLITH_STORE` remain the only way a user
+names a store.
 
 ## Portal parity
 
@@ -230,3 +292,10 @@ Tags `v*` trigger `.github/workflows/release.yml`, which first verifies the tag
 matches `Cargo.toml`'s version. GitHub Actions must stay SHA-pinned with a
 trailing `# vN` comment for Dependabot. No Intel macOS target — ONNX Runtime
 stopped publishing `osx-x86_64`.
+
+The Linux jobs pin `ubuntu-22.04`, not `-latest`. A binary built on 24.04
+carries a glibc 2.39 floor and is dead on Debian 12 and Ubuntu 22.04 LTS; 22.04
+is glibc 2.35, which is what the `glibc floor` step asserts. That assertion
+reads the *versions* of the symbols, because the floor rose across three
+releases without failing a single build when nothing checked them. Moving those
+runners forward means moving the floor, so do not.

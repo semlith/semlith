@@ -38,6 +38,21 @@ struct Member {
 }
 
 impl Fleet {
+    /// A fleet with nothing in it.
+    ///
+    /// For the MCP methods that are about the server rather than about a
+    /// corpus — `initialize`, `tools/list`, `ping`. An agent that connects to
+    /// a daemon before anything has been indexed should be told which tools
+    /// exist, not that the daemon is broken.
+    pub fn empty() -> Self {
+        Self {
+            members: Vec::new(),
+            embedders: Vec::new(),
+            embeds: 0,
+            quiet: true,
+        }
+    }
+
     /// Open every store in `dirs`, which must all already be stores.
     ///
     /// The same store named twice — the flag repeated, a relative path beside
@@ -255,16 +270,6 @@ impl Fleet {
         let callers = self.graph_in(only, |s| crate::store::edges_in(s.db(), name, kinds))?;
         let callees = self.graph_in(only, |s| crate::store::edges_out(s.db(), name, kinds))?;
         Ok(crate::graph::Neighbours { callers, callees })
-    }
-
-    /// What reaches `name` within `depth` hops, across the chosen stores.
-    pub fn impact_in(
-        &self,
-        only: Option<&[String]>,
-        name: &str,
-        depth: u32,
-    ) -> Result<Vec<crate::graph::Reached>> {
-        self.graph_in(only, |s| crate::graph::impact(s.db(), name, depth))
     }
 
     /// The shortest chain from `from` to `to`, in the first store that has one.
@@ -504,12 +509,6 @@ impl Labelled for crate::store::EdgeEnd {
     }
 }
 
-impl Labelled for crate::graph::Reached {
-    fn label(&mut self, store: &str) {
-        self.symbol.store = Some(store.to_string());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +522,7 @@ mod tests {
             text: String::new(),
             store: None,
             lists: vec!["vector"],
+            image: None,
         }
     }
 

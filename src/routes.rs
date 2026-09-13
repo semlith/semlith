@@ -21,9 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-/// How many files one Files request returns before it starts counting instead.
-/// A corpus is tens of thousands of files and a browser table is not.
-const FILE_PAGE: usize = 500;
+/// The largest page the Files route will serve. A corpus is tens of thousands
+/// of files and a browser table is not; the portal asks for 8 to 50 and the
+/// cap is what stops a hand-written query asking for all of them.
+const FILE_PAGE: i64 = 500;
 
 pub fn handler(state: Arc<State>) -> Handler {
     Arc::new(move |request| route(&state, request))
@@ -53,9 +54,9 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/symbol") => symbol(state, request),
         (true, _, "/api/neighbors") => neighbors(state, request),
         (true, _, "/api/path") => shortest_path(state, request),
-        (true, _, "/api/impact") => impact(state, request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/ledger") => ledger(state),
+        (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
 
         (_, true, "/api/index") => index(state, request),
@@ -64,12 +65,31 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
+        // MCP over HTTP, on the path a client's configuration names. The
+        // credential is checked in `http`, which accepts the agent key here
+        // and nowhere else.
+        (_, true, crate::http::MCP_PATH) => mcp(state, request),
+        (_, true, "/api/endpoint") => endpoint(state, request),
+        (_, true, "/api/key") => key(state, request),
+        (_, true, "/api/setup") => fix_setup(request),
+        (_, true, "/api/root") => root(state, request),
+        (_, true, "/api/store/delete") => delete_store(state, request),
+        (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
-        // A method that exists on another verb is worth telling apart from a
-        // route that does not exist: one is a bug in the page, the other is a
-        // typed URL.
-        (_, _, p) if p.starts_with("/api/") => Response::error(405, "wrong method for this route"),
+        // A route that exists on another verb is worth telling apart from one
+        // that does not exist at all: the first is a bug in the page, the
+        // second is a typed or stale URL. Only the write routes are listed,
+        // because a GET of one of them is the case that actually happens — a
+        // browser replaying a URL — and a path that is on no list at all, like
+        // a route a later release removed, is a 404 rather than an invitation
+        // to try another verb.
+        (
+            _,
+            _,
+            "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/rotate" | "/api/mcp"
+            | "/api/upgrade",
+        ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
     }
 }
@@ -102,13 +122,31 @@ fn stores(state: &Arc<State>) -> Response {
                     s.dim(),
                     s.len(),
                     s.shards(),
+                    // What the store spans, which `stats` cannot answer: the
+                    // Stores page states lines of code and how many file types
+                    // and readers they run to, and a page that counts its own
+                    // rows to get there is describing the page.
+                    store::file_facets(s.db(), &[]).unwrap_or_default(),
                 )
             });
 
-        let (files, chunks, bytes, model, dim, vectors, shards) = match stats {
-            Some((Ok((f, c, b)), model, dim, len, shards)) => (f, c, b, model, dim, len, shards),
-            _ => (0, 0, 0, String::new(), 0, 0, None),
+        let (files, chunks, bytes, model, dim, vectors, shards, facets) = match stats {
+            Some((Ok((f, c, b)), model, dim, len, shards, facets)) => {
+                (f, c, b, model, dim, len, shards, facets)
+            }
+            _ => (0, 0, 0, String::new(), 0, 0, None, store::Facets::default()),
         };
+
+        // The reader is a property of the code rather than a column, so it is
+        // derived from the extensions the store actually holds rather than
+        // stored a second time beside them.
+        let mut readers: Vec<&'static str> = facets
+            .extensions
+            .iter()
+            .map(|ext| chunk::reader_of(Path::new(&format!("x.{ext}"))))
+            .collect();
+        readers.sort_unstable();
+        readers.dedup();
 
         out.push(json!({
             "name": handle.name,
@@ -126,6 +164,9 @@ fn stores(state: &Arc<State>) -> Response {
             "dim": dim,
             "vectors": vectors,
             "shards": shards.map(|(n, max)| json!({ "count": n, "resident": max })),
+            "lines": facets.lines,
+            "formats": facets.extensions.len(),
+            "readers": readers.len(),
             "watching": handle.watching.load(Ordering::Relaxed),
             "queue": handle.queue_depth(),
             "last_write": handle.last_write.load(Ordering::Relaxed),
@@ -153,38 +194,99 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         return Response::json(&json!({ "files": [], "total": 0 }));
     };
 
-    let mut rows = Vec::new();
-    let mut total = 0usize;
+    let sort = request
+        .query("sort")
+        .and_then(store::FileSort::parse)
+        .unwrap_or(store::FileSort::Path);
+    let desc = request.query("dir") == Some("desc");
+    let limit = request
+        .query("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(15)
+        .clamp(1, FILE_PAGE);
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0)
+        .clamp(0, i64::from(u32::MAX));
+
+    // Each store is asked for the first `offset + limit` rows in the requested
+    // order and the merge picks the page out of the union. Asking each store
+    // for the page directly would be wrong the moment two stores are open: the
+    // tenth row overall is not the tenth row of either of them.
+    let take = offset.saturating_add(limit);
+    let mut merged: Vec<(String, store::FileRow)> = Vec::new();
+    let mut total = 0i64;
+    let mut extensions: Vec<String> = Vec::new();
+    let mut stores = 0usize;
     for (label, opened) in fleet.each() {
         if !only.is_empty() && !only.iter().any(|n| n == label) {
             continue;
         }
-        let listed = match store::file_rows(opened.db(), filter.groups()) {
+        stores += 1;
+        match store::file_count(opened.db(), filter.groups()) {
+            Ok(count) => total += count,
+            Err(e) => return Response::error(500, &e.to_string()),
+        }
+        match store::file_facets(opened.db(), filter.groups()) {
+            Ok(facets) => extensions.extend(facets.extensions),
+            Err(e) => return Response::error(500, &e.to_string()),
+        }
+        let listed = match store::file_rows(opened.db(), filter.groups(), sort, desc, take) {
             Ok(r) => r,
             Err(e) => return Response::error(500, &e.to_string()),
         };
-        total += listed.len();
-        for (path, bytes, chunks, lines) in listed {
-            if rows.len() >= FILE_PAGE {
-                continue;
-            }
-            let as_path = Path::new(&path);
-            rows.push(json!({
+        merged.extend(listed.into_iter().map(|row| (label.to_string(), row)));
+    }
+
+    merged.sort_by(|(_, a), (_, b)| {
+        let order = match sort {
+            store::FileSort::Path => a.path.cmp(&b.path),
+            store::FileSort::Bytes => a.bytes.cmp(&b.bytes),
+            store::FileSort::Chunks => a.chunks.cmp(&b.chunks),
+            store::FileSort::Lines => a.lines.cmp(&b.lines),
+            store::FileSort::Indexed => a.indexed_at.cmp(&b.indexed_at),
+        };
+        let order = if desc { order.reverse() } else { order };
+        order.then_with(|| a.path.cmp(&b.path))
+    });
+
+    let rows: Vec<Value> = merged
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .map(|(label, row)| {
+            let as_path = Path::new(&row.path);
+            json!({
                 "store": label,
-                "path": path,
+                "path": row.path,
                 "ext": as_path.extension().and_then(|e| e.to_str()).unwrap_or(""),
                 "lang": language_of(as_path),
                 "reader": chunk::reader_of(as_path),
-                "bytes": bytes,
-                "chunks": chunks,
-                "lines": lines,
-            }));
-        }
-    }
+                "bytes": row.bytes,
+                "chunks": row.chunks,
+                "lines": row.lines,
+                "indexed_at": row.indexed_at,
+            })
+        })
+        .collect();
 
-    // A truncated list that does not say it is truncated is how somebody
-    // concludes a file was never indexed.
-    Response::json(&json!({ "files": rows, "total": total, "page": FILE_PAGE }))
+    extensions.sort();
+    extensions.dedup();
+
+    Response::json(&json!({
+        "files": rows,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "sort": request.query("sort").unwrap_or("path"),
+        "dir": if desc { "desc" } else { "asc" },
+        // The header states what the whole listing spans, not what the page
+        // happens to hold: "9 formats" read off fifteen rows is a number about
+        // the table rather than about the corpus.
+        "formats": extensions.len(),
+        "stores": stores,
+    }))
 }
 
 /// The same fused search the CLI and `semlith_search` run.
@@ -250,6 +352,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "text": h.text,
                 "store": h.store.clone().or_else(|| single.then(|| label.clone()).flatten()),
                 "lists": h.lists,
+                "image": h.image.map(|px| json!({ "width": px.width, "height": px.height })),
             })
         })
         .collect();
@@ -349,19 +452,135 @@ fn ledger(state: &Arc<State>) -> Response {
 }
 
 fn models() -> Response {
-    let mut out = vec![json!({
-        "name": embed::GRANITE_NAME,
-        "dim": 384,
-        "description": "default. IBM Granite R2 small, int8, English",
-    })];
+    let mut out = vec![
+        json!({
+            "name": embed::GRANITE_NAME,
+            "dim": 384,
+            "description": "default. IBM Granite R2 small, int8, English",
+        }),
+        // Not a choice, so it is listed apart from the models a store can be
+        // built with: both halves of it are loaded together, on the first
+        // image a store indexes, and nothing selects them.
+        json!({
+            "name": crate::image::MODEL_NAME,
+            "dim": crate::image::DIM,
+            "description": "images. CLIP ViT-B/32, vision and text, fixed",
+            "code": "Qdrant/clip-ViT-B-32-vision",
+        }),
+    ];
     for info in TextEmbedding::list_supported_models() {
         out.push(json!({
             "name": info.model.to_string(),
             "dim": info.dim,
             "description": info.description,
+            "code": info.model_code,
         }));
     }
+
+    // Size is reported for a model this machine has actually downloaded, and
+    // left blank for one it has not. fastembed's catalogue carries no size, and
+    // a number copied from a model card is a claim about somebody else's file.
+    let cached = cached_model_sizes();
+    for model in &mut out {
+        let code = model.get("code").and_then(Value::as_str).unwrap_or("");
+        let key = code.rsplit('/').next().unwrap_or(code).to_ascii_lowercase();
+        if let Some(bytes) = cached.get(&key) {
+            model["bytes"] = json!(bytes);
+        }
+    }
+
     Response::json(&json!({ "models": out }))
+}
+
+/// How many bytes each model in the cache occupies, by its directory name.
+fn cached_model_sizes() -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(crate::model_cache_dir()) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let total = walk_bytes(&entry.path());
+        if total > 0 {
+            // fastembed names a cache directory `models--<org>--<model>`.
+            let key = name.rsplit("--").next().unwrap_or(&name).to_string();
+            *out.entry(key).or_insert(0) += total;
+        }
+    }
+    out
+}
+
+fn walk_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => walk_bytes(&entry.path()),
+            Ok(_) => entry.metadata().map(|m| m.len()).unwrap_or(0),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
+/// One indexed image, served to the Search page's preview.
+///
+/// Bounded to files the store has actually indexed as images: the path arrives
+/// from the page, and a route that read whatever path it was handed would be a
+/// file-read primitive behind a loopback port. The `images` table is the
+/// allowlist, so the only files this can serve are ones the user pointed
+/// semlith at.
+fn image_file(state: &Arc<State>, request: &Request) -> Response {
+    let Some(want) = request.query("path") else {
+        return Response::error(400, "missing path");
+    };
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::error(404, "no such image");
+    };
+
+    let indexed = fleet.each().any(|(_, store)| {
+        store
+            .db()
+            .query_row(
+                "SELECT 1 FROM images i JOIN files f ON f.id = i.file_id WHERE f.path = ?1",
+                rusqlite::params![want],
+                |_| Ok(()),
+            )
+            .is_ok()
+    });
+    if !indexed {
+        return Response::error(404, "no such image");
+    }
+
+    let path = Path::new(want);
+    let Ok(bytes) = std::fs::read(path) else {
+        // Indexed once and gone since: the row is real and the file is not.
+        return Response::error(404, "the file is no longer on disk");
+    };
+    let kind = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => return Response::error(404, "no such image"),
+    };
+    Response::new(200, kind, bytes)
 }
 
 fn languages() -> Response {
@@ -451,6 +670,11 @@ fn privacy(state: &Arc<State>) -> Response {
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
         "token_cookie": crate::http::TOKEN_COOKIE,
+        // Enough of the token to recognise the one this browser holds, and
+        // not enough to be one. The full value is in the cookie the browser
+        // already has and in the body of the rotate response, which sets the
+        // new cookie in the same breath — it is in no other response.
+        "token_preview": preview(&state.server.token()),
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
         "csp": "default-src 'self'",
         "cors": false,
@@ -458,12 +682,28 @@ fn privacy(state: &Arc<State>) -> Response {
     }))
 }
 
+/// The first sixteen characters of a secret, and an ellipsis.
+fn preview(secret: &str) -> String {
+    let head: String = secret.chars().take(16).collect();
+    if head.len() < secret.len() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 fn about(state: &Arc<State>) -> Response {
+    let binary = std::env::current_exe().unwrap_or_default();
     Response::json(&json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "binary": std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
+        "format_version": store::FORMAT_VERSION,
+        "binary": binary.display().to_string(),
+        // Measured rather than stated: the size of the file this process was
+        // started from.
+        "binary_bytes": std::fs::metadata(&binary).map(|m| m.len()).unwrap_or(0),
+        "target": format!("{} · {}", std::env::consts::ARCH, std::env::consts::OS),
+        "bind": format!("127.0.0.1:{}", state.server.port()),
+        "revisions": crate::mcp::SUPPORTED,
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),
@@ -488,14 +728,30 @@ fn about(state: &Arc<State>) -> Response {
 /// read — it asks `/api/setup` separately, and renders that panel when the
 /// answer arrives rather than holding the whole page for it.
 fn agents(state: &Arc<State>) -> Response {
+    let connections = state.clients();
+    let key = state.server.agent_key();
     Response::json(&json!({
         "forwarding": state.proxy_count() > 0,
-        "connected": state.proxy_count(),
+        "connected": connections.len(),
+        // Every client heard from recently, whichever transport it arrived on.
+        "connections": connections,
         // Read from the MCP server's own definitions rather than repeated
-        // here: a second copy is how a tool ends up served and invisible.
-        "tools": crate::mcp::tool_names(),
+        // here: a second copy is how a tool ends up served and invisible, and
+        // a second description is how it ends up documented as something else.
+        "tools": crate::mcp::tool_list()
+            .into_iter()
+            .map(|(name, about)| json!({ "name": name, "about": about }))
+            .collect::<Vec<_>>(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
+        "endpoint": {
+            "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
+            "open": state.server.mcp_open(),
+        },
+        // The live key, so the stanza the page shows is one that works. It is
+        // already on this machine in a file this user owns, and every stanza
+        // the page exists to hand out carries it.
+        "key": key,
         "install": {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,
@@ -508,6 +764,59 @@ fn agents(state: &Arc<State>) -> Response {
 /// read: nothing here installs anything.
 fn setup() -> Response {
     Response::json(&json!(crate::setup::status()))
+}
+
+/// Perform one setup step the page can see is not done.
+///
+/// A panel that reports "not on PATH" and then tells the reader to go and run a
+/// command is a panel that found the problem and declined to fix it. Only the
+/// steps that are safe without a prompt are here: PATH edits a shell rc file
+/// this tool owns a marked block in, and nothing else is offered.
+fn fix_setup(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    match body.get("step").and_then(Value::as_str) {
+        Some("path") => match crate::setup::run_path_step() {
+            Ok(step) => Response::json(&json!({ "step": step, "status": crate::setup::status() })),
+            Err(e) => Response::error(500, &e.to_string()),
+        },
+        Some(other) => Response::error(400, &format!("{other} is not a step this route runs")),
+        None => Response::error(400, "missing step"),
+    }
+}
+
+/// Point a registered store at another root.
+///
+/// For a corpus that moved: the registry still names the old directory and the
+/// portal shows the root as missing, so the fix is offered where the problem is
+/// visible. It rewrites the registry and nothing else — the store's vectors,
+/// chunks and graph are untouched, and the watcher picks the new root up on the
+/// next daemon start.
+fn root(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let (Some(store), Some(path)) = (
+        body.get("store").and_then(Value::as_str),
+        body.get("root").and_then(Value::as_str),
+    ) else {
+        return Response::error(400, "missing store or root");
+    };
+    match home::repoint(store, Path::new(path)) {
+        Ok(()) => Response::json(&json!({
+            "store": store,
+            "root": path,
+            "message": format!(
+                "{store} now covers {path}. It is watched from the next start of \
+                 the daemon; nothing was re-embedded."
+            ),
+            "restart": state.stores().iter().any(|s| s.name == store),
+        })),
+        Err(e) => Response::error(409, &e.to_string()),
+    }
 }
 
 // ----------------------------------------------------------------- graph
@@ -591,26 +900,6 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
     })
 }
 
-fn impact(state: &Arc<State>, request: &Request) -> Response {
-    let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
-        return Response::error(400, "missing name");
-    };
-    let name = name.to_string();
-    let depth = request
-        .query("depth")
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(crate::graph::DEFAULT_DEPTH)
-        .clamp(1, 20);
-    let only = request.query_all("store");
-    let empty = json!({ "reached": [], "depth": depth, "truncated": false });
-    with_fleet(state, empty, move |fleet| {
-        let only = (!only.is_empty()).then_some(only);
-        let reached = fleet.impact_in(only.as_deref(), &name, depth)?;
-        let truncated = reached.len() >= crate::graph::MAX_NODES;
-        Ok(json!({ "reached": reached, "depth": depth, "truncated": truncated }))
-    })
-}
-
 /// The nodes and edges the Graph page draws.
 ///
 /// Scoped to a store, to a directory, or to one symbol and its neighbourhood —
@@ -683,6 +972,48 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         Ok(progress) => stream(progress),
         Err(e) => Response::error(409, &e.to_string()),
     }
+}
+
+/// Pause, resume or stop the index run a store is working on.
+///
+/// Stopping undoes what the run embedded, so the store is as it was before it
+/// started — a half-indexed corpus is worse than none, because nothing says
+/// which half it is.
+fn index_control(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    match body.get("action").and_then(Value::as_str) {
+        Some("pause") => store
+            .paused
+            .store(true, std::sync::atomic::Ordering::Relaxed),
+        Some("resume") => store
+            .paused
+            .store(false, std::sync::atomic::Ordering::Relaxed),
+        Some("stop") => {
+            // The queue first: a job that has not started is answered from
+            // here, immediately, because there is nothing of it to undo.
+            store.cancel_queued();
+            store
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // Released, so a paused run reaches the check that stops it.
+            store
+                .paused
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        _ => return Response::error(400, "action must be \"pause\", \"resume\" or \"stop\""),
+    }
+    Response::json(&json!({
+        "store": store.name,
+        "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
+        "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+    }))
 }
 
 /// Create the store `path` belongs in and open it in this daemon.
@@ -783,23 +1114,95 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
-    let Some(path) = body.get("path").and_then(Value::as_str) else {
-        return Response::error(400, "no path given");
+    // One path or many. The Files page selects rows and forgets the set, and
+    // a set of one is the same statement as before.
+    let paths: Vec<String> = match (
+        body.get("path").and_then(Value::as_str),
+        body.get("paths").and_then(Value::as_array),
+    ) {
+        (Some(one), _) => vec![one.to_string()],
+        (None, Some(many)) => many
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        (None, None) => return Response::error(400, "no path given"),
     };
+    if paths.is_empty() {
+        return Response::error(400, "no path given");
+    }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
     // Not streamed: forgetting a file is one statement, and a client that has
-    // to parse a stream to learn a number is a client doing extra work.
-    let progress = match state.forget(&store, PathBuf::from(path)) {
-        Ok(p) => p,
-        Err(e) => return Response::error(409, &e.to_string()),
+    // to parse a stream to learn a number is a client doing extra work. A
+    // batch is those statements one after another, because the writer is one
+    // thread and running them together would not make it two.
+    let single = paths.len() == 1;
+    let mut forgot = 0_i64;
+    let mut images = 0_i64;
+    let mut missing: Vec<String> = Vec::new();
+    for path in &paths {
+        let progress = match state.forget(&store, PathBuf::from(path)) {
+            Ok(p) => p,
+            Err(e) => return Response::error(409, &e.to_string()),
+        };
+        let value = match progress.recv() {
+            Ok(v) => v,
+            Err(_) => return Response::error(500, "the writer stopped before answering"),
+        };
+        // One path keeps the answer it has always had, so the MCP tool and
+        // every existing caller read the same shape.
+        if single {
+            return Response::json(&value);
+        }
+        let chunks = value.get("forgot").and_then(Value::as_i64).unwrap_or(0);
+        if chunks == 0 && value.get("images").and_then(Value::as_i64).unwrap_or(0) == 0 {
+            missing.push(path.clone());
+        }
+        forgot += chunks;
+        images += value.get("images").and_then(Value::as_i64).unwrap_or(0);
+    }
+    let kept = paths.len() - missing.len();
+    Response::json(&json!({
+        "files": kept,
+        "asked": paths.len(),
+        "forgot": forgot,
+        "images": images,
+        "not_indexed": missing,
+        "message": format!(
+            "{kept} file{} forgotten, {forgot} chunk{} removed.",
+            if kept == 1 { "" } else { "s" },
+            if forgot == 1 { "" } else { "s" },
+        ),
+    }))
+}
+
+/// Delete a store: everything semlith derived from a corpus, and the registry
+/// entry naming it.
+///
+/// The files that were indexed are not touched, which is the line the portal
+/// says out loud before it asks for confirmation.
+fn delete_store(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
     };
-    match progress.recv() {
-        Ok(value) => Response::json(&value),
-        Err(_) => Response::error(500, "the writer stopped before answering"),
+    let Some(name) = body.get("store").and_then(Value::as_str) else {
+        return Response::error(400, "no store given");
+    };
+    match state.delete_store(name) {
+        Ok(dir) => Response::json(&json!({
+            "store": name,
+            "deleted": dir.display().to_string(),
+            "message": format!(
+                "{name} is gone: its vectors, chunks, graph and ledger were deleted and the \
+                 registry no longer lists it. The files it indexed are untouched."
+            ),
+        })),
+        Err(e) => Response::error(409, &e.to_string()),
     }
 }
 
@@ -841,29 +1244,144 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
 /// runs — which is what makes every supported protocol revision behave the
 /// same through the proxy as it does in process.
 fn mcp(state: &Arc<State>, request: &Request) -> Response {
-    if let Some(pid) = crate::proxy::proxy_pid(request.header("semlith-proxy")) {
+    let proxy = crate::proxy::proxy_pid(request.header("semlith-proxy"));
+    if let Some(pid) = proxy {
         state.saw_proxy(pid);
     }
     let body = match request.json() {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
-    if let Err(e) = state.open_mcp_fleet() {
+
+    // Who is asking. A client is told from another by its session: the id this
+    // daemon hands out at `initialize` over HTTP, or the proxy's pid for a
+    // forwarding `semlith mcp`. One that echoes neither is one unnamed client
+    // rather than a new one per request.
+    let transport = match proxy {
+        Some(_) => "stdio proxy",
+        None if request.path == crate::http::MCP_PATH => "http /mcp",
+        None => "portal",
+    };
+    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = body.get("params");
+    let name = params
+        .and_then(|p| p.get("clientInfo"))
+        .and_then(|c| c.get("name"))
+        .and_then(Value::as_str);
+    let revision = params
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(Value::as_str);
+    let session = request
+        .header("mcp-session-id")
+        .map(str::to_string)
+        .or_else(|| proxy.map(|pid| pid.to_string()))
+        .unwrap_or_else(|| {
+            if method == "initialize" {
+                new_session()
+            } else {
+                String::from("anonymous")
+            }
+        });
+    state.note_client(&session, transport, name, revision, method == "tools/call");
+    // A method that is about the server rather than about a corpus is answered
+    // whether or not anything is indexed: an agent connecting to a fresh
+    // install should be told which tools exist, not that the daemon is broken.
+    let corpus_free = matches!(method, "initialize" | "tools/list" | "ping")
+        || method.starts_with("notifications/");
+    if let Err(e) = state.open_mcp_fleet()
+        && !corpus_free
+    {
         return Response::error(409, &e.to_string());
     }
 
     let writer = daemon::Writer(Arc::clone(state));
     let mut fleet = state.mcp_fleet.lock().expect("the mcp fleet lock");
-    let Some(fleet) = fleet.as_mut() else {
-        return Response::error(409, "this daemon has no store open");
+    let mut nothing = crate::fleet::Fleet::empty();
+    let fleet = match fleet.as_mut() {
+        Some(fleet) => fleet,
+        None if corpus_free => &mut nothing,
+        None => return Response::error(409, "this daemon has no store open"),
     };
 
-    match crate::mcp::answer(fleet, Some(&writer), &body) {
+    let response = match crate::mcp::answer(fleet, Some(&writer), &body) {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON
         // object, so the proxy writes nothing to a client that expects nothing.
         None => Response::new(200, "application/json; charset=utf-8", Vec::new()),
+    };
+    // The session id is handed back at `initialize`, which is where the MCP
+    // HTTP transport says a server may assign one. A client that echoes it is
+    // counted as itself on every later call; one that does not still works.
+    if method == "initialize" {
+        return response.header("Mcp-Session-Id", session);
     }
+    response
+}
+
+/// A session id, which identifies a client and guards nothing.
+fn new_session() -> String {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes).expect("the OS random source");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Rotate the agent key, or take up one another process has just written.
+///
+/// The previous key stays valid until this daemon exits unless `now` is set,
+/// so a client mid-session finishes its work rather than failing on the call
+/// it happened to be making. It is not persisted: a restart is where the old
+/// key stops, which is the same moment every client had to be told anyway.
+fn key(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let now = body.get("now").and_then(Value::as_bool).unwrap_or(false);
+    // Read before it is replaced: it is what identifies the stanzas to rewrite.
+    let previous = crate::home::agent_key().unwrap_or_default();
+    let fresh = match body.get("key").and_then(Value::as_str) {
+        // A key another process has already written to disk.
+        Some(key) if crate::home::is_agent_key(key) => key.to_string(),
+        Some(_) => return Response::error(400, "that is not an agent key"),
+        None => match crate::home::rotate_agent_key() {
+            Ok(key) => key,
+            Err(e) => return Response::error(500, &e.to_string()),
+        },
+    };
+    state.server.rotate_agent(&fresh, now);
+    // Every client whose configuration file already carried the old key is
+    // carried forward with it. A rotation that leaves twelve files
+    // authenticating with a refused key is a rotation that breaks the machine
+    // it was run on.
+    let updated: Vec<String> = crate::setup::recarry_key(&previous, &fresh)
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    Response::json(&json!({
+        "key": fresh,
+        "previous_valid": !now,
+        "updated": updated,
+        "stanzas": crate::clients::http_stanzas(&fresh),
+    }))
+}
+
+/// Start or stop the MCP endpoint while the daemon runs.
+///
+/// Closing it drops the route and nothing else: the stores stay open, the
+/// watcher keeps running and the portal keeps working.
+fn endpoint(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(open) = body.get("open").and_then(Value::as_bool) else {
+        return Response::error(400, "missing open");
+    };
+    state.server.set_mcp_open(open);
+    Response::json(&json!({
+        "open": open,
+        "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
+    }))
 }
 
 fn rotate(state: &Arc<State>) -> Response {
