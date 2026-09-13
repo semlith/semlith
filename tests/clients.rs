@@ -22,19 +22,34 @@ const README: &str = include_str!("../README.md");
 const SECTION: &str = "### Setting it up in your client";
 
 /// Every client the release promises a stanza for.
-const CLIENTS: [&str; 12] = [
+const CLIENTS: [&str; 27] = [
     "Claude Code",
-    "Claude Desktop",
     "OpenAI Codex",
-    "GitHub Copilot in VS Code",
+    "OpenCode",
+    "IO CLI",
     "GitHub Copilot CLI",
+    "Gemini CLI",
+    "Qwen Code",
+    "Amp",
+    "Crush",
+    "Droid",
+    "Goose",
+    "Amazon Q Developer CLI",
+    "OpenClaw",
+    "DeepSeek",
+    "Warp",
+    "GitHub Copilot in VS Code",
     "Cursor",
     "Windsurf",
     "Zed",
-    "Gemini CLI",
     "JetBrains",
     "Cline",
-    "Goose",
+    "Roo Code",
+    "Kilo Code",
+    "Continue",
+    "Kiro",
+    "LM Studio",
+    "Claude Desktop",
 ];
 
 /// Since 0.9.0 a stanza carries no path at all: the server resolves its own
@@ -146,7 +161,20 @@ fn is_http(body: &str) -> bool {
 fn every_stanza_launches_a_server_that_answers() {
     let home = two_registered_stores();
 
-    let stanzas: Vec<(String, String)> = blocks(&section())
+    let all = blocks(&section());
+    // Every client has a stanza, and several have two — so the section can
+    // never quietly shrink to one example that happens to still work. Most of
+    // them are HTTP since 0.13.0; those are asserted by
+    // `the_http_stanzas_name_the_endpoint_and_carry_a_credential`, and only
+    // the subprocess ones can be launched here.
+    assert!(
+        all.len() >= CLIENTS.len(),
+        "{} stanzas for {} clients",
+        all.len(),
+        CLIENTS.len()
+    );
+
+    let stanzas: Vec<(String, String)> = all
         .into_iter()
         .filter(|(_, body)| !is_http(body))
         .collect();
@@ -156,13 +184,11 @@ fn every_stanza_launches_a_server_that_answers() {
             "a {language} stanza does not name the semlith binary:\n{body}"
         );
     }
-    // Every client has a stanza, and several have two — so the section can
-    // never quietly shrink to one example that happens to still work.
     assert!(
-        stanzas.len() >= CLIENTS.len(),
-        "{} stanzas for {} clients",
-        stanzas.len(),
-        CLIENTS.len()
+        stanzas.len() >= 4,
+        "the section documents {} subprocess stanzas; the stdio path is no \
+         longer exercised",
+        stanzas.len()
     );
 
     let named = answers(&home, &["mcp".to_string()]);

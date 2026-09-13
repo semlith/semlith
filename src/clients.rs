@@ -204,7 +204,7 @@ mod tests {
     fn every_documented_client_is_parsed_with_at_least_one_stanza() {
         let parsed = clients();
         assert!(
-            parsed.len() >= 12,
+            parsed.len() >= 27,
             "only {} clients parsed out of the README",
             parsed.len()
         );
