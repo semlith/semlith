@@ -2056,6 +2056,48 @@ async function storesView() {
             // the machine. Two stores can have been built with two models and
             // their vectors are not comparable, so it belongs beside the row.
             lineCell(`${s.model} · ${s.dim} dims`, "meta"),
+            // Two things worth saying about a store rather than about its
+            // contents: whether this machine has agreed to open it without
+            // being told to, and whether anybody else on the machine can read
+            // what it holds.
+            s.trusted === false
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill("not trusted", "warn"),
+                  el("button", {
+                    class: "button secondary small",
+                    type: "button",
+                    text: "Trust this store",
+                    onclick: async (e) => {
+                      const button = e.currentTarget;
+                      button.disabled = true;
+                      adoptNote.className = "note";
+                      adoptNote.textContent = "Trusting…";
+                      try {
+                        await post("/api/trust", { path: s.dir });
+                        adoptNote.textContent = `${s.dir} is trusted. semlith opens it from its own directory now, without --store.`;
+                        await refreshStores();
+                      } catch (err) {
+                        adoptNote.className = "note bad";
+                        adoptNote.textContent = err.message;
+                        button.disabled = false;
+                      }
+                    },
+                  }),
+                )
+              : null,
+            s.loose_mode
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill(`mode ${s.loose_mode}`, "warn"),
+                  el("span", {
+                    class: "meta",
+                    text: "other users on this machine can read what this store indexed; the next open narrows it to 700",
+                  }),
+                )
+              : null,
           ),
       },
       {
@@ -3000,6 +3042,12 @@ async function indexView() {
             )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
             say(event.path, `${event.scanned}/${event.total}`, event.outcome);
           } else if (event.event === "done") {
+            /* Named, one line each, with the rule that refused them. An agent
+             * or a person who asked for a file and got silence cannot tell that
+             * from a file that was not there. */
+            for (const refusal of event.refused || []) {
+              say(`${refusal.path} — ${refusal.why}`, "refused", "refused");
+            }
             if (event.stopped) {
               // Not 100%: nothing was kept, and a full bar would say the
               // opposite of what happened.
@@ -3794,6 +3842,54 @@ async function privacyView() {
       el(
         "div",
         { class: "rows" },
+        /* The rules this release added, each with what the daemon found when it
+         * looked. A page that states a policy is a page; a page that states a
+         * policy and the reading behind it is something a reader can disagree
+         * with, which is the only version worth putting on a Privacy page. */
+        el(
+          "div",
+          { class: "card pad" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Rules" }),
+            el("span", { class: "spacer" }),
+            pill(
+              (data.rules || []).every((r) => r.ok) ? "all holding" : "check the rows",
+              (data.rules || []).every((r) => r.ok) ? "good" : "warn",
+            ),
+          ),
+          el("p", {
+            class: "subtitle",
+            text: "What semlith refuses, and what this daemon found when it checked. Every row is a finding from the 0.14.0 security audit, closed with the test that would have caught it.",
+          }),
+          el(
+            "div",
+            { class: "rules" },
+            (data.rules || []).map((rule) =>
+              el(
+                "div",
+                { class: rule.ok ? "rule-row" : "rule-row bad" },
+                el(
+                  "div",
+                  { class: "rule-head" },
+                  el("span", { class: "dot " + (rule.ok ? "good" : "warn") }),
+                  el("span", { class: "rule-id", text: rule.id }),
+                ),
+                el("p", { class: "rule-text", text: rule.rule }),
+                // The reading, under the rule rather than beside it: it is a
+                // path or a count often enough that a column would spend the
+                // whole card's width on one of them and wrap the rest.
+                el(
+                  "div",
+                  { class: "rule-found" },
+                  el("span", { class: "eyebrow", text: "found" }),
+                  el("code", { class: "rule-check", text: rule.check }),
+                ),
+              ),
+            ),
+          ),
+        ),
         el(
           "div",
           { class: "card pad" },

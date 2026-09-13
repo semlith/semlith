@@ -158,6 +158,27 @@ impl Daemon {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0)
     }
+
+    /// A GET route's body, parsed.
+    fn json(&self, path: &str) -> serde_json::Value {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("the daemon listens");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+             Connection: close\r\n\r\n",
+            self.port, self.token
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.flush().unwrap();
+
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("{path} is not JSON: {e}\n{text}"))
+    }
 }
 
 impl Drop for Daemon {
@@ -363,5 +384,55 @@ fn no_view_in_the_map_is_a_route_that_does_not_exist() {
         seen.push(route);
         let method = method_for(route);
         assert_ne!(daemon.status(method, route), 404, "{route} is not served");
+    }
+}
+
+/// The Privacy page's Rules section is the release's claims with the daemon's
+/// own reading beside each. A row that only stated the rule would be a sentence
+/// somebody wrote.
+#[test]
+fn the_privacy_route_carries_a_rule_per_control_with_its_own_check() {
+    let daemon = Daemon::start();
+    let privacy = daemon.json("/api/privacy");
+    let rules = privacy["rules"]
+        .as_array()
+        .expect("the privacy route carries no rules");
+
+    // Every control this release added, by the name the page shows.
+    for want in [
+        "header-borne token",
+        "same-origin writes",
+        "store trust",
+        "index boundary",
+        "deny-list",
+        "private addresses",
+        "pinned models",
+        "model cache",
+        "directory modes",
+        "agent key",
+    ] {
+        let rule = rules
+            .iter()
+            .find(|r| r["id"] == want)
+            .unwrap_or_else(|| panic!("no rule for {want}:\n{privacy}"));
+        assert!(
+            rule["rule"].as_str().is_some_and(|t| t.len() > 40),
+            "{want} states no rule: {rule}"
+        );
+        assert!(
+            rule["check"].as_str().is_some_and(|t| !t.is_empty()),
+            "{want} has no check: {rule}"
+        );
+        assert!(rule["ok"].is_boolean(), "{want} has no verdict: {rule}");
+    }
+
+    // On a fresh daemon in a sandbox, every one of them holds — which is what
+    // makes a row that does not hold worth looking at.
+    for rule in rules {
+        assert_eq!(
+            rule["ok"], true,
+            "{} does not hold on a fresh install: {}",
+            rule["id"], rule["check"]
+        );
     }
 }

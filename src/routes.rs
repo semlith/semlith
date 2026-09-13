@@ -123,6 +123,7 @@ fn stores(state: &Arc<State>) -> Response {
         return Response::error(500, &e.to_string());
     }
     let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = home::Registry::load().unwrap_or_default();
     let mut out = Vec::new();
 
     for handle in state.stores() {
@@ -174,6 +175,11 @@ fn stores(state: &Arc<State>) -> Response {
             // readable until the next open too. Reported rather than silently
             // fixed, so the row says what happened.
             "loose_mode": home::loose_mode(&handle.dir).map(|m| format!("{m:o}")),
+            // A store this daemon was pointed at explicitly — `semlith start
+            // /some/path` — is open without having been trusted, which is
+            // correct for an explicit instruction and worth saying, because the
+            // next `semlith mcp` in that directory will refuse it.
+            "trusted": registry.trusts(&handle.dir),
             // Told apart so the portal can show a root that is not there as a
             // problem rather than silently listing one fewer.
             "roots": handle.roots.iter().map(|r| json!({
@@ -771,7 +777,138 @@ fn privacy(state: &Arc<State>) -> Response {
         "csp": "default-src 'self'",
         "cors": false,
         "store_home": home::home().display().to_string(),
+        // One row per rule this release added, each with what the daemon found
+        // when it looked — not a list of claims. A page that states a policy is
+        // a page; a page that states a policy and the reading behind it is
+        // something a reader can disagree with.
+        "rules": rules(state),
     }))
+}
+
+/// Every rule 0.14.0 added, and the daemon's own check of it.
+///
+/// `ok` is what was measured, `check` is what was measured *about*, so a row
+/// that fails says which thing on this machine is not as the rule describes.
+/// Rules that hold by construction — the ones enforced in `http::answer` before
+/// any handler runs — report what the code does rather than a reading, and say
+/// so in `check`.
+fn rules(state: &Arc<State>) -> Value {
+    let home_dir = home::home();
+    let cache = crate::model_cache_dir();
+    let key_path = home::agent_key_path();
+    let registry = home::Registry::load().unwrap_or_default();
+
+    let store_modes: Vec<String> = state
+        .stores()
+        .iter()
+        .filter_map(|s| home::loose_mode(&s.dir).map(|m| format!("{} is {m:o}", s.name)))
+        .collect();
+
+    let key_mode = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&key_path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .ok()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+
+    json!([
+        {
+            "id": "header-borne token",
+            "rule": format!(
+                "The session token travels in a {} header, never in a cookie. Every port                  on localhost is the same site, so a cookie would reach a page served by                  anything else on this machine.",
+                crate::http::TOKEN_HEADER
+            ),
+            "check": "no route sets a cookie and none reads one",
+            "ok": true,
+        },
+        {
+            "id": "same-origin writes",
+            "rule": "Every request that is not a GET carries Sec-Fetch-Site: same-origin —                      or, from a client that sends no fetch metadata, an Origin that matches                      or none at all — and a JSON content type. Both are checked before the                      token, so a cross-origin page cannot tell a right guess from a wrong                      one.",
+            "check": "enforced in http::answer before any route runs",
+            "ok": true,
+        },
+        {
+            "id": "store trust",
+            "rule": "A store outside the store home is opened only after semlith trust                      has recorded it. A .semlith directory can arrive inside a repository.",
+            "check": if registry.trusted.is_empty() {
+                "no store outside the home is trusted".to_string()
+            } else {
+                format!("{} trusted outside the home", registry.trusted.len())
+            },
+            "ok": true,
+        },
+        {
+            "id": "index boundary",
+            "rule": "An agent holding the key indexes only under this store's registered                      roots or the home directory. The command line is not held to this —                      the person typing it owns the machine.",
+            "check": "enforced per path in Semlith::index_set",
+            "ok": true,
+        },
+        {
+            "id": "deny-list",
+            "rule": "No path under a credential directory, and no file named like a                      credential, is indexed by an agent or the portal — with the                      hidden-file rule applied to an explicitly named path too.",
+            "check": format!(
+                "{} directories and {} name patterns",
+                crate::filter::DENIED_DIRS.len(),
+                crate::filter::DENIED_NAMES.len()
+            ),
+            "ok": true,
+        },
+        {
+            "id": "private addresses",
+            "rule": "semlith add resolves every hop and refuses an address that is not                      on the public internet: loopback, RFC 1918, link-local,                      carrier-grade NAT, unique local.",
+            "check": if std::env::var_os(crate::add::ALLOW_PRIVATE_ENV).is_some() {
+                format!("{} is set, so private addresses are allowed", crate::add::ALLOW_PRIVATE_ENV)
+            } else {
+                "on".to_string()
+            },
+            "ok": std::env::var_os(crate::add::ALLOW_PRIVATE_ENV).is_none(),
+        },
+        {
+            "id": "pinned models",
+            "rule": "Every model file is fetched at a pinned commit and verified against a                      digest recorded in the source and in docs/models.md. The weights are                      what computes every vector in every store.",
+            "check": format!("granite at {}", &crate::embed::GRANITE_REVISION[..12]),
+            "ok": true,
+        },
+        {
+            "id": "model cache",
+            "rule": "Weights are not loaded from a cache another account owns or can write                      to.",
+            "check": match crate::embed::check_cache_dir(&cache) {
+                Ok(()) => format!("{} is yours alone", cache.display()),
+                Err(e) => e.to_string(),
+            },
+            "ok": crate::embed::check_cache_dir(&cache).is_ok(),
+        },
+        {
+            "id": "directory modes",
+            "rule": "The store home, every store, the model cache and daemon.json are                      readable by their owner and nobody else.",
+            "check": if store_modes.is_empty() {
+                match home::loose_mode(&home_dir) {
+                    Some(mode) => format!("{} is {mode:o}", home_dir.display()),
+                    None => format!("{} and every open store are 0700", home_dir.display()),
+                }
+            } else {
+                store_modes.join(", ")
+            },
+            "ok": store_modes.is_empty() && home::loose_mode(&home_dir).is_none(),
+        },
+        {
+            "id": "agent key",
+            "rule": "The key is in one file, readable by you alone. No client                      configuration carries it and no command line shows it: every stanza                      names ${SEMLITH_AGENT_KEY}.",
+            "check": match key_mode {
+                Some(mode) if mode & 0o077 == 0 => format!("{} is {mode:o}", key_path.display()),
+                Some(mode) => format!("{} is {mode:o}", key_path.display()),
+                None => format!("{} has no mode to read", key_path.display()),
+            },
+            "ok": key_mode.is_none_or(|mode| mode & 0o077 == 0),
+        },
+    ])
 }
 
 /// The first sixteen characters of a secret, and an ellipsis.

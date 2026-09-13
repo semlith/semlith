@@ -1189,6 +1189,11 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                         // A stopped run undid itself: nothing it embedded is
                         // in the store, so the next attempt starts from zero.
                         "stopped": done.stopped,
+                        // Named, with the rule that refused each. A count would
+                        // be a number somebody has to go and investigate.
+                        "refused": done.refused.iter().map(|(path, why)| {
+                            serde_json::json!({ "path": path, "why": why })
+                        }).collect::<Vec<_>>(),
                     }));
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
