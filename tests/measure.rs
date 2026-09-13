@@ -804,8 +804,13 @@ fn measure_what_sharding_costs_recall() {
     let mut overlaps = Vec::new();
     let mut identical = 0;
     for query in queries {
-        let a = ranking(&mut one, query);
-        let b = ranking(&mut many, query);
+        // One query vector for both stores. Embedding the query twice — once
+        // per store, as `search` would — puts the runtime's thread jitter in
+        // the difference between them, which is the thing this measurement is
+        // trying to attribute to sharding.
+        let vector = one.embed_query(query).unwrap();
+        let a = ranking(&mut one, query, &vector);
+        let b = ranking(&mut many, query, &vector);
         let shared = a.iter().filter(|hit| b.contains(hit)).count();
         let overlap = shared as f32 / a.len().max(1) as f32;
         if a == b {
@@ -873,9 +878,9 @@ fn index_with(store: &Path, corpus: &Path, shard_vectors: &str) {
 /// The top ten hits as a comparable list. Line spans rather than chunk ids: two
 /// stores built separately need not agree on ids, but they do on what a chunk
 /// is.
-fn ranking(store: &mut Semlith, query: &str) -> Vec<(String, u32)> {
+fn ranking(store: &mut Semlith, query: &str, vector: &[f32]) -> Vec<(String, u32)> {
     store
-        .search(query, 10)
+        .search_with_vector(query, vector, 10, &semlith::filter::Filter::default())
         .unwrap()
         .into_iter()
         .map(|h| (h.path, h.start_line))

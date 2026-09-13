@@ -999,8 +999,20 @@ impl Semlith {
     /// the subset is a minority of the corpus, which is the case the filter
     /// exists for.
     pub fn search_filtered(&mut self, query: &str, k: usize, filter: &Filter) -> Result<Vec<Hit>> {
-        let vector = self.embed(vec![self.model.query_text(query)])?.remove(0);
+        let vector = self.embed_query(query)?;
         self.search_with_vector(query, &vector, k, filter)
+    }
+
+    /// The query, embedded with this store's model: the vector
+    /// [`Semlith::search_with_vector`] takes.
+    ///
+    /// Public because a caller comparing two stores has to be able to hold the
+    /// query vector still. Embedding the same text twice does not give the same
+    /// floats — ONNX Runtime reduces across its threads in whatever order they
+    /// finish — and under int8 quantisation that moves a ranking, which is
+    /// noise in a measurement that is about something else.
+    pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
+        Ok(self.embed(vec![self.model.query_text(query)])?.remove(0))
     }
 
     /// [`Semlith::search_filtered`] with the query already embedded.
