@@ -3050,6 +3050,14 @@ td.row-end {
 }
 .modal .subtitle {
   margin: 0;
+  /* A path has no spaces in it, so without this the line cannot break and the
+   * dialog's own text pushes out past both its edges. */
+  overflow-wrap: anywhere;
+  max-height: 40dvh;
+  overflow-y: auto;
+}
+.modal .card-title {
+  overflow-wrap: anywhere;
 }
 .modal .actions {
   margin-top: var(--sp-4);
