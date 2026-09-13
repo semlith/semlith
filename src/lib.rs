@@ -1685,10 +1685,13 @@ pub fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Overrides [`model_cache_dir`].
+pub const MODEL_CACHE_ENV: &str = "SEMLITH_MODEL_CACHE";
+
 /// Where ONNX model weights are cached. Shared across stores — the weights are
 /// large and identical for a given model.
 pub fn model_cache_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("SEMLITH_MODEL_CACHE") {
+    if let Ok(dir) = std::env::var(MODEL_CACHE_ENV) {
         return PathBuf::from(dir);
     }
     let base = std::env::var("HOME")
