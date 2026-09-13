@@ -225,10 +225,9 @@ A store that fits searches at full speed; a store past its budget pays to read
 shards back on each query and says so on stderr rather than looking mysteriously
 slower. `semlith stats` shows both numbers before you spend an hour finding out.
 
-Checkpointing, the memory budget and shards are all properties of the store
-layout introduced in 0.7.0, so they apply to stores created by 0.7.0 or later.
-A store you already have keeps working exactly as it did; see
-[Compatibility](#compatibility).
+Checkpointing, the memory budget and shards are properties of the store layout,
+so a store written by an older release keeps its own and keeps working exactly
+as it did. [Compatibility](#compatibility) says which layout is which.
 
 ## Keeping the store current
 
@@ -294,16 +293,27 @@ semlith: opened api at /Users/you/.semlith/stores/api — watching 1 root(s)
 That one URL is printed once, on stdout. Everything else the daemon says goes
 to stderr, and the token never appears there.
 
-The page has the stores with their counts and the watcher's live event feed,
-the indexed files with the same `path`/`ext`/`lang` filters the CLI has and the
-reader that parsed each one, a search box running the same fused search the CLI
-and the MCP tools run, a folder picker that indexes into a store with progress
-streaming as it goes, a URL field beside it that fetches one page or paper into
-the store and indexes it the same way, every language `--lang` accepts with the
-extensions and filenames that make it up, an Agents page with the client stanzas
-for every agent and the switch that opens and closes the HTTP MCP endpoint, a
-Privacy page, and an About page. With no store yet it opens on a welcome screen
-instead.
+Nine pages, and each one is the same answer the terminal gives:
+
+- **Stores** — what is indexed, with the watcher's live feed beside it.
+- **Files** — every indexed file with the `path`/`ext`/`lang` filters the CLI
+  has, the reader that parsed each one, and when it was last indexed. Sorted and
+  paged by the server, so ordering a column orders the store rather than the
+  page.
+- **Index** — a folder picker that indexes into a store with progress streaming
+  as it goes, and a URL field that fetches one page or paper into the store.
+- **Search** — the same fused search the CLI and the MCP tools run, previewing an
+  image hit inline.
+- **Graph** — the symbols and edges as a drawing: pick one and see what calls it
+  and what it calls.
+- **Languages** — every name `--lang` accepts, with the extensions and filenames
+  that make it up.
+- **Agents** — who is connected, the tools they can call, the stanza for every
+  documented client, and the switch that opens and closes the HTTP endpoint.
+- **Ledger** — what agents retrieved, when recording is on.
+- **Privacy** and **About** — the claims below, and how to check them yourself.
+
+With no store yet it opens on a welcome screen instead.
 
 **It is not on the network.** `127.0.0.1` is the only address it binds and there
 is no flag to change that. Every page and every `/api/` route needs the per-run
@@ -324,9 +334,9 @@ machine that pre-seeded `SEMLITH_MODEL_CACHE` can prove nothing was fetched.
 
 ### One writer, and why that stopped being a problem
 
-A store has one writer. Before 0.9.0 that meant choosing: `semlith watch`
-holding the lock so your store stayed current, *or* an agent able to call
-`semlith_index`. The second one was refused for as long as the first ran.
+A store has one writer, which used to mean choosing: a watcher holding the lock
+so your store stayed current, *or* an agent able to call `semlith_index`. The
+second was refused for as long as the first ran.
 
 The daemon ends that without weakening the rule. It *is* the writer, and
 everything else is a client of it: when a daemon is running, `semlith mcp`
@@ -346,7 +356,7 @@ is not a bookmark. `--port` or `SEMLITH_PORT` changes it deliberately.
 
 ## Where stores live
 
-Since 0.9.0 a new store goes in `~/.semlith/stores/<name>`, and
+A new store goes in `~/.semlith/stores/<name>`, and
 `~/.semlith/registry.json` records which directories it covers:
 
 ```sh
@@ -361,10 +371,10 @@ directories called `api` get `api` and `api-2` rather than being merged.
 With no `--store` flag, Semlith resolves a store in this order:
 
 1. `--store` or `SEMLITH_STORE`, which always win.
-2. A `.semlith` directory beside the corpus, if there is one. **This is what
-   keeps every setup written before 0.9.0 working unchanged** — a local store
-   still wins, and the only difference you see is a line on stderr saying
-   `adopt` would move it into the home.
+2. A `.semlith` directory beside the corpus, if there is one. **A local store
+   always wins**, which is what keeps a setup that predates the store home
+   working untouched; the only difference is a line on stderr saying `adopt`
+   would move it into the home.
 3. A registered store whose root is this directory or an ancestor of it, so
    running from `src/` reaches the store that covers the repository.
 4. Otherwise a new store in the home, registered against this directory.
@@ -483,8 +493,8 @@ holding 137 MB on one store and 137 MB on three — one loaded model, not three.
 
 ## The code graph
 
-From 0.12.0 a store knows the structure of the code in it, not only its text.
-Indexing extracts symbols and the edges between them with tree-sitter — for
+A store knows the structure of the code in it, not only its text. Indexing
+extracts symbols and the edges between them with tree-sitter — for
 Rust, TypeScript, Python, Go, Java and C — on the same changed-file path that
 drives re-embedding. So a file saved under `semlith start` updates its edges in
 the same pass that updates its vectors, and there is no build step and no
@@ -509,8 +519,8 @@ $ semlith path run acquire
 
 **Reverse reachability is not currently part of the product.** `neighbors`
 answers what calls a symbol one hop back; walking every caller of every caller
-to a depth is not a question any command here answers, and 0.13.0 removed the
-one that did.
+to a depth is not a question any command here answers. The
+[changelog](CHANGELOG.md) says when that changed and what replaced it.
 
 **Extracted or inferred.** Every edge says how it was resolved. A call whose
 name the file also imports was resolved by the file itself and is marked
@@ -532,8 +542,8 @@ no symbols; the portal's About page lists the six that carry edges.
 
 ## Finding an image
 
-From 0.13.0 a store holds pictures as well as text. `.png`, `.jpg`, `.jpeg`,
-`.webp` and `.gif` are embedded with CLIP ViT-B/32's vision encoder into a
+A store holds pictures as well as text. `.png`, `.jpg`, `.jpeg`, `.webp` and
+`.gif` are embedded with CLIP ViT-B/32's vision encoder into a
 second vector space inside the store, and a text query is embedded with the
 matching CLIP text encoder — that pairing is the whole trick, and it is why
 there is one fixed pair here rather than a choice of image model.
@@ -558,9 +568,9 @@ around.
 The two model files are fetched on the first image a store indexes, never at
 start, and they go to the same model cache the text model uses — so a store
 that never holds an image never downloads them, and `--airgap` refuses each by
-name before a socket is opened. Nothing about the store format moves: the table
-and the `images/` directory are additive, and a 0.12.0 binary reads such a store
-as the text corpus it already was.
+name before a socket is opened. Nothing about the store format moves: the table and the
+`images/` directory are additive, and a binary that predates them reads such a
+store as the text corpus it already was.
 
 ## The retrieval ledger
 
@@ -620,7 +630,7 @@ subsystem instead of the whole repository:
 ```
 
 One server can hold several stores, which is how an agent working across
-repositories asks one question instead of one per repository. Since 0.9.0 that
+repositories asks one question instead of one per repository. That
 is what a bare `semlith mcp` already does — it opens every store in the
 registry — so indexing a second repository needs no edit to any client's
 configuration:
@@ -674,15 +684,15 @@ required JSON-RPC batching, and a client pinned to it is answered with
 
 Every snippet below runs `semlith mcp`, with no path in it. The server opens
 every store registered in `~/.semlith/registry.json` — which is every store
-`semlith index` has made since 0.9.0 — plus a `.semlith` beside the directory
+`semlith index` has made — plus a `.semlith` beside the directory
 the agent was started in, if there is one. Index another repository and the
 agent that is already configured can search it, with no edit to any of these
 files.
 
 `--store` still works and still wins when it is given: repeat it to open a
 chosen set of stores, or set `SEMLITH_STORE` to a path-separator-delimited
-list. A store written before 0.9.0 keeps working where it is, and `semlith
-adopt ./.semlith` moves it into the home so these stanzas reach it.
+list. A store that sits beside its corpus keeps working where it is, and
+`semlith adopt ./.semlith` moves it into the home so these stanzas reach it.
 
 `cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
 your `PATH` in a shell but often not in an editor launched from a desktop icon
@@ -999,7 +1009,7 @@ Two things live in the store directory:
   rebuild as the corpus grows: add vectors, they are searchable. Splitting the
   index is what lets a search hold a few shards instead of the whole corpus, a
   save rewrite one shard instead of everything, and a long index run checkpoint
-  as it goes. Stores created before 0.7.0 have a single `index.tv` instead and
+  as it goes. An older store has a single `index.tv` instead and
   keep it.
 - **`store.db`** — SQLite. Holds the chunk text, its file, and its line span,
   plus the content hash that makes re-indexing incremental.
@@ -1031,7 +1041,7 @@ SQLite query against the stored file paths. That set becomes an allowlist the
 vector index scans inside, and the same predicate goes into the FTS5 query, so
 both halves rank within the subset and fusion never sees a chunk one half was
 forbidden to return. Nothing is stored for it: the file path has been in the
-database since 0.1.0, so filtering works on an existing store with no
+database from the beginning, so filtering works on an existing store with no
 re-indexing.
 
 ## Performance
@@ -1118,11 +1128,18 @@ and run the same search.
 ### What sharding costs
 
 A store split into 16 shards answers with the same top ten as the same corpus in
-one shard **91.7%** of the time, measured over twelve questions about meaning
+one shard **about 90%** of the time, measured over twelve questions about meaning
 rather than about an identifier. The shards are what keep peak memory flat, and
 that is the price.
 
-The binary is **45.6 MB**, up 1.8 MB from 0.12.0, which is the image support.
+The figure moves between 0.88 and 0.98 from run to run, and the reason is worth
+knowing: ONNX Runtime reduces across its threads in whatever order they finish,
+so the same question does not embed to exactly the same vector twice, and a
+vector that lands nearer a tie changes which of two near-equal chunks comes
+back. It is the same effect that makes `SEMLITH_EMBED_THREADS` worth pinning
+when you want a reproducible index.
+
+The binary is **45.6 MB**, of which 1.8 MB is the image support.
 
 ### What a store costs to hold
 
@@ -1233,18 +1250,18 @@ Everyone participating is expected to follow the
   every query, so the memory bound is bought with latency. The bound is the
   point — a corpus that does not fit in memory is searchable at all — but if
   your store fits comfortably, raising the budget is free speed.
-- Checkpointing, the memory budget and one-shard saves need the 0.7.0 store
-  layout. A store created by an earlier version keeps its single index file and
-  behaves exactly as it did, which also means an interrupted index run on one
-  still loses the run.
+- Checkpointing, the memory budget and one-shard saves need the sharded store
+  layout. A store written before it keeps its single index file and behaves
+  exactly as it did, which also means an interrupted index run on one still
+  loses the run. [Compatibility](#compatibility) says which is which.
 - The default model is English-only. `semlith models` lists multilingual
   alternatives, which must be chosen when the store is created.
 - Image search is not OCR, and the CLIP pair behind it is fixed — there is no
   `--model` for the image half. A screenshot of a wall of text is matched on
   looking like a wall of text, not on the words in it, and a store that indexes
   its first image downloads two more model files to do so.
-- Reverse reachability over the code graph is not in this release. `neighbors`
-  goes one hop back and no command walks further.
+- Reverse reachability over the code graph is not part of the product.
+  `neighbors` goes one hop back and no command walks further.
 - Search filters are SQLite `GLOB` patterns, so `*` crosses `/` and there is no
   distinct `**`, no regex, and no way to express "not this path". `--lang` maps
   a fixed table of extensions and never reads file contents, so a Perl script
