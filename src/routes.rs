@@ -80,6 +80,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
+        (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
         // MCP over HTTP, on the path a client's configuration names. The
@@ -719,6 +720,10 @@ fn privacy(state: &Arc<State>) -> Response {
         // printed URL, and once more in the body of the rotate response — it is
         // in no other response, and it is in no cookie at all.
         "token_preview": preview(&state.server.token()),
+        // How long a rotated agent key still works, if one still does. Shown
+        // as a countdown rather than as "until this daemon exits", which on a
+        // machine somebody leaves running is not a grace period at all.
+        "key_grace_seconds": state.server.key_grace().map(|left| left.as_secs()),
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
         "csp": "default-src 'self'",
         "cors": false,
@@ -771,6 +776,17 @@ fn about(state: &Arc<State>) -> Response {
 /// it made the Agents page block on a subprocess for a payload the page never
 /// read — it asks `/api/setup` separately, and renders that panel when the
 /// answer arrives rather than holding the whole page for it.
+/// The agent key itself, once, because somebody pressed Reveal.
+///
+/// A POST rather than a GET: it is not something a page should receive for
+/// merely being open, and the same-origin and JSON rules every write carries
+/// apply to it. The key is on this machine already, in a file this user owns —
+/// what this route changes is that reading it is a deliberate act rather than
+/// part of rendering a page.
+fn reveal(state: &Arc<State>) -> Response {
+    Response::json(&json!({ "key": state.server.agent_key() }))
+}
+
 fn agents(state: &Arc<State>) -> Response {
     let connections = state.clients();
     let key = state.server.agent_key();
@@ -792,10 +808,18 @@ fn agents(state: &Arc<State>) -> Response {
             "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
             "open": state.server.mcp_open(),
         },
-        // The live key, so the stanza the page shows is one that works. It is
-        // already on this machine in a file this user owns, and every stanza
-        // the page exists to hand out carries it.
-        "key": key,
+        // Not the key. This route is read on every visit to the Agents page,
+        // so the credential that opens the MCP endpoint used to be in a
+        // response the page had done nothing to ask for. The page shows the
+        // variable form, which is what a client stanza should carry anyway, and
+        // `POST /api/agents/reveal` hands over the real value once, when
+        // somebody presses the button.
+        "key_env": crate::setup::KEY_ENV,
+        // Not even a preview. A preview of an agent key still begins `sml_`,
+        // and this route is read on every visit to the page — the point is that
+        // nothing about the credential arrives unasked.
+        "key_set": home::is_agent_key(&key),
+        "key_path": home::agent_key_path().display().to_string(),
         "install": {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,

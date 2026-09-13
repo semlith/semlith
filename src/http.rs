@@ -339,8 +339,18 @@ impl Drop for InFlight {
 #[derive(Default)]
 struct Agent {
     current: String,
-    previous: Option<String>,
+    /// The key this one replaced, and when it stops being accepted.
+    previous: Option<(String, std::time::Instant)>,
 }
+
+/// How long a rotated agent key keeps working.
+///
+/// It used to be "until this process exits", which on a daemon somebody leaves
+/// running is not a grace period but a second live credential — a key rotated
+/// because it leaked stayed valid for as long as the machine was up. Fifteen
+/// minutes is long enough for a tool call in flight and a client that has to be
+/// restarted, and short enough to be a window rather than a state.
+const KEY_GRACE: Duration = Duration::from_secs(15 * 60);
 
 pub struct Server {
     listener: TcpListener,
@@ -405,8 +415,21 @@ impl Server {
         agent.previous = if now || was.is_empty() {
             None
         } else {
-            Some(was)
+            Some((was, std::time::Instant::now() + KEY_GRACE))
         };
+    }
+
+    /// How long the previous key keeps working, if one still does.
+    ///
+    /// `None` once it has expired or was dropped immediately, which is what the
+    /// Privacy page shows as a countdown rather than as "until this exits".
+    pub fn key_grace(&self) -> Option<Duration> {
+        let agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
+        agent
+            .previous
+            .as_ref()
+            .map(|(_, until)| until.saturating_duration_since(std::time::Instant::now()))
+            .filter(|left| !left.is_zero())
     }
 
     pub fn mcp_open(&self) -> bool {
@@ -621,7 +644,7 @@ impl Server {
 struct Auth {
     token: String,
     agent: String,
-    previous: Option<String>,
+    previous: Option<(String, std::time::Instant)>,
     mcp_open: bool,
     /// The port this server answers on, so an `Origin` header can be compared
     /// against the origin it actually names.
@@ -640,9 +663,9 @@ impl Auth {
         if !self.agent.is_empty() && same(bearer, &self.agent) {
             return true;
         }
-        self.previous
-            .as_deref()
-            .is_some_and(|previous| !previous.is_empty() && same(bearer, previous))
+        self.previous.as_ref().is_some_and(|(previous, until)| {
+            !previous.is_empty() && *until > std::time::Instant::now() && same(bearer, previous)
+        })
     }
 }
 

@@ -3384,7 +3384,10 @@ async function agentsView() {
       keyNote.textContent = "Rotating…";
       try {
         const done = await post("/api/key", {});
-        stanzas.key = done.key;
+        // Only if the page was already showing the real one; otherwise the
+        // stanza still names the variable, which is now correct for the new
+        // key without anybody touching it.
+        if (stanzas.revealed) stanzas.key = done.key;
         showClient(chosen);
         const carried = done.updated || [];
         // Said plainly, because the two halves have different consequences:
@@ -3403,6 +3406,44 @@ async function agentsView() {
         keyNote.textContent = e.message;
       } finally {
         rotate.disabled = false;
+      }
+    },
+  });
+
+  // ---- the key itself, only when asked for
+  /* Masked until asked for. The route does not send a preview either: a
+   * preview of an agent key still begins `sml_`, and the point is that nothing
+   * about the credential arrives unasked. */
+  const MASKED = data.key_set ? "sml_" + "•".repeat(24) : "no key yet";
+  const keyBox = el("code", { class: "text", text: MASKED });
+  const reveal = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Reveal",
+    onclick: async () => {
+      if (stanzas.revealed) {
+        // Pressed again: put it away. A page left open on a screen should not
+        // keep showing a live credential because somebody looked at it once.
+        stanzas.revealed = false;
+        stanzas.key = "${" + KEY_ENV + "}";
+        keyBox.textContent = MASKED;
+        reveal.textContent = "Reveal";
+        showClient(chosen);
+        return;
+      }
+      reveal.disabled = true;
+      try {
+        const shown = await post("/api/agents/reveal", {});
+        stanzas.revealed = true;
+        stanzas.key = String(shown.key);
+        keyBox.textContent = stanzas.key;
+        reveal.textContent = "Hide";
+        showClient(chosen);
+      } catch (e) {
+        keyNote.className = "note bad";
+        keyNote.textContent = e.message;
+      } finally {
+        reveal.disabled = false;
       }
     },
   });
@@ -3439,7 +3480,16 @@ async function agentsView() {
     ["editor", "Editors"],
     ["desktop", "Desktop"],
   ];
-  const stanzas = { key: data.key || "" };
+  /* What a stanza carries.
+   *
+   * The variable form by default: a configuration file that names
+   * `${SEMLITH_AGENT_KEY}` keeps working across every rotation, and a file that
+   * carries the key itself goes stale the moment somebody presses Rotate. The
+   * real key is fetched only when Reveal is pressed — `/api/agents` no longer
+   * returns it, so a page that is merely open never receives the credential
+   * that opens the MCP endpoint. */
+  const KEY_ENV = data.key_env || "SEMLITH_AGENT_KEY";
+  const stanzas = { key: "${" + KEY_ENV + "}", revealed: false };
   let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
   let chosen = clients.findIndex((c) => c.group === group);
   const tabs = el("div", { class: "tabs" });
@@ -3448,7 +3498,7 @@ async function agentsView() {
 
   /** The HTTP form, built here from the key the route just handed back. */
   /** The placeholder the README prints where a real key goes. */
-  const KEY_SLOT = "sml_YOURKEY";
+  const KEY_SLOT = "${SEMLITH_AGENT_KEY}";
 
   /** Whether a stanza configures the endpoint rather than a subprocess. */
   const overHttp = (text) => text.includes("/mcp") || text.includes("--transport http");
@@ -3501,9 +3551,11 @@ async function agentsView() {
       fill(body, empty("No client stanza is compiled into this build."));
       return;
     }
-    // The documented stanzas, with this daemon's key in them: a reader who
-    // copies one should not have to find `sml_YOURKEY` and paste the key over
-    // it, and the page already knows the key.
+    // The documented stanzas. They name ${SEMLITH_AGENT_KEY}, which is what a
+    // client should carry: it survives a rotation, and the key stays in one
+    // file with one set of permissions. Pressing Reveal substitutes the literal
+    // value for a reader who wants to paste it somewhere that cannot read an
+    // environment variable.
     const own = (client.stanzas || []).map((s) => ({
       format: s.format,
       text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
@@ -3570,6 +3622,21 @@ async function agentsView() {
       ],
     }),
     endpointNote,
+    el(
+      "div",
+      { class: "card pad dense" },
+      el("span", { class: "card-title", text: "Agent key" }),
+      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
+      says(
+        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. Every stanza below names ",
+        mono("${" + KEY_ENV + "}"),
+        " instead of the key, so the client reads it from the environment at start and a rotation needs no file rewritten. It is exported by the block ",
+        mono("semlith setup"),
+        " wrote in your shell startup file, from ",
+        mono(data.key_path || "~/.semlith/agent.key"),
+        ".",
+      ),
+    ),
     keyNote,
     el(
       "div",

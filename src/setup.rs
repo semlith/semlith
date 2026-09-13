@@ -404,10 +404,32 @@ fn path_line(bin: &Path) -> Result<String> {
     let is_fish = std::env::var("SHELL")
         .map(|s| s.ends_with("fish"))
         .unwrap_or(false);
+    let key = home::agent_key_path().display().to_string();
+    if key.contains('\n') || key.contains('\r') || key.contains('\0') {
+        bail!(
+            "the agent key path contains a newline, so it cannot be written into a shell startup file"
+        );
+    }
+
+    // Two lines: the bin directory on PATH, and the agent key in the
+    // environment. The key is exported by *reading the file* at shell start
+    // rather than by being written into this file, so the credential lives in
+    // one place with one set of permissions, and rotating it needs nothing
+    // rewritten — every client stanza names the variable.
     Ok(if is_fish {
-        format!("set -gx PATH {} $PATH", fish_quote(&path))
+        format!(
+            "set -gx PATH {} $PATH\n\
+             test -r {key_q}; and set -gx {KEY_ENV} (cat {key_q})",
+            fish_quote(&path),
+            key_q = fish_quote(&key),
+        )
     } else {
-        format!("export PATH={}:$PATH", posix_quote(&path))
+        format!(
+            "export PATH={}:$PATH\n\
+             [ -r {key_q} ] && export {KEY_ENV}=\"$(cat {key_q})\"",
+            posix_quote(&path),
+            key_q = posix_quote(&key),
+        )
     })
 }
 
@@ -634,7 +656,7 @@ pub fn register_claude() -> bool {
 /// This is the one client semlith writes a configuration for, because it has a
 /// CLI for it. Every other client is named and left to the user — a tool that
 /// edits a file it does not own is a tool that eventually corrupts one.
-pub fn register_claude_http(key: &str, url: &str) -> bool {
+pub fn register_claude_http(url: &str) -> bool {
     // Replaced rather than added beside: `claude mcp add` refuses a name that
     // is already registered, so an existing entry is removed first. A missing
     // one makes the remove fail, which is fine and is why its status is
@@ -653,12 +675,22 @@ pub fn register_claude_http(key: &str, url: &str) -> bool {
             "semlith",
             url,
             "--header",
-            &format!("Authorization: Bearer {key}"),
+            // The name of the variable, not the key. Every argument of every
+            // process on this machine is readable by every other process the
+            // user owns, and `ps` during a registration used to show the
+            // credential that opens the MCP endpoint. The client expands this
+            // itself, from the variable the rc block exports, so the config
+            // file never carries the key either — and rotating it needs no
+            // config rewritten at all.
+            &format!("Authorization: Bearer ${{{KEY_ENV}}}"),
         ])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+/// The variable a client's configuration names instead of the key itself.
+pub const KEY_ENV: &str = "SEMLITH_AGENT_KEY";
 
 /// Whether the Claude Code CLI is on this machine at all.
 pub fn claude_present() -> bool {
@@ -737,7 +769,31 @@ pub fn recarry_key(previous: &str, fresh: &str) -> Vec<PathBuf> {
                 .map(|e| format!("{}.", e.to_string_lossy()))
                 .unwrap_or_default()
         ));
-        if std::fs::write(&temp, &swapped).is_ok() && std::fs::rename(&temp, &path).is_ok() {
+        // The temp file is created with the original's mode, not with the
+        // process umask. A config file somebody had locked down to 0600 came
+        // back as 0644 after a rotation, because the rename carried the new
+        // file's permissions with it — a rotation is meant to reduce what a
+        // credential is exposed to, not widen it. 0600 when the original's
+        // mode cannot be read, because guessing narrow is the safe direction.
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0o600)
+        };
+        let written = (|| -> std::io::Result<()> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(mode);
+            }
+            let mut file = options.open(&temp)?;
+            file.write_all(swapped.as_bytes())
+        })();
+        if written.is_ok() && std::fs::rename(&temp, &path).is_ok() {
             done.push(path);
         } else {
             let _ = std::fs::remove_file(&temp);

@@ -1056,8 +1056,13 @@ fn main() -> Result<()> {
                 // Claude Code is the one client semlith writes a config for,
                 // because it has a CLI for it. Everything else is named.
                 if semlith::setup::claude_present() {
-                    if semlith::setup::register_claude_http(&fresh, &url) {
-                        println!("Claude Code was re-registered against {url}.");
+                    if semlith::setup::register_claude_http(&url) {
+                        println!(
+                            "Claude Code was re-registered against {url}, naming \
+                             ${{{}}} rather than the key itself, so this is the last \
+                             rotation that needed it touched.",
+                            semlith::setup::KEY_ENV
+                        );
                     } else {
                         println!(
                             "Claude Code is installed but `claude mcp add` failed; paste the stanza below."

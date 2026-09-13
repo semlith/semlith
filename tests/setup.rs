@@ -380,3 +380,77 @@ fn a_hostile_store_home_is_quoted_into_the_rc_file_or_refused() {
 fn shell_word(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
 }
+
+/// Every argument of every process is readable by every other process this
+/// user owns, so a registration that put the key on a command line put it where
+/// `ps` could read it. The stanza names the variable instead.
+#[test]
+fn the_key_never_reaches_a_command_line_or_a_config_file() {
+    let m = Machine::new();
+    let out = m.setup(&["--yes", "--airgap"]);
+    assert!(out.status.success(), "{}", Machine::said(&out));
+
+    // The rc block exports the key by reading the file, rather than carrying a
+    // copy of it. One credential, one file, one set of permissions.
+    let rc = std::fs::read_to_string(m.home.join(".zshrc")).expect("the rc file");
+    assert!(
+        rc.contains("SEMLITH_AGENT_KEY") && rc.contains("agent.key"),
+        "the rc block does not export the key from its file:\n{rc}"
+    );
+    assert!(
+        !rc.contains("sml_"),
+        "the rc file carries a literal key:\n{rc}"
+    );
+
+    let checked = Command::new("sh")
+        .arg("-n")
+        .arg(m.home.join(".zshrc"))
+        .output();
+    assert!(
+        checked.expect("running sh -n").status.success(),
+        "the rc file is not valid shell:\n{rc}"
+    );
+}
+
+/// A rotation is meant to reduce what a credential is exposed to. It used to
+/// widen it: the temp file the rewrite went through was created with the
+/// process umask, and the rename carried those permissions onto a file somebody
+/// had locked down.
+#[test]
+fn a_rotation_never_loosens_a_config_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let m = Machine::new();
+    let config = m
+        .home
+        .join(".codeium")
+        .join("windsurf")
+        .join("mcp_config.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let old = format!("sml_{}", "a".repeat(64));
+    let fresh = format!("sml_{}", "b".repeat(64));
+    std::fs::write(&config, format!(r#"{{"key":"{old}"}}"#)).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let before = std::fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+    assert_eq!(before, 0o600);
+
+    // `recarry_key` reads HOME, so this drives it through the library rather
+    // than through a second process.
+    let was = std::env::var_os("HOME");
+    // SAFETY: this test is single-threaded and restores the variable below.
+    unsafe { std::env::set_var("HOME", &m.home) };
+    let changed = semlith::setup::recarry_key(&old, &fresh);
+    match was {
+        Some(v) => unsafe { std::env::set_var("HOME", v) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+
+    assert_eq!(changed, vec![config.clone()], "{changed:?}");
+    let after = std::fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        after, 0o600,
+        "the rotation loosened the file from {before:o} to {after:o}"
+    );
+    assert!(std::fs::read_to_string(&config).unwrap().contains(&fresh));
+}

@@ -19,8 +19,13 @@ const SECTION: &str = "### Setting it up in your client";
 /// The heading the HTTP stanzas live under.
 const HTTP_SECTION: &str = "### Connecting over HTTP";
 
-/// What a stanza's placeholder key is replaced with.
-const KEY_PLACEHOLDER: &str = "sml_YOURKEY";
+/// What a stanza names where the agent key goes.
+///
+/// The variable rather than the key from 0.14.0: a configuration file that
+/// names it keeps working across every rotation, and one that carries the key
+/// itself goes stale the moment somebody rotates. The portal substitutes the
+/// literal value into this only when the reader has pressed Reveal.
+const KEY_PLACEHOLDER: &str = "${SEMLITH_AGENT_KEY}";
 
 /// One pasteable block.
 #[derive(Debug, Clone, serde::Serialize)]
