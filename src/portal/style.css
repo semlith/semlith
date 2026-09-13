@@ -824,9 +824,12 @@ h2 {
 
 /* A page header's controls are one row of one height. The small button is
  * 32px, which sat 4px short of the field beside it and read as a row that had
- * not been lined up. */
-.page-head .actions .button,
-.page-head .actions .button.small {
+ * not been lined up.
+ *
+ * Direct children only: a copy control lives inside a field in that same row,
+ * and a descendant selector grew it to the field's own height. */
+.page-head .actions > .button,
+.page-head .actions > .button.small {
   height: 36px;
 }
 
