@@ -518,6 +518,20 @@ fn collect(
             let Some(target) = target.filter(|t| !t.is_empty()) else {
                 continue;
             };
+            // A macro invocation is recorded under the name the source writes.
+            //
+            // `format!(...)` is a reference to the macro `format!`, not a call
+            // to a function called `format`, and the two are different names.
+            // Conflating them made every function that formats a string look
+            // like a caller of `store::format`: 229 of them on semlith's own
+            // store, against three real ones. The grammar's tags query cannot
+            // tell them apart because it captures the identifier without its
+            // `!`, so the distinction is restored here.
+            let target = if in_macro(node) {
+                format!("{target}!")
+            } else {
+                target
+            };
             refs.push(Ref {
                 name: target,
                 kind,
@@ -538,6 +552,23 @@ fn collect(
             });
         }
     }
+}
+
+/// Whether a captured reference is (or sits directly inside) a macro
+/// invocation.
+///
+/// Only the node itself and its immediate parents are checked, because a
+/// grammar captures either the invocation or the identifier naming it, and
+/// climbing further would swallow every ordinary call that happens to appear
+/// inside a macro's arguments — `format!("{}", helper())` really does call
+/// `helper`.
+fn in_macro(node: tree_sitter::Node) -> bool {
+    const MACRO_KINDS: [&str; 2] = ["macro_invocation", "macro_expression"];
+    if MACRO_KINDS.contains(&node.kind()) {
+        return true;
+    }
+    node.parent()
+        .is_some_and(|parent| MACRO_KINDS.contains(&parent.kind()))
 }
 
 /// The lead a `@hint` capture carries, or `None` when it carries none worth
@@ -1320,6 +1351,33 @@ mod tests {
             .find(|x| x.to == to && x.kind == kind)
             .map(|x| x.confidence.clone())
             .unwrap_or_else(|| panic!("no {kind} edge to {to} in {:?}", e.edges))
+    }
+
+    /// A macro invocation is not a call to a function of that name.
+    ///
+    /// `format!(...)` is the single worst case in the corpus: every function
+    /// that formats a string looked like a caller of `store::format`, which on
+    /// the semlith store meant 229 of them. The name the source writes is
+    /// `format!`, and that is a different name from `format` — so that is what
+    /// the edge records, and the two stop being confused for one another.
+    #[test]
+    fn a_macro_invocation_is_recorded_under_the_name_the_source_writes() {
+        let e = run(
+            "a.rs",
+            "fn go() { let s = format!(\"{}\", 1); println!(\"{s}\"); helper(); }\nfn helper() {}\n",
+        );
+        assert!(
+            !has_edge(&e, "go", "format", "calls"),
+            "a `format!` is not a call to `fn format`: {:?}",
+            e.edges
+        );
+        assert!(has_edge(&e, "go", "format!", "calls"), "{:?}", e.edges);
+        assert!(has_edge(&e, "go", "println!", "calls"), "{:?}", e.edges);
+        assert!(
+            has_edge(&e, "go", "helper", "calls"),
+            "an ordinary call is untouched: {:?}",
+            e.edges
+        );
     }
 
     #[test]
