@@ -753,9 +753,12 @@ mod tests {
     /// how the portal came to draw a chip the search route then refused.
     #[test]
     fn a_daemon_name_replaces_the_label_derived_from_the_directory() {
-        let dir = std::env::temp_dir().join("semlith-fleet-name-test");
-        let named = vec![(dir.clone(), "semlith-review".to_string())];
-        assert_eq!(name_for(&dir, &named).as_deref(), Some("semlith-review"));
+        let dir = std::env::temp_dir()
+            .join("semlith-fleet-name-test")
+            .join("store");
+        // The directory is called `store`; the registry calls it `work`.
+        let named = vec![(dir.clone(), "work".to_string())];
+        assert_eq!(name_for(&dir, &named).as_deref(), Some("work"));
 
         // A directory the caller says nothing about keeps what it had, so a
         // fleet opened from the command line is unchanged.
