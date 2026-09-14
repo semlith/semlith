@@ -286,6 +286,20 @@ impl Fleet {
         })
     }
 
+    /// What should count this fleet's tokens.
+    ///
+    /// The first store with a loaded model decides, and its tokenizer counts
+    /// for the whole answer. Two stores could in principle be on two models;
+    /// mixing two tokenizers inside one ratio would be worse than using one of
+    /// them and labelling the row, which is what this does.
+    pub fn counter(&self) -> crate::ledger::Counter<'_> {
+        self.members
+            .iter()
+            .find_map(|m| m.store.tokenizer())
+            .map(crate::ledger::Counter::Model)
+            .unwrap_or(crate::ledger::Counter::Chars4)
+    }
+
     /// The shortest chain from `from` to `to`, in the first store that has one.
     ///
     /// A path that crossed two stores would be a path through two unrelated

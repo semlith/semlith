@@ -8,6 +8,28 @@
 use semlith::Semlith;
 use std::path::Path;
 
+/// One row's worth of arguments, so a test that cares about two of them does
+/// not have to spell out the other eight.
+fn row<'a>(
+    client: &'a str,
+    query: &'a str,
+    excerpt: i64,
+    whole: i64,
+) -> semlith::store::NewRetrieval<'a> {
+    semlith::store::NewRetrieval {
+        client,
+        session: "test",
+        tool: "search",
+        query,
+        hits: 1,
+        micros: 4200,
+        excerpt_tokens: excerpt,
+        whole_file_tokens: whole,
+        stale_hits: 0,
+        tokenizer: semlith::ledger::CHARS4,
+    }
+}
+
 /// Recording is off by default, and a search with it off writes nothing.
 #[test]
 #[ignore = "downloads an embedding model on first run"]
@@ -40,16 +62,8 @@ fn one_recorded_retrieval_is_one_row_the_cli_prints() {
     }
 
     let s = Semlith::open(store.path(), None).unwrap();
-    semlith::store::record_retrieval(
-        s.db(),
-        "claude-code",
-        "sourdough starter",
-        3,
-        4200,
-        180,
-        4000,
-    )
-    .unwrap();
+    semlith::store::record_retrieval(s.db(), &row("claude-code", "sourdough starter", 180, 4000))
+        .unwrap();
     assert_eq!(rows(s.db()), 1);
 
     let (queries, clients, excerpt, whole) = semlith::store::ledger_totals(s.db()).unwrap();
@@ -75,7 +89,7 @@ fn editing_a_row_breaks_the_chain_and_the_break_is_found() {
 
     let s = Semlith::open(store.path(), None).unwrap();
     for i in 0..4 {
-        semlith::store::record_retrieval(s.db(), "agent", &format!("query {i}"), 1, 10, 5, 50)
+        semlith::store::record_retrieval(s.db(), &row("agent", &format!("query {i}"), 5, 50))
             .unwrap();
     }
     assert!(

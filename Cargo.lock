@@ -2481,6 +2481,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokenizers",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-go",

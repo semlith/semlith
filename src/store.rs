@@ -1382,15 +1382,10 @@ pub struct Retrieval {
 ///
 /// The chain is the point: a row cannot be quietly edited or removed without
 /// every hash after it failing to recompute.
-pub fn record_retrieval(
-    db: &Connection,
-    client: &str,
-    query: &str,
-    hits: i64,
-    micros: i64,
-    excerpt_tokens: i64,
-    whole_file_tokens: i64,
-) -> Result<()> {
+pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    let (client, query) = (row.client, row.query);
+    let (hits, micros) = (row.hits, row.micros);
+    let (excerpt_tokens, whole_file_tokens) = (row.excerpt_tokens, row.whole_file_tokens);
     // The ledger is the one write that happens on a read: a retrieval is
     // recorded by the search that answered it. It asks for the same permission
     // an index run does.
@@ -1407,20 +1402,12 @@ pub fn record_retrieval(
         )
         .optional()?
         .unwrap_or_default();
-    let hash = chain_hash(
-        &prev,
-        at,
-        client,
-        query,
-        hits,
-        micros,
-        excerpt_tokens,
-        whole_file_tokens,
-    );
+    let hash = chain_hash(&prev, at, row);
     db.execute(
         "INSERT INTO retrievals
-         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+          session, tool, stale_hits, tokenizer)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             at,
             client,
@@ -1430,14 +1417,78 @@ pub fn record_retrieval(
             excerpt_tokens,
             whole_file_tokens,
             prev,
-            hash
+            hash,
+            row.session,
+            row.tool,
+            row.stale_hits,
+            row.tokenizer
         ],
     )?;
     Ok(())
 }
 
+/// One retrieval, before it has a timestamp or a place in the chain.
+///
+/// A struct rather than thirteen positional arguments, because two adjacent
+/// `i64`s that mean different things are a bug waiting for a refactor.
+#[derive(Debug, Clone)]
+pub struct NewRetrieval<'a> {
+    /// Who asked: `claude-code`, `cursor`, `cli`, `portal`.
+    pub client: &'a str,
+    /// Which conversation, so one agent's session can be read as a unit.
+    pub session: &'a str,
+    /// Which tool: `search`, `neighbors`, `path`, `symbol`.
+    pub tool: &'a str,
+    pub query: &'a str,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    /// How many of those hits came from a file edited since it was indexed.
+    pub stale_hits: i64,
+    /// What counted the two token figures. Rows counted two different ways are
+    /// never summed together, so the label travels with the row rather than
+    /// being assumed from its age.
+    pub tokenizer: &'a str,
+}
+
+/// The hash covering one row and the one before it.
+///
+/// # Two formulas
+///
+/// A row written before 0.15.0 has four columns this one does not, and its
+/// hash was computed without them. Recomputing such a row under the new
+/// formula would report every 0.14.0 ledger as broken — which is the one thing
+/// a verify must never do, because a verify that cries wolf is worse than no
+/// verify at all.
+///
+/// So the formula is chosen per row, by the row itself: `tool` is NULL on
+/// every row written before 0.15.0 and set on every row written since. There
+/// is no version column and no migration, and a store holding rows of both
+/// kinds walks end to end.
+fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
+    let NewRetrieval {
+        client,
+        query,
+        hits,
+        micros,
+        excerpt_tokens: excerpt,
+        whole_file_tokens: whole,
+        ..
+    } = row;
+    let mut payload = format!(
+        "{prev}\u{1f}{at}\u{1f}{client}\u{1f}{query}\u{1f}{hits}\u{1f}{micros}\u{1f}{excerpt}\u{1f}{whole}"
+    );
+    payload.push_str(&format!(
+        "\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        row.session, row.tool, row.stale_hits, row.tokenizer
+    ));
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+/// The 0.14.0 formula, for rows written under it.
 #[allow(clippy::too_many_arguments)]
-fn chain_hash(
+fn legacy_chain_hash(
     prev: &str,
     at: i64,
     client: &str,
@@ -1486,12 +1537,98 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     )?)
 }
 
+/// The one savings figure, with the denominators that make it readable.
+///
+/// `net` is what the ledger says was not read: the whole-file cost of the
+/// files an answer named, less what the answer itself cost. Rows that found
+/// nothing are excluded from it and counted separately — a retrieval that
+/// returned no hits saved nothing, and a ledger that quietly dropped those
+/// rows would report a ratio that no honest denominator supports.
+///
+/// `tier` is `measured` when every credited row was counted with the store's
+/// own tokenizer, and `modelled` when any of them was estimated at four
+/// characters per token. The two are never summed: a mixed ledger reports
+/// `modelled`, because that is what the weaker half makes the whole.
+///
+/// # What this figure does not do
+///
+/// It does not deduplicate files across the retrievals of one session. If an
+/// agent searches twice and both answers name `src/lib.rs`, the denominator
+/// counts that file twice, and the real alternative — one read — is cheaper
+/// than the figure implies. Fixing it needs the file set stored per row, which
+/// this release does not add. The number is therefore an upper bound on what
+/// was saved, and `semlith stats` says so rather than presenting it as exact.
+pub fn ledger_savings(db: &Connection) -> Result<Savings> {
+    let (credited, net): (i64, i64) = db.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
+         FROM retrievals WHERE hits > 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let total: i64 = db.query_row("SELECT COUNT(*) FROM retrievals", [], |r| r.get(0))?;
+    let estimated: i64 = db.query_row(
+        "SELECT COUNT(*) FROM retrievals
+         WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(Savings {
+        net: net.max(0),
+        credited,
+        total,
+        measured: credited > 0 && estimated == 0,
+    })
+}
+
+/// What the ledger adds up to.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Savings {
+    /// Whole-file tokens less excerpt tokens, over rows that found something.
+    pub net: i64,
+    /// How many retrievals that was over.
+    pub credited: i64,
+    /// How many retrievals there are in total, credited or not. The
+    /// denominator, so a figure is never shown without one.
+    pub total: i64,
+    /// Whether every credited row was counted with the store's own tokenizer.
+    pub measured: bool,
+}
+
+impl Savings {
+    /// `measured` or `modelled`.
+    pub fn tier(&self) -> &'static str {
+        if self.measured {
+            "measured"
+        } else {
+            "modelled"
+        }
+    }
+
+    /// What share of retrievals the figure covers, as a percentage.
+    pub fn coverage(&self) -> i64 {
+        if self.total == 0 {
+            return 0;
+        }
+        self.credited * 100 / self.total
+    }
+}
+
+/// How many retrievals each client made, most first.
+pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT client, COUNT(*) FROM retrievals GROUP BY client ORDER BY COUNT(*) DESC, client",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Re-walk the chain and return the id of the first row that does not verify.
 ///
 /// `None` means the ledger is intact.
 pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
     let mut stmt = db.prepare(
-        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash
+        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+                session, tool, stale_hits, tokenizer
          FROM retrievals ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
@@ -1507,13 +1644,58 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         if prev != expected {
             return Ok(Some(id));
         }
-        let recomputed = chain_hash(&prev, at, &client, &query, hits, micros, excerpt, whole);
+        // `tool` is NULL on every row written before 0.15.0 and set on every
+        // row written since, which is what says which formula wrote this hash.
+        let tool: Option<String> = r.get(11)?;
+        let recomputed = match tool {
+            Some(tool) => {
+                let session: String = r.get(10)?;
+                let stale: i64 = r.get(12)?;
+                let tokenizer: String = r.get(13)?;
+                chain_hash(
+                    &prev,
+                    at,
+                    &NewRetrieval {
+                        client: &client,
+                        session: &session,
+                        tool: &tool,
+                        query: &query,
+                        hits,
+                        micros,
+                        excerpt_tokens: excerpt,
+                        whole_file_tokens: whole,
+                        stale_hits: stale,
+                        tokenizer: &tokenizer,
+                    },
+                )
+            }
+            None => legacy_chain_hash(&prev, at, &client, &query, hits, micros, excerpt, whole),
+        };
         if recomputed != hash {
             return Ok(Some(id));
         }
         expected = hash;
     }
     Ok(None)
+}
+
+/// The total bytes of every file a grep for `name` would have to read.
+///
+/// The honest denominator for a graph answer's saving. A search's denominator
+/// is the files its hits came from; a graph answer has no hits, but it does
+/// have an answer that would otherwise have been assembled by grepping for the
+/// name and reading what came back. These are those files: the ones that
+/// define the name, and the ones whose code points at it.
+pub fn grep_cost(db: &Connection, name: &str) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COALESCE(SUM(bytes), 0) FROM files WHERE id IN (
+            SELECT s.file_id FROM symbols s WHERE s.name = ?1
+            UNION
+            SELECT s.file_id FROM symbols s JOIN edges e ON e.src = s.id WHERE e.dst = ?1
+         )",
+        params![name],
+        |r| r.get(0),
+    )?)
 }
 
 /// One definition's span and identity: `(start, end, name, kind)`.

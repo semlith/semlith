@@ -90,16 +90,62 @@ pub trait Writer: Send + Sync {
 /// over stdio and the same request forwarded over loopback are answered by the
 /// same code — which is what makes "every supported revision works through the
 /// proxy" true by construction rather than by a second implementation agreeing.
-pub fn answer(stores: &mut Fleet, writer: Option<&dyn Writer>, request: &Value) -> Option<Value> {
+pub fn answer(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    request: &Value,
+    session: &mut Session,
+) -> Option<Value> {
     let id = request.get("id").cloned()?;
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or(json!({}));
-    Some(reply(&id, dispatch(stores, writer, method, &params)))
+    Some(reply(
+        &id,
+        dispatch(stores, writer, method, &params, session),
+    ))
+}
+
+/// Who is on the other end of this connection, and which conversation it is.
+///
+/// The ledger is the reason this exists. Before 0.15.0 a retrieval by an agent
+/// was recorded as nothing at all, and the savings figure the product is built
+/// on counted only the portal's own search box. A row now says which client
+/// asked and which conversation it belonged to, and both of those are facts
+/// the protocol already carries — the client names itself in `initialize`, and
+/// the transport already has a session.
+#[derive(Debug, Clone)]
+pub struct Session {
+    /// The client's own name for itself, from `clientInfo.name`.
+    ///
+    /// `mcp` until the handshake says otherwise, which covers a client that
+    /// sends no `clientInfo` and one that starts calling tools without
+    /// initializing at all.
+    pub client: String,
+    pub id: String,
+}
+
+impl Session {
+    pub fn new(id: impl Into<String>) -> Self {
+        Session {
+            client: "mcp".to_string(),
+            id: id.into(),
+        }
+    }
+
+    fn who(&self) -> crate::ledger::Who<'_> {
+        crate::ledger::Who {
+            client: &self.client,
+            session: &self.id,
+        }
+    }
 }
 
 /// Read requests from `input` until EOF, answering on `output`.
 pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) -> Result<()> {
     stores.quiet = true;
+    // One connection is one conversation, so the id is made once here and every
+    // row this client writes carries it.
+    let mut session = Session::new(format!("stdio-{}", std::process::id()));
 
     for line in input.lines() {
         let line = line?;
@@ -126,7 +172,7 @@ pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) ->
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let result = dispatch(stores, None, method, &params);
+        let result = dispatch(stores, None, method, &params, &mut session);
         respond(&mut output, &id, result)?;
     }
     Ok(())
@@ -158,6 +204,7 @@ fn dispatch(
     writer: Option<&dyn Writer>,
     method: &str,
     params: &Value,
+    session: &mut Session,
 ) -> Result<Value, Fail> {
     let declared = declared_version(params);
 
@@ -191,6 +238,18 @@ fn dispatch(
         )),
 
         "initialize" => {
+            // The client names itself here or nowhere. `claude-code`, `cursor`,
+            // `codex` — the ledger records exactly this string rather than a
+            // display name, so what the table says matches what the client
+            // calls itself in its own configuration.
+            if let Some(name) = params
+                .get("clientInfo")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+                .filter(|n| !n.trim().is_empty())
+            {
+                session.client = name.to_string();
+            }
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = negotiate(asked);
             // "The agent sees no tools" is otherwise undiagnosable from the
@@ -226,7 +285,7 @@ fn dispatch(
         }
 
         "tools/call" => {
-            let called = call_tool(stores, writer, params)?;
+            let called = call_tool(stores, writer, params, session)?;
             Ok(if modern {
                 modernize(called, None)
             } else {
@@ -457,9 +516,11 @@ fn call_tool(
     stores: &mut Fleet,
     writer: Option<&dyn Writer>,
     params: &Value,
+    session: &Session,
 ) -> Result<Value, Fail> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let started = std::time::Instant::now();
 
     let body = match name {
         "semlith_search" => {
@@ -845,7 +906,61 @@ fn call_tool(
         other => return Err((-32602, format!("unknown tool: {other}"), None)),
     };
 
+    record(stores, session, name, &args, &body, started.elapsed());
     Ok(json!({ "content": [{ "type": "text", "text": body }] }))
+}
+
+/// Write this tool call into the ledger, if it was a retrieval.
+///
+/// Every read an agent makes is recorded here from 0.15.0. Until then the only
+/// caller was the portal's own search box, which meant the savings figure the
+/// product is built on counted the one user who was not the point.
+///
+/// Indexing, adding and forgetting are writes, not retrievals, and are not
+/// recorded: the ledger answers "what did an agent read instead of reading
+/// files", and those three answer a different question. `semlith_stats` and
+/// `semlith_languages` are not retrievals either — they are questions about
+/// the tool rather than about the corpus.
+///
+/// Failures here are swallowed exactly as they were in `routes.rs`: a store
+/// that cannot be written to must not turn a successful answer into an error
+/// the agent sees.
+fn record(
+    stores: &Fleet,
+    session: &Session,
+    tool: &str,
+    args: &Value,
+    body: &str,
+    elapsed: std::time::Duration,
+) {
+    let who = session.who();
+    match tool {
+        "semlith_search" => {
+            // The hits are gone by now — `render` and `locate` consume them —
+            // so the row is built from the reply, which is what the agent was
+            // actually handed and therefore what it actually cost.
+            let Some(query) = args.get("query").and_then(Value::as_str) else {
+                return;
+            };
+            crate::ledger::reply(stores, &who, "search", query, body, elapsed);
+        }
+        "semlith_neighbors" | "semlith_path" | "semlith_symbol" => {
+            // `path` is asked about two names and the first is the one the
+            // question is about, which is the one a grep would have started
+            // from.
+            let Some(subject) = args
+                .get("name")
+                .or_else(|| args.get("from"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let short = tool.trim_start_matches("semlith_");
+            let found = !body.contains("not connected") && !body.contains("nothing");
+            crate::ledger::graph(stores, &who, short, subject, body, found, elapsed);
+        }
+        _ => {}
+    }
 }
 
 /// What to say when the graph has nothing for a name.

@@ -30,6 +30,7 @@ pub mod home;
 pub mod http;
 pub mod image;
 pub mod index;
+pub mod ledger;
 pub mod lock;
 pub mod mcp;
 pub mod portal;
@@ -421,6 +422,8 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// The embedder's own tokenizer, for counting rather than estimating.
+    tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
     clip: image::Clip,
     /// The index generation this process has loaded. Compared against the
@@ -507,6 +510,7 @@ impl Semlith {
             model,
             dim,
             embedder: None,
+            tokenizer: None,
             clip: image::Clip::default(),
             generation,
             quiet: false,
@@ -620,6 +624,16 @@ impl Semlith {
         self.index.evictions()
     }
 
+    /// The tokenizer this store's model embeds with, once it has been loaded.
+    ///
+    /// `None` before the first embedding, which is why the ledger labels every
+    /// row with what counted it: a graph-only session never loads a model, and
+    /// a row counted at four characters per token must never be added to one
+    /// counted properly.
+    pub fn tokenizer(&self) -> Option<&tokenizers::Tokenizer> {
+        self.tokenizer.as_ref()
+    }
+
     /// Loading the ONNX model costs a second or so, so it is deferred until a
     /// command actually needs to embed something.
     fn embedder(&mut self) -> Result<&mut TextEmbedding> {
@@ -629,11 +643,12 @@ impl Semlith {
             // chunk (base64, minified JS) blow up attention memory for no
             // retrieval benefit; two characters per token is a safe floor for
             // real text and code.
-            self.embedder = Some(self.model.load(
-                model_cache_dir(),
-                chunk::MAX_CHARS / 2,
-                self.quiet,
-            )?);
+            let cache = model_cache_dir();
+            // Read from the same cache, in the same breath. The ledger counts
+            // tokens with it, so it is loaded exactly when the model is and
+            // never fetched on its own.
+            self.tokenizer = self.model.tokenizer(&cache);
+            self.embedder = Some(self.model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?);
         }
         Ok(self.embedder.as_mut().unwrap())
     }
