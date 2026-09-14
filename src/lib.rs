@@ -210,6 +210,30 @@ impl Prefer {
     }
 }
 
+/// How much a chunk the graph walk ranked first is lifted over one it barely
+/// reached.
+///
+/// Small on purpose. The fusion already knows what the query matched; this is
+/// the code's opinion about what else is relevant, and it is a tiebreak rather
+/// than a second ranking. There is no model behind any of these three and
+/// there is not going to be one — every input is something the store already
+/// holds.
+const GRAPH_PROXIMITY: f32 = 0.15;
+
+/// How much a chunk that sits inside a named definition is lifted over one
+/// that does not.
+///
+/// A hit inside `fn record_retrieval` is a place a reader can act on; a hit in
+/// the prose between two functions usually is not, even when it matched.
+const KIND_LIFT: f32 = 0.10;
+
+/// How much a chunk from a file edited since it was indexed is pushed down.
+///
+/// Not removed: the excerpt may still be the best answer there is, and 0.15.0
+/// already flags it as stale. This only means a current answer of equal
+/// quality is preferred to it.
+const STALE_PENALTY: f32 = 0.10;
+
 /// One candidate in the fusion: which id space it is in, its id, the score it
 /// has accumulated, and which lists put it there.
 ///
@@ -285,6 +309,13 @@ struct Reached {
     id: u64,
     weight: f32,
     tier: String,
+    /// Where the walk put this chunk, as a share of the best one it found.
+    ///
+    /// 1.0 for the chunk the PageRank ranked first, falling away from there.
+    /// This is the "distance from the seeds" the rerank reads: a chunk the
+    /// walk barely reached should not be lifted as though the code insisted
+    /// on it.
+    proximity: f32,
 }
 
 /// The tier of the edge that reached `id`, if the graph list reached it at all.
@@ -1430,6 +1461,7 @@ impl Semlith {
 
         // The store answers in its own order; the walk's order is the answer,
         // so the rows are put back into it before the budget is applied.
+        let best = ranked.first().map(|(_, mass, _)| *mass);
         let mut symbols = store::symbols_by_names(&self.db, &names, filter.groups())?;
         symbols.sort_by_key(|s| place.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
 
@@ -1444,10 +1476,21 @@ impl Semlith {
                 .map(|(_, _, tier)| tier.clone())
                 .unwrap_or_else(|| graph::INFERRED.to_string());
             let weight = Self::expansion_weight(&tier);
+            // As a share of the best score the walk produced, so the number
+            // means the same thing whatever the absolute masses came out at.
+            let proximity = match (found, best) {
+                (Some((_, mass, _)), Some(best)) if best > 0.0 => mass / best,
+                _ => 0.0,
+            };
             // A chunk the other two lists already ranked gains nothing from
             // being re-ranked here; the fusion adds the contribution anyway.
             if !ids.iter().any(|r| r.id == id) {
-                ids.push(Reached { id, weight, tier });
+                ids.push(Reached {
+                    id,
+                    weight,
+                    tier,
+                    proximity,
+                });
             }
             if ids.len() >= depth {
                 break;
@@ -1830,6 +1873,11 @@ impl Semlith {
         ranked.truncate(depth.max(k));
 
         let mut hits = Vec::with_capacity(ranked.len());
+        // Kept beside the hits rather than on them: how near the graph walk
+        // put a chunk is an input to the ranking, not something a caller of
+        // `search` has any use for. Index-aligned with `hits`, which nothing
+        // between here and the rerank reorders.
+        let mut proximity: Vec<f32> = Vec::with_capacity(ranked.len());
         for (((is_image, id), score), found_by) in ranked {
             if is_image {
                 // An image hit carries its path and pixel size where a chunk
@@ -1857,6 +1905,7 @@ impl Semlith {
                         },
                         0.0,
                     ));
+                    proximity.push(0.0);
                 }
                 continue;
             }
@@ -1887,20 +1936,38 @@ impl Semlith {
                     },
                     similarity,
                 ));
+                proximity.push(
+                    graph_ids
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.proximity)
+                        .unwrap_or(0.0),
+                );
             }
         }
         self.mark_freshness(&mut hits)?;
         self.name_enclosing_symbols(&mut hits)?;
 
-        // The preference is applied here rather than inside the fusion because
-        // it is about the file a chunk is in, which the fusion has no way to
-        // know: it ranks ids.
-        if prefer != Prefer::Any {
-            for (hit, _) in hits.iter_mut() {
-                hit.score *= prefer.multiplier(filter::is_code(&hit.path));
+        // The rerank, and the preference with it. Both are applied here rather
+        // than inside the fusion because both are about things the fusion has
+        // no way to know — the file a chunk is in, the definition it sits
+        // inside, whether that file has been edited since — and all three are
+        // only known once the rows have been fetched.
+        //
+        // The fused score stays the dominant term. These are tiebreaks: a
+        // chunk the query matched badly does not climb over one it matched
+        // well because it happens to sit in a function.
+        for ((hit, _), proximity) in hits.iter_mut().zip(&proximity) {
+            hit.score *= 1.0 + GRAPH_PROXIMITY * proximity;
+            if hit.symbol_kind.is_some() {
+                hit.score *= 1.0 + KIND_LIFT;
             }
-            hits.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
+            if !hit.fresh {
+                hit.score *= 1.0 - STALE_PENALTY;
+            }
+            hit.score *= prefer.multiplier(filter::is_code(&hit.path));
         }
+        hits.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
         hits.truncate(k);
         Ok(hits)
     }
@@ -2225,6 +2292,24 @@ mod tests {
         assert_eq!(Prefer::parse("DOCS").unwrap(), Prefer::Docs);
         assert_eq!(Prefer::parse("").unwrap(), Prefer::Any);
         assert!(Prefer::parse("source").is_err());
+    }
+
+    /// The rerank is a tiebreak, not a second ranking. Every factor has to be
+    /// small enough that a chunk the query matched badly cannot climb over one
+    /// it matched well, and large enough to separate two that matched equally.
+    #[test]
+    fn every_rerank_factor_is_a_tiebreak_rather_than_a_ranking() {
+        let strongest = (1.0 + GRAPH_PROXIMITY) * (1.0 + KIND_LIFT);
+        let weakest = 1.0 - STALE_PENALTY;
+        assert!(
+            strongest / weakest < 1.5,
+            "the whole rerank spans {strongest}/{weakest}, which is a ranking rather than a \
+             tiebreak"
+        );
+        const { assert!(GRAPH_PROXIMITY > 0.0 && KIND_LIFT > 0.0 && STALE_PENALTY > 0.0) };
+        // A stale hit is pushed down, never removed: the excerpt in hand may
+        // still be the best answer there is.
+        const { assert!(STALE_PENALTY < 1.0) };
     }
 
     #[test]
