@@ -309,7 +309,7 @@ Module responsibilities:
   upgrade, deliberately, because a stub answering a graph question wrongly is
   worse than a tool that is not there. The `edges_dst` index stays — it is what
   `graph::neighbours` reads to answer the callers half — and the traversal
-  returns in 0.14.0 as a paid surface. Do not reintroduce it here.
+  returns in 0.18.0, rebuilt and free. Do not reintroduce it here.
 - **An image is embedded in the same `index_set` pass that embeds text**, inside
   the same held lock, on the same changed-file path. There is no image build
   step and there must not be one, for the reason there is no `graph build`: the
