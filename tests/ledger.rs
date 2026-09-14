@@ -242,6 +242,63 @@ fn a_search_from_the_command_line_is_recorded_as_cli() {
     );
 }
 
+/// The ledger counts with the model's own tokenizer, and says which counted.
+///
+/// This is the test that would have caught the release's worst near-miss.
+/// `Fleet` keeps its own embedder pool and never calls `Semlith::embedder`, so
+/// hanging the tokenizer off `Semlith` left every real path — the CLI, MCP, the
+/// portal — falling back to four characters per token while the contract, the
+/// documentation and the changelog all said otherwise. The rows said `chars4`
+/// and nothing else did.
+///
+/// Asserting the label rather than the number, because the number is the
+/// tokenizer's business and the label is the ledger's promise.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_recorded_retrieval_says_the_model_counted_it() {
+    let (corpus, store) = corpus();
+    {
+        let mut s = Semlith::open(store.path(), None).unwrap();
+        s.quiet = true;
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+            .unwrap();
+    }
+
+    // Through the fleet, which is what every surface actually uses.
+    let mut fleet = semlith::fleet::Fleet::open(&[store.path().to_path_buf()]).unwrap();
+    fleet.quiet = true;
+    let hits = fleet
+        .search_filtered("sourdough", 3, &semlith::filter::Filter::default())
+        .unwrap();
+    assert!(!hits.is_empty(), "the fixture corpus should answer this");
+    semlith::ledger::search(
+        &fleet,
+        &semlith::ledger::Who {
+            client: "harness",
+            session: "harness",
+        },
+        "sourdough",
+        &hits,
+        std::time::Duration::from_millis(1),
+    );
+    drop(fleet);
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let labels: Vec<String> = s
+        .db()
+        .prepare("SELECT tokenizer FROM retrievals")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(!labels.is_empty(), "nothing was recorded");
+    assert!(
+        labels.iter().all(|l| l == semlith::ledger::MODEL),
+        "the ledger fell back to an estimate while claiming to count: {labels:?}"
+    );
+}
+
 /// A store holding rows of both kinds verifies end to end.
 ///
 /// The formula changed in 0.15.0, and the row says which one wrote it. Getting
