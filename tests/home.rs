@@ -445,11 +445,15 @@ fn a_cloned_store_is_refused_until_it_is_trusted() {
         "--list does not name the trusted store: {}",
         text(&listed)
     );
-    let trusted_list = s.registry()["trusted"].clone();
+    // The count, not the list. CodeQL reads an interpolated registry value as
+    // sensitive data reaching a log, and it is right about the shape even though
+    // this one is a temporary directory in a test — and "recorded 2 entries" is
+    // a better failure message than a JSON array anyway.
+    let recorded = s.registry()["trusted"].as_array().map(Vec::len);
     assert_eq!(
-        trusted_list.as_array().map(Vec::len),
+        recorded,
         Some(1),
-        "trusting twice recorded it twice: {trusted_list}"
+        "trusting twice recorded {recorded:?} entries"
     );
 }
 

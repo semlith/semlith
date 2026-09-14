@@ -804,7 +804,11 @@ fn rules(state: &Arc<State>) -> Value {
         .filter_map(|s| home::loose_mode(&s.dir).map(|m| format!("{} is {m:o}", s.name)))
         .collect();
 
-    let key_mode = {
+    // Annotated: on Windows both arms of this are `None`, and `None` on its own
+    // tells the compiler nothing — the comparisons below then have two `PartialEq`
+    // impls to choose between, one of them serde_json's. A Windows-only type
+    // error, which is exactly the kind the matrix exists to find.
+    let key_mode: Option<u32> = {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
