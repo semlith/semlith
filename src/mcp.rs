@@ -357,6 +357,24 @@ pub fn tool_list() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// How many bytes `tools/list` is, for the harness that gates on it.
+///
+/// Exposed rather than recomputed in the test, so the number the gate reads is
+/// the number the server sends.
+pub fn tool_list_bytes() -> usize {
+    serde_json::to_string(&tool_defs("default"))
+        .map(|json| json.len())
+        .unwrap_or(0)
+}
+
+/// How many bytes a locate reply for these hits would be.
+///
+/// The harness measures what an agent is actually handed, which is this and
+/// not the `Hit` list behind it.
+pub fn locate_bytes(hits: &[crate::Hit], query: &str) -> usize {
+    locate(hits, query, DEFAULT_LOCATE_TOKENS).len()
+}
+
 fn tool_defs(open: &str) -> Value {
     let store_arg = format!("Open: {open}.");
     let write_store_arg = format!("Open: {open}. Required when several are.");
@@ -1315,6 +1333,102 @@ mod tests {
         let modern = json!({ "_meta": { META_VERSION: MODERN } });
         assert_eq!(declared_version(&modern), Some(MODERN));
         assert_eq!(declared_version(&json!({ "name": "semlith_stats" })), None);
+    }
+
+    fn hit(path: &str, start: u32, end: u32, text: &str) -> crate::Hit {
+        crate::Hit {
+            score: 0.5,
+            path: path.to_string(),
+            start_line: start,
+            end_line: end,
+            text: text.to_string(),
+            store: None,
+            lists: vec!["vector", "keyword"],
+            image: None,
+            fresh: true,
+            symbol: Some("edges_out".to_string()),
+            symbol_kind: Some("fn".to_string()),
+            provenance: None,
+        }
+    }
+
+    /// The cost half of the release, as a unit.
+    ///
+    /// The study measured a warm reply at 4.9-7.2 KB at k=8 against 100-300
+    /// bytes for the grep an agent could have run instead. A locate row is an
+    /// address, not the thing at the address, and this is the budget that says
+    /// so in a number rather than in a paragraph.
+    #[test]
+    fn a_locate_row_is_an_address_rather_than_its_contents() {
+        let hits: Vec<crate::Hit> = (0..8)
+            .map(|i| {
+                hit(
+                    &format!("src/file{i}.rs"),
+                    100 + i * 10,
+                    120 + i * 10,
+                    "fn edges_out(db: &Connection, name: &str) -> Result<Vec<EdgeEnd>> {\n\
+                         let filter = kind_predicate(kinds, \"e.kind\");\n\
+                         // A long chunk of source, of the kind 0.14.0 sent whole.\n",
+                )
+            })
+            .collect();
+
+        let reply = locate(&hits, "edges_out", DEFAULT_LOCATE_TOKENS);
+        let per_hit = reply.len() / hits.len();
+        assert!(
+            per_hit < 200,
+            "a locate row costs {per_hit} bytes; the whole reply was:\n{reply}"
+        );
+        assert!(reply.contains("edges_out fn"), "{reply}");
+        assert!(reply.contains("100-120"), "{reply}");
+    }
+
+    /// The budget is honoured, and a reply that was cut says so rather than
+    /// looking like a complete answer that found less.
+    #[test]
+    fn a_small_budget_cuts_the_reply_and_says_it_did() {
+        // Enough files for the floor to bite. A bigger *chunk* would not do
+        // it: the budget measures the reply, and a locate row is one line of a
+        // chunk however long the chunk is — which is the whole point of the
+        // format, and is worth pinning here.
+        let hits: Vec<crate::Hit> = (0..40)
+            .map(|i| hit(&format!("src/file{i}.rs"), 10, 40, "fn a() { helper(); }\n"))
+            .collect();
+
+        let full = locate(&hits, "helper", 10_000);
+        assert!(!full.contains("truncated:"), "nothing was cut: {full}");
+
+        let cut = locate(&hits, "helper", MIN_LOCATE_TOKENS);
+        assert!(cut.contains("truncated:"), "{cut}");
+        assert!(cut.len() < full.len(), "the budget did not cut anything");
+        assert!(
+            cut.contains("of 40"),
+            "the reader is told what the total was: {cut}"
+        );
+    }
+
+    /// A budget small enough to return nothing would turn a search into a
+    /// silent failure, so the first file always comes back.
+    #[test]
+    fn an_impossible_budget_still_returns_the_best_file() {
+        let hits = vec![hit("src/store.rs", 948, 970, "fn edges_out() {}\n")];
+        let reply = locate(&hits, "edges_out", 1);
+        assert!(reply.contains("src/store.rs"), "{reply}");
+    }
+
+    /// A stale hit says so. An agent quoting a chunk from a file that has moved
+    /// under it is the same class of defect as a wrong path, and just as quiet.
+    #[test]
+    fn a_stale_hit_is_marked_and_a_graph_reached_one_carries_its_tier() {
+        let mut stale = hit("src/lib.rs", 10, 20, "fn a() {}\n");
+        stale.fresh = false;
+        let mut reached = hit("src/graph.rs", 30, 40, "fn b() {}\n");
+        reached.lists = vec!["graph"];
+        reached.provenance = Some(crate::graph::RESOLVED.to_string());
+
+        let reply = locate(&[stale, reached], "a", DEFAULT_LOCATE_TOKENS);
+        assert!(reply.contains("stale"), "{reply}");
+        assert!(reply.contains("graph(resolved)"), "{reply}");
     }
 
     /// The tool list is the first thing every agent pays for, once per session,

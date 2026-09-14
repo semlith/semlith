@@ -832,28 +832,34 @@ questions:
   # ------------------------------------------------------------------
   # multi-hop — questions only the graph answers.
   #
-  # The four `connected: false` questions are the wrong-yes gate. Three of them
-  # come straight from `docs/graph-path-inferred-edges.md`, where all three were
-  # reproduced returning short, plausible, entirely wrong chains, every hop
-  # labelled `(inferred)`. The truth in each case is that no MCP tool call
-  # reaches the retrieval ledger, established by reading the code rather than by
-  # asking the graph:
+  # The `connected: false` questions are the wrong-yes gate. They come from
+  # `docs/graph-path-inferred-edges.md`, where each was reproduced returning a
+  # short, plausible, entirely wrong chain, every hop labelled `(inferred)`.
   #
-  #   - `routes.rs:416` is the only `if state.ledger` gate in the crate, and
-  #     `routes.rs:417` the only production call to `routes::record`, with the
-  #     client hardcoded to "portal".
-  #   - `mcp::call_tool`'s search arm runs `stores.search_in(...)` then
-  #     `render(&hits)`, and never records.
-  #   - `routes::mcp` hands the request to `mcp::answer`, and nothing on that
-  #     path touches the ledger.
+  # As written against the 199463c baseline there were four of them, and the
+  # truth in each case was that no MCP tool call reached the retrieval ledger:
+  # `routes.rs:416` held the only `if state.ledger` gate in the crate,
+  # `routes::record` was the only production caller of `store::record_retrieval`
+  # with its client hardcoded to "portal", and neither `mcp::call_tool` nor
+  # `routes::mcp` touched the ledger at all.
   #
-  # Re-verified against this tree by grep: `record_retrieval` has exactly three
-  # call sites, one in `routes::record` and two in `tests/ledger.rs`.
+  # 0.15.0 changed that, deliberately: it is the release that made every surface
+  # record. `routes::record` is gone, its job moved to `src/ledger.rs`, and
+  # `mcp::call_tool` now calls it. Two of the four questions therefore became
+  # genuinely connected — `path-call-tool-to-ledger` at three hops and
+  # `path-answer-to-ledger` at five — and both were re-derived from a clean
+  # index of the tree, with every hop `resolved` or `extracted` and no seam.
+  # Their notes carry the chain and the reasoning.
   #
-  # The three `connected: true` questions keep the metric two-sided. All three
-  # were verified by reading every call site in the chain, and all three use
-  # names with exactly one definition in the crate, so a correct answer needs no
-  # luck with collisions.
+  # `path-search-in-to-ledger` and `path-is-image-to-ledger` stay at
+  # `connected: false` and are now the whole of the gate. `search_in` reaches
+  # the search machinery and never the ledger, which is what makes it the
+  # control: if a change ever makes the finder answer "yes" there, that is a
+  # wrong yes rather than a third flip, and the difference is checkable by
+  # reading the three hops it would have to invent.
+  #
+  # The `connected: true` questions keep the metric two-sided. Each was verified
+  # by reading every call site in its chain.
   # ------------------------------------------------------------------
 
   - id: path-call-tool-to-ledger
@@ -862,7 +868,10 @@ questions:
     from: call_tool
     to: record_retrieval
     depth: 6
-    connected: false
+    # Was `false`, and was true at the 199463c baseline. 0.15.0 made the two
+    # genuinely connected: see the note.
+    connected: true
+    hops: 3
     grep: grep -rn 'record_retrieval\|fn call_tool\|ledger' src/mcp.rs src/routes.rs
     spans:
       - path: src/mcp.rs
@@ -887,13 +896,36 @@ questions:
       confident wrong yes, against roughly 5.2 KB of grep plus two reads to
       reach a correct no.
 
+      Changed in 0.15.0, and the change is in the code rather than in this
+      file. The release made `call_tool` record every retrieval, so the chain
+      `call_tool -> record -> graph -> record_retrieval` now genuinely exists:
+      `mcp::call_tool` calls `mcp::record`, which calls `ledger::graph`, which
+      calls `store::record_retrieval`. Measured on a clean index of the tree at
+      the time of the release: three hops, one extracted and two resolved, no
+      seam and no ambiguous name.
+
+      This is the one kind of edit this file permits — the ground truth was
+      right about 0.14.0 and the code stopped matching it — and it is the kind
+      most easily abused, so the check that distinguishes it is recorded here.
+      The false chain this question was written for went through `record` with
+      two definitions and `index` with seven, and was welded at a seam. The
+      chain now is not that chain: it goes through a different `record`, in
+      `mcp.rs`, that the caller is in the same file as, and every hop resolves
+      to exactly one definition. `path-search-in-to-ledger` is the control and
+      is deliberately left at `connected: false` — `search_in` still does not
+      reach the ledger, and if a future change makes the tool answer "yes"
+      there, that is a wrong yes and not another flip.
+
   - id: path-answer-to-ledger
     shape: multi-hop
     tool: path
     from: answer
     to: record_retrieval
     depth: 6
-    connected: false
+    # Flipped for the same reason as `path-call-tool-to-ledger`, one hop
+    # further out: `answer` reaches `call_tool` through `dispatch`.
+    connected: true
+    hops: 5
     grep: grep -rn 'record_retrieval\|fn answer' src/mcp.rs src/routes.rs
     spans:
       - path: src/mcp.rs
