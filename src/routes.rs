@@ -26,6 +26,14 @@ use std::sync::atomic::Ordering;
 /// cap is what stops a hand-written query asking for all of them.
 const FILE_PAGE: i64 = 500;
 
+/// How deep the Files route will page.
+///
+/// The cost of an offset is paid before the page is cut: every open store is
+/// asked for `offset + limit` rows in the requested order and the merge picks
+/// the page out of the union, so the offset is what is allocated rather than
+/// what is returned.
+const FILE_OFFSET_MAX: i64 = 10_000;
+
 pub fn handler(state: Arc<State>) -> Handler {
     Arc::new(move |request| route(&state, request))
 }
@@ -41,6 +49,14 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
 
     match (get, post, path) {
         (true, _, "/") => crate::portal::page(),
+
+        // A route that panics, so the containment in `http::answer` is proved
+        // against a running daemon rather than against a unit test's handler.
+        // `debug_assertions` is off in a release build, so the binary a user
+        // installs does not have it: this is a test fixture that happens to
+        // live beside the routes it tests, not a hidden endpoint.
+        #[cfg(debug_assertions)]
+        (true, _, "/api/panic") => panic!("the route that exists to panic, panicking"),
 
         (true, _, "/api/stores") => stores(state),
         (true, _, "/api/files") => files(state, request),
@@ -63,6 +79,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
+        (_, true, "/api/trust") => trust(state, request),
+        (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
         // MCP over HTTP, on the path a client's configuration names. The
@@ -104,7 +122,8 @@ fn stores(state: &Arc<State>) -> Response {
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = home::Registry::load().unwrap_or_default();
     let mut out = Vec::new();
 
     for handle in state.stores() {
@@ -151,6 +170,16 @@ fn stores(state: &Arc<State>) -> Response {
         out.push(json!({
             "name": handle.name,
             "dir": handle.dir.display().to_string(),
+            // A store made before 0.14.0 is readable by everyone on the machine
+            // until it is opened by this binary, and one somebody chmod'ed is
+            // readable until the next open too. Reported rather than silently
+            // fixed, so the row says what happened.
+            "loose_mode": home::loose_mode(&handle.dir).map(|m| format!("{m:o}")),
+            // A store this daemon was pointed at explicitly — `semlith start
+            // /some/path` — is open without having been trusted, which is
+            // correct for an explicit instruction and worth saying, because the
+            // next `semlith mcp` in that directory will refuse it.
+            "trusted": registry.trusts(&handle.dir),
             // Told apart so the portal can show a root that is not there as a
             // problem rather than silently listing one fewer.
             "roots": handle.roots.iter().map(|r| json!({
@@ -186,10 +215,26 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    // Before anything is opened. An offset of four billion asks every open
+    // store for four billion rows in sorted order and merges them, which is a
+    // whole machine's memory for a page nobody is reading. The portal pages in
+    // fifteens; ten thousand is deeper than any table it draws, and a refusal
+    // past it is a clearer answer than a clamp that silently shows page one.
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if !(0..=FILE_OFFSET_MAX).contains(&offset) {
+        return Response::error(
+            400,
+            &format!("offset must be between 0 and {FILE_OFFSET_MAX}"),
+        );
+    }
+
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_mut() else {
         return Response::json(&json!({ "files": [], "total": 0 }));
     };
@@ -204,11 +249,6 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(15)
         .clamp(1, FILE_PAGE);
-    let offset = request
-        .query("offset")
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0)
-        .clamp(0, i64::from(u32::MAX));
 
     // Each store is asked for the first `offset + limit` rows in the requested
     // order and the merge picks the page out of the union. Asking each store
@@ -305,10 +345,26 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    // Before anything is opened. An offset of four billion asks every open
+    // store for four billion rows in sorted order and merges them, which is a
+    // whole machine's memory for a page nobody is reading. The portal pages in
+    // fifteens; ten thousand is deeper than any table it draws, and a refusal
+    // past it is a clearer answer than a clamp that silently shows page one.
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    if !(0..=FILE_OFFSET_MAX).contains(&offset) {
+        return Response::error(
+            400,
+            &format!("offset must be between 0 and {FILE_OFFSET_MAX}"),
+        );
+    }
+
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_mut() else {
         return Response::json(&json!({ "hits": [], "selected": 0 }));
     };
@@ -537,14 +593,29 @@ fn walk_bytes(dir: &Path) -> u64 {
 /// file-read primitive behind a loopback port. The `images` table is the
 /// allowlist, so the only files this can serve are ones the user pointed
 /// semlith at.
+/// The largest image this route will read into memory.
+///
+/// A preview in a search result. The indexer's own cap is larger, and a file
+/// past this one is a file the page should not be trying to draw anyway.
+const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
 fn image_file(state: &Arc<State>, request: &Request) -> Response {
     let Some(want) = request.query("path") else {
         return Response::error(400, "missing path");
     };
+    // Resolved before it is looked up, and the resolved path is what is looked
+    // up. The store records canonical paths, so a name that now points
+    // somewhere else — an indexed `diagram.png` replaced by a symlink to
+    // `/etc/shadow` — resolves to a path the store has never heard of and is a
+    // 404 rather than a read. Checking the name and then opening it is the
+    // gap: the two are not the same file if anything moved in between.
+    let path = crate::canonical(Path::new(want));
+    let looked_up = path.to_string_lossy().into_owned();
+
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let mut fleet = state.fleet.lock().expect("the fleet lock");
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_mut() else {
         return Response::error(404, "no such image");
     };
@@ -554,7 +625,7 @@ fn image_file(state: &Arc<State>, request: &Request) -> Response {
             .db()
             .query_row(
                 "SELECT 1 FROM images i JOIN files f ON f.id = i.file_id WHERE f.path = ?1",
-                rusqlite::params![want],
+                rusqlite::params![&looked_up],
                 |_| Ok(()),
             )
             .is_ok()
@@ -563,11 +634,28 @@ fn image_file(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(404, "no such image");
     }
 
-    let path = Path::new(want);
-    let Ok(bytes) = std::fs::read(path) else {
+    // Opened once, and everything decided from the open handle: what is read is
+    // what was opened, whatever the name points at by the time it is read.
+    let Ok(file) = std::fs::File::open(&path) else {
         // Indexed once and gone since: the row is real and the file is not.
         return Response::error(404, "the file is no longer on disk");
     };
+    let Ok(meta) = file.metadata() else {
+        return Response::error(404, "the file is no longer on disk");
+    };
+    if !meta.is_file() {
+        return Response::error(404, "no such image");
+    }
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Response::error(413, "the image is larger than the portal will draw");
+    }
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    if file.take(MAX_IMAGE_BYTES).read_to_end(&mut bytes).is_err() {
+        return Response::error(404, "the file could not be read");
+    }
+
+    let path = path.as_path();
     let kind = match path
         .extension()
         .and_then(|e| e.to_str())
@@ -614,8 +702,14 @@ fn dirs(request: &Request) -> Response {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.clone());
     // Canonicalized first, so `..` and a symlink are both resolved before the
-    // containment check rather than after it.
-    let resolved = crate::canonical(&asked);
+    // containment check rather than after it — and through `std::fs` directly
+    // rather than through the helper, which returns the path unchanged when it
+    // cannot resolve one. A path that does not resolve is a path this route
+    // cannot say anything about, so it is refused rather than checked as
+    // written.
+    let Ok(resolved) = std::fs::canonicalize(&asked) else {
+        return Response::error(400, "that path cannot be resolved");
+    };
     if !resolved.starts_with(&home) {
         return Response::error(400, "outside the home directory");
     }
@@ -669,17 +763,156 @@ fn privacy(state: &Arc<State>) -> Response {
         "model_cache": cache.display().to_string(),
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
-        "token_cookie": crate::http::TOKEN_COOKIE,
+        "token_header": crate::http::TOKEN_HEADER,
         // Enough of the token to recognise the one this browser holds, and
-        // not enough to be one. The full value is in the cookie the browser
-        // already has and in the body of the rotate response, which sets the
-        // new cookie in the same breath — it is in no other response.
+        // not enough to be one. The full value reaches the page once, in the
+        // printed URL, and once more in the body of the rotate response — it is
+        // in no other response, and it is in no cookie at all.
         "token_preview": preview(&state.server.token()),
+        // How long a rotated agent key still works, if one still does. Shown
+        // as a countdown rather than as "until this daemon exits", which on a
+        // machine somebody leaves running is not a grace period at all.
+        "key_grace_seconds": state.server.key_grace().map(|left| left.as_secs()),
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
         "csp": "default-src 'self'",
         "cors": false,
         "store_home": home::home().display().to_string(),
+        // One row per rule this release added, each with what the daemon found
+        // when it looked — not a list of claims. A page that states a policy is
+        // a page; a page that states a policy and the reading behind it is
+        // something a reader can disagree with.
+        "rules": rules(state),
     }))
+}
+
+/// Every rule 0.14.0 added, and the daemon's own check of it.
+///
+/// `ok` is what was measured, `check` is what was measured *about*, so a row
+/// that fails says which thing on this machine is not as the rule describes.
+/// Rules that hold by construction — the ones enforced in `http::answer` before
+/// any handler runs — report what the code does rather than a reading, and say
+/// so in `check`.
+fn rules(state: &Arc<State>) -> Value {
+    let home_dir = home::home();
+    let cache = crate::model_cache_dir();
+    let key_path = home::agent_key_path();
+    let registry = home::Registry::load().unwrap_or_default();
+
+    let store_modes: Vec<String> = state
+        .stores()
+        .iter()
+        .filter_map(|s| home::loose_mode(&s.dir).map(|m| format!("{} is {m:o}", s.name)))
+        .collect();
+
+    // Annotated: on Windows both arms of this are `None`, and `None` on its own
+    // tells the compiler nothing — the comparisons below then have two `PartialEq`
+    // impls to choose between, one of them serde_json's. A Windows-only type
+    // error, which is exactly the kind the matrix exists to find.
+    let key_mode: Option<u32> = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&key_path)
+                .map(|m| m.permissions().mode() & 0o777)
+                .ok()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+
+    json!([
+        {
+            "id": "header-borne token",
+            "rule": format!(
+                "The session token travels in a {} header, never in a cookie. Every port                  on localhost is the same site, so a cookie would reach a page served by                  anything else on this machine.",
+                crate::http::TOKEN_HEADER
+            ),
+            "check": "no route sets a cookie and none reads one",
+            "ok": true,
+        },
+        {
+            "id": "same-origin writes",
+            "rule": "Every request that is not a GET carries Sec-Fetch-Site: same-origin —                      or, from a client that sends no fetch metadata, an Origin that matches                      or none at all — and a JSON content type. Both are checked before the                      token, so a cross-origin page cannot tell a right guess from a wrong                      one.",
+            "check": "enforced in http::answer before any route runs",
+            "ok": true,
+        },
+        {
+            "id": "store trust",
+            "rule": "A store outside the store home is opened only after semlith trust                      has recorded it. A .semlith directory can arrive inside a repository.",
+            "check": if registry.trusted.is_empty() {
+                "no store outside the home is trusted".to_string()
+            } else {
+                format!("{} trusted outside the home", registry.trusted.len())
+            },
+            "ok": true,
+        },
+        {
+            "id": "index boundary",
+            "rule": "An agent holding the key indexes only under this store's registered                      roots or the home directory. The command line is not held to this —                      the person typing it owns the machine.",
+            "check": "enforced per path in Semlith::index_set",
+            "ok": true,
+        },
+        {
+            "id": "deny-list",
+            "rule": "No path under a credential directory, and no file named like a                      credential, is indexed by an agent or the portal — with the                      hidden-file rule applied to an explicitly named path too.",
+            "check": format!(
+                "{} directories and {} name patterns",
+                crate::filter::DENIED_DIRS.len(),
+                crate::filter::DENIED_NAMES.len()
+            ),
+            "ok": true,
+        },
+        {
+            "id": "private addresses",
+            "rule": "semlith add resolves every hop and refuses an address that is not                      on the public internet: loopback, RFC 1918, link-local,                      carrier-grade NAT, unique local.",
+            "check": if std::env::var_os(crate::add::ALLOW_PRIVATE_ENV).is_some() {
+                format!("{} is set, so private addresses are allowed", crate::add::ALLOW_PRIVATE_ENV)
+            } else {
+                "on".to_string()
+            },
+            "ok": std::env::var_os(crate::add::ALLOW_PRIVATE_ENV).is_none(),
+        },
+        {
+            "id": "pinned models",
+            "rule": "Every model file is fetched at a pinned commit and verified against a                      digest recorded in the source and in docs/models.md. The weights are                      what computes every vector in every store.",
+            "check": format!("granite at {}", &crate::embed::GRANITE_REVISION[..12]),
+            "ok": true,
+        },
+        {
+            "id": "model cache",
+            "rule": "Weights are not loaded from a cache another account owns or can write                      to.",
+            "check": match crate::embed::check_cache_dir(&cache) {
+                Ok(()) => format!("{} is yours alone", cache.display()),
+                Err(e) => e.to_string(),
+            },
+            "ok": crate::embed::check_cache_dir(&cache).is_ok(),
+        },
+        {
+            "id": "directory modes",
+            "rule": "The store home, every store, the model cache and daemon.json are                      readable by their owner and nobody else.",
+            "check": if store_modes.is_empty() {
+                match home::loose_mode(&home_dir) {
+                    Some(mode) => format!("{} is {mode:o}", home_dir.display()),
+                    None => format!("{} and every open store are 0700", home_dir.display()),
+                }
+            } else {
+                store_modes.join(", ")
+            },
+            "ok": store_modes.is_empty() && home::loose_mode(&home_dir).is_none(),
+        },
+        {
+            "id": "agent key",
+            "rule": "The key is in one file, readable by you alone. No client                      configuration carries it and no command line shows it: every stanza                      names ${SEMLITH_AGENT_KEY}.",
+            "check": match key_mode {
+                Some(mode) if mode & 0o077 == 0 => format!("{} is {mode:o}", key_path.display()),
+                Some(mode) => format!("{} is {mode:o}", key_path.display()),
+                None => format!("{} has no mode to read", key_path.display()),
+            },
+            "ok": key_mode.is_none_or(|mode| mode & 0o077 == 0),
+        },
+    ])
 }
 
 /// The first sixteen characters of a secret, and an ellipsis.
@@ -727,6 +960,17 @@ fn about(state: &Arc<State>) -> Response {
 /// it made the Agents page block on a subprocess for a payload the page never
 /// read — it asks `/api/setup` separately, and renders that panel when the
 /// answer arrives rather than holding the whole page for it.
+/// The agent key itself, once, because somebody pressed Reveal.
+///
+/// A POST rather than a GET: it is not something a page should receive for
+/// merely being open, and the same-origin and JSON rules every write carries
+/// apply to it. The key is on this machine already, in a file this user owns —
+/// what this route changes is that reading it is a deliberate act rather than
+/// part of rendering a page.
+fn reveal(state: &Arc<State>) -> Response {
+    Response::json(&json!({ "key": state.server.agent_key() }))
+}
+
 fn agents(state: &Arc<State>) -> Response {
     let connections = state.clients();
     let key = state.server.agent_key();
@@ -748,10 +992,18 @@ fn agents(state: &Arc<State>) -> Response {
             "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
             "open": state.server.mcp_open(),
         },
-        // The live key, so the stanza the page shows is one that works. It is
-        // already on this machine in a file this user owns, and every stanza
-        // the page exists to hand out carries it.
-        "key": key,
+        // Not the key. This route is read on every visit to the Agents page,
+        // so the credential that opens the MCP endpoint used to be in a
+        // response the page had done nothing to ask for. The page shows the
+        // variable form, which is what a client stanza should carry anyway, and
+        // `POST /api/agents/reveal` hands over the real value once, when
+        // somebody presses the button.
+        "key_env": crate::setup::KEY_ENV,
+        // Not even a preview. A preview of an agent key still begins `sml_`,
+        // and this route is read on every visit to the page — the point is that
+        // nothing about the credential arrives unasked.
+        "key_set": home::is_agent_key(&key),
+        "key_path": home::agent_key_path().display().to_string(),
         "install": {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,
@@ -831,7 +1083,7 @@ fn with_fleet(
     if let Err(e) = state.open_fleet() {
         return Response::error(500, &e.to_string());
     }
-    let fleet = state.fleet.lock().expect("the fleet lock");
+    let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let Some(fleet) = fleet.as_ref() else {
         return Response::json(&empty);
     };
@@ -1208,6 +1460,37 @@ fn delete_store(state: &Arc<State>, request: &Request) -> Response {
 
 /// The welcome screen's "Adopt an existing .semlith", running the same code
 /// path the CLI `adopt` runs.
+/// Say that a store directory outside the home may be opened.
+///
+/// The portal's half of `semlith trust`. It records a path and moves nothing,
+/// which is the difference from `/api/adopt` beside it: a developer who wants
+/// their `.semlith` to stay with its corpus should not have to move it to keep
+/// using it.
+fn trust(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(dir) = body.get("path").and_then(Value::as_str) else {
+        return Response::error(400, "no path given");
+    };
+    let mut registry = match home::Registry::load() {
+        Ok(r) => r,
+        Err(e) => return Response::error(500, &e.to_string()),
+    };
+    match registry.trust(Path::new(dir)) {
+        Ok(dir) => Response::json(&json!({
+            "dir": dir.display().to_string(),
+            "trusted": registry.trusted.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
+            // The daemon opened its stores at startup, so one trusted now joins
+            // on the next start — the same answer `/api/adopt` gives, for the
+            // same reason.
+            "restart_required": !state.stores().iter().any(|s| s.dir == dir),
+        })),
+        Err(e) => Response::error(400, &e.to_string()),
+    }
+}
+
 fn adopt(state: &Arc<State>, request: &Request) -> Response {
     let body = match request.json() {
         Ok(b) => b,
@@ -1271,8 +1554,15 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     let revision = params
         .and_then(|p| p.get("protocolVersion"))
         .and_then(Value::as_str);
+    // A session id arrives from a client and goes back out in a response
+    // header, so what a client may send is exactly what `new_session` produces:
+    // sixteen hex characters. Anything else — a header injection, a control
+    // character, a kilobyte of text — is replaced with a fresh id rather than
+    // reflected, and the client is told the new one in the `initialize`
+    // response the same way it would be told a first one.
     let session = request
         .header("mcp-session-id")
+        .filter(|id| is_session_id(id))
         .map(str::to_string)
         .or_else(|| proxy.map(|pid| pid.to_string()))
         .unwrap_or_else(|| {
@@ -1295,7 +1585,7 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
     }
 
     let writer = daemon::Writer(Arc::clone(state));
-    let mut fleet = state.mcp_fleet.lock().expect("the mcp fleet lock");
+    let mut fleet = state.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
     let mut nothing = crate::fleet::Fleet::empty();
     let fleet = match fleet.as_mut() {
         Some(fleet) => fleet,
@@ -1316,6 +1606,12 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         return response.header("Mcp-Session-Id", session);
     }
     response
+}
+
+/// The shape [`new_session`] produces, and the only shape accepted from a
+/// client.
+fn is_session_id(value: &str) -> bool {
+    value.len() == 16 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A session id, which identifies a client and guards nothing.
@@ -1386,9 +1682,10 @@ fn endpoint(state: &Arc<State>, request: &Request) -> Response {
 
 fn rotate(state: &Arc<State>) -> Response {
     let fresh = state.rotate();
-    // Returned once, and set as the cookie in the same response, so the page
-    // that asked keeps working and the old token stops.
-    Response::json(&json!({ "token": fresh, "url": daemon::url(state) })).with_token(&fresh)
+    // Returned once, to the page that asked and holds the old one. It keeps
+    // working because it puts this value in the header from here on; every
+    // other holder of the old token stops at the next request.
+    Response::json(&json!({ "token": fresh, "url": daemon::url(state) }))
 }
 
 // ---------------------------------------------------------------- helpers

@@ -61,29 +61,119 @@ pub struct Discovery {
 }
 
 impl Discovery {
+    /// The daemon to forward to, if this file names one and is one semlith
+    /// wrote.
+    ///
+    /// This file decides where `semlith mcp` sends every call, so a repository
+    /// that carried one would be choosing the port an agent's questions and
+    /// answers travel through. Four things have to hold, and each of them is a
+    /// way the file could have come from somewhere else:
+    ///
+    /// - the store it sits in is one this user trusts, so a cloned `.semlith`
+    ///   never gets this far;
+    /// - on unix it is mode `0600` and owned by this user, so another account
+    ///   on the machine did not write it;
+    /// - the pid it names is alive, so a stale file from a dead daemon is
+    ///   ignored rather than followed to whatever now holds that port;
+    /// - the token is 64 hex characters, so what is about to be put in a header
+    ///   is a token rather than whatever was in the file.
+    ///
+    /// Every failure falls back to opening the store directly, which is what
+    /// this function's `None` has always meant.
     pub fn read(store_dir: &Path) -> Option<Self> {
-        let text = std::fs::read_to_string(store_dir.join(DISCOVERY_FILE)).ok()?;
-        serde_json::from_str(&text).ok()
+        if !home::Registry::load().ok()?.trusts(store_dir) {
+            return None;
+        }
+        let path = store_dir.join(DISCOVERY_FILE);
+        if !owner_only(&path) {
+            eprintln!(
+                "semlith: ignoring {} — it is not a file this user wrote privately",
+                path.display()
+            );
+            return None;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let found: Self = serde_json::from_str(&text).ok()?;
+        if found.token.len() != 64 || !found.token.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        if !alive(found.pid) {
+            return None;
+        }
+        Some(found)
     }
 
     fn write(&self, store_dir: &Path) -> Result<()> {
         let path = store_dir.join(DISCOVERY_FILE);
-        std::fs::write(&path, serde_json::to_string_pretty(self)? + "\n")
-            .with_context(|| format!("writing {}", path.display()))?;
-        // The token is in this file, so nobody else on a shared machine reads
-        // it. Best effort: a filesystem without modes is not a reason to fail
-        // to start.
+        // The mode is set as the file is created rather than afterwards. The
+        // session token is in this file, and a file that is world-readable for
+        // the microsecond between the two is a file that was world-readable —
+        // the same reason `home::write_agent_key` opens with a mode.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(home::FILE_MODE);
         }
+        let mut file = options
+            .open(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        use std::io::Write;
+        file.write_all((serde_json::to_string_pretty(self)? + "\n").as_bytes())
+            .with_context(|| format!("writing {}", path.display()))?;
+        // An existing file keeps its own mode through `truncate`, so one left
+        // loose by an older semlith is narrowed here too.
+        home::tighten_file(&path);
         Ok(())
     }
 
     fn remove(store_dir: &Path) {
         let _ = std::fs::remove_file(store_dir.join(DISCOVERY_FILE));
     }
+}
+
+/// Whether a file is one this user wrote and nobody else can read.
+///
+/// On Windows there is no mode to read: the home sits inside the user's
+/// profile, whose default ACL grants that user alone, and semlith carries no
+/// API for reading an ACL. Stated rather than silently assumed, as
+/// `home::check_key_mode` already does for the agent key.
+#[cfg(unix)]
+fn owner_only(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    // SAFETY: `getuid` reads this process's own id and cannot fail.
+    let me = unsafe { libc::getuid() };
+    meta.uid() == me && meta.permissions().mode() & 0o177 == 0
+}
+
+#[cfg(not(unix))]
+fn owner_only(path: &Path) -> bool {
+    path.exists()
+}
+
+/// Whether a process id names something running.
+///
+/// `kill(pid, 0)` asks the kernel without sending anything. A pid this user
+/// does not own answers `EPERM`, which still means it is alive — and a daemon
+/// belonging to somebody else is one this file should not have named, which
+/// `owner_only` has already decided.
+#[cfg(unix)]
+fn alive(pid: u32) -> bool {
+    // SAFETY: signal 0 delivers nothing; this is the documented liveness probe.
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+fn alive(_pid: u32) -> bool {
+    true
 }
 
 /// Something the watcher thread should do next, on behalf of a request.
@@ -138,7 +228,7 @@ pub struct Store {
 
 impl Store {
     fn note(&self, text: String) {
-        let mut events = self.events.lock().expect("the event lock");
+        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         if events.len() == EVENT_HISTORY {
             events.pop_front();
         }
@@ -149,7 +239,7 @@ impl Store {
     pub fn events(&self) -> Vec<Event> {
         self.events
             .lock()
-            .expect("the event lock")
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
             .cloned()
             .collect()
@@ -171,7 +261,7 @@ impl Store {
         notice: Option<serde_json::Value>,
     ) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
-        let mut queue = self.queue.lock().expect("the queue lock");
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut notice) = notice {
             if let Some(object) = notice.as_object_mut() {
                 object.insert("store".into(), serde_json::json!(self.name));
@@ -185,12 +275,15 @@ impl Store {
 
     /// Whether the writer has anything waiting — the Index view's queue depth.
     pub fn queue_depth(&self) -> usize {
-        self.queue.lock().expect("the queue lock").len()
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Put a slice's remainder back, behind whatever is waiting.
     fn requeue(&self, queued: Queued) {
-        self.queue.lock().expect("the queue lock").push_back(queued);
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(queued);
     }
 
     /// Drop every index job that has not started, answering each as stopped.
@@ -200,7 +293,7 @@ impl Store {
     /// "stopping…" for as long as the queue took. Nothing was embedded, so
     /// there is nothing to undo and the answer is immediate.
     pub fn cancel_queued(&self) -> usize {
-        let mut queue = self.queue.lock().expect("the queue lock");
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let mut dropped = 0;
         queue.retain(|queued| {
             if !matches!(queued.job, Job::Index(..)) {
@@ -439,7 +532,7 @@ impl State {
         query: bool,
     ) {
         let now = now();
-        let mut clients = self.clients.lock().expect("the client lock");
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         let entry = clients
             .entry(format!("{transport}:{session}"))
             .or_insert_with(|| Client {
@@ -467,7 +560,7 @@ impl State {
         let now = now();
         self.clients
             .lock()
-            .expect("the client lock")
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|client| now.saturating_sub(client.seen) <= PROXY_FRESH)
             .cloned()
@@ -476,7 +569,7 @@ impl State {
 
     /// Note that a forwarding `semlith mcp` is alive.
     pub fn saw_proxy(&self, pid: u32) {
-        let mut proxies = self.proxies.lock().expect("the proxy lock");
+        let mut proxies = self.proxies.lock().unwrap_or_else(|e| e.into_inner());
         let now = now();
         proxies.insert(pid, now);
         proxies.retain(|_, seen| now.saturating_sub(*seen) <= PROXY_FRESH);
@@ -487,7 +580,7 @@ impl State {
         let now = now();
         self.proxies
             .lock()
-            .expect("the proxy lock")
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .filter(|seen| now.saturating_sub(**seen) <= PROXY_FRESH)
             .count()
@@ -495,7 +588,7 @@ impl State {
 
     /// The reader forwarded MCP calls answer from, opened on first use.
     pub fn open_mcp_fleet(&self) -> Result<()> {
-        let mut fleet = self.mcp_fleet.lock().expect("the mcp fleet lock");
+        let mut fleet = self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner());
         if fleet.is_some() {
             return Ok(());
         }
@@ -584,14 +677,14 @@ impl State {
     /// and doing that while holding the lock would stall whichever request
     /// happened to be next. The reader is opened on demand anyway.
     fn reopen_readers(&self) {
-        *self.fleet.lock().expect("the fleet lock") = None;
-        *self.mcp_fleet.lock().expect("the mcp fleet lock") = None;
+        *self.fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.mcp_fleet.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// The reader every read route answers from, opened on first use and
     /// reopened after a store joins.
     pub fn open_fleet(&self) -> Result<()> {
-        let mut fleet = self.fleet.lock().expect("the fleet lock");
+        let mut fleet = self.fleet.lock().unwrap_or_else(|e| e.into_inner());
         if fleet.is_some() {
             return Ok(());
         }
@@ -609,7 +702,7 @@ impl State {
         *self
             .refusals
             .lock()
-            .expect("the refusal lock")
+            .unwrap_or_else(|e| e.into_inner())
             .entry(class.as_str())
             .or_insert(0) += 1;
     }
@@ -824,7 +917,7 @@ pub fn run(
         let warming = Arc::clone(&state);
         let report = report_line.clone();
         std::thread::spawn(move || {
-            let mut fleet = warming.fleet.lock().expect("the fleet lock");
+            let mut fleet = warming.fleet.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(fleet) = fleet.as_mut()
                 && let Err(e) = fleet.warm()
             {
@@ -864,7 +957,11 @@ pub fn run(
             Discovery::remove(&store.dir);
         }
 
-        let refusals = state.refusals.lock().expect("the refusal lock").clone();
+        let refusals = state
+            .refusals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if !refusals.is_empty() {
             let counts: Vec<String> = refusals
                 .iter()
@@ -938,7 +1035,12 @@ fn tend(
         |writer| {
             // The writer is this thread, so a queued job runs here or nowhere.
             loop {
-                let Some(next) = store.queue.lock().expect("the queue lock").pop_front() else {
+                let Some(next) = store
+                    .queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop_front()
+                else {
                     return Ok(());
                 };
                 perform(store, writer, next);
@@ -966,6 +1068,12 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                 say(serde_json::json!({ "event": "started", "paths": names }));
             }
             let started_at = std::time::Instant::now();
+            // Every queued job arrived through the portal or through a
+            // forwarded `semlith_index`, so both are held to the boundary: this
+            // store's registered roots and the home directory, and never a
+            // credential by name. The watcher's own re-embeds are inside those
+            // roots by construction.
+            writer.boundary = crate::Boundary::within(crate::home::index_roots(&store.dir));
             // A pause belongs to the run that was on when it was asked for.
             // A stop does not need clearing here: a job that was queued when
             // one arrived has already been dropped from the queue, so reaching
@@ -1081,6 +1189,11 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                         // A stopped run undid itself: nothing it embedded is
                         // in the store, so the next attempt starts from zero.
                         "stopped": done.stopped,
+                        // Named, with the rule that refused each. A count would
+                        // be a number somebody has to go and investigate.
+                        "refused": done.refused.iter().map(|(path, why)| {
+                            serde_json::json!({ "path": path, "why": why })
+                        }).collect::<Vec<_>>(),
                     }));
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),

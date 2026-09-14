@@ -30,14 +30,31 @@ use std::path::{Path, PathBuf};
 pub const HOME_ENV: &str = "SEMLITH_HOME";
 
 /// Where stores live: `~/.semlith`, or whatever [`HOME_ENV`] names.
+///
+/// With neither variable set this used to fall back to `.` — so a semlith run
+/// by a daemon supervisor, a cron job or a container entrypoint with no
+/// environment created `./.semlith` in whatever directory it happened to start
+/// in, and wrote the registry and the agent key there. [`home_or_error`] is the
+/// form that says so; this one keeps the fallback for the callers that only
+/// want a path to show.
 pub fn home() -> PathBuf {
+    home_or_error().unwrap_or_else(|_| PathBuf::from(".").join(".semlith"))
+}
+
+/// The store home, or an error naming both variables.
+pub fn home_or_error() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".semlith")
+    match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        Some(base) => Ok(PathBuf::from(base).join(".semlith")),
+        None => bail!(
+            "neither {HOME_ENV} nor HOME is set, so semlith does not know where its \
+             stores live. Set {HOME_ENV} to the directory you want them in — \
+             writing them into the working directory would put a store, a registry \
+             and an agent key wherever this process happened to start."
+        ),
+    }
 }
 
 /// The directory holding one subdirectory per store.
@@ -139,8 +156,7 @@ fn new_agent_key() -> String {
 fn write_agent_key(key: &str) -> Result<()> {
     let path = agent_key_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        secure_dir(parent)?;
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -189,6 +205,105 @@ fn check_key_mode(_path: &Path) -> Result<()> {
 /// What a store directory is called when it sits beside its corpus.
 pub const LOCAL_DIR: &str = ".semlith";
 
+/// The mode every directory semlith creates gets, and keeps.
+pub const DIR_MODE: u32 = 0o700;
+
+/// The mode every file semlith creates that is worth reading gets.
+pub const FILE_MODE: u32 = 0o600;
+
+/// Create a directory nobody else on the machine can read, and keep it that way.
+///
+/// A store holds the text of every file it indexed. On a shared machine — a
+/// build box, a lab workstation, a container with more than one account — a
+/// directory created with the process umask is usually `0755`, so the corpus
+/// was readable by everyone. The tightening is applied on every open rather
+/// than only at creation, because a store made by an older semlith is already
+/// loose and its owner will never think to fix it by hand.
+///
+/// Only ever narrows. A directory somebody has deliberately opened up is not
+/// something this widens back, and nothing here touches a directory semlith did
+/// not make.
+pub fn secure_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    tighten_dir(path);
+    Ok(())
+}
+
+/// Narrow a directory to [`DIR_MODE`] if it is looser. Best effort: a
+/// filesystem without modes is not a reason to fail to open a store.
+pub fn tighten_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(DIR_MODE));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// The same for a file.
+pub fn tighten_file(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(FILE_MODE));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Write a file nobody else on the machine can read.
+///
+/// The mode is set as the file is created rather than afterwards: a file that
+/// is world-readable for the microsecond between the two is a file that was
+/// world-readable. The registry names every store on the machine and the roots
+/// each one covers, which is a map of what this user works on.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(FILE_MODE);
+    }
+    let mut file = options.open(path)?;
+    use std::io::Write;
+    file.write_all(bytes)?;
+    // An existing file keeps its own mode through `truncate`, so one left loose
+    // by an older semlith is narrowed here too.
+    tighten_file(path);
+    Ok(())
+}
+
+/// Whether this directory is readable by anyone but its owner.
+///
+/// What `semlith stats` and the Stores page report, so a store that was made
+/// before 0.14.0 and has not been opened since says so rather than looking
+/// like every other row.
+pub fn loose_mode(path: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).ok()?.permissions().mode() & 0o777;
+        (mode & 0o077 != 0).then_some(mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// One store's entry in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -208,6 +323,20 @@ pub struct Entry {
 pub struct Registry {
     #[serde(default)]
     pub stores: BTreeMap<String, Entry>,
+    /// Store directories outside the home that this user has said may be
+    /// opened, canonical.
+    ///
+    /// A `.semlith` beside a corpus is a store somebody put there, and from
+    /// 0.14.0 that somebody has to have been this user: a repository can carry
+    /// one, and a cloned store is a corpus an attacker chose, answering the
+    /// questions an agent asks. `semlith adopt` moves such a store into the
+    /// home and `semlith trust` records it where it is; either is a deliberate
+    /// act, which is the whole difference.
+    ///
+    /// A registry written by an older semlith has no such field and loads as an
+    /// empty list, which is why the first interactive run offers to fill it.
+    #[serde(default)]
+    pub trusted: Vec<PathBuf>,
 }
 
 impl Registry {
@@ -239,18 +368,30 @@ impl Registry {
     pub fn save(&self) -> Result<()> {
         let path = registry_path();
         let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("creating the store home {}", dir.display()))?;
-        let temp = path.with_extension("json.new");
+        secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
+        // A name of this process's own. `registry.json.new` was one fixed name
+        // for every process on the machine, so two semliths saving at once
+        // wrote the same temporary file and one of them renamed the other's
+        // half-written bytes into place.
+        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
         let body = serde_json::to_string_pretty(self)? + "\n";
-        std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
-        std::fs::rename(&temp, &path).with_context(|| format!("writing {}", path.display()))?;
+        write_private(&temp, body.as_bytes())
+            .with_context(|| format!("writing {}", temp.display()))?;
+        if let Err(e) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e).with_context(|| format!("writing {}", path.display()));
+        }
         Ok(())
     }
 
     /// Where a registered store's directory is.
+    ///
+    /// The name is sanitised here as well as where it is chosen: this is a
+    /// public function taking a string that becomes a path, and a registry
+    /// somebody edited by hand — which is not supported, and happens — should
+    /// not be able to name `../..`.
     pub fn dir_of(name: &str) -> PathBuf {
-        stores_root().join(name)
+        stores_root().join(sanitize(name))
     }
 
     /// Every registered store's directory, in name order.
@@ -312,6 +453,39 @@ impl Registry {
             entry.roots.sort();
         }
         self.save()
+    }
+
+    /// Whether this store directory may be opened without being named.
+    ///
+    /// Anything under the store home is trusted by being there — semlith put it
+    /// there. Anything else has to be in the list.
+    pub fn trusts(&self, dir: &Path) -> bool {
+        let dir = crate::canonical(dir);
+        if dir.starts_with(crate::canonical(&home())) {
+            return true;
+        }
+        self.trusted.iter().any(|t| crate::canonical(t) == dir)
+    }
+
+    /// Record a store directory as one this user has chosen to open.
+    ///
+    /// Idempotent, and it moves nothing: `adopt` is the command that moves a
+    /// store, and somebody who wants their `.semlith` to stay beside its corpus
+    /// should not have to move it to keep using it.
+    pub fn trust(&mut self, dir: &Path) -> Result<PathBuf> {
+        let dir = crate::canonical(dir);
+        if !dir.join("store.db").exists() {
+            bail!(
+                "{} is not a semlith store — no store.db in it",
+                dir.display()
+            );
+        }
+        if !self.trusted.iter().any(|t| t == &dir) {
+            self.trusted.push(dir.clone());
+            self.trusted.sort();
+            self.save()?;
+        }
+        Ok(dir)
     }
 
     /// A store name that is free, derived from `stem`.
@@ -428,6 +602,10 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
         }
     }
 
+    // Asked before anything resolves to a path under it, so a run with no
+    // environment is an error naming both variables rather than a store
+    // created in whatever directory it started in.
+    home_or_error()?;
     let anchor_dir = directory_of(anchor);
     let registry = Registry::load()?;
 
@@ -449,6 +627,9 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
 
     let local = anchor_dir.join(LOCAL_DIR);
     if local.join("store.db").exists() {
+        if !registry.trusts(&local) {
+            bail!("{}", untrusted(&local));
+        }
         return Ok(Choice::Local(local));
     }
 
@@ -525,17 +706,77 @@ pub fn all_dirs(flags: &[PathBuf], cwd: &Path) -> Result<Vec<PathBuf>> {
         }
     }
 
+    let registry = Registry::load()?;
     let mut out = Vec::new();
     let local = cwd.join(LOCAL_DIR);
     if local.join("store.db").exists() {
+        // A read is not safer than a write here: the answer a search gives is
+        // the whole of what a poisoned store is for.
+        if !registry.trusts(&local) {
+            bail!("{}", untrusted(&local));
+        }
         out.push(local);
     }
-    for dir in Registry::load()?.dirs() {
+    for dir in registry.dirs() {
         if dir.join("store.db").exists() {
             out.push(dir);
         }
     }
     Ok(out)
+}
+
+/// The directories an agent may index into this store.
+///
+/// The roots the registry records for it, and — when the store is a `.semlith`
+/// beside its corpus — the directory it sits in. That second one matters
+/// because `--store` deliberately registers nothing (a path the user names
+/// every time is not a store the daemon should list), so without it a store
+/// created as `--store <corpus>/.semlith` has no roots at all and an agent
+/// cannot index the very corpus that store is about.
+///
+/// A `.semlith` directory's parent *is* its corpus by construction: it is the
+/// default root `semlith adopt` records for exactly that reason.
+pub fn index_roots(store_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Registry::load()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .name_of(store_dir)
+                .and_then(|name| registry.stores.get(name))
+                .map(|entry| entry.roots.clone())
+        })
+        .unwrap_or_default();
+
+    if store_dir.file_name().is_some_and(|n| n == LOCAL_DIR)
+        && let Some(corpus) = store_dir.parent()
+    {
+        let corpus = crate::canonical(corpus);
+        if !roots.contains(&corpus) {
+            roots.push(corpus);
+        }
+    }
+    roots
+}
+
+/// What to say about a store this user has not said may be opened.
+///
+/// Both commands are named because they are different answers to the same
+/// question: `trust` leaves the store where it is, `adopt` moves it into the
+/// home. Somebody who cloned a repository and does not recognise the store is
+/// being told, in the same sentence, that there is one.
+fn untrusted(dir: &Path) -> String {
+    format!(
+        "{} is a semlith store this machine has not been told to open.\n\
+         A `.semlith` directory can arrive inside a repository, and a store is \
+         what semlith answers from, so it is opened only once you have said so:\n\
+         \n    semlith trust {}      keep it where it is\n\
+         \n    semlith adopt {}      move it into {}\n\
+         \nOr name it explicitly with --store, which is always an instruction.",
+        dir.display(),
+        dir.display(),
+        dir.display(),
+        stores_root().display(),
+    )
 }
 
 /// Move an existing store directory into the home and register it.
@@ -577,8 +818,7 @@ pub fn adopt(source: &Path, root: Option<&Path>, name: Option<&str>) -> Result<(
     let name = registry.free_name(&stem);
     let target = Registry::dir_of(&name);
 
-    std::fs::create_dir_all(stores_root())
-        .with_context(|| format!("creating {}", stores_root().display()))?;
+    secure_dir(&stores_root())?;
     match std::fs::rename(&source, &target) {
         Ok(()) => {}
         Err(_) => {

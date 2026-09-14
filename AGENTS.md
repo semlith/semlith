@@ -5,7 +5,7 @@ of truth; `CLAUDE.md` points here.
 
 ## Build and test
 
-Rust 1.89+, edition 2024, 64-bit only (turbovec refuses 32-bit). Nothing has to
+Rust 1.90+, edition 2024, 64-bit only (turbovec refuses 32-bit). Nothing has to
 be installed first: turbovec 1.0.0 dropped BLAS, so there is no OpenBLAS step on
 Linux any more, and the TLS stack is rustls rather than the system OpenSSL. The
 packaged Linux binary must keep needing nothing but glibc and libstdc++ —
@@ -108,6 +108,35 @@ Module responsibilities:
 | `src/main.rs` | Clap parsing and human output formatting |
 
 ### Invariants worth knowing before editing
+
+- **There is no cookie.** The portal's session token travels in a
+  `Semlith-Token` header, because every port on `localhost` is the same site and
+  `SameSite=Strict` never separated this daemon from a page served by anything
+  else on `127.0.0.1`. Nothing may set a cookie or read one. A write is refused
+  before the token is compared unless it carries a JSON content type and, from a
+  client that sends fetch metadata, `Sec-Fetch-Site: same-origin` — which is why
+  `http::answer` checks the origin rule first and returns 403 with an empty body.
+  The page and its own static assets are the one credential-free surface, because
+  a browser attaches no header to a stylesheet.
+- **The deny-list is one table.** `filter::DENIED_DIRS` and
+  `filter::DENIED_NAMES` in `filter.rs`, applied by `Boundary::refuses` to walked
+  entries and explicitly named paths alike. A second copy anywhere is a rule that
+  will disagree with itself. The hidden-file rule applies to an explicit path
+  too: that is the whole of what `~/.ssh/id_rsa` used to slip past.
+- **A store outside the store home is opened only when the registry trusts it.**
+  `Registry::trusts` is the one predicate; `home::resolve` and `home::all_dirs`
+  both ask it, and `Discovery::read` asks it before it will read a `daemon.json`
+  at all. `--store` and `SEMLITH_STORE` bypass it deliberately — naming a store
+  is an instruction rather than a discovery.
+- **A store connection refuses writes until a write path asks.** `store::open`
+  sets `query_only`, and `Semlith::writing` lifts it around `index_set`,
+  `forget_held` and the ledger's `record_retrieval`. A fourth write path has to
+  take the same guard or SQLite will refuse it, which is the point.
+- **The two Linux release binaries load ONNX Runtime from beside themselves.**
+  `embed::link_runtime` runs before anything asks for a model and is a no-op in
+  every build without the `dynamic-ort` feature. Anything that loads a model
+  through a path that does not call it will work on every platform except the one
+  the release ships.
 
 - **The model is fixed when a store is created.** Vectors from two models are
   not comparable; switching means delete and re-index. Changing
@@ -293,9 +322,37 @@ matches `Cargo.toml`'s version. GitHub Actions must stay SHA-pinned with a
 trailing `# vN` comment for Dependabot. No Intel macOS target — ONNX Runtime
 stopped publishing `osx-x86_64`.
 
-The Linux jobs pin `ubuntu-22.04`, not `-latest`. A binary built on 24.04
-carries a glibc 2.39 floor and is dead on Debian 12 and Ubuntu 22.04 LTS; 22.04
-is glibc 2.35, which is what the `glibc floor` step asserts. That assertion
-reads the *versions* of the symbols, because the floor rose across three
-releases without failing a single build when nothing checked them. Moving those
-runners forward means moving the floor, so do not.
+The Linux jobs build with `--no-default-features --features dynamic-ort` and
+pack Microsoft's own ONNX Runtime into the archive beside the binary. The runner
+is not what decides the floor and never was: the prebuilt ONNX Runtime `ort`
+downloads references `__isoc23_strtol@GLIBC_2.38`, so 0.13.0's attempt to build
+on `ubuntu-22.04` failed to link, and no older runner or container could have
+helped. Not linking it is what helped. The `glibc floor` step runs `objdump -T`
+over the packaged binary *and* the library beside it — what a user runs is the
+pair — and **fails above `GLIBC_2.35`**. It printed a number for three releases
+and the floor rose to 2.39 without failing a build; a gate that does not exit
+non-zero is not a gate.
+
+`cargo install`, macOS and Windows link ONNX Runtime as they always have. The
+two Linux release binaries are the only build that differs, which is why
+`link_runtime` is a no-op everywhere else.
+
+## `unsafe` in this crate
+
+Every site, with the reason it is sound. Adding one means adding a row: a
+`SAFETY:` comment on the block is necessary and not sufficient, because what
+makes this set reviewable is being able to read the whole of it at once.
+
+| Where | Call | Why it is sound |
+|---|---|---|
+| `embed::performance_cores` | `libc::sysctlbyname` | A NUL-terminated C string, and an `i32` whose size the call is told and will not exceed. macOS only. |
+| `embed::check_cache_dir` | `libc::getuid` | Reads this process's own uid and cannot fail. |
+| `daemon::owner_only` | `libc::getuid` | As above. |
+| `daemon::alive` | `libc::kill(pid, 0)` | Signal 0 delivers nothing; the documented liveness probe. |
+| `upgrade::writable` | `libc::access` | Two `CString`s that outlive the call; `access` reads them and returns. |
+| `watch::on_signal` | `libc::signal` | Installs and restores a handler that only stores into an `AtomicBool`, which is what an async-signal-safe handler may do. |
+| `main`'s `--airgap` | `std::env::set_var` | Before any thread is spawned. |
+| Test helpers in `embed`, `home`, `setup`, `upgrade` | `std::env::set_var` | Each guarded by a mutex that every test reading the variable also takes, and each restores what was there. |
+
+None of them holds a raw pointer across a call, and none is on a path that runs
+per file or per request.

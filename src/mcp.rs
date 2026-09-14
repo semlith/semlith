@@ -676,6 +676,14 @@ fn call_tool(
                 Err(e) => return Ok(tool_error(&e.to_string())),
             };
 
+            // The key that opens this tool lives in a config file on disk, so
+            // what it can reach is what a copied config file can reach. An
+            // agent may index this store's own roots and the home directory,
+            // and never a credential by name. `semlith index` on the command
+            // line is not held to the boundary — the person typing it is the
+            // owner of the machine.
+            store.boundary = crate::Boundary::within(crate::home::index_roots(store.dir()));
+
             match store.index_paths_within(&roots, index_budget(), |_, _| {}) {
                 // A store another process is writing is a conflict to report,
                 // not an error to fail the call with: the agent can wait, or
@@ -697,6 +705,11 @@ fn call_tool(
                              nothing already indexed is redone.",
                             report.remaining
                         ));
+                    }
+                    // Named, one per line, with the rule that refused each. A
+                    // refusal reported as a count is one an agent retries.
+                    for (path, why) in &report.refused {
+                        out.push_str(&format!("\nrefused: {path} — {why}"));
                     }
                     out
                 }

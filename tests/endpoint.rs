@@ -108,7 +108,7 @@ impl Daemon {
         self.send(
             method,
             path,
-            &format!("Cookie: semlith_token={}\r\n", self.token),
+            &format!("Semlith-Token: {}\r\n", self.token),
             body,
         )
     }
@@ -321,5 +321,40 @@ fn a_connected_client_is_listed_with_what_it_said_about_itself() {
     assert!(
         body.contains("2025-06-18"),
         "the negotiated revision is missing: {body}"
+    );
+}
+
+/// The key opens the endpoint, so a page that is merely open must not be handed
+/// it. `/api/agents` is read on every visit to the Agents page.
+#[test]
+fn the_agents_route_does_not_carry_the_key_and_reveal_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(&dir.path().join("home"), &[]);
+
+    let (status, body) = daemon.with_token("GET", "/api/agents", "");
+    assert_eq!(status, 200);
+    assert!(
+        !body.contains("sml_"),
+        "/api/agents still carries the key:\n{body}"
+    );
+    // `with_token` hands back the whole response, headers and all.
+    let payload = body.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&body);
+    let agents: serde_json::Value = serde_json::from_str(payload).expect("JSON");
+    assert_eq!(agents["key_env"], "SEMLITH_AGENT_KEY");
+    assert_eq!(
+        agents["key_set"], true,
+        "the page cannot tell whether a key exists: {agents}"
+    );
+
+    // Pressing Reveal is a write, so it carries the same same-origin and JSON
+    // rules every other write does, and it hands the key over once.
+    let (status, body) = daemon.with_token("POST", "/api/agents/reveal", "{}");
+    assert_eq!(status, 200, "{body}");
+    let payload = body.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&body);
+    let shown: serde_json::Value = serde_json::from_str(payload).expect("JSON");
+    assert_eq!(
+        shown["key"].as_str().unwrap_or_default(),
+        daemon.key(),
+        "reveal did not return the live key"
     );
 }

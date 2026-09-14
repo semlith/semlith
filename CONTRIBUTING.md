@@ -8,7 +8,7 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## Getting set up
 
-You need a 64-bit machine and Rust 1.89 or newer. turbovec refuses to compile
+You need a 64-bit machine and Rust 1.90 or newer. turbovec refuses to compile
 on 32-bit targets by design.
 
 Nothing else has to be installed first. turbovec 1.0.0 dropped its BLAS

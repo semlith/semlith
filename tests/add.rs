@@ -255,6 +255,10 @@ fn fixture() -> &'static Fixture {
         // with a placeholder the route map is built around.
         let fixture = Fixture::serve(routes("127.0.0.2:1"));
         unsafe { std::env::set_var("SEMLITH_ADD_ORIGIN", fixture.origin()) };
+        // The fixture is on loopback, which `semlith add` refuses from 0.14.0
+        // unless this says otherwise. It is the same opt-in a developer
+        // indexing an intranet host uses — the tests do not get a private door.
+        unsafe { std::env::set_var("SEMLITH_ADD_ALLOW_PRIVATE", "1") };
         fixture
     })
 }
@@ -458,6 +462,7 @@ fn airgap_refuses_before_a_single_request_is_made() {
         .args(["add", "--airgap", &h.fixture.url(path)])
         .env("SEMLITH_HOME", h.dir())
         .env("SEMLITH_ADD_ORIGIN", h.fixture.origin())
+        .env("SEMLITH_ADD_ALLOW_PRIVATE", "1")
         .env("SEMLITH_STORE", h.dir())
         .output()
         .expect("running semlith add --airgap");
@@ -514,4 +519,58 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The case this rule exists for: a tool that runs on your machine, told to
+/// fetch a URL, is a way to read what only your machine can reach.
+#[test]
+fn an_address_that_is_not_on_the_internet_is_refused_at_every_hop() {
+    let h = Harness::new();
+
+    for url in [
+        "https://127.0.0.1:1/x",
+        "https://10.0.0.1/",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://192.168.1.1/",
+        "https://172.16.0.1/",
+        "https://100.64.0.1/",
+        "https://[::1]/x",
+        "https://[fd00::1]/x",
+    ] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(["add", url])
+            .env("SEMLITH_HOME", h.dir())
+            .env("SEMLITH_STORE", h.dir())
+            .env_remove("SEMLITH_ADD_ALLOW_PRIVATE")
+            .output()
+            .expect("running semlith add");
+        assert!(!out.status.success(), "{url} was fetched");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            said.contains("not on the public internet"),
+            "{url} was refused for some other reason:\n{said}"
+        );
+        // The refusal names the address, so somebody reading it knows which
+        // hop of a chain was the problem.
+        assert!(
+            said.contains("resolves to"),
+            "the refusal does not name the address:\n{said}"
+        );
+    }
+
+    // And the opt-in works, which is what makes the rule a default rather than
+    // a wall: the fixture server is on loopback.
+    let allowed = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["add", &h.fixture.url("/page.html")])
+        .env("SEMLITH_HOME", h.dir())
+        .env("SEMLITH_STORE", h.dir())
+        .env("SEMLITH_ADD_ORIGIN", h.fixture.origin())
+        .env("SEMLITH_ADD_ALLOW_PRIVATE", "1")
+        .output()
+        .expect("running semlith add");
+    assert!(
+        allowed.status.success(),
+        "the opt-in did not work:\n{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
 }

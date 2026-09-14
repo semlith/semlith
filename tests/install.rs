@@ -141,6 +141,15 @@ fn release(corrupt: bool) -> Release {
     // Non-zero exit for every argument, so install.sh's `setup --help` probe
     // fails and the script prints PATH instructions instead of running a setup.
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("make it executable");
+    // From 0.14.0 the Linux archives carry ONNX Runtime beside the binary,
+    // because that is where a `dynamic-ort` build loads it from. The fixture
+    // carries one on every platform: what is under test is that the script
+    // puts it next to the binary rather than leaving it in the tarball.
+    fs::write(
+        stage.join(&name).join("libonnxruntime.so"),
+        b"not really a library",
+    )
+    .expect("stage the runtime");
 
     let archive = root.join(&archive_name);
     let tar = Command::new("tar")
@@ -183,11 +192,30 @@ fn release(corrupt: bool) -> Release {
     }
 }
 
+/// The shipped script with its one origin rewritten to the fixture's.
+///
+/// The script takes no origin from the environment — a `curl … | sh` that read
+/// one would install whatever a hostile shell profile pointed it at — so the
+/// test edits a copy instead. Everything else about the copy is the shipped
+/// script, and the rewrite fails loudly if the line it is looking for moves.
+fn script_pointed_at(origin: &str, into: &Path) -> PathBuf {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let text = std::fs::read_to_string(&shipped).expect("reading install.sh");
+    assert!(
+        text.contains("origin=https://github.com"),
+        "install.sh no longer pins one origin; this test rewrites that line"
+    );
+    let redirected = text.replace("origin=https://github.com", &format!("origin={origin}"));
+    let copy = into.join("install.sh");
+    std::fs::write(&copy, redirected).expect("writing the redirected script");
+    copy
+}
+
 fn install(release: &Release) -> std::process::Output {
+    let script = script_pointed_at(&release.origin, &release.home);
     Command::new("sh")
-        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+        .arg(&script)
         .env("SEMLITH_VERSION", TAG)
-        .env("SEMLITH_RELEASES_ORIGIN", &release.origin)
         .env("SEMLITH_HOME", &release.semlith_home)
         .env("HOME", &release.home)
         .output()
@@ -221,6 +249,35 @@ fn installs_a_verified_release() {
     assert!(
         printed.contains(MARKER),
         "the installed file is not the one from the archive; it printed {printed:?}"
+    );
+}
+
+/// A binary that loads its runtime from beside itself is a binary the installer
+/// has to put a second file next to. One without it cannot embed anything, and
+/// the failure would arrive on the first index rather than on the install.
+#[test]
+fn the_runtime_lands_beside_the_binary() {
+    let release = release(false);
+    let out = install(&release);
+    assert!(
+        out.status.success(),
+        "install.sh exited {:?}\nstdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bin = release.semlith_home.join("bin");
+    assert!(bin.join("semlith").exists(), "the binary was not installed");
+    assert_eq!(
+        fs::read(bin.join("libonnxruntime.so")).expect("the runtime was not installed"),
+        b"not really a library",
+        "the runtime beside the binary is not the one the archive carried"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("libonnxruntime.so"),
+        "the install did not say it placed the runtime:\n{}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 

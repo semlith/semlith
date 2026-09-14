@@ -42,8 +42,91 @@ function fill(node, ...kids) {
   return node;
 }
 
+/* The session token.
+ *
+ * It arrives once, in the query of the URL the daemon printed, and from then on
+ * it lives in this page and in sessionStorage — never in a cookie. A cookie
+ * would be attached to a request any page on any other 127.0.0.1 port made,
+ * because every port on localhost is the same site; a header is attached only
+ * by this page.
+ *
+ * The token is taken out of the address bar as soon as it is read, so it is not
+ * in the history, not in a bookmark, and not in what someone screenshots. The
+ * reload path is why sessionStorage is here at all: refreshing the page sends a
+ * request this script did not make, so the URL it reloads must not need to
+ * carry the token.
+ */
+const TOKEN_HEADER = "Semlith-Token";
+
+const session = (() => {
+  const KEY = "semlith.token";
+  let token = "";
+  try {
+    const fromUrl = new URLSearchParams(location.search).get("token");
+    if (fromUrl) {
+      token = fromUrl;
+      sessionStorage.setItem(KEY, token);
+      const clean = location.pathname + location.hash;
+      history.replaceState(null, "", clean || "/");
+    } else {
+      token = sessionStorage.getItem(KEY) || "";
+    }
+  } catch (_) {
+    /* A browser with storage disabled still works for as long as this document
+     * lives; only the reload stops surviving. */
+  }
+  return {
+    get: () => token,
+    set(fresh) {
+      token = fresh;
+      try {
+        sessionStorage.setItem(KEY, fresh);
+      } catch (_) {
+        /* as above */
+      }
+    },
+  };
+})();
+
+/** The headers every request to this daemon carries. */
+function authed(extra) {
+  return { ...(extra || {}), [TOKEN_HEADER]: session.get() };
+}
+
+/* An image the store indexed, fetched rather than linked.
+ *
+ * A browser attaches no header to an `<img src>`, and since 0.14.0 the token is
+ * a header, so the bytes are read through `fetch` and handed to the element as
+ * an object URL. The URL is revoked once the image has decoded: a search that
+ * returns forty pictures would otherwise hold forty blobs for the life of the
+ * page. */
+function imagePreview(path) {
+  const img = el("img", { class: "preview", alt: "" });
+  fetch(`/api/image?path=${encodeURIComponent(path)}`, {
+    credentials: "omit",
+    headers: authed(),
+  })
+    .then((response) => (response.ok ? response.blob() : Promise.reject(response.statusText)))
+    .then((blob) => {
+      const url = URL.createObjectURL(blob);
+      img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
+      img.src = url;
+    })
+    .catch(() => {
+      img.replaceWith(el("pre", { class: "muted", text: `${path} could not be read` }));
+    });
+  return img;
+}
+
 async function api(path, options) {
-  const response = await fetch(path, { credentials: "same-origin", ...options });
+  const options_ = options || {};
+  const response = await fetch(path, {
+    // No cookie is sent because there is none to send, and saying so keeps a
+    // future one from being attached by accident.
+    credentials: "omit",
+    ...options_,
+    headers: authed(options_.headers),
+  });
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -1973,6 +2056,48 @@ async function storesView() {
             // the machine. Two stores can have been built with two models and
             // their vectors are not comparable, so it belongs beside the row.
             lineCell(`${s.model} · ${s.dim} dims`, "meta"),
+            // Two things worth saying about a store rather than about its
+            // contents: whether this machine has agreed to open it without
+            // being told to, and whether anybody else on the machine can read
+            // what it holds.
+            s.trusted === false
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill("not trusted", "warn"),
+                  el("button", {
+                    class: "button secondary small",
+                    type: "button",
+                    text: "Trust this store",
+                    onclick: async (e) => {
+                      const button = e.currentTarget;
+                      button.disabled = true;
+                      adoptNote.className = "note";
+                      adoptNote.textContent = "Trusting…";
+                      try {
+                        await post("/api/trust", { path: s.dir });
+                        adoptNote.textContent = `${s.dir} is trusted. semlith opens it from its own directory now, without --store.`;
+                        await refreshStores();
+                      } catch (err) {
+                        adoptNote.className = "note bad";
+                        adoptNote.textContent = err.message;
+                        button.disabled = false;
+                      }
+                    },
+                  }),
+                )
+              : null,
+            s.loose_mode
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill(`mode ${s.loose_mode}`, "warn"),
+                  el("span", {
+                    class: "meta",
+                    text: "other users on this machine can read what this store indexed; the next open narrows it to 700",
+                  }),
+                )
+              : null,
           ),
       },
       {
@@ -2621,13 +2746,7 @@ async function searchView() {
           // An image has no excerpt to quote, so the hit shows the image. It
           // is served from the store's own list of indexed images, so the
           // route cannot be asked for a file nobody pointed semlith at.
-          hit.image
-            ? el("img", {
-                class: "preview",
-                src: `/api/image?path=${encodeURIComponent(hit.path)}`,
-                alt: "",
-              })
-            : el("pre", { text: hit.text }),
+          hit.image ? imagePreview(hit.path) : el("pre", { text: hit.text }),
           el(
             "div",
             { class: "hit-actions" },
@@ -2855,8 +2974,8 @@ async function indexView() {
     try {
       const response = await fetch(route, {
         method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        credentials: "omit",
+        headers: authed({ "Content-Type": "application/json" }),
         body: JSON.stringify({ ...body, store: storeSelect.value || undefined }),
       });
       if (!response.ok) {
@@ -2923,6 +3042,12 @@ async function indexView() {
             )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
             say(event.path, `${event.scanned}/${event.total}`, event.outcome);
           } else if (event.event === "done") {
+            /* Named, one line each, with the rule that refused them. An agent
+             * or a person who asked for a file and got silence cannot tell that
+             * from a file that was not there. */
+            for (const refusal of event.refused || []) {
+              say(`${refusal.path} — ${refusal.why}`, "refused", "refused");
+            }
             if (event.stopped) {
               // Not 100%: nothing was kept, and a full bar would say the
               // opposite of what happened.
@@ -3307,7 +3432,10 @@ async function agentsView() {
       keyNote.textContent = "Rotating…";
       try {
         const done = await post("/api/key", {});
-        stanzas.key = done.key;
+        // Only if the page was already showing the real one; otherwise the
+        // stanza still names the variable, which is now correct for the new
+        // key without anybody touching it.
+        if (stanzas.revealed) stanzas.key = done.key;
         showClient(chosen);
         const carried = done.updated || [];
         // Said plainly, because the two halves have different consequences:
@@ -3326,6 +3454,44 @@ async function agentsView() {
         keyNote.textContent = e.message;
       } finally {
         rotate.disabled = false;
+      }
+    },
+  });
+
+  // ---- the key itself, only when asked for
+  /* Masked until asked for. The route does not send a preview either: a
+   * preview of an agent key still begins `sml_`, and the point is that nothing
+   * about the credential arrives unasked. */
+  const MASKED = data.key_set ? "sml_" + "•".repeat(24) : "no key yet";
+  const keyBox = el("code", { class: "text", text: MASKED });
+  const reveal = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Reveal",
+    onclick: async () => {
+      if (stanzas.revealed) {
+        // Pressed again: put it away. A page left open on a screen should not
+        // keep showing a live credential because somebody looked at it once.
+        stanzas.revealed = false;
+        stanzas.key = "${" + KEY_ENV + "}";
+        keyBox.textContent = MASKED;
+        reveal.textContent = "Reveal";
+        showClient(chosen);
+        return;
+      }
+      reveal.disabled = true;
+      try {
+        const shown = await post("/api/agents/reveal", {});
+        stanzas.revealed = true;
+        stanzas.key = String(shown.key);
+        keyBox.textContent = stanzas.key;
+        reveal.textContent = "Hide";
+        showClient(chosen);
+      } catch (e) {
+        keyNote.className = "note bad";
+        keyNote.textContent = e.message;
+      } finally {
+        reveal.disabled = false;
       }
     },
   });
@@ -3362,7 +3528,16 @@ async function agentsView() {
     ["editor", "Editors"],
     ["desktop", "Desktop"],
   ];
-  const stanzas = { key: data.key || "" };
+  /* What a stanza carries.
+   *
+   * The variable form by default: a configuration file that names
+   * `${SEMLITH_AGENT_KEY}` keeps working across every rotation, and a file that
+   * carries the key itself goes stale the moment somebody presses Rotate. The
+   * real key is fetched only when Reveal is pressed — `/api/agents` no longer
+   * returns it, so a page that is merely open never receives the credential
+   * that opens the MCP endpoint. */
+  const KEY_ENV = data.key_env || "SEMLITH_AGENT_KEY";
+  const stanzas = { key: "${" + KEY_ENV + "}", revealed: false };
   let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
   let chosen = clients.findIndex((c) => c.group === group);
   const tabs = el("div", { class: "tabs" });
@@ -3371,7 +3546,7 @@ async function agentsView() {
 
   /** The HTTP form, built here from the key the route just handed back. */
   /** The placeholder the README prints where a real key goes. */
-  const KEY_SLOT = "sml_YOURKEY";
+  const KEY_SLOT = "${SEMLITH_AGENT_KEY}";
 
   /** Whether a stanza configures the endpoint rather than a subprocess. */
   const overHttp = (text) => text.includes("/mcp") || text.includes("--transport http");
@@ -3424,9 +3599,11 @@ async function agentsView() {
       fill(body, empty("No client stanza is compiled into this build."));
       return;
     }
-    // The documented stanzas, with this daemon's key in them: a reader who
-    // copies one should not have to find `sml_YOURKEY` and paste the key over
-    // it, and the page already knows the key.
+    // The documented stanzas. They name ${SEMLITH_AGENT_KEY}, which is what a
+    // client should carry: it survives a rotation, and the key stays in one
+    // file with one set of permissions. Pressing Reveal substitutes the literal
+    // value for a reader who wants to paste it somewhere that cannot read an
+    // environment variable.
     const own = (client.stanzas || []).map((s) => ({
       format: s.format,
       text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
@@ -3493,6 +3670,21 @@ async function agentsView() {
       ],
     }),
     endpointNote,
+    el(
+      "div",
+      { class: "card pad dense" },
+      el("span", { class: "card-title", text: "Agent key" }),
+      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
+      says(
+        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. Every stanza below names ",
+        mono("${" + KEY_ENV + "}"),
+        " instead of the key, so the client reads it from the environment at start and a rotation needs no file rewritten. It is exported by the block ",
+        mono("semlith setup"),
+        " wrote in your shell startup file, from ",
+        mono(data.key_path || "~/.semlith/agent.key"),
+        ".",
+      ),
+    ),
     keyNote,
     el(
       "div",
@@ -3558,10 +3750,12 @@ async function privacyView() {
       rotateNote.textContent = "Rotating…";
       try {
         const fresh = await post("/api/rotate", {});
-        // The rotate response is the one place the whole token appears, and it
-        // sets the new cookie in the same breath. What is shown is still the
-        // preview: a page that prints a live credential in full is a page
+        // The rotate response is the one place the whole token appears after
+        // the printed URL, and this page has to take the new one before its
+        // next request: nothing else will tell it. What is shown is still the
+        // preview — a page that prints a live credential in full is a page
         // someone screenshots.
+        session.set(String(fresh.token));
         tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
         rotateNote.textContent =
           "Rotated. The old token stopped working immediately. This is the portal's own session token, not the agent key: no client stanza carries it, so nothing needs reconfiguring. The agent key is rotated on the Agents page.";
@@ -3648,6 +3842,54 @@ async function privacyView() {
       el(
         "div",
         { class: "rows" },
+        /* The rules this release added, each with what the daemon found when it
+         * looked. A page that states a policy is a page; a page that states a
+         * policy and the reading behind it is something a reader can disagree
+         * with, which is the only version worth putting on a Privacy page. */
+        el(
+          "div",
+          { class: "card pad" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Rules" }),
+            el("span", { class: "spacer" }),
+            pill(
+              (data.rules || []).every((r) => r.ok) ? "all holding" : "check the rows",
+              (data.rules || []).every((r) => r.ok) ? "good" : "warn",
+            ),
+          ),
+          el("p", {
+            class: "subtitle",
+            text: "What semlith refuses, and what this daemon found when it checked. Every row is a finding from the 0.14.0 security audit, closed with the test that would have caught it.",
+          }),
+          el(
+            "div",
+            { class: "rules" },
+            (data.rules || []).map((rule) =>
+              el(
+                "div",
+                { class: rule.ok ? "rule-row" : "rule-row bad" },
+                el(
+                  "div",
+                  { class: "rule-head" },
+                  el("span", { class: "dot " + (rule.ok ? "good" : "warn") }),
+                  el("span", { class: "rule-id", text: rule.id }),
+                ),
+                el("p", { class: "rule-text", text: rule.rule }),
+                // The reading, under the rule rather than beside it: it is a
+                // path or a count often enough that a column would spend the
+                // whole card's width on one of them and wrap the rest.
+                el(
+                  "div",
+                  { class: "rule-found" },
+                  el("span", { class: "eyebrow", text: "found" }),
+                  el("code", { class: "rule-check", text: rule.check }),
+                ),
+              ),
+            ),
+          ),
+        ),
         el(
           "div",
           { class: "card pad" },
@@ -3679,11 +3921,11 @@ async function privacyView() {
           el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
           rotateNote,
           says(
-            "Generated at start, held in a SameSite=Strict ",
-            mono(data.token_cookie),
-            " cookie, and required on every ",
+            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
+            mono(data.token_header),
+            " header on every ",
             mono("/api"),
-            " route. Shown truncated: no response carries it in full except the one that rotates it, which sets the new cookie in the same breath.",
+            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
           ),
           el("hr", { class: "rule" }),
           el("span", { class: "card-title", text: "Content-Security-Policy" }),
