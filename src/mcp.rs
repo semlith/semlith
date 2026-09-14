@@ -398,7 +398,7 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Semantic + keyword search. Returns where; format excerpt adds the text.",
+            "description": "Semantic + keyword search. format excerpt adds the text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,11 +406,11 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs." },
-                    "ext": { "type": "array", "items": { "type": "string" } },
-                    "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
+                    "path": { "type": "array", "description": "Globs." },
+                    "ext": { "type": "array" },
+                    "lang": { "type": "array", "description": "See semlith_languages." },
                     "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
-                    "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
+                    "store": { "type": "array", "description": store_arg }
                 },
                 "required": ["query"]
             },
@@ -423,7 +423,7 @@ fn tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "target": { "type": "string", "description": "path:start-end, path:line, or a symbol name." },
-                    "store": { "type": "array", "items": { "type": "string" } }
+                    "store": { "type": "array" }
                 },
                 "required": ["target"]
             },
@@ -437,7 +437,7 @@ fn tool_defs(open: &str) -> Value {
                 "properties": {
                     "query": { "type": "string", "description": "e.g. (call_expression function: (identifier) @f)" },
                     "lang": { "type": "string" },
-                    "store": { "type": "array", "items": { "type": "string" } }
+                    "store": { "type": "array" }
                 },
                 "required": ["query", "lang"]
             },
@@ -445,7 +445,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_stats",
-            "description": "What each open store holds: files, chunks, bytes, model, ledger totals.",
+            "description": "What each open store holds.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
@@ -461,10 +461,10 @@ fn tool_defs(open: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "array", "items": { "type": "string" } },
-                    "ext": { "type": "array", "items": { "type": "string" } },
-                    "lang": { "type": "array", "items": { "type": "string" } },
-                    "store": { "type": "array", "items": { "type": "string" } },
+                    "path": { "type": "array" },
+                    "ext": { "type": "array" },
+                    "lang": { "type": "array" },
+                    "store": { "type": "array" },
                     "limit": { "type": "integer" }
                 }
             },
@@ -476,7 +476,7 @@ fn tool_defs(open: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "array", "items": { "type": "string" } },
+                    "path": { "type": "array" },
                     "store": { "type": "string", "description": write_store_arg }
                 },
                 "required": ["path"]
@@ -510,7 +510,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "A symbol's definition, callers, callees and the ring beyond, in one reply.",
+            "description": "A symbol's definition, callers, callees and the ring beyond.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -529,7 +529,7 @@ fn tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "kind": { "type": "array", "items": { "type": "string" } },
+                    "kind": { "type": "array" },
                     "all": { "type": "boolean", "description": "Expand collapsed rows and missing targets." },
                     "store": { "type": "string" }
                 },
@@ -539,14 +539,14 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_path",
-            "description": "The shortest chain between two symbols, or a statement that there is none.",
+            "description": "The shortest chain between two symbols, or that there is none.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "from": { "type": "string" },
                     "to": { "type": "string" },
                     "depth": { "type": "integer", "description": "Default 6." },
-                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; then it is a hypothesis." },
+                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; then a hypothesis." },
                     "strict": { "type": "boolean" },
                     "store": { "type": "string" }
                 },
@@ -1601,17 +1601,19 @@ mod tests {
     /// test rather than a note because a one-sentence description is the kind
     /// of thing that grows back a paragraph at a time.
     ///
-    /// 0.16.0 raised it from 4 000 to 4 400 because it adds two tools, and
-    /// every description was trimmed first rather than the number moved first
-    /// — the eleven that existed came down by 240 bytes in the same commit.
-    /// What was not done, deliberately: dropping `items` from the array
-    /// properties, or the `readOnlyHint` annotations. Both would have bought
-    /// the bytes by making the schema worse to call, which is the opposite of
-    /// what this budget exists for.
+    /// 0.16.0 adds two tools and the number did not move. It was raised to
+    /// 4 400 mid-release and put back: the harness counted the real list at
+    /// 1 100 tokens against its own 1 000-token gate, which is what a gate is
+    /// for. What paid for the two new tools was the `items` schema on the
+    /// twelve array properties — `path`, `ext`, `lang` and `store` have only
+    /// ever held strings, their names say so, and JSON Schema reads an array
+    /// with no `items` as one that may hold anything. The `readOnlyHint`
+    /// annotations stayed: a client acts on those, and buying bytes by making
+    /// the tools need an approval prompt each is the opposite of what this
+    /// budget exists for.
     ///
     /// Bytes are the proxy; tokens are the criterion. `tests/retrieval.rs`
-    /// counts the real thing with the store's own tokenizer and is the gate
-    /// that decides whether this list is small enough.
+    /// counts the real thing and is the gate that decides.
     #[test]
     fn the_tool_list_stays_small() {
         let size = serde_json::to_string(&tool_defs("default")).unwrap().len();
@@ -1628,7 +1630,7 @@ mod tests {
             })
             .collect();
         assert!(
-            size < 4_400,
+            size < 4_000,
             "tools/list is {size} bytes: {}",
             each.join(" ")
         );

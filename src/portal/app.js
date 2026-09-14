@@ -96,25 +96,34 @@ function authed(extra) {
 /* An image the store indexed, fetched rather than linked.
  *
  * A browser attaches no header to an `<img src>`, and since 0.14.0 the token is
- * a header, so the bytes are read through `fetch` and handed to the element as
- * an object URL. The URL is revoked once the image has decoded: a search that
- * returns forty pictures would otherwise hold forty blobs for the life of the
- * page. */
+ * a header, so the bytes are read through `fetch` and handed to the element
+ * directly.
+ *
+ * A `data:` URL rather than an object URL, which is what this used until
+ * 0.16.0 and why no preview ever appeared: the policy the server sends is
+ * `img-src 'self' data:`, and a `blob:` URL is neither, so every one of them
+ * was refused before it decoded. `data:` costs the base64 third and has no
+ * handle to revoke — acceptable because the body panel holds one picture at a
+ * time. Widening the policy to `blob:` would have been the other fix, and the
+ * policy is the thing this product is checkable on. */
 function imagePreview(path) {
   const img = el("img", { class: "preview", alt: "" });
+  const failed = () =>
+    img.replaceWith(el("pre", { class: "muted", text: `${path} could not be read` }));
   fetch(`/api/image?path=${encodeURIComponent(path)}`, {
     credentials: "omit",
     headers: authed(),
   })
     .then((response) => (response.ok ? response.blob() : Promise.reject(response.statusText)))
     .then((blob) => {
-      const url = URL.createObjectURL(blob);
-      img.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
-      img.src = url;
+      const reader = new FileReader();
+      reader.onload = () => {
+        img.src = String(reader.result);
+      };
+      reader.onerror = failed;
+      reader.readAsDataURL(blob);
     })
-    .catch(() => {
-      img.replaceWith(el("pre", { class: "muted", text: `${path} could not be read` }));
-    });
+    .catch(failed);
   return img;
 }
 
@@ -224,7 +233,8 @@ const NAV_ICONS = {
   files: "M6 3h7l5 5v13H6z|M13 3v5h5",
   index: "M4 6h16|M4 12h10|M4 18h13",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
-  languages: "M4 6h9|M8 6v2c0 3-2 5-4 6|M7 11c1 2 3 3 5 3.5|M13 20l4-9 4 9|M14.6 17h4.8",
+  read: "M6 3h9l4 4v14H6z|M15 3v4h4|M9 12h7|M9 16h4",
+  pattern: "M9 5 5 12l4 7|M15 5l4 7-4 7|M13.4 8.5l-2.8 7",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
   ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
@@ -905,8 +915,9 @@ const VIEWS = [
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
   { group: "Workspace", id: "index", label: "Index", title: "Index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
+  { group: "Explore", id: "read", label: "Read", title: "Read" },
+  { group: "Explore", id: "pattern", label: "Pattern", title: "Pattern" },
   { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
-  { group: "Explore", id: "languages", label: "Languages", title: "Languages" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
   { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
@@ -1000,6 +1011,8 @@ function graphCanvas(options) {
   let frame = null;
   let running = true;
   let settled = false;
+  /* Whether this canvas has ever been in the document. See `tick`. */
+  let attached = false;
   /* How much of the force is still applied. The layout cools, but never to
    * nothing: it bottoms out at `ALPHA_FLOOR`, so the springs keep holding the
    * shape while the drift below moves it. Anything that changes the layout —
@@ -1208,6 +1221,17 @@ function graphCanvas(options) {
   }
 
   function tick() {
+    // A view that has been navigated away from is not worth animating. The
+    // canvas is built before it is inserted, so the first frames legitimately
+    // run detached — only a canvas that *was* in the page and is not any more
+    // has been thrown away.
+    if (wrap.isConnected) attached = true;
+    else if (attached) {
+      frame = null;
+      running = false;
+      observer.disconnect();
+      return;
+    }
     const box = wrap.getBoundingClientRect();
     if (running || dragging) step(Math.max(box.width, 240), Math.max(box.height, 240));
     // Hover is eased rather than switched, so a fast pointer sweep across a
@@ -2780,69 +2804,389 @@ async function filesView() {
   );
 }
 
-// ------------------------------------------------------------- languages
+// ------------------------------------------------------- read and pattern
 
-async function languagesView() {
-  let data;
-  try {
-    data = await api("/api/languages");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Languages"), error(e.message));
-  }
-  const languages = data.languages || [];
+/* Which store a question is asked of. One choice rather than a row of
+ * independent toggles: "All stores" is a state a reader can name, where three
+ * chips half-lit is a filter they have to reconstruct from the lighting. */
+function storePicker(initial, onChange) {
+  let picked = initial || "";
+  const row = el("div", { class: "store-chips" });
+  const paint = () => {
+    for (const chip of row.children) {
+      chip.setAttribute("aria-pressed", String(chip.getAttribute("data-store") === picked));
+    }
+  };
+  const add = (name, label) =>
+    row.append(
+      el("button", {
+        class: "chip",
+        type: "button",
+        "data-store": name,
+        text: label,
+        onclick: () => {
+          picked = name;
+          paint();
+          onChange();
+        },
+      }),
+    );
+  add("", "All stores");
+  for (const store of state.stores) add(store.name, store.name);
+  paint();
+  return { node: row, stores: () => (picked ? [picked] : []) };
+}
 
-  const tags = (list) => list.map((item) => el("span", { class: "tag wrapped", text: item }));
+/* Whether the file still looks the way it did when it was indexed — the dot
+ * and the word together. The dot alone was a colour with the meaning in a
+ * tooltip, which is no meaning at all on a phone or in a screenshot. */
+function freshMark(fresh) {
+  const ok = fresh !== false;
+  return el(
+    "span",
+    {
+      class: "fresh",
+      title: ok ? "indexed from the bytes on disk" : "file changed since it was indexed",
+    },
+    el("span", { class: `fresh-dot ${ok ? "is-fresh" : "is-stale"}` }),
+    el("span", { class: "word", text: ok ? "fresh" : "stale" }),
+  );
+}
 
-  const table = dataTable({
-    className: "w-languages",
-    sort: "name",
-    perPage: 25,
-    rows: languages,
-    columns: [
-      { key: "name", label: "Name", className: "path", value: (l) => l.name },
-      {
-        key: "extensions",
-        label: "Extensions",
-        value: (l) => (l.extensions || []).length,
-        render: (l) => tags((l.extensions || []).map((e) => `.${e}`)),
-      },
-      {
-        key: "filenames",
-        label: "Filenames",
-        className: "narrow-drop",
-        value: (l) => (l.filenames || []).length,
-        render: (l) =>
-          (l.filenames || []).length ? tags(l.filenames) : el("span", { class: "meta", text: "—" }),
-      },
-    ],
+/* Code with a line-number gutter, numbered from the span's own first line —
+ * the same coordinates `semlith read` and every error message print, so a
+ * number read here can be typed back in without arithmetic. */
+function codeGutter(text, startLine) {
+  const from = Number(startLine) || 1;
+  return el(
+    "div",
+    { class: "gutter-code" },
+    String(text == null ? "" : text)
+      .split("\n")
+      .map((line, i) =>
+        el(
+          "div",
+          { class: "code-line" },
+          el("span", { class: "ln", text: String(from + i) }),
+          el("span", { class: "lt", text: line }),
+        ),
+      ),
+  );
+}
+
+/** One span, as `/api/read` returns it. */
+function spanCard(span) {
+  const named = span.symbol ? `${span.symbol_kind || ""} ${span.symbol}`.trim() : "";
+  return el(
+    "div",
+    { class: "span-card" },
+    el(
+      "div",
+      { class: "span-head" },
+      el("span", { class: "path", text: span.path }),
+      el("span", { class: "lines", text: `${span.start_line}-${span.end_line}` }),
+      span.store ? el("span", { class: "from", text: span.store }) : null,
+      el("span", { class: "spacer" }),
+      freshMark(span.fresh),
+    ),
+    named ? el("div", { class: "sig", text: named }) : null,
+    codeGutter(span.text, span.start_line),
+  );
+}
+
+async function readView() {
+  await refreshStores();
+
+  const out = el("div", { class: "read-out" });
+  const meta = el("span", { class: "search-meta" });
+  const input = el("input", {
+    type: "search",
+    placeholder: "path:start-end, path:line, or a symbol name",
+    onkeydown: (e) => {
+      if (e.key === "Enter") run();
+    },
   });
+  const picker = storePicker("", () => run());
+  /* Which request the page is showing. Changing the store while a read is in
+   * flight starts a second one, and without this the slower of the two wins
+   * whichever question it was answering. */
+  let generation = 0;
+
+  const nothing = () =>
+    empty(
+      "A span or a name. src/store.rs:1041-1080 reads those lines, src/store.rs:1041 reads the chunk around one, and a bare name reads the definition.",
+    );
+
+  async function run(target) {
+    if (target !== undefined) input.value = target;
+    const want = input.value.trim();
+    const mine = ++generation;
+    if (!want) {
+      meta.textContent = "";
+      return fill(out, nothing());
+    }
+
+    const params = new URLSearchParams({ target: want });
+    for (const store of picker.stores()) params.append("store", store);
+    meta.textContent = "reading…";
+    let data;
+    try {
+      data = await api(`/api/read?${params}`);
+    } catch (e) {
+      if (mine !== generation) return;
+      meta.textContent = "";
+      return fill(out, error(e.message));
+    }
+    if (mine !== generation) return;
+    meta.textContent = "";
+
+    if (data.span) return fill(out, spanCard(data.span));
+
+    const rows = data.definitions || [];
+    if (!rows.length) {
+      return fill(
+        out,
+        empty(
+          `Nothing indexed at ${want}. Files lists what is; a name has to be one the graph extracted, which is the six languages the About page ticks.`,
+        ),
+      );
+    }
+    // Several definitions carry this name, and which one was meant is the
+    // reader's to say. Choosing here is how a confident answer about the
+    // wrong function gets quoted.
+    fill(
+      out,
+      el(
+        "div",
+        { class: "locate-group" },
+        el(
+          "div",
+          { class: "locate-file" },
+          el("span", { class: "file", text: `${rows.length} definitions of this name` }),
+          el("span", { class: "spacer" }),
+          el("span", { class: "span-summary", text: "pick one" }),
+        ),
+        rows.map((row) =>
+          el(
+            "button",
+            {
+              class: "locate-row",
+              type: "button",
+              onclick: () => run(`${row.path}:${row.start_line}-${row.end_line}`),
+            },
+            el(
+              "span",
+              { class: "row-top" },
+              el("span", { class: "lines", text: `${row.start_line}-${row.end_line}` }),
+              el("span", { class: "sym", text: `${row.kind} ${row.name}`.trim() }),
+              el("span", { class: "spacer" }),
+              row.store ? el("span", { class: "from", text: row.store }) : null,
+            ),
+            el("span", { class: "locate-excerpt", text: row.qualified || row.path }),
+          ),
+        ),
+      ),
+    );
+  }
+
+  fill(out, nothing());
+  setTimeout(() => input.focus(), 0);
 
   return el(
     "div",
     { class: "view" },
     pageHead(
-      "Languages",
-      "Every name --lang accepts, on the command line, in the MCP tools and in the search box.",
-      { pill: pill(`${languages.length} languages`) },
+      "Read",
+      "The second stage. Search says where; this says what, and nothing around it.",
     ),
-    languages.length ? table.node : empty("The language table is empty, which should be impossible."),
-    el("p", {
-      class: "subtitle",
-      text: "Extension and filename decide the language; file contents are never read to guess it, because a store is searched far more often than it is built. The two names with no extension — dockerfile and makefile — match by filename instead.",
-    }),
+    el(
+      "div",
+      { class: "card pad rows" },
+      el("div", { class: "search-field" }, icon(ICONS.file, 18), labelled("read-target", "Target", input), meta),
+      picker.node,
+    ),
+    out,
+  );
+}
+
+async function patternView() {
+  await refreshStores();
+
+  let about;
+  try {
+    about = await api("/api/about");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Pattern"), error(e.message));
+  }
+  // Only the grammars exist here: a tree-sitter query needs a tree, and the
+  // languages with one are the languages the graph is extracted from.
+  const languages = about.graph_languages || [];
+
+  const out = el("div", { class: "read-out" });
+  const meta = el("span", { class: "search-meta" });
+  const input = el("input", {
+    type: "search",
+    placeholder: "(call_expression function: (identifier) @f)",
+    onkeydown: (e) => {
+      if (e.key === "Enter") run();
+    },
+  });
+  const langField = el(
+    "select",
+    { class: "field", onchange: () => run() },
+    languages.map((name) => el("option", { value: name, text: name })),
+  );
+  const picker = storePicker("", () => run());
+  /* As on the Read page: changing the language or the store while a match is
+   * in flight starts a second one, and the slower must not win. */
+  let generation = 0;
+
+  const nothing = () =>
+    empty(
+      "A tree-sitter query, in its own S-expression syntax. Every capture it names comes back with the lines it sat on.",
+    );
+
+  async function run() {
+    const query = input.value.trim();
+    const mine = ++generation;
+    if (!query) {
+      meta.textContent = "";
+      return fill(out, nothing());
+    }
+    const lang = langField.value || languages[0] || "rust";
+    const params = new URLSearchParams({ query, lang });
+    for (const store of picker.stores()) params.append("store", store);
+    meta.textContent = "matching…";
+    let data;
+    try {
+      data = await api(`/api/pattern?${params}`);
+    } catch (e) {
+      if (mine !== generation) return;
+      meta.textContent = "";
+      return fill(out, error(e.message));
+    }
+    if (mine !== generation) return;
+
+    // The parser's own words, never "no matches": a caller told the corpus
+    // does not contain the shape stops looking for it, and a mistyped pattern
+    // would have said exactly that.
+    if (data.error) {
+      meta.textContent = "";
+      return fill(out, error(data.error));
+    }
+
+    const matches = data.matches || [];
+    meta.textContent = `${matches.length} match${matches.length === 1 ? "" : "es"} · ${n(
+      data.files,
+    )} file${data.files === 1 ? "" : "s"} parsed`;
+
+    if (!matches.length) {
+      // Two different facts, and only the second one is about the pattern.
+      return fill(
+        out,
+        empty(
+          data.files
+            ? `${n(data.files)} ${lang} file${data.files === 1 ? "" : "s"} parsed, and none holds that shape.`
+            : `No ${lang} file is indexed in the selected stores, so nothing was parsed. This is not an answer about your pattern.`,
+        ),
+      );
+    }
+
+    const groups = [];
+    for (const found of matches) {
+      const seen = groups.find((g) => g.path === found.path && g.store === found.store);
+      if (seen) seen.rows.push(found);
+      else groups.push({ path: found.path, store: found.store, rows: [found] });
+    }
+
+    fill(
+      out,
+      el(
+        "div",
+        { class: "locate-list results" },
+        groups.map((group) =>
+          el(
+            "div",
+            { class: "locate-group" },
+            el(
+              "div",
+              { class: "locate-file" },
+              el("span", { class: "file", text: group.path }),
+              group.store ? el("span", { class: "from", text: group.store }) : null,
+              el("span", { class: "spacer" }),
+              el("span", {
+                class: "span-summary",
+                text: `${group.rows.length} match${group.rows.length === 1 ? "" : "es"}`,
+              }),
+            ),
+            group.rows.map((row) =>
+              el(
+                "div",
+                { class: "locate-row static" },
+                el(
+                  "span",
+                  { class: "row-top" },
+                  el("span", { class: "lines", text: `${row.start_line}-${row.end_line}` }),
+                  el("span", { class: "badges" }, el("span", { class: "badge capture", text: row.capture })),
+                ),
+                el("span", { class: "locate-excerpt", text: row.text }),
+              ),
+            ),
+          ),
+        ),
+        data.truncated
+          ? el(
+              "div",
+              { class: "locate-footer" },
+              el("span", { class: "truncated", text: "truncated — the cap was reached before the corpus ran out" }),
+            )
+          : null,
+      ),
+    );
+  }
+
+  fill(out, nothing());
+  setTimeout(() => input.focus(), 0);
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Pattern",
+      "A structural query, not a regular expression. It matches the syntax tree, so a call is a call wherever it is written.",
+    ),
+    el(
+      "div",
+      { class: "card pad rows" },
+      el(
+        "div",
+        { class: "search-field" },
+        icon(ICONS.search, 18),
+        labelled("pattern-query", "Pattern", input),
+        meta,
+      ),
+      el(
+        "div",
+        { class: "filters" },
+        labelled("pattern-lang", "Language", langField),
+        el("span", { class: "rule" }),
+        picker.node,
+      ),
+    ),
+    out,
   );
 }
 
 // ---------------------------------------------------------------- search
 
-/* Which of the three ranked lists found a hit. One letter each, with the name
- * on hover: a hit the graph alone reached is a neighbour of a match rather
- * than a match, and reading it as a match is the mistake this prevents. */
+/* Which of the ranked lists found a hit. The word rather than an initial: a
+ * hit the graph alone reached is a neighbour of a match rather than a match,
+ * and `g` said that only to a reader who hovered it. */
 const LIST_LABELS = {
-  vector: ["v", "vector — the embedding matched"],
-  keyword: ["f", "full text — the terms matched"],
-  graph: ["g", "graph — reached from a neighbouring symbol"],
-  image: ["i", "image — the picture matched the words"],
+  vector: "vector — the embedding matched",
+  keyword: "full text — the terms matched",
+  graph: "graph — reached from a neighbouring symbol",
+  image: "image — the picture matched the words",
 };
 
 function fusionBadges(lists) {
@@ -2850,10 +3194,9 @@ function fusionBadges(lists) {
   return el(
     "span",
     { class: "badges" },
-    lists.map((list) => {
-      const [letter, title] = LIST_LABELS[list] || [list[0], list];
-      return el("span", { class: `badge ${list}`, title, text: letter });
-    }),
+    lists.map((list) =>
+      el("span", { class: `badge ${list}`, title: LIST_LABELS[list] || list, text: list }),
+    ),
   );
 }
 
@@ -2873,16 +3216,16 @@ function confidenceBadge(value) {
   return el("span", { class: `conf ${value}`, title: why, text: label });
 }
 
-/* Whether the file still looks the way it did when it was indexed. Amber
- * rather than red: a stale hit is still the best answer available, it just
- * needs re-reading before it is quoted. */
-function freshnessDot(fresh) {
-  return el("span", {
-    class: `fresh-dot ${fresh ? "is-fresh" : "is-stale"}`,
-    title: fresh ? "indexed from the file as it is now" : "file changed since it was indexed",
-    "aria-label": fresh ? "fresh" : "stale",
-  });
-}
+/* What a graph-reached hit's provenance means, as a sentence rather than as a
+ * badge nobody can expand. A reader who does not know what `inferred` claims
+ * reads every row as verified. */
+const PROVENANCE_NOTE = {
+  extracted: "Found through the graph: the source names the target, so nothing had to be ranked.",
+  resolved: "Found through the graph: the name and its module hint agree on one definition.",
+  inferred: "Found through the graph by bare name. Corroborate before you rely on it.",
+  ambiguous:
+    "Found through the graph, but several definitions carry this name and none was chosen.",
+};
 
 /* The one line of a chunk worth showing in a locator row: the line with most
  * of the query's words in it, or the first line with anything on it. */
@@ -2934,38 +3277,110 @@ async function searchView() {
   await refreshStores();
 
   const results = el("div", { class: "results locate-list" });
-  const body = el("div", { class: "body-panel" });
+  const bodyCard = el("div", { class: "span-card" });
+  const aroundName = el("span", { class: "sym" });
   const footer = el("div", { class: "locate-footer" });
   const meta = el("span", { class: "search-meta" });
+  /* The shape the ranker read and what it did about it, from the answer's own
+   * fields. Re-deriving the rule here would be a second classifier, and only
+   * one of the two ranked the hits underneath it. */
+  const shapeHint = el("div", { class: "shape-hint", hidden: true });
 
-  // How many hits to ask for, and what one answer may cost. Both are what an
-  // agent sets on the tool, shown here so a person can see the same dials.
-  const kField = el("input", {
-    type: "number",
-    min: "1",
-    max: "50",
-    value: "8",
-    class: "stepper",
-    onchange: () => run(),
-  });
-  const budgetField = el("input", {
-    type: "number",
-    min: "200",
-    step: "100",
-    value: "1500",
-    class: "stepper wide",
-    onchange: () => run(),
-  });
-  const budget = () => Math.max(200, Number(budgetField.value) || 1500);
+  /* The second ring, drawn rather than linked. One canvas for the whole visit
+   * to the page: a fresh one per opened hit would be a fresh animation loop
+   * per click. */
+  const ego = graphCanvas({});
+  const stage = el(
+    "div",
+    { class: "ego-panel" },
+    ego.node,
+    el("span", { class: "ego-hint", text: "drag a node · click to select" }),
+  );
+
+  // The dials, in the design's order. Each is the same control an agent sets
+  // on the tool, shown here so a person can see what the agent is holding.
+  let k = 8;
+  const kValue = el("span", { class: "dial-value", text: "k = 8" });
+  const bump = (delta) => {
+    const next = Math.min(50, Math.max(1, k + delta));
+    if (next === k) return;
+    k = next;
+    kValue.textContent = `k = ${k}`;
+    run();
+  };
+  const kDial = el(
+    "div",
+    { class: "dial" },
+    kValue,
+    el("button", { class: "step", type: "button", "aria-label": "fewer hits", title: "fewer hits", text: "–", onclick: () => bump(-1) }),
+    el("button", { class: "step", type: "button", "aria-label": "more hits", title: "more hits", text: "+", onclick: () => bump(1) }),
+  );
+
+  /* Which side of the corpus to lean towards. Live from 0.16.0: the query text
+   * says how a question was written, and this says what the asker is after,
+   * which the text cannot. */
+  let prefer = "any";
+  const preferPills = ["code", "docs", "any"].map((name) =>
+    el("button", {
+      class: "seg",
+      type: "button",
+      "aria-pressed": String(name === prefer),
+      text: name,
+      onclick: () => {
+        if (prefer === name) return;
+        prefer = name;
+        for (const pill of preferPills) {
+          pill.setAttribute("aria-pressed", String(pill.textContent === prefer));
+        }
+        run();
+      },
+    }),
+  );
+  const preferDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-label", text: "Prefer" }),
+    el("span", { class: "segs" }, preferPills),
+  );
+
+  const langField = el("input", { class: "bare", size: "8", placeholder: "any", onchange: () => run() });
+  const pathField = el("input", { class: "bare", size: "8", placeholder: "any", onchange: () => run() });
+  const langDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-prefix", text: "lang:" }),
+    labelled("search-lang", "Only this language", langField),
+  );
+  const pathDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-prefix", text: "path:" }),
+    labelled("search-path", "Only paths matching this glob", pathField),
+  );
+
+  const budgetField = el("input", { class: "bare", size: "5", value: "1500", inputmode: "numeric", onchange: () => run() });
+  const budgetDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-label", text: "Budget" }),
+    labelled("search-budget", "Budget in tokens", budgetField),
+    el("span", { class: "unit", text: "tok" }),
+  );
+  const budget = () => Math.max(200, Number(String(budgetField.value).replace(/[^0-9]/g, "")) || 1500);
+
   // Restored rather than reset: the question and the store filter survive a
   // trip to another page, because coming back to an empty box means typing it
   // again.
-  const chosen = new Set(state.search.stores);
+  const picker = storePicker(state.search.stores[0] || "", () => run());
   let generation = 0;
 
   const input = el("input", {
     type: "search",
     placeholder: "Ask it something",
+    oninput: () => {
+      // The hint is about the query in the box. An empty box has no shape.
+      if (!input.value.trim()) shapeHint.hidden = true;
+    },
     onkeydown: (e) => {
       if (e.key === "Enter") run();
     },
@@ -2976,19 +3391,23 @@ async function searchView() {
 
   async function run() {
     const query = input.value.trim();
-    state.search = { query, stores: [...chosen] };
+    state.search = { query, stores: picker.stores() };
     if (!query) {
+      shapeHint.hidden = true;
       fill(results, nothing());
-      fill(body);
+      showBody(null, "");
       fill(footer);
       meta.textContent = "";
       return;
     }
 
     const mine = ++generation;
-    const k = Math.min(50, Math.max(1, Number(kField.value) || 8));
-    const params = new URLSearchParams({ query, k: String(k) });
-    for (const store of chosen) params.append("store", store);
+    const params = new URLSearchParams({ query, k: String(k), prefer });
+    for (const store of picker.stores()) params.append("store", store);
+    const lang = langField.value.trim();
+    const path = pathField.value.trim();
+    if (lang) params.append("lang", lang);
+    if (path) params.append("path", path);
 
     meta.textContent = "searching…";
     let data;
@@ -2997,19 +3416,30 @@ async function searchView() {
     } catch (e) {
       if (mine !== generation) return;
       fill(results, error(e.message));
-      fill(body);
+      showBody(null, "");
       fill(footer);
       meta.textContent = "";
       return;
     }
     if (mine !== generation) return;
 
+    if (data.shape_label) {
+      fill(
+        shapeHint,
+        el("span", { class: "dot" }),
+        el("span", { text: `${data.shape_label} · ${data.weighting}` }),
+      );
+      shapeHint.hidden = false;
+    }
+
+    // Hits and how long, which is what the question was. The corpus size is a
+    // fact about the store, and the Stores page is where it is asked.
     meta.textContent = data.hits.length
-      ? `${data.hits.length} of ${n(data.chunks)} chunks · ${Math.round(data.micros / 1000)} ms`
+      ? `${data.hits.length} hit${data.hits.length === 1 ? "" : "s"} · ${(data.micros / 1000).toFixed(1)} ms`
       : "";
 
     if (!data.hits.length) {
-      fill(body);
+      showBody(null, "");
       fill(footer);
       fill(
         results,
@@ -3054,8 +3484,9 @@ async function searchView() {
 
     fill(
       results,
-      shown.map((group) =>
-        el(
+      shown.map((group) => {
+        const spans = group.hits.map((hit) => `${hit.start_line}-${hit.end_line}`);
+        return el(
           "div",
           { class: "locate-group" },
           el(
@@ -3063,10 +3494,15 @@ async function searchView() {
             { class: "locate-file" },
             el("span", { class: "file", text: group.path }),
             group.store ? el("span", { class: "from", text: group.store }) : null,
+            el("span", { class: "spacer" }),
+            el("span", {
+              class: "span-summary",
+              text: spans.length > 1 ? `${spans.length} spans · ${spans.join(", ")}` : spans[0],
+            }),
           ),
-          group.hits.map((hit) => locateRow(hit, query, body)),
-        ),
-      ),
+          group.hits.map((hit) => locateRow(hit, query)),
+        );
+      }),
     );
     fill(
       footer,
@@ -3082,77 +3518,187 @@ async function searchView() {
     );
     // The body panel starts on the best hit rather than empty: the first
     // question anyone has about a result list is what the top one says.
-    if (shown.length) showBody(shown[0].hits[0], body, query);
+    const first = results.querySelector(".locate-row");
+    if (first) first.setAttribute("aria-pressed", "true");
+    showBody(shown[0].hits[0], query);
   }
 
   /* One locator line: where it is, what it is called, how it was found,
-   * whether the file has moved under it, and one line of it. */
-  function locateRow(hit, query, body) {
-    const named = hit.symbol
-      ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim()
-      : "";
+   * whether the file has moved under it, and one line of it. Both lines sit
+   * inside the one control, so the excerpt is part of the target rather than
+   * a strip of dead pixels under it. */
+  function locateRow(hit, query) {
+    const line = bestLine(hit.text, query);
     const row = el(
       "button",
       {
         class: "locate-row",
         type: "button",
+        "aria-pressed": "false",
         onclick: () => {
           for (const other of results.querySelectorAll(".locate-row")) {
             other.setAttribute("aria-pressed", "false");
           }
           row.setAttribute("aria-pressed", "true");
-          showBody(hit, body, query);
+          showBody(hit, query);
         },
       },
-      el("span", {
-        class: "lines",
-        text: hit.image
-          ? `${hit.image.width}×${hit.image.height} px`
-          : `${hit.start_line}-${hit.end_line}`,
-      }),
-      named ? el("span", { class: "sym", text: named }) : null,
-      fusionBadges(hit.lists),
-      // Only for a hit the graph reached: a vector match has no provenance to
-      // state beyond the badge it already carries.
-      confidenceBadge(hit.provenance),
-      el("span", { class: "spacer" }),
-      freshnessDot(hit.fresh !== false),
+      el(
+        "span",
+        { class: "row-top" },
+        el("span", {
+          class: "lines",
+          text: hit.image
+            ? `${hit.image.width}×${hit.image.height} px`
+            : `${hit.start_line}-${hit.end_line}`,
+        }),
+        // A hit with no symbol is prose, said rather than left as a gap the
+        // reader has to interpret. An image is neither, and its badge and its
+        // pixel dimensions have already said so.
+        hit.image
+          ? null
+          : el("span", {
+              class: "sym",
+              text: hit.symbol ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim() : "prose",
+            }),
+        fusionBadges(hit.lists),
+        el("span", { class: "spacer" }),
+        freshMark(hit.fresh),
+        // Only for a hit the graph reached: a vector match has no provenance
+        // to state beyond the badge it already carries.
+        confidenceBadge(hit.provenance),
+      ),
+      line ? el("span", { class: "locate-excerpt", text: line }) : null,
     );
-    const line = bestLine(hit.text, query);
-    return el(
-      "div",
-      { class: "locate-line" },
-      row,
-      line ? el("code", { class: "locate-excerpt", text: line }) : null,
-    );
+    return row;
   }
 
-  /* The second stage: the span itself, once a row has been chosen. */
-  function showBody(hit, body, query) {
-    const named = hit.symbol
-      ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim()
-      : hit.path.split("/").pop();
+  /* The second stage: the span itself, once a row has been chosen.
+   *
+   * What the row already carries is painted at once; the signature, the
+   * symbol's whole span and the neighbourhood arrive from `/api/read` and
+   * `/api/symbol` after it, because none of them is worth a spinner over the
+   * text the reader clicked for.
+   */
+  let openHit = null;
+  let openQuery = "";
+  let wholeSpan = null;
+  let signature = "";
+  let whole = false;
+  /* How many definitions the second read found. `many` is not a failure — it
+   * is the store saying it cannot tell which one this is, and the button says
+   * that rather than pretending there is nothing more to open. */
+  let definitions = 0;
+  let bodyGeneration = 0;
+
+  function showBody(hit, query) {
+    openHit = hit;
+    openQuery = query;
+    wholeSpan = null;
+    signature = "";
+    whole = false;
+    definitions = 0;
+    const mine = ++bodyGeneration;
+    paintBody();
+    if (!hit) {
+      ego.draw({ nodes: [], edges: [] }, null);
+      aroundName.textContent = "—";
+      return;
+    }
+
+    const target = hit.symbol || `${hit.path}:${hit.start_line}`;
+    const params = new URLSearchParams({ target });
+    if (hit.store) params.append("store", hit.store);
+    api(`/api/read?${params}`)
+      .then((data) => {
+        if (mine !== bodyGeneration) return;
+        if (!data.span) {
+          definitions = (data.definitions || []).length;
+          if (definitions) paintBody();
+          return;
+        }
+        wholeSpan = data.span;
+        // The signature is the first line of the definition, which is where
+        // every language this indexes puts it.
+        if (hit.symbol) {
+          signature = (data.span.text || "")
+            .split("\n")
+            .map((l) => l.trim())
+            .find((l) => l.length > 0) || "";
+        }
+        paintBody();
+      })
+      .catch(() => {
+        /* The row's own text is already on screen; a failed second read is
+         * not worth replacing it with an error. */
+      });
+
+    drawAround(hit, mine);
+  }
+
+  function paintBody() {
+    const hit = openHit;
+    if (!hit) {
+      fill(
+        bodyCard,
+        empty("Pick a row. The span opens here, with what it is called and how it was found."),
+      );
+      return;
+    }
+    const showing = whole && wholeSpan ? wholeSpan : hit;
+    const lines = `${showing.start_line}-${showing.end_line}`;
+    // Nothing wider to open: a button that redraws the same lines is a button
+    // that makes a reader doubt they clicked it.
+    const wider =
+      wholeSpan &&
+      (wholeSpan.start_line < hit.start_line || wholeSpan.end_line > hit.end_line);
+
     fill(
-      body,
+      bodyCard,
       el(
         "div",
-        { class: "body-head" },
-        el("span", { class: "sym", text: named }),
-        el("span", { class: "lines", text: `${hit.start_line}-${hit.end_line}` }),
+        { class: "span-head" },
+        el("span", { class: "path", text: hit.path }),
+        el("span", { class: "lines", text: lines }),
         el("span", { class: "spacer" }),
+        freshMark(hit.fresh),
         confidenceBadge(hit.provenance),
-        freshnessDot(hit.fresh !== false),
       ),
+      hit.provenance && PROVENANCE_NOTE[hit.provenance]
+        ? el("p", { class: "prov-note", text: PROVENANCE_NOTE[hit.provenance] })
+        : null,
       hit.fresh === false
         ? el("p", {
             class: "note",
             text: "This file has changed since it was indexed. The lines below are what was read then.",
           })
         : null,
-      hit.image ? imagePreview(hit.path) : el("pre", { text: hit.text }),
+      signature ? el("div", { class: "sig", text: signature }) : null,
+      hit.image ? imagePreview(hit.path) : codeGutter(showing.text, showing.start_line),
       el(
         "div",
-        { class: "hit-actions" },
+        { class: "span-foot" },
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          disabled: !wider,
+          title: wider
+            ? null
+            : definitions
+              ? `${definitions} definitions carry this name, and which one this is was not settled. The Read page lists them.`
+              : "this span is already the whole of it",
+          text: whole
+            ? "Collapse to the matched span"
+            : hit.symbol
+              ? "Read whole symbol"
+              : "Read the whole section",
+          onclick: () => {
+            whole = !whole;
+            paintBody();
+          },
+        }),
+        el("span", { class: "body-meta", text: `semlith_read · ${hit.path}:${lines} · second stage` }),
+        el("span", { class: "spacer" }),
         el("a", {
           href: "#graph",
           class: "quiet",
@@ -3167,27 +3713,30 @@ async function searchView() {
     );
   }
 
-  const storeChips = state.stores.map((store) =>
-    el("button", {
-      class: "chip",
-      type: "button",
-      "aria-pressed": "false",
-      text: store.name,
-      onclick: (e) => {
-        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
-        e.currentTarget.setAttribute("aria-pressed", String(on));
-        if (on) chosen.add(store.name);
-        else chosen.delete(store.name);
-        run();
-      },
-    }),
-  );
-  for (const chip of storeChips) {
-    chip.setAttribute("aria-pressed", String(chosen.has(chip.textContent)));
+  /* The neighbourhood of the open hit, one ring out and then one more, from
+   * the evidence block `/api/symbol` already returns. Drawn here rather than
+   * linked to, because leaving the page to see what calls this loses the span
+   * that raised the question. */
+  async function drawAround(hit, mine) {
+    const name = hit.symbol || symbolIn(hit);
+    aroundName.textContent = name || "—";
+    if (!name) return ego.draw({ nodes: [], edges: [] }, null);
+    const params = new URLSearchParams({ name });
+    if (hit.store) params.append("store", hit.store);
+    let data;
+    try {
+      data = await api(`/api/symbol?${params}`);
+    } catch (_) {
+      return;
+    }
+    if (mine !== bodyGeneration) return;
+    ego.draw(egoGraph(name, data), null);
   }
 
   fill(results, nothing());
+  paintBody();
   setTimeout(() => {
+    ego.start();
     if (state.pendingQuery) {
       input.value = state.pendingQuery;
       state.pendingQuery = "";
@@ -3213,34 +3762,76 @@ async function searchView() {
         labelled("search-query", "Search the index", input),
         meta,
       ),
+      shapeHint,
       el(
         "div",
         { class: "filters" },
-        storeChips.length > 1 ? storeChips : null,
-        labelled("search-k", "k", kField),
-        // Reserved rather than hidden: query-shape routing is 0.16.0, and a
-        // control that appears later without warning is worse than one that
-        // says when it arrives.
-        el(
-          "span",
-          { class: "prefer", title: "Query-shape routing arrives in 0.16.0" },
-          el("span", { class: "meta", text: "Prefer" }),
-          el("span", { class: "seg is-on", text: "any" }),
-          el("span", { class: "seg is-off", text: "code" }),
-          el("span", { class: "seg is-off", text: "docs" }),
-        ),
-        labelled("search-budget", "Budget", budgetField),
-        el("span", { class: "spacer" }),
-        el("span", { class: "meta", text: "vector + fts5 + graph, fused by rank" }),
+        picker.node,
+        el("span", { class: "rule" }),
+        kDial,
+        preferDial,
+        langDial,
+        pathDial,
+        budgetDial,
+        el("span", { class: "dial-note", text: "what one answer may cost an agent" }),
       ),
     ),
     el(
       "div",
       { class: "two-stage" },
       el("div", { class: "locate-col" }, results, footer),
-      body,
+      el(
+        "div",
+        { class: "body-col" },
+        bodyCard,
+        el(
+          "div",
+          { class: "around-head" },
+          el("span", { class: "title" }, "Around ", aroundName),
+          el("span", { class: "meta", text: "graph expansion" }),
+        ),
+        stage,
+      ),
     ),
   );
+}
+
+/* The evidence block, as a graph the canvas can draw: the symbol at the
+ * centre, its callers and callees around it, and the second ring hung off the
+ * first-ring name it was reached through — `via` is the whole of what makes
+ * it a second ring rather than another neighbour.
+ *
+ * A caller or callee row is an `EdgeEnd`, which flattens the symbol it
+ * reached into itself: the name is on the row, not under a `symbol` key, and
+ * `kind` is the edge's kind rather than the symbol's. */
+function egoGraph(name, data) {
+  const nodes = [{ name, kind: "symbol" }];
+  const index = new Map([[name, 0]]);
+  const edges = [];
+  const add = (label, kind) => {
+    if (!index.has(label)) {
+      index.set(label, nodes.length);
+      nodes.push({ name: label, kind });
+    }
+    return index.get(label);
+  };
+  const link = (from, to, kind, confidence) => {
+    if (from !== to) edges.push({ from, to, kind, confidence });
+  };
+  for (const end of data.callers || []) {
+    link(add(end.name, end.kind), 0, end.kind, end.confidence);
+  }
+  for (const end of data.callees || []) {
+    link(0, add(end.name, end.kind), end.kind, end.confidence);
+  }
+  for (const hop of data.ego || []) {
+    const via = index.get(hop.via);
+    if (via === undefined) continue;
+    const it = add(hop.name, hop.kind);
+    if (hop.direction === "caller") link(it, via, hop.kind, hop.confidence);
+    else link(via, it, hop.kind, hop.confidence);
+  }
+  return { nodes, edges };
 }
 
 // ----------------------------------------------------------------- index
@@ -4378,11 +4969,64 @@ async function privacyView() {
 
 // ----------------------------------------------------------------- about
 
+/* Every name `--lang` accepts, with a tick on the ones the graph is extracted
+ * from. It lives here rather than on a page of its own because it is a fact
+ * about the binary, and a page that held one table was a click between the
+ * reader and a list they wanted to scan. */
+function langCard(languages, withEdges) {
+  const edges = new Set(withEdges);
+  return el(
+    "div",
+    { class: "card pad lang-card" },
+    el(
+      "div",
+      { class: "rows tight" },
+      el("span", { class: "card-title", text: `${languages.length} languages` }),
+      el("span", {
+        class: "subtitle",
+        text: "Search filters and the code graph read the same table, so the two cannot disagree.",
+      }),
+    ),
+    el(
+      "div",
+      { class: "lang-grid" },
+      languages.map((lang) => {
+        const has = edges.has(lang.name);
+        const names = (lang.extensions || [])
+          .map((e) => `.${e}`)
+          .concat(lang.filenames || []);
+        return el(
+          "div",
+          { class: "lang-row" },
+          el("span", {
+            class: `tick ${has ? "on" : "off"}`,
+            title: has ? "graph edges as well as search" : "search only",
+            text: has ? "✓" : "",
+          }),
+          el("span", { class: "name", text: lang.name }),
+          el("span", { class: "spacer" }),
+          el("span", { class: "exts", text: names.join(" ") }),
+        );
+      }),
+    ),
+    says(
+      "A tick means the grammar carries graph edges as well as search; everything else is indexed and searchable, it just has no edges yet. ",
+      mono("semlith languages"),
+      " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built.",
+    ),
+  );
+}
+
 async function aboutView() {
   let about;
   let models;
+  let languages;
   try {
-    [about, models] = await Promise.all([api("/api/about"), api("/api/models")]);
+    [about, models, languages] = await Promise.all([
+      api("/api/about"),
+      api("/api/models"),
+      api("/api/languages"),
+    ]);
   } catch (e) {
     return el("div", { class: "view" }, pageHead("About"), error(e.message));
   }
@@ -4446,25 +5090,7 @@ async function aboutView() {
           row("MCP revisions", (about.revisions || []).join(" · ")),
           row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
         ),
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "Languages with graph edges" }),
-          el(
-            "div",
-            { class: "chips" },
-            (about.graph_languages || []).map((lang) =>
-              el("span", { class: "chip static blue", text: lang }),
-            ),
-          ),
-          says(
-            "Everything else is indexed and searchable; it just has no edges yet. ",
-            mono("semlith languages"),
-            ` lists all ${about.languages} that `,
-            mono("--lang"),
-            " accepts.",
-          ),
-        ),
+        langCard(languages.languages || [], about.graph_languages || []),
       ),
       list.length ? table.node : el("div", { class: "card pad" }, empty("No model is listed.")),
     ),
@@ -4576,7 +5202,8 @@ const RENDER = {
   files: filesView,
   index: indexView,
   search: searchView,
-  languages: languagesView,
+  read: readView,
+  pattern: patternView,
   agents: agentsView,
   privacy: privacyView,
   about: aboutView,

@@ -43,7 +43,13 @@ const VIEWS: &[(&str, &str)] = &[
     // the daemon can see but has not been told to open.
     ("trust", "/api/trust"),
     ("models", "/api/models"),
-    ("languages", "/api/languages"),
+    // `semlith languages` is the About page's language table, which the v3
+    // design puts there rather than on a page of its own. `/api/languages` is
+    // still what fills it; the route named here is the page's own, because a
+    // parity row has to point at a view somebody can open.
+    ("languages", "/api/about"),
+    ("read", "/api/read"),
+    ("pattern", "/api/pattern"),
     ("setup", "/api/setup"),
     // A check and an install both reach the network, so neither is something a
     // route answers to a GET that a browser might replay.
@@ -62,8 +68,11 @@ const VIEWS: &[(&str, &str)] = &[
 const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_search", "/api/search"),
     ("semlith_stats", "/api/stores"),
-    ("semlith_languages", "/api/languages"),
+    // As above: the table moved to About, so that is where the view is.
+    ("semlith_languages", "/api/about"),
     ("semlith_files", "/api/files"),
+    ("semlith_read", "/api/read"),
+    ("semlith_pattern", "/api/pattern"),
     ("semlith_index", "/api/index"),
     ("semlith_add", "/api/add"),
     ("semlith_forget", "/api/forget"),

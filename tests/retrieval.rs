@@ -38,6 +38,10 @@ struct Question {
     connected: Option<bool>,
     hops: Option<usize>,
     k: Option<usize>,
+    /// For `tool: read`: `path:start-end` or a symbol name.
+    target: String,
+    /// For `tool: search`: the preference an agent would pass.
+    prefer: String,
     spans: Vec<Span>,
 }
 
@@ -90,6 +94,7 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
         match question.tool.as_str() {
             "search" => score_search(&mut semlith, &root, question, &mut report),
             "path" => score_path(&semlith, question, &mut report),
+            "read" => score_read(&semlith, &root, question, &mut report),
             // Scored by the same span rule as a search once they are wired up.
             // Counted as skipped rather than as misses: a metric that punishes
             // the harness for what the harness has not implemented is a metric
@@ -133,10 +138,26 @@ struct Report {
     graph_only: usize,
     graph_only_hits: usize,
     wrong_yes: usize,
+    /// How many lines each `read` answer came back as. The locate-then-read
+    /// claim is about size as much as about correctness.
+    read_lines: Vec<usize>,
+    /// Search questions that named a preference, and how many of those landed
+    /// a span — the number that says whether `prefer` earns its argument.
+    preferred: usize,
+    preferred_hits: usize,
     chains_found: usize,
     chains_expected: usize,
     chain_length_matches: usize,
     misses: Vec<String>,
+    /// Every scored question and the rank its first satisfying hit landed at,
+    /// in question order.
+    ///
+    /// The aggregate hit@k numbers cannot say whether a release helped: adding
+    /// ten questions moves every percentage whether or not anything got
+    /// better. This table is what one run compares against another, question
+    /// by question, and it is why the ids in the question set may never be
+    /// reused.
+    ranks: Vec<(String, Option<usize>)>,
 }
 
 impl Report {
@@ -161,6 +182,21 @@ impl Report {
             "  graph-only hits    {} of {} satisfied a span",
             self.graph_only_hits, self.graph_only
         );
+        if self.preferred > 0 {
+            println!(
+                "  prefer questions   {} of {} landed a span",
+                self.preferred_hits, self.preferred
+            );
+        }
+        if !self.read_lines.is_empty() {
+            let mut lines = self.read_lines.clone();
+            lines.sort_unstable();
+            println!(
+                "  read answer size   median {} lines, worst {}",
+                lines[lines.len() / 2],
+                lines.last().copied().unwrap_or(0)
+            );
+        }
         println!(
             "\n  wrong yes          {}  (path questions whose true answer is \"not connected\")",
             self.wrong_yes
@@ -170,6 +206,13 @@ impl Report {
             self.chains_found, self.chains_expected, self.chain_length_matches
         );
         println!("  tools/list         {tool_list} bytes, about {tool_tokens} tokens");
+        println!("\n  rank of the first satisfying hit, per question:");
+        for (id, rank) in &self.ranks {
+            match rank {
+                Some(rank) => println!("    {rank:>3}  {id}"),
+                None => println!("      -  {id}"),
+            }
+        }
         if !self.misses.is_empty() {
             println!("\n  missed at k=8:");
             for id in &self.misses {
@@ -182,10 +225,27 @@ impl Report {
 
 fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report: &mut Report) {
     let k = question.k.unwrap_or(8);
-    let hits = semlith
-        .search(&question.query, k)
-        .unwrap_or_else(|e| panic!("{}: search failed: {e}", question.id));
+    let prefer =
+        semlith::Prefer::parse(&question.prefer).unwrap_or_else(|e| panic!("{}: {e}", question.id));
+    let vector = semlith
+        .embed_query(&question.query)
+        .unwrap_or_else(|e| panic!("{}: embedding failed: {e}", question.id));
+    let hits: Vec<semlith::Hit> = semlith
+        .search_preferring(
+            &question.query,
+            &vector,
+            k,
+            &semlith::filter::Filter::default(),
+            prefer,
+        )
+        .unwrap_or_else(|e| panic!("{}: search failed: {e}", question.id))
+        .into_iter()
+        .map(|(hit, _)| hit)
+        .collect();
     report.scored += 1;
+    if prefer != semlith::Prefer::Any {
+        report.preferred += 1;
+    }
 
     // The reply an agent would actually be handed, which is what its cost is.
     report
@@ -206,6 +266,7 @@ fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report:
             }
         }
     }
+    report.ranks.push((question.id.clone(), first));
     match first {
         Some(rank) => {
             for k in [1usize, 3, 8] {
@@ -213,8 +274,48 @@ fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report:
                     *report.hit_at.entry(k).or_default() += 1;
                 }
             }
+            if prefer != semlith::Prefer::Any {
+                report.preferred_hits += 1;
+            }
         }
         None => report.misses.push(question.id.clone()),
+    }
+}
+
+/// Did `read` return the span the question names, and nothing like a file?
+///
+/// The whole claim of the locate-then-read pair is that the second stage costs
+/// one span rather than one file, so the size of what came back is as much the
+/// measurement as whether it was right.
+fn score_read(semlith: &Semlith, root: &Path, question: &Question, report: &mut Report) {
+    report.scored += 1;
+    let target = semlith::Target::parse(&question.target);
+    let found = semlith
+        .read(&target, &semlith::filter::Filter::default())
+        .unwrap_or_else(|e| panic!("{}: read failed: {e}", question.id));
+
+    let Some(semlith::Read::One(span)) = found else {
+        report.ranks.push((question.id.clone(), None));
+        report.misses.push(question.id.clone());
+        return;
+    };
+    report.bytes.push(span.text.len());
+    report.read_lines.push(span.text.lines().count());
+
+    let hit = question.spans.iter().any(|want| {
+        let same_file =
+            span.path.ends_with(&want.path) || root.join(&want.path).to_string_lossy() == span.path;
+        let overlaps = span.start_line <= want.end_line && span.end_line >= want.start_line;
+        let named = want.symbol.is_empty() || span.symbol.as_deref() == Some(want.symbol.as_str());
+        same_file && overlaps && named
+    });
+    report.ranks.push((question.id.clone(), hit.then_some(1)));
+    if hit {
+        for k in [1usize, 3, 8] {
+            *report.hit_at.entry(k).or_default() += 1;
+        }
+    } else {
+        report.misses.push(question.id.clone());
     }
 }
 
@@ -511,6 +612,8 @@ fn assign(
         "from" => question.from = value.to_string(),
         "to" => question.to = value.to_string(),
         "connected" => question.connected = Some(value == "true"),
+        "target" => question.target = value.to_string(),
+        "prefer" => question.prefer = value.to_string(),
         "hops" => question.hops = Some(number(value, line) as usize),
         "k" => question.k = Some(number(value, line) as usize),
         "depth" | "grep" | "kinds" | "want" | "note" => {}
