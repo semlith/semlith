@@ -687,3 +687,140 @@ fn index(store: &Path, corpus: &Path) {
 fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).unwrap();
 }
+
+/// A re-export is the only thing between the name a caller wrote and the
+/// definition it meant, so a walk that will not cross one answers "not
+/// connected" about code that is connected. The chain here is only walkable
+/// through `helper`, which is an alias and nothing else.
+///
+/// The same corpus proves the other half of 0.16.0's edge work: `neighbors`
+/// names the line the call was written on, which is not the line the calling
+/// function starts on.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_path_crosses_a_re_export_and_neighbours_names_the_call_site() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "alias.rs",
+        "pub use real::worker as helper;\n",
+    );
+    write(
+        corpus.path(),
+        "real.rs",
+        "fn worker() { finish(); }\nfn finish() {}\n",
+    );
+    // The call sits on line 4, four lines below the `fn` that contains it.
+    write(
+        corpus.path(),
+        "start.rs",
+        "fn start() {\n    let x = 1;\n    let _ = x;\n    helper();\n}\n",
+    );
+    index(store.path(), corpus.path());
+
+    let walked = cli(store.path(), &["path", "start", "finish"]);
+    assert!(
+        walked.contains("aliases"),
+        "the hop through the re-export must say what kind of hop it was: {walked}"
+    );
+    assert!(
+        walked.contains("helper"),
+        "the alias is a node on the chain: {walked}"
+    );
+    assert!(
+        !walked.contains("not connected"),
+        "the chain exists once aliases are crossable: {walked}"
+    );
+
+    let out = cli(store.path(), &["neighbors", "start"]);
+    assert!(
+        out.contains("called at") && out.contains(":4"),
+        "the call site is line 4, not the line `start` begins on: {out}"
+    );
+}
+
+/// The second stage of a retrieval: a locate answer says where, and this
+/// returns exactly that and nothing around it. A name with several definitions
+/// returns the list rather than guessing which one was meant.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn read_returns_one_span_and_refuses_to_guess_between_definitions() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "one.rs",
+        "fn alpha() {\n    let marker = 1;\n}\nfn shared() {}\n",
+    );
+    write(corpus.path(), "two.rs", "fn shared() {}\n");
+    index(store.path(), corpus.path());
+
+    let by_name = cli(store.path(), &["read", "alpha"]);
+    assert!(by_name.contains("let marker = 1;"), "{by_name}");
+    assert!(
+        !by_name.contains("fn shared"),
+        "a read is the span and nothing around it: {by_name}"
+    );
+
+    let by_span = cli(store.path(), &["read", "one.rs:2-2"]);
+    assert!(by_span.contains("let marker = 1;"), "{by_span}");
+    assert!(
+        !by_span.contains("fn alpha"),
+        "line 2 is not line 1: {by_span}"
+    );
+
+    let ambiguous = cli(store.path(), &["read", "shared"]);
+    assert!(
+        ambiguous.contains("2 definitions"),
+        "two definitions and nothing to choose between them: {ambiguous}"
+    );
+
+    let missing = cli(store.path(), &["read", "nosuchsymbol"]);
+    assert!(missing.contains("nothing indexed"), "{missing}");
+}
+
+/// A structural question a regex cannot ask: every call whose function is a
+/// bare identifier. The grammar is the one the extractor already uses, read
+/// from the same table, so a language `pattern` accepts is one the graph
+/// accepts.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_pattern_finds_the_shape_and_says_which_files_it_parsed() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "one.rs",
+        "fn caller() {\n    helper();\n}\nfn helper() {}\n",
+    );
+    write(corpus.path(), "notes.md", "helper() is called here too\n");
+    index(store.path(), corpus.path());
+
+    let out = cli(
+        store.path(),
+        &[
+            "pattern",
+            "--lang",
+            "rust",
+            "(call_expression function: (identifier) @called)",
+        ],
+    );
+    assert!(out.contains("@called"), "{out}");
+    assert!(out.contains("helper"), "{out}");
+    assert!(out.contains("one.rs:2"), "the call is on line 2: {out}");
+    // The Markdown file mentions the same text and is not Rust, so it is not
+    // parsed and cannot match.
+    assert!(!out.contains("notes.md"), "{out}");
+
+    // A pattern that does not compile is the caller's mistake, and saying "no
+    // matches" would have them conclude the code lacks the shape.
+    let broken = cli(store.path(), &["pattern", "--lang", "rust", "(unbalanced"]);
+    assert!(
+        broken.contains("not a valid tree-sitter pattern"),
+        "{broken}"
+    );
+
+    let nolang = cli(store.path(), &["pattern", "--lang", "cobol", "(x) @y"]);
+    assert!(nolang.contains("no grammar for"), "{nolang}");
+}

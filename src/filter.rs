@@ -101,6 +101,35 @@ const fn lang(
     }
 }
 
+/// The entries in [`LANGUAGES`] that are prose, markup or data rather than
+/// implementation.
+///
+/// Named as the short list rather than tagging all 46 rows, because this is a
+/// ranking hint and not a fact about the language: `prefer: docs` lifting a
+/// README above the function it describes is the whole intent, and nothing
+/// else in the crate asks the question.
+const PROSE: &[&str] = &["css", "html", "json", "markdown", "toml", "yaml"];
+
+/// Whether a path holds implementation, for [`crate::Prefer`].
+///
+/// A path in no language at all — a `.txt` note, an extracted `.epub` — reads
+/// as prose, which is what it is.
+pub fn is_code(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    LANGUAGES
+        .iter()
+        .find(|entry| {
+            entry.extensions.contains(&ext)
+                || entry.filenames.iter().any(|f| match f.strip_suffix(".*") {
+                    Some(stem) => name.starts_with(stem),
+                    None => *f == name,
+                })
+        })
+        .is_some_and(|entry| !PROSE.contains(&entry.name))
+}
+
 /// The entry for a `--lang` name, matched case-insensitively.
 pub fn language(name: &str) -> Option<&'static Language> {
     let wanted = name.to_ascii_lowercase();
@@ -159,6 +188,18 @@ impl Filter {
     }
 
     /// AND-groups of OR-patterns, ready for the SQL builder.
+    /// This filter, narrowed to one language as well.
+    ///
+    /// A new group rather than a merge, because groups intersect: whatever the
+    /// caller already asked for stays, and the language is an additional
+    /// requirement rather than an alternative to it.
+    pub fn and_language(&self, language: &str) -> Result<Self> {
+        let added = Self::new(&[], &[], std::slice::from_ref(&language.to_string()))?;
+        let mut groups = self.groups.clone();
+        groups.extend(added.groups);
+        Ok(Self { groups })
+    }
+
     pub fn groups(&self) -> &[Vec<String>] {
         &self.groups
     }
@@ -203,6 +244,32 @@ fn separator_prefix() -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `prefer` needs to tell a README from the function it describes, and a
+    /// file in no language at all is prose.
+    #[test]
+    fn code_is_told_from_prose_by_the_language_table() {
+        for path in [
+            "src/lib.rs",
+            "a/b.py",
+            "Makefile",
+            "deploy/Dockerfile",
+            "x.ts",
+        ] {
+            assert!(super::is_code(path), "{path} is code");
+        }
+        for path in [
+            "README.md",
+            "docs/architecture.md",
+            "Cargo.toml",
+            "page.html",
+            "data.json",
+            "notes.txt",
+            "book.epub",
+        ] {
+            assert!(!super::is_code(path), "{path} is not code");
+        }
+    }
+
     use super::*;
 
     fn s(items: &[&str]) -> Vec<String> {

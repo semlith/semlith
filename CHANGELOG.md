@@ -7,6 +7,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-14
+
+0.15.0 made the free product honest and cheap. It did not make it better at
+finding things. This release spends the harness that release built on the
+ranking itself, and reports what the harness said — including where it said no.
+
+### The graph list stops being a set and becomes a ranking
+
+- **Graph neighbours are ranked by personalised PageRank.** 0.15.0 expanded one
+  flat hop from the top eight hits and weighted the result by the confidence of
+  the edge that reached it. That treats every neighbour of every seed as equally
+  related, so a symbol reached once from a weak hit ranked alongside one reached
+  from three strong ones — a set, not a ranking. The walk is now seeded with each
+  hit's own fusion contribution, splits a chunk's mass between the symbols it
+  holds, and pushes it outward three rounds at 0.85 damping. Neighbours are still
+  read one name at a time and are cached, so a name is queried once however many
+  rounds run and only the frontier is ever held; `graph::MAX_NODES` still bounds
+  it, and ambiguous edges are still refused.
+- **A symbol question is answered with one evidence block.** `semlith symbol` and
+  `semlith_symbol` return the definition, the resolved callers and callees, and
+  the ring two hops out, together. That used to be three tool calls, two of which
+  had to be made before the caller knew whether the first had found the right
+  symbol. The second ring is walked only through first-ring names that are
+  `extracted` or `resolved`: an ambiguous name is several unrelated definitions
+  wearing one label, and expanding through one would put another symbol's callers
+  into this one's context.
+- **An edge records the line the call was written on.** `edges` gains a nullable
+  `line` column, so "where is X invoked" returns the call rather than the
+  enclosing definition, which can be hundreds of lines away. NULL on every row an
+  older binary wrote, and a renderer prints nothing rather than falling back to
+  the definition line — a wrong call site is worse than no call site.
+- **A walk crosses a re-export.** `pub use x as y`, `export { x as y }`,
+  `from x import y as z` and Go's aliased import become `aliases` edges, and
+  `aliases` joins the kinds a path may follow. A walk that refused to cross a
+  rename answered "not connected" about code that is connected. A re-export that
+  does not rename adds nothing: there is no name change to cross.
+
+### Search reads the query before it ranks the answer
+
+- **An identifier and a question are weighted differently.** FTS5 is exact about
+  a name and vague about a sentence; the embedding is the other way round, and
+  both halves were being scored as though equally likely to know. An
+  identifier-shaped query now weights the keyword list twice; a question-shaped
+  one leaves the two level. The rule is one token of identifier characters,
+  deliberately crude and entirely inspectable, and every surface reports which
+  shape it read — a caller can only correct a misread shape if it can see that
+  one happened. The harness says this is the single largest win in the release:
+  without it, hit@3 falls from 17 to 13 and hit@8 from 25 to 20.
+- **`prefer: code | docs | any`** is the correction, on the CLI, over MCP and on
+  `/api/search`. It multiplies rather than filters, so `prefer: code` over a
+  corpus of prose still answers with the prose.
+- **The fused set is reranked by graph distance and freshness.** Constants, no
+  model, no learned weights; every input is something the store already holds,
+  and both are tiebreaks — the whole span is under 1.5x, asserted — so a chunk
+  the query matched badly cannot climb over one it matched well.
+
+### Two new tools, and a tool list that did not grow
+
+- **`semlith read`** returns one span or one symbol and nothing around it: the
+  second stage after a locate answer. A name with several definitions returns the
+  list rather than choosing. Reads come from the store's chunks and never from
+  disk, so the boundary that governs indexing governs reading.
+- **`semlith pattern`** runs a tree-sitter structural query over the indexed
+  files of one language — the questions a regex cannot ask. The grammar comes
+  from the extractor's own table, so a language `pattern` accepts is one the
+  graph accepts. An invalid pattern returns the parser's own message rather than
+  an empty list, because a caller handed "no matches" concludes the code lacks
+  the shape.
+- **Twelve tools now fit the budget ten used to.** `tools/list` is 3 995 bytes,
+  about 999 tokens, against 3 940 for ten tools in 0.15.0. What paid for the two
+  new tools was the `items` schema on the array properties: `path`, `ext`, `lang`
+  and `store` have only ever held strings and their names say so. The
+  `readOnlyHint` annotations stayed — a client acts on those, and buying bytes by
+  making every tool need an approval prompt is the opposite of what the budget is
+  for.
+
+### A store has one name
+
+- **The portal drew store chips the search route then refused.** `/api/stores`
+  reports the name the daemon registered — what a person typed, and what the
+  chips are made of — while the fleet every route answers from derived its own
+  label from the store directory's basename. The two agree for a store in
+  `~/.semlith/stores/<name>`, where the directory *is* the name, and disagree
+  for every store opened by path: clicking the chip returned "no store called
+  work is open; these are: store". All three fleets the daemon builds — the one
+  it starts with, the one the portal opens lazily, and the reader forwarded MCP
+  calls answer from — now take their names from the registry, so `store:` means
+  the same thing on every surface.
+
+### The portal
+
+- **Neither new tool gets a page, and that is the decision rather than an
+  omission.** `read` already has a view: it is the Search page's second stage,
+  where the button sits on the hit that raised the question with the span
+  already in hand. A page of its own could only be started by retyping a
+  coordinate you got from Search. `pattern` takes a tree-sitter query in
+  S-expression syntax, which nobody writes from memory — a page for it is a box
+  you can only fill by pasting from documentation, which is a worse manual
+  rather than a view. Both tools work on the CLI and over MCP, where the caller
+  is an agent that can write the query, and the Agents page lists both with what
+  they are for. `tests/portal.rs` records the reasoning beside `start` and `mcp`,
+  which are exempt for their own reasons.
+- The Search page rebuilt to that design: the query-shape hint, file cards with
+  span summaries, word-pill fusion badges, the provenance sentence, a signature
+  strip, a line-number gutter, a read-whole-symbol control, and an ego-graph
+  panel. The `Prefer` control is live rather than a disabled promise, and the
+  shape hint is drawn from what the server actually ranked with rather than from
+  a second classifier in the browser.
+- Three bugs found by rendering the pages rather than reading the diff: image
+  previews were handed a `blob:` URL the page's own CSP had always refused and so
+  had never worked; the Read and Pattern views could let a slow earlier answer
+  overwrite a newer one; and the graph canvas leaked an animation loop per visit.
+- **The Languages page is gone.** Its list lives on About, where the design puts
+  it. `semlith languages`, `semlith_languages` and `/api/languages` are
+  unchanged.
+
+### What the harness said no to
+
+A third rerank factor — a lift for a chunk sitting inside a named definition —
+was specified, built, measured and removed. In a code repository nearly every
+code chunk sits inside a definition and nearly no prose chunk does, so it is a
+second and blunter `prefer: code` applied to every query, including the ones that
+asked for `prefer: docs`. It costs two hits at k=3, and `prefer-code-over-prose`
+ranks first without it and third with it. It is recorded in the release's
+iteration log rather than quietly dropped.
+
+
 ## [0.15.0] - 2026-09-14
 
 The graph stops answering questions it cannot support, the search stops sending

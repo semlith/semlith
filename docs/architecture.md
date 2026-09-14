@@ -711,3 +711,88 @@ better than a flag that silently means its opposite. `--no-ledger` stops a
 session; `SEMLITH_LEDGER=0` stops a machine — a shared build box, a container,
 somebody else's laptop. The two exist separately because they are different
 promises.
+
+## Ranking (0.16.0)
+
+Three things happen between the fused list and the answer, and none of them
+involves a model.
+
+**The graph list is a walk, not a hop.** 0.12.0 added a third list: the symbols
+inside the top hits, one hop out, and the chunks those neighbours live in. That
+list was a set. Everything one hop from any seed was in it, weighted only by how
+well the *edge* was supported, so a symbol reached once from a weak hit sat
+alongside one reached from three strong ones. 0.16.0 makes it a ranking: a
+personalised PageRank, seeded with each hit's own fusion contribution, damped at
+0.85, three rounds.
+
+Personalised matters more than PageRank does. A plain PageRank over a code graph
+ranks the repository's most-called utility first for every query anyone ever
+asks; the 0.15 of the mass that does not flow is what keeps the walk anchored to
+the chunks this particular query actually found.
+
+The implementation deliberately does not build a graph. `graph::expand` takes a
+closure that answers "the dependency neighbours of this one name" and calls it at
+most once per name across all three rounds, caching what comes back. So the walk
+holds its frontier and never the corpus, `MAX_NODES` still bounds it, and the
+maths is unit-testable against a literal adjacency map with no store and no
+model — which is how the "three seeds at two hops beat one seed at one hop"
+property is asserted rather than asserted about.
+
+**A query is read before it is ranked.** FTS5 is exact about an identifier and
+vague about a sentence. The embedding is the other way round. Until 0.16.0 both
+halves were scored as though equally likely to know the answer, whichever kind of
+thing had been typed. `shape_of` decides, from the query text alone: one token of
+identifier characters is an identifier and weights the keyword list twice;
+anything else is a question and leaves the two level.
+
+The rule is crude, and that is the design rather than a compromise. A rule a user
+can predict beats an accurate one they cannot, because the shape is reported in
+every answer and `prefer` is there to overrule it. There is exactly one
+classifier, in `lib.rs`, and the portal draws its hint from the server's reply
+rather than re-deriving the rule in JavaScript — a second classifier would be a
+second opinion about an answer the first one had already ranked.
+
+**The rerank is two tiebreaks.** Graph distance from the seeds, and freshness,
+applied after the rows are fetched because both need things the fusion cannot
+know. The whole span is under 1.5x, asserted in a test, so a chunk the query
+matched badly cannot climb over one it matched well.
+
+It was specified as three. The third — a lift for a chunk sitting inside a named
+definition — was built, measured and removed inside the release. The harness is
+the reason: it costs two hits at k=3. The *mechanism* is the reason it will not
+come back. In a code repository nearly every code chunk sits inside a definition
+and nearly no prose chunk does, so the factor is a second and blunter
+`prefer: code` applied to every query — including the ones that asked for
+`prefer: docs`. The release adds a way for a caller to say which side of the
+corpus they want; a constant that says it for them, always, in one direction, is
+not a tiebreak but an argument with the user.
+
+No weight here is learned. Every input is something the store already holds. The
+per-repository learned profile belongs to a later release and is not smuggled in
+as a constant.
+
+## Reading one span (0.16.0)
+
+A locate answer costs about 150 bytes a hit and tells an agent where to look.
+Before 0.16.0 the only way to act on one was to read the whole file, which is the
+cost the locate format exists to avoid — so the cheap first stage was paid for
+twice.
+
+`semlith read` is the second stage. It takes what a locate answer prints — a
+store-relative path and a line range — or a symbol name, and returns exactly
+that. Three decisions in it are worth recording:
+
+It answers from the store's chunks and never from disk. Reading the file would
+answer for content semlith was never allowed to index, which matters because an
+agent holding the agent key can call this: naming `~/.ssh/id_rsa` as a span must
+not be a way around the deny-list that governs indexing.
+
+It stitches by line number rather than concatenating. Chunks overlap by two
+lines, so concatenation would repeat the seam and every line number after it
+would be wrong — for a tool whose entire output is line numbers, that is the only
+thing that matters.
+
+It resolves a span's path by suffix against what was actually indexed, because a
+locate answer prints a store-relative path while `files.path` is absolute. Two
+indexed files matching one suffix is an error naming both rather than a guess
+between them — the same refusal the graph's `ambiguous` value exists to make.

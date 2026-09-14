@@ -16,6 +16,7 @@ break, and is treated as one.
 | Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. From 0.15.0, `SEMLITH_LEDGER` — `0`, `off` or `false` stops the ledger recording anything on this machine. |
 | CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
 | CLI commands added in 0.14.0 | `trust <dir>` and `trust --list`, and `index --include-secrets`. |
+| CLI commands added in 0.16.0 | `read <target>` — `path:start-end`, `path:line` or a symbol name — and `pattern <query> --lang <name>`. `search` gains `--prefer code\|docs\|any`, defaulting to `any`. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
 | The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME` and `SEMLITH_YES`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
@@ -23,7 +24,7 @@ break, and is treated as one.
 | `semlith setup --yes` | Runs every step with its default and no prompt, so a script or an agent can install semlith unattended. |
 | `semlith upgrade --check` | Exits 0 when the installed version is current and 10 when a newer release exists, and changes nothing either way. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
-| MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`, `semlith_symbol`, `semlith_neighbors`, `semlith_path`, and from 0.15.0 `semlith_languages`. `semlith_impact` was on this list until 0.13.0 removed it; see the break below. |
+| MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`, `semlith_symbol`, `semlith_neighbors`, `semlith_path`, from 0.15.0 `semlith_languages`, and from 0.16.0 `semlith_read` and `semlith_pattern`. `semlith_impact` was on this list until 0.13.0 removed it; see the break below. |
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
 | MCP protocol revisions | The list the server advertises: `2026-07-28`, `2025-11-25`, `2025-06-18`, `2024-11-05`. Dropping one is a break. |
 | Where the daemon binds | `127.0.0.1`, and only that. Widening it would be a break in the direction that matters, and is not something a flag will ever do. |
@@ -449,6 +450,38 @@ instead: `tool` is NULL on every row written before 0.15.0 and set on every row
 written since, and that is what decides which formula verifies it. A store
 holding rows of both kinds verifies end to end. A verify that reported every
 0.14.0 ledger as broken would be worse than no verify at all.
+
+## Breaks in 0.16.0
+
+Three, none of which needs a re-index and none of which changes the store format.
+
+**No portal page is added for `read` or `pattern`.** Not a break — they are new
+in this release and never had one — but worth stating, because portal parity
+otherwise implies it. `read`'s view is the Search page's second stage and
+`pattern` is an agent-facing query surface; both are on the CLI and over MCP,
+and the Agents page lists them. `/api/read` and `/api/pattern` exist and are
+covered by the same stability promise as the rest of `/api`.
+
+**The portal's Languages page is gone.** Its content — the language list, with
+which of them carry graph edges — is on the About page, where the design puts it.
+`semlith languages`, `semlith_languages` and `/api/languages` are unchanged, so
+nothing scripted against them breaks; only the page and its navigation entry are
+removed. A bookmark to the Languages route lands on About.
+
+**MCP array arguments no longer declare `items`.** `path`, `ext`, `lang` and
+`store` are still arrays of strings and still behave identically. Their schemas
+now say `{"type": "array"}` rather than `{"type": "array", "items": {"type":
+"string"}}`. This is what paid for the two new tools inside the same `tools/list`
+budget, and it is listed here because a client that validates strictly against
+the advertised schema sees a change — although a schema that constrains less
+never rejects what the old one accepted.
+
+**`semlith_symbol` returns more than it did.** It answered with a flat list of
+definitions; it now answers with a block carrying the definition, the resolved
+callers and callees, and the ring two hops out. A caller that parsed the old
+output line by line has to read the block instead. `/api/symbol` keeps its
+`symbols` key unchanged and adds `callers`, `callees` and `ego` beside it, so the
+HTTP shape is additive rather than replaced.
 
 ## What a break would look like
 

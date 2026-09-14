@@ -1118,3 +1118,183 @@ questions:
       nothing may present one as the other. In this repository 136 names have
       more than one definition, covering 405 symbols, and 9727 of 9926 call
       edges are inferred — so this is not a corner case, it is the normal case.
+
+  # ------------------------------------------------------------------
+  # 0.16.0 — the questions this release's features exist to answer.
+  #
+  # These are the one place in this file whose spans are NOT line ranges in
+  # 199463c, because the code they ask about did not exist in 0.14.0. Their
+  # spans are read from the 0.16.0 working tree and the `symbol` anchor is what
+  # keeps them scoring after the lines move, exactly as the matching rule at the
+  # top of this file describes. Said here rather than left for a reader to
+  # notice.
+  #
+  # The identifier/question pairs are the point of the shape work: both halves
+  # of a pair ask for the same code, one the way a programmer types and one the
+  # way a person asks, and both have to land it. A pair where only one half
+  # scores is the measurement saying the weighting went too far.
+  # ------------------------------------------------------------------
+
+  - id: shape-pair-ppr-identifier
+    shape: identifier
+    tool: search
+    query: DAMPING
+    grep: grep -rn 'DAMPING' src/graph.rs
+    spans:
+      - path: src/graph.rs
+        symbol: expand
+        start_line: 876
+        end_line: 939
+    note: >-
+      The identifier half of the pair. Its question-shaped twin is
+      `shape-pair-ppr-question`; both ask for `graph::expand`. Written first as
+      the query `personalised_pagerank`, which was a mistake and is recorded
+      here rather than quietly corrected: no such identifier exists in the
+      crate, so the question asked for a term the corpus does not contain and
+      could only ever be a miss. `DAMPING` is what a programmer who knows this
+      code would actually type. The file's own rule is to fix a question that is
+      wrong about the code and say so, not to widen a span until something
+      passes.
+
+  - id: shape-pair-ppr-question
+    shape: concept
+    tool: search
+    query: how are graph neighbours ranked when several search hits agree on one symbol
+    grep: grep -rn 'pagerank\|damping' src
+    spans:
+      - path: src/graph.rs
+        symbol: expand
+        start_line: 876
+        end_line: 939
+    note: >-
+      The question half. Names nothing in the code, which is where the vector
+      list has to carry it.
+
+  - id: shape-pair-prefer-identifier
+    shape: identifier
+    tool: search
+    query: shape_of
+    grep: grep -rn 'fn shape_of' src
+    spans:
+      - path: src/lib.rs
+        symbol: shape_of
+        start_line: 144
+        end_line: 157
+    note: >-
+      An identifier whose own subject is identifier detection. If the keyword
+      weighting works anywhere it works here.
+
+  - id: shape-pair-prefer-question
+    shape: concept
+    tool: search
+    query: what decides whether a query is treated as a name or as a sentence
+    grep: grep -rn 'identifier-shaped' src
+    spans:
+      - path: src/lib.rs
+        symbol: shape_of
+        start_line: 144
+        end_line: 157
+    note: The question half of the same subject.
+
+  - id: prefer-code-over-prose
+    shape: concept
+    tool: search
+    query: how a retrieval is recorded in the ledger
+    prefer: code
+    grep: grep -rn 'record_retrieval' src
+    spans:
+      - path: src/ledger.rs
+        symbol: ~
+        start_line: 1
+        end_line: 296
+      - path: src/store.rs
+        symbol: record_retrieval
+        start_line: 1
+        end_line: 2600
+    note: >-
+      The subject is discussed at length in `docs/architecture.md`, `AGENTS.md`
+      and the README, and implemented in two files. `prefer: code` asks for the
+      implementation. The spans are deliberately whole-file: what is being
+      measured is which side of the corpus came back, not which line.
+
+  - id: prefer-docs-over-code
+    shape: concept
+    tool: search
+    query: why the retrieval ledger records by default
+    prefer: docs
+    grep: grep -rn 'on by default' docs AGENTS.md
+    spans:
+      - path: docs/architecture.md
+        symbol: ~
+        start_line: 1
+        end_line: 4000
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 1
+        end_line: 1000
+    note: >-
+      The mirror of the question above. "Why" is a question the prose answers
+      and the code cannot, so `prefer: docs` should reach the documents. Whole
+      -file spans for the same reason.
+
+  - id: call-site-where-invoked
+    shape: identifier
+    tool: search
+    query: insert_edge
+    grep: grep -rn 'insert_edge(' src
+    spans:
+      - path: src/store.rs
+        symbol: insert_edge
+        start_line: 949
+        end_line: 975
+      - path: src/lib.rs
+        symbol: extract_graph
+        start_line: 1400
+        end_line: 1560
+    note: >-
+      "Where is X invoked" is the question `edges.line` exists for. Either the
+      definition or the one call site in `extract_graph` satisfies it; the
+      release record says which the answer led with.
+
+  - id: read-one-span-by-symbol
+    shape: identifier
+    tool: read
+    target: chunks_overlapping
+    spans:
+      - path: src/store.rs
+        symbol: chunks_overlapping
+        start_line: 593
+        end_line: 616
+    note: >-
+      The second stage of a retrieval, asked by name. What is measured is the
+      size of what came back as much as whether it was right: the claim is one
+      span rather than one file, and `src/store.rs` is over two thousand lines.
+
+  - id: read-one-span-by-line
+    shape: identifier
+    tool: read
+    target: src/graph.rs:1182-1190
+    spans:
+      - path: src/graph.rs
+        symbol: call_site
+        start_line: 1182
+        end_line: 1190
+    note: >-
+      The same second stage asked the way a locate answer prints it — a
+      store-relative path and a line range. This is the exact string an agent
+      copies out of a `semlith_search` reply.
+
+  - id: multi-hop-alias-crossing
+    shape: multi-hop
+    tool: path
+    from: shape_of
+    to: keyword_weight
+    connected: true
+    hops: 1
+    note: >-
+      A short chain inside the shape work, used as the control for the alias
+      questions: it must keep being found while `aliases` joins the walkable
+      kinds. The repository has no aliased re-export of its own, so the
+      alias-crossing case is proven in `tests/graph.rs` over a fixture corpus
+      instead, and that is said here rather than faked with a question this file
+      cannot ask.

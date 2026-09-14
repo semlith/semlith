@@ -104,7 +104,8 @@ Module responsibilities:
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
-| `src/graph.rs` | tree-sitter extraction, and the bounded traversals over the edges |
+| `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
+| `src/pattern.rs` | `semlith pattern`: one tree-sitter query over the indexed files of one language |
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
@@ -174,6 +175,56 @@ Module responsibilities:
   expansion resolves its neighbours through `store::symbols_by_names`, which
   takes the same predicate, so a chunk outside the filter cannot arrive through
   the graph either.
+- **The graph list is a ranked walk, not a hop.** From 0.16.0 `graph::expand` is
+  a personalised PageRank seeded with each fused hit's own contribution: a chunk
+  both lists found seeds twice as hard as one only a single list found, and a
+  chunk holding three symbols splits its mass between them rather than seeding
+  each as though it were a hit of its own. Neighbours are read through a closure,
+  one name at a time, and cached — a name is asked about once however many rounds
+  run, so the walk holds the frontier and never the whole graph, and `MAX_NODES`
+  is still the bound. The maths takes a closure rather than a database handle
+  precisely so it is unit-tested against a literal adjacency map with no store
+  and no model.
+- **The rerank has no model and no learned weights, and its factors are
+  tiebreaks.** Graph distance from the seeds, and freshness. The whole span is
+  under 1.5x — asserted, not intended — so a chunk the query matched badly cannot
+  climb over one it matched well. A third factor, a lift for a chunk inside a
+  named definition, was specified, built, measured and removed in the same
+  release: in a code repository it is a second and blunter `prefer: code` applied
+  to every query, and it fights the real one. Do not reintroduce it, and do not
+  add a learned weight here — the per-repository learned profile is 0.18.0's.
+- **The query's shape is read in one place.** `shape_of` in `lib.rs`, from the
+  query text and nothing else, so every surface that prints it calls that
+  function and there is no second classifier. The portal draws the hint from
+  `/api/search`'s own `shape_label` and `weighting` fields for the same reason: a
+  classifier in the browser would be a second opinion about an answer the server
+  already ranked. An identifier-shaped query weights the keyword list twice; a
+  question-shaped one leaves the two level. `prefer` multiplies and never
+  filters, so `prefer: code` over a corpus of prose still answers.
+- **`edges.line` is where the source text sat, not where anything is defined.**
+  Added by the same `ALTER TABLE` mechanism `hint` uses, so `FORMAT_VERSION` does
+  not move, and NULL on every row an older binary wrote. A renderer prints
+  nothing for a NULL rather than falling back to the enclosing definition's line:
+  those are different lines, often hundreds apart, and a wrong call site is worse
+  than no call site.
+- **`aliases` is a dependency kind.** A re-export or an aliased import becomes a
+  symbol of its own plus an `aliases` edge to the bare name it stands for, and
+  the kind joins `DEPENDENCY_KINDS` so a walk can cross it — a walk that would
+  not answered "not connected" about code that is connected. A re-export that
+  does not rename emits nothing; there is no name change to cross.
+- **`read` answers from chunks, never from disk.** `Semlith::read` returns a span
+  stitched from the store's own rows, by line number rather than by
+  concatenation, because chunks overlap by two lines and concatenating repeats
+  the seam. Reading the file off disk would answer for content semlith was never
+  allowed to index — an agent holding the agent key could name `~/.ssh/id_rsa` as
+  a span. A span path is resolved by suffix against what was indexed, because a
+  locate answer prints a store-relative path and `files.path` is absolute; two
+  files matching one suffix is an error naming both, never a guess.
+- **`pattern` reads its grammar from `graph::language_grammar`.** The extractor's
+  own table, so a language `pattern` accepts is a language the graph accepts and
+  there is no second list to drift. Its text comes from the store's chunks too,
+  and a file whose first line the store does not hold is skipped rather than
+  parsed at line numbers that would be wrong.
 - **The graph is extracted inside `index_set`, never separately.** It is written
   where the file id and the new chunk ids are both already in hand, after
   `delete_file` has taken the old rows away. That is the whole freshness claim:
@@ -406,7 +457,16 @@ names a store.
 
 **A CLI command or an MCP tool is not done until its portal view exists.** Every
 release that adds one adds the view in the same release; parity debt is not a
-thing this repository carries. `tests/portal.rs` is the gate: it reads the
+thing this repository carries.
+
+A *view* is not always a page. `semlith languages` is the About page's table and
+`semlith_read` is the Search page's second stage — both have a surface a person
+can open, which is what the rule is for. What the rule forbids is a capability
+with no surface at all, and the exemption list in `tests/portal.rs` is where a
+deliberate absence is argued rather than assumed: `start` and `mcp` have no
+state of their own to show, and `pattern` takes a tree-sitter query that nobody
+writes into a browser box. Adding a row there is allowed; adding one without the
+reasoning beside it is not. `tests/portal.rs` is the gate: it reads the
 subcommand list out of `--help` and the tool list off a running daemon, and
 fails if any of them — bar `start` and `mcp`, which have their reasons recorded
 there — has no route.
