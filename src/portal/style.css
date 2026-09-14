@@ -938,6 +938,14 @@ h2 {
   align-items: stretch;
 }
 
+/* Three equal columns that collapse together rather than one at a time: the
+ * ledger's command cards are a set, and two-above-one reads as a hierarchy
+ * they do not have. */
+.grid.three {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: stretch;
+}
+
 /* A grid that is the page's scrolling child scrolls its columns rather than
  * itself, so a long model table does not drag the fact cards up with it. */
 .grid.grow > * {
@@ -972,6 +980,13 @@ h2 {
   color: var(--muted);
   font-size: var(--t-small);
   line-height: var(--lh-prose);
+}
+
+/* The one figure a page argues for, ringed in the accent. Used on the ledger's
+ * measured ratio, which is the number a reader came to the page for and the one
+ * that must never be read without its coverage and tier beside it. */
+.stat.ringed {
+  border-color: var(--accent);
 }
 
 .rows {
@@ -2583,8 +2598,14 @@ pre.code {
 .gutter-code {
   padding: var(--sp-3) 4px var(--sp-3) 0;
   border-top: 1px solid var(--line-soft);
-  overflow-x: auto;
+  overflow: auto;
   min-width: 0;
+  /* Capped so the span stays a span. "Read whole symbol" on a long function
+   * returns hundreds of lines, and without a ceiling the card pushed the ring
+   * below it off the bottom of the rail — the two are meant to be read
+   * together. */
+  max-height: 420px;
+  overscroll-behavior: contain;
 }
 .code-line {
   display: flex;
@@ -2648,9 +2669,14 @@ pre.code {
   font-size: var(--t-tiny);
   color: var(--muted);
 }
+/* Tall enough for the ring to be a shape rather than a pile. At 260px a
+ * symbol with a dozen neighbours drew every label on top of every other, which
+ * is the one thing a graph is for. It grows with the rail rather than sitting
+ * at a fixed height, with a floor that keeps it legible on a short window. */
 .ego-panel {
   position: relative;
-  height: 260px;
+  flex: 1 1 340px;
+  min-height: 340px;
   flex-shrink: 0;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -3250,6 +3276,10 @@ pre.code {
   font-family: var(--mono);
   font-size: var(--t-tiny);
 }
+.client-breakdown .client-note {
+  color: var(--muted);
+}
+
 /* Each client is one unbreakable unit: a name and its count belong on one
  * line, and the wrapping happens between clients rather than inside one. */
 .client-breakdown .client {
@@ -3375,8 +3405,34 @@ pre.code {
   text-wrap: pretty;
 }
 
+/* The tool list's own price, boxed off from the list it prices. It is the one
+ * number on this page an agent pays whether or not it asks anything, so it
+ * reads as a fact about the server rather than as a caption under a heading. */
+.cost {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  background: var(--soft);
+  border-radius: var(--r-3);
+  padding: var(--sp-3) var(--sp-3h);
+}
+
+.cost-line {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-note {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--muted);
+}
+
+/* Tall enough that the twelve tools are a list rather than a peephole; the
+ * grid inside still scrolls once a future release outgrows it. */
 .tools {
-  max-height: 330px;
+  max-height: 460px;
 }
 
 .who {

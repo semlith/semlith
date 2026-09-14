@@ -1848,6 +1848,16 @@ async function graphView() {
 }
 
 /** One figure with its label, as the design draws them. */
+/* Ring one card in the accent, for the single figure a page exists to show.
+ *
+ * A wrapper rather than an argument on `stat`, because emphasis is a property
+ * of the page's argument and not of the number: the same statistic is ringed on
+ * one page and plain on another. */
+function ringed(node) {
+  node.classList.add("ringed");
+  return node;
+}
+
 function stat(label, value, note) {
   return el(
     "div",
@@ -1884,10 +1894,17 @@ async function ledgerView() {
           : pill("not recording", null),
       },
     ),
+    // Six across, then two wide, then who asked — the order the design puts
+    // them in, and the order they are read in: what was asked, what it cost,
+    // what it saved, and how much of the ledger that figure covers.
     el(
       "div",
       { class: "strip" },
-      stat("Queries recorded", n(data.queries), `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`),
+      stat(
+        "Queries recorded",
+        n(data.queries),
+        `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`,
+      ),
       stat("Excerpt tokens", n(data.excerpt_tokens), "what agents were actually sent"),
       stat(
         "Whole-file tokens",
@@ -1897,29 +1914,35 @@ async function ledgerView() {
       // A ratio never stands alone. Coverage says how much of the ledger it is
       // computed over, and the tier says whether the tokens were counted or
       // estimated — without both, a number like 18.3x is a marketing claim.
-      stat(
-        "Measured ratio",
-        data.ratio ? `${data.ratio.toFixed(1)}×` : "—",
-        data.ratio
-          ? `coverage ${data.coverage}% · ${data.tier}`
-          : "needs a recorded query",
+      // Ringed rather than merely present: it is the figure a reader came for,
+      // and the ring is what carries its two qualifiers with it.
+      ringed(
+        stat(
+          "Measured ratio",
+          data.ratio ? `${data.ratio.toFixed(1)}×` : "—",
+          data.ratio ? `coverage ${data.coverage}% · ${data.tier}` : "needs a recorded query",
+        ),
       ),
-    ),
-    el(
-      "div",
-      { class: "strip" },
-      stat("Net tokens", n(data.net_tokens || 0), "whole-file less excerpt, over rows that found something"),
       stat(
         "Coverage",
         `${data.coverage || 0}%`,
         `${n(data.credited || 0)} of ${n(data.queries)} retrievals credited`,
       ),
       stat(
+        "Net tokens",
+        n(data.net_tokens || 0),
+        "whole-file less excerpt, over rows that found something",
+      ),
+    ),
+    el(
+      "div",
+      { class: "strip" },
+      stat(
         "Zero-hit",
         `${data.queries ? Math.round(((data.queries - (data.credited || 0)) * 100) / data.queries) : 0}%`,
-        "recorded, and credited nothing",
+        "queries the corpus could not answer — recorded, and credited nothing",
       ),
-      stat("Tier", data.tier || "modelled", "measured when the store's own tokenizer counted it"),
+      stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
     ),
     clientBreakdown(data.by_client),
     el(
@@ -1927,24 +1950,40 @@ async function ledgerView() {
       { class: "scroller" },
       el(
         "div",
-        { class: "card pad dense" },
-        copyField("semlith ledger --last 20"),
-        el("p", { class: "subtitle", text: "Prints the ledger on the command line." }),
-      ),
-      el(
-        "div",
-        { class: "card pad dense" },
-        copyField("semlith ledger --verify"),
-        el("p", {
-          class: "subtitle",
-          text: "Re-walks the hash chain and names the first row that does not verify.",
-        }),
-        el("p", {
-          class: "subtitle",
-          text: data.intact
-            ? "The chain is intact."
-            : "The chain does not verify. Some rows have been edited or removed.",
-        }),
+        { class: "grid three" },
+        el(
+          "div",
+          { class: "card pad dense" },
+          copyField("semlith ledger --last 20"),
+          el("p", {
+            class: "subtitle",
+            text: "Prints the ledger on the command line. Nothing here needs a key.",
+          }),
+        ),
+        el(
+          "div",
+          { class: "card pad dense" },
+          copyField("semlith ledger --verify"),
+          el("p", {
+            class: "subtitle",
+            text: "Re-walks the hash chain and names the first row that does not verify.",
+          }),
+          el("p", {
+            class: "subtitle",
+            text: data.intact
+              ? "The chain is intact."
+              : "The chain does not verify. Some rows have been edited or removed.",
+          }),
+        ),
+        el(
+          "div",
+          { class: "card pad dense" },
+          copyField("semlith start --no-ledger"),
+          el("p", {
+            class: "subtitle",
+            text: "Run the daemon without recording, for this session only. SEMLITH_LEDGER=0 does the same for a machine.",
+          }),
+        ),
       ),
       on
         ? null
@@ -1989,6 +2028,11 @@ function clientBreakdown(byClient) {
   return el(
     "div",
     { class: "client-breakdown" },
+    // Labelled, because a bare run of names and numbers under eight stat cards
+    // reads as a caption for the cards rather than as its own fact. The line
+    // after it is the fact: these are the client's own names, from the MCP
+    // handshake, not a guess made here.
+    el("span", { class: "eyebrow", text: "by client" }),
     entries.map(([client, count], i) =>
       el(
         "span",
@@ -1998,6 +2042,10 @@ function clientBreakdown(byClient) {
         el("span", { class: "count", text: n(count) }),
       ),
     ),
+    el("span", {
+      class: "client-note",
+      text: "— MCP, HTTP and CLI, under the client's own name",
+    }),
   );
 }
 
@@ -3111,7 +3159,11 @@ async function patternView() {
             el(
               "div",
               { class: "locate-file" },
-              el("span", { class: "file", text: group.path }),
+              // The tail, not the whole absolute path. A store indexed from
+            // `/Users/someone/Documents/work` repeats that prefix on every
+            // row, where it is the one part they all share; the full path is a
+            // hover away.
+            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
               group.store ? el("span", { class: "from", text: group.store }) : null,
               el("span", { class: "spacer" }),
               el("span", {
@@ -3289,7 +3341,31 @@ async function searchView() {
   /* The second ring, drawn rather than linked. One canvas for the whole visit
    * to the page: a fresh one per opened hit would be a fresh animation loop
    * per click. */
-  const ego = graphCanvas({});
+  const ego = graphCanvas({
+    /* The same two handlers the Graph page passes, so the panel behaves like
+     * the page it is a window onto rather than like a picture of it: a node
+     * lifts on hover with a card naming it, and a click selects it and its
+     * neighbours. Without these the hint underneath — "drag a node · click to
+     * select" — described something that did not happen. */
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("ego");
+      tip.atPoint(
+        x,
+        y,
+        [
+          el("div", { class: "tip-head" }, el("i", {}), node.name),
+          node.kind ? egoRow("kind", node.kind) : null,
+          node.path
+            ? egoRow("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`)
+            : null,
+        ].filter(Boolean),
+        "ego",
+      );
+    },
+    onPick: (node) => {
+      aroundName.textContent = node ? node.name : "—";
+    },
+  });
   const stage = el(
     "div",
     { class: "ego-panel" },
@@ -3492,7 +3568,7 @@ async function searchView() {
           el(
             "div",
             { class: "locate-file" },
-            el("span", { class: "file", text: group.path }),
+            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
             group.store ? el("span", { class: "from", text: group.store }) : null,
             el("span", { class: "spacer" }),
             el("span", {
@@ -3658,7 +3734,7 @@ async function searchView() {
       el(
         "div",
         { class: "span-head" },
-        el("span", { class: "path", text: hit.path }),
+        el("span", { class: "path", "data-tip": hit.path, text: shortPath(hit.path) }),
         el("span", { class: "lines", text: lines }),
         el("span", { class: "spacer" }),
         freshMark(hit.fresh),
@@ -3697,7 +3773,11 @@ async function searchView() {
             paintBody();
           },
         }),
-        el("span", { class: "body-meta", text: `semlith_read · ${hit.path}:${lines} · second stage` }),
+        el("span", {
+          class: "body-meta",
+          "data-tip": hit.path,
+          text: `semlith_read · ${shortPath(hit.path)}:${lines} · second stage`,
+        }),
         el("span", { class: "spacer" }),
         el("a", {
           href: "#graph",
@@ -3731,6 +3811,10 @@ async function searchView() {
     }
     if (mine !== bodyGeneration) return;
     ego.draw(egoGraph(name, data), null);
+    /* Select the symbol the panel is about, so it arrives drawn in the accent
+     * with its neighbours lifted — the state the Graph page puts a focused node
+     * in. Before this the centre was one grey box among twenty. */
+    ego.pick(name);
   }
 
   fill(results, nothing());
@@ -3804,14 +3888,42 @@ async function searchView() {
  * A caller or callee row is an `EdgeEnd`, which flattens the symbol it
  * reached into itself: the name is on the row, not under a `symbol` key, and
  * `kind` is the edge's kind rather than the symbol's. */
+/** One `key  value` line in the ego panel's hover card. */
+function egoRow(key, value) {
+  return el(
+    "div",
+    { class: "tip-row" },
+    el("span", { class: "k", text: key }),
+    el("span", { class: "v", text: String(value) }),
+  );
+}
+
 function egoGraph(name, data) {
-  const nodes = [{ name, kind: "symbol" }];
+  const centre = (data.symbols || [])[0] || {};
+  const nodes = [
+    {
+      name,
+      kind: centre.kind || "symbol",
+      path: centre.path,
+      start_line: centre.start_line,
+      end_line: centre.end_line,
+    },
+  ];
   const index = new Map([[name, 0]]);
   const edges = [];
-  const add = (label, kind) => {
+  /* `where` is the symbol row an edge resolved to, when there was one. The
+   * hover card says which file a neighbour lives in, which is most of what
+   * anyone wants from it. */
+  const add = (label, kind, where) => {
     if (!index.has(label)) {
       index.set(label, nodes.length);
-      nodes.push({ name: label, kind });
+      nodes.push({
+        name: label,
+        kind,
+        path: where && where.path,
+        start_line: where && where.start_line,
+        end_line: where && where.end_line,
+      });
     }
     return index.get(label);
   };
@@ -3819,10 +3931,10 @@ function egoGraph(name, data) {
     if (from !== to) edges.push({ from, to, kind, confidence });
   };
   for (const end of data.callers || []) {
-    link(add(end.name, end.kind), 0, end.kind, end.confidence);
+    link(add(end.name, end.kind, end), 0, end.kind, end.confidence);
   }
   for (const end of data.callees || []) {
-    link(0, add(end.name, end.kind), end.kind, end.confidence);
+    link(0, add(end.name, end.kind, end), end.kind, end.confidence);
   }
   for (const hop of data.ego || []) {
     const via = index.get(hop.via);
@@ -4717,17 +4829,31 @@ async function agentsView() {
             "div",
             { class: "head" },
             el("span", { class: "card-title", text: "Tools exposed" }),
-            el("span", { class: "meta", text: String(tools.length) }),
+            el("span", {
+              class: "meta",
+              text: `${tools.length} tool${tools.length === 1 ? "" : "s"}`,
+            }),
           ),
           // The schema is the first thing every agent reads and the last thing
-          // anyone thinks to measure. 0.14.0's was 8 955 bytes, about 2 200
-          // tokens, paid once per session before a single question.
-          el("p", {
-            class: "subtitle",
-            text: `Tool list: ${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · about ${n(
-              Math.ceil((data.tool_list_bytes || 0) / 4),
-            )} tokens, read once per session.`,
-          }),
+          // anyone thinks to measure: it is paid once per session, before a
+          // single question is asked. Measured from what this daemon is
+          // serving right now rather than quoted from a release, so the number
+          // cannot go stale on the page.
+          el(
+            "div",
+            { class: "cost" },
+            el("span", { class: "card-title", text: "What the tool list costs" }),
+            el("span", {
+              class: "cost-line",
+              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · about ${n(
+                Math.ceil((data.tool_list_bytes || 0) / 4),
+              )} tokens per session`,
+            }),
+            el("span", {
+              class: "cost-note",
+              text: "read once, before the agent asks anything",
+            }),
+          ),
           el(
             "div",
             { class: "tool-grid" },
@@ -4888,7 +5014,7 @@ async function privacyView() {
           ),
           el("p", {
             class: "subtitle",
-            text: "What semlith refuses, and what this daemon found when it checked. Every row is a finding from the 0.14.0 security audit, closed with the test that would have caught it.",
+            text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
           }),
           el(
             "div",
@@ -5075,7 +5201,11 @@ async function aboutView() {
     pageHead("About", "One Rust binary. The portal you are reading is compiled into it."),
     el(
       "div",
-      { class: "grid two grow" },
+      // Sized to its content rather than to the height left over, so the page
+      // scrolls as one. With `grow` the two columns were capped at the
+      // viewport and the language card — 46 rows — pushed the rest of the left
+      // column out of sight with nothing to scroll it back.
+      { class: "grid two" },
       el(
         "div",
         { class: "rows" },
