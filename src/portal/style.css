@@ -2298,6 +2298,217 @@ pre.code {
   min-width: 0;
 }
 
+/* Two stages, because a search answers "where" and a read answers "what", and
+ * an answer that always does both is an answer that always costs both. The
+ * list is a column of locator lines; the panel holds whichever one is open. */
+.two-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0;
+  flex-grow: 1;
+  min-height: 0;
+}
+.locate-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+.locate-list {
+  gap: var(--sp-4);
+}
+.locate-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.locate-file {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  font-weight: 500;
+  padding-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+.locate-file .from {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+
+.locate-line {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.locate-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r-3);
+  background: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--ink-2);
+  transition: background var(--d-fade) var(--e-in-out);
+}
+.locate-row:hover {
+  background: var(--soft);
+}
+.locate-row[aria-pressed="true"] {
+  background: var(--soft);
+  border-color: var(--line);
+}
+.locate-row .sym {
+  color: var(--ink);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.locate-row .lines {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.locate-excerpt {
+  display: block;
+  padding: 0 10px 8px 10px;
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  line-height: var(--lh-code);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.locate-footer {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px var(--sp-5) var(--sp-5);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.locate-footer .truncated {
+  color: var(--amber-ink);
+}
+
+.body-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px var(--sp-5) var(--sp-6);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.body-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+}
+.body-head .sym {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.body-head .lines {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+.body-panel pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  line-height: var(--lh-code);
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.body-panel .preview {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: var(--r-3);
+  border: 1px solid var(--line-soft);
+  background: var(--soft);
+  object-fit: contain;
+}
+.body-panel .note {
+  margin: 0;
+  font-size: var(--t-tiny);
+  color: var(--amber-ink);
+}
+
+/* Freshness. Amber rather than red: a stale hit is still the best answer
+ * available, it just wants re-reading before it is quoted. */
+.fresh-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  cursor: help;
+}
+.fresh-dot.is-fresh {
+  background: var(--green);
+}
+.fresh-dot.is-stale {
+  background: var(--accent);
+}
+
+/* The reserved Prefer control. Shown disabled rather than hidden, so the
+ * feature does not appear one release without warning. */
+.prefer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.prefer .seg {
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  color: var(--muted);
+}
+.prefer .seg.is-on {
+  background: var(--chip);
+  color: var(--ink-2);
+}
+
+.stepper {
+  width: 56px;
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+}
+.stepper.wide {
+  width: 72px;
+}
+
+@media (max-width: 900px) {
+  .two-stage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .locate-col {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
 /* ----------------------------------------------------------------- graph */
 
 /* The graph is the one page that is a drawing rather than a document: a header
@@ -2433,8 +2644,17 @@ pre.code {
   display: inline-block;
 }
 
+/* The canvas legend carries the same four values the rail does, drawn the way
+ * the canvas draws them: solid for an edge the source settled, dotted for a
+ * bare-name match, dashed and amber for a name that could mean several
+ * different things. */
 .graph-legend .inferred i {
+  border-top-style: dotted;
+}
+
+.graph-legend .ambiguous i {
   border-top-style: dashed;
+  border-top-color: var(--amber-ink);
 }
 
 .graph-legend .selected i {
@@ -2588,25 +2808,112 @@ pre.code {
   box-shadow: 0 -1px 0 var(--line-soft);
 }
 
-/* Confidence, everywhere it appears. Never colour alone: an inferred edge
- * reads as inferred in a greyscale screenshot too. */
+/* Confidence, everywhere it appears — and it appears everywhere, because a
+ * hop or an edge without one is a hop a reader assumes was verified.
+ *
+ * Four values from 0.15.0. Never colour alone: each tier is distinguishable in
+ * a greyscale screenshot too, which is why `ambiguous` is the dashed one. It
+ * earns the dashes rather than `inferred`, because it is the value that says
+ * the answer could be any of several things.
+ *
+ * `extracted` and `resolved` share a tone deliberately. The difference between
+ * them is how the target was settled, not how much it can be relied on: one
+ * was named by an import, the other narrowed to exactly one definition. Both
+ * are answers. `inferred` is neutral — a bare-name match, which is usually
+ * right and is not evidence. `ambiguous` is amber, because it is not an answer
+ * at all. */
 .conf {
   font-family: var(--mono);
   font-size: var(--t-micro);
   padding: 1px var(--sp-2);
   border-radius: var(--r-pill);
   white-space: nowrap;
+  cursor: help;
 }
 
-.conf.extracted {
+.conf.extracted,
+.conf.resolved {
   background: var(--green-soft);
   color: var(--green-ink);
 }
 
 .conf.inferred {
+  background: var(--chip);
+  color: var(--muted);
+}
+
+.conf.ambiguous {
   background: var(--amber-soft);
   color: var(--amber-ink);
   border: 1px dashed currentColor;
+}
+
+/* The legend under the rail: what the four badges claim, said once. */
+.conf-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--sp-3) 0 0;
+  border-top: 1px solid var(--line-soft);
+}
+.legend-chip {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.legend-chip .why {
+  font-size: var(--t-micro);
+  color: var(--muted);
+}
+
+/* A collapsed ambiguous row, and whatever it opens. */
+.ambiguous-row {
+  flex-wrap: wrap;
+}
+.nested-wrap {
+  flex-basis: 100%;
+}
+.rail-list.nested {
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--line-soft);
+  margin-top: 4px;
+}
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--blue);
+  cursor: pointer;
+  text-align: left;
+}
+.link-button.quiet {
+  color: var(--muted);
+  font-size: var(--t-tiny);
+}
+
+/* Who the ledger recorded. One line, because it is one fact, and it is the
+ * fact that says the record is working: a breakdown that reads `portal 31` and
+ * nothing else is a ledger measuring its own search box. */
+.client-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-5) var(--sp-3);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+}
+.client-breakdown .who {
+  color: var(--ink-2);
+}
+.client-breakdown .count {
+  color: var(--muted);
+  margin-left: 4px;
+}
+.client-breakdown .sep {
+  color: var(--muted);
+  margin-right: var(--sp-2);
 }
 
 /* ---------------------------------------------------------------- ledger */

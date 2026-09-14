@@ -867,10 +867,10 @@ function rowMenu(items) {
 }
 
 /** A status pill. One shape, and a dot only where it reports a state. */
-function pill(text, tone) {
+function pill(text, tone, props) {
   return el(
     "span",
-    { class: tone ? `pill ${tone}` : "pill" },
+    { class: tone ? `pill ${tone}` : "pill", ...(props || {}) },
     tone ? el("i", {}) : null,
     text,
   );
@@ -952,6 +952,9 @@ function graphInk() {
     nearFill: read("--blue-soft", "#e3ecf2"),
     nearLine: read("--blue", "#4c7088"),
     nearText: read("--ink", "#1e2a35"),
+    // The tone an ambiguous edge is drawn in: the same amber the badge uses,
+    // so the canvas and the rail say one thing.
+    warn: read("--amber-ink", "#7a4e0a"),
     sel: read("--accent", "#f0a43c"),
     selLine: read("--accent-edge", "#c97f14"),
     selText: read("--accent-ink", "#1e2a35"),
@@ -1156,9 +1159,18 @@ function graphCanvas(options) {
       ctx.strokeStyle = hot ? ink.hot : ink.edge;
       ctx.fillStyle = hot ? ink.hot : ink.edge;
       ctx.lineWidth = hot ? 1.7 : 1.1;
-      // An inferred edge is dashed as well as coloured: colour alone is not a
-      // distinction everyone can see.
-      ctx.setLineDash(edge.confidence === "extracted" ? [] : [4, 4]);
+      // Drawn with the same four values the rail shows. An edge the source
+      // settled is solid; one matched by bare name is dotted; one that could
+      // mean several different definitions is dashed and drawn in the warning
+      // tone, because it is not a claim about this code at all.
+      const settled = edge.confidence === "extracted" || edge.confidence === "resolved";
+      if (edge.confidence === "ambiguous") {
+        ctx.strokeStyle = hot ? ink.hot : ink.warn;
+        ctx.fillStyle = hot ? ink.hot : ink.warn;
+        ctx.setLineDash([6, 4]);
+      } else {
+        ctx.setLineDash(settled ? [] : [2, 3]);
+      }
       ctx.beginPath();
       ctx.moveTo(ax, ay);
       ctx.lineTo(ex, ey);
@@ -1463,7 +1475,7 @@ async function graphView() {
     );
   }
 
-  function ends(title, list, absent) {
+  function ends(title, list, absent, extra) {
     return el(
       "div",
       { class: "rail-group" },
@@ -1472,31 +1484,95 @@ async function graphView() {
         ? el(
             "ul",
             { class: "rail-list" },
-            list.map((end) =>
-              el(
-                "li",
-                {},
-                el("a", {
-                  href: `#graph?name=${encodeURIComponent(end.name)}`,
-                  text: end.name,
-                  onclick: (e) => {
-                    e.preventDefault();
-                    focus(end.name);
-                  },
-                }),
-                el("span", {
-                  class: `conf ${end.confidence}`,
-                  text: end.confidence,
-                  title:
-                    end.confidence === "extracted"
-                      ? "Resolved through an import in the source file."
-                      : "Matched by name. Two functions can share one.",
-                }),
-                el("span", { class: "via", text: end.kind }),
-              ),
-            ),
+            list.map((end) => endRow(end)),
           )
         : el("div", { class: "rail-hint", text: absent }),
+      extra || null,
+    );
+  }
+
+  /* One neighbour. An ambiguous row stands for several definitions and must
+   * not name one of them: a reader who follows it would open one of four files
+   * the call could have meant. It says how many instead, and opens on ask. */
+  function endRow(end) {
+    if (end.confidence === "ambiguous") {
+      const li = el("li", { class: "ambiguous-row" });
+      let open = false;
+      const toggle = el("button", {
+        class: "link-button",
+        type: "button",
+        text: `${end.name} · ${end.definitions} definitions`,
+        "aria-expanded": "false",
+        onclick: async () => {
+          open = !open;
+          toggle.setAttribute("aria-expanded", String(open));
+          if (!open) return fill(nested);
+          fill(nested, el("div", { class: "rail-hint", text: "Loading…" }));
+          let all;
+          try {
+            all = await api(
+              `/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`,
+            );
+          } catch (e) {
+            return fill(nested, error(e.message));
+          }
+          const each = all.callees.filter((c) => c.name === end.name);
+          fill(
+            nested,
+            el(
+              "ul",
+              { class: "rail-list nested" },
+              each.map((one) =>
+                el(
+                  "li",
+                  {},
+                  el("a", {
+                    href: `#graph?name=${encodeURIComponent(one.name)}`,
+                    text: `${shortPath(one.path)}:${one.start_line}`,
+                    onclick: (e) => {
+                      e.preventDefault();
+                      focus(one.name);
+                    },
+                  }),
+                ),
+              ),
+            ),
+          );
+        },
+      });
+      const nested = el("div", { class: "nested-wrap" });
+      return fill(li, toggle, confidenceBadge(end.confidence), el("span", { class: "via", text: end.kind }), nested);
+    }
+    return el(
+      "li",
+      {},
+      el("a", {
+        href: `#graph?name=${encodeURIComponent(end.name)}`,
+        text: end.name,
+        onclick: (e) => {
+          e.preventDefault();
+          focus(end.name);
+        },
+      }),
+      confidenceBadge(end.confidence),
+      el("span", { class: "via", text: end.kind }),
+    );
+  }
+
+  /* What the four values mean, once, under the rail. A badge whose meaning a
+   * reader has to guess is a badge that gets read as decoration. */
+  function confidenceLegend() {
+    return el(
+      "div",
+      { class: "conf-legend" },
+      Object.entries(CONFIDENCE).map(([value, [label, why]]) =>
+        el(
+          "span",
+          { class: "legend-chip" },
+          el("span", { class: `conf ${value}`, text: label }),
+          el("span", { class: "why", text: why }),
+        ),
+      ),
     );
   }
 
@@ -1508,7 +1584,15 @@ async function graphView() {
     } catch (e) {
       return fill(rail, error(e.message));
     }
-    const edge = (e) => ({ name: e.name, kind: e.kind, confidence: e.confidence });
+    state.graphSelected = node.name;
+    const edge = (e) => ({
+      name: e.name,
+      kind: e.kind,
+      confidence: e.confidence,
+      definitions: e.definitions,
+      path: e.path,
+      start_line: e.start_line,
+    });
 
     fill(
       rail,
@@ -1534,7 +1618,48 @@ async function graphView() {
         ),
       ),
       ends("Callers", data.callers.map(edge), "Nothing in the graph calls this."),
-      ends("Callees", data.callees.map(edge), "A leaf, as far as the extracted edges go."),
+      ends(
+        "Callees",
+        data.callees.map(edge),
+        "A leaf, as far as the extracted edges go.",
+        // Targets the store holds no definition for. Left out by default,
+        // because a list of names this corpus knows nothing about is noise —
+        // and counted, because "no callees" and "every callee is outside the
+        // index" are different facts.
+        data.hidden
+          ? el("button", {
+              class: "link-button quiet",
+              type: "button",
+              text: `Show ${data.hidden} unresolved`,
+              onclick: async (e) => {
+                const button = e.currentTarget;
+                button.textContent = "Loading…";
+                let all;
+                try {
+                  all = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`);
+                } catch (err) {
+                  button.replaceWith(error(err.message));
+                  return;
+                }
+                button.replaceWith(
+                  el(
+                    "ul",
+                    { class: "rail-list nested" },
+                    all.unresolved.map((one) =>
+                      el(
+                        "li",
+                        {},
+                        el("span", { text: one.name }),
+                        el("span", { class: "via", text: one.kind }),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            })
+          : null,
+      ),
+      confidenceLegend(),
       el(
         "div",
         { class: "rail-actions" },
@@ -1664,7 +1789,9 @@ async function graphView() {
           "div",
           { class: "graph-legend" },
           el("span", { class: "key extracted" }, el("i", {}), "extracted"),
+          el("span", { class: "key resolved" }, el("i", {}), "resolved"),
           el("span", { class: "key inferred" }, el("i", {}), "inferred"),
+          el("span", { class: "key ambiguous" }, el("i", {}), "ambiguous"),
           el("span", { class: "key selected" }, el("i", {}), "selected"),
         ),
         meta,
@@ -1724,20 +1851,53 @@ async function ledgerView() {
     pageHead(
       "Retrieval ledger",
       "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
-      { pill: pill(on ? "recording · opt-in" : "not recording", on ? "on" : null) },
+      {
+        pill: on
+          ? pill("recording", "on", {
+              title:
+                "On by default. Rows live in the store beside the chunks and never leave this machine.",
+            })
+          : pill("not recording", null),
+      },
     ),
     el(
       "div",
       { class: "strip" },
       stat("Queries recorded", n(data.queries), `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`),
-      stat("Excerpt tokens", n(data.excerpt_tokens), "what the agents actually read"),
-      stat("Whole-file tokens", n(data.whole_file_tokens), "what a grep loop would have cost"),
+      stat("Excerpt tokens", n(data.excerpt_tokens), "what agents were actually sent"),
+      stat(
+        "Whole-file tokens",
+        n(data.whole_file_tokens),
+        "what reading those files whole would have cost, counted with the store's tokenizer",
+      ),
+      // A ratio never stands alone. Coverage says how much of the ledger it is
+      // computed over, and the tier says whether the tokens were counted or
+      // estimated — without both, a number like 18.3x is a marketing claim.
       stat(
         "Measured ratio",
         data.ratio ? `${data.ratio.toFixed(1)}×` : "—",
-        data.ratio ? "not a marketing claim" : "needs a recorded query",
+        data.ratio
+          ? `coverage ${data.coverage}% · ${data.tier}`
+          : "needs a recorded query",
       ),
     ),
+    el(
+      "div",
+      { class: "strip" },
+      stat("Net tokens", n(data.net_tokens || 0), "whole-file less excerpt, over rows that found something"),
+      stat(
+        "Coverage",
+        `${data.coverage || 0}%`,
+        `${n(data.credited || 0)} of ${n(data.queries)} retrievals credited`,
+      ),
+      stat(
+        "Zero-hit",
+        `${data.queries ? Math.round(((data.queries - (data.credited || 0)) * 100) / data.queries) : 0}%`,
+        "recorded, and credited nothing",
+      ),
+      stat("Tier", data.tier || "modelled", "measured when the store's own tokenizer counted it"),
+    ),
+    clientBreakdown(data.by_client),
     el(
       "div",
       { class: "scroller" },
@@ -1746,6 +1906,21 @@ async function ledgerView() {
         { class: "card pad dense" },
         copyField("semlith ledger --last 20"),
         el("p", { class: "subtitle", text: "Prints the ledger on the command line." }),
+      ),
+      el(
+        "div",
+        { class: "card pad dense" },
+        copyField("semlith ledger --verify"),
+        el("p", {
+          class: "subtitle",
+          text: "Re-walks the hash chain and names the first row that does not verify.",
+        }),
+        el("p", {
+          class: "subtitle",
+          text: data.intact
+            ? "The chain is intact."
+            : "The chain does not verify. Some rows have been edited or removed.",
+        }),
       ),
       on
         ? null
@@ -1756,9 +1931,9 @@ async function ledgerView() {
             el(
               "div",
               {},
-              "Start the daemon with ",
-              mono("--ledger"),
-              " to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+              "The daemon was started with ",
+              mono("--no-ledger"),
+              ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
             ),
           ),
       says(
@@ -1766,9 +1941,37 @@ async function ledgerView() {
         mono("~/.semlith/stores/<name>/store.db"),
         ", table ",
         mono("retrievals"),
-        ". Off by default; deleting the rows is a ",
+        ". On by default; ",
+        mono("--no-ledger"),
+        " or ",
+        mono("SEMLITH_LEDGER=0"),
+        " turns it off, and deleting the rows is one ",
         mono("DELETE"),
         ".",
+      ),
+    ),
+  );
+}
+
+/* Who the ledger recorded, and how often.
+ *
+ * The row that says the ledger works. Before 0.15.0 it could only ever read
+ * `portal 31`, because the portal's own search box was the only thing that
+ * wrote to it; a line with `claude-code` on it is the whole point of the
+ * release. */
+function clientBreakdown(byClient) {
+  const entries = Object.entries(byClient || {}).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return null;
+  return el(
+    "div",
+    { class: "client-breakdown" },
+    entries.map(([client, count], i) =>
+      el(
+        "span",
+        { class: "client" },
+        i ? el("span", { class: "sep", text: "·" }) : null,
+        el("span", { class: "who", text: client }),
+        el("span", { class: "count", text: n(count) }),
       ),
     ),
   );
@@ -2654,6 +2857,71 @@ function fusionBadges(lists) {
   );
 }
 
+/* The four confidence values an edge or a graph-found hit can carry, and what
+ * each one actually claims. Never rendered without one: a hop with no badge is
+ * a hop a reader will assume was verified. */
+const CONFIDENCE = {
+  extracted: ["extracted", "the import names the target"],
+  resolved: ["resolved", "name and module hint agree on one definition"],
+  inferred: ["inferred", "matched by bare name"],
+  ambiguous: ["ambiguous", "several definitions, none chosen"],
+};
+
+function confidenceBadge(value) {
+  if (!value) return null;
+  const [label, why] = CONFIDENCE[value] || [value, ""];
+  return el("span", { class: `conf ${value}`, title: why, text: label });
+}
+
+/* Whether the file still looks the way it did when it was indexed. Amber
+ * rather than red: a stale hit is still the best answer available, it just
+ * needs re-reading before it is quoted. */
+function freshnessDot(fresh) {
+  return el("span", {
+    class: `fresh-dot ${fresh ? "is-fresh" : "is-stale"}`,
+    title: fresh ? "indexed from the file as it is now" : "file changed since it was indexed",
+    "aria-label": fresh ? "fresh" : "stale",
+  });
+}
+
+/* The one line of a chunk worth showing in a locator row: the line with most
+ * of the query's words in it, or the first line with anything on it. */
+function bestLine(text, query) {
+  const terms = (query || "")
+    .split(/[^A-Za-z0-9_]+/)
+    .filter((t) => t.length > 2)
+    .map((t) => t.toLowerCase());
+  let best = null;
+  let bestScore = -1;
+  for (const raw of (text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const lowered = line.toLowerCase();
+    const score = terms.filter((t) => lowered.includes(t)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      best = line;
+    }
+  }
+  if (!best) return "";
+  // Capped as the tool caps it, rather than left to the stylesheet's ellipsis:
+  // a row is one line of context, and a minified file would otherwise put a
+  // whole line of it into the page for the browser to hide.
+  return best.length > 120 ? `${best.slice(0, 120)}…` : best;
+}
+
+/* What one locator row costs, counted the way `mcp::locate` counts it: the
+ * text the row actually renders, at four characters to a token. */
+function rowCost(hit, query) {
+  const named = hit.symbol ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim() : "";
+  const marks = (hit.lists || []).join("+") + (hit.fresh === false ? " stale" : "");
+  const row = `  ${hit.start_line}-${hit.end_line} ${named} ${marks}\n    ${bestLine(
+    hit.text,
+    query,
+  )}\n`;
+  return Math.ceil(row.length / 4);
+}
+
 /** The likeliest symbol name in a hit, for the link into the graph. */
 function symbolIn(hit) {
   const match = hit.text.match(
@@ -2665,8 +2933,30 @@ function symbolIn(hit) {
 async function searchView() {
   await refreshStores();
 
-  const results = el("div", { class: "results" });
+  const results = el("div", { class: "results locate-list" });
+  const body = el("div", { class: "body-panel" });
+  const footer = el("div", { class: "locate-footer" });
   const meta = el("span", { class: "search-meta" });
+
+  // How many hits to ask for, and what one answer may cost. Both are what an
+  // agent sets on the tool, shown here so a person can see the same dials.
+  const kField = el("input", {
+    type: "number",
+    min: "1",
+    max: "50",
+    value: "8",
+    class: "stepper",
+    onchange: () => run(),
+  });
+  const budgetField = el("input", {
+    type: "number",
+    min: "200",
+    step: "100",
+    value: "1500",
+    class: "stepper wide",
+    onchange: () => run(),
+  });
+  const budget = () => Math.max(200, Number(budgetField.value) || 1500);
   // Restored rather than reset: the question and the store filter survive a
   // trip to another page, because coming back to an empty box means typing it
   // again.
@@ -2689,12 +2979,15 @@ async function searchView() {
     state.search = { query, stores: [...chosen] };
     if (!query) {
       fill(results, nothing());
+      fill(body);
+      fill(footer);
       meta.textContent = "";
       return;
     }
 
     const mine = ++generation;
-    const params = new URLSearchParams({ query, k: "8" });
+    const k = Math.min(50, Math.max(1, Number(kField.value) || 8));
+    const params = new URLSearchParams({ query, k: String(k) });
     for (const store of chosen) params.append("store", store);
 
     meta.textContent = "searching…";
@@ -2704,6 +2997,8 @@ async function searchView() {
     } catch (e) {
       if (mine !== generation) return;
       fill(results, error(e.message));
+      fill(body);
+      fill(footer);
       meta.textContent = "";
       return;
     }
@@ -2714,6 +3009,8 @@ async function searchView() {
       : "";
 
     if (!data.hits.length) {
+      fill(body);
+      fill(footer);
       fill(
         results,
         empty(
@@ -2723,45 +3020,149 @@ async function searchView() {
       return;
     }
 
+    // Grouped by file, in the order the ranking put the files in: eight hits
+    // in one file are one file to open, and the best hit's file is the first
+    // thing read.
+    const groups = [];
+    for (const hit of data.hits) {
+      const found = groups.find((g) => g.path === hit.path && g.store === hit.store);
+      if (found) found.hits.push(hit);
+      else groups.push({ path: hit.path, store: hit.store, hits: [hit] });
+    }
+
+    // Cut to the budget, lowest-ranked first, exactly as the tool does — and
+    // the footer says so. A footer that reported a budget nothing enforced
+    // would be a number for decoration; a list that silently dropped rows
+    // would be worse.
+    const cap = budget();
+    let spent = 0;
+    const shown = [];
+    for (const group of groups) {
+      // What the *rows* cost, not what the chunks behind them cost. A locate
+      // row is one line of a chunk however long the chunk is, which is the
+      // whole point of the format — measuring the chunk here would make the
+      // page cut at a tenth of the budget the tool cuts at, for the same
+      // number in the same box.
+      const cost = group.hits.reduce((total, hit) => total + rowCost(hit, query), 4);
+      // The first group always shows, whatever it costs: a budget that
+      // returned nothing would turn a search into a silent failure.
+      if (shown.length && spent + cost > cap) break;
+      spent += cost;
+      shown.push(group);
+    }
+    const kept = shown.reduce((total, group) => total + group.hits.length, 0);
+
     fill(
       results,
-      data.hits.map((hit) =>
+      shown.map((group) =>
         el(
           "div",
-          { class: "hit" },
+          { class: "locate-group" },
           el(
             "div",
-            { class: "where" },
-            el("span", { class: "file", text: hit.path }),
-            el("span", {
-              class: "lines",
-              text: hit.image
-                ? `${hit.image.width}×${hit.image.height} px`
-                : `${hit.start_line}-${hit.end_line}`,
-            }),
-            el("span", { class: "from", text: hit.store }),
-            el("span", { class: "spacer" }),
-            fusionBadges(hit.lists),
+            { class: "locate-file" },
+            el("span", { class: "file", text: group.path }),
+            group.store ? el("span", { class: "from", text: group.store }) : null,
           ),
-          // An image has no excerpt to quote, so the hit shows the image. It
-          // is served from the store's own list of indexed images, so the
-          // route cannot be asked for a file nobody pointed semlith at.
-          hit.image ? imagePreview(hit.path) : el("pre", { text: hit.text }),
-          el(
-            "div",
-            { class: "hit-actions" },
-            el("a", {
-              href: "#graph",
-              class: "quiet",
-              text: "Open in graph",
-              onclick: (e) => {
-                e.preventDefault();
-                state.pendingSymbol = symbolIn(hit);
-                go("graph");
-              },
-            }),
-          ),
+          group.hits.map((hit) => locateRow(hit, query, body)),
         ),
+      ),
+    );
+    fill(
+      footer,
+      el("span", {
+        text: `${kept} of ${data.hits.length} shown · ${n(spent)} tokens · budget ${n(cap)}`,
+      }),
+      kept < data.hits.length
+        ? el("span", {
+            class: "truncated",
+            text: `truncated: ${kept} of ${data.hits.length}`,
+          })
+        : null,
+    );
+    // The body panel starts on the best hit rather than empty: the first
+    // question anyone has about a result list is what the top one says.
+    if (shown.length) showBody(shown[0].hits[0], body, query);
+  }
+
+  /* One locator line: where it is, what it is called, how it was found,
+   * whether the file has moved under it, and one line of it. */
+  function locateRow(hit, query, body) {
+    const named = hit.symbol
+      ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim()
+      : "";
+    const row = el(
+      "button",
+      {
+        class: "locate-row",
+        type: "button",
+        onclick: () => {
+          for (const other of results.querySelectorAll(".locate-row")) {
+            other.setAttribute("aria-pressed", "false");
+          }
+          row.setAttribute("aria-pressed", "true");
+          showBody(hit, body, query);
+        },
+      },
+      el("span", {
+        class: "lines",
+        text: hit.image
+          ? `${hit.image.width}×${hit.image.height} px`
+          : `${hit.start_line}-${hit.end_line}`,
+      }),
+      named ? el("span", { class: "sym", text: named }) : null,
+      fusionBadges(hit.lists),
+      // Only for a hit the graph reached: a vector match has no provenance to
+      // state beyond the badge it already carries.
+      confidenceBadge(hit.provenance),
+      el("span", { class: "spacer" }),
+      freshnessDot(hit.fresh !== false),
+    );
+    const line = bestLine(hit.text, query);
+    return el(
+      "div",
+      { class: "locate-line" },
+      row,
+      line ? el("code", { class: "locate-excerpt", text: line }) : null,
+    );
+  }
+
+  /* The second stage: the span itself, once a row has been chosen. */
+  function showBody(hit, body, query) {
+    const named = hit.symbol
+      ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim()
+      : hit.path.split("/").pop();
+    fill(
+      body,
+      el(
+        "div",
+        { class: "body-head" },
+        el("span", { class: "sym", text: named }),
+        el("span", { class: "lines", text: `${hit.start_line}-${hit.end_line}` }),
+        el("span", { class: "spacer" }),
+        confidenceBadge(hit.provenance),
+        freshnessDot(hit.fresh !== false),
+      ),
+      hit.fresh === false
+        ? el("p", {
+            class: "note",
+            text: "This file has changed since it was indexed. The lines below are what was read then.",
+          })
+        : null,
+      hit.image ? imagePreview(hit.path) : el("pre", { text: hit.text }),
+      el(
+        "div",
+        { class: "hit-actions" },
+        el("a", {
+          href: "#graph",
+          class: "quiet",
+          text: "Open in graph",
+          onclick: (e) => {
+            e.preventDefault();
+            state.pendingSymbol = hit.symbol || symbolIn(hit);
+            go("graph");
+          },
+        }),
       ),
     );
   }
@@ -2816,11 +3217,29 @@ async function searchView() {
         "div",
         { class: "filters" },
         storeChips.length > 1 ? storeChips : null,
+        labelled("search-k", "k", kField),
+        // Reserved rather than hidden: query-shape routing is 0.16.0, and a
+        // control that appears later without warning is worse than one that
+        // says when it arrives.
+        el(
+          "span",
+          { class: "prefer", title: "Query-shape routing arrives in 0.16.0" },
+          el("span", { class: "meta", text: "Prefer" }),
+          el("span", { class: "seg is-on", text: "any" }),
+          el("span", { class: "seg is-off", text: "code" }),
+          el("span", { class: "seg is-off", text: "docs" }),
+        ),
+        labelled("search-budget", "Budget", budgetField),
         el("span", { class: "spacer" }),
         el("span", { class: "meta", text: "vector + fts5 + graph, fused by rank" }),
       ),
     ),
-    results,
+    el(
+      "div",
+      { class: "two-stage" },
+      el("div", { class: "locate-col" }, results, footer),
+      body,
+    ),
   );
 }
 
@@ -3709,6 +4128,15 @@ async function agentsView() {
             el("span", { class: "card-title", text: "Tools exposed" }),
             el("span", { class: "meta", text: String(tools.length) }),
           ),
+          // The schema is the first thing every agent reads and the last thing
+          // anyone thinks to measure. 0.14.0's was 8 955 bytes, about 2 200
+          // tokens, paid once per session before a single question.
+          el("p", {
+            class: "subtitle",
+            text: `Tool list: ${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · about ${n(
+              Math.ceil((data.tool_list_bytes || 0) / 4),
+            )} tokens, read once per session.`,
+          }),
           el(
             "div",
             { class: "tool-grid" },
@@ -3809,6 +4237,14 @@ async function privacyView() {
       fact("Host check", "localhost only", "a foreign Host header gets 400 before anything runs"),
       fact("Assets", "include_bytes!", "the page you are reading is inside the binary"),
       fact("Telemetry", "none", "no analytics, and no update check Semlith makes on its own"),
+      // Said on this page, not only on the Ledger page. Somebody checking the
+      // privacy claim should find the one thing semlith writes down about
+      // them here, with how to stop it, rather than discovering it elsewhere.
+      fact(
+        "Retrieval ledger",
+        "records locally",
+        "the daemon prints this on every start; --no-ledger stops it for a session, SEMLITH_LEDGER=0 for a machine, and the rows never leave the store",
+      ),
       fact("Model cache", data.model_cached ? "cached" : "not downloaded", data.model_cache),
     ),
     el(
