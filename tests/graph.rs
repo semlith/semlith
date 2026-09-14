@@ -687,3 +687,51 @@ fn index(store: &Path, corpus: &Path) {
 fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).unwrap();
 }
+
+/// A re-export is the only thing between the name a caller wrote and the
+/// definition it meant, so a walk that will not cross one answers "not
+/// connected" about code that is connected. The chain here is only walkable
+/// through `helper`, which is an alias and nothing else.
+///
+/// The same corpus proves the other half of 0.16.0's edge work: `neighbors`
+/// names the line the call was written on, which is not the line the calling
+/// function starts on.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_path_crosses_a_re_export_and_neighbours_names_the_call_site() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "alias.rs", "pub use real::worker as helper;\n");
+    write(
+        corpus.path(),
+        "real.rs",
+        "fn worker() { finish(); }\nfn finish() {}\n",
+    );
+    // The call sits on line 4, four lines below the `fn` that contains it.
+    write(
+        corpus.path(),
+        "start.rs",
+        "fn start() {\n    let x = 1;\n    let _ = x;\n    helper();\n}\n",
+    );
+    index(store.path(), corpus.path());
+
+    let walked = cli(store.path(), &["path", "start", "finish"]);
+    assert!(
+        walked.contains("aliases"),
+        "the hop through the re-export must say what kind of hop it was: {walked}"
+    );
+    assert!(
+        walked.contains("helper"),
+        "the alias is a node on the chain: {walked}"
+    );
+    assert!(
+        !walked.contains("not connected"),
+        "the chain exists once aliases are crossable: {walked}"
+    );
+
+    let out = cli(store.path(), &["neighbors", "start"]);
+    assert!(
+        out.contains("called at") && out.contains(":4"),
+        "the call site is line 4, not the line `start` begins on: {out}"
+    );
+}

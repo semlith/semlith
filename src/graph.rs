@@ -35,7 +35,7 @@ use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
 /// Edge kinds, as stored in `edges.kind`.
-pub const KINDS: [&str; 5] = ["defines", "calls", "imports", "references", "contains"];
+pub const KINDS: [&str; 6] = ["defines", "calls", "imports", "references", "contains", "aliases"];
 
 /// Stored on the edge: the syntax tree said where the target came from.
 pub const EXTRACTED: &str = "extracted";
@@ -154,6 +154,12 @@ fn supplement(lang: &str) -> &'static str {
         "rust" => {
             r#"
             (use_declaration argument: (_) @reference.import)
+            ; `use store::Semlith as Store;` — the alias is a symbol of its own
+            ; and the path it stands for is what it reaches. Without the edge a
+            ; walk stops at `Store`, which is defined nowhere.
+            (use_as_clause
+              path: (_) @reference.alias
+              alias: (_) @name) @definition.alias
             ; A scoped call names the function and the thing it went through.
             ; Only the function earns an edge: `store::edges_out` is a call to
             ; `edges_out`, and `store` is what says *which* `edges_out`. Until
@@ -184,6 +190,13 @@ fn supplement(lang: &str) -> &'static str {
         "typescript" => {
             r#"
             (import_statement source: (string) @reference.import)
+            ; `import { search as find }` and `export { search as find }`.
+            (import_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
+            (export_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
             (function_declaration name: (identifier) @name) @definition.function
             (class_declaration name: (type_identifier) @name) @definition.class
             (interface_declaration name: (type_identifier) @name) @definition.interface
@@ -204,6 +217,10 @@ fn supplement(lang: &str) -> &'static str {
             r#"
             (import_statement name: (_) @reference.import)
             (import_from_statement module_name: (_) @reference.import)
+            ; `import numpy as np`, `from x import search as find`.
+            (aliased_import
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
             ; `json.loads(...)`, `self.store.search(...)`: the object names the
             ; module or the attribute the call went through.
             (call
@@ -215,6 +232,11 @@ fn supplement(lang: &str) -> &'static str {
         "go" => {
             r#"
             (import_spec path: (interpreted_string_literal) @reference.import)
+            ; `import fp "path/filepath"` — the alias is what the file then
+            ; writes, and the path is what it stands for.
+            (import_spec
+              name: (package_identifier) @name
+              path: (interpreted_string_literal) @reference.alias) @definition.alias
         "#
         }
         "java" => {
@@ -521,6 +543,7 @@ fn collect(
             let kind = match kind {
                 "call" => "calls",
                 "import" => "imports",
+                "alias" => "aliases",
                 _ => "references",
             };
             // An import is a literal path and is kept whole. Anything else
@@ -530,6 +553,13 @@ fn collect(
             // `impl` block for an implementation.
             let target = if kind == "imports" {
                 Some(trim_literal(&text[node.byte_range()]).to_string())
+            } else if kind == "aliases" {
+                // The captured node is the path the alias stands for, and
+                // `edges.dst` is a bare name, so `store::Semlith` has to become
+                // `Semlith` before it can resolve against anything. `@name`
+                // here is the alias, not the target, which is why this does not
+                // fall through to the branch below.
+                last_segment(&text[node.byte_range()])
             } else {
                 match name {
                     Some(n) => Some(text[n.byte_range()].to_string()),
@@ -742,6 +772,20 @@ fn import_names(raw: &str) -> Vec<String> {
     out
 }
 
+/// The bare name at the end of a path an alias stands for.
+///
+/// `store::Semlith` is `Semlith`, `"path/filepath"` is `filepath`, `x.y.search`
+/// is `search`. `edges.dst` is a name rather than a path, so an alias that kept
+/// its path would resolve against nothing.
+fn last_segment(raw: &str) -> Option<String> {
+    let cleaned = trim_literal(raw);
+    cleaned
+        .rsplit(['/', '.', ':'])
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Strip the quoting a literal import path arrives wrapped in.
 fn trim_literal(raw: &str) -> &str {
     raw.trim()
@@ -769,7 +813,12 @@ pub const MAX_NODES: usize = 2000;
 /// between two unrelated functions in one file look like a two-hop
 /// dependency. Neighbours still show them, because "what is in this" is a
 /// question someone asks.
-pub const DEPENDENCY_KINDS: [&str; 3] = ["calls", "imports", "references"];
+/// `aliases` is here from 0.16.0 for the opposite reason to `defines`: a
+/// re-export or an aliased import is the only thing standing between the name
+/// a caller wrote and the definition it meant, so a walk that refuses to cross
+/// one reports "not connected" about code that is connected. It is a
+/// dependency in the sense that matters — following it lands on real code.
+pub const DEPENDENCY_KINDS: [&str; 4] = ["calls", "imports", "references", "aliases"];
 
 pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
@@ -1656,6 +1705,45 @@ mod tests {
         // reserved for a row an older binary wrote.
         assert!(
             e.edges.iter().all(|x| x.line.is_some()),
+            "{:?}",
+            e.edges
+        );
+    }
+
+    /// A re-export is the only thing between the name a caller wrote and the
+    /// definition it meant. Each language records the alias as a symbol of its
+    /// own and an `aliases` edge from it to the bare name it stands for.
+    #[test]
+    fn an_alias_becomes_a_symbol_and_an_edge_to_what_it_stands_for() {
+        let rust = run("a.rs", "pub use store::Semlith as Store;\n");
+        assert!(
+            rust.symbols.iter().any(|s| s.name == "Store"),
+            "{:?}",
+            rust.symbols
+        );
+        assert!(
+            has_edge(&rust, "Store", "Semlith", "aliases"),
+            "{:?}",
+            rust.edges
+        );
+
+        let py = run("a.py", "from x import search as find\n");
+        assert!(has_edge(&py, "find", "search", "aliases"), "{:?}", py.edges);
+
+        let ts = run("a.ts", "import { search as find } from './x';\n");
+        assert!(has_edge(&ts, "find", "search", "aliases"), "{:?}", ts.edges);
+
+        let go = run("a.go", "package m\nimport fp \"path/filepath\"\n");
+        assert!(has_edge(&go, "fp", "filepath", "aliases"), "{:?}", go.edges);
+    }
+
+    /// A re-export that does not rename has nothing to cross: the alias and
+    /// the definition are one name, and a self-edge would be noise.
+    #[test]
+    fn a_re_export_that_does_not_rename_adds_no_alias_edge() {
+        let e = run("a.rs", "pub use store::Semlith;\n");
+        assert!(
+            !e.edges.iter().any(|x| x.kind == "aliases"),
             "{:?}",
             e.edges
         );
