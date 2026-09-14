@@ -1011,11 +1011,43 @@ pub fn symbols_by_names(
 /// What the symbols named `name` point at: callees, imports, references out.
 ///
 /// One hop. `kinds` empty means every edge kind.
+///
+/// # Resolution
+///
+/// `edges.dst` is a name, and a name is not an address: a store of any size
+/// holds four `get`s and seven `index`es. Until 0.15.0 this returned every
+/// definition that shared the name, each as its own row and each looking
+/// exactly like a call the source makes — which is how `semlith path` came to
+/// answer "yes, connected" to questions whose honest answer is "no".
+///
+/// Each edge is now resolved against its candidates by [`rank`], and the
+/// confidence it comes back with says how it was settled:
+///
+/// - `extracted` — the file named where the target came from. Stored, and
+///   never overwritten here: a fact from the syntax tree outranks a ranking.
+/// - `resolved` — the candidates narrowed to exactly one. Either the source
+///   narrowed them (same file, the hint, an import) or the corpus did, by
+///   holding only one definition of the name.
+/// - `ambiguous` — several candidates survived and nothing chose between them.
+///   Every candidate is returned, each marked `ambiguous` and each carrying
+///   the count, so a renderer can collapse them to one row and a traversal can
+///   refuse to cross them.
+///
+/// `inferred` is the stored value and is what [`edges_in`] and the edge census
+/// still show. It does not come back from here, because by the time a target
+/// has been looked up there is always something to say about it: either one
+/// definition answers to the name or several do.
+///
+/// A resolution is against the indexed corpus, not against the world. One
+/// definition of `parse` in the store does not prove the call went to it
+/// rather than to a dependency that was never indexed — that is what the
+/// hidden-by-default unresolved targets are about, not this.
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path
          FROM symbols src
+         JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
          JOIN symbols s ON s.name = e.dst
          JOIN files f ON f.id = s.file_id
@@ -1026,12 +1058,192 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
     let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
     binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
     let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
-        Ok(EdgeEnd {
+        Ok(Reached {
             symbol: symbol_row(r)?,
             kind: r.get(8)?,
             confidence: r.get(9)?,
+            hint: r.get(10)?,
+            src_path: r.get(11)?,
         })
     })?;
+    let reached = rows.collect::<Result<Vec<_>, _>>()?;
+    resolve(db, reached)
+}
+
+/// One row of the join behind [`edges_out`]: a candidate for an edge's target,
+/// with everything the ranking needs about the edge itself.
+struct Reached {
+    symbol: SymbolRow,
+    kind: String,
+    confidence: String,
+    hint: Option<String>,
+    src_path: String,
+}
+
+/// Turn candidate rows into resolved edges.
+///
+/// The rows arrive as the cross product of edges and the definitions their
+/// targets could mean, so they are grouped back into edges first. Order is
+/// preserved: the first time an edge is seen decides where its rows sit in the
+/// answer, so a caller that used to read this list top to bottom still reads
+/// it in the same order.
+fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
+    // (source file, target name, edge kind, hint) — one edge in the source.
+    type Key = (String, String, String, Option<String>);
+    let mut order: Vec<Key> = Vec::new();
+    let mut groups: std::collections::HashMap<Key, Vec<Reached>> = std::collections::HashMap::new();
+    for row in reached {
+        let key = (
+            row.src_path.clone(),
+            row.symbol.name.clone(),
+            row.kind.clone(),
+            row.hint.clone(),
+        );
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(row);
+    }
+
+    // The imports of each source file, read once and only when a group
+    // actually needs them: the first two tiers settle most edges, and a file's
+    // imports are a query this should not pay for on every hop of a traversal.
+    let mut imports: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    let mut out = Vec::new();
+    for key in order {
+        let candidates = groups.remove(&key).unwrap_or_default();
+        let (src_path, _, _, hint) = &key;
+        let definitions = candidates.len();
+
+        if definitions == 1 {
+            // Nothing to choose between. Whatever the syntax tree said stands,
+            // and a bare name that matches exactly one definition in the store
+            // is as resolved as the corpus can make it.
+            let row = candidates.into_iter().next().expect("one candidate");
+            let confidence = if row.confidence == crate::graph::EXTRACTED {
+                crate::graph::EXTRACTED
+            } else {
+                crate::graph::RESOLVED
+            };
+            out.push(EdgeEnd {
+                symbol: row.symbol,
+                kind: row.kind,
+                confidence: confidence.to_string(),
+                definitions,
+            });
+            continue;
+        }
+
+        // Rank without the imports first. If that already leaves one winner,
+        // the import query is never run.
+        let mut ranks: Vec<u8> = candidates
+            .iter()
+            .map(|c| rank(&c.symbol.path, src_path, hint.as_deref(), &[]))
+            .collect();
+        if survivors(&ranks) != 1 && ranks.contains(&UNRANKED) {
+            let of_file = match imports.get(src_path) {
+                Some(found) => found.clone(),
+                None => {
+                    let found = file_imports(db, src_path)?;
+                    imports.insert(src_path.clone(), found.clone());
+                    found
+                }
+            };
+            ranks = candidates
+                .iter()
+                .map(|c| rank(&c.symbol.path, src_path, hint.as_deref(), &of_file))
+                .collect();
+        }
+
+        let best = ranks.iter().copied().min().unwrap_or(UNRANKED);
+        let settled = survivors(&ranks) == 1;
+        for (row, rank) in candidates.into_iter().zip(&ranks) {
+            if settled && *rank != best {
+                continue;
+            }
+            let confidence = if row.confidence == crate::graph::EXTRACTED && settled {
+                crate::graph::EXTRACTED
+            } else if settled {
+                crate::graph::RESOLVED
+            } else {
+                crate::graph::AMBIGUOUS
+            };
+            out.push(EdgeEnd {
+                symbol: row.symbol,
+                kind: row.kind,
+                confidence: confidence.to_string(),
+                definitions,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The rank of a candidate that nothing placed. Sorts last, and is what says
+/// "the imports are worth reading for this group".
+const UNRANKED: u8 = 3;
+
+/// How many candidates sit at the best rank.
+fn survivors(ranks: &[u8]) -> usize {
+    match ranks.iter().min() {
+        Some(best) => ranks.iter().filter(|r| *r == best).count(),
+        None => 0,
+    }
+}
+
+/// Where a candidate definition sits in the ranking, lower being better.
+///
+/// 0. The same file as the call. A file that defines a name and calls it means
+///    its own.
+/// 1. A file the hint names. `store::edges_out` in the presence of
+///    `src/store.rs` is not a coincidence.
+/// 2. A file the calling file imports. Weaker than the hint because an import
+///    list is a set of possibilities rather than a statement about this call.
+/// 3. Nothing placed it.
+fn rank(candidate: &str, src_path: &str, hint: Option<&str>, imports: &[String]) -> u8 {
+    if candidate == src_path {
+        return 0;
+    }
+    if hint.is_some_and(|h| names_file(h, candidate)) {
+        return 1;
+    }
+    if imports.iter().any(|i| {
+        i.split(['/', '.', ':', '\\'])
+            .any(|segment| !segment.is_empty() && names_file(segment, candidate))
+    }) {
+        return 2;
+    }
+    UNRANKED
+}
+
+/// Whether `word` names the file at `path` — its stem, or one of its
+/// directories.
+///
+/// `store` names `src/store.rs` and `src/store/mod.rs` alike, which is the
+/// point: a module is a file or a directory depending on how the author felt
+/// that day, and a hint knows neither.
+fn names_file(word: &str, path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    if path.file_stem().is_some_and(|stem| stem == word) {
+        return true;
+    }
+    path.parent()
+        .into_iter()
+        .flat_map(|parent| parent.components())
+        .any(|component| component.as_os_str() == word)
+}
+
+/// Everything one file imports, as the raw strings the extractor recorded.
+fn file_imports(db: &Connection, path: &str) -> Result<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT e.dst FROM edges e
+         JOIN symbols s ON s.id = e.src
+         JOIN files f ON f.id = s.file_id
+         WHERE f.path = ?1 AND e.kind = 'imports'",
+    )?;
+    let rows = stmt.query_map(params![path], |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -1057,6 +1269,10 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
             symbol: symbol_row(r)?,
             kind: r.get(8)?,
             confidence: r.get(9)?,
+            // A caller is a symbol, not a name: the row came from the edge's
+            // own `src` id, so there is nothing to resolve and nothing to be
+            // ambiguous about. This direction is unchanged from 0.14.0.
+            definitions: 1,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1335,6 +1551,181 @@ mod tests {
             out[0].symbol.start_line, 9,
             "and now points at the new rows"
         );
+    }
+
+    /// A store with one caller and several definitions of the name it calls.
+    ///
+    /// Returns the connection; `paths` are the files each definition of
+    /// `callee` lives in, and the caller is always `src/caller.rs`.
+    fn many_definitions(paths: &[&str]) -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        one_symbol(&db, "src/caller.rs", "caller");
+        for (i, path) in paths.iter().enumerate() {
+            // The caller's own file is already there, and a definition in it
+            // is exactly the case the same-file rank is about.
+            let file = db
+                .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .unwrap()
+                .unwrap_or_else(|| insert_file(&db, path, &format!("h{i}"), 1, 0).unwrap());
+            insert_symbol(&db, file, None, &sym("callee")).unwrap();
+        }
+        db
+    }
+
+    fn call(db: &Connection, hint: Option<&str>) {
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(db, src, "callee", "calls", "inferred", hint).unwrap();
+    }
+
+    /// One definition of the name is one answer, whatever the hint says.
+    #[test]
+    fn a_name_with_one_definition_resolves() {
+        let db = many_definitions(&["src/other.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].confidence, crate::graph::RESOLVED);
+        assert_eq!(out[0].definitions, 1);
+    }
+
+    /// Four definitions and nothing to choose between them. Every candidate
+    /// comes back marked `ambiguous` and carrying the count, so a renderer can
+    /// say "4 definitions" instead of printing four calls the source never
+    /// made.
+    #[test]
+    fn a_name_nothing_narrows_is_ambiguous_and_keeps_every_candidate() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|e| e.confidence == crate::graph::AMBIGUOUS));
+        assert!(out.iter().all(|e| e.definitions == 4));
+    }
+
+    /// The hint picks the definition whose file it names, and the other three
+    /// are not returned at all.
+    #[test]
+    fn a_hint_that_names_a_file_resolves_to_that_definition() {
+        let db = many_definitions(&["src/a.rs", "src/store.rs", "src/c.rs"]);
+        call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol.path, "src/store.rs");
+        assert_eq!(out[0].confidence, crate::graph::RESOLVED);
+        assert_eq!(
+            out[0].definitions, 3,
+            "the count is what the ranking chose between, not what survived"
+        );
+    }
+
+    /// A hint naming a directory works the same way: a module is a file or a
+    /// directory depending on how the author felt that day.
+    #[test]
+    fn a_hint_names_a_directory_as_readily_as_a_file() {
+        let db = many_definitions(&["src/a.rs", "src/store/mod.rs"]);
+        call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/store/mod.rs");
+    }
+
+    /// The calling file's own definition wins over one the hint names. A file
+    /// that defines a name and calls it means its own.
+    #[test]
+    fn the_calling_file_outranks_the_hint() {
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/caller.rs");
+    }
+
+    /// With no hint, what the calling file imports breaks the tie.
+    #[test]
+    fn an_import_resolves_what_the_hint_cannot() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None).unwrap();
+        call(&db, None);
+        let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol.path, "src/b.rs");
+        assert_eq!(out[0].confidence, crate::graph::RESOLVED);
+    }
+
+    /// The hint outranks the import list: an import is a set of possibilities,
+    /// a hint is a statement about this call.
+    #[test]
+    fn the_hint_outranks_an_import() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None).unwrap();
+        call(&db, Some("a"));
+        let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol.path, "src/a.rs");
+    }
+
+    /// An edge the syntax tree settled is never downgraded by a ranking.
+    #[test]
+    fn an_extracted_edge_stays_extracted() {
+        let db = many_definitions(&["src/store.rs"]);
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(&db, src, "callee", "calls", "extracted", Some("store")).unwrap();
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out[0].confidence, crate::graph::EXTRACTED);
+    }
+
+    /// A store written by 0.14.0 has a NULL hint on every row. It must answer
+    /// exactly as it did then: one definition is the answer, several are a
+    /// question.
+    #[test]
+    fn a_null_hint_behaves_as_it_did_before_hints_existed() {
+        let db = many_definitions(&["src/a.rs"]);
+        call(&db, None);
+        let one = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].symbol.path, "src/a.rs");
+
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        call(&db, None);
+        let two = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(
+            two.len(),
+            2,
+            "both candidates are still reachable, now labelled rather than asserted"
+        );
+    }
+
+    /// Callers are unchanged: the row came from the edge's own `src` id, so
+    /// there is nothing to resolve and the stored confidence stands.
+    #[test]
+    fn callers_keep_the_stored_confidence() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        call(&db, None);
+        let inbound = edges_in(&db, "callee", &[]).unwrap();
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].confidence, crate::graph::INFERRED);
+        assert_eq!(inbound[0].definitions, 1);
     }
 
     /// Both directions resolve, and the edge kind filter applies to each.
