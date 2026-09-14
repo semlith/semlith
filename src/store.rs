@@ -96,11 +96,18 @@ CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
 -- `confidence` is `extracted` when an import in the source file named where the
 -- target came from, and `inferred` when the target was matched by bare name.
 -- Nothing that displays an edge may present the second as the first.
+-- `hint` is what the source text said about where `dst` lives, when it said
+-- anything: the module of a scoped call, the receiver of a method call, the
+-- object of a qualified one. Nullable, and NULL on every row an older binary
+-- wrote, which is why the format version does not move for it. It is a lead,
+-- not an address, and `edges_out` treats it as one ranking signal among
+-- several — see `resolve`.
 CREATE TABLE IF NOT EXISTS edges (
     src        INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
     dst        TEXT NOT NULL,
     kind       TEXT NOT NULL,
-    confidence TEXT NOT NULL
+    confidence TEXT NOT NULL,
+    hint       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
@@ -172,6 +179,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "foreign_keys", "ON")?;
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
+    add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
     // Everything above is the schema this binary needs in place before the
@@ -304,6 +312,54 @@ const FTS_BUILT: &str = "fts_built";
 /// A 0.1.0 store has chunks but no FTS index, and the triggers only fire on new
 /// writes. Rebuilding from the text already in SQLite costs no embedding and
 /// leaves the vectors untouched.
+/// Columns added to tables that already exist in a store written by an older
+/// binary.
+///
+/// `CREATE TABLE IF NOT EXISTS` is how every table here arrives, and it does
+/// nothing at all to a table that is already there — so a column added to the
+/// schema above reaches a fresh store and no other. This is the other half:
+/// one `ALTER TABLE ADD COLUMN` per column, run on every open, skipped when
+/// the column is present.
+///
+/// Every column here must be nullable with no default, which is what makes the
+/// operation an O(1) catalogue edit rather than a table rewrite, and what lets
+/// an older binary keep reading the store afterwards: it selects by name and
+/// never sees them. That is the whole reason `format_version` does not move —
+/// the same reasoning `docs/compatibility.md` records for the graph tables.
+fn add_columns(db: &Connection) -> Result<()> {
+    const ADDITIONS: [(&str, &str, &str); 5] = [
+        ("edges", "hint", "TEXT"),
+        // The ledger's 0.15.0 columns. `session` groups the retrievals of one
+        // agent conversation, `tool` says which tool was asked, `stale_hits`
+        // counts the answers that came from a file edited since it was
+        // indexed, and `tokenizer` names what counted the two token figures so
+        // rows counted two different ways are never summed together.
+        ("retrievals", "session", "TEXT"),
+        ("retrievals", "tool", "TEXT"),
+        ("retrievals", "stale_hits", "INTEGER"),
+        ("retrievals", "tokenizer", "TEXT"),
+    ];
+    for (table, column, kind) in ADDITIONS {
+        if has_column(db, table, column)? {
+            continue;
+        }
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind};"))?;
+    }
+    Ok(())
+}
+
+fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn backfill_fts(db: &Connection) -> Result<()> {
     if get_meta(db, FTS_BUILT)?.is_some() {
         return Ok(());
@@ -810,6 +866,29 @@ pub struct EdgeEnd {
     pub symbol: SymbolRow,
     pub kind: String,
     pub confidence: String,
+    /// How many definitions of this name the store holds.
+    ///
+    /// `1` for an edge that could only ever mean one thing. Greater than one
+    /// on an `ambiguous` row, where it is the number a renderer prints instead
+    /// of listing every candidate as though each were a separate call — and on
+    /// a `resolved` row, where it is how many candidates the ranking had to
+    /// choose between, which is the difference between "there was only one"
+    /// and "there were four and the source said which".
+    pub definitions: usize,
+    /// The definition this edge actually leaves from.
+    ///
+    /// [`edges_out`] is asked about a name, and a name can have several
+    /// definitions, each with its own edges. Without this the answer says only
+    /// that *something* called `index` reaches here — which is how a path
+    /// finder ends up walking out of one definition of a name and into
+    /// another without anything on the page saying so.
+    ///
+    /// `None` from [`edges_in`], where the queried name is the far end of the
+    /// edge and there is no single row it leaves from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_line: Option<u32>,
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -857,10 +936,11 @@ pub fn insert_edge(
     dst: &str,
     kind: &str,
     confidence: &str,
+    hint: Option<&str>,
 ) -> Result<()> {
     db.execute(
-        "INSERT INTO edges (src, dst, kind, confidence) VALUES (?1, ?2, ?3, ?4)",
-        params![src, dst, kind, confidence],
+        "INSERT INTO edges (src, dst, kind, confidence, hint) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![src, dst, kind, confidence, hint],
     )?;
     Ok(())
 }
@@ -945,11 +1025,43 @@ pub fn symbols_by_names(
 /// What the symbols named `name` point at: callees, imports, references out.
 ///
 /// One hop. `kinds` empty means every edge kind.
+///
+/// # Resolution
+///
+/// `edges.dst` is a name, and a name is not an address: a store of any size
+/// holds four `get`s and seven `index`es. Until 0.15.0 this returned every
+/// definition that shared the name, each as its own row and each looking
+/// exactly like a call the source makes — which is how `semlith path` came to
+/// answer "yes, connected" to questions whose honest answer is "no".
+///
+/// Each edge is now resolved against its candidates by [`rank`], and the
+/// confidence it comes back with says how it was settled:
+///
+/// - `extracted` — the file named where the target came from. Stored, and
+///   never overwritten here: a fact from the syntax tree outranks a ranking.
+/// - `resolved` — the candidates narrowed to exactly one. Either the source
+///   narrowed them (same file, the hint, an import) or the corpus did, by
+///   holding only one definition of the name.
+/// - `ambiguous` — several candidates survived and nothing chose between them.
+///   Every candidate is returned, each marked `ambiguous` and each carrying
+///   the count, so a renderer can collapse them to one row and a traversal can
+///   refuse to cross them.
+///
+/// `inferred` is the stored value and is what [`edges_in`] and the edge census
+/// still show. It does not come back from here, because by the time a target
+/// has been looked up there is always something to say about it: either one
+/// definition answers to the name or several do.
+///
+/// A resolution is against the indexed corpus, not against the world. One
+/// definition of `parse` in the store does not prove the call went to it
+/// rather than to a dependency that was never indexed — that is what the
+/// hidden-by-default unresolved targets are about, not this.
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line
          FROM symbols src
+         JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
          JOIN symbols s ON s.name = e.dst
          JOIN files f ON f.id = s.file_id
@@ -960,13 +1072,239 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
     let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
     binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
     let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
-        Ok(EdgeEnd {
+        Ok(Reached {
             symbol: symbol_row(r)?,
             kind: r.get(8)?,
             confidence: r.get(9)?,
+            hint: r.get(10)?,
+            src_path: r.get(11)?,
+            src_line: r.get(12)?,
+        })
+    })?;
+    let reached = rows.collect::<Result<Vec<_>, _>>()?;
+    resolve(db, reached)
+}
+
+/// One row of the join behind [`edges_out`]: a candidate for an edge's target,
+/// with everything the ranking needs about the edge itself.
+struct Reached {
+    symbol: SymbolRow,
+    kind: String,
+    confidence: String,
+    hint: Option<String>,
+    src_path: String,
+    src_line: u32,
+}
+
+/// Turn candidate rows into resolved edges.
+///
+/// The rows arrive as the cross product of edges and the definitions their
+/// targets could mean, so they are grouped back into edges first. Order is
+/// preserved: the first time an edge is seen decides where its rows sit in the
+/// answer, so a caller that used to read this list top to bottom still reads
+/// it in the same order.
+fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
+    // (source file, target name, edge kind, hint) — one edge in the source.
+    type Key = (String, String, String, Option<String>);
+    let mut order: Vec<Key> = Vec::new();
+    let mut groups: std::collections::HashMap<Key, Vec<Reached>> = std::collections::HashMap::new();
+    for row in reached {
+        let key = (
+            row.src_path.clone(),
+            row.symbol.name.clone(),
+            row.kind.clone(),
+            row.hint.clone(),
+        );
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
+        }
+        groups.entry(key).or_default().push(row);
+    }
+
+    // The imports of each source file, read once and only when a group
+    // actually needs them: the first two tiers settle most edges, and a file's
+    // imports are a query this should not pay for on every hop of a traversal.
+    let mut imports: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    let mut out = Vec::new();
+    for key in order {
+        let candidates = groups.remove(&key).unwrap_or_default();
+        let (src_path, _, _, hint) = &key;
+        let definitions = candidates.len();
+
+        if definitions == 1 {
+            // Nothing to choose between. Whatever the syntax tree said stands,
+            // and a bare name that matches exactly one definition in the store
+            // is as resolved as the corpus can make it.
+            let row = candidates.into_iter().next().expect("one candidate");
+            let confidence = if row.confidence == crate::graph::EXTRACTED {
+                crate::graph::EXTRACTED
+            } else {
+                crate::graph::RESOLVED
+            };
+            out.push(EdgeEnd {
+                symbol: row.symbol,
+                kind: row.kind,
+                confidence: confidence.to_string(),
+                definitions,
+                from_path: Some(row.src_path),
+                from_line: Some(row.src_line),
+            });
+            continue;
+        }
+
+        // Rank without the imports first. If that already leaves one winner,
+        // the import query is never run.
+        let mut ranks: Vec<u8> = candidates
+            .iter()
+            .map(|c| rank(&c.symbol.path, src_path, hint.as_deref(), &[]))
+            .collect();
+        if survivors(&ranks) != 1 && ranks.contains(&UNRANKED) {
+            let of_file = match imports.get(src_path) {
+                Some(found) => found.clone(),
+                None => {
+                    let found = file_imports(db, src_path)?;
+                    imports.insert(src_path.clone(), found.clone());
+                    found
+                }
+            };
+            ranks = candidates
+                .iter()
+                .map(|c| rank(&c.symbol.path, src_path, hint.as_deref(), &of_file))
+                .collect();
+        }
+
+        let best = ranks.iter().copied().min().unwrap_or(UNRANKED);
+        let settled = survivors(&ranks) == 1;
+        for (row, rank) in candidates.into_iter().zip(&ranks) {
+            if settled && *rank != best {
+                continue;
+            }
+            let confidence = if row.confidence == crate::graph::EXTRACTED && settled {
+                crate::graph::EXTRACTED
+            } else if settled {
+                crate::graph::RESOLVED
+            } else {
+                crate::graph::AMBIGUOUS
+            };
+            out.push(EdgeEnd {
+                symbol: row.symbol,
+                kind: row.kind,
+                confidence: confidence.to_string(),
+                definitions,
+                from_path: Some(row.src_path),
+                from_line: Some(row.src_line),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The rank of a candidate that nothing placed. Sorts last, and is what says
+/// "the imports are worth reading for this group".
+const UNRANKED: u8 = 3;
+
+/// How many candidates sit at the best rank.
+fn survivors(ranks: &[u8]) -> usize {
+    match ranks.iter().min() {
+        Some(best) => ranks.iter().filter(|r| *r == best).count(),
+        None => 0,
+    }
+}
+
+/// Where a candidate definition sits in the ranking, lower being better.
+///
+/// 0. The same file as the call. A file that defines a name and calls it means
+///    its own.
+/// 1. A file the hint names. `store::edges_out` in the presence of
+///    `src/store.rs` is not a coincidence.
+/// 2. A file the calling file imports. Weaker than the hint because an import
+///    list is a set of possibilities rather than a statement about this call.
+/// 3. Nothing placed it.
+fn rank(candidate: &str, src_path: &str, hint: Option<&str>, imports: &[String]) -> u8 {
+    if candidate == src_path {
+        return 0;
+    }
+    if hint.is_some_and(|h| names_file(h, candidate)) {
+        return 1;
+    }
+    if imports.iter().any(|i| {
+        i.split(['/', '.', ':', '\\'])
+            .any(|segment| !segment.is_empty() && names_file(segment, candidate))
+    }) {
+        return 2;
+    }
+    UNRANKED
+}
+
+/// Whether `word` names the file at `path` — its stem, or one of its
+/// directories.
+///
+/// `store` names `src/store.rs` and `src/store/mod.rs` alike, which is the
+/// point: a module is a file or a directory depending on how the author felt
+/// that day, and a hint knows neither.
+fn names_file(word: &str, path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    if path.file_stem().is_some_and(|stem| stem == word) {
+        return true;
+    }
+    path.parent()
+        .into_iter()
+        .flat_map(|parent| parent.components())
+        .any(|component| component.as_os_str() == word)
+}
+
+/// Everything one file imports, as the raw strings the extractor recorded.
+fn file_imports(db: &Connection, path: &str) -> Result<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT e.dst FROM edges e
+         JOIN symbols s ON s.id = e.src
+         JOIN files f ON f.id = s.file_id
+         WHERE f.path = ?1 AND e.kind = 'imports'",
+    )?;
+    let rows = stmt.query_map(params![path], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Targets of `name`'s edges that the store holds no definition for.
+///
+/// [`edges_out`] joins to `symbols`, so an edge pointing at something outside
+/// the corpus — a standard-library call, a crate that was never indexed —
+/// simply does not appear there. That is the right default: a list of names
+/// the store knows nothing about is noise in an answer about this codebase.
+/// It is not the right *only* option, because "semlith shows no callees" and
+/// "everything this calls lives outside the index" are different facts, and
+/// only one of them means the graph is working.
+pub fn unresolved_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Unresolved>> {
+    let filter = kind_predicate(kinds, "e.kind");
+    let sql = format!(
+        "SELECT DISTINCT e.dst, e.kind, e.confidence
+         FROM symbols src
+         JOIN edges e ON e.src = src.id
+         WHERE src.name = ?1 AND {filter}
+           AND NOT EXISTS (SELECT 1 FROM symbols s WHERE s.name = e.dst)
+         ORDER BY e.dst"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
+    binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+        Ok(Unresolved {
+            name: r.get(0)?,
+            kind: r.get(1)?,
+            confidence: r.get(2)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// An edge whose target this store has no definition for.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Unresolved {
+    pub name: String,
+    pub kind: String,
+    pub confidence: String,
 }
 
 /// What points at `name`: callers, importers, references in.
@@ -991,6 +1329,12 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
             symbol: symbol_row(r)?,
             kind: r.get(8)?,
             confidence: r.get(9)?,
+            // A caller is a symbol, not a name: the row came from the edge's
+            // own `src` id, so there is nothing to resolve and nothing to be
+            // ambiguous about. This direction is unchanged from 0.14.0.
+            definitions: 1,
+            from_path: None,
+            from_line: None,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1038,15 +1382,10 @@ pub struct Retrieval {
 ///
 /// The chain is the point: a row cannot be quietly edited or removed without
 /// every hash after it failing to recompute.
-pub fn record_retrieval(
-    db: &Connection,
-    client: &str,
-    query: &str,
-    hits: i64,
-    micros: i64,
-    excerpt_tokens: i64,
-    whole_file_tokens: i64,
-) -> Result<()> {
+pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
+    let (client, query) = (row.client, row.query);
+    let (hits, micros) = (row.hits, row.micros);
+    let (excerpt_tokens, whole_file_tokens) = (row.excerpt_tokens, row.whole_file_tokens);
     // The ledger is the one write that happens on a read: a retrieval is
     // recorded by the search that answered it. It asks for the same permission
     // an index run does.
@@ -1063,7 +1402,120 @@ pub fn record_retrieval(
         )
         .optional()?
         .unwrap_or_default();
-    let hash = chain_hash(
+    let hash = chain_hash(&prev, at, row);
+    db.execute(
+        "INSERT INTO retrievals
+         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+          session, tool, stale_hits, tokenizer)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            at,
+            client,
+            query,
+            hits,
+            micros,
+            excerpt_tokens,
+            whole_file_tokens,
+            prev,
+            hash,
+            row.session,
+            row.tool,
+            row.stale_hits,
+            row.tokenizer
+        ],
+    )?;
+    Ok(())
+}
+
+/// One retrieval, before it has a timestamp or a place in the chain.
+///
+/// A struct rather than thirteen positional arguments, because two adjacent
+/// `i64`s that mean different things are a bug waiting for a refactor.
+#[derive(Debug, Clone)]
+pub struct NewRetrieval<'a> {
+    /// Who asked: `claude-code`, `cursor`, `cli`, `portal`.
+    pub client: &'a str,
+    /// Which conversation, so one agent's session can be read as a unit.
+    pub session: &'a str,
+    /// Which tool: `search`, `neighbors`, `path`, `symbol`.
+    pub tool: &'a str,
+    pub query: &'a str,
+    pub hits: i64,
+    pub micros: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    /// How many of those hits came from a file edited since it was indexed.
+    pub stale_hits: i64,
+    /// What counted the two token figures. Rows counted two different ways are
+    /// never summed together, so the label travels with the row rather than
+    /// being assumed from its age.
+    pub tokenizer: &'a str,
+}
+
+/// The hash covering one row and the one before it.
+///
+/// # Two formulas
+///
+/// A row written before 0.15.0 has four columns this one does not, and its
+/// hash was computed without them. Recomputing such a row under the new
+/// formula would report every 0.14.0 ledger as broken — which is the one thing
+/// a verify must never do, because a verify that cries wolf is worse than no
+/// verify at all.
+///
+/// So the formula is chosen per row, by the row itself: `tool` is NULL on
+/// every row written before 0.15.0 and set on every row written since. There
+/// is no version column and no migration, and a store holding rows of both
+/// kinds walks end to end.
+fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
+    let NewRetrieval {
+        client,
+        query,
+        hits,
+        micros,
+        excerpt_tokens: excerpt,
+        whole_file_tokens: whole,
+        ..
+    } = row;
+    let mut payload = format!(
+        "{prev}\u{1f}{at}\u{1f}{client}\u{1f}{query}\u{1f}{hits}\u{1f}{micros}\u{1f}{excerpt}\u{1f}{whole}"
+    );
+    payload.push_str(&format!(
+        "\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        row.session, row.tool, row.stale_hits, row.tokenizer
+    ));
+    blake3::hash(payload.as_bytes()).to_hex().to_string()
+}
+
+/// Append a row in the shape 0.14.0 wrote, for the test that proves a store
+/// holding both kinds still verifies.
+///
+/// Public because that test is an integration test and cannot reach a private
+/// function — and because the property it proves is worth proving. A verify
+/// that reported every ledger written before this release as broken would be
+/// worse than no verify at all, and nothing but a real pre-0.15.0 row in a
+/// real store demonstrates that it does not.
+pub fn record_legacy_retrieval(
+    db: &Connection,
+    client: &str,
+    query: &str,
+    excerpt_tokens: i64,
+    whole_file_tokens: i64,
+) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let prev: String = db
+        .query_row(
+            "SELECT hash FROM retrievals ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let (hits, micros) = (1, 1000);
+    let hash = legacy_chain_hash(
         &prev,
         at,
         client,
@@ -1073,6 +1525,8 @@ pub fn record_retrieval(
         excerpt_tokens,
         whole_file_tokens,
     );
+    // The four 0.15.0 columns are left NULL, which is what makes this a row of
+    // the older kind and what `ledger_break` reads to choose the formula.
     db.execute(
         "INSERT INTO retrievals
          (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash)
@@ -1092,8 +1546,9 @@ pub fn record_retrieval(
     Ok(())
 }
 
+/// The 0.14.0 formula, for rows written under it.
 #[allow(clippy::too_many_arguments)]
-fn chain_hash(
+fn legacy_chain_hash(
     prev: &str,
     at: i64,
     client: &str,
@@ -1142,12 +1597,98 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     )?)
 }
 
+/// The one savings figure, with the denominators that make it readable.
+///
+/// `net` is what the ledger says was not read: the whole-file cost of the
+/// files an answer named, less what the answer itself cost. Rows that found
+/// nothing are excluded from it and counted separately — a retrieval that
+/// returned no hits saved nothing, and a ledger that quietly dropped those
+/// rows would report a ratio that no honest denominator supports.
+///
+/// `tier` is `measured` when every credited row was counted with the store's
+/// own tokenizer, and `modelled` when any of them was estimated at four
+/// characters per token. The two are never summed: a mixed ledger reports
+/// `modelled`, because that is what the weaker half makes the whole.
+///
+/// # What this figure does not do
+///
+/// It does not deduplicate files across the retrievals of one session. If an
+/// agent searches twice and both answers name `src/lib.rs`, the denominator
+/// counts that file twice, and the real alternative — one read — is cheaper
+/// than the figure implies. Fixing it needs the file set stored per row, which
+/// this release does not add. The number is therefore an upper bound on what
+/// was saved, and `semlith stats` says so rather than presenting it as exact.
+pub fn ledger_savings(db: &Connection) -> Result<Savings> {
+    let (credited, net): (i64, i64) = db.query_row(
+        "SELECT COUNT(*), COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
+         FROM retrievals WHERE hits > 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let total: i64 = db.query_row("SELECT COUNT(*) FROM retrievals", [], |r| r.get(0))?;
+    let estimated: i64 = db.query_row(
+        "SELECT COUNT(*) FROM retrievals
+         WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(Savings {
+        net: net.max(0),
+        credited,
+        total,
+        measured: credited > 0 && estimated == 0,
+    })
+}
+
+/// What the ledger adds up to.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Savings {
+    /// Whole-file tokens less excerpt tokens, over rows that found something.
+    pub net: i64,
+    /// How many retrievals that was over.
+    pub credited: i64,
+    /// How many retrievals there are in total, credited or not. The
+    /// denominator, so a figure is never shown without one.
+    pub total: i64,
+    /// Whether every credited row was counted with the store's own tokenizer.
+    pub measured: bool,
+}
+
+impl Savings {
+    /// `measured` or `modelled`.
+    pub fn tier(&self) -> &'static str {
+        if self.measured {
+            "measured"
+        } else {
+            "modelled"
+        }
+    }
+
+    /// What share of retrievals the figure covers, as a percentage.
+    pub fn coverage(&self) -> i64 {
+        if self.total == 0 {
+            return 0;
+        }
+        self.credited * 100 / self.total
+    }
+}
+
+/// How many retrievals each client made, most first.
+pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT client, COUNT(*) FROM retrievals GROUP BY client ORDER BY COUNT(*) DESC, client",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// Re-walk the chain and return the id of the first row that does not verify.
 ///
 /// `None` means the ledger is intact.
 pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
     let mut stmt = db.prepare(
-        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash
+        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
+                session, tool, stale_hits, tokenizer
          FROM retrievals ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
@@ -1163,13 +1704,117 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         if prev != expected {
             return Ok(Some(id));
         }
-        let recomputed = chain_hash(&prev, at, &client, &query, hits, micros, excerpt, whole);
+        // `tool` is NULL on every row written before 0.15.0 and set on every
+        // row written since, which is what says which formula wrote this hash.
+        let tool: Option<String> = r.get(11)?;
+        let recomputed = match tool {
+            Some(tool) => {
+                let session: String = r.get(10)?;
+                let stale: i64 = r.get(12)?;
+                let tokenizer: String = r.get(13)?;
+                chain_hash(
+                    &prev,
+                    at,
+                    &NewRetrieval {
+                        client: &client,
+                        session: &session,
+                        tool: &tool,
+                        query: &query,
+                        hits,
+                        micros,
+                        excerpt_tokens: excerpt,
+                        whole_file_tokens: whole,
+                        stale_hits: stale,
+                        tokenizer: &tokenizer,
+                    },
+                )
+            }
+            None => legacy_chain_hash(&prev, at, &client, &query, hits, micros, excerpt, whole),
+        };
         if recomputed != hash {
             return Ok(Some(id));
         }
         expected = hash;
     }
     Ok(None)
+}
+
+/// The total bytes of every file a grep for `name` would have to read.
+///
+/// The honest denominator for a graph answer's saving. A search's denominator
+/// is the files its hits came from; a graph answer has no hits, but it does
+/// have an answer that would otherwise have been assembled by grepping for the
+/// name and reading what came back. These are those files: the ones that
+/// define the name, and the ones whose code points at it.
+pub fn grep_cost(db: &Connection, name: &str) -> Result<i64> {
+    Ok(db.query_row(
+        "SELECT COALESCE(SUM(bytes), 0) FROM files WHERE id IN (
+            SELECT s.file_id FROM symbols s WHERE s.name = ?1
+            UNION
+            SELECT s.file_id FROM symbols s JOIN edges e ON e.src = s.id WHERE e.dst = ?1
+         )",
+        params![name],
+        |r| r.get(0),
+    )?)
+}
+
+/// One definition's span and identity: `(start, end, name, kind)`.
+pub type SymbolSpan = (u32, u32, String, String);
+
+/// Every symbol defined in each of `paths`.
+///
+/// What turns a line range into a place a person recognises. A hit that says
+/// `src/store.rs:1041-1090` makes a reader open the file to find out what is
+/// there; one that says `record_retrieval` does not.
+///
+/// Read per file rather than per hit, because eight hits in one file are one
+/// question about that file.
+pub fn symbols_in_files(
+    db: &Connection,
+    paths: &[String],
+) -> Result<std::collections::HashMap<String, Vec<SymbolSpan>>> {
+    let mut out: std::collections::HashMap<String, Vec<SymbolSpan>> = Default::default();
+    if paths.is_empty() {
+        return Ok(out);
+    }
+    let holes = vec!["?"; paths.len()].join(", ");
+    let sql = format!(
+        "SELECT f.path, s.start_line, s.end_line, s.name, s.kind
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE f.path IN ({holes}) AND s.kind != 'module'
+         ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let args = paths.iter().cloned().map(Value::Text);
+    let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+    while let Some(r) = rows.next()? {
+        let path: String = r.get(0)?;
+        out.entry(path)
+            .or_default()
+            .push((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?));
+    }
+    Ok(out)
+}
+
+/// `(bytes, indexed_at)` for each of `paths` the store knows.
+///
+/// The cheap half of a freshness check: what the store recorded about a file
+/// when it read it. The other half is one `stat` of the file as it is now.
+pub fn file_stamps(
+    db: &Connection,
+    paths: &[String],
+) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let holes = vec!["?"; paths.len()].join(", ");
+    let sql = format!("SELECT path, bytes, indexed_at FROM files WHERE path IN ({holes})");
+    let mut stmt = db.prepare(&sql)?;
+    let args = paths.iter().cloned().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+        Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+    })?;
+    Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
 }
 
 /// `(symbols, edges)` — the graph's size, for `stats` and the portal.
@@ -1228,7 +1873,7 @@ mod tests {
     fn deleting_a_file_deletes_its_symbols_and_its_outgoing_edges() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
+        insert_edge(&db, caller, "callee", "calls", "inferred", None).unwrap();
         assert_eq!(graph_stats(&db).unwrap(), (1, 1));
 
         delete_file(&db, "a.rs").unwrap();
@@ -1249,7 +1894,7 @@ mod tests {
     fn re_indexing_the_target_file_leaves_edges_into_it_intact() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
+        insert_edge(&db, caller, "callee", "calls", "inferred", None).unwrap();
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
         insert_symbol(&db, b, None, &sym("callee")).unwrap();
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 1);
@@ -1271,6 +1916,181 @@ mod tests {
         );
     }
 
+    /// A store with one caller and several definitions of the name it calls.
+    ///
+    /// Returns the connection; `paths` are the files each definition of
+    /// `callee` lives in, and the caller is always `src/caller.rs`.
+    fn many_definitions(paths: &[&str]) -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        one_symbol(&db, "src/caller.rs", "caller");
+        for (i, path) in paths.iter().enumerate() {
+            // The caller's own file is already there, and a definition in it
+            // is exactly the case the same-file rank is about.
+            let file = db
+                .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .unwrap()
+                .unwrap_or_else(|| insert_file(&db, path, &format!("h{i}"), 1, 0).unwrap());
+            insert_symbol(&db, file, None, &sym("callee")).unwrap();
+        }
+        db
+    }
+
+    fn call(db: &Connection, hint: Option<&str>) {
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(db, src, "callee", "calls", "inferred", hint).unwrap();
+    }
+
+    /// One definition of the name is one answer, whatever the hint says.
+    #[test]
+    fn a_name_with_one_definition_resolves() {
+        let db = many_definitions(&["src/other.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].confidence, crate::graph::RESOLVED);
+        assert_eq!(out[0].definitions, 1);
+    }
+
+    /// Four definitions and nothing to choose between them. Every candidate
+    /// comes back marked `ambiguous` and carrying the count, so a renderer can
+    /// say "4 definitions" instead of printing four calls the source never
+    /// made.
+    #[test]
+    fn a_name_nothing_narrows_is_ambiguous_and_keeps_every_candidate() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs", "src/c.rs", "src/d.rs"]);
+        call(&db, None);
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|e| e.confidence == crate::graph::AMBIGUOUS));
+        assert!(out.iter().all(|e| e.definitions == 4));
+    }
+
+    /// The hint picks the definition whose file it names, and the other three
+    /// are not returned at all.
+    #[test]
+    fn a_hint_that_names_a_file_resolves_to_that_definition() {
+        let db = many_definitions(&["src/a.rs", "src/store.rs", "src/c.rs"]);
+        call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol.path, "src/store.rs");
+        assert_eq!(out[0].confidence, crate::graph::RESOLVED);
+        assert_eq!(
+            out[0].definitions, 3,
+            "the count is what the ranking chose between, not what survived"
+        );
+    }
+
+    /// A hint naming a directory works the same way: a module is a file or a
+    /// directory depending on how the author felt that day.
+    #[test]
+    fn a_hint_names_a_directory_as_readily_as_a_file() {
+        let db = many_definitions(&["src/a.rs", "src/store/mod.rs"]);
+        call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/store/mod.rs");
+    }
+
+    /// The calling file's own definition wins over one the hint names. A file
+    /// that defines a name and calls it means its own.
+    #[test]
+    fn the_calling_file_outranks_the_hint() {
+        let db = many_definitions(&["src/caller.rs", "src/store.rs"]);
+        call(&db, Some("store"));
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].symbol.path, "src/caller.rs");
+    }
+
+    /// With no hint, what the calling file imports breaks the tie.
+    #[test]
+    fn an_import_resolves_what_the_hint_cannot() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None).unwrap();
+        call(&db, None);
+        let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol.path, "src/b.rs");
+        assert_eq!(out[0].confidence, crate::graph::RESOLVED);
+    }
+
+    /// The hint outranks the import list: an import is a set of possibilities,
+    /// a hint is a statement about this call.
+    #[test]
+    fn the_hint_outranks_an_import() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None).unwrap();
+        call(&db, Some("a"));
+        let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].symbol.path, "src/a.rs");
+    }
+
+    /// An edge the syntax tree settled is never downgraded by a ranking.
+    #[test]
+    fn an_extracted_edge_stays_extracted() {
+        let db = many_definitions(&["src/store.rs"]);
+        let src: i64 = db
+            .query_row("SELECT id FROM symbols WHERE name = 'caller'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        insert_edge(&db, src, "callee", "calls", "extracted", Some("store")).unwrap();
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out[0].confidence, crate::graph::EXTRACTED);
+    }
+
+    /// A store written by 0.14.0 has a NULL hint on every row. It must answer
+    /// exactly as it did then: one definition is the answer, several are a
+    /// question.
+    #[test]
+    fn a_null_hint_behaves_as_it_did_before_hints_existed() {
+        let db = many_definitions(&["src/a.rs"]);
+        call(&db, None);
+        let one = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].symbol.path, "src/a.rs");
+
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        call(&db, None);
+        let two = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(
+            two.len(),
+            2,
+            "both candidates are still reachable, now labelled rather than asserted"
+        );
+    }
+
+    /// Callers are unchanged: the row came from the edge's own `src` id, so
+    /// there is nothing to resolve and the stored confidence stands.
+    #[test]
+    fn callers_keep_the_stored_confidence() {
+        let db = many_definitions(&["src/a.rs", "src/b.rs"]);
+        call(&db, None);
+        let inbound = edges_in(&db, "callee", &[]).unwrap();
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].confidence, crate::graph::INFERRED);
+        assert_eq!(inbound[0].definitions, 1);
+    }
+
     /// Both directions resolve, and the edge kind filter applies to each.
     #[test]
     fn edges_resolve_in_both_directions_and_filter_by_kind() {
@@ -1278,8 +2098,8 @@ mod tests {
         let caller = one_symbol(&db, "a.rs", "caller");
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
         insert_symbol(&db, b, None, &sym("callee")).unwrap();
-        insert_edge(&db, caller, "callee", "calls", "extracted").unwrap();
-        insert_edge(&db, caller, "callee", "references", "inferred").unwrap();
+        insert_edge(&db, caller, "callee", "calls", "extracted", None).unwrap();
+        insert_edge(&db, caller, "callee", "references", "inferred", None).unwrap();
 
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 2);
         let calls = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
@@ -1301,7 +2121,7 @@ mod tests {
     fn an_edge_to_an_unindexed_target_resolves_to_nothing_without_erroring() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "println", "calls", "inferred").unwrap();
+        insert_edge(&db, caller, "println", "calls", "inferred", None).unwrap();
         assert!(edges_out(&db, "caller", &[]).unwrap().is_empty());
         assert_eq!(graph_stats(&db).unwrap().1, 1, "but the edge row is there");
     }

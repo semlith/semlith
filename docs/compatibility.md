@@ -13,7 +13,7 @@ break, and is treated as one.
 |---|---|
 | CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `add`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, `setup`, `upgrade`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
-| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. |
+| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. From 0.15.0, `SEMLITH_LEDGER` — `0`, `off` or `false` stops the ledger recording anything on this machine. |
 | CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
 | CLI commands added in 0.14.0 | `trust <dir>` and `trust --list`, and `index --include-secrets`. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
@@ -23,7 +23,7 @@ break, and is treated as one.
 | `semlith setup --yes` | Runs every step with its default and no prompt, so a script or an agent can install semlith unattended. |
 | `semlith upgrade --check` | Exits 0 when the installed version is current and 10 when a newer release exists, and changes nothing either way. |
 | Exit codes | Whether a given outcome exits zero or non-zero. A blocked index run exits non-zero; a search that finds nothing exits zero, because finding nothing is an answer. |
-| MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`, `semlith_symbol`, `semlith_neighbors`, `semlith_path`. `semlith_impact` was on this list until 0.13.0 removed it; see the break below. |
+| MCP tool names | `semlith_search`, `semlith_stats`, `semlith_files`, `semlith_index`, `semlith_add`, `semlith_forget`, `semlith_symbol`, `semlith_neighbors`, `semlith_path`, and from 0.15.0 `semlith_languages`. `semlith_impact` was on this list until 0.13.0 removed it; see the break below. |
 | MCP input schemas | The arguments each tool accepts and their types. An existing argument does not change meaning or become required. |
 | MCP protocol revisions | The list the server advertises: `2026-07-28`, `2025-11-25`, `2025-06-18`, `2024-11-05`. Dropping one is a break. |
 | Where the daemon binds | `127.0.0.1`, and only that. Widening it would be a break in the direction that matters, and is not something a flag will ever do. |
@@ -234,6 +234,85 @@ here with the way back where there is one.
   daemon exits. On a machine somebody leaves running, "until this process exits"
   was a second live credential rather than a grace period.
 
+### 0.15.0 removes a flag, and changes what an agent gets back
+
+**One break in the covered surface and two changes of default.** All three come
+out of the same finding: the graph was answering questions it could not support,
+the search was answering "where is this" by sending the thing itself, and the
+ledger that was supposed to measure both of those recorded nothing an agent did.
+
+#### `semlith start --ledger` is gone
+
+- **What breaks.** A script, a service file or a stanza that passes `--ledger`
+  exits non-zero at parse time with an unrecognised-argument message. There is
+  no shim and no deprecation period.
+- **Why.** The flag now asks for the default. Keeping it as a no-op would leave
+  every existing script reading as though it were switching something on, which
+  is the worst of the three options: worse than removing it, and worse than
+  leaving it meaning what it meant. A parse error is corrected once and never
+  misleads.
+- **What to do instead.** Delete the flag. If the intent was *not* to record,
+  that is `--no-ledger` for one session, or `SEMLITH_LEDGER=0` for a machine.
+
+#### The ledger records by default
+
+- **What changes.** From 0.15.0 every retrieval is recorded into the store's
+  `retrievals` table — over stdio, over the daemon's `/mcp` endpoint, from the
+  CLI and from the portal, for graph tools as well as search. Through 0.14.0 only
+  the portal's own search box ever wrote a row, and only when `--ledger` was
+  passed.
+- **Why.** A ledger nobody switched on measured nobody: the savings figure had no
+  denominator and the audit trail had no rows. 0.12.0's stated principle — that a
+  local tool which starts logging without being told is no different from one
+  that phones home — is retired in favour of one that is narrower and checkable:
+  the rows never leave the store they were written into, the daemon says on every
+  start that it is recording and names the flag that stops it, and erasing every
+  row is one `DELETE`.
+- **What to do if you do not want it.** `semlith start --no-ledger` for a
+  session, `SEMLITH_LEDGER=0` for a machine. Both are read at the point of
+  writing rather than cached, so the environment variable takes effect without
+  restarting anything.
+
+#### `semlith_search` answers with locations, not excerpts
+
+- **What changes.** Over MCP, `semlith_search` gains
+  `format: locate | excerpt` and defaults to `locate`. `/api/search` takes the
+  same `format` argument but keeps returning the text unless a caller asks for
+  `locate`, because the portal's own Search page is the caller and a person
+  reading a panel is not paying by the token. A locate row is the
+  store-relative path, the line span, the enclosing symbol and its kind, the
+  lists that found it, provenance for a row the graph reached, a freshness flag,
+  and one line of the text; rows are grouped by file and cut to a `max_tokens`
+  budget (default 1500, floor 200) that states `truncated: N of M` when it cuts.
+  A client that parsed the reply for full chunk text gets a shorter reply than it
+  did in 0.14.0.
+- **The CLI is unchanged.** `semlith search` still prints excerpts, and `--json`
+  still carries the chunk text. This is a change to the agent-facing default
+  only, because a person reading a terminal is not paying by the token.
+- **The opt-back.** `format: "excerpt"` returns exactly what 0.14.0 returned.
+- **Why.** An agent that already knows the identifier wants the address, not the
+  building. The study behind this release measured a warm reply at 4.9–7.2 KB at
+  `k=8` against 100–300 bytes for the grep the agent could have run instead.
+
+#### What is additive, and therefore is not a break
+
+Everything else in this release adds fields beside the ones already there, under
+the *Additive fields* rule above. Existing keys keep their names, types and
+meanings.
+
+- **`edges.hint`**, a nullable `TEXT` column recording what the source said about
+  where a call goes. NULL on every row an older binary wrote.
+- **Four nullable columns on `retrievals`**: `session`, `tool`, `stale_hits` and
+  `tokenizer`.
+- **On a hit**: `fresh`, `symbol`, `symbol_kind` and `provenance`. `fresh` is
+  present on every hit; the other three are omitted when there is nothing to say.
+- **On an edge**: `definitions`, `from_path` and `from_line`.
+- **Two more confidence values.** An edge's confidence was `extracted` or
+  `inferred`; it is now one of `extracted`, `resolved`, `inferred` or
+  `ambiguous`. The two new ones are computed when a query runs and never stored,
+  so nothing in a store changes shape — but a consumer that matched on exactly
+  two strings will see two it does not recognise.
+
 ## The honest version of the promise
 
 semlith is 0.x. Under SemVer, a 0.x minor bump is permitted to break anything,
@@ -340,6 +419,36 @@ pass, which re-reads the files.
 The internal table layout is [not a covered surface](#what-is-not-covered), and
 this does not change that. It is described because people plan around it, not
 because it is promised.
+
+### 0.15.0 adds columns and does not move the number
+
+Same reasoning one step further along: `format_version` stays **2**.
+
+0.12.0 and 0.13.0 added whole tables an older binary does not read. 0.15.0 adds
+*columns* to tables that already exist — `hint` on `edges`, and `session`, `tool`,
+`stale_hits` and `tokenizer` on `retrievals` — which is the case worth spelling
+out, because a column is something an older binary might plausibly meet.
+
+Every one of them is nullable and added by an `ALTER TABLE` that runs on open
+beside the `CREATE TABLE IF NOT EXISTS` batch, so no store is migrated and
+nothing is rewritten. An older binary reads these tables with `SELECT` statements
+that name their columns, so a column it has never heard of is a column it never
+asks for.
+
+**So, in both directions, with no migration:** a 0.14.0 binary opens a store
+0.15.0 wrote, searches it, walks its graph and prints its ledger exactly as it
+did before, ignoring the five new columns. A 0.15.0 binary opens a store 0.14.0
+wrote, finds a NULL hint on every edge, and resolves those edges exactly as
+0.14.0 did — the hint is a tie-breaker, and its absence costs the ranking a tier
+rather than an answer. The rows fill in for a file on the next `index` pass that
+touches it, which re-reads the bytes.
+
+The ledger's hash chain is the one place where a new column could have broken an
+old store, because the chain covers a row's fields. It is versioned by the row
+instead: `tool` is NULL on every row written before 0.15.0 and set on every row
+written since, and that is what decides which formula verifies it. A store
+holding rows of both kinds verifies end to end. A verify that reported every
+0.14.0 ledger as broken would be worse than no verify at all.
 
 ## What a break would look like
 

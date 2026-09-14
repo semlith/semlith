@@ -1,0 +1,1120 @@
+# The fixed question set for the retrieval harness (`tests/retrieval.rs`).
+#
+# This file is the measuring stick, so it is committed before the work it
+# measures. Every question here was written from the two study documents in
+# `live-project-files/semlith/docs/vector-graph-retrieval/` and from reading the
+# repository, not from reading a resolver that answers them. Adding a question
+# because the resolver now gets it right, or loosening a span because the
+# resolver misses it, makes every number this file produces meaningless. If a
+# question turns out to be wrong about the code, fix the question and say so in
+# its `note`; do not fix it by widening the span until something passes.
+#
+#
+# ## The baseline the line numbers came from
+#
+# Spans are line ranges in commit `199463c` (the `develop` merge that is
+# semlith 0.14.0), which is also the tree the two study documents measured. They
+# were taken from that commit rather than from the working tree on purpose: the
+# resolution-hint work began landing in `src/graph.rs`, `src/lib.rs` and
+# `src/store.rs` while this file was being written, and a question set whose
+# line numbers came out of a tree that was being edited to answer it would prove
+# nothing. Pinning to the release the questions were written against is what
+# makes "these were not fitted to the resolver" checkable rather than asserted.
+#
+# Line numbers drift. The `symbol` on every span is the durable anchor, and the
+# matching rule below is written so that a moved function still scores.
+#
+#
+# ## Schema
+#
+# Top level:
+#
+#   version    schema version of this file. Bump it if a field changes meaning.
+#   baseline   the commit the spans were read from, for re-deriving them later.
+#   corpus     what the harness indexes before running anything.
+#   defaults   values a question may omit.
+#   questions  the set itself.
+#
+# Every question:
+#
+#   id       stable, unique, never reused. Results are keyed on it, so renaming
+#            an id silently breaks any comparison against an earlier run.
+#   shape    what the asker already knows, not which tool answers:
+#              identifier  the asker knows the term (`edges_out`, `MAX_NODES`).
+#                          This is where a grep is 100-300 bytes and semlith
+#                          must not cost 20-60x that.
+#              concept     the asker knows the idea and not the name. This is
+#                          where vector search earns its place, and where the
+#                          report measured grep returning 17-59 lines of noise.
+#              multi-hop   a question about the graph's structure — "does A
+#                          reach B", "what happens when two symbols share a
+#                          name". Only the graph answers these, and today it
+#                          answers some of them wrongly.
+#   tool     the surface exercised: search | symbol | neighbors | path.
+#   query    for `search`: the text an agent would send.
+#   name     for `symbol` and `neighbors`: the symbol asked about.
+#   kinds    for `neighbors`: edge kinds to restrict to. Omitted means all.
+#   want     for `neighbors`: `callers` or `callees` — which half is scored.
+#   from/to  for `path`: the two endpoints.
+#   depth    for `path`: hop budget. Defaults to `defaults.depth`.
+#   connected  for `path`: the true answer. `false` means the two really are not
+#            connected by any chain of real calls, and a tool that returns a
+#            chain anyway has produced a wrong yes.
+#   hops     for `path` with `connected: true`: the length of the real chain.
+#   k        for `search`: how many hits to ask for. Defaults to `defaults.k`.
+#   spans    the ground truth — every span that genuinely answers the question.
+#   grep     optional. The command an agent who already knew the term would
+#            type, run from the repository root. The report's central finding is
+#            a bytes-per-answer ratio, and it cannot be computed without the
+#            other side of it. A question with no sensible grep omits this.
+#   note     optional prose. Present wherever the ground truth needed a
+#            judgement call, saying what was checked and why this span and not
+#            another.
+#
+# Every span:
+#
+#   path        repository-relative.
+#   symbol      the definition the span covers. This is the anchor of record: if
+#               the line numbers no longer match, re-derive them from this name.
+#               A span over a doc file or a schema comment has no symbol; it
+#               carries `symbol: ~` and relies on its line range.
+#   start_line  inclusive, 1-based.
+#   end_line    inclusive.
+#
+#
+# ## The rule for choosing a span
+#
+# A span covers a whole definition — the function, the `impl` block, the `const`
+# with its doc comment — with a little slack, never one exact line. A span that
+# names one line is a span that breaks when somebody adds an argument above it,
+# and a broken span does not fail loudly: it silently subtracts a hit from every
+# metric this file feeds.
+#
+# Where the answer is genuinely spread across two places (the constant and the
+# loop that uses it; the code and the doc that explains it), both are listed.
+# Any one of a question's spans counts as a hit — they are alternatives, not a
+# conjunction.
+#
+# Spans were preferred in stable, load-bearing files — `store.rs`, `lib.rs`,
+# `chunk.rs`, `filter.rs` — over code that churns. `graph.rs` is the exception:
+# some questions are about the traversal and there is nowhere else for them to
+# live. Those spans are the most likely in the set to need re-deriving.
+#
+#
+# ## What the harness is expected to do
+#
+# Index `corpus.roots` into a temporary store, then for each question call its
+# tool and score:
+#
+#   hit@1 / hit@3 / hit@8
+#       A returned hit satisfies a span when it is from the same `path` AND
+#       either its line range overlaps [start_line, end_line], or the symbol
+#       enclosing it is `symbol`. The symbol clause is what makes a moved
+#       function still score. A question is a hit@k if any of its spans is
+#       satisfied by any of the first k hits.
+#
+#   bytes per answer
+#       Length of the rendered tool reply. Report the median and the worst case,
+#       not the mean — the report's finding is that every search reply is about
+#       7 KB whatever the question, and a mean hides that.
+#
+#   graph-list marginal hits
+#       Of the hits that carry the `graph` badge and no other, how many satisfy
+#       a span. `lib.rs`'s own comment on `graph_expansion` says a ranked walk
+#       waits for a recall measurement; this is that measurement. The report
+#       counted 12 graph-only hits in 88 across the seed questions and found the
+#       ones it inspected to be wrong, so the number to beat is close to zero.
+#
+#   wrong yes
+#       Over `tool: path` questions with `connected: false`: the count of
+#       questions where a chain was returned. This must be zero. It is the one
+#       metric with a hard gate, because a confident wrong "no chain exists,
+#       here it is anyway" is worse than the tool not existing.
+#
+#   chain match
+#       Over `tool: path` questions with `connected: true`: whether a chain was
+#       found at all, and whether its length equals `hops`.
+#
+# A harness that does not implement `tool: symbol` or `tool: neighbors` yet
+# should skip those questions and say how many it skipped, rather than scoring
+# them as misses.
+
+version: 1
+
+baseline:
+  commit: 199463c
+  release: 0.14.0
+  read_on: 2026-09-14
+
+corpus:
+  # The repository itself, which is the corpus both study documents measured,
+  # plus the document-format fixtures so the non-code readers are exercised too.
+  roots:
+    - .
+    - tests/fixtures
+
+defaults:
+  k: 8
+  depth: 6
+
+questions:
+
+  # ------------------------------------------------------------------
+  # identifier — the asker already knows the term.
+  #
+  # These are the questions grep answers in one line and 100-300 bytes. The
+  # point of measuring them is not recall, which should be trivially perfect;
+  # it is cost. A 7 KB reply to `edges_out` is the reason an agent with grep in
+  # hand does not reach for the store.
+  # ------------------------------------------------------------------
+
+  - id: id-edges-out
+    shape: identifier
+    tool: search
+    query: edges_out
+    grep: grep -rn 'fn edges_out' src
+    spans:
+      - path: src/store.rs
+        symbol: edges_out
+        start_line: 948
+        end_line: 970
+    note: >-
+      Seed Q12. `edges_out` has exactly one definition in the crate, which is
+      what makes it a clean identifier case: there is no name collision to
+      excuse a wrong answer. FTS5 tokenises it as `edges` + `out` under
+      unicode61, and both halves are rare enough that the keyword list lands it.
+
+  - id: id-chain-hash
+    shape: identifier
+    tool: search
+    query: chain_hash
+    grep: grep -rn 'fn chain_hash' src
+    spans:
+      - path: src/store.rs
+        symbol: chain_hash
+        start_line: 1096
+        end_line: 1110
+    note: >-
+      The report's §2.6 note 3 records that `chain_hash` never appeared at all
+      when the query was the prose description (see `concept-ledger-chain`),
+      because docs and tests outranked it. Asking by name is the control for
+      that: if the exact identifier also misses, the problem is not
+      prose-versus-code weighting.
+
+  - id: id-max-nodes
+    shape: identifier
+    tool: search
+    query: MAX_NODES
+    grep: grep -rn 'MAX_NODES' src
+    spans:
+      - path: src/graph.rs
+        symbol: MAX_NODES
+        start_line: 590
+        end_line: 597
+    note: >-
+      Span starts at the doc comment, which is where the answer actually is —
+      the constant is `2000` and the reason is the four lines above it. In
+      `graph.rs`, so expect this one to need re-deriving.
+
+  - id: id-rrf-k
+    shape: identifier
+    tool: search
+    query: RRF_K
+    grep: grep -rn 'RRF_K' src
+    spans:
+      - path: src/lib.rs
+        symbol: RRF_K
+        start_line: 87
+        end_line: 91
+    note: >-
+      The constant and its doc comment. The loop that uses it is inside
+      `search_ranked`, a 170-line function; listing that whole span here would
+      make almost any hit in the fusion code count, which is too generous for an
+      identifier question. `concept-rrf-fusion` carries the wider span.
+
+  - id: id-parse-timeout
+    shape: identifier
+    tool: search
+    query: PARSE_TIMEOUT
+    grep: grep -rn 'PARSE_TIMEOUT' src
+    spans:
+      - path: src/graph.rs
+        symbol: PARSE_TIMEOUT
+        start_line: 32
+        end_line: 33
+      - path: src/graph.rs
+        symbol: extract
+        start_line: 236
+        end_line: 373
+    note: >-
+      Two spans because the constant and its use are far apart and either
+      answers the question. The constant sits oddly in the middle of the `use`
+      block at the top of the file, which is where it is, not a typo here.
+
+  - id: id-overlap-lines
+    shape: identifier
+    tool: search
+    query: OVERLAP_LINES
+    grep: grep -rn 'OVERLAP_LINES' src
+    spans:
+      - path: src/chunk.rs
+        symbol: OVERLAP_LINES
+        start_line: 14
+        end_line: 16
+      - path: src/chunk.rs
+        symbol: chunk_text
+        start_line: 117
+        end_line: 166
+    note: >-
+      `chunk.rs` is small and has barely moved in three releases, so this is one
+      of the more durable spans in the set.
+
+  - id: id-token-header
+    shape: identifier
+    tool: search
+    query: TOKEN_HEADER
+    grep: grep -rn 'TOKEN_HEADER' src
+    spans:
+      - path: src/http.rs
+        symbol: TOKEN_HEADER
+        start_line: 77
+        end_line: 83
+    note: >-
+      Deliberately separate from `concept-token-compared`, which is the same
+      subject asked as prose and which the report measured as a miss. The pair
+      is the cleanest identifier-versus-concept comparison in the set.
+
+  - id: id-dependency-kinds
+    shape: identifier
+    tool: search
+    query: DEPENDENCY_KINDS
+    grep: grep -rn 'DEPENDENCY_KINDS' src
+    spans:
+      - path: src/graph.rs
+        symbol: DEPENDENCY_KINDS
+        start_line: 599
+        end_line: 608
+    note: >-
+      Doc comment included: it is the part that says why `defines` and
+      `contains` are excluded, which is the answer anyone asking this wants.
+
+  - id: id-image-floor-env
+    shape: identifier
+    tool: search
+    query: SEMLITH_IMAGE_FLOOR
+    grep: grep -rn 'SEMLITH_IMAGE_FLOOR' src
+    spans:
+      - path: src/lib.rs
+        symbol: IMAGE_FLOOR
+        start_line: 105
+        end_line: 126
+    note: >-
+      One span covering `IMAGE_FLOOR`, `IMAGE_FLOOR_ENV` and `image_floor()`,
+      which are consecutive and only make sense together. An environment
+      variable name is a good identifier case because it is a single rare token
+      with no plausible synonym, so a miss here is a keyword-half problem.
+
+  - id: id-keyword-search
+    shape: identifier
+    tool: search
+    query: keyword_search
+    grep: grep -rn 'fn keyword_search' src
+    spans:
+      - path: src/store.rs
+        symbol: keyword_search
+        start_line: 386
+        end_line: 437
+    note: >-
+      Span starts at the doc comment rather than `pub fn`, so the answer to
+      "what is this and why" is inside it.
+
+  - id: id-writing-guard
+    shape: identifier
+    tool: search
+    query: Writing
+    grep: grep -rn 'struct Writing' src
+    spans:
+      - path: src/store.rs
+        symbol: Writing
+        start_line: 226
+        end_line: 243
+    note: >-
+      A deliberately hard identifier case: `Writing` is a common English word,
+      so the keyword half has no rare token to lean on and the vector half will
+      see the word in prose all over the corpus. It is the shape the report
+      predicts will fail — `format` and `join` are the same class — and it is
+      here to be measured rather than because it is expected to pass. The span
+      covers the struct and its `impl`; `impl Drop` immediately follows at
+      244-251 and is the other half of the mechanism.
+
+  - id: id-symbol-edges-out
+    shape: identifier
+    tool: symbol
+    name: edges_out
+    grep: grep -rn 'fn edges_out' src
+    spans:
+      - path: src/store.rs
+        symbol: edges_out
+        start_line: 948
+        end_line: 970
+    note: >-
+      Seed Q13. The report measured this at 106 bytes against grep's 107 — the
+      one row where semlith already matches grep on cost while being
+      AST-exact rather than a text match. It is the cost baseline the `locate`
+      format is aiming at, so it is worth keeping measured.
+
+  - id: id-symbol-chain-hash
+    shape: identifier
+    tool: symbol
+    name: chain_hash
+    grep: grep -rn 'fn chain_hash' src
+    spans:
+      - path: src/store.rs
+        symbol: chain_hash
+        start_line: 1096
+        end_line: 1110
+    note: >-
+      A private function, unlike `edges_out`. Included to check that `symbol`
+      answers for a name with no `pub`, since nothing in the extraction path
+      depends on visibility and a regression there would be quiet.
+
+  - id: id-neighbors-record-retrieval
+    shape: identifier
+    tool: neighbors
+    name: record_retrieval
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'record_retrieval' src tests
+    spans:
+      - path: src/routes.rs
+        symbol: record
+        start_line: 428
+        end_line: 472
+      - path: tests/ledger.rs
+        symbol: one_recorded_retrieval_is_one_row_the_cli_prints
+        start_line: 30
+        end_line: 62
+      - path: tests/ledger.rs
+        symbol: editing_a_row_breaks_the_chain_and_the_break_is_found
+        start_line: 64
+        end_line: 105
+    note: >-
+      Seed Q10, and the question the report singles out as the graph's best
+      showing: `edges_in` is keyed on the target name and every source is an id
+      with a file behind it, so callers come back exact. Verified by grep — the
+      three callers listed here are every call site of `record_retrieval` in the
+      crate, one production and two test. The production one is `routes::record`
+      at line 462, inside the span above.
+
+  - id: id-neighbors-edges-out
+    shape: identifier
+    tool: neighbors
+    name: edges_out
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'store::edges_out(' src
+    spans:
+      - path: src/graph.rs
+        symbol: neighbours
+        start_line: 630
+        end_line: 636
+      - path: src/graph.rs
+        symbol: shortest_path
+        start_line: 638
+        end_line: 691
+      - path: src/lib.rs
+        symbol: graph_expansion
+        start_line: 1143
+        end_line: 1212
+      - path: src/fleet.rs
+        symbol: neighbours_in
+        start_line: 264
+        end_line: 273
+    note: >-
+      Four production callers, each verified by reading the call site. There are
+      further call sites inside `graph.rs`'s own unit tests and inside
+      `store.rs`'s; they are correct callers and a tool that lists them is not
+      wrong, so the harness should score a hit on any of the four above and not
+      penalise extras.
+
+  - id: id-neighbors-chain-hash
+    shape: identifier
+    tool: neighbors
+    name: chain_hash
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'chain_hash(' src
+    spans:
+      - path: src/store.rs
+        symbol: record_retrieval
+        start_line: 1037
+        end_line: 1093
+    note: >-
+      One production caller, and it is the only one. The other reference is in
+      `store.rs`'s own test at 1166, which recomputes the hash to prove the
+      chain verifies. A small, completely enumerable caller set is the useful
+      control against `id-neighbors-edges-out`, where the set is larger.
+
+  # ------------------------------------------------------------------
+  # concept — the asker knows the idea and not the name.
+  #
+  # This is the half the vector index exists for, and the half where the report
+  # measured grep returning 17-59 lines of noise from a guessed term. It is also
+  # where prose outranks code: the architecture docs, the CHANGELOG and the
+  # README describe these mechanisms in the same words the query uses, so
+  # several of these questions return the essay about the code instead of the
+  # code. The spans below are the implementation. Where a doc genuinely answers
+  # too it is listed as a second span, but the code is listed first on purpose.
+  # ------------------------------------------------------------------
+
+  - id: concept-token-compared
+    shape: concept
+    tool: search
+    query: where is the session token compared against the request header
+    grep: grep -rn 'Semlith-Token' src
+    spans:
+      - path: src/http.rs
+        symbol: TOKEN_HEADER
+        start_line: 77
+        end_line: 83
+      - path: src/http.rs
+        symbol: ~
+        start_line: 754
+        end_line: 778
+    note: >-
+      Seed Q1, and a measured miss: the report records the top 8 as portal
+      JavaScript and routes, with `http.rs` not appearing until `lang=rust` was
+      added, and then only at rank 4. The second span is the comparison itself —
+      the `by_header` / `by_agent` block inside the request-admission path. It
+      has no enclosing named symbol that is stable enough to anchor on, so it
+      carries `symbol: ~` and a generous range; the load-bearing lines are the
+      `header(TOKEN_HEADER_KEY)` check and the refusal under it.
+
+  - id: concept-rrf-fusion
+    shape: concept
+    tool: search
+    query: reciprocal rank fusion of vector and keyword results
+    grep: grep -rn 'RRF_K' src
+    spans:
+      - path: src/lib.rs
+        symbol: RRF_K
+        start_line: 87
+        end_line: 91
+      - path: src/lib.rs
+        symbol: search_ranked
+        start_line: 1433
+        end_line: 1603
+    note: >-
+      Seed Q2, measured at rank 4 with the top three being docs and a wrapper,
+      and the fusion loop itself only 9th at k=20. The second span is the whole
+      of `search_ranked` rather than the loop's exact lines, because the loop
+      moves whenever a list is added to the fusion — an image list was added in
+      0.13.0 and a graph list in 0.12.0 — while the function has kept its name
+      and its job.
+
+  - id: concept-edge-dst-is-a-name
+    shape: concept
+    tool: search
+    query: why is the edge destination a symbol name rather than an id
+    grep: grep -rn 'dst' src/store.rs
+    spans:
+      - path: src/store.rs
+        symbol: ~
+        start_line: 83
+        end_line: 104
+      - path: docs/architecture.md
+        symbol: ~
+        start_line: 442
+        end_line: 458
+    note: >-
+      Seed Q3. The answer is a schema comment, not code — the sixteen lines
+      above `CREATE TABLE edges` are the whole argument, and there is no symbol
+      to anchor on, hence `symbol: ~`. The doc span is listed second and is
+      genuinely a correct answer here rather than the prose-outranks-code
+      failure: this is a design-rationale question, and `docs/architecture.md`
+      is where design rationale belongs.
+
+  - id: concept-parse-timeout
+    shape: concept
+    tool: search
+    query: tree-sitter parse timeout for pathological files
+    grep: grep -rn 'PARSE_TIMEOUT' src
+    spans:
+      - path: src/graph.rs
+        symbol: PARSE_TIMEOUT
+        start_line: 32
+        end_line: 33
+      - path: src/graph.rs
+        symbol: extract
+        start_line: 236
+        end_line: 373
+    note: >-
+      Seed Q4, measured as a hit. The deadline is set at line 257, inside
+      `extract`; the whole function is the span because the deadline moves with
+      any change to the parse setup around it.
+
+  - id: concept-chunk-overlap
+    shape: concept
+    tool: search
+    query: chunk size and overlap lines when splitting a file into chunks
+    grep: grep -rn 'overlap' src/chunk.rs
+    spans:
+      - path: src/chunk.rs
+        symbol: MAX_CHARS
+        start_line: 6
+        end_line: 20
+      - path: src/chunk.rs
+        symbol: chunk_text
+        start_line: 117
+        end_line: 166
+    note: >-
+      Seed Q5, measured as a hit. The first span covers `MAX_CHARS`,
+      `OVERLAP_LINES` and `MAX_FILE_BYTES`, which are three consecutive
+      constants that answer the question together.
+
+  - id: concept-ledger-chain
+    shape: concept
+    tool: search
+    query: ledger rows are hash chained so an edited row is detected
+    grep: grep -rn 'chain_hash' src
+    spans:
+      - path: src/store.rs
+        symbol: record_retrieval
+        start_line: 1037
+        end_line: 1093
+      - path: src/store.rs
+        symbol: chain_hash
+        start_line: 1096
+        end_line: 1110
+    note: >-
+      Seed Q6, and a measured miss — §2.6 note 3 records that docs, tests and
+      `record_retrieval` outranked `chain_hash` at store.rs:1096, which never
+      appeared at all. Note that `record_retrieval` is itself listed as a span
+      here, so under this file's rule the seed's original verdict softens: the
+      function that builds the chain is a correct answer to "how are rows hash
+      chained", even though the hashing itself is one level down. The seed's
+      regex demanded the deeper span; this file accepts either, and the `note`
+      is here so a later reader knows the two scores are not comparable.
+
+  - id: concept-hidden-files-refused
+    shape: concept
+    tool: search
+    query: hidden files and ssh private keys are refused when indexing
+    grep: grep -rn 'hidden' src
+    spans:
+      - path: src/filter.rs
+        symbol: denied
+        start_line: 406
+        end_line: 437
+      - path: src/filter.rs
+        symbol: Denied
+        start_line: 388
+        end_line: 404
+      - path: docs/security.md
+        symbol: ~
+        start_line: 99
+        end_line: 106
+    note: >-
+      Seed Q7, measured as a hit at rank 2 — and the report's note 4 records
+      that its original regex expected `lib.rs` and was simply wrong about where
+      the code lives. The spans here were re-derived by reading `filter.rs`
+      rather than carried over from that regex. This is one of the two questions
+      where grep does badly: guessing the term `hidden` returns 59 lines across
+      portal JavaScript and docs.
+
+  - id: concept-expansion-seeds
+    shape: concept
+    tool: search
+    query: how many top hits seed the graph expansion
+    grep: grep -rn 'SEEDS' src/lib.rs
+    spans:
+      - path: src/lib.rs
+        symbol: graph_expansion
+        start_line: 1143
+        end_line: 1212
+    note: >-
+      Seed Q8, measured as a hit. `SEEDS` is a function-local constant at line
+      1165, so there is nothing to anchor on but the enclosing function; the
+      span starts at its doc comment, which is also where the "one hop, not a
+      ranked walk" reasoning lives.
+
+  - id: concept-stale-index-on-save
+    shape: concept
+    tool: search
+    query: what keeps a long-running reader from answering from an index that was replaced underneath it
+    grep: grep -rn 'stale' src
+    spans:
+      - path: src/lib.rs
+        symbol: refresh
+        start_line: 488
+        end_line: 519
+      - path: src/lib.rs
+        symbol: GENERATION
+        start_line: 78
+        end_line: 85
+      - path: src/lib.rs
+        symbol: generation
+        start_line: 1691
+        end_line: 1697
+    note: >-
+      Seed Q9, reworded. The seed asked "what keeps the index from going stale
+      when a file is saved" and accepted a hit anywhere in `watch.rs`, `lib.rs`
+      or `daemon.rs`, which is loose enough that almost anything scores. Reading
+      the code, the actual mechanism is narrow and nameable: `Semlith::refresh`
+      compares the store's `index_generation` meta key against the one this
+      process loaded, and evicts the index when they differ. The three spans are
+      that comparison, the key's doc comment explaining why a timestamp cannot
+      do the job, and the reader. The reword keeps the seed's vocabulary
+      mismatch — an agent would guess `stale`, which appears in none of the
+      three — while making the ground truth real. The seed's hit and this one
+      are not comparable; that is the intent.
+
+  - id: concept-clip-text-encoder
+    shape: concept
+    tool: search
+    query: the query for images goes through CLIP's text encoder
+    grep: grep -rn 'text encoder' src
+    spans:
+      - path: src/image.rs
+        symbol: embed_query
+        start_line: 198
+        end_line: 226
+    note: >-
+      Seed Q14, measured as a hit. `Images::embed_query` is the only place a
+      text query is turned into a CLIP vector; its doc comment is the sentence
+      the query paraphrases, which is why this one lands.
+
+  - id: concept-store-refuses-writes
+    shape: concept
+    tool: search
+    query: how does the store stop a query from writing to the database
+    grep: grep -rn 'query_only' src
+    spans:
+      - path: src/store.rs
+        symbol: read_only
+        start_line: 215
+        end_line: 227
+      - path: src/store.rs
+        symbol: Writing
+        start_line: 226
+        end_line: 251
+    note: >-
+      The two spans overlap by two lines because `read_only`'s doc comment ends
+      by naming `Writing` and `Writing` begins immediately after. Left
+      overlapping rather than trimmed: either is a correct answer and both
+      should score. The mechanism is SQLite's `query_only` pragma, lifted only
+      by the `Writing` guard, which the three write paths take — indexing,
+      forgetting, and recording a retrieval.
+
+  - id: concept-fts-bare-terms
+    shape: concept
+    tool: search
+    query: why is a search query stripped to bare terms before it reaches the full text index
+    grep: grep -rn 'chunks_fts MATCH' src/store.rs
+    spans:
+      - path: src/store.rs
+        symbol: keyword_search
+        start_line: 386
+        end_line: 437
+    note: >-
+      The doc comment is the answer: a raw query is parsed as FTS5 syntax, where
+      a bare `AND` is an operator and `foo(` is a syntax error, so a search for
+      "index AND search" would silently mean something the user did not type.
+      A good concept question because none of the query's words — stripped,
+      bare, full text — appear in the function.
+
+  - id: concept-two-indexers-at-once
+    shape: concept
+    tool: search
+    query: what stops two processes from indexing the same store at the same time
+    grep: grep -rn 'index.lock' src
+    spans:
+      - path: src/lock.rs
+        symbol: StoreLock
+        start_line: 21
+        end_line: 28
+      - path: src/lock.rs
+        symbol: acquire
+        start_line: 30
+        end_line: 85
+    note: >-
+      `lock.rs` is 200 lines and has not changed since 0.12.0, so this is a
+      durable span. The file is also small enough that a hit anywhere in it is
+      effectively a hit, which is fine — the question is whether the store is
+      found at all, not whether the exact line is.
+
+  - id: concept-null-chunk-id
+    shape: concept
+    tool: search
+    query: why can a symbol row point at no chunk at all
+    grep: grep -rn 'chunk_id' src/store.rs
+    spans:
+      - path: src/store.rs
+        symbol: ~
+        start_line: 61
+        end_line: 81
+    note: >-
+      A schema comment again, with no symbol to anchor on. The answer is the
+      three lines saying `chunk_id` is nullable on purpose: a symbol's defining
+      line always falls inside some chunk, but a file whose chunks were
+      rewritten between extraction and insertion would otherwise have to fail
+      rather than record the symbol. The report's §2.7 turns the same field into
+      a retrieval consequence — graph expansion returns the head of a function
+      and never its body — which is worth knowing when reading the
+      graph-marginal number.
+
+  - id: concept-which-languages-have-edges
+    shape: concept
+    tool: search
+    query: which file types actually get symbols and edges extracted from them
+    grep: grep -rn 'EXTENSIONS' src/graph.rs
+    spans:
+      - path: src/graph.rs
+        symbol: LANGUAGES
+        start_line: 72
+        end_line: 73
+      - path: src/graph.rs
+        symbol: EXTENSIONS
+        start_line: 75
+        end_line: 91
+      - path: src/graph.rs
+        symbol: language_of
+        start_line: 93
+        end_line: 100
+    note: >-
+      Three consecutive spans covering the language list, the extension map and
+      the lookup. The honest answer today is six languages and eleven
+      extensions, against the 46 languages `filter::LANGUAGES` accepts for
+      search — the parity gap the report's §5.11 is about. A plausible wrong
+      answer is `filter::LANGUAGES` at filter.rs:35, which is the search filter
+      and carries no grammar; it is deliberately not listed as a span, so a tool
+      that returns it scores a miss.
+
+  - id: concept-why-defines-excluded-from-path
+    shape: concept
+    tool: search
+    query: why does a dependency path ignore the edges that say one symbol sits inside another
+    grep: grep -rn 'DEPENDENCY_KINDS' src
+    spans:
+      - path: src/graph.rs
+        symbol: DEPENDENCY_KINDS
+        start_line: 599
+        end_line: 608
+    note: >-
+      The doc comment answers it directly: every symbol is reached in one hop
+      from the file it lives in, so including `defines` would make a path
+      between two unrelated functions in one file look like a two-hop
+      dependency. Worth measuring because the report found `graph_expansion`
+      does follow those edges — it passes an empty `kinds` slice, so all five —
+      and that this is one of the two causes of the wrong graph-only hits.
+
+  - id: concept-where-a-retrieval-is-written
+    shape: concept
+    tool: search
+    query: where does a search get written down so the savings can be counted later
+    grep: grep -rn 'record_retrieval\|state.ledger' src
+    spans:
+      - path: src/routes.rs
+        symbol: record
+        start_line: 428
+        end_line: 472
+      - path: src/store.rs
+        symbol: record_retrieval
+        start_line: 1037
+        end_line: 1093
+    note: >-
+      Two spans, and they are the whole of it. `routes.rs:416` holds the only
+      `if state.ledger` gate in the crate and `routes.rs:417` is the only
+      production call to `routes::record`, with the client string hardcoded to
+      `"portal"`. That single fact is what makes the four `not connected` path
+      questions below true, so this question and those share their evidence.
+
+  # ------------------------------------------------------------------
+  # multi-hop — questions only the graph answers.
+  #
+  # The `connected: false` questions are the wrong-yes gate. They come from
+  # `docs/graph-path-inferred-edges.md`, where each was reproduced returning a
+  # short, plausible, entirely wrong chain, every hop labelled `(inferred)`.
+  #
+  # As written against the 199463c baseline there were four of them, and the
+  # truth in each case was that no MCP tool call reached the retrieval ledger:
+  # `routes.rs:416` held the only `if state.ledger` gate in the crate,
+  # `routes::record` was the only production caller of `store::record_retrieval`
+  # with its client hardcoded to "portal", and neither `mcp::call_tool` nor
+  # `routes::mcp` touched the ledger at all.
+  #
+  # 0.15.0 changed that, deliberately: it is the release that made every surface
+  # record. `routes::record` is gone, its job moved to `src/ledger.rs`, and
+  # `mcp::call_tool` now calls it. Two of the four questions therefore became
+  # genuinely connected — `path-call-tool-to-ledger` at three hops and
+  # `path-answer-to-ledger` at five — and both were re-derived from a clean
+  # index of the tree, with every hop `resolved` or `extracted` and no seam.
+  # Their notes carry the chain and the reasoning.
+  #
+  # `path-search-in-to-ledger` and `path-is-image-to-ledger` stay at
+  # `connected: false` and are now the whole of the gate. `search_in` reaches
+  # the search machinery and never the ledger, which is what makes it the
+  # control: if a change ever makes the finder answer "yes" there, that is a
+  # wrong yes rather than a third flip, and the difference is checkable by
+  # reading the three hops it would have to invent.
+  #
+  # The `connected: true` questions keep the metric two-sided. Each was verified
+  # by reading every call site in its chain.
+  # ------------------------------------------------------------------
+
+  - id: path-call-tool-to-ledger
+    shape: multi-hop
+    tool: path
+    from: call_tool
+    to: record_retrieval
+    depth: 6
+    # Was `false`, and was true at the 199463c baseline. 0.15.0 made the two
+    # genuinely connected: see the note.
+    connected: true
+    hops: 3
+    grep: grep -rn 'record_retrieval\|fn call_tool\|ledger' src/mcp.rs src/routes.rs
+    spans:
+      - path: src/mcp.rs
+        symbol: call_tool
+        start_line: 552
+        end_line: 603
+      - path: src/routes.rs
+        symbol: ~
+        start_line: 412
+        end_line: 421
+    note: >-
+      Seed Q11, and the origin of the whole finding. The reported false chain
+      was `call_tool -> index -> first_store -> record -> record_retrieval`,
+      four hops, every one inferred. It is the clearest case in the document:
+      `first_store` at routes.rs:1277 calls `home::record`, the registry write,
+      and the traversal arrives at the name `record` and leaves it through an
+      edge belonging to `routes::record` — two unrelated functions welded into
+      one hop because `record` has two definitions. `index` on that chain has
+      seven. The first span is the search arm of `call_tool`, which runs
+      `search_in` then `render` and records nothing; the second is the only
+      ledger gate in the crate. The report measured this as 168 bytes to reach a
+      confident wrong yes, against roughly 5.2 KB of grep plus two reads to
+      reach a correct no.
+
+      Changed in 0.15.0, and the change is in the code rather than in this
+      file. The release made `call_tool` record every retrieval, so the chain
+      `call_tool -> record -> graph -> record_retrieval` now genuinely exists:
+      `mcp::call_tool` calls `mcp::record`, which calls `ledger::graph`, which
+      calls `store::record_retrieval`. Measured on a clean index of the tree at
+      the time of the release: three hops, one extracted and two resolved, no
+      seam and no ambiguous name.
+
+      This is the one kind of edit this file permits — the ground truth was
+      right about 0.14.0 and the code stopped matching it — and it is the kind
+      most easily abused, so the check that distinguishes it is recorded here.
+      The false chain this question was written for went through `record` with
+      two definitions and `index` with seven, and was welded at a seam. The
+      chain now is not that chain: it goes through a different `record`, in
+      `mcp.rs`, that the caller is in the same file as, and every hop resolves
+      to exactly one definition. `path-search-in-to-ledger` is the control and
+      is deliberately left at `connected: false` — `search_in` still does not
+      reach the ledger, and if a future change makes the tool answer "yes"
+      there, that is a wrong yes and not another flip.
+
+  - id: path-answer-to-ledger
+    shape: multi-hop
+    tool: path
+    from: answer
+    to: record_retrieval
+    depth: 6
+    # Flipped for the same reason as `path-call-tool-to-ledger`, one hop
+    # further out: `answer` reaches `call_tool` through `dispatch`.
+    connected: true
+    hops: 5
+    grep: grep -rn 'record_retrieval\|fn answer' src/mcp.rs src/routes.rs
+    spans:
+      - path: src/mcp.rs
+        symbol: answer
+        start_line: 93
+        end_line: 98
+      - path: src/routes.rs
+        symbol: ~
+        start_line: 412
+        end_line: 421
+    note: >-
+      The reported false chain was five hops:
+      `answer -> handler -> route -> search -> record -> record_retrieval`.
+      Note that `answer` itself has two definitions in this crate, `http::answer`
+      and `mcp::answer`, so the question's own endpoint is ambiguous — which is
+      part of what makes it a good test, and why the span names `mcp::answer`
+      explicitly. Either way the true answer is the same: neither reaches the
+      ledger.
+
+  - id: path-search-in-to-ledger
+    shape: multi-hop
+    tool: path
+    from: search_in
+    to: record_retrieval
+    depth: 6
+    connected: false
+    grep: grep -rn 'record_retrieval\|fn search_in' src tests
+    spans:
+      - path: src/fleet.rs
+        symbol: search_in
+        start_line: 168
+        end_line: 218
+      - path: src/routes.rs
+        symbol: ~
+        start_line: 412
+        end_line: 421
+    note: >-
+      The reported false chain was
+      `search_in -> search_ranked -> search -> record -> record_retrieval`.
+      `search` has five definitions in this crate — `fleet.rs`, `index.rs`
+      twice, `lib.rs` and `routes.rs` — so the third hop is a coin toss between
+      five unrelated functions. `search_in` itself has exactly one definition,
+      which is why it is the endpoint rather than `search`.
+
+  - id: path-is-image-to-ledger
+    shape: multi-hop
+    tool: path
+    from: is_image
+    to: record_retrieval
+    depth: 6
+    connected: false
+    grep: grep -rn 'fn is_image' src
+    spans:
+      - path: src/image.rs
+        symbol: is_image
+        start_line: 104
+        end_line: 115
+    note: >-
+      Not from the document — added so the wrong-yes metric has a case that is
+      not about the ledger's callers. `is_image` is a six-line extension
+      predicate that calls nothing defined in this crate; there is no route from
+      it to anything, let alone to the ledger. It is nonetheless a real trap:
+      one of its callees is `contains`, which has two definitions here, so a
+      traversal over collapsed names has somewhere to go. A tool that returns a
+      chain for this is doing exactly what the document describes, on a question
+      where the wrongness is obvious to any reader.
+
+  - id: path-expansion-to-edges-out
+    shape: multi-hop
+    tool: path
+    from: graph_expansion
+    to: edges_out
+    depth: 6
+    connected: true
+    hops: 1
+    grep: grep -n 'edges_out' src/lib.rs
+    spans:
+      - path: src/lib.rs
+        symbol: graph_expansion
+        start_line: 1143
+        end_line: 1212
+      - path: src/store.rs
+        symbol: edges_out
+        start_line: 948
+        end_line: 970
+    note: >-
+      A real one-hop chain, verified by reading the call at lib.rs:1183:
+      `store::edges_out(&self.db, name, &[])`. Both names have exactly one
+      definition in the crate, so there is no collision to make this accidentally
+      right. The edge is `inferred` rather than `extracted` — the Rust
+      supplement query records `store::edges_out` as two call edges, one to the
+      module prefix and one to the function, and only the prefix is covered by
+      an import — which makes this a good control: a correct answer here must
+      come from a real edge, not from the confidence label.
+
+  - id: path-record-retrieval-to-chain-hash
+    shape: multi-hop
+    tool: path
+    from: record_retrieval
+    to: chain_hash
+    depth: 6
+    connected: true
+    hops: 1
+    grep: grep -n 'chain_hash' src/store.rs
+    spans:
+      - path: src/store.rs
+        symbol: record_retrieval
+        start_line: 1037
+        end_line: 1093
+      - path: src/store.rs
+        symbol: chain_hash
+        start_line: 1096
+        end_line: 1110
+    note: >-
+      One hop, verified at store.rs:1066. Both functions are in the same file
+      and neither name has a second definition anywhere in the crate, which
+      makes this the easiest true-positive in the set — deliberately, so that a
+      failure here means something is broken rather than ambiguous. It also sits
+      next door to the four `connected: false` questions, so a resolver that
+      gets safety by refusing to traverse near the ledger fails visibly here.
+
+  - id: path-index-paths-to-writing
+    shape: multi-hop
+    tool: path
+    from: index_paths
+    to: index_set_writing
+    depth: 6
+    connected: true
+    hops: 3
+    grep: grep -n 'fn index_paths\|fn index_walk\|fn index_set' src/lib.rs
+    spans:
+      - path: src/lib.rs
+        symbol: index_paths
+        start_line: 621
+        end_line: 631
+      - path: src/lib.rs
+        symbol: index_walk
+        start_line: 694
+        end_line: 700
+      - path: src/lib.rs
+        symbol: index_set
+        start_line: 718
+        end_line: 730
+      - path: src/lib.rs
+        symbol: index_set_writing
+        start_line: 746
+        end_line: 1125
+    note: >-
+      The one genuinely multi-hop true positive. The chain is
+      `index_paths -> index_walk -> index_set -> index_set_writing`, and every
+      hop was verified by reading the call: `self.index_walk(roots, on_file)` at
+      630, `self.index_set(walk(roots), ...)` at 699, and
+      `me.index_set_writing(...)` at 729. That last one is inside a closure
+      passed to `self.writing(...)`; the extractor attributes a call to the
+      innermost named definition enclosing it, which is `index_set`, so the edge
+      exists. All four names have exactly one definition in the crate. The
+      report reproduced the neighbouring chain `main -> index_paths ->
+      index_walk -> index_set` and found it correct, which is independent
+      confirmation that these method calls are captured at all. `hops: 3` is the
+      chain length in edges; a tool that finds a shorter route has found
+      something this file does not know about and the discrepancy should be
+      investigated rather than assumed to be a tool bug.
+
+  - id: multihop-two-symbols-share-a-name
+    shape: multi-hop
+    tool: search
+    query: what happens when two different functions in different files have the same name
+    grep: grep -rn 'dst' src/store.rs src/graph.rs
+    spans:
+      - path: src/store.rs
+        symbol: ~
+        start_line: 83
+        end_line: 104
+      - path: src/graph.rs
+        symbol: shortest_path
+        start_line: 638
+        end_line: 691
+      - path: src/graph.rs
+        symbol: ~
+        start_line: 21
+        end_line: 28
+    note: >-
+      Asked as a search rather than a graph call, because it is the question an
+      agent asks just before it decides whether to trust a path result, and
+      nothing in the tool surface answers it. The three spans are the schema
+      comment explaining that `dst` is a name resolved at query time, the
+      breadth-first traversal that walks those collapsed names, and the module
+      doc that states the invariant the composition violates in spirit: an
+      inferred edge is marked and stays marked everywhere it surfaces, and
+      nothing may present one as the other. In this repository 136 names have
+      more than one definition, covering 405 symbols, and 9727 of 9926 call
+      edges are inferred — so this is not a corner case, it is the normal case.

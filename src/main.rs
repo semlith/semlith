@@ -67,11 +67,21 @@ enum Command {
         /// Stores to open. Defaults to every registered store.
         paths: Vec<PathBuf>,
 
-        /// Record what agents retrieve into each store's ledger. Off unless
-        /// asked for, and nothing recorded ever leaves the machine — see
-        /// `semlith ledger`.
+        /// Do not record what agents retrieve into each store's ledger.
+        ///
+        /// Recording is on from 0.15.0. The rows never leave the machine, the
+        /// daemon says on every start that it is recording and how to stop,
+        /// and deleting every row is one statement. A record an agent cannot
+        /// see being written is what makes the savings figure and the audit
+        /// trail true rather than optional — and until 0.15.0 the ledger was
+        /// opt-in, which in practice meant empty.
+        ///
+        /// `SEMLITH_LEDGER=0` is the same thing for a machine that should
+        /// never record at all. `--ledger` was removed rather than kept as a
+        /// flag that does nothing, so a script that passes it fails here and
+        /// is corrected once.
         #[arg(long)]
-        ledger: bool,
+        no_ledger: bool,
 
         /// Port to listen on (also settable with SEMLITH_PORT). Never falls
         /// back to another port: the URL is meant to be a bookmark.
@@ -261,6 +271,13 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         last: usize,
 
+        /// Re-walk the hash chain and exit non-zero if it is broken.
+        ///
+        /// Prints nothing else. For a cron job or a CI step that wants to know
+        /// the record has not been edited, rather than a person reading rows.
+        #[arg(long)]
+        verify: bool,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -290,6 +307,17 @@ enum Command {
         #[arg(long, short)]
         kind: Vec<String>,
 
+        /// Show every definition behind a collapsed row, and the targets this
+        /// store holds no definition for.
+        ///
+        /// Off by default. A name with four definitions is one row saying so,
+        /// because four rows would read as four calls; and a call into a
+        /// dependency that was never indexed is left out, because a list of
+        /// names the store knows nothing about is noise in an answer about
+        /// this codebase.
+        #[arg(long)]
+        all: bool,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -306,6 +334,22 @@ enum Command {
         /// Most hops to search before giving up.
         #[arg(long, short, default_value_t = 6)]
         depth: u32,
+
+        /// Walk names with several definitions too, and label what that found.
+        ///
+        /// Off by default. A name like `record` or `index` can be several
+        /// unrelated functions, and a chain that crosses one has changed
+        /// subject halfway through without saying so. This prints those chains
+        /// with the join marked and the sentence that says what they are worth.
+        #[arg(long)]
+        all_edges: bool,
+
+        /// Refuse to cross a name with several definitions. On by default.
+        ///
+        /// Here so a script can state the default rather than rely on it. When
+        /// both this and --all-edges are given, this one wins.
+        #[arg(long)]
+        strict: bool,
 
         /// Emit JSON instead of formatted text.
         #[arg(long)]
@@ -582,6 +626,10 @@ fn main() -> Result<()> {
             let started = Instant::now();
             let hits = fleet.search_filtered(&query, k, &filter)?;
             let elapsed = started.elapsed();
+            // The command line is a client like any other, and its retrievals
+            // count for exactly as much as an agent's. Recorded under `cli`, in
+            // the same table, through the same path.
+            semlith::ledger::search(&fleet, &CLI_LEDGER, &query, &hits, elapsed);
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
@@ -673,9 +721,27 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Ledger { last, json } => {
+        Command::Ledger { last, verify, json } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let many = fleet.len() > 1;
+            if verify {
+                let mut broken = false;
+                for (label, store) in fleet.each() {
+                    match semlith::store::ledger_break(store.db())? {
+                        Some(row) => {
+                            broken = true;
+                            println!("{label}: the chain does not verify from row {row} onwards");
+                        }
+                        None => println!("{label}: the chain is intact"),
+                    }
+                }
+                // Non-zero so a script can act on it. A verify that reported a
+                // broken chain and exited 0 would be worse than no verify.
+                if broken {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             let mut any = false;
             for (label, store) in fleet.each() {
                 let rows = semlith::store::retrievals(store.db(), last)?;
@@ -715,8 +781,9 @@ fn main() -> Result<()> {
             }
             if !any && !json {
                 eprintln!(
-                    "nothing recorded. Recording is off unless `semlith start --ledger` asked \
-                     for it, and nothing recorded ever leaves this machine."
+                    "nothing recorded yet. The daemon records by default from 0.15.0 and says \
+                     so on every start; `--no-ledger` or SEMLITH_LEDGER=0 stops it. Nothing \
+                     recorded ever leaves this machine."
                 );
             }
         }
@@ -747,7 +814,12 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Neighbors { name, kind, json } => {
+        Command::Neighbors {
+            name,
+            kind,
+            all,
+            json,
+        } => {
             for k in &kind {
                 if !semlith::graph::KINDS.contains(&k.as_str()) {
                     anyhow::bail!(
@@ -757,15 +829,44 @@ fn main() -> Result<()> {
                 }
             }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let neighbours = fleet.neighbours_in(None, &name, &kind)?;
+            let started = Instant::now();
+            let neighbours = fleet.neighbours_in(None, &name, &kind, all)?;
+            let found = !neighbours.callers.is_empty() || !neighbours.callees.is_empty();
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "neighbors",
+                &name,
+                "",
+                found,
+                started.elapsed(),
+            );
             if json {
                 println!("{}", serde_json::to_string_pretty(&neighbours)?);
-            } else if neighbours.callers.is_empty() && neighbours.callees.is_empty() {
+            } else if neighbours.callers.is_empty()
+                && neighbours.callees.is_empty()
+                && neighbours.hidden == 0
+                && neighbours.unresolved.is_empty()
+            {
                 eprintln!("{}", nothing_known(&fleet, &name));
             } else {
                 let mut out = std::io::stdout().lock();
                 print_ends(&mut out, "callers", &neighbours.callers)?;
                 print_ends(&mut out, "callees", &neighbours.callees)?;
+                if neighbours.hidden > 0 {
+                    writeln!(
+                        out,
+                        "\n{} target{} outside this store, not listed (--all)",
+                        neighbours.hidden,
+                        if neighbours.hidden == 1 { "" } else { "s" },
+                    )?;
+                }
+                if !neighbours.unresolved.is_empty() {
+                    writeln!(out, "\n{}outside this store{}", bold(), reset())?;
+                    for end in &neighbours.unresolved {
+                        writeln!(out, "  {} via {}", end.name, end.kind)?;
+                    }
+                }
             }
         }
 
@@ -773,52 +874,43 @@ fn main() -> Result<()> {
             from,
             to,
             depth,
+            all_edges,
+            strict,
             json,
         } => {
+            let all_edges = all_edges && !strict;
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let path = fleet.path_in(None, &from, &to, depth)?;
+            let started = Instant::now();
+            let chain = fleet.path_in(None, &from, &to, depth, all_edges)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "path",
+                &from,
+                "",
+                chain.is_some(),
+                started.elapsed(),
+            );
             if json {
-                println!("{}", serde_json::to_string_pretty(&path)?);
+                println!("{}", serde_json::to_string_pretty(&chain)?);
             } else {
-                match path {
+                match chain {
                     // An empty chain is `from == to`, which is a path of no
                     // hops rather than no path.
-                    Some(steps) if steps.is_empty() => {
+                    Some(chain) if chain.steps.is_empty() => {
                         println!("{from} is {to}");
                     }
-                    Some(steps) => {
+                    Some(chain) => {
                         let mut out = std::io::stdout().lock();
-                        for (i, step) in steps.iter().enumerate() {
-                            writeln!(
-                                out,
-                                "{}{}.{} {} --{}--> {}  ({})",
-                                bold(),
-                                i + 1,
-                                reset(),
-                                step.from,
-                                step.kind,
-                                step.to,
-                                step.confidence,
-                            )?;
-                        }
-                        let all = steps
-                            .iter()
-                            .all(|s| s.confidence == semlith::graph::EXTRACTED);
-                        writeln!(
+                        write!(
                             out,
-                            "{} hop{}, {}",
-                            steps.len(),
-                            if steps.len() == 1 { "" } else { "s" },
-                            if all {
-                                "all extracted"
-                            } else {
-                                "some inferred by name"
-                            },
+                            "{}",
+                            chain.render(bold(), reset(), &|p| display(std::path::Path::new(p)))
                         )?;
                     }
                     None => eprintln!(
-                        "no chain from {from} to {to} within {depth} hops \
-                         (a longer --depth may find one)"
+                        "{}",
+                        semlith::graph::not_connected(&from, &to, depth, all_edges)
                     ),
                 }
             }
@@ -881,6 +973,21 @@ fn main() -> Result<()> {
                     );
                 }
                 println!("indexed  {}", semlith::human_bytes(bytes));
+                // One line, and never a number without its denominator. A
+                // store that has recorded nothing prints nothing here rather
+                // than a zero that reads like a measurement.
+                let savings = semlith::store::ledger_savings(store.db())?;
+                if savings.total > 0 {
+                    println!(
+                        "saved    {} tokens not read, over {} of {} retrievals \
+                         ({}% coverage, {})",
+                        savings.net,
+                        savings.credited,
+                        savings.total,
+                        savings.coverage(),
+                        savings.tier(),
+                    );
+                }
                 if many {
                     println!();
                 }
@@ -1012,7 +1119,7 @@ fn main() -> Result<()> {
 
         Command::Start {
             paths,
-            ledger,
+            no_ledger,
             port,
             debounce,
             airgap,
@@ -1031,7 +1138,7 @@ fn main() -> Result<()> {
                 semlith::daemon::port_of(port),
                 std::time::Duration::from_millis(debounce),
                 semlith::embed::airgap(),
-                ledger,
+                !no_ledger && semlith::ledger::enabled(),
                 !no_mcp_http,
                 |line| eprintln!("semlith: {line}"),
             )?;
@@ -1367,6 +1474,16 @@ fn resolve_for_add(
     }
 }
 
+/// What the ledger calls a retrieval made from the command line.
+///
+/// One session per invocation is the truth of it: the process starts, asks one
+/// thing and exits. Pretending otherwise would make a session count that means
+/// nothing.
+const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
+    client: "cli",
+    session: "cli",
+};
+
 fn display(path: &std::path::Path) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     path.strip_prefix(&cwd)
@@ -1396,6 +1513,13 @@ fn reset() -> &'static str {
 /// A store with an empty graph and a store that simply does not contain the
 /// symbol are different facts, and only one of them means "run index". Saying
 /// "not found" for both is how someone concludes the feature is broken.
+/// What to say when the graph has nothing to show for a name.
+///
+/// Only reached when there is genuinely nothing — no caller, no callee, and
+/// nothing hidden. A symbol whose every target lies outside the corpus has
+/// something to say and used to be reported here as though it did not exist,
+/// which is the confusion between "semlith shows no callees" and "everything
+/// this calls is outside the index" that the hidden count exists to end.
 fn nothing_known(fleet: &semlith::fleet::Fleet, name: &str) -> String {
     let symbols: i64 = fleet
         .each()
@@ -1431,6 +1555,17 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         return Ok(());
     }
     for end in ends {
+        // A collapsed row stands for every definition of the name, so it says
+        // how many rather than pointing at whichever one came back first —
+        // which would read as a fact about where the call goes.
+        if end.confidence == semlith::graph::AMBIGUOUS {
+            writeln!(
+                out,
+                "  {} via {} ({}) · {} definitions",
+                end.symbol.name, end.kind, end.confidence, end.definitions,
+            )?;
+            continue;
+        }
         writeln!(
             out,
             "  {} via {} ({})  {}{}:{}",

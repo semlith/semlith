@@ -95,6 +95,28 @@ impl Model {
         }
     }
 
+    /// The tokenizer this model embeds with, for counting tokens rather than
+    /// estimating them.
+    ///
+    /// The same `tokenizer.json` [`Self::load`] hands to fastembed, read from
+    /// the same cache and verified against the same pinned digest — so a token
+    /// count here and the model's own segmentation are the same arithmetic,
+    /// not two approximations of it.
+    ///
+    /// `None` when the file is not cached, which is the airgapped machine that
+    /// has never fetched a model. The caller falls back to four characters per
+    /// token and says so in the row it writes.
+    pub fn tokenizer(&self, cache_dir: &Path) -> Option<tokenizers::Tokenizer> {
+        let name = match self {
+            Model::Granite => GRANITE_REPO,
+            // fastembed lays a builtin model's files out under its own
+            // directory name, which is the model's `model_code`.
+            Model::Builtin(m) => return builtin_tokenizer(cache_dir, m),
+        };
+        let dir = snapshot_dir(cache_dir, name, GRANITE_REVISION)?;
+        tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).ok()
+    }
+
     pub fn load(
         &self,
         cache_dir: PathBuf,
@@ -284,6 +306,51 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
 /// Refuse to download model weights, so an air-gapped machine can prove this
 /// process never reached the network. Set by `--airgap` and readable directly.
 pub const AIRGAP_ENV: &str = "SEMLITH_AIRGAP";
+
+/// Find a builtin model's cached `tokenizer.json`.
+///
+/// fastembed does not publish where it put the files, so this looks for the
+/// one file that matters under the cache root. Cheap and bounded: the cache
+/// holds a handful of model directories, and a miss costs a directory walk and
+/// returns `None`.
+fn builtin_tokenizer(cache_dir: &Path, model: &EmbeddingModel) -> Option<tokenizers::Tokenizer> {
+    let wanted = format!("{model}").to_lowercase().replace('/', "--");
+    let entries = std::fs::read_dir(cache_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if !name.contains(&wanted) {
+            continue;
+        }
+        for candidate in walk_for(&entry.path(), "tokenizer.json") {
+            if let Ok(tokenizer) = tokenizers::Tokenizer::from_file(&candidate) {
+                return Some(tokenizer);
+            }
+        }
+    }
+    None
+}
+
+/// Every `name` at most two directories below `root`.
+fn walk_for(root: &Path, name: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let direct = root.join(name);
+    if direct.is_file() {
+        found.push(direct);
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let nested = entry.path().join(name);
+        if nested.is_file() {
+            found.push(nested);
+        }
+    }
+    found
+}
 
 pub fn airgap() -> bool {
     matches!(
