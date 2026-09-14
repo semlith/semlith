@@ -814,27 +814,23 @@ fn main() -> Result<()> {
 
         Command::Symbol { name, k, json } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let found = fleet.symbols_in(None, &name, k)?;
+            // One answer rather than three: the definition, who calls it, what
+            // it calls, and the ring beyond that. Asking for a definition and
+            // then having to ask twice more to know whether it was the right
+            // one is what this replaces.
+            let found =
+                fleet.evidence_in(None, &name, &semlith::graph::dependency_kinds(), k, false)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&found)?);
-            } else if found.is_empty() {
+            } else if found.definitions.is_empty() {
                 eprintln!("{}", nothing_known(&fleet, &name));
             } else {
                 let mut out = std::io::stdout().lock();
-                for symbol in &found {
-                    writeln!(
-                        out,
-                        "{}{}{} {}  {}{}:{}-{}",
-                        bold(),
-                        symbol.name,
-                        reset(),
-                        symbol.kind,
-                        store_prefix(&symbol.store),
-                        display(std::path::Path::new(&symbol.path)),
-                        symbol.start_line,
-                        symbol.end_line,
-                    )?;
-                }
+                writeln!(
+                    out,
+                    "{}",
+                    found.render(bold(), reset(), &|p| display(std::path::Path::new(p)))
+                )?;
             }
         }
 

@@ -1234,6 +1234,176 @@ pub fn neighbours(
     })
 }
 
+/// How many second-ring names an evidence block will name.
+///
+/// The ego graph is context, not an answer: past a dozen it stops telling a
+/// reader where they are and starts costing them the tokens they came to save.
+const EGO_LIMIT: usize = 12;
+
+/// One name two hops from the centre, and the first-ring name it came through.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hop {
+    /// The first-ring name this was reached through.
+    pub via: String,
+    pub name: String,
+    pub kind: String,
+    pub confidence: String,
+    /// `caller` or `callee`, relative to `via`.
+    pub direction: &'static str,
+}
+
+/// Everything the store knows about one symbol, in one reply.
+///
+/// An agent asking "what is `record_retrieval`" wanted the definition, who
+/// calls it, what it calls, and roughly where it sits — and before 0.16.0 that
+/// was three tool calls and three replies, two of which it had to make before
+/// it knew whether the first was the right symbol.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Evidence {
+    pub name: String,
+    pub definitions: Vec<crate::store::SymbolRow>,
+    pub callers: Vec<crate::store::EdgeEnd>,
+    pub callees: Vec<crate::store::EdgeEnd>,
+    /// The second ring, reached only through names the first ring settled.
+    pub ego: Vec<Hop>,
+}
+
+/// The definition, the first ring and the second ring, in one pass.
+///
+/// The second ring is walked only through first-ring names that are
+/// `extracted` or `resolved`. An ambiguous name is several unrelated
+/// definitions wearing one label, and expanding through one would put
+/// somebody else's callers into this symbol's context — the same wrong answer
+/// the path finder used to give, in a different shape.
+pub fn evidence(
+    db: &rusqlite::Connection,
+    name: &str,
+    kinds: &[String],
+    limit: usize,
+    all: bool,
+) -> Result<Evidence> {
+    let definitions = crate::store::symbols_named(db, name, limit)?;
+    let ring = neighbours(db, name, kinds, all)?;
+
+    let mut ego: Vec<Hop> = Vec::new();
+    let settled: Vec<(&str, &crate::store::EdgeEnd)> = ring
+        .callers
+        .iter()
+        .map(|e| ("caller", e))
+        .chain(ring.callees.iter().map(|e| ("callee", e)))
+        .filter(|(_, e)| e.confidence == EXTRACTED || e.confidence == RESOLVED)
+        .collect();
+
+    for (_, first) in &settled {
+        if ego.len() >= EGO_LIMIT {
+            break;
+        }
+        let out = crate::store::edges_out(db, &first.symbol.name, kinds)?;
+        let into = crate::store::edges_in(db, &first.symbol.name, kinds)?;
+        for (direction, end) in out
+            .into_iter()
+            .map(|e| ("callee", e))
+            .chain(into.into_iter().map(|e| ("caller", e)))
+        {
+            if ego.len() >= EGO_LIMIT {
+                break;
+            }
+            // The centre is not two hops from itself, and a name already in
+            // the first ring is context the reader has.
+            if end.symbol.name == name
+                || ring
+                    .callers
+                    .iter()
+                    .chain(ring.callees.iter())
+                    .any(|e| e.symbol.name == end.symbol.name)
+                || ego.iter().any(|h| h.name == end.symbol.name)
+            {
+                continue;
+            }
+            ego.push(Hop {
+                via: first.symbol.name.clone(),
+                name: end.symbol.name,
+                kind: end.kind,
+                confidence: end.confidence,
+                direction,
+            });
+        }
+    }
+
+    Ok(Evidence {
+        name: name.to_string(),
+        definitions,
+        callers: ring.callers,
+        callees: ring.callees,
+        ego,
+    })
+}
+
+impl Evidence {
+    /// The block as every surface prints it.
+    ///
+    /// One renderer for the CLI and the MCP reply, for the reason the path
+    /// finder has one: two hand-written copies is how the same answer ends up
+    /// described two different ways.
+    pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = String::new();
+        for symbol in &self.definitions {
+            out.push_str(&format!(
+                "{bold}{}{reset} {}  {}:{}-{}\n",
+                symbol.name,
+                symbol.kind,
+                shorten(&symbol.path),
+                symbol.start_line,
+                symbol.end_line,
+            ));
+        }
+        if self.definitions.len() > 1 {
+            out.push_str(&format!(
+                "{} definitions of this name\n",
+                self.definitions.len()
+            ));
+        }
+        for (heading, ends) in [("callers", &self.callers), ("callees", &self.callees)] {
+            out.push_str(&format!("\n{bold}{heading}{reset} ({})\n", ends.len()));
+            if ends.is_empty() {
+                out.push_str("  none\n");
+            }
+            for end in ends.iter() {
+                if end.confidence == AMBIGUOUS {
+                    out.push_str(&format!(
+                        "  {} via {} ({}) · {} definitions{}\n",
+                        end.symbol.name,
+                        end.kind,
+                        end.confidence,
+                        end.definitions,
+                        call_site(end, shorten),
+                    ));
+                    continue;
+                }
+                out.push_str(&format!(
+                    "  {} via {} ({})  {}:{}{}\n",
+                    end.symbol.name,
+                    end.kind,
+                    end.confidence,
+                    shorten(&end.symbol.path),
+                    end.symbol.start_line,
+                    call_site(end, shorten),
+                ));
+            }
+        }
+        if !self.ego.is_empty() {
+            out.push_str(&format!("\n{bold}two hops out{reset}\n"));
+            for hop in &self.ego {
+                out.push_str(&format!(
+                    "  {} · {} of {} ({})\n",
+                    hop.name, hop.direction, hop.via, hop.confidence,
+                ));
+            }
+        }
+        out.trim_end().to_string()
+    }
+}
+
 /// The shortest chain of edges from `from` to `to`, if there is one.
 ///
 /// Breadth-first, so the first path found is a shortest one. `None` means the
@@ -1979,6 +2149,54 @@ mod tests {
             crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None, None).unwrap();
         }
         db
+    }
+
+    /// The block is one reply where 0.15.0 needed three, and the second ring
+    /// is walked only through names the first ring settled — an ambiguous name
+    /// is several unrelated definitions, and expanding one would put somebody
+    /// else's callers into this symbol's context.
+    #[test]
+    fn the_evidence_block_carries_the_definition_both_rings_and_no_ambiguity() {
+        let db = chain();
+        let found = evidence(&db, "b", &dependency_kinds(), 20, false).unwrap();
+
+        assert_eq!(found.name, "b");
+        assert!(!found.definitions.is_empty(), "{found:?}");
+        assert!(
+            found.callers.iter().any(|e| e.symbol.name == "a"),
+            "{:?}",
+            found.callers
+        );
+        assert!(
+            found.callees.iter().any(|e| e.symbol.name == "c"),
+            "{:?}",
+            found.callees
+        );
+        // `d` is two hops from `b`, through `c`.
+        assert!(
+            found.ego.iter().any(|h| h.name == "d" && h.via == "c"),
+            "{:?}",
+            found.ego
+        );
+        // The centre and the first ring are not in the second ring.
+        assert!(
+            found
+                .ego
+                .iter()
+                .all(|h| h.name != "b" && h.name != "a" && h.name != "c"),
+            "{:?}",
+            found.ego
+        );
+        assert!(
+            found.ego.len() <= EGO_LIMIT,
+            "the ring is context, not an answer: {:?}",
+            found.ego
+        );
+
+        let text = found.render("", "", &verbatim);
+        assert!(text.contains("callers"), "{text}");
+        assert!(text.contains("callees"), "{text}");
+        assert!(text.contains("two hops out"), "{text}");
     }
 
     #[test]

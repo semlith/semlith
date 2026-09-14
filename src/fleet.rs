@@ -287,6 +287,42 @@ impl Fleet {
         })
     }
 
+    /// Everything the chosen stores know about `name`, in one reply.
+    ///
+    /// Merged the same way neighbours are: each store answers about its own
+    /// rows and the lists are joined, because one name defined in two stores
+    /// is still one name.
+    pub fn evidence_in(
+        &self,
+        only: Option<&[String]>,
+        name: &str,
+        kinds: &[String],
+        limit: usize,
+        all: bool,
+    ) -> Result<crate::graph::Evidence> {
+        let mut merged: Option<crate::graph::Evidence> = None;
+        for part in self.graph_each(only, |s| {
+            crate::graph::evidence(s.db(), name, kinds, limit, all)
+        })? {
+            match &mut merged {
+                None => merged = Some(part),
+                Some(into) => {
+                    into.definitions.extend(part.definitions);
+                    into.callers.extend(part.callers);
+                    into.callees.extend(part.callees);
+                    into.ego.extend(part.ego);
+                }
+            }
+        }
+        Ok(merged.unwrap_or_else(|| crate::graph::Evidence {
+            name: name.to_string(),
+            definitions: Vec::new(),
+            callers: Vec::new(),
+            callees: Vec::new(),
+            ego: Vec::new(),
+        }))
+    }
+
     /// Callers and callees of `name`, merged across the chosen stores.
     pub fn neighbours_in(
         &self,
@@ -358,6 +394,23 @@ impl Fleet {
 
     /// Run a read over the chosen stores and concatenate what comes back,
     /// labelling each row with its store when more than one is open.
+    /// One answer per chosen store, unlabelled.
+    ///
+    /// The sibling of [`Fleet::graph_in`] for a reader that returns one whole
+    /// answer per store rather than a list of rows to concatenate.
+    fn graph_each<T>(
+        &self,
+        only: Option<&[String]>,
+        read: impl Fn(&Semlith) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let chosen = self.chosen(only)?;
+        let mut out = Vec::new();
+        for i in chosen {
+            out.push(read(&self.members[i].store)?);
+        }
+        Ok(out)
+    }
+
     fn graph_in<T: Labelled>(
         &self,
         only: Option<&[String]>,

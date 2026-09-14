@@ -1128,8 +1128,22 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
     let only = request.query_all("store");
     with_fleet(state, json!({ "symbols": [] }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        let found = fleet.symbols_in(only.as_deref(), &name, k)?;
-        Ok(json!({ "symbols": found }))
+        let found = fleet.evidence_in(
+            only.as_deref(),
+            &name,
+            &crate::graph::dependency_kinds(),
+            k,
+            false,
+        )?;
+        // `symbols` stays where it was so the portal's existing symbol lookup
+        // is unchanged; the rest of the block is beside it rather than in
+        // place of it.
+        Ok(json!({
+            "symbols": found.definitions,
+            "callers": found.callers,
+            "callees": found.callees,
+            "ego": found.ego,
+        }))
     })
 }
 

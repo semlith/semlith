@@ -483,7 +483,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "Where a symbol is defined, from the syntax tree rather than matched text.",
+            "description": "A symbol's definition, its callers and callees, and the ring beyond them, in one reply.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -819,23 +819,17 @@ fn call_tool(
             };
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
             let only = strings(&args, "store");
-            match stores.symbols_in(Some(&only), name, k.clamp(1, 200)) {
-                Ok(found) if found.is_empty() => empty_graph(stores, name),
-                Ok(found) => found
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "{} ({}) {}{}:{}-{}",
-                            s.name,
-                            s.kind,
-                            label_of(&s.store),
-                            s.path,
-                            s.start_line,
-                            s.end_line
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+            match stores.evidence_in(
+                Some(&only),
+                name,
+                &crate::graph::dependency_kinds(),
+                k.clamp(1, 200),
+                false,
+            ) {
+                Ok(found) if found.definitions.is_empty() => empty_graph(stores, name),
+                // The same renderer the CLI prints, so an agent and a person
+                // are told the same thing about one symbol.
+                Ok(found) => found.render("", "", &crate::graph::verbatim),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
