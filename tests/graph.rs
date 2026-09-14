@@ -779,3 +779,48 @@ fn read_returns_one_span_and_refuses_to_guess_between_definitions() {
     let missing = cli(store.path(), &["read", "nosuchsymbol"]);
     assert!(missing.contains("nothing indexed"), "{missing}");
 }
+
+/// A structural question a regex cannot ask: every call whose function is a
+/// bare identifier. The grammar is the one the extractor already uses, read
+/// from the same table, so a language `pattern` accepts is one the graph
+/// accepts.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_pattern_finds_the_shape_and_says_which_files_it_parsed() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "one.rs",
+        "fn caller() {\n    helper();\n}\nfn helper() {}\n",
+    );
+    write(corpus.path(), "notes.md", "helper() is called here too\n");
+    index(store.path(), corpus.path());
+
+    let out = cli(
+        store.path(),
+        &[
+            "pattern",
+            "--lang",
+            "rust",
+            "(call_expression function: (identifier) @called)",
+        ],
+    );
+    assert!(out.contains("@called"), "{out}");
+    assert!(out.contains("helper"), "{out}");
+    assert!(out.contains("one.rs:2"), "the call is on line 2: {out}");
+    // The Markdown file mentions the same text and is not Rust, so it is not
+    // parsed and cannot match.
+    assert!(!out.contains("notes.md"), "{out}");
+
+    // A pattern that does not compile is the caller's mistake, and saying "no
+    // matches" would have them conclude the code lacks the shape.
+    let broken = cli(store.path(), &["pattern", "--lang", "rust", "(unbalanced"]);
+    assert!(
+        broken.contains("not a valid tree-sitter pattern"),
+        "{broken}"
+    );
+
+    let nolang = cli(store.path(), &["pattern", "--lang", "cobol", "(x) @y"]);
+    assert!(nolang.contains("no grammar for"), "{nolang}");
+}

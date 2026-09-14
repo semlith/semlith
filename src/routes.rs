@@ -67,6 +67,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/privacy") => privacy(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
+        (true, _, "/api/pattern") => pattern(state, request),
         (true, _, "/api/read") => read(state, request),
         (true, _, "/api/symbol") => symbol(state, request),
         (true, _, "/api/neighbors") => neighbors(state, request),
@@ -1114,6 +1115,38 @@ fn with_fleet(
         Ok(value) => Response::json(&value),
         Err(e) => Response::error(500, &e.to_string()),
     }
+}
+
+/// A tree-sitter structural pattern over the indexed files of one language.
+fn pattern(state: &Arc<State>, request: &Request) -> Response {
+    let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
+        return Response::error(400, "missing query");
+    };
+    let Some(lang) = request.query("lang").filter(|l| !l.trim().is_empty()) else {
+        return Response::error(400, "missing lang");
+    };
+    let only = request.query_all("store");
+    let empty = json!({ "language": lang, "matches": [], "files": 0, "truncated": false });
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        // A bad pattern or an unknown language is the caller's to correct, and
+        // comes back as the parser's own words rather than an empty list.
+        match fleet.pattern_in(
+            only.as_deref(),
+            lang,
+            query,
+            &crate::filter::Filter::default(),
+        ) {
+            Ok(found) => Ok(serde_json::to_value(found)?),
+            Err(e) => Ok(json!({
+                "language": lang,
+                "matches": [],
+                "files": 0,
+                "truncated": false,
+                "error": e.to_string(),
+            })),
+        }
+    })
 }
 
 /// One span, or the definitions to choose between. The Search page's second

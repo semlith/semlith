@@ -33,6 +33,7 @@ pub mod index;
 pub mod ledger;
 pub mod lock;
 pub mod mcp;
+pub mod pattern;
 pub mod portal;
 pub mod proxy;
 pub mod routes;

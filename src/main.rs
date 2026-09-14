@@ -207,6 +207,27 @@ enum Command {
         json: bool,
     },
 
+    /// Run a tree-sitter structural pattern over the indexed files of one
+    /// language.
+    ///
+    /// `semlith pattern --lang rust '(call_expression function: (identifier) @f)'`
+    Pattern {
+        /// The pattern, in tree-sitter's S-expression query syntax.
+        query: String,
+
+        /// The language to parse. Required; see `semlith languages`.
+        #[arg(long, short)]
+        lang: String,
+
+        /// Only search files matching this glob. Repeatable.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show what the store contains.
     Stats,
 
@@ -915,6 +936,61 @@ fn main() -> Result<()> {
                         writeln!(out, "{line}")?;
                     }
                 }
+            }
+        }
+
+        Command::Pattern {
+            query,
+            lang,
+            path,
+            json,
+        } => {
+            let filter = Filter::new(&path, &[], &[])?;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let started = Instant::now();
+            let found = fleet.pattern_in(None, &lang, &query, &filter)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "pattern",
+                &query,
+                "",
+                !found.matches.is_empty(),
+                started.elapsed(),
+            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else if found.matches.is_empty() {
+                // Two different facts, and only one of them means the caller
+                // should change the pattern.
+                if found.files == 0 {
+                    eprintln!("no indexed file is {}", found.language);
+                } else {
+                    eprintln!("no match in {} {} files", found.files, found.language);
+                }
+            } else {
+                let mut out = std::io::stdout().lock();
+                for found in &found.matches {
+                    writeln!(
+                        out,
+                        "{}{}{}:{}-{}{} @{}  {}",
+                        bold(),
+                        store_prefix(&found.store),
+                        display(std::path::Path::new(&found.path)),
+                        found.start_line,
+                        found.end_line,
+                        reset(),
+                        found.capture,
+                        found.text,
+                    )?;
+                }
+                eprintln!(
+                    "{} match(es) in {} {} files{}",
+                    found.matches.len(),
+                    found.files,
+                    found.language,
+                    if found.truncated { " (truncated)" } else { "" },
+                );
             }
         }
 

@@ -287,6 +287,41 @@ impl Fleet {
         })
     }
 
+    /// One structural pattern, run over every chosen store.
+    ///
+    /// The matches are labelled and concatenated in store order; the file and
+    /// match counts are summed, and `truncated` is true when any store hit its
+    /// own budget, because a partial answer from one store is a partial
+    /// answer.
+    pub fn pattern_in(
+        &self,
+        only: Option<&[String]>,
+        language: &str,
+        source: &str,
+        filter: &crate::filter::Filter,
+    ) -> Result<crate::pattern::Matches> {
+        let chosen = self.chosen(only)?;
+        let label_rows = self.members.len() > 1;
+        let mut out = crate::pattern::Matches {
+            language: language.trim().to_ascii_lowercase(),
+            matches: Vec::new(),
+            files: 0,
+            truncated: false,
+        };
+        for i in chosen {
+            let part = crate::pattern::run(self.members[i].store.db(), language, source, filter)?;
+            out.files += part.files;
+            out.truncated |= part.truncated;
+            for mut found in part.matches {
+                if label_rows {
+                    found.store = Some(self.members[i].label.clone());
+                }
+                out.matches.push(found);
+            }
+        }
+        Ok(out)
+    }
+
     /// One span, from whichever chosen store holds it.
     ///
     /// The first store with an answer wins, and its label rides along when

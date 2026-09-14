@@ -9,7 +9,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-const SCHEMA: &str = r#"
+pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL

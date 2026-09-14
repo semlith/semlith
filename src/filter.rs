@@ -188,6 +188,18 @@ impl Filter {
     }
 
     /// AND-groups of OR-patterns, ready for the SQL builder.
+    /// This filter, narrowed to one language as well.
+    ///
+    /// A new group rather than a merge, because groups intersect: whatever the
+    /// caller already asked for stays, and the language is an additional
+    /// requirement rather than an alternative to it.
+    pub fn and_language(&self, language: &str) -> Result<Self> {
+        let added = Self::new(&[], &[], std::slice::from_ref(&language.to_string()))?;
+        let mut groups = self.groups.clone();
+        groups.extend(added.groups);
+        Ok(Self { groups })
+    }
+
     pub fn groups(&self) -> &[Vec<String>] {
         &self.groups
     }

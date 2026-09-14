@@ -430,6 +430,20 @@ fn tool_defs(open: &str) -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "semlith_pattern",
+            "description": "Tree-sitter pattern over indexed files of one language.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "e.g. (call_expression function: (identifier) @f)" },
+                    "lang": { "type": "string" },
+                    "store": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["query", "lang"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "semlith_stats",
             "description": "What each open store holds: files, chunks, bytes, model, ledger totals.",
             "inputSchema": { "type": "object", "properties": {} },
@@ -663,6 +677,45 @@ fn call_tool(
                         if span.fresh { "" } else { " · stale" },
                         span.text
                     )
+                }
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_pattern" => {
+            let Some(query) = args.get("query").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: query".into(), None));
+            };
+            let Some(lang) = args.get("lang").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: lang".into(), None));
+            };
+            let only = strings(&args, "store");
+            match stores.pattern_in(Some(&only), lang, query, &crate::filter::Filter::default()) {
+                // "no file of that language is indexed" and "none of them
+                // match" are different facts, and only the second means the
+                // pattern was wrong.
+                Ok(found) if found.files == 0 => {
+                    format!("No indexed file is {}.", found.language)
+                }
+                Ok(found) if found.matches.is_empty() => {
+                    format!("No match in {} {} files.", found.files, found.language)
+                }
+                Ok(found) => {
+                    let mut out = String::new();
+                    for m in &found.matches {
+                        out.push_str(&format!(
+                            "{}{}:{}-{} @{}  {}\n",
+                            label_of(&m.store),
+                            m.path,
+                            m.start_line,
+                            m.end_line,
+                            m.capture,
+                            m.text
+                        ));
+                    }
+                    if found.truncated {
+                        out.push_str(&format!("truncated at {} matches\n", found.matches.len()));
+                    }
+                    out.trim_end().to_string()
                 }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
@@ -1037,6 +1090,11 @@ fn record(
                 return;
             };
             crate::ledger::reply(stores, &who, "search", query, body, elapsed);
+        }
+        "semlith_pattern" => {
+            let subject = args.get("query").and_then(Value::as_str).unwrap_or("");
+            let found = !body.starts_with("No match") && !body.starts_with("No indexed");
+            crate::ledger::graph(stores, &who, "pattern", subject, "", found, elapsed);
         }
         "semlith_read" => {
             let subject = args.get("target").and_then(Value::as_str).unwrap_or("");

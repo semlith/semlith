@@ -261,6 +261,15 @@ fn supplement(lang: &str) -> &'static str {
     }
 }
 
+/// The grammar for a language, for a caller outside the extractor.
+///
+/// `semlith pattern` compiles its own query against the same grammar the
+/// extractor uses, read from the same table, so the two halves cannot disagree
+/// about what "rust" is.
+pub fn language_grammar(lang: &str) -> Option<Language> {
+    grammar(lang).map(|(language, _)| language)
+}
+
 fn grammar(lang: &str) -> Option<(Language, &'static str)> {
     match lang {
         "rust" => Some((
