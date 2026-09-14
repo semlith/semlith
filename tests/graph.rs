@@ -739,3 +739,43 @@ fn a_path_crosses_a_re_export_and_neighbours_names_the_call_site() {
         "the call site is line 4, not the line `start` begins on: {out}"
     );
 }
+
+/// The second stage of a retrieval: a locate answer says where, and this
+/// returns exactly that and nothing around it. A name with several definitions
+/// returns the list rather than guessing which one was meant.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn read_returns_one_span_and_refuses_to_guess_between_definitions() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "one.rs",
+        "fn alpha() {\n    let marker = 1;\n}\nfn shared() {}\n",
+    );
+    write(corpus.path(), "two.rs", "fn shared() {}\n");
+    index(store.path(), corpus.path());
+
+    let by_name = cli(store.path(), &["read", "alpha"]);
+    assert!(by_name.contains("let marker = 1;"), "{by_name}");
+    assert!(
+        !by_name.contains("fn shared"),
+        "a read is the span and nothing around it: {by_name}"
+    );
+
+    let by_span = cli(store.path(), &["read", "one.rs:2-2"]);
+    assert!(by_span.contains("let marker = 1;"), "{by_span}");
+    assert!(
+        !by_span.contains("fn alpha"),
+        "line 2 is not line 1: {by_span}"
+    );
+
+    let ambiguous = cli(store.path(), &["read", "shared"]);
+    assert!(
+        ambiguous.contains("2 definitions"),
+        "two definitions and nothing to choose between them: {ambiguous}"
+    );
+
+    let missing = cli(store.path(), &["read", "nosuchsymbol"]);
+    assert!(missing.contains("nothing indexed"), "{missing}");
+}

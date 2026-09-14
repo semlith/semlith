@@ -287,6 +287,45 @@ impl Fleet {
         })
     }
 
+    /// One span, from whichever chosen store holds it.
+    ///
+    /// The first store with an answer wins, and its label rides along when
+    /// there is more than one store to tell apart. A name with several
+    /// definitions returns the list from the first store that has any, because
+    /// a list that mixed two stores' definitions would need a store column the
+    /// caller did not ask for.
+    pub fn read_in(
+        &self,
+        only: Option<&[String]>,
+        target: &crate::Target,
+        filter: &crate::filter::Filter,
+    ) -> Result<Option<crate::Read>> {
+        let chosen = self.chosen(only)?;
+        let label_rows = self.members.len() > 1;
+        for i in chosen {
+            let Some(found) = self.members[i].store.read(target, filter)? else {
+                continue;
+            };
+            return Ok(Some(match found {
+                crate::Read::One(mut span) => {
+                    if label_rows {
+                        span.store = Some(self.members[i].label.clone());
+                    }
+                    crate::Read::One(span)
+                }
+                crate::Read::Choose(mut rows) => {
+                    if label_rows {
+                        for row in &mut rows {
+                            row.store = Some(self.members[i].label.clone());
+                        }
+                    }
+                    crate::Read::Choose(rows)
+                }
+            }));
+        }
+        Ok(None)
+    }
+
     /// Everything the chosen stores know about `name`, in one reply.
     ///
     /// Merged the same way neighbours are: each store answers about its own

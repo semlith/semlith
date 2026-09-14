@@ -323,6 +323,79 @@ fn provenance_of(graph: &[Reached], id: u64) -> Option<String> {
     graph.iter().find(|r| r.id == id).map(|r| r.tier.clone())
 }
 
+/// What `read` was asked for: a span of a file, or a symbol by name.
+///
+/// Parsed rather than guessed at, so `src/store.rs:1041-1080` and
+/// `record_retrieval` are told apart by shape and a caller is never handed the
+/// wrong kind of answer for a typo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Span { path: String, start: u32, end: u32 },
+    Symbol(String),
+}
+
+impl Target {
+    /// `path:start-end`, `path:line`, or a symbol name.
+    ///
+    /// A colon with a number after it is a span; anything else is a name. A
+    /// Windows drive letter is not a false positive, because what follows the
+    /// colon there is a separator rather than a digit.
+    pub fn parse(raw: &str) -> Self {
+        let raw = raw.trim();
+        if let Some((path, lines)) = raw.rsplit_once(':')
+            && !path.is_empty()
+        {
+            let (start, end) = match lines.split_once('-') {
+                Some((a, b)) => (a.parse::<u32>().ok(), b.parse::<u32>().ok()),
+                None => (lines.parse::<u32>().ok(), lines.parse::<u32>().ok()),
+            };
+            if let (Some(start), Some(end)) = (start, end) {
+                return Self::Span {
+                    path: path.to_string(),
+                    start: start.min(end),
+                    end: start.max(end),
+                };
+            }
+        }
+        Self::Symbol(raw.to_string())
+    }
+}
+
+/// One span of one file, and nothing around it.
+///
+/// The second stage of a retrieval. A locate answer costs about 150 bytes a
+/// hit and says where to look; this is what turns one of those into the text,
+/// without the whole file riding along with it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Span {
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub text: String,
+    /// The definition the span sits inside, when it sits inside one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_kind: Option<String>,
+    /// Whether the file still looks the way it did when it was indexed.
+    pub fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+}
+
+/// What a `read` produced: the span, or the definitions to choose between.
+///
+/// A name with several definitions returns the list rather than one of them.
+/// Guessing would be the same defect the graph's `ambiguous` value exists to
+/// refuse: a confident answer that is right a fraction of the time reads
+/// exactly like one that is right.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Read {
+    One(Span),
+    Choose(Vec<store::SymbolRow>),
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub score: f32,
@@ -1972,6 +2045,143 @@ impl Semlith {
         Ok(hits)
     }
 
+    /// One span of one file, or the definitions to choose between.
+    ///
+    /// Answers only from the store's own chunks. Reading the file off disk
+    /// would answer for content semlith never indexed and was never allowed to
+    /// look at — the boundary that governs indexing has to govern reading, or
+    /// an agent holding the agent key could read `~/.ssh/id_rsa` by naming it
+    /// as a span.
+    pub fn read(&self, target: &Target, filter: &Filter) -> Result<Option<Read>> {
+        let (path, start, end) = match target {
+            Target::Span { path, start, end } => {
+                // A locate answer prints a store-relative path, so that is
+                // what comes back in. Two indexed files can end with the same
+                // suffix, and choosing one of them would be a guess.
+                let candidates = store::files_ending_with(&self.db, path, 8)?;
+                match candidates.len() {
+                    0 => return Ok(None),
+                    1 => (candidates[0].clone(), *start, *end),
+                    _ => anyhow::bail!(
+                        "{path:?} matches {} indexed files: {}. Name more of the path.",
+                        candidates.len(),
+                        candidates.join(", ")
+                    ),
+                }
+            }
+            Target::Symbol(name) => {
+                let found = store::symbols_named(&self.db, name, 200)?;
+                match found.len() {
+                    0 => return Ok(None),
+                    1 => {
+                        let only = &found[0];
+                        (only.path.clone(), only.start_line, only.end_line)
+                    }
+                    // Several definitions and nothing to choose between them.
+                    // The list is the answer.
+                    _ => return Ok(Some(Read::Choose(found))),
+                }
+            }
+        };
+
+        // The same eligibility the other surfaces use, through the same
+        // predicate, so a chunk a filter excludes cannot be read either.
+        let allowed = if filter.is_empty() {
+            None
+        } else {
+            Some(store::filtered_chunk_ids(&self.db, filter.groups())?)
+        };
+        let chunks: Vec<store::ChunkRow> = store::chunks_overlapping(&self.db, &path, start, end)?
+            .into_iter()
+            .filter(|c| match &allowed {
+                Some(ids) => ids.contains(&(c.id as u64)),
+                None => true,
+            })
+            .collect();
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        // Chunks overlap by two lines, so they are stitched by line number
+        // rather than concatenated — concatenation would repeat the seam and
+        // the caller would read two copies of the same line as two lines.
+        let mut lines: Vec<(u32, String)> = Vec::new();
+        for chunk in &chunks {
+            for (offset, line) in chunk.text.lines().enumerate() {
+                let number = chunk.start_line + offset as u32;
+                if lines.iter().any(|(n, _)| *n == number) {
+                    continue;
+                }
+                lines.push((number, line.to_string()));
+            }
+        }
+        lines.sort_by_key(|(number, _)| *number);
+        lines.retain(|(number, _)| *number >= start && *number <= end);
+        if lines.is_empty() {
+            return Ok(None);
+        }
+
+        let first = lines.first().map(|(n, _)| *n).unwrap_or(start);
+        let last = lines.last().map(|(n, _)| *n).unwrap_or(end);
+        let text = lines
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut span = Span {
+            path,
+            start_line: first,
+            end_line: last,
+            text,
+            symbol: None,
+            symbol_kind: None,
+            fresh: true,
+            store: None,
+        };
+        self.name_enclosing_symbol(&mut span)?;
+        self.mark_span_freshness(&mut span)?;
+        Ok(Some(Read::One(span)))
+    }
+
+    /// The innermost definition a span sits inside, if any.
+    fn name_enclosing_symbol(&self, span: &mut Span) -> Result<()> {
+        let by_file = store::symbols_in_files(&self.db, std::slice::from_ref(&span.path))?;
+        let Some(symbols) = by_file.get(&span.path) else {
+            return Ok(());
+        };
+        if let Some((_, _, name, kind)) = symbols
+            .iter()
+            .filter(|(start, end, _, _)| *start <= span.start_line && *end >= span.start_line)
+            .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
+        {
+            span.symbol = Some(name.clone());
+            span.symbol_kind = Some(kind.clone());
+        }
+        Ok(())
+    }
+
+    /// Whether the file a span came from still looks the way it did when it
+    /// was indexed. The same conservative rule search uses.
+    fn mark_span_freshness(&self, span: &mut Span) -> Result<()> {
+        let stamps = store::file_stamps(&self.db, std::slice::from_ref(&span.path))?;
+        let Some((bytes, indexed_at)) = stamps.get(&span.path) else {
+            return Ok(());
+        };
+        span.fresh = match std::fs::metadata(&span.path) {
+            Ok(meta) => {
+                meta.len() as i64 == *bytes
+                    && meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at)
+            }
+            Err(_) => false,
+        };
+        Ok(())
+    }
+
     /// Give every hit the name of the definition it sits inside.
     ///
     /// One query for the whole answer, and the innermost definition wins: a
@@ -2310,6 +2520,50 @@ mod tests {
         // A stale hit is pushed down, never removed: the excerpt in hand may
         // still be the best answer there is.
         const { assert!(STALE_PENALTY < 1.0) };
+    }
+
+    /// A span and a name are told apart by shape, not by trying one and
+    /// falling back — a caller mistyping a path must not silently get a
+    /// symbol lookup for it.
+    #[test]
+    fn a_read_target_is_a_span_or_a_name_by_its_shape() {
+        assert_eq!(
+            Target::parse("src/store.rs:1041-1080"),
+            Target::Span {
+                path: "src/store.rs".to_string(),
+                start: 1041,
+                end: 1080
+            }
+        );
+        // One line is a span of one.
+        assert_eq!(
+            Target::parse("src/store.rs:12"),
+            Target::Span {
+                path: "src/store.rs".to_string(),
+                start: 12,
+                end: 12
+            }
+        );
+        // Backwards is still a span, in the order the file has.
+        assert_eq!(
+            Target::parse("a.rs:80-40"),
+            Target::Span {
+                path: "a.rs".to_string(),
+                start: 40,
+                end: 80
+            }
+        );
+        for name in [
+            "record_retrieval",
+            "store::edges_out",
+            "src/store.rs",
+            "a.rs:notanumber",
+        ] {
+            assert!(
+                matches!(Target::parse(name), Target::Symbol(_)),
+                "{name:?} is a name"
+            );
+        }
     }
 
     #[test]

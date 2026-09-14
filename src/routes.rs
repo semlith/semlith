@@ -67,6 +67,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/privacy") => privacy(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
+        (true, _, "/api/read") => read(state, request),
         (true, _, "/api/symbol") => symbol(state, request),
         (true, _, "/api/neighbors") => neighbors(state, request),
         (true, _, "/api/path") => shortest_path(state, request),
@@ -1113,6 +1114,25 @@ fn with_fleet(
         Ok(value) => Response::json(&value),
         Err(e) => Response::error(500, &e.to_string()),
     }
+}
+
+/// One span, or the definitions to choose between. The Search page's second
+/// stage: the list costs about 150 bytes a hit and this is what turns one of
+/// them into the text.
+fn read(state: &Arc<State>, request: &Request) -> Response {
+    let Some(raw) = request.query("target").filter(|t| !t.trim().is_empty()) else {
+        return Response::error(400, "missing target");
+    };
+    let target = crate::Target::parse(raw);
+    let only = request.query_all("store");
+    with_fleet(state, json!({ "span": null }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        match fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())? {
+            None => Ok(json!({ "span": null, "definitions": [] })),
+            Some(crate::Read::One(span)) => Ok(json!({ "span": span, "definitions": [] })),
+            Some(crate::Read::Choose(rows)) => Ok(json!({ "span": null, "definitions": rows })),
+        }
+    })
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {

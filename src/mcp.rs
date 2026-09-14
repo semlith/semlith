@@ -406,13 +406,26 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs; a wrong guess hides the answer." },
+                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs." },
                     "ext": { "type": "array", "items": { "type": "string" } },
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
-                    "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Lift code or prose. Default any." },
+                    "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
                     "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
                 },
                 "required": ["query"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_read",
+            "description": "One span or one symbol, and nothing around it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol name." },
+                    "store": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["target"]
             },
             "annotations": { "readOnlyHint": true }
         },
@@ -457,7 +470,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_add",
-            "description": "Fetch one https URL into the store. No crawling. Refused under --airgap.",
+            "description": "Fetch one https URL. No crawling. Refused under --airgap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -470,7 +483,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_forget",
-            "description": "Drop one file from a store. The file on disk is untouched.",
+            "description": "Drop one file from a store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -483,7 +496,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "A symbol's definition, its callers and callees, and the ring beyond them, in one reply.",
+            "description": "A symbol's definition, callers, callees and the ring beyond, in one reply.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -497,13 +510,13 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_neighbors",
-            "description": "What calls a symbol and what it calls. Edges are extracted, resolved, inferred or ambiguous; only the first two are certain.",
+            "description": "What calls a symbol and what it calls. Only extracted and resolved edges are certain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
                     "kind": { "type": "array", "items": { "type": "string" } },
-                    "all": { "type": "boolean", "description": "Expand collapsed rows; list targets this store lacks." },
+                    "all": { "type": "boolean", "description": "Expand collapsed rows and missing targets." },
                     "store": { "type": "string" }
                 },
                 "required": ["name"]
@@ -512,14 +525,14 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_path",
-            "description": "The shortest chain between two symbols, or a statement that there is none. An ambiguous name is not crossed unless you ask.",
+            "description": "The shortest chain between two symbols, or a statement that there is none.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "from": { "type": "string" },
                     "to": { "type": "string" },
                     "depth": { "type": "integer", "description": "Default 6." },
-                    "all_edges": { "type": "boolean", "description": "Cross them; the answer is then a hypothesis." },
+                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; then it is a hypothesis." },
                     "strict": { "type": "boolean" },
                     "store": { "type": "string" }
                 },
@@ -608,6 +621,50 @@ fn call_tool(
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
                 }
+            }
+        }
+        "semlith_read" => {
+            let Some(raw) = args.get("target").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: target".into(), None));
+            };
+            let target = crate::Target::parse(raw);
+            let only = strings(&args, "store");
+            match stores.read_in(Some(&only), &target, &crate::filter::Filter::default()) {
+                Ok(None) => {
+                    format!("Nothing indexed at {raw:?}. semlith_files says what is indexed.")
+                }
+                Ok(Some(crate::Read::Choose(rows))) => {
+                    let mut out = format!("{} definitions of this name:\n", rows.len());
+                    for row in &rows {
+                        out.push_str(&format!(
+                            "  {} ({}) {}{}:{}-{}\n",
+                            row.name,
+                            row.kind,
+                            label_of(&row.store),
+                            row.path,
+                            row.start_line,
+                            row.end_line
+                        ));
+                    }
+                    out.trim_end().to_string()
+                }
+                Ok(Some(crate::Read::One(span))) => {
+                    let named = match (&span.symbol, &span.symbol_kind) {
+                        (Some(name), Some(kind)) => format!(" · {name} {kind}"),
+                        (Some(name), None) => format!(" · {name}"),
+                        _ => String::new(),
+                    };
+                    format!(
+                        "{}{}:{}-{}{named}{}\n{}",
+                        label_of(&span.store),
+                        span.path,
+                        span.start_line,
+                        span.end_line,
+                        if span.fresh { "" } else { " · stale" },
+                        span.text
+                    )
+                }
+                Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
         "semlith_stats" => {
@@ -980,6 +1037,11 @@ fn record(
                 return;
             };
             crate::ledger::reply(stores, &who, "search", query, body, elapsed);
+        }
+        "semlith_read" => {
+            let subject = args.get("target").and_then(Value::as_str).unwrap_or("");
+            let found = !body.starts_with("Nothing indexed");
+            crate::ledger::graph(stores, &who, "read", subject, "", found, elapsed);
         }
         "semlith_neighbors" | "semlith_path" | "semlith_symbol" => {
             // `path` is asked about two names and the first is the one the
@@ -1480,6 +1542,18 @@ mod tests {
     /// and mostly cannot act on. The budget here is the release's, and it is a
     /// test rather than a note because a one-sentence description is the kind
     /// of thing that grows back a paragraph at a time.
+    ///
+    /// 0.16.0 raised it from 4 000 to 4 400 because it adds two tools, and
+    /// every description was trimmed first rather than the number moved first
+    /// — the eleven that existed came down by 240 bytes in the same commit.
+    /// What was not done, deliberately: dropping `items` from the array
+    /// properties, or the `readOnlyHint` annotations. Both would have bought
+    /// the bytes by making the schema worse to call, which is the opposite of
+    /// what this budget exists for.
+    ///
+    /// Bytes are the proxy; tokens are the criterion. `tests/retrieval.rs`
+    /// counts the real thing with the store's own tokenizer and is the gate
+    /// that decides whether this list is small enough.
     #[test]
     fn the_tool_list_stays_small() {
         let size = serde_json::to_string(&tool_defs("default")).unwrap().len();
@@ -1496,7 +1570,7 @@ mod tests {
             })
             .collect();
         assert!(
-            size < 4_000,
+            size < 4_400,
             "tools/list is {size} bytes: {}",
             each.join(" ")
         );

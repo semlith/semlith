@@ -190,6 +190,23 @@ enum Command {
         json: bool,
     },
 
+    /// Print one span, or one symbol's definition, and nothing around it.
+    ///
+    /// The second stage after a search: `semlith read src/store.rs:1041-1080`
+    /// or `semlith read record_retrieval`.
+    Read {
+        /// `path:start-end`, `path:line`, or a symbol name.
+        target: String,
+
+        /// Only read files matching this glob. Repeatable.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show what the store contains.
     Stats,
 
@@ -831,6 +848,73 @@ fn main() -> Result<()> {
                     "{}",
                     found.render(bold(), reset(), &|p| display(std::path::Path::new(p)))
                 )?;
+            }
+        }
+
+        Command::Read { target, path, json } => {
+            let filter = Filter::new(&path, &[], &[])?;
+            let target = semlith::Target::parse(&target);
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let started = Instant::now();
+            let found = fleet.read_in(None, &target, &filter)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "read",
+                match &target {
+                    semlith::Target::Span { path, .. } => path,
+                    semlith::Target::Symbol(name) => name,
+                },
+                "",
+                found.is_some(),
+                started.elapsed(),
+            );
+            match found {
+                None => eprintln!(
+                    "nothing indexed at that span or under that name (store has {} chunks)",
+                    fleet.chunks()
+                ),
+                Some(found) if json => println!("{}", serde_json::to_string_pretty(&found)?),
+                // Several definitions and nothing to choose between them, so
+                // the list is the answer rather than a guess at which one.
+                Some(semlith::Read::Choose(rows)) => {
+                    let mut out = std::io::stdout().lock();
+                    writeln!(out, "{} definitions of this name:", rows.len())?;
+                    for row in &rows {
+                        writeln!(
+                            out,
+                            "  {} {}  {}{}:{}-{}",
+                            row.name,
+                            row.kind,
+                            store_prefix(&row.store),
+                            display(std::path::Path::new(&row.path)),
+                            row.start_line,
+                            row.end_line,
+                        )?;
+                    }
+                }
+                Some(semlith::Read::One(span)) => {
+                    let mut out = std::io::stdout().lock();
+                    let named = match (&span.symbol, &span.symbol_kind) {
+                        (Some(name), Some(kind)) => format!("  {name} {kind}"),
+                        (Some(name), None) => format!("  {name}"),
+                        _ => String::new(),
+                    };
+                    writeln!(
+                        out,
+                        "{}{}{}:{}-{}{named}{}{}",
+                        bold(),
+                        store_prefix(&span.store),
+                        display(std::path::Path::new(&span.path)),
+                        span.start_line,
+                        span.end_line,
+                        if span.fresh { "" } else { "  · stale" },
+                        reset(),
+                    )?;
+                    for line in span.text.lines() {
+                        writeln!(out, "{line}")?;
+                    }
+                }
             }
         }
 

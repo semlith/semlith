@@ -567,6 +567,54 @@ pub fn insert_chunk(
     Ok(db.last_insert_rowid())
 }
 
+/// Indexed files whose path ends with `suffix`, most specific first.
+///
+/// A locate answer prints a store-relative path and a user types one, while
+/// `files.path` is absolute. Rather than teach every caller to rebuild the
+/// absolute form — which needs the store's roots and gets it wrong for a file
+/// reached through a symlink — the suffix is matched against what was actually
+/// indexed. `/` is prepended so `one.rs` cannot match `alone.rs`.
+pub fn files_ending_with(db: &Connection, suffix: &str, limit: usize) -> Result<Vec<String>> {
+    let suffix = suffix.trim_start_matches(['.', '/']);
+    let mut stmt = db.prepare(
+        "SELECT path FROM files WHERE path = ?1 OR path LIKE '%/' || ?1
+         ORDER BY LENGTH(path) LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![suffix, limit as i64], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Every chunk of one file whose lines overlap `start..=end`, in file order.
+///
+/// The second stage of a retrieval: a locate answer says `src/store.rs:1041-1080`
+/// and this is what returns those lines and nothing else. Chunks overlap by two
+/// lines by design, so the caller stitches rather than concatenates — which is
+/// [`crate::Span::text`]'s job, not this one's.
+pub fn chunks_overlapping(
+    db: &Connection,
+    path: &str,
+    start: u32,
+    end: u32,
+) -> Result<Vec<ChunkRow>> {
+    let mut stmt = db.prepare(
+        "SELECT c.id, f.path, c.ord, c.start_line, c.end_line, c.text
+         FROM chunks c JOIN files f ON f.id = c.file_id
+         WHERE f.path = ?1 AND c.start_line <= ?2 AND c.end_line >= ?3
+         ORDER BY c.ord",
+    )?;
+    let rows = stmt.query_map(params![path, end, start], |r| {
+        Ok(ChunkRow {
+            id: r.get(0)?,
+            path: r.get(1)?,
+            ord: r.get(2)?,
+            start_line: r.get(3)?,
+            end_line: r.get(4)?,
+            text: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn chunk(db: &Connection, id: u64) -> Result<Option<ChunkRow>> {
     Ok(db
         .query_row(
