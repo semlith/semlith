@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2481,6 +2481,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokenizers",
  "tree-sitter",
  "tree-sitter-c",
  "tree-sitter-go",

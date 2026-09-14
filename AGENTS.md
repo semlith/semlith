@@ -31,7 +31,19 @@ cargo test --test mcp -- --ignored some_test_name    # one test
 cargo test --test image -- --ignored                 # images; downloads CLIP as well
 cargo test --release --test measure -- --ignored --nocapture   # perf claims; needs --release
 cargo test --release --test shards -- --ignored --nocapture
+cargo test --release --test retrieval -- --ignored --nocapture # retrieval quality
 ```
+
+`tests/retrieval.rs` is the harness behind every retrieval claim this repository
+makes. It runs a fixed set of 41 questions with ground-truth spans from
+`tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
+multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer and the graph list's
+marginal contribution. It asserts two things: the wrong-yes count for `path` is
+zero, and `tools/list` costs under 1 000 tokens. Change ranking, chunking or the
+tool schemas and run it; a number moving is the report, and an adjective is not.
+The question set's spans are line ranges in the 0.14.0 merge, and the `symbol`
+field is the durable anchor when one moves — the file's header says how to
+re-derive it.
 
 `tests/endpoint.rs` is the exception in the other direction: it drives the
 daemon's `/mcp` route and its credential, neither of which needs an embedding
@@ -93,6 +105,7 @@ Module responsibilities:
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/graph.rs` | tree-sitter extraction, and the bounded traversals over the edges |
+| `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
@@ -173,10 +186,34 @@ Module responsibilities:
   and silently orphan every edge pointing into it from `a.rs` — the graph would
   rot on exactly the operation this design exists to make safe. It also lets an
   edge to something unindexed (a standard-library call) still be recorded.
-- **`extracted` versus `inferred` is load-bearing.** A call whose name the file
-  imports is extracted; a bare name match is inferred. Two functions called `new`
-  in different modules is the normal case, so nothing that renders an edge may
-  present the second as the first.
+- **Confidence is four values, and only two of them are stored.** `extracted` (the
+  file said where the name came from) and `inferred` (a bare name match) are
+  written into `edges.confidence` at extraction time. `resolved` (the candidates
+  ranked down to one) and `ambiguous` (they did not) are computed by
+  `store::edges_out` when a query runs and are never written down — deliberately,
+  because re-indexing a target changes which definitions exist and a stored
+  ranking would go stale the moment it did. `edges_in` answers from the edge's own
+  `src` id, so callers still carry the stored value and there is nothing to
+  resolve. Nothing that renders an edge may present one value as another.
+
+  **What to trust, in order.** `extracted` and `resolved` are answers: the source
+  named the target, or the ranking left exactly one candidate standing. `inferred`
+  is a hint worth checking. `ambiguous` is not an answer at all — it means the
+  store holds several definitions of that name and cannot say which one this is,
+  and it carries the count so a renderer says "4 definitions" rather than printing
+  four calls. Never quote an ambiguous edge as a call site without opening the
+  file.
+- **`edges.hint` is what the source said, not what the query decided.** The module
+  of a scoped call, the receiver of a method call, the object of a qualified
+  Python or TypeScript call. Nullable, NULL on every row an older binary wrote,
+  added by the `ALTER TABLE` in `store::add_columns` that runs on open — which is
+  why `FORMAT_VERSION` does not move. The ranking that reads it prefers, in order:
+  the calling file's own definition, a definition whose file the hint names, one in
+  a file the caller imports, then a unique definition in the corpus. An edge the
+  syntax tree already settled stays `extracted` and is not re-ranked: a fact
+  outranks a ranking. Rust's supplement must not emit the path segment of a scoped
+  call as a second `calls` edge — `store::edges_out()` is a call to `edges_out`,
+  not to `store`.
 - **Traversal is bounded and reads one hop at a time.** No `petgraph`, no
   in-memory whole-graph structure: `graph::neighbours` and
   `graph::shortest_path` walk the indexed `edges(src)`/`edges(dst)` columns
@@ -184,6 +221,37 @@ Module responsibilities:
   as the corpus grows. `shortest_path` follows `DEPENDENCY_KINDS` only — the
   structural edges are true and useless for reachability, since every symbol is
   one hop from the file that defines it.
+- **A path walks definitions, not names.** A node in the traversal is a name, a
+  file and a line, and a chain may only leave from the definition it arrived at.
+  Refusing ambiguous edges is not enough on its own: at 0.14.0 every hop of
+  `call_tool -> record_retrieval` on this repository's own store resolved to one
+  definition, and the chain was still false, because hop 3 arrived at `search` in
+  `lib.rs` and hop 4 left from `search` in `routes.rs`. Each hop true, the chain
+  not. (That pair is genuinely connected from 0.15.0, which is the release that
+  made `call_tool` record; `search_in -> record_retrieval` is the case that still
+  has no chain.) So `semlith path` refuses by default and says "not connected within N hops
+  by resolved edges"; `--all-edges` / `all_edges: true` walks the old way and
+  labels it — both endpoints per hop with file and line, a seam where the chain
+  changed subject, a trailer whose four confidence counts add up to the hop count,
+  and the line "A hypothesis, not a finding." `--strict` / `strict: true` states
+  the default out loud and wins over `--all-edges`. One renderer serves the CLI and
+  the MCP reply, so the two cannot describe one answer differently.
+- **`semlith neighbors` collapses and hides, and `--all` undoes both.** Callees to
+  a name with several definitions are one row carrying the count, because four
+  rows saying `get` read as four calls. Targets the store holds no definition for
+  are counted rather than silently omitted, and `--all` / `all: true` lists them:
+  "semlith shows no callees" and "everything this calls is outside the index" are
+  different facts.
+- **`semlith_search` answers where by default; the CLI still answers with text.**
+  Over MCP and `/api/search`, `format: locate` returns one line per hit — path,
+  span, enclosing symbol and kind, the lists that found it, provenance for a
+  graph-reached row, a freshness flag, one line of text — grouped by file and cut
+  to `max_tokens` (default 1500, floor 200) with `truncated: N of M`. Ask for
+  `format: "excerpt"` when you actually need the body; that is what 0.14.0
+  returned. `semlith search` in a terminal is unchanged. Every hit carries
+  `fresh`, from one `stat` per distinct path against the recorded size and mtime —
+  conservative on purpose, so a `touch` reads as stale, because a false "check
+  this" costs a reread and a false "this is current" costs a wrong quotation.
 - **Reverse reachability left the free product in 0.13.0.** `semlith impact`,
   `semlith_impact` and `/api/impact` are gone, with no shim: an agent carrying
   `semlith_impact` in a saved prompt or a committed `.mcp.json` breaks on
@@ -206,10 +274,37 @@ Module responsibilities:
   reads such a store as the text corpus it already was. Anything that would make
   an older binary misread a store is a format bump instead; adding a table it
   ignores is not.
-- **The ledger is off unless asked for**, and its rows are hash-chained: each
-  carries the hash of the one before it, so `store::ledger_break` finds an edited
-  or deleted row. Recording and `semlith ledger` are free on every tier,
+- **The ledger records by default, locally, from every surface.** `src/ledger.rs`
+  is the one writer, and stdio MCP, the daemon's `/mcp` route, the CLI and the
+  portal all call it — a search from the CLI and the same search from an agent
+  must be counted the same way, which is why there is one module rather than four
+  call sites. A row carries the client's own name from the MCP `initialize`
+  handshake (`claude-code`, `cursor`, `cli`, `portal`) and a session id. Graph
+  tools record too, against the bytes a grep for that name would have made you
+  read; a zero-hit retrieval is recorded and credited nothing, because a ledger
+  that remembers only its successes is a marketing document. Rows are
+  hash-chained, each carrying the hash of the one before it, so
+  `store::ledger_break` finds an edited or deleted row — and the chain is
+  versioned *by the row*: `tool` is NULL on every pre-0.15.0 row and set on every
+  row since, which is what picks the formula, so a store holding both kinds
+  verifies end to end. Recording and `semlith ledger` are free on every tier,
   permanently; do not put either behind a key.
+- **On by default is the whole point, and the principle that makes it all right
+  is narrower than the one it replaced.** 0.12.0 said a local tool that starts
+  logging without being told is no different from one that phones home. What that
+  bought was a ledger nobody switched on: no denominator under the savings figure
+  and no rows in the audit trail. What holds instead is checkable — the rows never
+  leave the store they were written into, the daemon says on every start that it
+  is recording and names the flag that stops it, and erasing every row is one
+  `DELETE`. `semlith start --ledger` is removed rather than kept as a no-op, so a
+  script that passes it fails at parse time; `--no-ledger` stops a session and
+  `SEMLITH_LEDGER=0` stops a machine. Do not reintroduce an off-by-default.
+- **Both sides of a ratio are counted on the same instrument.** The store's own
+  embedding tokenizer counts excerpt and whole-file tokens — the same
+  `tokenizer.json`, the same cache, the same pinned digest. Four characters per
+  token survives only as the fallback for a session that never loaded a model, and
+  `retrievals.tokenizer` records which counted the row, so rows counted two
+  different ways are never summed.
 - **`mcp::tool_names` is the one tool list.** `routes::agents` reads it rather
   than repeating it, because two hand-written copies is how a tool ends up served
   by the server and invisible in the portal.
@@ -243,7 +338,8 @@ Module responsibilities:
 Env overrides: `SEMLITH_STORE` (PATH-style separated), `SEMLITH_HOME`,
 `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`,
 `SEMLITH_INDEX_MEMORY`, `SEMLITH_SHARD_VECTORS`, `SEMLITH_CHECKPOINT_SECS`,
-`SEMLITH_MODEL_CACHE`, `SEMLITH_MCP_INDEX_BUDGET`.
+`SEMLITH_MODEL_CACHE`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_LEDGER` (`0`, `off`
+or `false` stops the ledger recording on this machine).
 
 Deeper rationale lives in `docs/architecture.md`; what is and isn't a stability
 contract lives in `docs/compatibility.md`.
@@ -280,9 +376,9 @@ relaxation without an issue like
 [#41](https://github.com/semlith/semlith/issues/41):
 
 - `127.0.0.1` is the only bind address, and there is no flag to change it.
-- The portal and every `/api/*` route need the per-run token, as a
-  `SameSite=Strict; HttpOnly` cookie. Without it: 401 and an empty body. `/mcp`
-  takes the agent key as a bearer instead, and is the only route that does.
+- The portal and every `/api/*` route need the per-run token, in a
+  `Semlith-Token` header. Without it: 401 and an empty body. `/mcp` takes the
+  agent key as a bearer instead, and is the only route that does.
 - The `Host` header must be `localhost`, `127.0.0.1` or `::1`. Otherwise: 400.
 - Every response carries a `Content-Security-Policy` allowing only `'self'`, and
   no CORS header is emitted anywhere.

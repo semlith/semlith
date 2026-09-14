@@ -364,9 +364,23 @@ pub struct State {
     pub mcp_fleet: Mutex<Option<Fleet>>,
     /// Whether retrievals are recorded into each store's `retrievals` table.
     ///
-    /// Off unless asked for, on the principle the whole product is built on:
-    /// a local tool that starts logging what you searched for without being
-    /// told to is not meaningfully different from one that phones home.
+    /// On unless `--no-ledger` or `SEMLITH_LEDGER=0` says otherwise, which
+    /// reverses what 0.12.0 to 0.14.0 did. The principle those releases stated
+    /// was that a local tool which starts logging without being told to is not
+    /// different from one that phones home; the principle that actually holds
+    /// is narrower and checkable:
+    ///
+    /// - the rows never leave the store they were written into, which is still
+    ///   provable with a packet capture;
+    /// - the daemon says on every start that it is recording, and names the
+    ///   flag that stops it;
+    /// - erasing every row is one `DELETE`.
+    ///
+    /// What the old default cost was the thing the record is for. A ledger
+    /// nobody switched on measured nobody, so the savings figure had no
+    /// denominator and the audit trail had no rows — and the one client whose
+    /// retrievals it did record was the portal's own search box, which is not
+    /// who the product is for.
     pub ledger: bool,
 }
 
@@ -523,6 +537,20 @@ impl State {
     /// forwarding `semlith mcp` it is the proxy's pid. A client that echoes
     /// neither is counted as one unnamed client per transport rather than as a
     /// new one on every request.
+    /// The name a session gave itself when it initialized.
+    ///
+    /// The MCP handshake carries `clientInfo` once, and every later request on
+    /// that session carries none — so the name the ledger records has to come
+    /// from what was noted at the handshake rather than from the request in
+    /// hand.
+    pub fn client_name(&self, session: &str, transport: &str) -> Option<String> {
+        let clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        clients
+            .get(&format!("{transport}:{session}"))
+            .map(|client| client.name.clone())
+            .filter(|name| name != "unnamed client")
+    }
+
     pub fn note_client(
         &self,
         session: &str,
@@ -803,6 +831,18 @@ pub fn run(
     // minute.
     let server = Arc::new(Server::bind(port)?);
     report(&format!("listening on 127.0.0.1:{}", server.port()));
+
+    // Said on every start, in both states, before anything is recorded.
+    //
+    // This is the whole of what makes default-on recording honest rather than
+    // a surprise: the person who started the daemon is told, in the same
+    // breath as the port, that it keeps a record and how to stop it. A default
+    // nobody is told about is the thing 0.12.0 was right to refuse.
+    report(if ledger {
+        "ledger: recording (local only; --no-ledger to stop)"
+    } else {
+        "ledger: off for this session"
+    });
 
     // The agent key is read, or written if this machine has none. It survives
     // restarts and upgrades on purpose: a client's configuration is written

@@ -397,6 +397,12 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     // because the portal always has the possibility of more than one.
     let single = fleet.len() == 1;
     let label = fleet.labels().first().map(|s| s.to_string());
+    // `format=locate` leaves the text out, for a caller paying for it. The
+    // portal asks for it on the list and fetches the body when a row is
+    // opened, which is the two-stage shape its Search page is built around.
+    let locate = request
+        .query("format")
+        .is_some_and(|f| f.eq_ignore_ascii_case("locate"));
     let out: Vec<Value> = hits
         .iter()
         .map(|h| {
@@ -405,16 +411,31 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "path": h.path,
                 "start_line": h.start_line,
                 "end_line": h.end_line,
-                "text": h.text,
+                "text": if locate { String::new() } else { h.text.clone() },
                 "store": h.store.clone().or_else(|| single.then(|| label.clone()).flatten()),
                 "lists": h.lists,
                 "image": h.image.map(|px| json!({ "width": px.width, "height": px.height })),
+                "fresh": h.fresh,
+                "symbol": h.symbol,
+                "symbol_kind": h.symbol_kind,
+                "provenance": h.provenance,
             })
         })
         .collect();
 
     if state.ledger {
-        record(fleet, "portal", query, &hits, elapsed);
+        // The portal is one client among several now, named the same way the
+        // agents are, and recorded through the same path they use.
+        crate::ledger::search(
+            fleet,
+            &crate::ledger::Who {
+                client: "portal",
+                session: "portal",
+            },
+            query,
+            &hits,
+            elapsed,
+        );
     }
 
     Response::json(&json!({
@@ -423,52 +444,6 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
     }))
-}
-
-/// Write one retrieval into every store that answered.
-///
-/// Tokens are estimated at four characters each. That is a rough rule and it is
-/// said to be one on the page: what matters for the ratio is that both sides
-/// are measured the same way, not that either is exact.
-fn record(
-    fleet: &crate::fleet::Fleet,
-    client: &str,
-    query: &str,
-    hits: &[crate::Hit],
-    elapsed: std::time::Duration,
-) {
-    const CHARS_PER_TOKEN: i64 = 4;
-    let excerpt: i64 = hits.iter().map(|h| h.text.len() as i64).sum::<i64>() / CHARS_PER_TOKEN;
-
-    for (label, store) in fleet.each() {
-        // Only the stores this answer actually came from, so a search across
-        // three stores does not write three identical rows.
-        let mine: Vec<&crate::Hit> = hits
-            .iter()
-            .filter(|h| h.store.as_deref().is_none_or(|s| s == label))
-            .collect();
-        if mine.is_empty() {
-            continue;
-        }
-        // What reading those files whole would have cost, which is the honest
-        // denominator: the ratio is measured against a real alternative.
-        let paths: std::collections::BTreeSet<&str> =
-            mine.iter().map(|h| h.path.as_str()).collect();
-        let whole: i64 = paths
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len() as i64 / CHARS_PER_TOKEN)
-            .sum();
-        let _ = store::record_retrieval(
-            store.db(),
-            client,
-            query,
-            mine.len() as i64,
-            elapsed.as_micros() as i64,
-            excerpt,
-            whole,
-        );
-    }
 }
 
 /// The free half of the ledger: whether it is recording, and the totals.
@@ -494,6 +469,28 @@ fn ledger(state: &Arc<State>) -> Response {
             whole += w;
             intact = intact && store::ledger_break(store.db())?.is_none();
         }
+        // Summed across stores the same way the totals are, and reported with
+        // the denominators that make them readable: a ratio on its own is a
+        // marketing number, and the Ledger page is told not to draw one.
+        let mut net = 0;
+        let (mut credited, mut total) = (0, 0);
+        let mut measured = true;
+        let mut by_client: std::collections::BTreeMap<String, i64> = Default::default();
+        for (_, store) in fleet.each() {
+            let savings = store::ledger_savings(store.db())?;
+            net += savings.net;
+            credited += savings.credited;
+            total += savings.total;
+            measured = measured && savings.measured;
+            for (client, count) in store::ledger_clients(store.db())? {
+                *by_client.entry(client).or_default() += count;
+            }
+        }
+        let coverage = if total == 0 {
+            0
+        } else {
+            credited * 100 / total
+        };
         let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
         Ok(json!({
             "recording": recording,
@@ -503,6 +500,11 @@ fn ledger(state: &Arc<State>) -> Response {
             "whole_file_tokens": whole,
             "ratio": ratio,
             "intact": intact,
+            "net_tokens": net,
+            "credited": credited,
+            "coverage": coverage,
+            "tier": if measured && credited > 0 { "measured" } else { "modelled" },
+            "by_client": by_client,
         }))
     })
 }
@@ -986,6 +988,10 @@ fn agents(state: &Arc<State>) -> Response {
             .into_iter()
             .map(|(name, about)| json!({ "name": name, "about": about }))
             .collect::<Vec<_>>(),
+        // What the tool list costs an agent, once per session, before it has
+        // asked anything. A cost a user should be able to see rather than one
+        // they would have to capture traffic to discover.
+        "tool_list_bytes": crate::mcp::tool_list_bytes(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         "endpoint": {
@@ -1124,13 +1130,17 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &format!("unknown edge kind {bad:?}"));
     }
     let only = request.query_all("store");
+    let all = request
+        .query("all")
+        .is_some_and(|v| v == "1" || v == "true");
     let empty = json!({ "callers": [], "callees": [] });
     with_fleet(state, empty, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         Ok(json!(fleet.neighbours_in(
             only.as_deref(),
             &name,
-            &kinds
+            &kinds,
+            all
         )?))
     })
 }
@@ -1146,9 +1156,23 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or(6)
         .clamp(1, 20);
     let only = request.query_all("store");
+    // Resolved edges only unless the caller asks otherwise, the same default
+    // the CLI and the MCP tool take. The portal's Graph page sends
+    // `all_edges=1` behind its own control and labels what comes back.
+    let all_edges = request
+        .query("all_edges")
+        .is_some_and(|v| v == "1" || v == "true");
     with_fleet(state, json!({ "path": null }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        Ok(json!({ "path": fleet.path_in(only.as_deref(), &from, &to, depth)? }))
+        let chain = fleet.path_in(only.as_deref(), &from, &to, depth, all_edges)?;
+        // `path` keeps its name and its shape — an array of steps or null —
+        // so a 0.14.0 reader of this endpoint still finds what it looks for.
+        // The counts arrive beside it rather than inside it.
+        Ok(json!({
+            "path": chain.as_ref().map(|c| &c.steps),
+            "summary": chain.as_ref().map(|c| &c.summary),
+            "all_edges": all_edges,
+        }))
     })
 }
 
@@ -1593,7 +1617,14 @@ fn mcp(state: &Arc<State>, request: &Request) -> Response {
         None => return Response::error(409, "this daemon has no store open"),
     };
 
-    let response = match crate::mcp::answer(fleet, Some(&writer), &body) {
+    // The client named itself at `initialize` and never again, so the name the
+    // ledger records comes from what was noted then. The transport's session id
+    // is the conversation id, which is what it is for.
+    let mut mcp_session = crate::mcp::Session::new(session.clone());
+    if let Some(named) = state.client_name(&session, transport) {
+        mcp_session.client = named;
+    }
+    let response = match crate::mcp::answer(fleet, Some(&writer), &body, &mut mcp_session) {
         Some(value) => Response::json(&value),
         // A notification. Answered with an empty 200 rather than an empty JSON
         // object, so the proxy writes nothing to a client that expects nothing.

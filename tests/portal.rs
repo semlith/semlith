@@ -62,6 +62,7 @@ const VIEWS: &[(&str, &str)] = &[
 const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_search", "/api/search"),
     ("semlith_stats", "/api/stores"),
+    ("semlith_languages", "/api/languages"),
     ("semlith_files", "/api/files"),
     ("semlith_index", "/api/index"),
     ("semlith_add", "/api/add"),

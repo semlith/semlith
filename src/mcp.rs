@@ -90,16 +90,62 @@ pub trait Writer: Send + Sync {
 /// over stdio and the same request forwarded over loopback are answered by the
 /// same code — which is what makes "every supported revision works through the
 /// proxy" true by construction rather than by a second implementation agreeing.
-pub fn answer(stores: &mut Fleet, writer: Option<&dyn Writer>, request: &Value) -> Option<Value> {
+pub fn answer(
+    stores: &mut Fleet,
+    writer: Option<&dyn Writer>,
+    request: &Value,
+    session: &mut Session,
+) -> Option<Value> {
     let id = request.get("id").cloned()?;
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or(json!({}));
-    Some(reply(&id, dispatch(stores, writer, method, &params)))
+    Some(reply(
+        &id,
+        dispatch(stores, writer, method, &params, session),
+    ))
+}
+
+/// Who is on the other end of this connection, and which conversation it is.
+///
+/// The ledger is the reason this exists. Before 0.15.0 a retrieval by an agent
+/// was recorded as nothing at all, and the savings figure the product is built
+/// on counted only the portal's own search box. A row now says which client
+/// asked and which conversation it belonged to, and both of those are facts
+/// the protocol already carries — the client names itself in `initialize`, and
+/// the transport already has a session.
+#[derive(Debug, Clone)]
+pub struct Session {
+    /// The client's own name for itself, from `clientInfo.name`.
+    ///
+    /// `mcp` until the handshake says otherwise, which covers a client that
+    /// sends no `clientInfo` and one that starts calling tools without
+    /// initializing at all.
+    pub client: String,
+    pub id: String,
+}
+
+impl Session {
+    pub fn new(id: impl Into<String>) -> Self {
+        Session {
+            client: "mcp".to_string(),
+            id: id.into(),
+        }
+    }
+
+    fn who(&self) -> crate::ledger::Who<'_> {
+        crate::ledger::Who {
+            client: &self.client,
+            session: &self.id,
+        }
+    }
 }
 
 /// Read requests from `input` until EOF, answering on `output`.
 pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) -> Result<()> {
     stores.quiet = true;
+    // One connection is one conversation, so the id is made once here and every
+    // row this client writes carries it.
+    let mut session = Session::new(format!("stdio-{}", std::process::id()));
 
     for line in input.lines() {
         let line = line?;
@@ -126,7 +172,7 @@ pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) ->
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let result = dispatch(stores, None, method, &params);
+        let result = dispatch(stores, None, method, &params, &mut session);
         respond(&mut output, &id, result)?;
     }
     Ok(())
@@ -158,6 +204,7 @@ fn dispatch(
     writer: Option<&dyn Writer>,
     method: &str,
     params: &Value,
+    session: &mut Session,
 ) -> Result<Value, Fail> {
     let declared = declared_version(params);
 
@@ -191,6 +238,18 @@ fn dispatch(
         )),
 
         "initialize" => {
+            // The client names itself here or nowhere. `claude-code`, `cursor`,
+            // `codex` — the ledger records exactly this string rather than a
+            // display name, so what the table says matches what the client
+            // calls itself in its own configuration.
+            if let Some(name) = params
+                .get("clientInfo")
+                .and_then(|c| c.get("name"))
+                .and_then(Value::as_str)
+                .filter(|n| !n.trim().is_empty())
+            {
+                session.client = name.to_string();
+            }
             let asked = params.get("protocolVersion").and_then(Value::as_str);
             let version = negotiate(asked);
             // "The agent sees no tools" is otherwise undiagnosable from the
@@ -226,7 +285,7 @@ fn dispatch(
         }
 
         "tools/call" => {
-            let called = call_tool(stores, writer, params)?;
+            let called = call_tool(stores, writer, params, session)?;
             Ok(if modern {
                 modernize(called, None)
             } else {
@@ -298,253 +357,175 @@ pub fn tool_list() -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn tool_defs(open: &str) -> Value {
-    let store_arg = format!(
-        "Restrict the search to these stores by name. Open stores: {open}. \
-         Omit to search all of them, which is usually right — narrow only when \
-         you already know which corpus holds the answer."
-    );
-    let write_store_arg = format!(
-        "Which store to write to, by name. Open stores: {open}. \
-         Required when more than one is open, since a store takes one writer."
-    );
+/// How many bytes `tools/list` is, for the harness that gates on it.
+///
+/// Exposed rather than recomputed in the test, so the number the gate reads is
+/// the number the server sends.
+pub fn tool_list_bytes() -> usize {
+    serde_json::to_string(&tool_defs("default"))
+        .map(|json| json.len())
+        .unwrap_or(0)
+}
 
+/// How many bytes a locate reply for these hits would be.
+///
+/// The harness measures what an agent is actually handed, which is this and
+/// not the `Hit` list behind it.
+pub fn locate_bytes(hits: &[crate::Hit], query: &str) -> usize {
+    locate(hits, query, DEFAULT_LOCATE_TOKENS).len()
+}
+
+fn tool_defs(open: &str) -> Value {
+    let store_arg = format!("Open: {open}.");
+    let write_store_arg = format!("Open: {open}. Required when several are.");
+
+    // One short sentence per tool, and nothing at all on an argument whose
+    // name already says what it is.
+    //
+    // 0.14.0's tool list was 8 955 bytes, about 2 200 tokens, and every agent
+    // paid it once per session before asking anything. Most of it was advice —
+    // when to prefer this tool over a grep, what a filter does to a result —
+    // which a model either already knows or will not follow from a schema.
+    // There are no `title` annotations either: a title that restates the
+    // description is a second copy of it, and the portal's Agents page falls
+    // back to the description for exactly this reason. The behavioural hints
+    // stay, because a client acts on those.
+    //
+    // What is left is what a caller cannot guess: the defaults, the one filter
+    // that can hide an answer, and the four words that say an edge may be
+    // wrong. `the_tool_list_stays_small` keeps the rest from growing back a
+    // paragraph at a time.
     json!([
         {
             "name": "semlith_search",
-            "description":
-                "Semantic search over the local semlith store: docs, PDFs, code, and notes \
-                 that have been indexed on this machine. Returns the most relevant excerpts \
-                 with their file path and line range. Use this instead of reading whole files \
-                 when you need to find where something is discussed or implemented. \
-                 Optionally narrow the search to one part of the corpus with path, ext or lang.",
+            "description": "Semantic and keyword search. Returns where the matches are; format \"excerpt\" adds the text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What you are looking for. A question in plain English, or an exact identifier — both are searched."
-                    },
-                    "k": {
-                        "type": "integer",
-                        "description": "How many excerpts to return (default 8).",
-                        "minimum": 1,
-                        "maximum": 50
-                    },
-                    "path": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description":
-                            "Restrict the search to files matching these globs, e.g. \"src/**\". \
-                             A pattern that does not start with / matches anywhere in the tree. \
-                             `*` crosses directory separators, so `src/*` reaches the whole \
-                             subtree. Only filter when you already know which part of the \
-                             corpus holds the answer — a wrong guess hides it entirely."
-                    },
-                    "ext": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Restrict the search to these file extensions, e.g. [\"rs\", \"toml\"]."
-                    },
-                    "lang": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description":
-                            "Restrict the search to these languages, e.g. [\"rust\"]. Accepts: \
-                             c, cpp, csharp, css, go, haskell, html, java, javascript, json, \
-                             kotlin, lua, markdown, ocaml, php, python, ruby, rust, scala, \
-                             shell, sql, swift, toml, typescript, yaml."
-                    },
-                    "store": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": store_arg
-                    }
+                    "query": { "type": "string" },
+                    "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
+                    "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
+                    "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
+                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs. A wrong guess hides the answer." },
+                    "ext": { "type": "array", "items": { "type": "string" } },
+                    "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
+                    "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
                 },
                 "required": ["query"]
             },
-            "annotations": { "title": "Search the semlith store", "readOnlyHint": true }
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_stats",
-            "description":
-                "Report what the local semlith stores currently contain: file count, chunk \
-                 count, indexed bytes, and the embedding model, one line per store. Use this \
-                 to check whether a corpus is indexed before searching it, and to learn the \
-                 store names the other tools accept.",
+            "description": "What each open store holds: files, chunks, bytes, model, ledger totals.",
             "inputSchema": { "type": "object", "properties": {} },
-            "annotations": { "title": "Describe the semlith stores", "readOnlyHint": true }
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_languages",
+            "description": "The languages lang accepts, and which carry graph edges.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_files",
-            "description":
-                "List the files currently indexed, narrowed the same way as a search. Use it \
-                 to tell \"this file is not indexed\" apart from \"the corpus does not discuss \
-                 this\", which a search returning nothing cannot say.",
+            "description": "List indexed files. Tells \"not indexed\" apart from \"not discussed\".",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Only list files matching these globs, e.g. \"src/**\"."
-                    },
-                    "ext": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Only list files with these extensions, e.g. [\"rs\"]."
-                    },
-                    "lang": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Only list files of these languages, e.g. [\"rust\"]."
-                    },
-                    "store": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": store_arg
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "How many paths to return before counting the rest (default 200).",
-                        "minimum": 1
-                    }
+                    "path": { "type": "array", "items": { "type": "string" } },
+                    "ext": { "type": "array", "items": { "type": "string" } },
+                    "lang": { "type": "array", "items": { "type": "string" } },
+                    "store": { "type": "array", "items": { "type": "string" } },
+                    "limit": { "type": "integer" }
                 }
             },
-            "annotations": { "title": "List indexed files", "readOnlyHint": true }
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_index",
-            "description":
-                "Index files and directories into a store that is already open, so their \
-                 contents become searchable in this session. Only what has changed is \
-                 re-embedded. Large corpora take longer than one tool call allows: the call \
-                 returns what it managed and how much is left, and calling it again continues \
-                 from there.",
+            "description": "Index paths into an open store. Only what changed is re-embedded; a long run says how much is left.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Files or directories to index. Directories are walked, honouring .gitignore."
-                    },
+                    "path": { "type": "array", "items": { "type": "string" } },
                     "store": { "type": "string", "description": write_store_arg }
                 },
                 "required": ["path"]
             },
-            "annotations": { "title": "Index files into the store", "readOnlyHint": false }
+            "annotations": {}
         },
         {
             "name": "semlith_add",
-            "description":
-                "Fetch one URL into the store and index it, so its contents become \
-                 searchable in this session: a web page, a PDF such as an arXiv paper, or a \
-                 file on GitHub (a /blob/ link is rewritten to the raw file). Exactly one \
-                 request is made, for exactly this URL — nothing is crawled, no link is \
-                 followed, and no credential is ever sent. The file is written inside the \
-                 store's own downloads directory, never into the user's working tree. \
-                 Refused when semlith is running with --airgap.",
+            "description": "Fetch one https URL into the store. Nothing is crawled, no credential sent. Refused under --airgap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The https URL to fetch. Plain http is refused."
-                    },
+                    "url": { "type": "string" },
                     "store": { "type": "string", "description": write_store_arg }
                 },
                 "required": ["url"]
             },
-            "annotations": {
-                "title": "Add a URL to the store",
-                "readOnlyHint": false,
-                "openWorldHint": true
-            }
+            "annotations": { "openWorldHint": true }
         },
         {
             "name": "semlith_forget",
-            "description":
-                "Remove one file from a store, so it stops appearing in searches. The file on \
-                 disk is untouched; only what was indexed about it goes.",
+            "description": "Drop one file from a store. The file on disk is untouched.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "The file to remove from the index." },
-                    "store": { "type": "string", "description": write_store_arg }
+                    "path": { "type": "string" },
+                    "store": { "type": "string" }
                 },
                 "required": ["path"]
             },
-            "annotations": {
-                "title": "Forget a file",
-                "readOnlyHint": false,
-                "destructiveHint": true
-            }
+            "annotations": { "destructiveHint": true }
         },
         {
             "name": "semlith_symbol",
-            "description":
-                "Find where a symbol is defined, by exact name, across every indexed store. \
-                 Returns the file and line range of each definition. Use this instead of \
-                 grepping for `fn name` or `def name`: it reads the definition out of the \
-                 parsed syntax tree, so it does not match the name in a comment, a string, \
-                 or a call. Six languages carry symbols — Rust, TypeScript, Python, Go, Java \
-                 and C.",
+            "description": "Where a symbol is defined, from the parsed syntax tree rather than matched in text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
-                    "k": { "type": "integer", "description": "Most definitions to return. Default 20." },
-                    "store": { "type": "string", "description": store_arg }
+                    "name": { "type": "string" },
+                    "k": { "type": "integer", "description": "Default 20." },
+                    "store": { "type": "string" }
                 },
                 "required": ["name"]
             },
-            "annotations": { "title": "Find a symbol's definition", "readOnlyHint": true }
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_neighbors",
-            "description":
-                "List what calls a symbol and what it calls, one hop in each direction, from \
-                 the extracted code graph. Use this to answer \"who uses this\" and \"what \
-                 does this depend on\" in one call rather than a chain of greps. Each edge \
-                 says whether it was resolved through an import (extracted) or matched by \
-                 name (inferred) — do not treat an inferred edge as certain.",
+            "description": "What calls a symbol and what it calls. Each edge is extracted, resolved, inferred or ambiguous; only the first two are certain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "The symbol's name, matched exactly." },
-                    "kind": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description":
-                            "Only follow edges of these kinds: defines, calls, imports, \
-                             references, contains. Omit for all of them."
-                    },
-                    "store": { "type": "string", "description": store_arg }
+                    "name": { "type": "string" },
+                    "kind": { "type": "array", "items": { "type": "string" } },
+                    "all": { "type": "boolean", "description": "Expand collapsed rows; list targets this store lacks." },
+                    "store": { "type": "string" }
                 },
                 "required": ["name"]
             },
-            "annotations": { "title": "List a symbol's callers and callees", "readOnlyHint": true }
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_path",
-            "description":
-                "Show the shortest chain of edges from one symbol to another, naming every \
-                 edge in it. Use it to find out how two parts of a codebase are connected, \
-                 or to confirm that they are not. Follows calls, imports and references; \
-                 returns nothing when the two are unconnected within the depth searched, \
-                 which is an answer rather than a failure.",
+            "description": "The shortest chain between two symbols, or a statement that there is none. A name with several definitions is not crossed unless you ask.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "from": { "type": "string", "description": "The symbol the chain starts at." },
-                    "to": { "type": "string", "description": "The symbol the chain ends at." },
-                    "depth": { "type": "integer", "description": "Most hops to search. Default 6." },
-                    "store": { "type": "string", "description": store_arg }
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "depth": { "type": "integer", "description": "Default 6." },
+                    "all_edges": { "type": "boolean", "description": "Cross them; the answer is then a hypothesis." },
+                    "strict": { "type": "boolean" },
+                    "store": { "type": "string" }
                 },
                 "required": ["from", "to"]
             },
-            "annotations": { "title": "Find the path between two symbols", "readOnlyHint": true }
+            "annotations": { "readOnlyHint": true }
         }
     ])
 }
@@ -553,9 +534,11 @@ fn call_tool(
     stores: &mut Fleet,
     writer: Option<&dyn Writer>,
     params: &Value,
+    session: &Session,
 ) -> Result<Value, Fail> {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let started = std::time::Instant::now();
 
     let body = match name {
         "semlith_search" => {
@@ -592,9 +575,21 @@ fn call_tool(
                 "No indexed file matches that path/ext/lang filter. Try again without it."
                     .to_string()
             } else {
+                // Locate by default from 0.15.0. `format: "excerpt"` is the
+                // opt-back, and is what the CLI still does.
+                let excerpts = args
+                    .get("format")
+                    .and_then(Value::as_str)
+                    .is_some_and(|f| f.eq_ignore_ascii_case("excerpt"));
+                let max_tokens = args
+                    .get("max_tokens")
+                    .and_then(Value::as_u64)
+                    .map(|v| v as usize)
+                    .unwrap_or(DEFAULT_LOCATE_TOKENS);
                 match stores.search_in(Some(&only), query, k.clamp(1, 50), &filter) {
                     Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
-                    Ok(hits) => render(&hits),
+                    Ok(hits) if excerpts => render(&hits),
+                    Ok(hits) => locate(&hits, query, max_tokens),
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
@@ -830,6 +825,29 @@ fn call_tool(
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
+        "semlith_languages" => {
+            // The list the `lang` filter accepts, which is why it is no longer
+            // spelled out in that argument's description: it is a fact about
+            // this build, and a tool can state it once instead of every agent
+            // reading it once per session.
+            let with_edges: Vec<&str> = crate::graph::LANGUAGES.to_vec();
+            let names: Vec<String> = crate::filter::LANGUAGES
+                .iter()
+                .map(|entry| {
+                    if with_edges.contains(&entry.name) {
+                        format!("{} (graph)", entry.name)
+                    } else {
+                        entry.name.to_string()
+                    }
+                })
+                .collect();
+            format!(
+                "{} languages. Those marked (graph) also carry symbols and edges, so \
+                 semlith_symbol, semlith_neighbors and semlith_path work on them.\n{}",
+                names.len(),
+                names.join(", "),
+            )
+        }
         "semlith_neighbors" => {
             let Some(name) = args.get("name").and_then(Value::as_str) else {
                 return Err((-32602, "missing required argument: name".into(), None));
@@ -845,15 +863,46 @@ fn call_tool(
                 )));
             }
             let only = strings(&args, "store");
-            match stores.neighbours_in(Some(&only), name, &kinds) {
-                Ok(n) if n.callers.is_empty() && n.callees.is_empty() => empty_graph(stores, name),
-                Ok(n) => format!(
-                    "callers of {name} ({}):\n{}\n\ncallees of {name} ({}):\n{}",
-                    n.callers.len(),
-                    render_ends(&n.callers),
-                    n.callees.len(),
-                    render_ends(&n.callees),
-                ),
+            let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
+            match stores.neighbours_in(Some(&only), name, &kinds, all) {
+                // Only when there is genuinely nothing. A symbol whose every
+                // target lies outside the corpus has something to say, and
+                // saying "the graph does not have this" about it is the exact
+                // confusion the hidden count exists to end.
+                Ok(n)
+                    if n.callers.is_empty()
+                        && n.callees.is_empty()
+                        && n.hidden == 0
+                        && n.unresolved.is_empty() =>
+                {
+                    empty_graph(stores, name)
+                }
+                Ok(n) => {
+                    let mut body = format!(
+                        "callers of {name} ({}):\n{}\n\ncallees of {name} ({}):\n{}",
+                        n.callers.len(),
+                        render_ends(&n.callers),
+                        n.callees.len(),
+                        render_ends(&n.callees),
+                    );
+                    if n.hidden > 0 {
+                        body.push_str(&format!(
+                            "\n\n{} target{} outside this store, not listed. Ask with all: true.",
+                            n.hidden,
+                            if n.hidden == 1 { "" } else { "s" },
+                        ));
+                    }
+                    if !n.unresolved.is_empty() {
+                        let outside = n
+                            .unresolved
+                            .iter()
+                            .map(|u| format!("  {} via {}", u.name, u.kind))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        body.push_str(&format!("\n\noutside this store:\n{outside}"));
+                    }
+                    body
+                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -866,27 +915,81 @@ fn call_tool(
             };
             let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(6) as u32;
             let only = strings(&args, "store");
-            match stores.path_in(Some(&only), from, to, depth.clamp(1, 20)) {
-                Ok(Some(steps)) if steps.is_empty() => format!("{from} is {to}."),
-                Ok(Some(steps)) => {
-                    let chain = steps
-                        .iter()
-                        .map(|s| format!("{} --{}({})--> {}", s.from, s.kind, s.confidence, s.to))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!("{} hops:\n{chain}", steps.len())
-                }
-                Ok(None) => format!(
-                    "No chain from {from} to {to} within {depth} hops. They may be \
-                     unconnected, or connected only further than that."
-                ),
+            // `strict` is the default and the argument is the way to say so
+            // out loud; `all_edges` is what turns it off. A client that sends
+            // both is asking for the refusal it named explicitly.
+            let strict = args.get("strict").and_then(Value::as_bool).unwrap_or(false);
+            let all_edges = args
+                .get("all_edges")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !strict;
+            let depth = depth.clamp(1, 20);
+            match stores.path_in(Some(&only), from, to, depth, all_edges) {
+                Ok(Some(chain)) if chain.steps.is_empty() => format!("{from} is {to}."),
+                Ok(Some(chain)) => chain.render("", "", &crate::graph::verbatim),
+                Ok(None) => crate::graph::not_connected(from, to, depth, all_edges),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
         other => return Err((-32602, format!("unknown tool: {other}"), None)),
     };
 
+    record(stores, session, name, &args, &body, started.elapsed());
     Ok(json!({ "content": [{ "type": "text", "text": body }] }))
+}
+
+/// Write this tool call into the ledger, if it was a retrieval.
+///
+/// Every read an agent makes is recorded here from 0.15.0. Until then the only
+/// caller was the portal's own search box, which meant the savings figure the
+/// product is built on counted the one user who was not the point.
+///
+/// Indexing, adding and forgetting are writes, not retrievals, and are not
+/// recorded: the ledger answers "what did an agent read instead of reading
+/// files", and those three answer a different question. `semlith_stats` and
+/// `semlith_languages` are not retrievals either — they are questions about
+/// the tool rather than about the corpus.
+///
+/// Failures here are swallowed exactly as they were in `routes.rs`: a store
+/// that cannot be written to must not turn a successful answer into an error
+/// the agent sees.
+fn record(
+    stores: &Fleet,
+    session: &Session,
+    tool: &str,
+    args: &Value,
+    body: &str,
+    elapsed: std::time::Duration,
+) {
+    let who = session.who();
+    match tool {
+        "semlith_search" => {
+            // The hits are gone by now — `render` and `locate` consume them —
+            // so the row is built from the reply, which is what the agent was
+            // actually handed and therefore what it actually cost.
+            let Some(query) = args.get("query").and_then(Value::as_str) else {
+                return;
+            };
+            crate::ledger::reply(stores, &who, "search", query, body, elapsed);
+        }
+        "semlith_neighbors" | "semlith_path" | "semlith_symbol" => {
+            // `path` is asked about two names and the first is the one the
+            // question is about, which is the one a grep would have started
+            // from.
+            let Some(subject) = args
+                .get("name")
+                .or_else(|| args.get("from"))
+                .and_then(Value::as_str)
+            else {
+                return;
+            };
+            let short = tool.trim_start_matches("semlith_");
+            let found = !body.contains("not connected") && !body.contains("nothing");
+            crate::ledger::graph(stores, &who, short, subject, body, found, elapsed);
+        }
+        _ => {}
+    }
 }
 
 /// What to say when the graph has nothing for a name.
@@ -929,6 +1032,15 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
     }
     ends.iter()
         .map(|e| {
+            // A collapsed row stands for several definitions and must not name
+            // one of them: an agent reading `get  src/a.rs:12` will quote that
+            // file, and it is one of four the call could have meant.
+            if e.confidence == crate::graph::AMBIGUOUS {
+                return format!(
+                    "  {} via {} ({}) · {} definitions",
+                    e.symbol.name, e.kind, e.confidence, e.definitions
+                );
+            }
             format!(
                 "  {} via {} ({})  {}{}:{}",
                 e.symbol.name,
@@ -987,6 +1099,153 @@ fn tool_error(message: &str) -> Value {
 
 /// Compact, agent-readable: a locator line then the excerpt. Cheap to parse,
 /// cheap in tokens, and the locator is enough to go read the real file.
+/// The default reply shape from 0.15.0: where the answers are, not the answers
+/// themselves.
+///
+/// The study measured a warm `semlith_search` reply at 4.9-7.2 KB at k=8
+/// against 100-300 bytes for a grep the agent could have run. Most of that is
+/// chunk text the agent did not ask for and often does not read: it asked
+/// where something is, and was handed the something.
+///
+/// A locate row is where it is, what it is called, how it was found, and one
+/// line of it. An agent that wants the text asks for `format: excerpt`, or
+/// reads the file at the line it was just given — which is the same read it
+/// would have done anyway, and now it is one read instead of eight.
+///
+/// Rows are grouped by file because that is how the answer is used: eight hits
+/// in one file are one file to open.
+fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
+    if hits.is_empty() {
+        return String::new();
+    }
+    let budget = max_tokens.max(MIN_LOCATE_TOKENS);
+    let terms: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| t.len() > 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+
+    // Grouped, but in the order the ranking put the files in: the best hit's
+    // file is the first thing read.
+    let mut files: Vec<(String, Vec<&crate::Hit>)> = Vec::new();
+    for hit in hits {
+        let label = match &hit.store {
+            Some(store) => format!("{store} {}", hit.path),
+            None => hit.path.clone(),
+        };
+        match files.iter_mut().find(|(name, _)| *name == label) {
+            Some((_, group)) => group.push(hit),
+            None => files.push((label, vec![hit])),
+        }
+    }
+
+    // Rendered whole, then cut from the bottom — the ranking's own order — so
+    // what is dropped is what was worth least.
+    let mut blocks: Vec<(usize, String)> = Vec::new();
+    for (label, group) in &files {
+        let mut block = format!("{label}\n");
+        for hit in group {
+            block.push_str(&locate_row(hit, &terms));
+        }
+        blocks.push((group.len(), block));
+    }
+
+    let total = hits.len();
+    let mut out = String::new();
+    let mut shown = 0usize;
+    for (count, block) in blocks {
+        if !out.is_empty() && tokens(&out) + tokens(&block) > budget {
+            break;
+        }
+        out.push_str(&block);
+        shown += count;
+    }
+    if shown < total {
+        out.push_str(&format!("truncated: {shown} of {total}\n"));
+    }
+    out.trim_end().to_string()
+}
+
+/// One line of `where`, and one line of `what`.
+fn locate_row(hit: &crate::Hit, terms: &[String]) -> String {
+    if let Some(px) = hit.image {
+        return format!("  image {}x{} px\n", px.width, px.height);
+    }
+    let mut marks = Vec::new();
+    if !hit.lists.is_empty() {
+        // A hit the graph reached says how well supported the edge was. A hit
+        // the query matched needs no such qualifier.
+        match (&hit.provenance, hit.lists.as_slice()) {
+            (Some(tier), ["graph"]) => marks.push(format!("graph({tier})")),
+            _ => marks.push(hit.lists.join("+")),
+        }
+    }
+    if !hit.fresh {
+        marks.push("stale".to_string());
+    }
+    let named = match (&hit.symbol, &hit.symbol_kind) {
+        (Some(name), Some(kind)) => format!(" \u{00b7} {name} {kind}"),
+        (Some(name), None) => format!(" \u{00b7} {name}"),
+        _ => String::new(),
+    };
+    let marked = if marks.is_empty() {
+        String::new()
+    } else {
+        format!(" \u{00b7} {}", marks.join(" \u{00b7} "))
+    };
+    format!(
+        "  {}-{}{named}{marked}\n    {}\n",
+        hit.start_line,
+        hit.end_line,
+        best_line(&hit.text, terms),
+    )
+}
+
+/// The one line of a chunk most worth showing: the one with the most of the
+/// query's words in it.
+///
+/// Falling back to the first line with anything on it, which is what a reader
+/// skimming the file would see first anyway.
+fn best_line(text: &str, terms: &[String]) -> String {
+    const WIDTH: usize = 96;
+    let scored = text
+        .lines()
+        .map(|line| {
+            let lowered = line.to_lowercase();
+            let hits = terms.iter().filter(|t| lowered.contains(*t)).count();
+            (hits, line.trim())
+        })
+        .filter(|(_, line)| !line.is_empty())
+        .max_by_key(|(hits, _)| *hits);
+    let line = match scored {
+        Some((0, _)) | None => text.lines().map(str::trim).find(|l| !l.is_empty()),
+        Some((_, line)) => Some(line),
+    }
+    .unwrap_or_default();
+    if line.chars().count() <= WIDTH {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(WIDTH).collect();
+    format!("{cut}\u{2026}")
+}
+
+/// The floor under `max_tokens`.
+///
+/// A budget small enough to return nothing is a budget that turns a search
+/// into a silent failure, so it is refused rather than honoured.
+const MIN_LOCATE_TOKENS: usize = 200;
+
+/// The default budget for a locate reply.
+const DEFAULT_LOCATE_TOKENS: usize = 1_500;
+
+/// How many tokens a string is.
+///
+/// Four characters per token, the estimate 0.12.0's ledger has always used,
+/// and it is labelled as an estimate wherever it is recorded.
+fn tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
+}
+
 fn render(hits: &[crate::Hit]) -> String {
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
@@ -1085,5 +1344,130 @@ mod tests {
         let modern = json!({ "_meta": { META_VERSION: MODERN } });
         assert_eq!(declared_version(&modern), Some(MODERN));
         assert_eq!(declared_version(&json!({ "name": "semlith_stats" })), None);
+    }
+
+    fn hit(path: &str, start: u32, end: u32, text: &str) -> crate::Hit {
+        crate::Hit {
+            score: 0.5,
+            path: path.to_string(),
+            start_line: start,
+            end_line: end,
+            text: text.to_string(),
+            store: None,
+            lists: vec!["vector", "keyword"],
+            image: None,
+            fresh: true,
+            symbol: Some("edges_out".to_string()),
+            symbol_kind: Some("fn".to_string()),
+            provenance: None,
+        }
+    }
+
+    /// The cost half of the release, as a unit.
+    ///
+    /// The study measured a warm reply at 4.9-7.2 KB at k=8 against 100-300
+    /// bytes for the grep an agent could have run instead. A locate row is an
+    /// address, not the thing at the address, and this is the budget that says
+    /// so in a number rather than in a paragraph.
+    #[test]
+    fn a_locate_row_is_an_address_rather_than_its_contents() {
+        let hits: Vec<crate::Hit> = (0..8)
+            .map(|i| {
+                hit(
+                    &format!("src/file{i}.rs"),
+                    100 + i * 10,
+                    120 + i * 10,
+                    "fn edges_out(db: &Connection, name: &str) -> Result<Vec<EdgeEnd>> {\n\
+                         let filter = kind_predicate(kinds, \"e.kind\");\n\
+                         // A long chunk of source, of the kind 0.14.0 sent whole.\n",
+                )
+            })
+            .collect();
+
+        let reply = locate(&hits, "edges_out", DEFAULT_LOCATE_TOKENS);
+        let per_hit = reply.len() / hits.len();
+        assert!(
+            per_hit < 200,
+            "a locate row costs {per_hit} bytes; the whole reply was:\n{reply}"
+        );
+        assert!(reply.contains("edges_out fn"), "{reply}");
+        assert!(reply.contains("100-120"), "{reply}");
+    }
+
+    /// The budget is honoured, and a reply that was cut says so rather than
+    /// looking like a complete answer that found less.
+    #[test]
+    fn a_small_budget_cuts_the_reply_and_says_it_did() {
+        // Enough files for the floor to bite. A bigger *chunk* would not do
+        // it: the budget measures the reply, and a locate row is one line of a
+        // chunk however long the chunk is — which is the whole point of the
+        // format, and is worth pinning here.
+        let hits: Vec<crate::Hit> = (0..40)
+            .map(|i| hit(&format!("src/file{i}.rs"), 10, 40, "fn a() { helper(); }\n"))
+            .collect();
+
+        let full = locate(&hits, "helper", 10_000);
+        assert!(!full.contains("truncated:"), "nothing was cut: {full}");
+
+        let cut = locate(&hits, "helper", MIN_LOCATE_TOKENS);
+        assert!(cut.contains("truncated:"), "{cut}");
+        assert!(cut.len() < full.len(), "the budget did not cut anything");
+        assert!(
+            cut.contains("of 40"),
+            "the reader is told what the total was: {cut}"
+        );
+    }
+
+    /// A budget small enough to return nothing would turn a search into a
+    /// silent failure, so the first file always comes back.
+    #[test]
+    fn an_impossible_budget_still_returns_the_best_file() {
+        let hits = vec![hit("src/store.rs", 948, 970, "fn edges_out() {}\n")];
+        let reply = locate(&hits, "edges_out", 1);
+        assert!(reply.contains("src/store.rs"), "{reply}");
+    }
+
+    /// A stale hit says so. An agent quoting a chunk from a file that has moved
+    /// under it is the same class of defect as a wrong path, and just as quiet.
+    #[test]
+    fn a_stale_hit_is_marked_and_a_graph_reached_one_carries_its_tier() {
+        let mut stale = hit("src/lib.rs", 10, 20, "fn a() {}\n");
+        stale.fresh = false;
+        let mut reached = hit("src/graph.rs", 30, 40, "fn b() {}\n");
+        reached.lists = vec!["graph"];
+        reached.provenance = Some(crate::graph::RESOLVED.to_string());
+
+        let reply = locate(&[stale, reached], "a", DEFAULT_LOCATE_TOKENS);
+        assert!(reply.contains("stale"), "{reply}");
+        assert!(reply.contains("graph(resolved)"), "{reply}");
+    }
+
+    /// The tool list is the first thing every agent pays for, once per session,
+    /// before it has asked anything.
+    ///
+    /// 0.14.0's was 8 955 bytes — about 2 200 tokens of schema an agent reads
+    /// and mostly cannot act on. The budget here is the release's, and it is a
+    /// test rather than a note because a one-sentence description is the kind
+    /// of thing that grows back a paragraph at a time.
+    #[test]
+    fn the_tool_list_stays_small() {
+        let size = serde_json::to_string(&tool_defs("default")).unwrap().len();
+        let each: Vec<String> = tool_defs("default")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                format!(
+                    "{}={}",
+                    t["name"].as_str().unwrap(),
+                    serde_json::to_string(t).unwrap().len()
+                )
+            })
+            .collect();
+        assert!(
+            size < 4_000,
+            "tools/list is {size} bytes: {}",
+            each.join(" ")
+        );
     }
 }

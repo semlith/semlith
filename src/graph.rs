@@ -37,8 +37,34 @@ use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 /// Edge kinds, as stored in `edges.kind`.
 pub const KINDS: [&str; 5] = ["defines", "calls", "imports", "references", "contains"];
 
+/// Stored on the edge: the syntax tree said where the target came from.
 pub const EXTRACTED: &str = "extracted";
+/// Stored on the edge: the target was matched by bare name alone.
 pub const INFERRED: &str = "inferred";
+/// Computed at query time: the name had several definitions and the hint,
+/// the source file, or its imports picked exactly one of them.
+pub const RESOLVED: &str = "resolved";
+/// Computed at query time: the name had several definitions and nothing in
+/// the source narrowed it to one. An answer that crosses one of these is a
+/// guess, and every surface says so.
+pub const AMBIGUOUS: &str = "ambiguous";
+
+/// Every confidence value a renderer can be handed, strongest first.
+///
+/// Two are written to `edges.confidence` and two are decided when the edge is
+/// read, because a stored `resolved` would go stale the moment a second
+/// definition of the name was indexed somewhere else.
+pub const CONFIDENCES: [&str; 4] = [EXTRACTED, RESOLVED, INFERRED, AMBIGUOUS];
+
+/// How much a confidence value is worth when something has to be ordered by
+/// it: lower is better. An unknown value sorts last rather than panicking, so
+/// a store written by a newer binary still renders.
+pub fn confidence_rank(confidence: &str) -> usize {
+    CONFIDENCES
+        .iter()
+        .position(|c| *c == confidence)
+        .unwrap_or(CONFIDENCES.len())
+}
 
 /// A symbol found in a file, before it has an id.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +86,15 @@ pub struct Edge {
     pub to: String,
     pub kind: String,
     pub confidence: String,
+    /// What the source text said about where the target lives, when it said
+    /// anything: the module of a scoped call, the receiver of a method call,
+    /// the object of a qualified one. `None` for a bare call, for an import,
+    /// and for every structural edge.
+    ///
+    /// It is a lead, not an address — `self.index.search` yields `index`,
+    /// which may name a field, a module or neither. The resolver treats it as
+    /// one ranking signal among several rather than as truth.
+    pub hint: Option<String>,
 }
 
 /// What one file yielded.
@@ -109,18 +144,28 @@ fn supplement(lang: &str) -> &'static str {
         "rust" => {
             r#"
             (use_declaration argument: (_) @reference.import)
-            ; A scoped call names two things worth an edge: the type or module
-            ; it went through, and the function itself. `File::create` is most
-            ; useful as an edge to `File`; `store::record_retrieval` is most
-            ; useful as an edge to `record_retrieval`. Capture both rather than
-            ; guess which kind of path this is.
+            ; A scoped call names the function and the thing it went through.
+            ; Only the function earns an edge: `store::edges_out` is a call to
+            ; `edges_out`, and `store` is what says *which* `edges_out`. Until
+            ; 0.15.0 the path segment was emitted as a second `calls` edge,
+            ; which recorded a call the source does not make and put a module
+            ; name into every path the finder walked. It is a hint now.
             (call_expression
-              function: (scoped_identifier path: (identifier) @name) @reference.call)
+              function: (scoped_identifier
+                path: (identifier) @hint
+                name: (identifier) @name)) @reference.call
+            ; A longer path, `crate::store::edges_out`: the hint is the segment
+            ; nearest the name, because that is the one that names the module.
             (call_expression
-              function: (scoped_identifier name: (identifier) @name) @reference.call)
-            ; A method call: `self.flush()`, `store.db()`.
+              function: (scoped_identifier
+                path: (scoped_identifier name: (identifier) @hint)
+                name: (identifier) @name)) @reference.call
+            ; A method call: `self.flush()`, `store.db()`, `self.index.search()`.
+            ; The receiver is the hint, reduced to its last identifier.
             (call_expression
-              function: (field_expression field: (field_identifier) @name) @reference.call)
+              function: (field_expression
+                value: (_) @hint
+                field: (field_identifier) @name)) @reference.call
         "#
         }
         // TypeScript's bundled query matches nothing on ordinary unexported
@@ -137,14 +182,24 @@ fn supplement(lang: &str) -> &'static str {
               name: (identifier) @name
               value: [(arrow_function) (function_expression)]) @definition.function
             (call_expression function: (identifier) @name) @reference.call
+            ; `store.search(...)`, `this.index.search(...)`: the object is the
+            ; hint, reduced to its last identifier.
             (call_expression
-              function: (member_expression property: (property_identifier) @name)) @reference.call
+              function: (member_expression
+                object: (_) @hint
+                property: (property_identifier) @name)) @reference.call
         "#
         }
         "python" => {
             r#"
             (import_statement name: (_) @reference.import)
             (import_from_statement module_name: (_) @reference.import)
+            ; `json.loads(...)`, `self.store.search(...)`: the object names the
+            ; module or the attribute the call went through.
+            (call
+              function: (attribute
+                object: (_) @hint
+                attribute: (identifier) @name)) @reference.call
         "#
         }
         "go" => {
@@ -231,6 +286,7 @@ struct Ref {
     name: String,
     kind: &'static str,
     at: usize,
+    hint: Option<String>,
 }
 
 /// Symbols and edges for one file.
@@ -326,12 +382,14 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 to: def.name.clone(),
                 kind: "contains".to_string(),
                 confidence: EXTRACTED.to_string(),
+                hint: None,
             }),
             None => edges.push(Edge {
                 from: module.clone(),
                 to: def.name.clone(),
                 kind: "defines".to_string(),
                 confidence: EXTRACTED.to_string(),
+                hint: None,
             }),
         }
     }
@@ -353,21 +411,53 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         if from == reference.name {
             continue; // direct recursion adds a self-edge and no information
         }
-        let confidence = if reference.kind == "imports" || imported.contains(&reference.name) {
-            EXTRACTED
-        } else {
-            INFERRED
-        };
+        // The file said where this came from, one way or the other: it
+        // imported the name itself (`use ...::edges_out;` then `edges_out()`),
+        // or it imported the thing the call went through (`use ...::store;`
+        // then `store::edges_out()`). The second is exactly as determined as
+        // the first — the module the call names is in the file's own imports —
+        // and reading it as inferred is what left Rust at 2% extracted while
+        // the source was perfectly explicit.
+        let named_by_file = reference.kind == "imports"
+            || imported.contains(&reference.name)
+            || reference
+                .hint
+                .as_ref()
+                .is_some_and(|h| imported.contains(h));
+        let confidence = if named_by_file { EXTRACTED } else { INFERRED };
         edges.push(Edge {
             from,
             to: reference.name.clone(),
             kind: reference.kind.to_string(),
             confidence: confidence.to_string(),
+            hint: reference.hint.clone(),
         });
     }
 
-    edges.sort_by(|a, b| (&a.from, &a.to, &a.kind).cmp(&(&b.from, &b.to, &b.kind)));
-    edges.dedup();
+    // One call can be captured by both the bundled query and the supplement,
+    // and only the supplement carries a hint. Deduplicating on the triple
+    // alone would keep whichever landed first; ordering by confidence and then
+    // by whether a hint is present makes the best-informed copy of each edge
+    // the one that survives.
+    edges.sort_by(|a, b| {
+        (
+            &a.from,
+            &a.to,
+            &a.kind,
+            confidence_rank(&a.confidence),
+            a.hint.is_none(),
+            &a.hint,
+        )
+            .cmp(&(
+                &b.from,
+                &b.to,
+                &b.kind,
+                confidence_rank(&b.confidence),
+                b.hint.is_none(),
+                &b.hint,
+            ))
+    });
+    edges.dedup_by(|a, b| (&a.from, &a.to, &a.kind) == (&b.from, &b.to, &b.kind));
 
     Ok(Some(Extraction { symbols, edges }))
 }
@@ -391,6 +481,7 @@ fn collect(
         // capture.
         let mut span: Option<(&str, tree_sitter::Node)> = None;
         let mut name: Option<tree_sitter::Node> = None;
+        let mut hint: Option<tree_sitter::Node> = None;
         let mut references: Vec<(&str, tree_sitter::Node)> = Vec::new();
         for capture in m.captures() {
             let capture_name = names[capture.index as usize];
@@ -398,6 +489,8 @@ fn collect(
                 span = Some((kind, capture.node));
             } else if capture_name == "name" {
                 name = Some(capture.node);
+            } else if capture_name == "hint" {
+                hint = Some(capture.node);
             } else if let Some(kind) = capture_name.strip_prefix("reference.") {
                 references.push((kind, capture.node));
             }
@@ -425,10 +518,25 @@ fn collect(
             let Some(target) = target.filter(|t| !t.is_empty()) else {
                 continue;
             };
+            // A macro invocation is recorded under the name the source writes.
+            //
+            // `format!(...)` is a reference to the macro `format!`, not a call
+            // to a function called `format`, and the two are different names.
+            // Conflating them made every function that formats a string look
+            // like a caller of `store::format`: 229 of them on semlith's own
+            // store, against three real ones. The grammar's tags query cannot
+            // tell them apart because it captures the identifier without its
+            // `!`, so the distinction is restored here.
+            let target = if in_macro(node) {
+                format!("{target}!")
+            } else {
+                target
+            };
             refs.push(Ref {
                 name: target,
                 kind,
                 at: node.start_byte(),
+                hint: hint.and_then(|h| hint_text(h, text)),
             });
         }
 
@@ -444,6 +552,40 @@ fn collect(
             });
         }
     }
+}
+
+/// Whether a captured reference is (or sits directly inside) a macro
+/// invocation.
+///
+/// Only the node itself and its immediate parents are checked, because a
+/// grammar captures either the invocation or the identifier naming it, and
+/// climbing further would swallow every ordinary call that happens to appear
+/// inside a macro's arguments — `format!("{}", helper())` really does call
+/// `helper`.
+fn in_macro(node: tree_sitter::Node) -> bool {
+    const MACRO_KINDS: [&str; 2] = ["macro_invocation", "macro_expression"];
+    if MACRO_KINDS.contains(&node.kind()) {
+        return true;
+    }
+    node.parent()
+        .is_some_and(|parent| MACRO_KINDS.contains(&parent.kind()))
+}
+
+/// The lead a `@hint` capture carries, or `None` when it carries none worth
+/// storing.
+///
+/// The capture is whatever stood to the left of the call — `store`, `self`,
+/// `self.index`, `crate::store`, `this.client` — so it is reduced to its last
+/// identifier the same way a reference is. Three of them are dropped rather
+/// than stored: `self`, `this` and `super` name the file the call is already
+/// in, so they rank nothing, and `crate` names the whole tree.
+fn hint_text(node: tree_sitter::Node, text: &str) -> Option<String> {
+    const USELESS: [&str; 5] = ["self", "this", "super", "crate", "cls"];
+    let name = reference_name(node, text)?;
+    if name.is_empty() || USELESS.contains(&name.as_str()) {
+        return None;
+    }
+    Some(name)
 }
 
 /// The identifier an edge should point at, out of whatever node the query
@@ -607,79 +749,416 @@ pub const MAX_NODES: usize = 2000;
 /// question someone asks.
 pub const DEPENDENCY_KINDS: [&str; 3] = ["calls", "imports", "references"];
 
-fn dependency_kinds() -> Vec<String> {
+pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
 }
 
 /// One edge of a path, as the path finder renders it.
+///
+/// Both ends carry a file and a line, and that is not decoration. A hop
+/// between two names says almost nothing when either name has several
+/// definitions: `index -> first_store` is true of some `index`, and until the
+/// row says which one, a reader cannot tell whether the chain holds together
+/// or quietly changed subject halfway through.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Step {
     pub from: String,
+    pub from_path: String,
+    pub from_line: u32,
     pub to: String,
+    pub to_path: String,
+    pub to_line: u32,
     pub kind: String,
     pub confidence: String,
+    /// How many definitions of `to` the store holds.
+    pub definitions: usize,
+}
+
+/// A chain, with what it is worth.
+///
+/// Named `Chain` rather than `Path` because this module already works with
+/// `std::path::Path` on every line that reads a file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Chain {
+    pub steps: Vec<Step>,
+    pub summary: Summary,
+}
+
+/// What the chain is made of, counted rather than described.
+///
+/// Every renderer prints this and none of them computes it, so the CLI, the
+/// MCP reply and the portal cannot drift into saying different things about
+/// one answer.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Summary {
+    pub hops: usize,
+    pub extracted: usize,
+    pub resolved: usize,
+    pub inferred: usize,
+    pub ambiguous: usize,
+    /// Joins where the chain left one definition of a name and picked up at
+    /// another. A seam is not a hop — it is the place two hops were welded
+    /// together, and the weld is the part that may not hold.
+    pub seams: usize,
+    /// The names welded at those seams, with how many definitions each has.
+    pub ambiguous_names: Vec<(String, usize)>,
+    /// Whether the honest word for this chain is "hypothesis".
+    ///
+    /// True when the chain has a seam, or when nothing on it was better than
+    /// a bare-name match. Either way the renderers say so in one line rather
+    /// than leaving a reader to work it out from the badges.
+    pub hypothesis: bool,
+}
+
+impl Summary {
+    /// Read the chain and count it.
+    fn of(steps: &[Step]) -> Self {
+        let mut summary = Summary {
+            hops: steps.len(),
+            ..Default::default()
+        };
+        for step in steps {
+            match step.confidence.as_str() {
+                EXTRACTED => summary.extracted += 1,
+                RESOLVED => summary.resolved += 1,
+                AMBIGUOUS => summary.ambiguous += 1,
+                _ => summary.inferred += 1,
+            }
+        }
+        // A seam sits between two hops: the first arrives at one definition of
+        // a name and the second leaves from another.
+        for pair in steps.windows(2) {
+            let (before, after) = (&pair[0], &pair[1]);
+            if (&before.to_path, before.to_line) == (&after.from_path, after.from_line) {
+                continue;
+            }
+            summary.seams += 1;
+            let name = before.to.clone();
+            if !summary.ambiguous_names.iter().any(|(n, _)| *n == name) {
+                summary
+                    .ambiguous_names
+                    .push((name, before.definitions.max(2)));
+            }
+        }
+        summary.hypothesis = summary.seams > 0
+            || (!steps.is_empty()
+                && steps
+                    .iter()
+                    .all(|s| s.confidence == INFERRED || s.confidence == AMBIGUOUS));
+        summary
+    }
 }
 
 /// What points at a symbol, and what it points at.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Neighbours {
     pub callers: Vec<crate::store::EdgeEnd>,
     pub callees: Vec<crate::store::EdgeEnd>,
+    /// Targets the store holds no definition for, listed only when asked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<crate::store::Unresolved>,
+    /// How many of those were left out. Non-zero only when they were, so a
+    /// reader is told the list is short rather than left to assume it is
+    /// complete.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hidden: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// One row per name an edge points at, rather than one row per definition that
+/// name could mean.
+///
+/// Only ambiguous rows are folded. A resolved edge already names one
+/// definition, and two resolved edges to the same name from two different
+/// definitions of the source are two real calls.
+pub fn collapse(callees: Vec<crate::store::EdgeEnd>) -> Vec<crate::store::EdgeEnd> {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    callees
+        .into_iter()
+        .filter(|end| {
+            if end.confidence != AMBIGUOUS {
+                return true;
+            }
+            seen.insert((end.symbol.name.clone(), end.kind.clone()))
+        })
+        .collect()
+}
+
+impl Chain {
+    /// The chain as every surface prints it.
+    ///
+    /// One renderer, called by the CLI and by the MCP reply, so the two cannot
+    /// drift into describing one answer differently. The portal draws the same
+    /// four parts from the same JSON.
+    ///
+    /// `bold` and `reset` are the terminal's escapes, or empty strings for a
+    /// surface that has none.
+    pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = String::new();
+        let width = self
+            .steps
+            .iter()
+            .map(|s| {
+                endpoint(&s.from, &shorten(&s.from_path), s.from_line)
+                    .chars()
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+
+        for (i, step) in self.steps.iter().enumerate() {
+            let left = endpoint(&step.from, &shorten(&step.from_path), step.from_line);
+            let right = endpoint(&step.to, &shorten(&step.to_path), step.to_line);
+            let pad = " ".repeat(width.saturating_sub(left.chars().count()));
+            out.push_str(&format!(
+                "{bold}{}{reset}  {left}{pad}  → {right}  {} · {}\n",
+                i + 1,
+                step.kind,
+                step.confidence,
+            ));
+            // The seam sits between two hops, because that is where it is: the
+            // chain arrived at one definition of a name and leaves from
+            // another. Drawing it as a hop of its own, as the first sketch of
+            // this did, inflates the hop count and hides the join.
+            if let Some(next) = self.steps.get(i + 1)
+                && (&step.to_path, step.to_line) != (&next.from_path, next.from_line)
+            {
+                out.push_str(&format!(
+                    "   ── seam · {}: {} definitions · continues from {}\n",
+                    step.to,
+                    step.definitions.max(2),
+                    endpoint(&next.from, &shorten(&next.from_path), next.from_line),
+                ));
+            }
+        }
+
+        out.push_str(&self.trailer());
+        out.push('\n');
+        if self.summary.hypothesis {
+            out.push_str("A hypothesis, not a finding.\n");
+        }
+        out
+    }
+
+    /// The counted line under the chain.
+    ///
+    /// Every number on it is read off the steps, so it cannot disagree with
+    /// what was printed above it.
+    pub fn trailer(&self) -> String {
+        let s = &self.summary;
+        // The four counts sum to the hop count, always. A trailer whose parts
+        // do not add up sends the reader looking for the hop it left out.
+        let mut line = format!(
+            "{} hop{} · {} extracted · {} resolved · {} inferred · {} ambiguous",
+            s.hops,
+            if s.hops == 1 { "" } else { "s" },
+            s.extracted,
+            s.resolved,
+            s.inferred,
+            s.ambiguous,
+        );
+        if s.seams > 0 {
+            let names = s
+                .ambiguous_names
+                .iter()
+                .map(|(name, count)| format!("{name}: {count} definitions"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            line.push_str(&format!(" · {} through ambiguous names ({names})", s.seams));
+        }
+        line
+    }
+}
+
+/// Leave a path exactly as the store recorded it.
+///
+/// What a surface with nothing better to do passes to [`Chain::render`]. The
+/// CLI passes something that strips the working directory, because a chain of
+/// six absolute paths is six copies of one prefix and one useful suffix.
+pub fn verbatim(path: &str) -> String {
+    path.to_string()
+}
+
+/// `name @ path:line`, or the bare name when the store could not say where.
+fn endpoint(name: &str, path: &str, line: u32) -> String {
+    if path.is_empty() {
+        return name.to_string();
+    }
+    format!("{name} @ {path}:{line}")
+}
+
+/// What to say when there is no chain.
+///
+/// The two sentences are different answers and must not be confused. Without
+/// `all_edges` the search refused to cross names it could not pin down, so the
+/// honest report is that nothing *it was willing to walk* connects the two —
+/// and it names the flag that widens the question. With `all_edges` it walked
+/// everything and still found nothing, which is as close to "no" as this tool
+/// gets.
+pub fn not_connected(from: &str, to: &str, depth: u32, all_edges: bool) -> String {
+    if all_edges {
+        format!("{from} and {to} are not connected within {depth} hops by any edge in the store.")
+    } else {
+        format!(
+            "{from} and {to} are not connected within {depth} hops by resolved edges. \
+             Ambiguous names were not crossed; --all-edges walks them and labels what it finds."
+        )
+    }
 }
 
 /// One hop in each direction around `name`.
-pub fn neighbours(db: &rusqlite::Connection, name: &str, kinds: &[String]) -> Result<Neighbours> {
+///
+/// `all` widens the answer in the two ways it is narrow. Without it, callees
+/// to a name with several definitions collapse to one row carrying the count:
+/// four rows saying `get` are four different functions, and printing them as
+/// four callees says this symbol calls `get` four times, which it does not.
+/// And without it, edges pointing outside the corpus are left out, as they
+/// always have been — with a count now, so a reader knows the list is short.
+///
+/// Callers are untouched in both states: an inbound edge came from a symbol
+/// id, so it is one definite place in one definite file.
+pub fn neighbours(
+    db: &rusqlite::Connection,
+    name: &str,
+    kinds: &[String],
+    all: bool,
+) -> Result<Neighbours> {
+    let callees = crate::store::edges_out(db, name, kinds)?;
+    let unresolved = crate::store::unresolved_out(db, name, kinds)?;
     Ok(Neighbours {
         callers: crate::store::edges_in(db, name, kinds)?,
-        callees: crate::store::edges_out(db, name, kinds)?,
+        callees: if all { callees } else { collapse(callees) },
+        hidden: if all { 0 } else { unresolved.len() },
+        unresolved: if all { unresolved } else { Vec::new() },
     })
 }
 
 /// The shortest chain of edges from `from` to `to`, if there is one.
 ///
 /// Breadth-first, so the first path found is a shortest one. `None` means the
-/// two are not connected within `depth` — which is an answer, not a failure,
-/// and is reported as one.
+/// two are not connected within `depth` by the edges this search was allowed
+/// to walk — which is an answer, not a failure, and is reported as one.
+///
+/// # What it will not walk
+///
+/// `all_edges` is false by default, and a search in that state refuses to
+/// cross an `ambiguous` name: one whose several definitions the source gave it
+/// no way to choose between. This is the release's central correction. The
+/// 0.14.0 finder crossed those names silently, so `call_tool` reached
+/// `record_retrieval` through a `record` that is two unrelated functions, and
+/// printed the result in exactly the format a real chain prints in. A wrong
+/// answer that looks like a right one is worse than no answer, so by default
+/// there is no answer.
+///
+/// With `all_edges` the old behaviour is available and labelled: the chain
+/// comes back with its seams marked, its confidences counted, and the sentence
+/// saying it is a hypothesis.
+///
+/// Within a depth, better-supported edges are expanded first, so a name
+/// reachable both ways is reached by the edge worth more. Without that the
+/// answer would depend on the order SQLite returned rows in.
 pub fn shortest_path(
     db: &rusqlite::Connection,
     from: &str,
     to: &str,
     depth: u32,
-) -> Result<Option<Vec<Step>>> {
+    all_edges: bool,
+) -> Result<Option<Chain>> {
     if from == to {
-        return Ok(Some(Vec::new()));
+        return Ok(Some(Chain {
+            steps: Vec::new(),
+            summary: Summary::default(),
+        }));
     }
-    // name -> the step that first reached it, for walking the chain back.
-    let mut came_from: std::collections::HashMap<String, Step> = std::collections::HashMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    seen.insert(from.to_string());
-    let mut frontier = vec![from.to_string()];
+    // A node is a definition, not a name. Two functions called `search` are
+    // two nodes, and a chain that arrives at one of them may only leave from
+    // that one.
+    //
+    // This is the whole correction. Refusing `ambiguous` edges is not enough
+    // on its own: on the semlith store every hop of `call_tool ->
+    // record_retrieval` resolves to exactly one definition, and the chain is
+    // still false, because hop 3 arrives at `search` in `lib.rs` and hop 4
+    // leaves from `search` in `routes.rs`. Each hop is true. The chain is not.
+    let mut came_from: std::collections::HashMap<Node, Step> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<Node> = std::collections::HashSet::new();
+    // The start is every definition of the name, because "does anything called
+    // `call_tool` reach this" is the question that was asked.
+    let start = Node::any(from);
+    seen.insert(start.clone());
+    let mut frontier = vec![start];
     let kinds = dependency_kinds();
 
     for _ in 0..depth {
-        let mut next = Vec::new();
+        // The whole level's edges, ordered by what they are worth, before any
+        // of them is taken. Ordering within one node would still let a weak
+        // edge out of the first node beat a strong edge out of the second.
+        let mut level: Vec<(Node, crate::store::EdgeEnd)> = Vec::new();
         for current in &frontier {
-            for edge in crate::store::edges_out(db, current, &kinds)? {
-                let name = edge.symbol.name.clone();
-                if !seen.insert(name.clone()) {
-                    continue;
+            for edge in crate::store::edges_out(db, &current.name, &kinds)? {
+                if !all_edges {
+                    if edge.confidence == AMBIGUOUS {
+                        continue;
+                    }
+                    // The edge has to leave from the definition the chain
+                    // actually reached. `edges_out` is asked about a name and
+                    // answers for every definition of it, which is right for
+                    // "what does this name call" and wrong for "what does
+                    // *this* function call".
+                    if !current.holds(edge.from_path.as_deref(), edge.from_line) {
+                        continue;
+                    }
                 }
-                came_from.insert(
-                    name.clone(),
-                    Step {
-                        from: current.clone(),
-                        to: name.clone(),
-                        kind: edge.kind,
-                        confidence: edge.confidence,
-                    },
-                );
-                if name == to {
-                    return Ok(Some(unwind(&came_from, from, to)));
+                level.push((current.clone(), edge));
+            }
+        }
+        level.sort_by_key(|(_, edge)| confidence_rank(&edge.confidence));
+
+        let mut next = Vec::new();
+        for (current, edge) in level {
+            // Strict walks definitions; `all_edges` walks names, which is what
+            // makes a seam possible and therefore visible. Keying the two the
+            // same way would quietly repair the chains this flag exists to
+            // show you.
+            let reached = if all_edges {
+                Node::any(&edge.symbol.name)
+            } else {
+                Node {
+                    name: edge.symbol.name.clone(),
+                    path: edge.symbol.path.clone(),
+                    line: edge.symbol.start_line,
                 }
-                next.push(name);
-                if seen.len() >= MAX_NODES {
-                    return Ok(None);
-                }
+            };
+            if !seen.insert(reached.clone()) {
+                continue;
+            }
+            came_from.insert(
+                reached.clone(),
+                Step {
+                    from: current.name.clone(),
+                    // An edge always knows which definition it leaves from.
+                    // The fallback is for a row an older store cannot supply,
+                    // and it says so rather than inventing a line.
+                    from_path: edge.from_path.unwrap_or_default(),
+                    from_line: edge.from_line.unwrap_or(0),
+                    to: reached.name.clone(),
+                    to_path: edge.symbol.path,
+                    to_line: edge.symbol.start_line,
+                    kind: edge.kind,
+                    confidence: edge.confidence,
+                    definitions: edge.definitions,
+                },
+            );
+            if reached.name == to {
+                let steps = unwind(&came_from, from, &reached);
+                let summary = Summary::of(&steps);
+                return Ok(Some(Chain { steps, summary }));
+            }
+            next.push(reached);
+            if seen.len() >= MAX_NODES {
+                return Ok(None);
             }
         }
         if next.is_empty() {
@@ -688,6 +1167,44 @@ pub fn shortest_path(
         frontier = next;
     }
     Ok(None)
+}
+
+/// One definition, as the traversal addresses it.
+///
+/// `path` empty means "any definition of this name", which is what the start
+/// of a search is and nothing else ever is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Node {
+    name: String,
+    path: String,
+    line: u32,
+}
+
+impl Node {
+    fn any(name: &str) -> Self {
+        Node {
+            name: name.to_string(),
+            path: String::new(),
+            line: 0,
+        }
+    }
+
+    /// Whether an edge leaving `(path, line)` leaves from this definition.
+    ///
+    /// A node with no path is the start of the search and holds every
+    /// definition. An edge with no recorded source is one an older store
+    /// wrote, and is allowed rather than silently dropped: the store predates
+    /// the column, so refusing it would turn every pre-0.15.0 store's path
+    /// finder off.
+    fn holds(&self, path: Option<&str>, line: Option<u32>) -> bool {
+        if self.path.is_empty() {
+            return true;
+        }
+        match (path, line) {
+            (Some(path), Some(line)) => path == self.path && line == self.line,
+            _ => true,
+        }
+    }
 }
 
 /// The graph a page draws, scoped so it is drawable.
@@ -783,19 +1300,29 @@ pub fn scoped(
     }))
 }
 
-fn unwind(
-    came_from: &std::collections::HashMap<String, Step>,
-    start: &str,
-    end: &str,
-) -> Vec<Step> {
+fn unwind(came_from: &std::collections::HashMap<Node, Step>, start: &str, end: &Node) -> Vec<Step> {
     let mut chain = Vec::new();
-    let mut cursor = end.to_string();
-    while cursor != start {
-        let Some(step) = came_from.get(&cursor) else {
+    let mut cursor = end.clone();
+    while cursor.name != start {
+        // The precise definition first, then the name: a strict walk keys its
+        // nodes by definition and an `all_edges` walk keys them by name.
+        let Some(step) = came_from
+            .get(&cursor)
+            .or_else(|| came_from.get(&Node::any(&cursor.name)))
+        else {
             break;
         };
         chain.push(step.clone());
-        cursor = step.from.clone();
+        cursor = Node {
+            name: step.from.clone(),
+            path: step.from_path.clone(),
+            line: step.from_line,
+        };
+        // The first hop leaves from the search's own start, which holds every
+        // definition of its name and is keyed that way.
+        if cursor.name == start {
+            break;
+        }
     }
     chain.reverse();
     chain
@@ -824,6 +1351,33 @@ mod tests {
             .find(|x| x.to == to && x.kind == kind)
             .map(|x| x.confidence.clone())
             .unwrap_or_else(|| panic!("no {kind} edge to {to} in {:?}", e.edges))
+    }
+
+    /// A macro invocation is not a call to a function of that name.
+    ///
+    /// `format!(...)` is the single worst case in the corpus: every function
+    /// that formats a string looked like a caller of `store::format`, which on
+    /// the semlith store meant 229 of them. The name the source writes is
+    /// `format!`, and that is a different name from `format` — so that is what
+    /// the edge records, and the two stop being confused for one another.
+    #[test]
+    fn a_macro_invocation_is_recorded_under_the_name_the_source_writes() {
+        let e = run(
+            "a.rs",
+            "fn go() { let s = format!(\"{}\", 1); println!(\"{s}\"); helper(); }\nfn helper() {}\n",
+        );
+        assert!(
+            !has_edge(&e, "go", "format", "calls"),
+            "a `format!` is not a call to `fn format`: {:?}",
+            e.edges
+        );
+        assert!(has_edge(&e, "go", "format!", "calls"), "{:?}", e.edges);
+        assert!(has_edge(&e, "go", "println!", "calls"), "{:?}", e.edges);
+        assert!(
+            has_edge(&e, "go", "helper", "calls"),
+            "an ordinary call is untouched: {:?}",
+            e.edges
+        );
     }
 
     #[test]
@@ -855,16 +1409,88 @@ mod tests {
         );
     }
 
-    /// The two halves of the confidence column, in one file: `File` is
-    /// imported by name, `helper` is not.
+    /// The two halves of the stored confidence column, in one file. The call
+    /// is to `create`, and the file imported the `File` it goes through, so
+    /// the source named where it came from; `helper` is a bare name and did
+    /// not.
     #[test]
     fn an_imported_name_is_extracted_and_a_bare_one_is_inferred() {
         let e = run(
             "a.rs",
             "use std::fs::File;\nfn go() { File::create(\"x\"); helper(); }\nfn helper() {}\n",
         );
-        assert_eq!(confidence_of(&e, "File", "calls"), EXTRACTED);
+        assert_eq!(confidence_of(&e, "create", "calls"), EXTRACTED);
         assert_eq!(confidence_of(&e, "helper", "calls"), INFERRED);
+    }
+
+    fn hint_of(e: &Extraction, to: &str, kind: &str) -> Option<String> {
+        e.edges
+            .iter()
+            .find(|x| x.to == to && x.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} edge to {to} in {:?}", e.edges))
+            .hint
+            .clone()
+    }
+
+    /// A scoped call is a call to the function, and the path in front of it is
+    /// a lead about which definition of that function was meant. Until 0.15.0
+    /// the path segment was a second `calls` edge, which recorded a call the
+    /// source never makes and gave the path finder a module to walk through.
+    #[test]
+    fn a_scoped_rust_call_hints_at_its_module_and_does_not_call_it() {
+        let e = run("a.rs", "fn go() { store::edges_out(db, name); }\n");
+        assert!(has_edge(&e, "go", "edges_out", "calls"), "{:?}", e.edges);
+        assert_eq!(hint_of(&e, "edges_out", "calls").as_deref(), Some("store"));
+        assert!(
+            !has_edge(&e, "go", "store", "calls"),
+            "the module is not called: {:?}",
+            e.edges
+        );
+    }
+
+    /// A longer path hints with the segment nearest the name, because that is
+    /// the one that names the module the definition lives in.
+    #[test]
+    fn a_longer_rust_path_hints_with_the_segment_nearest_the_name() {
+        let e = run("a.rs", "fn go() { crate::store::edges_out(db); }\n");
+        assert_eq!(hint_of(&e, "edges_out", "calls").as_deref(), Some("store"));
+    }
+
+    /// A method call's receiver is a lead too, reduced to its last identifier.
+    /// `self` is dropped: it names the file the call is already in, so it
+    /// ranks nothing.
+    #[test]
+    fn a_rust_method_call_hints_with_its_receiver() {
+        let e = run(
+            "a.rs",
+            "fn go(&self) { self.index.search(v); self.flush(); }\n",
+        );
+        assert_eq!(hint_of(&e, "search", "calls").as_deref(), Some("index"));
+        assert_eq!(hint_of(&e, "flush", "calls"), None);
+    }
+
+    #[test]
+    fn python_and_typescript_qualified_calls_carry_the_object_as_a_hint() {
+        let py = run("m.py", "def go():\n    json.loads(raw)\n");
+        assert_eq!(hint_of(&py, "loads", "calls").as_deref(), Some("json"));
+
+        let ts = run("app.ts", "function go(){ store.search(q); }\n");
+        assert_eq!(hint_of(&ts, "search", "calls").as_deref(), Some("store"));
+    }
+
+    /// One call reaches the extractor twice — once from the bundled query,
+    /// once from the supplement — and only one of the two carries the hint.
+    /// The edge that survives has to be the informed one.
+    #[test]
+    fn the_hinted_copy_of_a_doubly_captured_call_is_the_one_kept() {
+        let e = run("a.rs", "fn go() { store::edges_out(db); }\n");
+        let calls: Vec<&Edge> = e
+            .edges
+            .iter()
+            .filter(|x| x.to == "edges_out" && x.kind == "calls")
+            .collect();
+        assert_eq!(calls.len(), 1, "{:?}", e.edges);
+        assert_eq!(calls[0].hint.as_deref(), Some("store"));
     }
 
     /// A nested definition hangs off its parent, not off the file.
@@ -986,7 +1612,7 @@ mod tests {
             );
         }
         for (from, to) in [("a", "b"), ("b", "c"), ("c", "d"), ("e", "d")] {
-            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED).unwrap();
+            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None).unwrap();
         }
         db
     }
@@ -994,7 +1620,7 @@ mod tests {
     #[test]
     fn neighbours_separates_the_two_directions() {
         let db = chain();
-        let n = neighbours(&db, "d", &[]).unwrap();
+        let n = neighbours(&db, "d", &[], false).unwrap();
         let mut callers: Vec<&str> = n.callers.iter().map(|e| e.symbol.name.as_str()).collect();
         callers.sort_unstable();
         assert_eq!(callers, ["c", "e"], "both callers of d");
@@ -1015,12 +1641,12 @@ mod tests {
             end_line: 2,
         };
         let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
-        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED).unwrap();
+        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None).unwrap();
         // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
-        let path = shortest_path(&db, "a", "d", 50).unwrap();
+        let path = shortest_path(&db, "a", "d", 50, false).unwrap();
         assert!(path.is_some(), "a still reaches d");
         assert!(
-            path.unwrap().len() <= 4,
+            path.unwrap().steps.len() <= 4,
             "a cycle inflated the shortest path"
         );
     }
@@ -1028,25 +1654,145 @@ mod tests {
     #[test]
     fn the_shortest_path_is_the_short_one_and_names_every_edge() {
         let db = chain();
-        let path = shortest_path(&db, "a", "d", 10)
+        let path = shortest_path(&db, "a", "d", 10, false)
             .unwrap()
             .expect("a reaches d");
         let hops: Vec<(&str, &str)> = path
+            .steps
             .iter()
             .map(|s| (s.from.as_str(), s.to.as_str()))
             .collect();
         assert_eq!(hops, [("a", "b"), ("b", "c"), ("c", "d")]);
-        assert!(path.iter().all(|s| s.kind == "calls"));
-        assert!(path.iter().all(|s| s.confidence == EXTRACTED));
+        assert!(path.steps.iter().all(|s| s.kind == "calls"));
+        assert!(path.steps.iter().all(|s| s.confidence == EXTRACTED));
+        assert!(path.steps.iter().all(|s| !s.to_path.is_empty()));
+        assert_eq!(path.summary.extracted, 3);
+        assert_eq!(path.summary.seams, 0);
+        assert!(!path.summary.hypothesis, "every hop is extracted");
+    }
+
+    /// The shape the release exists for: `start` calls `record`, and `record`
+    /// is two unrelated functions in two files. One of them calls `finish`.
+    ///
+    /// The 0.14.0 finder walked out of one `record` and into the other without
+    /// a word, and printed `start -> record -> finish` in the same format a
+    /// real chain prints in.
+    fn forked_name() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        let define = |db: &rusqlite::Connection, path: &str, name: &str, line: u32| {
+            let file = crate::store::insert_file(db, path, path, 1, 0).unwrap_or_else(|_| {
+                db.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+                    .unwrap()
+            });
+            let symbol = Symbol {
+                kind: "function".to_string(),
+                name: name.to_string(),
+                qualified: name.to_string(),
+                start_line: line,
+                end_line: line + 1,
+            };
+            crate::store::insert_symbol(db, file, None, &symbol).unwrap()
+        };
+        let start = define(&db, "src/start.rs", "start", 10);
+        define(&db, "src/one.rs", "record", 20);
+        let second = define(&db, "src/two.rs", "record", 30);
+        define(&db, "src/finish.rs", "finish", 40);
+
+        // `start` calls a `record`, and nothing in its source says which.
+        crate::store::insert_edge(&db, start, "record", "calls", INFERRED, None).unwrap();
+        // Only the second `record` reaches `finish`.
+        crate::store::insert_edge(&db, second, "finish", "calls", INFERRED, None).unwrap();
+        db
+    }
+
+    /// By default the finder will not cross a name it cannot pin down, so the
+    /// answer is that there is no chain. This is the central correction of the
+    /// release: no answer beats a wrong answer dressed as a right one.
+    #[test]
+    fn a_chain_through_an_ambiguous_name_is_not_walked_by_default() {
+        let db = forked_name();
+        assert!(
+            shortest_path(&db, "start", "finish", 6, false)
+                .unwrap()
+                .is_none(),
+            "the only route crosses a name with two definitions"
+        );
+    }
+
+    /// With `all_edges` the chain comes back, and every part of it says what
+    /// it is worth: the hop is ambiguous, the join is a seam, the trailer
+    /// counts it, and the sentence names it a hypothesis.
+    #[test]
+    fn the_same_chain_with_all_edges_is_labelled_rather_than_asserted() {
+        let db = forked_name();
+        let chain = shortest_path(&db, "start", "finish", 6, true)
+            .unwrap()
+            .expect("all_edges walks the ambiguous name");
+
+        assert_eq!(chain.steps.len(), 2);
+        assert_eq!(chain.steps[0].confidence, AMBIGUOUS);
+        assert_eq!(chain.steps[0].definitions, 2);
+        assert_eq!(chain.summary.seams, 1, "{:?}", chain.steps);
+        assert_eq!(
+            chain.summary.ambiguous_names,
+            vec![("record".to_string(), 2)]
+        );
+        assert!(chain.summary.hypothesis);
+
+        let rendered = chain.render("", "", &verbatim);
+        assert!(rendered.contains("seam"), "{rendered}");
+        assert!(rendered.contains("record: 2 definitions"), "{rendered}");
+        assert!(
+            rendered.contains("A hypothesis, not a finding."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("src/start.rs:10"),
+            "every hop shows both endpoints: {rendered}"
+        );
+    }
+
+    /// A chain with nothing to doubt says nothing about doubt. The trailer is
+    /// still printed, because a reader should not have to know that silence
+    /// means "all extracted".
+    #[test]
+    fn an_all_extracted_chain_carries_no_hypothesis_line() {
+        let db = chain();
+        let rendered = shortest_path(&db, "a", "d", 10, false)
+            .unwrap()
+            .expect("a reaches d")
+            .render("", "", &verbatim);
+        assert!(!rendered.contains("hypothesis"), "{rendered}");
+        assert!(!rendered.contains("seam"), "{rendered}");
+        assert!(rendered.contains("3 hops"), "{rendered}");
+        assert!(rendered.contains("3 extracted"), "{rendered}");
+    }
+
+    /// The refusal and the failure are different sentences, because they are
+    /// different answers, and only one of them has a flag that widens it.
+    #[test]
+    fn the_refusal_names_the_flag_that_widens_the_question() {
+        let strict = not_connected("a", "b", 6, false);
+        assert!(strict.contains("by resolved edges"), "{strict}");
+        assert!(strict.contains("--all-edges"), "{strict}");
+
+        let walked = not_connected("a", "b", 6, true);
+        assert!(walked.contains("any edge in the store"), "{walked}");
+        assert!(!walked.contains("--all-edges"), "{walked}");
     }
 
     /// Not connected is an answer, and so is not connected *within this depth*.
     #[test]
     fn an_unconnected_pair_returns_nothing_rather_than_erroring() {
         let db = chain();
-        assert!(shortest_path(&db, "a", "lonely", 10).unwrap().is_none());
         assert!(
-            shortest_path(&db, "a", "d", 2).unwrap().is_none(),
+            shortest_path(&db, "a", "lonely", 10, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            shortest_path(&db, "a", "d", 2, false).unwrap().is_none(),
             "d is three hops away, so a depth of two does not reach it"
         );
     }

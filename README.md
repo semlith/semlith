@@ -174,8 +174,8 @@ just those lines instead of the whole file.
 | `semlith symbol <NAME>` | Where a symbol is defined, by exact name, from the parsed syntax tree rather than a grep for `fn name`. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
-| `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`. Needs no key. |
-| `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--ledger`, `--no-mcp-http`. |
+| `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. Needs no key. |
+| `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--no-ledger`, `--no-mcp-http`. |
 | `semlith key show` \| `rotate` | Print the agent key that opens the HTTP MCP endpoint, and the stanza around it, or mint a new one. `--now` on `rotate` drops the previous key immediately. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
 | `semlith trust <DIR>` | Say that a store outside the store home may be opened, once. Nothing is moved. `--list` prints what is trusted. |
@@ -332,7 +332,8 @@ Nine pages, and each one is the same answer the terminal gives:
   that make it up.
 - **Agents** — who is connected, the tools they can call, the stanza for every
   documented client, and the switch that opens and closes the HTTP endpoint.
-- **Ledger** — what agents retrieved, when recording is on.
+- **Ledger** — what agents retrieved, which client asked, and what reading those
+  files whole would have cost instead.
 - **Privacy** and **About** — the claims below, and how to check them yourself.
 
 With no store yet it opens on a welcome screen instead.
@@ -527,16 +528,25 @@ $ semlith symbol acquire
 acquire method  src/lock.rs:32-85
 
 $ semlith neighbors acquire
-callers (2)
+callers (9)
+  open_store via calls (extracted)  src/daemon.rs:645
+  run via calls (extracted)  src/daemon.rs:805
   lock via defines (extracted)  src/lock.rs:1
-  run_held via calls (inferred)  src/watch.rs:122
-callees (3)
+  run via calls (inferred)  src/watch.rs:102
+  ...
+callees (8)
+  read via calls (resolved)  src/daemon.rs:83
+  write via calls (ambiguous) · 5 definitions
+  open via calls (ambiguous) · 10 definitions
+  daemon_holds via calls (resolved)  src/lock.rs:107
   ...
 
-$ semlith path run acquire
-1. run --calls--> run_held  (inferred)
-2. run_held --calls--> acquire  (inferred)
-2 hops, some inferred by name
+15 targets outside this store, not listed (--all)
+
+$ semlith path search_in record_retrieval
+search_in and record_retrieval are not connected within 6 hops by resolved
+edges. Ambiguous names were not crossed; --all-edges walks them and labels
+what it finds.
 ```
 
 **Reverse reachability is not currently part of the product.** `neighbors`
@@ -544,12 +554,35 @@ answers what calls a symbol one hop back; walking every caller of every caller
 to a depth is not a question any command here answers. The
 [changelog](CHANGELOG.md) says when that changed and what replaced it.
 
-**Extracted or inferred.** Every edge says how it was resolved. A call whose
-name the file also imports was resolved by the file itself and is marked
-`extracted`; a bare name match is `inferred`. Two functions called `new` in
-different modules is the normal case in real code, so Semlith records which kind
-of edge it has and never shows one as the other. Treat an inferred edge as a
-strong hint, not a fact.
+**Every edge says how well it is supported.** A call whose name — or, from
+0.15.0, whose module or receiver — the file also names was resolved by the file
+itself and is marked `extracted`. Everything else is ranked against the
+definitions the store actually holds: the calling file's own definition first,
+then one whose file the source pointed at, then one in a file the caller imports,
+then the case where the corpus holds only one definition of the name. One
+survivor is `resolved`. Several are `ambiguous`, and the row says how many rather
+than printing one of them as if it were the call. A bare name match with nothing
+to rank is `inferred`.
+
+Trust `extracted` and `resolved` as answers, `inferred` as a hint, and
+`ambiguous` as a question. Four functions called `get` in four modules is the
+normal case in real code, and one row saying so is more use than four rows that
+each look like a call site.
+
+**A path walks definitions, not names.** Every hop of a chain has to leave from
+the definition it arrived at. That sounds obvious and was not true before
+0.15.0: a chain could arrive at one `search` and leave from another, so every hop
+was true and the chain was false, in output identical to a right answer. By
+default `semlith path` now refuses to cross a name it cannot pin down and says
+so. `--all-edges` walks them anyway and shows its work — both ends of every hop
+with file and line, a seam where the chain changed subject, a count of the hops
+by confidence, and the sentence "A hypothesis, not a finding." `--strict` says
+the default out loud, for a script that would rather not rely on it.
+
+`semlith neighbors --all` expands a collapsed row into its definitions, and also
+lists the targets the store holds no definition for — calls into a dependency
+nobody indexed. Those were left out silently before; "no callees" and
+"everything this calls is outside the index" are different facts.
 
 **Search uses it.** The top vector and keyword hits are mapped to the symbols in
 them, expanded one hop, and the chunks those neighbours live in join the ranking
@@ -596,10 +629,12 @@ store as the text corpus it already was.
 
 ## The retrieval ledger
 
-Off unless you ask for it. `semlith start --ledger` records every query an agent
-ran into the store: the query, the client, how many hits came back, the excerpt
-tokens the agent actually read, and the whole-file tokens reading those files
-would have cost.
+Every retrieval goes into the store it came from: the query, the client that
+asked, the session it belonged to, how many hits came back, the excerpt tokens
+the agent actually read, and the whole-file tokens reading those files would have
+cost instead. Search and the graph tools alike, from an agent over stdio, from an
+agent over the daemon's `/mcp` endpoint, from the command line and from the
+portal.
 
 ```console
 $ semlith ledger --last 3
@@ -608,24 +643,47 @@ $ semlith ledger --last 3
 
 Each row carries the hash of the row before it, so an edited or removed row is
 detectable rather than merely unlikely — an audit record rather than a log file.
-Nothing is sent anywhere, and the command needs no licence key, now or ever.
+`semlith ledger --verify` re-walks that chain and exits non-zero if it is broken,
+naming the first row that does not verify. `semlith stats` prints one line of the
+total: tokens not read, over how many of how many retrievals, with the coverage
+and whether the figure was measured or modelled. Both sides of that ratio are
+counted with the store's own embedding tokenizer, so it is a count rather than a
+rule of thumb.
+
+**Recording is on, and it is local.** Before 0.15.0 it was off unless
+`semlith start --ledger` asked for it, which meant almost nobody had a ledger and
+the savings figure had no denominator. Three things make the new default all
+right, and each of them is checkable rather than asserted:
+
+- The rows never leave the store they were written into. Same claim as everything
+  else here, same way to check it: a packet capture.
+- The daemon says so every time it starts —
+  `ledger: recording (local only; --no-ledger to stop)`, or `ledger: off for this
+  session`.
+- Erasing every row is one `DELETE` against a SQLite file you already own.
+
+`semlith start --no-ledger` records nothing for that session; `SEMLITH_LEDGER=0`
+records nothing on that machine. The `--ledger` flag is gone rather than kept as
+a switch that does nothing, so a script still passing it fails loudly and is
+corrected once. The command needs no licence key, now or ever.
 
 ## Using it from an agent
 
-`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same nine
+`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same ten
 tools over HTTP:
 
 | Tool | What it does |
 | --- | --- |
-| `semlith_search` | Ranked excerpts with file and line range, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. An image hit carries its pixel size in place of the line range. |
+| `semlith_search` | Where the answer is: path, line span, enclosing symbol, how it was found and whether the file has changed since it was indexed, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. `format: "excerpt"` returns the text instead. An image hit carries its pixel size in place of the line range. |
 | `semlith_stats` | What each open store holds, and the names the other tools accept. |
 | `semlith_files` | Which files are indexed — so "not indexed" and "not discussed" stop looking the same. |
 | `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
 | `semlith_add` | Fetch one https URL into a store and index it, so a page or a paper joins the corpus mid-conversation. |
 | `semlith_forget` | Drop one file from a store. The file on disk is untouched. |
 | `semlith_symbol` | Where a symbol is defined, read off the parsed syntax tree rather than matched in a comment or a string. |
-| `semlith_neighbors` | What calls a symbol and what it calls, one hop each way, each edge saying whether it was extracted or inferred. |
-| `semlith_path` | The shortest chain of edges between two symbols, or nothing when they are unconnected within the depth searched. |
+| `semlith_neighbors` | What calls a symbol and what it calls, one hop each way, each edge saying how well supported it is. `all: true` expands a collapsed ambiguous row and lists the targets this store holds no definition for. |
+| `semlith_path` | The shortest chain of resolved edges between two symbols, or a refusal when it cannot get there without crossing a name it cannot pin down. `all_edges: true` crosses them and labels the answer a hypothesis. |
+| `semlith_languages` | Every name `lang` accepts, and the extensions and filenames behind each. A fact about the build, asked once instead of carried in every tool schema. |
 
 The two write tools take the store's lock for the call and give it back. A store
 another process is writing — `semlith watch`, say — comes back as a tool error
@@ -1486,7 +1544,7 @@ corpus with no pictures in it never downloads either.
 |---|---|
 | `tools/call` over HTTP | **23.4 ms** p50 over 20 calls |
 | the same call through the stdio proxy | **20.9 ms** p50, same daemon, same query |
-| `tools/list` | 8 702 bytes on the wire for nine tools, about 2 176 tokens |
+| `tools/list` | **3 940 bytes**, about 985 tokens, for ten tools with one store open — from 8 634 bytes for nine tools measured the same way in 0.14.0. `tests/retrieval.rs` asserts it stays under 1 000 tokens |
 | an MCP server open on one store | 131 MB; on three stores, 132 MB |
 | three same-model stores, one search | **1** query embed, +1.7 ms for the second store |
 
@@ -1578,6 +1636,12 @@ again; there is no migration that would not re-embed the corpus anyway.
 directory are additive, and a binary that knows nothing about either ignores
 both — so a store indexed with images is still a text store to 0.12.0, and the
 images come back the moment a 0.13.0 binary opens it.
+
+Neither does 0.15.0. It adds five nullable columns — a resolution hint on each
+edge, and four on the ledger's rows — by an `ALTER TABLE` that runs on open, so
+nothing is migrated: a 0.14.0 binary opens a 0.15.0 store and never asks for
+them, and a 0.15.0 binary reads a 0.14.0 store with NULL hints exactly as 0.14.0
+did, filling them in for a file on the next `index` pass that touches it.
 
 ## Contributing
 

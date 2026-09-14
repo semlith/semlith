@@ -1,0 +1,525 @@
+//! The retrieval harness: every claim this release makes about retrieval,
+//! measured rather than asserted.
+//!
+//! ```sh
+//! cargo test --test retrieval -- --ignored --nocapture
+//! ```
+//!
+//! It indexes the repository into a temporary store, runs the fixed question
+//! set in `tests/fixtures/retrieval/questions.yaml`, and prints hit@1, hit@3,
+//! hit@8, bytes per answer, the graph list's marginal contribution, and the
+//! wrong-yes count for `path`.
+//!
+//! Two of those are gates rather than readings. `wrong yes` must be zero: a
+//! path answer that says "connected, here is the chain" about two symbols that
+//! are not connected is worse than the tool not existing, because it is
+//! indistinguishable from a right answer. And `tools/list` must fit in a
+//! thousand tokens, because every agent pays it once per session before it has
+//! asked anything.
+//!
+//! The question set was written and committed before the work it measures, and
+//! its header says why. Nothing here may add a question, loosen a span, or
+//! skip a shape to make a number look better.
+
+use semlith::Semlith;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// One question, as the harness needs it.
+#[derive(Debug, Default, Clone)]
+struct Question {
+    id: String,
+    shape: String,
+    tool: String,
+    query: String,
+    name: String,
+    from: String,
+    to: String,
+    connected: Option<bool>,
+    hops: Option<usize>,
+    k: Option<usize>,
+    spans: Vec<Span>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Span {
+    path: String,
+    symbol: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+#[test]
+#[ignore = "indexes the repository and downloads an embedding model on first run"]
+fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
+    let root = repository_root();
+    let questions = read_questions(&root.join("tests/fixtures/retrieval/questions.yaml"));
+    assert!(
+        questions.len() >= 30,
+        "the question set has shrunk to {} questions; it is the measuring stick and \
+         may not be trimmed to suit a result",
+        questions.len()
+    );
+
+    let store = tempfile::tempdir().expect("a temporary store");
+    let mut semlith = Semlith::open(store.path(), None).expect("the store opens");
+    semlith.quiet = true;
+    semlith
+        .index_paths(std::slice::from_ref(&root), |_, _| {})
+        .expect("the repository indexes");
+
+    // The question set is not part of the corpus it measures.
+    //
+    // It lives under `tests/fixtures/`, so indexing the repository indexes it
+    // too — and it is a prose-dense document that names every identifier the
+    // questions ask about, many times each. The first run of this harness
+    // scored 16% at hit@1 and reported `edges_out` as a miss, because the top
+    // two hits for `edges_out` were the two places in this file that ask about
+    // `edges_out`. A benchmark that indexes its own answer key measures the
+    // answer key.
+    //
+    // Forgotten rather than filtered so the exclusion is a fact about the
+    // store rather than an argument every query has to remember to pass.
+    let questions_file = root.join("tests/fixtures/retrieval/questions.yaml");
+    semlith
+        .forget(&questions_file)
+        .expect("the question set leaves the corpus it measures");
+
+    let mut report = Report::default();
+    for question in &questions {
+        match question.tool.as_str() {
+            "search" => score_search(&mut semlith, &root, question, &mut report),
+            "path" => score_path(&semlith, question, &mut report),
+            // Scored by the same span rule as a search once they are wired up.
+            // Counted as skipped rather than as misses: a metric that punishes
+            // the harness for what the harness has not implemented is a metric
+            // that rewards deleting questions.
+            _ => report.skipped += 1,
+        }
+    }
+
+    let census = resolution_census(&semlith);
+    let tool_list = semlith::mcp::tool_list_bytes();
+    let tool_tokens = tool_list.div_ceil(4);
+    report.print(&questions, tool_list, tool_tokens);
+    census.print();
+
+    assert!(
+        census.share() > 50,
+        "only {}% of call edges whose target this corpus holds resolve to one \
+         definition; the resolver is the release's central change and this is the \
+         number that says whether it works",
+        census.share()
+    );
+    assert_eq!(
+        report.wrong_yes, 0,
+        "{} path question(s) returned a chain between symbols that are not connected. \
+         This is the one metric with a hard gate.",
+        report.wrong_yes
+    );
+    assert!(
+        tool_tokens < 1_000,
+        "tools/list is {tool_list} bytes, about {tool_tokens} tokens, and every agent \
+         pays it once per session"
+    );
+}
+
+#[derive(Default)]
+struct Report {
+    scored: usize,
+    skipped: usize,
+    hit_at: BTreeMap<usize, usize>,
+    bytes: Vec<usize>,
+    graph_only: usize,
+    graph_only_hits: usize,
+    wrong_yes: usize,
+    chains_found: usize,
+    chains_expected: usize,
+    chain_length_matches: usize,
+    misses: Vec<String>,
+}
+
+impl Report {
+    fn print(&self, questions: &[Question], tool_list: usize, tool_tokens: usize) {
+        let searched = self.scored.max(1);
+        println!("\n  retrieval harness — {} questions", questions.len());
+        println!("  {} scored, {} skipped\n", self.scored, self.skipped);
+        for k in [1usize, 3, 8] {
+            let hits = self.hit_at.get(&k).copied().unwrap_or(0);
+            println!(
+                "  hit@{k}   {hits}/{}  ({}%)",
+                self.scored,
+                hits * 100 / searched
+            );
+        }
+        let mut bytes = self.bytes.clone();
+        bytes.sort_unstable();
+        let median = bytes.get(bytes.len() / 2).copied().unwrap_or(0);
+        let worst = bytes.last().copied().unwrap_or(0);
+        println!("\n  bytes per answer   median {median}, worst {worst}");
+        println!(
+            "  graph-only hits    {} of {} satisfied a span",
+            self.graph_only_hits, self.graph_only
+        );
+        println!(
+            "\n  wrong yes          {}  (path questions whose true answer is \"not connected\")",
+            self.wrong_yes
+        );
+        println!(
+            "  chains found       {} of {}, {} at the expected length",
+            self.chains_found, self.chains_expected, self.chain_length_matches
+        );
+        println!("  tools/list         {tool_list} bytes, about {tool_tokens} tokens");
+        if !self.misses.is_empty() {
+            println!("\n  missed at k=8:");
+            for id in &self.misses {
+                println!("    {id}");
+            }
+        }
+        println!();
+    }
+}
+
+fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report: &mut Report) {
+    let k = question.k.unwrap_or(8);
+    let hits = semlith
+        .search(&question.query, k)
+        .unwrap_or_else(|e| panic!("{}: search failed: {e}", question.id));
+    report.scored += 1;
+
+    // The reply an agent would actually be handed, which is what its cost is.
+    report
+        .bytes
+        .push(semlith::mcp::locate_bytes(&hits, &question.query));
+
+    let mut first: Option<usize> = None;
+    for (rank, hit) in hits.iter().enumerate() {
+        let satisfies = question.spans.iter().any(|span| satisfied(root, hit, span));
+        if satisfies && first.is_none() {
+            first = Some(rank + 1);
+        }
+        // The third list's own contribution: a hit no other list ranked.
+        if hit.lists == ["graph"] {
+            report.graph_only += 1;
+            if satisfies {
+                report.graph_only_hits += 1;
+            }
+        }
+    }
+    match first {
+        Some(rank) => {
+            for k in [1usize, 3, 8] {
+                if rank <= k {
+                    *report.hit_at.entry(k).or_default() += 1;
+                }
+            }
+        }
+        None => report.misses.push(question.id.clone()),
+    }
+}
+
+fn score_path(semlith: &Semlith, question: &Question, report: &mut Report) {
+    report.scored += 1;
+    let found = semlith::graph::shortest_path(
+        semlith.db(),
+        &question.from,
+        &question.to,
+        6,
+        // The default, which is the behaviour under test. `--all-edges` is a
+        // deliberate request for a hypothesis and is not what an agent gets.
+        false,
+    )
+    .unwrap_or_else(|e| panic!("{}: path failed: {e}", question.id));
+
+    match question.connected {
+        Some(false) if found.is_some() => {
+            report.wrong_yes += 1;
+            report.misses.push(format!("{} (wrong yes)", question.id));
+        }
+        Some(false) => {}
+        Some(true) => {
+            report.chains_expected += 1;
+            match found {
+                Some(chain) => {
+                    report.chains_found += 1;
+                    if question.hops == Some(chain.steps.len()) {
+                        report.chain_length_matches += 1;
+                    }
+                }
+                None => report.misses.push(format!("{} (no chain)", question.id)),
+            }
+        }
+        None => {}
+    }
+}
+
+/// Whether one hit answers one span.
+///
+/// Same file, and either the line ranges overlap or the hit sits inside the
+/// definition the span names. The second clause is what lets a moved function
+/// still score, which is the property the question set was written to have.
+fn satisfied(root: &Path, hit: &semlith::Hit, span: &Span) -> bool {
+    let wanted = root.join(&span.path);
+    if Path::new(&hit.path) != wanted {
+        return false;
+    }
+    let overlaps = hit.start_line <= span.end_line && hit.end_line >= span.start_line;
+    let named = !span.symbol.is_empty() && hit.symbol.as_deref() == Some(span.symbol.as_str());
+    overlaps || named
+}
+
+/// What share of the call edges the corpus can answer for resolve to exactly
+/// one definition.
+///
+/// Measured through `edges_out`, not by reimplementing the ranking in SQL: the
+/// question is what the resolver actually returns, and a second implementation
+/// of the ladder would measure the second implementation.
+///
+/// The denominator is deliberately the edges whose target this corpus holds.
+/// An edge into the standard library or into a crate nobody indexed cannot be
+/// resolved by any ranking, and counting those would report a number that says
+/// more about what was indexed than about the resolver.
+struct Census {
+    resolved: usize,
+    extracted: usize,
+    ambiguous: usize,
+    outside: usize,
+}
+
+impl Census {
+    fn share(&self) -> usize {
+        let answerable = self.resolved + self.extracted + self.ambiguous;
+        if answerable == 0 {
+            return 0;
+        }
+        (self.resolved + self.extracted) * 100 / answerable
+    }
+
+    fn print(&self) {
+        let answerable = self.resolved + self.extracted + self.ambiguous;
+        println!("  resolution, over call edges whose target this corpus holds");
+        println!(
+            "    settled      {} of {answerable}  ({}%)",
+            self.resolved + self.extracted,
+            self.share()
+        );
+        println!("      extracted  {}", self.extracted);
+        println!("      resolved   {}", self.resolved);
+        println!("    ambiguous    {}", self.ambiguous);
+        println!("    outside the corpus, not counted   {}\n", self.outside);
+    }
+}
+
+fn resolution_census(semlith: &Semlith) -> Census {
+    let db = semlith.db();
+    let mut names: Vec<String> = Vec::new();
+    {
+        let mut stmt = db
+            .prepare("SELECT DISTINCT name FROM symbols")
+            .expect("the symbol table reads");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("symbol names read");
+        for name in rows {
+            names.push(name.expect("a symbol name"));
+        }
+    }
+
+    let kinds = vec!["calls".to_string()];
+    let mut census = Census {
+        resolved: 0,
+        extracted: 0,
+        ambiguous: 0,
+        outside: 0,
+    };
+    for name in &names {
+        // One row per *edge*, not per candidate.
+        //
+        // `edges_out` returns every candidate for an edge it could not settle,
+        // so an ambiguous edge with ten candidates comes back as ten rows and a
+        // resolved edge as one. Counting the raw rows makes the ambiguous share
+        // a function of how many definitions the ambiguous names happen to
+        // have, which is not what "what share of edges resolve" asks — and it
+        // reported 35% where the edges say something quite different.
+        // `collapse` folds each ambiguous edge back to the one row it is.
+        let edges = semlith::graph::collapse(
+            semlith::store::edges_out(db, name, &kinds).expect("edges read"),
+        );
+        for end in edges {
+            match end.confidence.as_str() {
+                c if c == semlith::graph::EXTRACTED => census.extracted += 1,
+                c if c == semlith::graph::RESOLVED => census.resolved += 1,
+                _ => census.ambiguous += 1,
+            }
+        }
+        census.outside += semlith::store::unresolved_out(db, name, &kinds)
+            .expect("unresolved read")
+            .len();
+    }
+    census
+}
+
+fn repository_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Read the question set.
+///
+/// A reader for exactly the subset of YAML this one file uses, because the
+/// release adds no dependency for the harness and a general parser is not what
+/// is needed: two levels of mapping, one list of records, one nested list of
+/// spans, and folded blocks that this ignores.
+///
+/// It fails loudly on anything it does not recognise. A parser that silently
+/// returned an empty set would turn every metric below into a passing zero,
+/// which is the one failure mode a measuring stick may not have.
+fn read_questions(path: &Path) -> Vec<Question> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("the question set is missing at {}: {e}", path.display()));
+
+    let mut questions: Vec<Question> = Vec::new();
+    let mut in_questions = false;
+    let mut in_spans = false;
+    // Set while a folded block (`>-`) is being skipped, to the indent of the
+    // key that opened it; every deeper line belongs to that block.
+    let mut folding: Option<usize> = None;
+
+    for (number, raw) in text.lines().enumerate() {
+        let line = raw.trim_end();
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if let Some(opened_at) = folding {
+            if indent > opened_at {
+                continue;
+            }
+            folding = None;
+        }
+        let body = line.trim_start();
+
+        if !in_questions {
+            in_questions = body == "questions:";
+            continue;
+        }
+
+        // A new question, or a new span inside one.
+        if let Some(rest) = body.strip_prefix("- ") {
+            if indent <= 2 {
+                questions.push(Question::default());
+                in_spans = false;
+            } else {
+                let current = questions
+                    .last_mut()
+                    .unwrap_or_else(|| panic!("line {}: a span before any question", number + 1));
+                assert!(
+                    in_spans,
+                    "line {}: a nested list that is not `spans`",
+                    number + 1
+                );
+                current.spans.push(Span::default());
+            }
+            assign(&mut questions, in_spans, rest, number + 1, &mut folding);
+            continue;
+        }
+
+        if body == "spans:" {
+            in_spans = true;
+            continue;
+        }
+        if indent <= 4 && body.ends_with(':') && !body.contains(": ") {
+            // A key with a block under it that is not `spans`. Nothing here
+            // needs one, so it is a change to this file the harness has not
+            // been taught about.
+            panic!("line {}: unrecognised block {body:?}", number + 1);
+        }
+        if indent <= 4 {
+            in_spans = false;
+        }
+        assign(&mut questions, in_spans, body, number + 1, &mut folding);
+    }
+
+    assert!(
+        !questions.is_empty(),
+        "the question set parsed to nothing, which would make every metric a passing zero"
+    );
+    for question in &questions {
+        assert!(!question.id.is_empty(), "a question with no id");
+        assert!(
+            !question.tool.is_empty(),
+            "{}: a question with no tool",
+            question.id
+        );
+    }
+    questions
+}
+
+/// Apply one `key: value` line to the question or span being built.
+fn assign(
+    questions: &mut [Question],
+    in_spans: bool,
+    body: &str,
+    line: usize,
+    folding: &mut Option<usize>,
+) {
+    let Some((key, value)) = body.split_once(':') else {
+        panic!("line {line}: {body:?} is not a key and a value");
+    };
+    let key = key.trim();
+    let value = value.trim();
+
+    // `>-` and `|` open a block that belongs to prose. The harness reads no
+    // prose, so the block is skipped rather than half-parsed.
+    if value.starts_with('>') || value.starts_with('|') {
+        *folding = Some(4);
+        return;
+    }
+    let value = value.trim_matches(|c| c == '"' || c == '\'');
+    let question = questions
+        .last_mut()
+        .unwrap_or_else(|| panic!("line {line}: a field before any question"));
+
+    if in_spans {
+        let span = question
+            .spans
+            .last_mut()
+            .unwrap_or_else(|| panic!("line {line}: a span field outside a span"));
+        match key {
+            "path" => span.path = value.to_string(),
+            // `~` is YAML's null, used where a span has no enclosing symbol.
+            "symbol" => {
+                span.symbol = if value == "~" {
+                    String::new()
+                } else {
+                    value.to_string()
+                }
+            }
+            "start_line" => span.start_line = number(value, line),
+            "end_line" => span.end_line = number(value, line),
+            "note" => {}
+            other => panic!("line {line}: unknown span field {other:?}"),
+        }
+        return;
+    }
+
+    match key {
+        "id" => question.id = value.to_string(),
+        "shape" => question.shape = value.to_string(),
+        "tool" => question.tool = value.to_string(),
+        "query" => question.query = value.to_string(),
+        "name" => question.name = value.to_string(),
+        "from" => question.from = value.to_string(),
+        "to" => question.to = value.to_string(),
+        "connected" => question.connected = Some(value == "true"),
+        "hops" => question.hops = Some(number(value, line) as usize),
+        "k" => question.k = Some(number(value, line) as usize),
+        "depth" | "grep" | "kinds" | "want" | "note" => {}
+        other => panic!("line {line}: unknown question field {other:?}"),
+    }
+}
+
+fn number(value: &str, line: usize) -> u32 {
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("line {line}: {value:?} is not a number"))
+}

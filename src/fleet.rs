@@ -24,6 +24,15 @@ pub struct Fleet {
     /// One loaded model per distinct model, shared by every store using it.
     /// Three stores built with the same model cost one copy of the weights.
     embedders: Vec<(Model, TextEmbedding)>,
+    /// The tokenizer of the first model this fleet loaded, for counting the
+    /// ledger's tokens rather than estimating them.
+    ///
+    /// It lives here rather than on each store because this is where models are
+    /// loaded. `Semlith` has an embedder of its own for the library path, and a
+    /// fleet never uses it — which is exactly how the ledger came to label every
+    /// row `chars4` while the code claimed to count with the real thing: the
+    /// tokenizer was hung off the object that was not doing the work.
+    tokenizer: Option<tokenizers::Tokenizer>,
     /// Query embeds performed, which is what the "one embed per model, not per
     /// store" claim is measured against.
     embeds: usize,
@@ -48,6 +57,7 @@ impl Fleet {
         Self {
             members: Vec::new(),
             embedders: Vec::new(),
+            tokenizer: None,
             embeds: 0,
             quiet: true,
         }
@@ -89,6 +99,7 @@ impl Fleet {
         Ok(Self {
             members,
             embedders: Vec::new(),
+            tokenizer: None,
             embeds: 0,
             quiet: false,
         })
@@ -266,10 +277,40 @@ impl Fleet {
         only: Option<&[String]>,
         name: &str,
         kinds: &[String],
+        all: bool,
     ) -> Result<crate::graph::Neighbours> {
         let callers = self.graph_in(only, |s| crate::store::edges_in(s.db(), name, kinds))?;
         let callees = self.graph_in(only, |s| crate::store::edges_out(s.db(), name, kinds))?;
-        Ok(crate::graph::Neighbours { callers, callees })
+        let unresolved =
+            self.graph_in(only, |s| crate::store::unresolved_out(s.db(), name, kinds))?;
+        // Collapsed after the stores are joined, not inside each of them: one
+        // name with two definitions in two stores is still one name.
+        Ok(crate::graph::Neighbours {
+            callers,
+            callees: if all {
+                callees
+            } else {
+                crate::graph::collapse(callees)
+            },
+            hidden: if all { 0 } else { unresolved.len() },
+            unresolved: if all { unresolved } else { Vec::new() },
+        })
+    }
+
+    /// What should count this fleet's tokens.
+    ///
+    /// The first store with a loaded model decides, and its tokenizer counts
+    /// for the whole answer. Two stores could in principle be on two models;
+    /// mixing two tokenizers inside one ratio would be worse than using one of
+    /// them and labelling the row, which is what this does.
+    pub fn counter(&self) -> crate::ledger::Counter<'_> {
+        self.tokenizer
+            .as_ref()
+            // A store's own tokenizer, for a caller that drove `Semlith`
+            // directly and handed the result here.
+            .or_else(|| self.members.iter().find_map(|m| m.store.tokenizer()))
+            .map(crate::ledger::Counter::Model)
+            .unwrap_or(crate::ledger::Counter::Chars4)
     }
 
     /// The shortest chain from `from` to `to`, in the first store that has one.
@@ -283,14 +324,17 @@ impl Fleet {
         from: &str,
         to: &str,
         depth: u32,
-    ) -> Result<Option<Vec<crate::graph::Step>>> {
-        let mut best: Option<Vec<crate::graph::Step>> = None;
+        all_edges: bool,
+    ) -> Result<Option<crate::graph::Chain>> {
+        let mut best: Option<crate::graph::Chain> = None;
         for i in self.chosen(only)? {
-            if let Some(path) =
-                crate::graph::shortest_path(self.members[i].store.db(), from, to, depth)?
-                && best.as_ref().is_none_or(|b| path.len() < b.len())
+            if let Some(chain) =
+                crate::graph::shortest_path(self.members[i].store.db(), from, to, depth, all_edges)?
+                && best
+                    .as_ref()
+                    .is_none_or(|b| chain.steps.len() < b.steps.len())
             {
-                best = Some(path);
+                best = Some(chain);
             }
         }
         Ok(best)
@@ -391,7 +435,13 @@ impl Fleet {
         if let Some(i) = self.embedders.iter().position(|(m, _)| m == model) {
             return Ok(i);
         }
-        let loaded = model.load(model_cache_dir(), chunk::MAX_CHARS / 2, self.quiet)?;
+        let cache = model_cache_dir();
+        // Read from the same cache in the same breath as the weights, so the
+        // count and the model's own segmentation are the same arithmetic.
+        if self.tokenizer.is_none() {
+            self.tokenizer = model.tokenizer(&cache);
+        }
+        let loaded = model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?;
         self.embedders.push((model.clone(), loaded));
         Ok(self.embedders.len() - 1)
     }
@@ -509,6 +559,12 @@ impl Labelled for crate::store::EdgeEnd {
     }
 }
 
+impl Labelled for crate::store::Unresolved {
+    /// Nothing to label. The row is a name the store does *not* hold, so
+    /// saying which store did not hold it would be noise: none of them did.
+    fn label(&mut self, _store: &str) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +579,10 @@ mod tests {
             store: None,
             lists: vec!["vector"],
             image: None,
+            fresh: true,
+            symbol: None,
+            symbol_kind: None,
+            provenance: None,
         }
     }
 

@@ -7,6 +7,176 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-14
+
+The graph stops answering questions it cannot support, the search stops sending
+the thing itself when it was asked where the thing is, and the ledger starts
+recording the agents it exists to measure.
+
+A study on 2026-09-14 measured all three: the graph was wrong about half the time
+on "does A reach B", with nothing in the output to say so; a search reply cost 20
+to 60 times the grep it replaced when the agent already knew the term; and the
+`retrievals` table was empty on real installations, because the only thing that
+ever wrote to it was the portal's own search box.
+
+### A graph that says how much it knows
+
+- **An edge's target is resolved, not matched by name.** `edges.dst` is a name,
+  and a name is not an address: a store of any size holds four `get`s and seven
+  `index`es, and every one of them used to come back as its own row,
+  indistinguishable from the call the source actually makes. Each edge is now
+  ranked against its candidates — the calling file's own definition first, then a
+  definition whose file the source pointed at, then one in a file the caller
+  imports, then the corpus holding only one definition of the name. One survivor
+  is `resolved`; several are `ambiguous`, and every candidate carries the
+  definition count so a renderer can say "4 definitions" rather than print four
+  calls. An edge the syntax tree already settled stays `extracted`: a fact
+  outranks a ranking. Both new values are computed when a query runs and never
+  stored, so re-indexing a target cannot make them stale.
+- **`edges.hint` records what the source said about where a call goes.** The
+  module of a scoped call, the receiver of a method call, the object of a
+  qualified Python or TypeScript call. The source almost always says more than
+  the name, and none of it was being kept. Rust's supplementary query also stops
+  emitting the path segment of a scoped call as a second `calls` edge —
+  `store::edges_out()` is a call to `edges_out`, not to `store`, and that edge
+  invented a call the source does not make and handed the path finder a module to
+  walk through.
+- **A path walks definitions, not names.** Refusing ambiguous edges is not enough
+  on its own: on the 0.14.0 store every hop of `call_tool -> record_retrieval`
+  resolved to exactly one definition and the chain was still false, because hop 3
+  arrived at `search` in `lib.rs` and hop 4 left from `search` in `routes.rs`.
+  Each hop true, the chain not. A node in the traversal is now a definition, and
+  a chain may only leave from the definition it arrived at. The false chains that
+  are still false — `search_in` and `is_image` to `record_retrieval` — now answer
+  "not connected within 6 hops by resolved edges", and a path that does exist
+  still answers with nothing to qualify it. The other two pairs the study named
+  became genuinely connected in this release, because this is the release that
+  made every surface record a retrieval; the question set carries the measured
+  chains and the reasoning.
+- **`--all-edges` walks the old way and says what it found.** Both endpoints on
+  every hop with file and line, a seam drawn where the chain changed subject, a
+  trailer whose four confidence counts add up to the hop count and which names
+  the ambiguous names crossed, and one line: "A hypothesis, not a finding."
+  `--strict` states the default out loud and wins when both are given. One
+  renderer serves the CLI, the MCP reply and the portal, so the three cannot
+  describe one answer differently.
+- **`semlith neighbors` collapses and hides.** Callees to a name with several
+  definitions are one row carrying the count, because four rows saying `get` read
+  as four calls and the symbol makes one. Targets the store holds no definition
+  for are counted rather than silently omitted. `--all` expands both: "semlith
+  shows no callees" and "everything this calls is outside the index" are
+  different facts.
+- **Search expansion follows only the kinds that mean "depends on"**, skips
+  ambiguous names, and weighs a chunk reached through a resolved edge above one
+  reached by a bare-name match. Following `defines` and `contains` pulled in
+  every symbol that shared a file with a hit, which diluted the two lists that
+  had answered the question.
+
+### A search that answers where
+
+- **`semlith_search` answers with locations by default.** A locate row is the
+  store-relative path, the line span, the enclosing symbol and its kind, the
+  lists that found it, provenance when the graph reached it, whether the file has
+  changed since it was indexed, and one line of the text — grouped by file and
+  cut to a `max_tokens` budget that states `truncated: 8 of 23` when it cuts. An
+  agent that already knows the identifier wants the address, not the building:
+  the study measured a warm reply at 4.9–7.2 KB at `k=8` against 100–300 bytes
+  for the grep it replaced. **This changes what an MCP client gets back.**
+  `format: "excerpt"` returns exactly what 0.14.0 returned, and the CLI is
+  unchanged — a person reading a terminal is not paying by the token.
+- **Every hit says whether its file has moved under it.** One `stat` per distinct
+  path, the current size and mtime against what the store recorded. Deliberately
+  conservative, so a `touch` with no edit reads as stale: a false "check this"
+  costs a reread and a false "this is current" costs a wrong quotation.
+- **`tools/list` is 3 940 bytes with one store open, from 8 634.** Every agent
+  paid the old one once per session before asking anything, and most of it was
+  advice a model either already knows or will not follow from a schema.
+  Descriptions are one sentence each, `title` annotations are gone — the portal
+  falls back to the description — and the language list moved to a tenth tool,
+  `semlith_languages`, because it is a fact about the build and can be stated
+  once rather than read by every agent every session.
+
+### A ledger that records the user it exists for
+
+- **Every retrieval is recorded, from every surface.** The write moved out of
+  `routes.rs` into `src/ledger.rs`, and stdio MCP, the daemon's `/mcp` endpoint,
+  the CLI and the portal all call it — so a search from the command line and the
+  same search from an agent are counted the same way rather than nearly the same
+  way. A row says which client asked, using the name the client gives itself in
+  the MCP handshake (`claude-code`, `cursor`, `cli`, `portal`), and which session
+  it belonged to. Graph answers are recorded against the honest denominator: the
+  bytes of every file a grep for that name would have made you read. A retrieval
+  that found nothing is recorded and credited nothing, because a ledger that
+  remembers only its successes is a marketing document.
+- **Recording is on by default, and `semlith start --ledger` is removed.** This
+  reverses what 0.12.0 through 0.14.0 said, and the reversal is the point. Those
+  releases stated that a local tool which starts logging without being told is
+  not different from one that phones home. What that principle bought was a
+  ledger nobody switched on: it measured nobody, so the savings figure had no
+  denominator and the audit trail had no rows. The principle that actually holds
+  is narrower and every clause of it is checkable — the rows never leave the
+  store they were written into, the daemon says on every start that it is
+  recording and names the flag that stops it, and erasing every row is one
+  `DELETE`. `--no-ledger` stops a session, `SEMLITH_LEDGER=0` stops a machine,
+  and the daemon prints `ledger: recording (local only; --no-ledger to stop)` or
+  `ledger: off for this session` every time it comes up.
+- **Both sides of a ratio are counted with the store's own tokenizer.** The same
+  `tokenizer.json` the embedding model already loads, out of the same cache,
+  under the same pinned digest. Four characters per token remains the fallback
+  for a session that never loaded a model — a graph-only session never does — and
+  the row says which counted it, so rows counted two different ways are never
+  summed. `tokenizers` is now named in `Cargo.toml`; it was already in the tree
+  under fastembed, on the same precedent as `image` and `getrandom` there.
+- **`semlith ledger --verify` re-walks the chain** and exits non-zero on a break,
+  naming the first row that does not verify. **`semlith stats` gains one line:**
+  tokens not read, over how many of how many retrievals, with the coverage and a
+  `measured` or `modelled` tier. It does not deduplicate files across one
+  session's retrievals, so it is an upper bound, and the line names its tier
+  rather than implying precision it does not have.
+- **Four nullable columns on `retrievals`** — `session`, `tool`, `stale_hits`,
+  `tokenizer` — added by an `ALTER TABLE` that runs on open. The hash chain is
+  versioned by the row rather than by the store: `tool` is NULL on every row
+  written before 0.15.0 and set on every row written since, which is what picks
+  the formula. A store holding rows of both kinds verifies end to end, because a
+  verify that reported every 0.14.0 ledger as broken would be worse than no
+  verify at all.
+
+### A number behind every retrieval claim
+
+- **`tests/retrieval.rs`**, `#[ignore]`d like the other model-downloading tests.
+  It runs a fixed set of 41 questions with ground-truth spans from
+  `tests/fixtures/retrieval/questions.yaml` — the asker who knows the identifier,
+  the asker who knows only the idea, and the asker whose question only the graph
+  can answer — and prints hit@1, hit@3, hit@8, bytes per answer, the graph list's
+  marginal contribution and the wrong-yes count for `path`. It asserts wrong-yes
+  is zero and `tools/list` is under 1 000 tokens. The question set was committed
+  before the work it measures, and its spans are line ranges in the 0.14.0 merge
+  rather than in the tree being edited to answer them. Run it with `cargo test
+  --release --test retrieval -- --ignored --nocapture`.
+
+### Removed
+
+- **`semlith start --ledger`.** The flag now asks for the default, and it is
+  removed rather than kept as a no-op: a script that passes it fails at parse
+  time and is corrected once, where a flag that silently meant its opposite would
+  go on reading as though it were switching something on.
+
+  **This is a break in the covered surface.** `docs/compatibility.md` records it,
+  along with the two changes of default — the ledger recording without being
+  asked, and `semlith_search` answering with locations where an MCP client
+  previously received excerpts.
+
+### Notes
+
+- **Existing stores open unchanged, and `format_version` stays 2.** The five new
+  columns are nullable and added by an `ALTER TABLE` beside the
+  `CREATE TABLE IF NOT EXISTS` batch every open already runs. A 0.14.0 binary
+  opens a 0.15.0 store and never asks for them; a 0.15.0 binary reads a 0.14.0
+  store with a NULL hint on every edge and resolves it exactly as 0.14.0 did,
+  filling the hints in for a file on the next `index` pass that touches it. The
+  hint is a tie-breaker, so its absence costs the ranking a tier rather than an
+  answer.
+
 ## [0.14.0] - 2026-09-14
 
 Every finding of the security audit of 0.13.0, closed in one release, each with
@@ -1165,7 +1335,9 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/semlith/semlith/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/semlith/semlith/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/semlith/semlith/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/semlith/semlith/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/semlith/semlith/compare/v0.10.0...v0.11.0
