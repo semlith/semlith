@@ -95,6 +95,16 @@ pub struct Edge {
     /// which may name a field, a module or neither. The resolver treats it as
     /// one ranking signal among several rather than as truth.
     pub hint: Option<String>,
+    /// The line the reference sat on in the source file.
+    ///
+    /// Where the call, import or reference was written — not where either
+    /// symbol is defined. "Where is X invoked" is a question about this line,
+    /// and before 0.16.0 the only answer available was the enclosing symbol's
+    /// definition, which can be hundreds of lines away.
+    ///
+    /// `None` on every row an older binary wrote, which is why the format
+    /// version does not move for it.
+    pub line: Option<u32>,
 }
 
 /// What one file yielded.
@@ -286,6 +296,7 @@ struct Ref {
     name: String,
     kind: &'static str,
     at: usize,
+    line: u32,
     hint: Option<String>,
 }
 
@@ -383,6 +394,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 kind: "contains".to_string(),
                 confidence: EXTRACTED.to_string(),
                 hint: None,
+                // A structural edge has no call site, so it carries the line
+                // the definition itself starts on rather than nothing: that is
+                // where the source says the containment happens.
+                line: Some(def.start_line),
             }),
             None => edges.push(Edge {
                 from: module.clone(),
@@ -390,6 +405,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 kind: "defines".to_string(),
                 confidence: EXTRACTED.to_string(),
                 hint: None,
+                line: Some(def.start_line),
             }),
         }
     }
@@ -431,6 +447,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             kind: reference.kind.to_string(),
             confidence: confidence.to_string(),
             hint: reference.hint.clone(),
+            line: Some(reference.line),
         });
     }
 
@@ -447,6 +464,8 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             confidence_rank(&a.confidence),
             a.hint.is_none(),
             &a.hint,
+            a.line.is_none(),
+            a.line,
         )
             .cmp(&(
                 &b.from,
@@ -455,6 +474,8 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 confidence_rank(&b.confidence),
                 b.hint.is_none(),
                 &b.hint,
+                b.line.is_none(),
+                b.line,
             ))
     });
     edges.dedup_by(|a, b| (&a.from, &a.to, &a.kind) == (&b.from, &b.to, &b.kind));
@@ -536,6 +557,7 @@ fn collect(
                 name: target,
                 kind,
                 at: node.start_byte(),
+                line: node.start_position().row as u32 + 1,
                 hint: hint.and_then(|h| hint_text(h, text)),
             });
         }
@@ -980,6 +1002,28 @@ impl Chain {
 /// six absolute paths is six copies of one prefix and one useful suffix.
 pub fn verbatim(path: &str) -> String {
     path.to_string()
+}
+
+/// Where the call, import or reference this edge records was actually written.
+///
+/// Empty when the edge carries no line — every row written before 0.16.0, and
+/// every row whose source file has not been re-indexed since. A renderer says
+/// nothing rather than pointing at the enclosing definition and calling it a
+/// call site, because those are different lines and often far apart.
+///
+/// The two shapes are not cosmetic. From [`crate::store::edges_out`] the row's
+/// own `symbol` is the *target*, so the call sits in a different file and has
+/// to be named. From [`crate::store::edges_in`] the row's `symbol` is the
+/// caller itself and its path is already on the line, so only the line number
+/// is new.
+pub fn call_site(end: &crate::store::EdgeEnd, shorten: &dyn Fn(&str) -> String) -> String {
+    let Some(line) = end.line else {
+        return String::new();
+    };
+    match &end.from_path {
+        Some(path) => format!("  · called at {}:{line}", shorten(path)),
+        None => format!("  · call at line {line}"),
+    }
 }
 
 /// `name @ path:line`, or the bare name when the store could not say where.
@@ -1584,6 +1628,39 @@ mod tests {
         assert!(e.symbols.iter().any(|s| s.name == "good"));
     }
 
+    /// The line an edge carries is the line the call was written on, not the
+    /// line the function that contains it starts on. Those are the same only
+    /// for a one-line function, which is why the fixture's call sits four
+    /// lines below its `fn`.
+    #[test]
+    fn a_reference_edge_carries_the_line_the_call_was_written_on() {
+        let e = run(
+            "a.rs",
+            "use other::helper;\n\nfn caller() {\n    let x = 1;\n    let _ = x;\n    helper();\n}\n",
+        );
+        let call = e
+            .edges
+            .iter()
+            .find(|x| x.kind == "calls" && x.to == "helper")
+            .unwrap_or_else(|| panic!("no call edge: {:?}", e.edges));
+        assert_eq!(call.line, Some(6), "{:?}", e.edges);
+
+        let import = e
+            .edges
+            .iter()
+            .find(|x| x.kind == "imports")
+            .unwrap_or_else(|| panic!("no import edge: {:?}", e.edges));
+        assert_eq!(import.line, Some(1), "{:?}", e.edges);
+
+        // Nothing this release extracts may leave the column empty: a NULL is
+        // reserved for a row an older binary wrote.
+        assert!(
+            e.edges.iter().all(|x| x.line.is_some()),
+            "{:?}",
+            e.edges
+        );
+    }
+
     #[test]
     fn recursion_does_not_produce_a_self_edge() {
         let e = run("a.rs", "fn loops() { loops(); }\n");
@@ -1612,7 +1689,7 @@ mod tests {
             );
         }
         for (from, to) in [("a", "b"), ("b", "c"), ("c", "d"), ("e", "d")] {
-            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None).unwrap();
+            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None, None).unwrap();
         }
         db
     }
@@ -1641,7 +1718,7 @@ mod tests {
             end_line: 2,
         };
         let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
-        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None).unwrap();
+        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None, None).unwrap();
         // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
         let path = shortest_path(&db, "a", "d", 50, false).unwrap();
         assert!(path.is_some(), "a still reaches d");
@@ -1700,9 +1777,9 @@ mod tests {
         define(&db, "src/finish.rs", "finish", 40);
 
         // `start` calls a `record`, and nothing in its source says which.
-        crate::store::insert_edge(&db, start, "record", "calls", INFERRED, None).unwrap();
+        crate::store::insert_edge(&db, start, "record", "calls", INFERRED, None, None).unwrap();
         // Only the second `record` reaches `finish`.
-        crate::store::insert_edge(&db, second, "finish", "calls", INFERRED, None).unwrap();
+        crate::store::insert_edge(&db, second, "finish", "calls", INFERRED, None, None).unwrap();
         db
     }
 

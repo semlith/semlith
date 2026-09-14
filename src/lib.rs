@@ -1364,6 +1364,7 @@ impl Semlith {
                 &edge.kind,
                 &edge.confidence,
                 edge.hint.as_deref(),
+                edge.line,
             )?;
             written += 1;
         }

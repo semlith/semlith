@@ -102,12 +102,18 @@ CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
 -- wrote, which is why the format version does not move for it. It is a lead,
 -- not an address, and `edges_out` treats it as one ranking signal among
 -- several — see `resolve`.
+-- `line` is where the reference was written in the source file, from 0.16.0.
+-- Not where either symbol is defined: "where is X invoked" is a question about
+-- this column, and until it existed the closest answer was the enclosing
+-- symbol's own start line. Nullable and NULL on every row an older binary
+-- wrote, so the format version does not move for it either.
 CREATE TABLE IF NOT EXISTS edges (
     src        INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
     dst        TEXT NOT NULL,
     kind       TEXT NOT NULL,
     confidence TEXT NOT NULL,
-    hint       TEXT
+    hint       TEXT,
+    line       INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
@@ -327,8 +333,10 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 5] = [
+    const ADDITIONS: [(&str, &str, &str); 6] = [
         ("edges", "hint", "TEXT"),
+        // 0.16.0: the line the reference was written on.
+        ("edges", "line", "INTEGER"),
         // The ledger's 0.15.0 columns. `session` groups the retrievals of one
         // agent conversation, `tool` says which tool was asked, `stale_hits`
         // counts the answers that came from a file edited since it was
@@ -889,6 +897,14 @@ pub struct EdgeEnd {
     pub from_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_line: Option<u32>,
+    /// The line the call, import or reference was written on, in the source
+    /// file named by `from_path`.
+    ///
+    /// `None` for an edge written before 0.16.0, and for one whose source file
+    /// has not been re-indexed since. A renderer says nothing rather than
+    /// guessing when it is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -937,10 +953,12 @@ pub fn insert_edge(
     kind: &str,
     confidence: &str,
     hint: Option<&str>,
+    line: Option<u32>,
 ) -> Result<()> {
     db.execute(
-        "INSERT INTO edges (src, dst, kind, confidence, hint) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![src, dst, kind, confidence, hint],
+        "INSERT INTO edges (src, dst, kind, confidence, hint, line)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![src, dst, kind, confidence, hint, line],
     )?;
     Ok(())
 }
@@ -1059,7 +1077,7 @@ pub fn symbols_by_names(
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
          FROM symbols src
          JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
@@ -1079,6 +1097,7 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
             hint: r.get(10)?,
             src_path: r.get(11)?,
             src_line: r.get(12)?,
+            line: r.get(13)?,
         })
     })?;
     let reached = rows.collect::<Result<Vec<_>, _>>()?;
@@ -1094,6 +1113,7 @@ struct Reached {
     hint: Option<String>,
     src_path: String,
     src_line: u32,
+    line: Option<u32>,
 }
 
 /// Turn candidate rows into resolved edges.
@@ -1150,6 +1170,7 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 definitions,
                 from_path: Some(row.src_path),
                 from_line: Some(row.src_line),
+                line: row.line,
             });
             continue;
         }
@@ -1195,6 +1216,7 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 definitions,
                 from_path: Some(row.src_path),
                 from_line: Some(row.src_line),
+                line: row.line,
             });
         }
     }
@@ -1314,7 +1336,7 @@ pub struct Unresolved {
 pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.line
          FROM edges e
          JOIN symbols s ON s.id = e.src
          JOIN files f ON f.id = s.file_id
@@ -1335,6 +1357,7 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
             definitions: 1,
             from_path: None,
             from_line: None,
+            line: r.get(10)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1873,7 +1896,7 @@ mod tests {
     fn deleting_a_file_deletes_its_symbols_and_its_outgoing_edges() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "callee", "calls", "inferred", None).unwrap();
+        insert_edge(&db, caller, "callee", "calls", "inferred", None, None).unwrap();
         assert_eq!(graph_stats(&db).unwrap(), (1, 1));
 
         delete_file(&db, "a.rs").unwrap();
@@ -1894,7 +1917,7 @@ mod tests {
     fn re_indexing_the_target_file_leaves_edges_into_it_intact() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "callee", "calls", "inferred", None).unwrap();
+        insert_edge(&db, caller, "callee", "calls", "inferred", None, None).unwrap();
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
         insert_symbol(&db, b, None, &sym("callee")).unwrap();
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 1);
@@ -1944,7 +1967,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(db, src, "callee", "calls", "inferred", hint).unwrap();
+        insert_edge(db, src, "callee", "calls", "inferred", hint, None).unwrap();
     }
 
     /// One definition of the name is one answer, whatever the hint says.
@@ -2019,7 +2042,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None).unwrap();
+        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None, None).unwrap();
         call(&db, None);
         let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
@@ -2037,7 +2060,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None).unwrap();
+        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None, None).unwrap();
         call(&db, Some("a"));
         let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
@@ -2053,7 +2076,7 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(&db, src, "callee", "calls", "extracted", Some("store")).unwrap();
+        insert_edge(&db, src, "callee", "calls", "extracted", Some("store"), None).unwrap();
         let out = edges_out(&db, "caller", &[]).unwrap();
         assert_eq!(out[0].confidence, crate::graph::EXTRACTED);
     }
@@ -2098,8 +2121,8 @@ mod tests {
         let caller = one_symbol(&db, "a.rs", "caller");
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
         insert_symbol(&db, b, None, &sym("callee")).unwrap();
-        insert_edge(&db, caller, "callee", "calls", "extracted", None).unwrap();
-        insert_edge(&db, caller, "callee", "references", "inferred", None).unwrap();
+        insert_edge(&db, caller, "callee", "calls", "extracted", None, None).unwrap();
+        insert_edge(&db, caller, "callee", "references", "inferred", None, None).unwrap();
 
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 2);
         let calls = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
@@ -2121,7 +2144,7 @@ mod tests {
     fn an_edge_to_an_unindexed_target_resolves_to_nothing_without_erroring() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "println", "calls", "inferred", None).unwrap();
+        insert_edge(&db, caller, "println", "calls", "inferred", None, None).unwrap();
         assert!(edges_out(&db, "caller", &[]).unwrap().is_empty());
         assert_eq!(graph_stats(&db).unwrap().1, 1, "but the edge row is there");
     }
@@ -2381,6 +2404,48 @@ mod tests {
                 .is_empty(),
             "cascade delete left the keyword index stale"
         );
+    }
+
+    /// A store written by 0.15.0 has no `edges.line`. Opening it must add the
+    /// column without touching the rows, and every edge already in it must
+    /// report no call site rather than a wrong one.
+    #[test]
+    fn a_pre_0_16_store_opens_and_its_edges_report_no_call_site() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE,
+                 hash TEXT NOT NULL, bytes INTEGER NOT NULL, indexed_at INTEGER NOT NULL);
+             CREATE TABLE symbols (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                 chunk_id INTEGER, kind TEXT NOT NULL, name TEXT NOT NULL,
+                 qualified TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER NOT NULL);
+             CREATE TABLE edges (src INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+                 dst TEXT NOT NULL, kind TEXT NOT NULL, confidence TEXT NOT NULL, hint TEXT);
+             INSERT INTO files VALUES (1, '/a/lib.rs', 'h', 10, 0);
+             INSERT INTO symbols VALUES (1, 1, NULL, 'function', 'caller', 'm::caller', 1, 9);
+             INSERT INTO symbols VALUES (2, 1, NULL, 'function', 'callee', 'm::callee', 20, 24);
+             CREATE TABLE retrievals (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
+                 client TEXT NOT NULL, query TEXT NOT NULL, hits INTEGER NOT NULL,
+                 micros INTEGER NOT NULL, excerpt_tokens INTEGER NOT NULL,
+                 whole_file_tokens INTEGER NOT NULL);
+             INSERT INTO edges VALUES (1, 'callee', 'calls', 'inferred', NULL);",
+        )
+        .unwrap();
+
+        add_columns(&db).unwrap();
+
+        let out = edges_out(&db, "caller", &[]).unwrap();
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(out[0].line, None, "a 0.15.0 row must not invent a call site");
+        assert_eq!(
+            crate::graph::call_site(&out[0], &crate::graph::verbatim),
+            "",
+            "nothing is rendered for an edge with no line"
+        );
+
+        let into = edges_in(&db, "callee", &[]).unwrap();
+        assert_eq!(into.len(), 1, "{into:?}");
+        assert_eq!(into[0].line, None);
     }
 
     #[test]

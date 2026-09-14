@@ -1561,20 +1561,25 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         if end.confidence == semlith::graph::AMBIGUOUS {
             writeln!(
                 out,
-                "  {} via {} ({}) · {} definitions",
-                end.symbol.name, end.kind, end.confidence, end.definitions,
+                "  {} via {} ({}) · {} definitions{}",
+                end.symbol.name,
+                end.kind,
+                end.confidence,
+                end.definitions,
+                semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
             )?;
             continue;
         }
         writeln!(
             out,
-            "  {} via {} ({})  {}{}:{}",
+            "  {} via {} ({})  {}{}:{}{}",
             end.symbol.name,
             end.kind,
             end.confidence,
             store_prefix(&end.symbol.store),
             display(std::path::Path::new(&end.symbol.path)),
             end.symbol.start_line,
+            semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
         )?;
     }
     Ok(())

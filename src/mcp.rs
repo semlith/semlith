@@ -1037,18 +1037,23 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
             // file, and it is one of four the call could have meant.
             if e.confidence == crate::graph::AMBIGUOUS {
                 return format!(
-                    "  {} via {} ({}) · {} definitions",
-                    e.symbol.name, e.kind, e.confidence, e.definitions
+                    "  {} via {} ({}) · {} definitions{}",
+                    e.symbol.name,
+                    e.kind,
+                    e.confidence,
+                    e.definitions,
+                    crate::graph::call_site(e, &crate::graph::verbatim)
                 );
             }
             format!(
-                "  {} via {} ({})  {}{}:{}",
+                "  {} via {} ({})  {}{}:{}{}",
                 e.symbol.name,
                 e.kind,
                 e.confidence,
                 label_of(&e.symbol.store),
                 e.symbol.path,
-                e.symbol.start_line
+                e.symbol.start_line,
+                crate::graph::call_site(e, &crate::graph::verbatim)
             )
         })
         .collect::<Vec<_>>()
