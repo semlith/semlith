@@ -137,7 +137,12 @@ The prebuilt Linux binary also starts on Debian 12 again, which it has not since
 - **M8 — `release.yml` grants `contents: write` to the one job that uploads**,
   and nothing at workflow level: the build jobs held a token with push rights
   while compiling a dependency tree. CI gains a leg that builds the
-  `rust-version` the crate declares, which nothing had ever checked.
+  `rust-version` the crate declares, which nothing had ever checked — and it
+  failed on its first run, because that number was wrong: tree-sitter 0.27 has
+  required Rust 1.90 since 0.12.0, so the declared floor is corrected from 1.89
+  to 1.90. Nobody on 1.89 loses anything they had; they could not build 0.12.0 or
+  0.13.0 either, and what they got was a dependency error rather than a clear
+  floor.
 - **L7 — `install.ps1` sets TLS 1.2 before its first request**, which is what
   Windows PowerShell 5.1 needs to reach github.com at all.
 - **I1, I2, I3 — `SECURITY.md` describes the release that exists.** The

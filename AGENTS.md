@@ -5,7 +5,7 @@ of truth; `CLAUDE.md` points here.
 
 ## Build and test
 
-Rust 1.89+, edition 2024, 64-bit only (turbovec refuses 32-bit). Nothing has to
+Rust 1.90+, edition 2024, 64-bit only (turbovec refuses 32-bit). Nothing has to
 be installed first: turbovec 1.0.0 dropped BLAS, so there is no OpenBLAS step on
 Linux any more, and the TLS stack is rustls rather than the system OpenSSL. The
 packaged Linux binary must keep needing nothing but glibc and libstdc++ —

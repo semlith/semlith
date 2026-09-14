@@ -14,7 +14,7 @@ leaving the machine.
 [![downloads](https://img.shields.io/crates/d/semlith.svg)](https://crates.io/crates/semlith)
 [![docs.rs](https://img.shields.io/docsrs/semlith?logo=docsdotrs&label=docs.rs)](https://docs.rs/semlith)
 
-[![msrv](https://img.shields.io/badge/rust-1.89%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![msrv](https://img.shields.io/badge/rust-1.90%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 [![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -123,7 +123,7 @@ semlith --version
 
 On Windows, unpack the `.zip` and move `semlith.exe` somewhere on your `PATH`.
 
-**From source**, with a Rust toolchain (1.89+):
+**From source**, with a Rust toolchain (1.90+):
 
 ```sh
 cargo install --git https://github.com/semlith/semlith
