@@ -70,6 +70,28 @@ can read the store directory can read your indexed content — treat the store
 with the same care as the files that went into it. If you index secrets, the
 store holds secrets.
 
+**From 0.15.0 the store also records what was retrieved from it.** Every search
+and every graph question — from an agent over stdio, from an agent over `/mcp`,
+from the command line, from the portal — appends a row to the `retrievals` table
+inside `store.db`: the query text, the client's own name, a session id, the hit
+count and the token figures. Recording is on by default, where through 0.14.0 it
+was off unless `semlith start --ledger` asked for it.
+
+That row is part of the store, and everything above about the store applies to
+it: it is not encrypted, and anyone who can read the store directory can read
+your query history. It is also the reason the default changed — a ledger nobody
+switched on has no rows, and an audit trail with no rows is not one.
+
+Nothing about it leaves this machine, and that claim is unchanged and still
+checkable the same way as every other claim on this page: a packet capture. The
+daemon states on every start that it is recording and names the flag that stops
+it. `semlith start --no-ledger` records nothing for that session,
+`SEMLITH_LEDGER=0` records nothing on that machine, and
+`DELETE FROM retrievals;` erases every row that was already written. The
+`--ledger` flag is gone rather than kept as a switch that does nothing, so a
+script still passing it fails at parse time rather than quietly meaning its
+opposite.
+
 **semlith indexes whatever *you* point it at — an agent is bounded.** On the
 command line, `.gitignore` and the hidden-file rule are a convenience rather
 than a boundary, and `semlith files` is how you check what went in. Through the

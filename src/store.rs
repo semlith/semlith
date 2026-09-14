@@ -1486,6 +1486,66 @@ fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
     blake3::hash(payload.as_bytes()).to_hex().to_string()
 }
 
+/// Append a row in the shape 0.14.0 wrote, for the test that proves a store
+/// holding both kinds still verifies.
+///
+/// Public because that test is an integration test and cannot reach a private
+/// function — and because the property it proves is worth proving. A verify
+/// that reported every ledger written before this release as broken would be
+/// worse than no verify at all, and nothing but a real pre-0.15.0 row in a
+/// real store demonstrates that it does not.
+pub fn record_legacy_retrieval(
+    db: &Connection,
+    client: &str,
+    query: &str,
+    excerpt_tokens: i64,
+    whole_file_tokens: i64,
+) -> Result<()> {
+    let _writing = Writing::begin(db)?;
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let prev: String = db
+        .query_row(
+            "SELECT hash FROM retrievals ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let (hits, micros) = (1, 1000);
+    let hash = legacy_chain_hash(
+        &prev,
+        at,
+        client,
+        query,
+        hits,
+        micros,
+        excerpt_tokens,
+        whole_file_tokens,
+    );
+    // The four 0.15.0 columns are left NULL, which is what makes this a row of
+    // the older kind and what `ledger_break` reads to choose the formula.
+    db.execute(
+        "INSERT INTO retrievals
+         (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            at,
+            client,
+            query,
+            hits,
+            micros,
+            excerpt_tokens,
+            whole_file_tokens,
+            prev,
+            hash
+        ],
+    )?;
+    Ok(())
+}
+
 /// The 0.14.0 formula, for rows written under it.
 #[allow(clippy::too_many_arguments)]
 fn legacy_chain_hash(

@@ -291,6 +291,21 @@ that selects nothing are both answered in-band with text the agent can act on:
 one names `semlith languages`, the other says to try again without the filter.
 Silently returning nothing would teach an agent that the corpus is empty.
 
+From 0.15.0 it answers *where* by default. `format: locate` returns one line per
+hit — store-relative path, line span, the enclosing symbol and its kind, the
+lists that found it, provenance for a row the graph reached, whether the file has
+changed since it was indexed, and one line of the text — grouped by file and cut
+to a `max_tokens` budget that states `truncated: N of M` when it cuts. An agent
+that knows the identifier it is looking for wants the address, not the building:
+sending the excerpt back cost 20 to 60 times what the grep it replaced would
+have. `format: "excerpt"` asks for the text, and the CLI is unchanged — a person
+reading a terminal is not paying by the token.
+
+Freshness is one `stat` per distinct path, comparing the file's current size and
+mtime against what the store recorded. It is deliberately conservative — a
+`touch` with no edit reads as stale — because a false "check this" costs a reread
+and a false "this is current" costs a wrong quotation.
+
 The server serves a fleet, so one process can hold several stores. Two details
 follow from the same principle: the open store names are written into the
 `store` argument's description, because an agent cannot narrow to a name it has
@@ -443,7 +458,7 @@ this design removes; the absence of that command is a feature.
 
 ```
 symbols(id, file_id -> files.id CASCADE, chunk_id, kind, name, qualified, start_line, end_line)
-edges(src -> symbols.id CASCADE, dst TEXT, kind, confidence)
+edges(src -> symbols.id CASCADE, dst TEXT, kind, confidence, hint TEXT)
 ```
 
 An edge belongs to the file its **source** is in, and dies with it. Its **target
@@ -456,6 +471,60 @@ operation this release exists to make safe. Resolving by name instead makes an
 edge exactly as current as both of its ends, and has a second benefit: an edge to
 something the corpus does not contain, such as a standard-library call, is still
 recorded and simply resolves to nothing.
+
+### What the source said, and what the query decides (0.15.0)
+
+A name is not an address. Any store of any size holds four `get`s and seven
+`index`es, and resolving `dst` by bare name returned all of them, every one
+indistinguishable from the call the source actually makes. That is how `semlith
+path` came to answer yes to questions whose honest answer is no, in output that
+looked exactly like a right answer.
+
+The fix has two halves, and they live on opposite sides of the store.
+
+**`edges.hint` is what the source said.** The module of a scoped call
+(`store::edges_out` gives a hint of `store`), the last identifier of a method
+call's receiver (`self.index.search` gives `index`), the object of a qualified
+Python or TypeScript call. It is written at extraction time by the same pass that
+writes the edge, it is nullable, and it is NULL on every row an older binary
+wrote. The column is added by an `ALTER TABLE` in `store::add_columns` that runs
+on open, which is why the store format version does not move — see
+[compatibility](compatibility.md) for the whole of that argument.
+
+One extraction change came with it: Rust's supplementary query no longer emits
+the path segment of a scoped call as a second `calls` edge. `store::edges_out()`
+is a call to `edges_out`. It is not a call to `store`, and recording it as one
+invented a call the source does not make and handed the path finder a module to
+walk through.
+
+**The ranking is what the query decides.** `store::edges_out` takes an edge's
+candidates and prefers, in order: a definition in the same file as the call; one
+whose file the hint names; one in a file the calling file imports; and failing
+all three, the case where the corpus holds only one definition of the name. One
+survivor is `resolved`. Several are `ambiguous`, and every candidate comes back
+carrying the count, so a renderer can say "4 definitions" rather than print four
+calls.
+
+So confidence is four values, and only two of them are stored. `extracted` and
+`inferred` are written into `edges.confidence` at extraction time; `resolved` and
+`ambiguous` are computed at query time and never written down. That is the point
+of computing them: re-indexing a target file changes which definitions exist, and
+a stored ranking would be wrong the moment it did. A ranking that cannot go stale
+is worth more than one that is cheaper to read.
+
+An edge the syntax tree already settled stays `extracted` and is not re-ranked. A
+fact outranks a ranking — and a call whose hint the file imports is a fact for
+the same reason a call whose name it imports is: the file said where it came
+from. Reading `use crate::store;` followed by `store::edges_out()` as a guess is
+part of why Rust sat at 2% extracted while the source was explicit.
+
+The import list is read lazily, per source file, and only for a group the first
+two tiers did not settle — a traversal should not pay a query per hop for a
+tie-break it does not need.
+
+Callers are untouched. An inbound row was found through the edge's own `src` id,
+which is an id and not a name, so there is nothing to resolve and `edges_in`
+still reports the stored value.
 
 ### Where the queries come from
 
@@ -489,6 +558,48 @@ from the file that defines it, so including them would make the blast radius of
 anything at least its whole file, and make two unrelated functions in one file
 look like a two-hop dependency.
 
+#### A path walks definitions, not names (0.15.0)
+
+Refusing ambiguous edges is not enough on its own, and the store this repository
+built of itself at 0.14.0 is the proof. Every hop of
+`call_tool -> record_retrieval` resolved to exactly one definition, and the
+chain was still false: hop 3 arrived at `search` in `lib.rs` and hop 4 left from
+`search` in `routes.rs`. Each hop true. The chain not, because a name was used
+as if it were a place.
+
+That particular pair is connected now, and honestly so — 0.15.0 is the release
+that made `call_tool` record a retrieval, so there is a real three-hop chain
+through `mcp::record` and `ledger::graph`. The defect it illustrates is not.
+`search_in -> record_retrieval` is the case that still has no chain, and still
+correctly answers that it has none.
+
+So a node in the traversal is a definition — a name, a file and a line — and a
+chain may only leave from the definition it arrived at. `graph::Step` carries
+both endpoints for that reason, and the default finder refuses to cross a name
+with several definitions at all, answering "not connected within N hops by
+resolved edges". A chain is a better answer than saying nothing, and saying
+nothing is a better answer than a chain that is wrong — because a wrong chain is
+indistinguishable from a right one, and is read as a finding.
+
+`--all-edges` (`all_edges: true` over MCP) walks the old way and labels what it
+found: both endpoints on every hop with file and line, a seam drawn wherever a
+hop leaves a different definition from the one the hop before arrived at, a
+trailer whose four confidence counts add up to the hop count and which names the
+ambiguous names crossed, and one line — "A hypothesis, not a finding." `--strict`
+/ `strict: true` states the default out loud so a script need not rely on it, and
+wins when both are given.
+
+One renderer serves the CLI and the MCP reply, because two renderers is how the
+same answer comes to be described two different ways.
+
+`semlith neighbors` collapses for the same reason. Callees to a name with several
+surviving definitions become one row carrying the count: four rows saying `get`
+read as four calls, and one row saying `get · ambiguous · 4 definitions` is what
+the store actually knows. `--all` / `all: true` expands them, and also lists the
+targets the store holds no definition for — those were silently omitted before,
+and "semlith shows no callees" and "everything this calls is outside the index"
+are different facts.
+
 ### The third ranked list
 
 `graph_expansion` seeds from the top few hits of the vector and keyword lists,
@@ -514,12 +625,89 @@ deleted row is detectable rather than merely unlikely. That is the difference
 between an audit record and a log file, and it costs one blake3 of a short string
 per recorded query.
 
-Recording is off unless `--ledger` asks for it. A local tool that begins recording
-what you searched for without being told to is not meaningfully different from one
-that phones home, and the whole product is built on not being that.
-
 Whole-file tokens are measured from the files the hits actually came from, so the
-saving has a real denominator. Tokens are estimated at four characters each, which
-is a rough rule — what makes the ratio meaningful is that both sides are estimated
-the same way, and the portal says so rather than implying precision it does not
-have.
+saving has a real denominator.
+
+### One writer, four surfaces (0.15.0)
+
+Until 0.15.0 the only thing that wrote a row was the portal's own search box. A
+retrieval made over stdio, over the daemon's `/mcp` endpoint or from the command
+line was recorded as nothing at all — which is to say the ledger measured the one
+user who was not the point, and the 2026-09-14 study found the table empty on
+real installations.
+
+The write therefore moved out of `routes.rs` into `src/ledger.rs`, and all four
+surfaces call it. One place decides what a row says, so a search from the CLI and
+the same search from an agent are counted the same way rather than nearly the
+same way. A row now carries the name the client gives itself in the MCP
+`initialize` handshake — `claude-code`, `cursor`, `cli`, `portal`, not a display
+name anybody chose to look good — and the session it belonged to.
+
+Graph tools record too, against the honest denominator: the bytes of every file a
+grep for that name would have made you read. And a retrieval that found nothing
+is recorded and credited nothing, because a ledger that remembers only its
+successes is a marketing document.
+
+`retrievals` gains four nullable columns — `session`, `tool`, `stale_hits`,
+`tokenizer` — added the same additive way as `edges.hint`, so the format version
+does not move here either.
+
+That leaves the chain hash, which covers the row's fields and cannot simply grow
+a field without invalidating every row written before it. **The chain is versioned
+by the row, not by the store.** `tool` is NULL on every row written before 0.15.0
+and set on every row written since, which is the discriminator that picks the
+formula: old rows verify under the old one, new rows under the new, and a store
+holding both kinds verifies end to end. A verify that reported every 0.14.0
+ledger as broken would be worse than no verify at all.
+
+### Counting tokens with the tokenizer that is already loaded (0.15.0)
+
+Both sides of a ratio are counted with the tokenizer the store's embedding model
+already loads — the same `tokenizer.json`, out of the same cache, under the same
+pinned digest — so the figure is a count rather than a rule of thumb. Four
+characters per token remains the fallback for a session that never loaded a model:
+a graph-only session never does, and neither does an airgapped machine with
+nothing cached.
+
+The row records which of the two counted it, in `tokenizer`. That is stored per
+row rather than inferred from the row's age because the thing that must never
+happen is summing a row counted one way with a row counted the other. A ratio is
+a comparison, and a comparison is only worth something when both sides were
+measured on the same instrument.
+
+`semlith ledger --verify` re-walks the chain and exits non-zero on a break, so a
+script can act on it. `semlith stats` gains one line: tokens not read, over how
+many of how many retrievals, with the coverage and whether the figure is
+`measured` or `modelled`. It does not deduplicate files across one session's
+retrievals, so it is an upper bound, and the line says which tier it is rather
+than implying a precision it does not have.
+
+### Recording is on, and what makes that all right
+
+0.12.0 through 0.14.0 stated a principle: a local tool that starts logging
+without being told is not meaningfully different from one that phones home. That
+principle is retired here, because what it bought was a ledger nobody switched
+on — which measured nobody, gave the savings figure no denominator, and left the
+audit trail with no rows in it.
+
+The principle that actually holds is narrower, and every clause of it is
+checkable:
+
+- **The rows never leave the store they were written into.** A row is written
+  beside the chunks it describes and nothing reads it off the machine. This is
+  the same claim `--airgap` makes about everything else, and it is provable the
+  same way: a packet capture.
+- **The daemon says on every start that it is recording, and names the flag that
+  stops it.** `ledger: recording (local only; --no-ledger to stop)`, or `ledger:
+  off for this session`. There is no state to discover, because the process
+  announces it every time it comes up.
+- **Erasing every row is one `DELETE`.** Not an export request, not a setting
+  that takes effect next time — one statement against a local SQLite file you
+  already own.
+
+`semlith start --ledger` is removed rather than kept as a flag that does nothing.
+A script that passes it fails at parse time and is corrected once, which is
+better than a flag that silently means its opposite. `--no-ledger` stops a
+session; `SEMLITH_LEDGER=0` stops a machine — a shared build box, a container,
+somebody else's laptop. The two exist separately because they are different
+promises.
