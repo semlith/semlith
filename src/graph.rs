@@ -35,7 +35,14 @@ use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
 /// Edge kinds, as stored in `edges.kind`.
-pub const KINDS: [&str; 5] = ["defines", "calls", "imports", "references", "contains"];
+pub const KINDS: [&str; 6] = [
+    "defines",
+    "calls",
+    "imports",
+    "references",
+    "contains",
+    "aliases",
+];
 
 /// Stored on the edge: the syntax tree said where the target came from.
 pub const EXTRACTED: &str = "extracted";
@@ -95,6 +102,16 @@ pub struct Edge {
     /// which may name a field, a module or neither. The resolver treats it as
     /// one ranking signal among several rather than as truth.
     pub hint: Option<String>,
+    /// The line the reference sat on in the source file.
+    ///
+    /// Where the call, import or reference was written — not where either
+    /// symbol is defined. "Where is X invoked" is a question about this line,
+    /// and before 0.16.0 the only answer available was the enclosing symbol's
+    /// definition, which can be hundreds of lines away.
+    ///
+    /// `None` on every row an older binary wrote, which is why the format
+    /// version does not move for it.
+    pub line: Option<u32>,
 }
 
 /// What one file yielded.
@@ -144,6 +161,12 @@ fn supplement(lang: &str) -> &'static str {
         "rust" => {
             r#"
             (use_declaration argument: (_) @reference.import)
+            ; `use store::Semlith as Store;` — the alias is a symbol of its own
+            ; and the path it stands for is what it reaches. Without the edge a
+            ; walk stops at `Store`, which is defined nowhere.
+            (use_as_clause
+              path: (_) @reference.alias
+              alias: (_) @name) @definition.alias
             ; A scoped call names the function and the thing it went through.
             ; Only the function earns an edge: `store::edges_out` is a call to
             ; `edges_out`, and `store` is what says *which* `edges_out`. Until
@@ -174,6 +197,13 @@ fn supplement(lang: &str) -> &'static str {
         "typescript" => {
             r#"
             (import_statement source: (string) @reference.import)
+            ; `import { search as find }` and `export { search as find }`.
+            (import_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
+            (export_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
             (function_declaration name: (identifier) @name) @definition.function
             (class_declaration name: (type_identifier) @name) @definition.class
             (interface_declaration name: (type_identifier) @name) @definition.interface
@@ -194,6 +224,10 @@ fn supplement(lang: &str) -> &'static str {
             r#"
             (import_statement name: (_) @reference.import)
             (import_from_statement module_name: (_) @reference.import)
+            ; `import numpy as np`, `from x import search as find`.
+            (aliased_import
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
             ; `json.loads(...)`, `self.store.search(...)`: the object names the
             ; module or the attribute the call went through.
             (call
@@ -205,6 +239,11 @@ fn supplement(lang: &str) -> &'static str {
         "go" => {
             r#"
             (import_spec path: (interpreted_string_literal) @reference.import)
+            ; `import fp "path/filepath"` — the alias is what the file then
+            ; writes, and the path is what it stands for.
+            (import_spec
+              name: (package_identifier) @name
+              path: (interpreted_string_literal) @reference.alias) @definition.alias
         "#
         }
         "java" => {
@@ -220,6 +259,15 @@ fn supplement(lang: &str) -> &'static str {
         }
         _ => "",
     }
+}
+
+/// The grammar for a language, for a caller outside the extractor.
+///
+/// `semlith pattern` compiles its own query against the same grammar the
+/// extractor uses, read from the same table, so the two halves cannot disagree
+/// about what "rust" is.
+pub fn language_grammar(lang: &str) -> Option<Language> {
+    grammar(lang).map(|(language, _)| language)
 }
 
 fn grammar(lang: &str) -> Option<(Language, &'static str)> {
@@ -286,6 +334,7 @@ struct Ref {
     name: String,
     kind: &'static str,
     at: usize,
+    line: u32,
     hint: Option<String>,
 }
 
@@ -383,6 +432,10 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 kind: "contains".to_string(),
                 confidence: EXTRACTED.to_string(),
                 hint: None,
+                // A structural edge has no call site, so it carries the line
+                // the definition itself starts on rather than nothing: that is
+                // where the source says the containment happens.
+                line: Some(def.start_line),
             }),
             None => edges.push(Edge {
                 from: module.clone(),
@@ -390,6 +443,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 kind: "defines".to_string(),
                 confidence: EXTRACTED.to_string(),
                 hint: None,
+                line: Some(def.start_line),
             }),
         }
     }
@@ -431,6 +485,7 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             kind: reference.kind.to_string(),
             confidence: confidence.to_string(),
             hint: reference.hint.clone(),
+            line: Some(reference.line),
         });
     }
 
@@ -447,6 +502,8 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
             confidence_rank(&a.confidence),
             a.hint.is_none(),
             &a.hint,
+            a.line.is_none(),
+            a.line,
         )
             .cmp(&(
                 &b.from,
@@ -455,6 +512,8 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 confidence_rank(&b.confidence),
                 b.hint.is_none(),
                 &b.hint,
+                b.line.is_none(),
+                b.line,
             ))
     });
     edges.dedup_by(|a, b| (&a.from, &a.to, &a.kind) == (&b.from, &b.to, &b.kind));
@@ -500,6 +559,7 @@ fn collect(
             let kind = match kind {
                 "call" => "calls",
                 "import" => "imports",
+                "alias" => "aliases",
                 _ => "references",
             };
             // An import is a literal path and is kept whole. Anything else
@@ -509,6 +569,13 @@ fn collect(
             // `impl` block for an implementation.
             let target = if kind == "imports" {
                 Some(trim_literal(&text[node.byte_range()]).to_string())
+            } else if kind == "aliases" {
+                // The captured node is the path the alias stands for, and
+                // `edges.dst` is a bare name, so `store::Semlith` has to become
+                // `Semlith` before it can resolve against anything. `@name`
+                // here is the alias, not the target, which is why this does not
+                // fall through to the branch below.
+                last_segment(&text[node.byte_range()])
             } else {
                 match name {
                     Some(n) => Some(text[n.byte_range()].to_string()),
@@ -536,6 +603,7 @@ fn collect(
                 name: target,
                 kind,
                 at: node.start_byte(),
+                line: node.start_position().row as u32 + 1,
                 hint: hint.and_then(|h| hint_text(h, text)),
             });
         }
@@ -720,6 +788,20 @@ fn import_names(raw: &str) -> Vec<String> {
     out
 }
 
+/// The bare name at the end of a path an alias stands for.
+///
+/// `store::Semlith` is `Semlith`, `"path/filepath"` is `filepath`, `x.y.search`
+/// is `search`. `edges.dst` is a name rather than a path, so an alias that kept
+/// its path would resolve against nothing.
+fn last_segment(raw: &str) -> Option<String> {
+    let cleaned = trim_literal(raw);
+    cleaned
+        .rsplit(['/', '.', ':'])
+        .find(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Strip the quoting a literal import path arrives wrapped in.
 fn trim_literal(raw: &str) -> &str {
     raw.trim()
@@ -747,10 +829,119 @@ pub const MAX_NODES: usize = 2000;
 /// between two unrelated functions in one file look like a two-hop
 /// dependency. Neighbours still show them, because "what is in this" is a
 /// question someone asks.
-pub const DEPENDENCY_KINDS: [&str; 3] = ["calls", "imports", "references"];
+/// `aliases` is here from 0.16.0 for the opposite reason to `defines`: a
+/// re-export or an aliased import is the only thing standing between the name
+/// a caller wrote and the definition it meant, so a walk that refuses to cross
+/// one reports "not connected" about code that is connected. It is a
+/// dependency in the sense that matters — following it lands on real code.
+pub const DEPENDENCY_KINDS: [&str; 4] = ["calls", "imports", "references", "aliases"];
 
 pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
+}
+
+/// How much of a symbol's score flows on to its neighbours each round.
+///
+/// PageRank's own default, and there is no reason here to disagree with it.
+/// The 0.15 that does not flow is what keeps the walk anchored to the chunks
+/// the query actually found — the whole difference between a personalised
+/// PageRank and a plain one, which would rank the repository's most-called
+/// utility first for every query ever asked.
+const DAMPING: f32 = 0.85;
+
+/// How many rounds the score is pushed outward from the seeds.
+///
+/// Three carries mass two hops out and leaves a third of it there. Each extra
+/// round costs another pass over the frontier and moves the ordering less than
+/// the one before it.
+const ROUNDS: usize = 3;
+
+/// Rank the neighbourhood of a set of seed symbols by personalised PageRank.
+///
+/// `personal` is the seed mass per symbol name — for search, the fusion
+/// contribution of the chunks each name was found in. `neighbours` is asked for
+/// one name's dependency edges at a time, as `(name, weight, confidence)`, and
+/// is asked at most once per name however many rounds run: the walk holds the
+/// frontier it has visited and never the whole graph, which is what keeps peak
+/// memory flat as the corpus grows.
+///
+/// Returns the reached names, best first, with the confidence of the best edge
+/// that reached each. A name the walk never reached through an edge is not in
+/// the result, however much seed mass it started with: the third list is about
+/// what the code says, and a seed nothing points at is only what the query
+/// said.
+///
+/// Why this rather than the flat hop it replaces: one hop treats every
+/// neighbour of every seed as equally related, so a symbol reached once from a
+/// weak seed ranks with one reached from three strong ones. That is not a
+/// ranking, it is a set.
+pub fn expand(
+    personal: &std::collections::HashMap<String, f32>,
+    mut neighbours: impl FnMut(&str) -> Result<Vec<(String, f32, String)>>,
+) -> Result<Vec<(String, f32, String)>> {
+    if personal.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut edges: std::collections::HashMap<String, Vec<(String, f32, String)>> =
+        std::collections::HashMap::new();
+    // The best edge that reached each name, which is what it is labelled with.
+    let mut tiers: std::collections::HashMap<String, (f32, String)> =
+        std::collections::HashMap::new();
+    let mut score = personal.clone();
+
+    for _ in 0..ROUNDS {
+        let mut next: std::collections::HashMap<String, f32> = personal
+            .iter()
+            .map(|(name, mass)| (name.clone(), (1.0 - DAMPING) * mass))
+            .collect();
+
+        for (name, mass) in &score {
+            if *mass <= 0.0 {
+                continue;
+            }
+            if !edges.contains_key(name) {
+                // The budget is on names visited, not on rows read, because
+                // that is what bounds both the queries and the memory.
+                if edges.len() >= MAX_NODES {
+                    continue;
+                }
+                edges.insert(name.clone(), neighbours(name)?);
+            }
+            let out = &edges[name];
+            let total: f32 = out.iter().map(|(_, weight, _)| *weight).sum();
+            if total <= 0.0 {
+                continue;
+            }
+            for (to, weight, confidence) in out {
+                *next.entry(to.clone()).or_default() += DAMPING * mass * weight / total;
+                match tiers.get(to) {
+                    Some((best, _)) if *best >= *weight => {}
+                    _ => {
+                        tiers.insert(to.clone(), (*weight, confidence.clone()));
+                    }
+                }
+            }
+        }
+        score = next;
+    }
+
+    // Reached through an edge, which `tiers` is the record of. A seed the walk
+    // never left and came back to is not a neighbour of anything and carries no
+    // confidence to label it with; a seed that *is* reached — the query matched
+    // a chunk and the code points at it as well — stays, because the graph
+    // really did find it and the badge on the hit says so.
+    let mut ranked: Vec<(String, f32, String)> = score
+        .into_iter()
+        .filter_map(|(name, mass)| {
+            let (weight, confidence) = tiers.get(&name)?.clone();
+            Some((name, mass, (weight, confidence)))
+        })
+        .map(|(name, mass, (_, confidence))| (name, mass, confidence))
+        .collect();
+    // Ties break by name so two runs over one store return one order.
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(ranked)
 }
 
 /// One edge of a path, as the path finder renders it.
@@ -982,6 +1173,28 @@ pub fn verbatim(path: &str) -> String {
     path.to_string()
 }
 
+/// Where the call, import or reference this edge records was actually written.
+///
+/// Empty when the edge carries no line — every row written before 0.16.0, and
+/// every row whose source file has not been re-indexed since. A renderer says
+/// nothing rather than pointing at the enclosing definition and calling it a
+/// call site, because those are different lines and often far apart.
+///
+/// The two shapes are not cosmetic. From [`crate::store::edges_out`] the row's
+/// own `symbol` is the *target*, so the call sits in a different file and has
+/// to be named. From [`crate::store::edges_in`] the row's `symbol` is the
+/// caller itself and its path is already on the line, so only the line number
+/// is new.
+pub fn call_site(end: &crate::store::EdgeEnd, shorten: &dyn Fn(&str) -> String) -> String {
+    let Some(line) = end.line else {
+        return String::new();
+    };
+    match &end.from_path {
+        Some(path) => format!("  · called at {}:{line}", shorten(path)),
+        None => format!("  · call at line {line}"),
+    }
+}
+
 /// `name @ path:line`, or the bare name when the store could not say where.
 fn endpoint(name: &str, path: &str, line: u32) -> String {
     if path.is_empty() {
@@ -1034,6 +1247,176 @@ pub fn neighbours(
         hidden: if all { 0 } else { unresolved.len() },
         unresolved: if all { unresolved } else { Vec::new() },
     })
+}
+
+/// How many second-ring names an evidence block will name.
+///
+/// The ego graph is context, not an answer: past a dozen it stops telling a
+/// reader where they are and starts costing them the tokens they came to save.
+const EGO_LIMIT: usize = 12;
+
+/// One name two hops from the centre, and the first-ring name it came through.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hop {
+    /// The first-ring name this was reached through.
+    pub via: String,
+    pub name: String,
+    pub kind: String,
+    pub confidence: String,
+    /// `caller` or `callee`, relative to `via`.
+    pub direction: &'static str,
+}
+
+/// Everything the store knows about one symbol, in one reply.
+///
+/// An agent asking "what is `record_retrieval`" wanted the definition, who
+/// calls it, what it calls, and roughly where it sits — and before 0.16.0 that
+/// was three tool calls and three replies, two of which it had to make before
+/// it knew whether the first was the right symbol.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Evidence {
+    pub name: String,
+    pub definitions: Vec<crate::store::SymbolRow>,
+    pub callers: Vec<crate::store::EdgeEnd>,
+    pub callees: Vec<crate::store::EdgeEnd>,
+    /// The second ring, reached only through names the first ring settled.
+    pub ego: Vec<Hop>,
+}
+
+/// The definition, the first ring and the second ring, in one pass.
+///
+/// The second ring is walked only through first-ring names that are
+/// `extracted` or `resolved`. An ambiguous name is several unrelated
+/// definitions wearing one label, and expanding through one would put
+/// somebody else's callers into this symbol's context — the same wrong answer
+/// the path finder used to give, in a different shape.
+pub fn evidence(
+    db: &rusqlite::Connection,
+    name: &str,
+    kinds: &[String],
+    limit: usize,
+    all: bool,
+) -> Result<Evidence> {
+    let definitions = crate::store::symbols_named(db, name, limit)?;
+    let ring = neighbours(db, name, kinds, all)?;
+
+    let mut ego: Vec<Hop> = Vec::new();
+    let settled: Vec<(&str, &crate::store::EdgeEnd)> = ring
+        .callers
+        .iter()
+        .map(|e| ("caller", e))
+        .chain(ring.callees.iter().map(|e| ("callee", e)))
+        .filter(|(_, e)| e.confidence == EXTRACTED || e.confidence == RESOLVED)
+        .collect();
+
+    for (_, first) in &settled {
+        if ego.len() >= EGO_LIMIT {
+            break;
+        }
+        let out = crate::store::edges_out(db, &first.symbol.name, kinds)?;
+        let into = crate::store::edges_in(db, &first.symbol.name, kinds)?;
+        for (direction, end) in out
+            .into_iter()
+            .map(|e| ("callee", e))
+            .chain(into.into_iter().map(|e| ("caller", e)))
+        {
+            if ego.len() >= EGO_LIMIT {
+                break;
+            }
+            // The centre is not two hops from itself, and a name already in
+            // the first ring is context the reader has.
+            if end.symbol.name == name
+                || ring
+                    .callers
+                    .iter()
+                    .chain(ring.callees.iter())
+                    .any(|e| e.symbol.name == end.symbol.name)
+                || ego.iter().any(|h| h.name == end.symbol.name)
+            {
+                continue;
+            }
+            ego.push(Hop {
+                via: first.symbol.name.clone(),
+                name: end.symbol.name,
+                kind: end.kind,
+                confidence: end.confidence,
+                direction,
+            });
+        }
+    }
+
+    Ok(Evidence {
+        name: name.to_string(),
+        definitions,
+        callers: ring.callers,
+        callees: ring.callees,
+        ego,
+    })
+}
+
+impl Evidence {
+    /// The block as every surface prints it.
+    ///
+    /// One renderer for the CLI and the MCP reply, for the reason the path
+    /// finder has one: two hand-written copies is how the same answer ends up
+    /// described two different ways.
+    pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = String::new();
+        for symbol in &self.definitions {
+            out.push_str(&format!(
+                "{bold}{}{reset} {}  {}:{}-{}\n",
+                symbol.name,
+                symbol.kind,
+                shorten(&symbol.path),
+                symbol.start_line,
+                symbol.end_line,
+            ));
+        }
+        if self.definitions.len() > 1 {
+            out.push_str(&format!(
+                "{} definitions of this name\n",
+                self.definitions.len()
+            ));
+        }
+        for (heading, ends) in [("callers", &self.callers), ("callees", &self.callees)] {
+            out.push_str(&format!("\n{bold}{heading}{reset} ({})\n", ends.len()));
+            if ends.is_empty() {
+                out.push_str("  none\n");
+            }
+            for end in ends.iter() {
+                if end.confidence == AMBIGUOUS {
+                    out.push_str(&format!(
+                        "  {} via {} ({}) · {} definitions{}\n",
+                        end.symbol.name,
+                        end.kind,
+                        end.confidence,
+                        end.definitions,
+                        call_site(end, shorten),
+                    ));
+                    continue;
+                }
+                out.push_str(&format!(
+                    "  {} via {} ({})  {}:{}{}\n",
+                    end.symbol.name,
+                    end.kind,
+                    end.confidence,
+                    shorten(&end.symbol.path),
+                    end.symbol.start_line,
+                    call_site(end, shorten),
+                ));
+            }
+        }
+        if !self.ego.is_empty() {
+            out.push_str(&format!("\n{bold}two hops out{reset}\n"));
+            for hop in &self.ego {
+                out.push_str(&format!(
+                    "  {} · {} of {} ({})\n",
+                    hop.name, hop.direction, hop.via, hop.confidence,
+                ));
+            }
+        }
+        out.trim_end().to_string()
+    }
 }
 
 /// The shortest chain of edges from `from` to `to`, if there is one.
@@ -1584,6 +1967,202 @@ mod tests {
         assert!(e.symbols.iter().any(|s| s.name == "good"));
     }
 
+    /// The line an edge carries is the line the call was written on, not the
+    /// line the function that contains it starts on. Those are the same only
+    /// for a one-line function, which is why the fixture's call sits four
+    /// lines below its `fn`.
+    #[test]
+    fn a_reference_edge_carries_the_line_the_call_was_written_on() {
+        let e = run(
+            "a.rs",
+            "use other::helper;\n\nfn caller() {\n    let x = 1;\n    let _ = x;\n    helper();\n}\n",
+        );
+        let call = e
+            .edges
+            .iter()
+            .find(|x| x.kind == "calls" && x.to == "helper")
+            .unwrap_or_else(|| panic!("no call edge: {:?}", e.edges));
+        assert_eq!(call.line, Some(6), "{:?}", e.edges);
+
+        let import = e
+            .edges
+            .iter()
+            .find(|x| x.kind == "imports")
+            .unwrap_or_else(|| panic!("no import edge: {:?}", e.edges));
+        assert_eq!(import.line, Some(1), "{:?}", e.edges);
+
+        // Nothing this release extracts may leave the column empty: a NULL is
+        // reserved for a row an older binary wrote.
+        assert!(e.edges.iter().all(|x| x.line.is_some()), "{:?}", e.edges);
+    }
+
+    /// A re-export is the only thing between the name a caller wrote and the
+    /// definition it meant. Each language records the alias as a symbol of its
+    /// own and an `aliases` edge from it to the bare name it stands for.
+    #[test]
+    fn an_alias_becomes_a_symbol_and_an_edge_to_what_it_stands_for() {
+        let rust = run("a.rs", "pub use store::Semlith as Store;\n");
+        assert!(
+            rust.symbols.iter().any(|s| s.name == "Store"),
+            "{:?}",
+            rust.symbols
+        );
+        assert!(
+            has_edge(&rust, "Store", "Semlith", "aliases"),
+            "{:?}",
+            rust.edges
+        );
+
+        let py = run("a.py", "from x import search as find\n");
+        assert!(has_edge(&py, "find", "search", "aliases"), "{:?}", py.edges);
+
+        let ts = run("a.ts", "import { search as find } from './x';\n");
+        assert!(has_edge(&ts, "find", "search", "aliases"), "{:?}", ts.edges);
+
+        let go = run("a.go", "package m\nimport fp \"path/filepath\"\n");
+        assert!(has_edge(&go, "fp", "filepath", "aliases"), "{:?}", go.edges);
+    }
+
+    /// A re-export that does not rename has nothing to cross: the alias and
+    /// the definition are one name, and a self-edge would be noise.
+    #[test]
+    fn a_re_export_that_does_not_rename_adds_no_alias_edge() {
+        let e = run("a.rs", "pub use store::Semlith;\n");
+        assert!(
+            !e.edges.iter().any(|x| x.kind == "aliases"),
+            "{:?}",
+            e.edges
+        );
+    }
+
+    /// The defect the flat hop had: `near` is one hop from a single weak seed
+    /// and `hub` is two hops from three strong ones, and one hop ranked them
+    /// the same because both were simply "reached". The walk has to prefer the
+    /// one the query's own hits agree about.
+    #[test]
+    fn a_symbol_three_seeds_agree_on_outranks_one_a_single_seed_reached() {
+        let adjacency: std::collections::HashMap<&str, Vec<&str>> = [
+            ("a", vec!["mid_a"]),
+            ("b", vec!["mid_b"]),
+            ("c", vec!["mid_c"]),
+            ("mid_a", vec!["hub"]),
+            ("mid_b", vec!["hub"]),
+            ("mid_c", vec!["hub"]),
+            ("weak", vec!["near"]),
+            ("hub", vec![]),
+            ("near", vec![]),
+        ]
+        .into_iter()
+        .collect();
+
+        let personal: std::collections::HashMap<String, f32> = [
+            ("a".to_string(), 1.0),
+            ("b".to_string(), 1.0),
+            ("c".to_string(), 1.0),
+            ("weak".to_string(), 0.2),
+        ]
+        .into_iter()
+        .collect();
+
+        let ranked = expand(&personal, |name| {
+            Ok(adjacency
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|to| (to.to_string(), 1.0, EXTRACTED.to_string()))
+                .collect())
+        })
+        .unwrap();
+
+        let place = |name: &str| ranked.iter().position(|(n, _, _)| n == name);
+        let hub = place("hub").unwrap_or_else(|| panic!("hub was not reached: {ranked:?}"));
+        let near = place("near").unwrap_or_else(|| panic!("near was not reached: {ranked:?}"));
+        assert!(
+            hub < near,
+            "two hops from three seeds must outrank one hop from a weak seed: {ranked:?}"
+        );
+        // Nothing points at a seed in this fixture, so no seed is reached and
+        // none is in the result. A seed the code *does* point at would stay —
+        // see `a_seed_the_code_points_at_is_still_reached`.
+        assert!(
+            ranked.iter().all(|(n, _, _)| !personal.contains_key(n)),
+            "no edge reaches a seed in this fixture: {ranked:?}"
+        );
+    }
+
+    /// The query matched a chunk and the code points at it as well. That is
+    /// two independent reasons to return it, and the hit has to say so — a
+    /// two-file corpus where every name is a seed is exactly where an
+    /// exclude-the-seeds rule silently empties the third list.
+    #[test]
+    fn a_seed_the_code_points_at_is_still_reached() {
+        let personal: std::collections::HashMap<String, f32> =
+            [("knead".to_string(), 1.0), ("autolyse".to_string(), 1.0)]
+                .into_iter()
+                .collect();
+        let ranked = expand(&personal, |name| {
+            Ok(match name {
+                "knead" => vec![("autolyse".to_string(), 1.0, EXTRACTED.to_string())],
+                _ => Vec::new(),
+            })
+        })
+        .unwrap();
+        assert!(
+            ranked.iter().any(|(n, _, _)| n == "autolyse"),
+            "a seed an edge reaches is still a neighbour: {ranked:?}"
+        );
+        assert!(
+            ranked.iter().all(|(n, _, _)| n != "knead"),
+            "nothing points at knead, so the walk did not reach it: {ranked:?}"
+        );
+    }
+
+    /// A name is asked about once however many rounds run. Without the cache
+    /// the walk would re-query the whole frontier every round, which is the
+    /// cost that would have made this unshippable.
+    #[test]
+    fn the_walk_asks_about_each_name_once() {
+        let mut asked: Vec<String> = Vec::new();
+        let personal: std::collections::HashMap<String, f32> =
+            [("a".to_string(), 1.0)].into_iter().collect();
+        expand(&personal, |name| {
+            asked.push(name.to_string());
+            Ok(match name {
+                "a" => vec![("b".to_string(), 1.0, EXTRACTED.to_string())],
+                "b" => vec![("c".to_string(), 1.0, INFERRED.to_string())],
+                _ => Vec::new(),
+            })
+        })
+        .unwrap();
+        let mut unique = asked.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(asked.len(), unique.len(), "asked twice: {asked:?}");
+    }
+
+    /// The label on a reached name is the best edge that reached it, not the
+    /// last one read.
+    #[test]
+    fn a_reached_name_is_labelled_by_the_best_edge_that_reached_it() {
+        let personal: std::collections::HashMap<String, f32> =
+            [("weak".to_string(), 1.0), ("strong".to_string(), 1.0)]
+                .into_iter()
+                .collect();
+        let ranked = expand(&personal, |name| {
+            Ok(match name {
+                "weak" => vec![("target".to_string(), 0.5, INFERRED.to_string())],
+                "strong" => vec![("target".to_string(), 1.0, EXTRACTED.to_string())],
+                _ => Vec::new(),
+            })
+        })
+        .unwrap();
+        let (_, _, tier) = ranked
+            .iter()
+            .find(|(n, _, _)| n == "target")
+            .expect("target reached");
+        assert_eq!(tier, EXTRACTED);
+    }
+
     #[test]
     fn recursion_does_not_produce_a_self_edge() {
         let e = run("a.rs", "fn loops() { loops(); }\n");
@@ -1612,9 +2191,57 @@ mod tests {
             );
         }
         for (from, to) in [("a", "b"), ("b", "c"), ("c", "d"), ("e", "d")] {
-            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None).unwrap();
+            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None, None).unwrap();
         }
         db
+    }
+
+    /// The block is one reply where 0.15.0 needed three, and the second ring
+    /// is walked only through names the first ring settled — an ambiguous name
+    /// is several unrelated definitions, and expanding one would put somebody
+    /// else's callers into this symbol's context.
+    #[test]
+    fn the_evidence_block_carries_the_definition_both_rings_and_no_ambiguity() {
+        let db = chain();
+        let found = evidence(&db, "b", &dependency_kinds(), 20, false).unwrap();
+
+        assert_eq!(found.name, "b");
+        assert!(!found.definitions.is_empty(), "{found:?}");
+        assert!(
+            found.callers.iter().any(|e| e.symbol.name == "a"),
+            "{:?}",
+            found.callers
+        );
+        assert!(
+            found.callees.iter().any(|e| e.symbol.name == "c"),
+            "{:?}",
+            found.callees
+        );
+        // `d` is two hops from `b`, through `c`.
+        assert!(
+            found.ego.iter().any(|h| h.name == "d" && h.via == "c"),
+            "{:?}",
+            found.ego
+        );
+        // The centre and the first ring are not in the second ring.
+        assert!(
+            found
+                .ego
+                .iter()
+                .all(|h| h.name != "b" && h.name != "a" && h.name != "c"),
+            "{:?}",
+            found.ego
+        );
+        assert!(
+            found.ego.len() <= EGO_LIMIT,
+            "the ring is context, not an answer: {:?}",
+            found.ego
+        );
+
+        let text = found.render("", "", &verbatim);
+        assert!(text.contains("callers"), "{text}");
+        assert!(text.contains("callees"), "{text}");
+        assert!(text.contains("two hops out"), "{text}");
     }
 
     #[test]
@@ -1641,7 +2268,7 @@ mod tests {
             end_line: 2,
         };
         let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
-        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None).unwrap();
+        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None, None).unwrap();
         // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
         let path = shortest_path(&db, "a", "d", 50, false).unwrap();
         assert!(path.is_some(), "a still reaches d");
@@ -1700,9 +2327,9 @@ mod tests {
         define(&db, "src/finish.rs", "finish", 40);
 
         // `start` calls a `record`, and nothing in its source says which.
-        crate::store::insert_edge(&db, start, "record", "calls", INFERRED, None).unwrap();
+        crate::store::insert_edge(&db, start, "record", "calls", INFERRED, None, None).unwrap();
         // Only the second `record` reaches `finish`.
-        crate::store::insert_edge(&db, second, "finish", "calls", INFERRED, None).unwrap();
+        crate::store::insert_edge(&db, second, "finish", "calls", INFERRED, None, None).unwrap();
         db
     }
 

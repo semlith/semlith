@@ -67,6 +67,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/privacy") => privacy(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
+        (true, _, "/api/pattern") => pattern(state, request),
+        (true, _, "/api/read") => read(state, request),
         (true, _, "/api/symbol") => symbol(state, request),
         (true, _, "/api/neighbors") => neighbors(state, request),
         (true, _, "/api/path") => shortest_path(state, request),
@@ -384,9 +386,17 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         return Response::json(&json!({ "hits": [], "selected": 0, "chunks": fleet.chunks() }));
     }
 
+    let prefer = match request.query("prefer") {
+        Some(raw) => match crate::Prefer::parse(raw) {
+            Ok(p) => p,
+            Err(e) => return Response::error(400, &e.to_string()),
+        },
+        None => crate::Prefer::default(),
+    };
+
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
-    let hits = match fleet.search_in(only.as_deref(), query, k, &filter) {
+    let hits = match fleet.search_preferring(only.as_deref(), query, k, &filter, prefer) {
         Ok(h) => h,
         Err(e) => return Response::error(500, &e.to_string()),
     };
@@ -438,11 +448,19 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         );
     }
 
+    // The page draws the shape hint from these two rather than re-deriving the
+    // rule in JavaScript, so there is one classifier and it is the one that
+    // ranked the answer.
+    let shape = crate::shape_of(query);
     Response::json(&json!({
         "hits": out,
         "selected": selected,
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
+        "shape": shape,
+        "shape_label": shape.as_str(),
+        "weighting": shape.weighting(),
+        "prefer": prefer,
     }))
 }
 
@@ -1099,6 +1117,57 @@ fn with_fleet(
     }
 }
 
+/// A tree-sitter structural pattern over the indexed files of one language.
+fn pattern(state: &Arc<State>, request: &Request) -> Response {
+    let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
+        return Response::error(400, "missing query");
+    };
+    let Some(lang) = request.query("lang").filter(|l| !l.trim().is_empty()) else {
+        return Response::error(400, "missing lang");
+    };
+    let only = request.query_all("store");
+    let empty = json!({ "language": lang, "matches": [], "files": 0, "truncated": false });
+    with_fleet(state, empty, move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        // A bad pattern or an unknown language is the caller's to correct, and
+        // comes back as the parser's own words rather than an empty list.
+        match fleet.pattern_in(
+            only.as_deref(),
+            lang,
+            query,
+            &crate::filter::Filter::default(),
+        ) {
+            Ok(found) => Ok(serde_json::to_value(found)?),
+            Err(e) => Ok(json!({
+                "language": lang,
+                "matches": [],
+                "files": 0,
+                "truncated": false,
+                "error": e.to_string(),
+            })),
+        }
+    })
+}
+
+/// One span, or the definitions to choose between. The Search page's second
+/// stage: the list costs about 150 bytes a hit and this is what turns one of
+/// them into the text.
+fn read(state: &Arc<State>, request: &Request) -> Response {
+    let Some(raw) = request.query("target").filter(|t| !t.trim().is_empty()) else {
+        return Response::error(400, "missing target");
+    };
+    let target = crate::Target::parse(raw);
+    let only = request.query_all("store");
+    with_fleet(state, json!({ "span": null }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        match fleet.read_in(only.as_deref(), &target, &crate::filter::Filter::default())? {
+            None => Ok(json!({ "span": null, "definitions": [] })),
+            Some(crate::Read::One(span)) => Ok(json!({ "span": span, "definitions": [] })),
+            Some(crate::Read::Choose(rows)) => Ok(json!({ "span": null, "definitions": rows })),
+        }
+    })
+}
+
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
         return Response::error(400, "missing name");
@@ -1112,8 +1181,22 @@ fn symbol(state: &Arc<State>, request: &Request) -> Response {
     let only = request.query_all("store");
     with_fleet(state, json!({ "symbols": [] }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        let found = fleet.symbols_in(only.as_deref(), &name, k)?;
-        Ok(json!({ "symbols": found }))
+        let found = fleet.evidence_in(
+            only.as_deref(),
+            &name,
+            &crate::graph::dependency_kinds(),
+            k,
+            false,
+        )?;
+        // `symbols` stays where it was so the portal's existing symbol lookup
+        // is unchanged; the rest of the block is beside it rather than in
+        // place of it.
+        Ok(json!({
+            "symbols": found.definitions,
+            "callers": found.callers,
+            "callees": found.callees,
+            "ego": found.ego,
+        }))
     })
 }
 

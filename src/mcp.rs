@@ -398,7 +398,7 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Semantic and keyword search. Returns where the matches are; format \"excerpt\" adds the text.",
+            "description": "Semantic + keyword search. format excerpt adds the text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,37 +406,65 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs. A wrong guess hides the answer." },
-                    "ext": { "type": "array", "items": { "type": "string" } },
-                    "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
-                    "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
+                    "path": { "type": "array", "description": "Globs." },
+                    "ext": { "type": "array" },
+                    "lang": { "type": "array", "description": "See semlith_languages." },
+                    "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
+                    "store": { "type": "array", "description": store_arg }
                 },
                 "required": ["query"]
             },
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "semlith_read",
+            "description": "One span or one symbol, and nothing around it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol name." },
+                    "store": { "type": "array" }
+                },
+                "required": ["target"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_pattern",
+            "description": "Tree-sitter pattern over indexed files of one language.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "e.g. (call_expression function: (identifier) @f)" },
+                    "lang": { "type": "string" },
+                    "store": { "type": "array" }
+                },
+                "required": ["query", "lang"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "semlith_stats",
-            "description": "What each open store holds: files, chunks, bytes, model, ledger totals.",
+            "description": "What each open store holds.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_languages",
-            "description": "The languages lang accepts, and which carry graph edges.",
+            "description": "The languages lang accepts, and which carry edges.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_files",
-            "description": "List indexed files. Tells \"not indexed\" apart from \"not discussed\".",
+            "description": "List indexed files: \"not indexed\" is not \"not discussed\".",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "array", "items": { "type": "string" } },
-                    "ext": { "type": "array", "items": { "type": "string" } },
-                    "lang": { "type": "array", "items": { "type": "string" } },
-                    "store": { "type": "array", "items": { "type": "string" } },
+                    "path": { "type": "array" },
+                    "ext": { "type": "array" },
+                    "lang": { "type": "array" },
+                    "store": { "type": "array" },
                     "limit": { "type": "integer" }
                 }
             },
@@ -444,20 +472,19 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_index",
-            "description": "Index paths into an open store. Only what changed is re-embedded; a long run says how much is left.",
+            "description": "Index paths. Only what changed is re-embedded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "array", "items": { "type": "string" } },
+                    "path": { "type": "array" },
                     "store": { "type": "string", "description": write_store_arg }
                 },
                 "required": ["path"]
             },
-            "annotations": {}
         },
         {
             "name": "semlith_add",
-            "description": "Fetch one https URL into the store. Nothing is crawled, no credential sent. Refused under --airgap.",
+            "description": "Fetch one https URL. No crawling. Refused under --airgap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -470,7 +497,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_forget",
-            "description": "Drop one file from a store. The file on disk is untouched.",
+            "description": "Drop one file from a store.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -483,7 +510,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "Where a symbol is defined, from the parsed syntax tree rather than matched in text.",
+            "description": "A symbol's definition, callers, callees and the ring beyond.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -497,13 +524,13 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_neighbors",
-            "description": "What calls a symbol and what it calls. Each edge is extracted, resolved, inferred or ambiguous; only the first two are certain.",
+            "description": "What calls a symbol and what it calls. Only extracted and resolved edges are certain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "kind": { "type": "array", "items": { "type": "string" } },
-                    "all": { "type": "boolean", "description": "Expand collapsed rows; list targets this store lacks." },
+                    "kind": { "type": "array" },
+                    "all": { "type": "boolean", "description": "Expand collapsed rows and missing targets." },
                     "store": { "type": "string" }
                 },
                 "required": ["name"]
@@ -512,14 +539,14 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_path",
-            "description": "The shortest chain between two symbols, or a statement that there is none. A name with several definitions is not crossed unless you ask.",
+            "description": "The shortest chain between two symbols, or that there is none.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "from": { "type": "string" },
                     "to": { "type": "string" },
                     "depth": { "type": "integer", "description": "Default 6." },
-                    "all_edges": { "type": "boolean", "description": "Cross them; the answer is then a hypothesis." },
+                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; then a hypothesis." },
                     "strict": { "type": "boolean" },
                     "store": { "type": "string" }
                 },
@@ -586,14 +613,111 @@ fn call_tool(
                     .and_then(Value::as_u64)
                     .map(|v| v as usize)
                     .unwrap_or(DEFAULT_LOCATE_TOKENS);
-                match stores.search_in(Some(&only), query, k.clamp(1, 50), &filter) {
+                let prefer = match args.get("prefer").and_then(Value::as_str) {
+                    Some(raw) => match crate::Prefer::parse(raw) {
+                        Ok(p) => p,
+                        Err(e) => return Ok(tool_error(&e.to_string())),
+                    },
+                    None => crate::Prefer::default(),
+                };
+                match stores.search_preferring(Some(&only), query, k.clamp(1, 50), &filter, prefer)
+                {
                     Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
-                    Ok(hits) if excerpts => render(&hits),
-                    Ok(hits) => locate(&hits, query, max_tokens),
+                    Ok(hits) if excerpts => {
+                        format!("{}\n{}", reading(query, prefer), render(&hits))
+                    }
+                    Ok(hits) => format!(
+                        "{}\n{}",
+                        reading(query, prefer),
+                        locate(&hits, query, max_tokens)
+                    ),
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
                 }
+            }
+        }
+        "semlith_read" => {
+            let Some(raw) = args.get("target").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: target".into(), None));
+            };
+            let target = crate::Target::parse(raw);
+            let only = strings(&args, "store");
+            match stores.read_in(Some(&only), &target, &crate::filter::Filter::default()) {
+                Ok(None) => {
+                    format!("Nothing indexed at {raw:?}. semlith_files says what is indexed.")
+                }
+                Ok(Some(crate::Read::Choose(rows))) => {
+                    let mut out = format!("{} definitions of this name:\n", rows.len());
+                    for row in &rows {
+                        out.push_str(&format!(
+                            "  {} ({}) {}{}:{}-{}\n",
+                            row.name,
+                            row.kind,
+                            label_of(&row.store),
+                            row.path,
+                            row.start_line,
+                            row.end_line
+                        ));
+                    }
+                    out.trim_end().to_string()
+                }
+                Ok(Some(crate::Read::One(span))) => {
+                    let named = match (&span.symbol, &span.symbol_kind) {
+                        (Some(name), Some(kind)) => format!(" · {name} {kind}"),
+                        (Some(name), None) => format!(" · {name}"),
+                        _ => String::new(),
+                    };
+                    format!(
+                        "{}{}:{}-{}{named}{}\n{}",
+                        label_of(&span.store),
+                        span.path,
+                        span.start_line,
+                        span.end_line,
+                        if span.fresh { "" } else { " · stale" },
+                        span.text
+                    )
+                }
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_pattern" => {
+            let Some(query) = args.get("query").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: query".into(), None));
+            };
+            let Some(lang) = args.get("lang").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: lang".into(), None));
+            };
+            let only = strings(&args, "store");
+            match stores.pattern_in(Some(&only), lang, query, &crate::filter::Filter::default()) {
+                // "no file of that language is indexed" and "none of them
+                // match" are different facts, and only the second means the
+                // pattern was wrong.
+                Ok(found) if found.files == 0 => {
+                    format!("No indexed file is {}.", found.language)
+                }
+                Ok(found) if found.matches.is_empty() => {
+                    format!("No match in {} {} files.", found.files, found.language)
+                }
+                Ok(found) => {
+                    let mut out = String::new();
+                    for m in &found.matches {
+                        out.push_str(&format!(
+                            "{}{}:{}-{} @{}  {}\n",
+                            label_of(&m.store),
+                            m.path,
+                            m.start_line,
+                            m.end_line,
+                            m.capture,
+                            m.text
+                        ));
+                    }
+                    if found.truncated {
+                        out.push_str(&format!("truncated at {} matches\n", found.matches.len()));
+                    }
+                    out.trim_end().to_string()
+                }
+                Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
         "semlith_stats" => {
@@ -805,23 +929,17 @@ fn call_tool(
             };
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
             let only = strings(&args, "store");
-            match stores.symbols_in(Some(&only), name, k.clamp(1, 200)) {
-                Ok(found) if found.is_empty() => empty_graph(stores, name),
-                Ok(found) => found
-                    .iter()
-                    .map(|s| {
-                        format!(
-                            "{} ({}) {}{}:{}-{}",
-                            s.name,
-                            s.kind,
-                            label_of(&s.store),
-                            s.path,
-                            s.start_line,
-                            s.end_line
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+            match stores.evidence_in(
+                Some(&only),
+                name,
+                &crate::graph::dependency_kinds(),
+                k.clamp(1, 200),
+                false,
+            ) {
+                Ok(found) if found.definitions.is_empty() => empty_graph(stores, name),
+                // The same renderer the CLI prints, so an agent and a person
+                // are told the same thing about one symbol.
+                Ok(found) => found.render("", "", &crate::graph::verbatim),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -973,6 +1091,16 @@ fn record(
             };
             crate::ledger::reply(stores, &who, "search", query, body, elapsed);
         }
+        "semlith_pattern" => {
+            let subject = args.get("query").and_then(Value::as_str).unwrap_or("");
+            let found = !body.starts_with("No match") && !body.starts_with("No indexed");
+            crate::ledger::graph(stores, &who, "pattern", subject, "", found, elapsed);
+        }
+        "semlith_read" => {
+            let subject = args.get("target").and_then(Value::as_str).unwrap_or("");
+            let found = !body.starts_with("Nothing indexed");
+            crate::ledger::graph(stores, &who, "read", subject, "", found, elapsed);
+        }
         "semlith_neighbors" | "semlith_path" | "semlith_symbol" => {
             // `path` is asked about two names and the first is the one the
             // question is about, which is the one a grep would have started
@@ -1037,18 +1165,23 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
             // file, and it is one of four the call could have meant.
             if e.confidence == crate::graph::AMBIGUOUS {
                 return format!(
-                    "  {} via {} ({}) · {} definitions",
-                    e.symbol.name, e.kind, e.confidence, e.definitions
+                    "  {} via {} ({}) · {} definitions{}",
+                    e.symbol.name,
+                    e.kind,
+                    e.confidence,
+                    e.definitions,
+                    crate::graph::call_site(e, &crate::graph::verbatim)
                 );
             }
             format!(
-                "  {} via {} ({})  {}{}:{}",
+                "  {} via {} ({})  {}{}:{}{}",
                 e.symbol.name,
                 e.kind,
                 e.confidence,
                 label_of(&e.symbol.store),
                 e.symbol.path,
-                e.symbol.start_line
+                e.symbol.start_line,
+                crate::graph::call_site(e, &crate::graph::verbatim)
             )
         })
         .collect::<Vec<_>>()
@@ -1164,6 +1297,24 @@ fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
         out.push_str(&format!("truncated: {shown} of {total}\n"));
     }
     out.trim_end().to_string()
+}
+
+/// How the query was read, in one short line above the hits.
+///
+/// An agent cannot correct a shape that was read wrongly unless it is told
+/// which one was read, and `prefer` is the correction — so the line names both
+/// and costs about eight tokens.
+fn reading(query: &str, prefer: crate::Prefer) -> String {
+    let shape = crate::shape_of(query);
+    match prefer {
+        crate::Prefer::Any => format!("{} · {}", shape.as_str(), shape.weighting()),
+        chosen => format!(
+            "{} · {} · prefer {}",
+            shape.as_str(),
+            shape.weighting(),
+            chosen.as_str()
+        ),
+    }
 }
 
 /// One line of `where`, and one line of `what`.
@@ -1449,6 +1600,20 @@ mod tests {
     /// and mostly cannot act on. The budget here is the release's, and it is a
     /// test rather than a note because a one-sentence description is the kind
     /// of thing that grows back a paragraph at a time.
+    ///
+    /// 0.16.0 adds two tools and the number did not move. It was raised to
+    /// 4 400 mid-release and put back: the harness counted the real list at
+    /// 1 100 tokens against its own 1 000-token gate, which is what a gate is
+    /// for. What paid for the two new tools was the `items` schema on the
+    /// twelve array properties — `path`, `ext`, `lang` and `store` have only
+    /// ever held strings, their names say so, and JSON Schema reads an array
+    /// with no `items` as one that may hold anything. The `readOnlyHint`
+    /// annotations stayed: a client acts on those, and buying bytes by making
+    /// the tools need an approval prompt each is the opposite of what this
+    /// budget exists for.
+    ///
+    /// Bytes are the proxy; tokens are the criterion. `tests/retrieval.rs`
+    /// counts the real thing and is the gate that decides.
     #[test]
     fn the_tool_list_stays_small() {
         let size = serde_json::to_string(&tool_defs("default")).unwrap().len();

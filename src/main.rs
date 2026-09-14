@@ -180,6 +180,49 @@ enum Command {
         #[arg(long, short)]
         lang: Vec<String>,
 
+        /// Lift the implementation (`code`), the prose about it (`docs`), or
+        /// neither (`any`, the default). A bias, not a filter.
+        #[arg(long, default_value = "any")]
+        prefer: String,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print one span, or one symbol's definition, and nothing around it.
+    ///
+    /// The second stage after a search: `semlith read src/store.rs:1041-1080`
+    /// or `semlith read record_retrieval`.
+    Read {
+        /// `path:start-end`, `path:line`, or a symbol name.
+        target: String,
+
+        /// Only read files matching this glob. Repeatable.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run a tree-sitter structural pattern over the indexed files of one
+    /// language.
+    ///
+    /// `semlith pattern --lang rust '(call_expression function: (identifier) @f)'`
+    Pattern {
+        /// The pattern, in tree-sitter's S-expression query syntax.
+        query: String,
+
+        /// The language to parse. Required; see `semlith languages`.
+        #[arg(long, short)]
+        lang: String,
+
+        /// Only search files matching this glob. Repeatable.
+        #[arg(long, short)]
+        path: Vec<String>,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -594,11 +637,15 @@ fn main() -> Result<()> {
             path,
             ext,
             lang,
+            prefer,
             json,
         } => {
             // Built before any store is opened, so an unknown language name
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
+            // Parsed before the model loads, like the filter, so a typo in the
+            // argument costs nothing.
+            let prefer = semlith::Prefer::parse(&prefer)?;
 
             let mut fleet = read_fleet(&cli.store, &cwd, false)?;
             fleet.quiet = json;
@@ -624,7 +671,7 @@ fn main() -> Result<()> {
             }
 
             let started = Instant::now();
-            let hits = fleet.search_filtered(&query, k, &filter)?;
+            let hits = fleet.search_preferring(None, &query, k, &filter, prefer)?;
             let elapsed = started.elapsed();
             // The command line is a client like any other, and its retrievals
             // count for exactly as much as an agent's. Recorded under `cli`, in
@@ -705,6 +752,21 @@ fn main() -> Result<()> {
                         fleet.files()?,
                     ),
                     None => eprintln!("{} hits in {:?}{across}", hits.len(), elapsed),
+                }
+                // How the query was read, and what that did. Printed on every
+                // answer rather than only when it was surprising: a caller can
+                // only correct a misread shape if it can see one happened.
+                let shape = semlith::shape_of(&query);
+                match prefer {
+                    semlith::Prefer::Any => {
+                        eprintln!("{} · {}", shape.as_str(), shape.weighting())
+                    }
+                    chosen => eprintln!(
+                        "{} · {} · prefer {}",
+                        shape.as_str(),
+                        shape.weighting(),
+                        chosen.as_str()
+                    ),
                 }
                 // Only when it happened. A store inside its budget never sees
                 // this line, and a store past it should not have to guess why
@@ -790,27 +852,145 @@ fn main() -> Result<()> {
 
         Command::Symbol { name, k, json } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let found = fleet.symbols_in(None, &name, k)?;
+            // One answer rather than three: the definition, who calls it, what
+            // it calls, and the ring beyond that. Asking for a definition and
+            // then having to ask twice more to know whether it was the right
+            // one is what this replaces.
+            let found =
+                fleet.evidence_in(None, &name, &semlith::graph::dependency_kinds(), k, false)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&found)?);
-            } else if found.is_empty() {
+            } else if found.definitions.is_empty() {
                 eprintln!("{}", nothing_known(&fleet, &name));
             } else {
                 let mut out = std::io::stdout().lock();
-                for symbol in &found {
+                writeln!(
+                    out,
+                    "{}",
+                    found.render(bold(), reset(), &|p| display(std::path::Path::new(p)))
+                )?;
+            }
+        }
+
+        Command::Read { target, path, json } => {
+            let filter = Filter::new(&path, &[], &[])?;
+            let target = semlith::Target::parse(&target);
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let started = Instant::now();
+            let found = fleet.read_in(None, &target, &filter)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "read",
+                match &target {
+                    semlith::Target::Span { path, .. } => path,
+                    semlith::Target::Symbol(name) => name,
+                },
+                "",
+                found.is_some(),
+                started.elapsed(),
+            );
+            match found {
+                None => eprintln!(
+                    "nothing indexed at that span or under that name (store has {} chunks)",
+                    fleet.chunks()
+                ),
+                Some(found) if json => println!("{}", serde_json::to_string_pretty(&found)?),
+                // Several definitions and nothing to choose between them, so
+                // the list is the answer rather than a guess at which one.
+                Some(semlith::Read::Choose(rows)) => {
+                    let mut out = std::io::stdout().lock();
+                    writeln!(out, "{} definitions of this name:", rows.len())?;
+                    for row in &rows {
+                        writeln!(
+                            out,
+                            "  {} {}  {}{}:{}-{}",
+                            row.name,
+                            row.kind,
+                            store_prefix(&row.store),
+                            display(std::path::Path::new(&row.path)),
+                            row.start_line,
+                            row.end_line,
+                        )?;
+                    }
+                }
+                Some(semlith::Read::One(span)) => {
+                    let mut out = std::io::stdout().lock();
+                    let named = match (&span.symbol, &span.symbol_kind) {
+                        (Some(name), Some(kind)) => format!("  {name} {kind}"),
+                        (Some(name), None) => format!("  {name}"),
+                        _ => String::new(),
+                    };
                     writeln!(
                         out,
-                        "{}{}{} {}  {}{}:{}-{}",
+                        "{}{}{}:{}-{}{named}{}{}",
                         bold(),
-                        symbol.name,
+                        store_prefix(&span.store),
+                        display(std::path::Path::new(&span.path)),
+                        span.start_line,
+                        span.end_line,
+                        if span.fresh { "" } else { "  · stale" },
                         reset(),
-                        symbol.kind,
-                        store_prefix(&symbol.store),
-                        display(std::path::Path::new(&symbol.path)),
-                        symbol.start_line,
-                        symbol.end_line,
+                    )?;
+                    for line in span.text.lines() {
+                        writeln!(out, "{line}")?;
+                    }
+                }
+            }
+        }
+
+        Command::Pattern {
+            query,
+            lang,
+            path,
+            json,
+        } => {
+            let filter = Filter::new(&path, &[], &[])?;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let started = Instant::now();
+            let found = fleet.pattern_in(None, &lang, &query, &filter)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "pattern",
+                &query,
+                "",
+                !found.matches.is_empty(),
+                started.elapsed(),
+            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&found)?);
+            } else if found.matches.is_empty() {
+                // Two different facts, and only one of them means the caller
+                // should change the pattern.
+                if found.files == 0 {
+                    eprintln!("no indexed file is {}", found.language);
+                } else {
+                    eprintln!("no match in {} {} files", found.files, found.language);
+                }
+            } else {
+                let mut out = std::io::stdout().lock();
+                for found in &found.matches {
+                    writeln!(
+                        out,
+                        "{}{}{}:{}-{}{} @{}  {}",
+                        bold(),
+                        store_prefix(&found.store),
+                        display(std::path::Path::new(&found.path)),
+                        found.start_line,
+                        found.end_line,
+                        reset(),
+                        found.capture,
+                        found.text,
                     )?;
                 }
+                eprintln!(
+                    "{} match(es) in {} {} files{}",
+                    found.matches.len(),
+                    found.files,
+                    found.language,
+                    if found.truncated { " (truncated)" } else { "" },
+                );
             }
         }
 
@@ -1561,20 +1741,25 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         if end.confidence == semlith::graph::AMBIGUOUS {
             writeln!(
                 out,
-                "  {} via {} ({}) · {} definitions",
-                end.symbol.name, end.kind, end.confidence, end.definitions,
+                "  {} via {} ({}) · {} definitions{}",
+                end.symbol.name,
+                end.kind,
+                end.confidence,
+                end.definitions,
+                semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
             )?;
             continue;
         }
         writeln!(
             out,
-            "  {} via {} ({})  {}{}:{}",
+            "  {} via {} ({})  {}{}:{}{}",
             end.symbol.name,
             end.kind,
             end.confidence,
             store_prefix(&end.symbol.store),
             display(std::path::Path::new(&end.symbol.path)),
             end.symbol.start_line,
+            semlith::graph::call_site(end, &|p| display(std::path::Path::new(p))),
         )?;
     }
     Ok(())

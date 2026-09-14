@@ -33,6 +33,7 @@ pub mod index;
 pub mod ledger;
 pub mod lock;
 pub mod mcp;
+pub mod pattern;
 pub mod portal;
 pub mod proxy;
 pub mod routes;
@@ -90,6 +91,147 @@ const GENERATION: &str = "index_generation";
 /// units on different scales. 60 is the value from the original TREC work and
 /// flattens the curve enough that a result ranked third is not dismissed.
 const RRF_K: f32 = 60.0;
+
+/// What a query looks like, which decides which half of the fusion is trusted.
+///
+/// Read off the query's own text, deterministically, with no model: an agent
+/// that pastes `record_retrieval` and an agent that asks "where does a
+/// retrieval get written down" want the same code, and until 0.16.0 both were
+/// scored as though the two halves were equally likely to know. They are not —
+/// FTS5 is exact about an identifier and vague about a sentence, and the
+/// embedding is the other way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Shape {
+    /// One token that is shaped like something a programmer typed.
+    Identifier,
+    /// Anything else, which in practice is a sentence.
+    Question,
+}
+
+impl Shape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Identifier => "identifier-shaped",
+            Self::Question => "question-shaped",
+        }
+    }
+
+    /// What the shape did to the fusion, in the words the portal prints.
+    pub fn weighting(self) -> &'static str {
+        match self {
+            Self::Identifier => "keyword weighted 2×",
+            Self::Question => "vector and keyword equal",
+        }
+    }
+
+    /// The multiplier this shape gives the keyword list.
+    fn keyword_weight(self) -> f32 {
+        match self {
+            Self::Identifier => 2.0,
+            Self::Question => 1.0,
+        }
+    }
+}
+
+/// Whether a query is shaped like an identifier or like a question.
+///
+/// The rule is deliberately crude and entirely inspectable: one token, made of
+/// the characters an identifier is made of, is an identifier. Everything else
+/// is a question. A crude rule that a user can predict beats an accurate one
+/// they cannot, because the shape is reported in the answer and `prefer` is
+/// there to overrule it.
+pub fn shape_of(query: &str) -> Shape {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.split_whitespace().count() > 1 {
+        return Shape::Question;
+    }
+    let identifier = trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.' || c == '!');
+    if identifier && trimmed.chars().any(|c| c.is_alphabetic()) {
+        Shape::Identifier
+    } else {
+        Shape::Question
+    }
+}
+
+/// Which side of the corpus a caller would rather be given.
+///
+/// The automatic weighting above is about *how* the query was written;
+/// this is about what the caller is looking for, which the query text cannot
+/// say. "How does indexing work" matches the architecture document and the
+/// function that does it equally well, and an agent about to edit code wants
+/// the second one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Prefer {
+    /// No bias. The default, and what every release before 0.16.0 did.
+    #[default]
+    Any,
+    /// The implementation rather than the prose about it.
+    Code,
+    /// The prose rather than the implementation.
+    Docs,
+}
+
+impl Prefer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Code => "code",
+            Self::Docs => "docs",
+        }
+    }
+
+    /// Parse the argument every surface takes, rejecting anything else by
+    /// name: a caller that passed `prefer: source` has to be told, or it reads
+    /// the unbiased answer as a biased one.
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "any" | "" => Ok(Self::Any),
+            "code" => Ok(Self::Code),
+            "docs" | "doc" => Ok(Self::Docs),
+            other => anyhow::bail!("prefer is code, docs or any, not {other:?}"),
+        }
+    }
+
+    /// What a hit's score is multiplied by under this preference.
+    ///
+    /// A bias, not a filter. A preferred hit is lifted and the rest keep their
+    /// place, so `prefer: code` over a corpus with no code still answers with
+    /// the prose rather than with nothing.
+    fn multiplier(self, is_code: bool) -> f32 {
+        const LIFT: f32 = 1.5;
+        match (self, is_code) {
+            (Self::Any, _) => 1.0,
+            (Self::Code, true) | (Self::Docs, false) => LIFT,
+            _ => 1.0,
+        }
+    }
+}
+
+/// How much a chunk the graph walk ranked first is lifted over one it barely
+/// reached.
+///
+/// Small on purpose. The fusion already knows what the query matched; this is
+/// the code's opinion about what else is relevant, and it is a tiebreak rather
+/// than a second ranking. There is no model behind either of these and there is
+/// not going to be one — every input is something the store already holds.
+///
+/// Measured: removing this factor costs two hits at k@1 and one at k@3 on the
+/// harness's question set, so it stays. A third factor, a lift for a chunk
+/// inside a named definition, was measured out of the release — in a code
+/// repository it is a second and blunter `prefer: code` applied to every query,
+/// and it fights the real one (US-SEMLITH-0.16.0-I02).
+const GRAPH_PROXIMITY: f32 = 0.15;
+
+/// How much a chunk from a file edited since it was indexed is pushed down.
+///
+/// Not removed: the excerpt may still be the best answer there is, and 0.15.0
+/// already flags it as stale. This only means a current answer of equal
+/// quality is preferred to it.
+const STALE_PENALTY: f32 = 0.10;
 
 /// One candidate in the fusion: which id space it is in, its id, the score it
 /// has accumulated, and which lists put it there.
@@ -166,11 +308,91 @@ struct Reached {
     id: u64,
     weight: f32,
     tier: String,
+    /// Where the walk put this chunk, as a share of the best one it found.
+    ///
+    /// 1.0 for the chunk the PageRank ranked first, falling away from there.
+    /// This is the "distance from the seeds" the rerank reads: a chunk the
+    /// walk barely reached should not be lifted as though the code insisted
+    /// on it.
+    proximity: f32,
 }
 
 /// The tier of the edge that reached `id`, if the graph list reached it at all.
 fn provenance_of(graph: &[Reached], id: u64) -> Option<String> {
     graph.iter().find(|r| r.id == id).map(|r| r.tier.clone())
+}
+
+/// What `read` was asked for: a span of a file, or a symbol by name.
+///
+/// Parsed rather than guessed at, so `src/store.rs:1041-1080` and
+/// `record_retrieval` are told apart by shape and a caller is never handed the
+/// wrong kind of answer for a typo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Span { path: String, start: u32, end: u32 },
+    Symbol(String),
+}
+
+impl Target {
+    /// `path:start-end`, `path:line`, or a symbol name.
+    ///
+    /// A colon with a number after it is a span; anything else is a name. A
+    /// Windows drive letter is not a false positive, because what follows the
+    /// colon there is a separator rather than a digit.
+    pub fn parse(raw: &str) -> Self {
+        let raw = raw.trim();
+        if let Some((path, lines)) = raw.rsplit_once(':')
+            && !path.is_empty()
+        {
+            let (start, end) = match lines.split_once('-') {
+                Some((a, b)) => (a.parse::<u32>().ok(), b.parse::<u32>().ok()),
+                None => (lines.parse::<u32>().ok(), lines.parse::<u32>().ok()),
+            };
+            if let (Some(start), Some(end)) = (start, end) {
+                return Self::Span {
+                    path: path.to_string(),
+                    start: start.min(end),
+                    end: start.max(end),
+                };
+            }
+        }
+        Self::Symbol(raw.to_string())
+    }
+}
+
+/// One span of one file, and nothing around it.
+///
+/// The second stage of a retrieval. A locate answer costs about 150 bytes a
+/// hit and says where to look; this is what turns one of those into the text,
+/// without the whole file riding along with it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Span {
+    pub path: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub text: String,
+    /// The definition the span sits inside, when it sits inside one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_kind: Option<String>,
+    /// Whether the file still looks the way it did when it was indexed.
+    pub fresh: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+}
+
+/// What a `read` produced: the span, or the definitions to choose between.
+///
+/// A name with several definitions returns the list rather than one of them.
+/// Guessing would be the same defect the graph's `ambiguous` value exists to
+/// refuse: a confident answer that is right a fraction of the time reads
+/// exactly like one that is right.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Read {
+    One(Span),
+    Choose(Vec<store::SymbolRow>),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1206,10 +1428,12 @@ impl Semlith {
     ///
     /// Seeded from the chunks the other two lists already found, mapped to the
     /// symbols defined in them, expanded one hop in both directions, and
-    /// resolved back to the chunks those neighbours live in. One hop, not a
-    /// ranked walk: a personalized PageRank over the graph is a real idea and
-    /// a change to be justified by a recall measurement, not shipped untested
-    /// inside a release that is already large.
+    /// resolved back to the chunks those neighbours live in — ranked, from
+    /// 0.16.0, by a personalised PageRank seeded with each hit's own fusion
+    /// contribution rather than by one flat hop. 0.15.0 left this as "a real
+    /// idea and a change to be justified by a recall measurement"; the
+    /// measurement is `tests/retrieval.rs`, and the marginal contribution of
+    /// this list is one of the numbers it prints.
     ///
     /// Everything here is gated by the same `Filter` the other two halves use,
     /// through the same `symbols_by_names` predicate — so the one-id-set
@@ -1239,18 +1463,38 @@ impl Semlith {
         // Seeded from the best of each list rather than all of it. Expanding
         // from a chunk ranked fortieth is expansion from noise.
         const SEEDS: usize = 8;
-        let seeds: Vec<u64> = dense
-            .iter()
-            .take(SEEDS)
-            .chain(keyword.iter().take(SEEDS))
-            .copied()
-            .collect();
-        if seeds.is_empty() {
+
+        // The seed mass is the fusion contribution each chunk is about to
+        // carry, so the walk starts out already knowing which hits the query
+        // answered best. A chunk both lists found seeds twice as hard as one
+        // only a single list found, which is the same judgement the fusion
+        // makes a few lines later.
+        let mut mass: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
+        for list in [dense, keyword] {
+            for (rank, id) in list.iter().take(SEEDS).enumerate() {
+                *mass.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
+            }
+        }
+        if mass.is_empty() {
             return Ok(Vec::new());
         }
 
-        let names = store::symbols_in_chunks(&self.db, &seeds)?;
-        if names.is_empty() {
+        // Per chunk rather than in one query, because which symbol carries
+        // which chunk's mass is the whole point of a personalised walk. A
+        // chunk holding three symbols splits its mass between them rather than
+        // seeding each of them as though it were a hit of its own.
+        let mut personal: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        for (id, mass) in &mass {
+            let names = store::symbols_in_chunks(&self.db, &[*id])?;
+            if names.is_empty() {
+                continue;
+            }
+            let share = mass / names.len() as f32;
+            for name in names {
+                *personal.entry(name).or_default() += share;
+            }
+        }
+        if personal.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -1260,8 +1504,8 @@ impl Semlith {
         // file with a hit, so the third list fills with neighbours-by-accident
         // and the two lists that answered the question get diluted.
         let kinds = graph::dependency_kinds();
-        let mut neighbours: Vec<(String, f32, String)> = Vec::new();
-        for name in &names {
+        let ranked = graph::expand(&personal, |name| {
+            let mut out = Vec::new();
             for end in store::edges_out(&self.db, name, &kinds)?
                 .into_iter()
                 .chain(store::edges_in(&self.db, name, &kinds)?)
@@ -1275,41 +1519,50 @@ impl Semlith {
                     continue;
                 }
                 let weight = Self::expansion_weight(&end.confidence);
-                match neighbours
-                    .iter_mut()
-                    .find(|(n, _, _)| *n == end.symbol.name)
-                {
-                    // Reached twice, by edges worth different amounts: the
-                    // better one is what it is worth, and what it is labelled.
-                    Some((_, best, tier)) if weight > *best => {
-                        *best = weight;
-                        *tier = end.confidence;
-                    }
-                    Some(_) => {}
-                    None => neighbours.push((end.symbol.name, weight, end.confidence)),
-                }
+                out.push((end.symbol.name, weight, end.confidence));
             }
-            if neighbours.len() >= depth * 4 {
-                break;
-            }
-        }
+            Ok(out)
+        })?;
 
-        let names: Vec<String> = neighbours.iter().map(|(n, _, _)| n.clone()).collect();
+        let names: Vec<String> = ranked.iter().map(|(name, _, _)| name.clone()).collect();
+        let place: std::collections::HashMap<&str, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), i))
+            .collect();
+
+        // The store answers in its own order; the walk's order is the answer,
+        // so the rows are put back into it before the budget is applied.
+        let best = ranked.first().map(|(_, mass, _)| *mass);
+        let mut symbols = store::symbols_by_names(&self.db, &names, filter.groups())?;
+        symbols.sort_by_key(|s| place.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
+
         let mut ids: Vec<Reached> = Vec::new();
-        for symbol in store::symbols_by_names(&self.db, &names, filter.groups())? {
+        for symbol in symbols {
             let Some(chunk_id) = symbol.chunk_id else {
                 continue;
             };
             let id = chunk_id as u64;
-            let found = neighbours.iter().find(|(n, _, _)| *n == symbol.name);
-            let weight = found.map(|(_, w, _)| *w).unwrap_or(INFERRED_EXPANSION);
+            let found = ranked.iter().find(|(name, _, _)| *name == symbol.name);
             let tier = found
-                .map(|(_, _, t)| t.clone())
+                .map(|(_, _, tier)| tier.clone())
                 .unwrap_or_else(|| graph::INFERRED.to_string());
+            let weight = Self::expansion_weight(&tier);
+            // As a share of the best score the walk produced, so the number
+            // means the same thing whatever the absolute masses came out at.
+            let proximity = match (found, best) {
+                (Some((_, mass, _)), Some(best)) if best > 0.0 => mass / best,
+                _ => 0.0,
+            };
             // A chunk the other two lists already ranked gains nothing from
             // being re-ranked here; the fusion adds the contribution anyway.
             if !ids.iter().any(|r| r.id == id) {
-                ids.push(Reached { id, weight, tier });
+                ids.push(Reached {
+                    id,
+                    weight,
+                    tier,
+                    proximity,
+                });
             }
             if ids.len() >= depth {
                 break;
@@ -1364,6 +1617,7 @@ impl Semlith {
                 &edge.kind,
                 &edge.confidence,
                 edge.hint.as_deref(),
+                edge.line,
             )?;
             written += 1;
         }
@@ -1551,6 +1805,23 @@ impl Semlith {
         k: usize,
         filter: &Filter,
     ) -> Result<Vec<(Hit, f32)>> {
+        self.search_preferring(query, vector, k, filter, Prefer::default())
+    }
+
+    /// [`Semlith::search_ranked`] with the caller's preference applied.
+    ///
+    /// The query's shape is read here rather than passed in, because it is a
+    /// function of the query text and nothing else — every surface that wants
+    /// to print it calls [`shape_of`] on the same string and gets the same
+    /// answer, with no second source of truth to drift.
+    pub fn search_preferring(
+        &mut self,
+        query: &str,
+        vector: &[f32],
+        k: usize,
+        filter: &Filter,
+        prefer: Prefer,
+    ) -> Result<Vec<(Hit, f32)>> {
         // A store being watched changes under a long-lived reader. Answering
         // from the index this process happened to load at startup is how an
         // agent ends up quoting a function that no longer exists.
@@ -1567,6 +1838,9 @@ impl Semlith {
         // given, and a chunk that is second on one side and absent from the
         // other still deserves to be considered.
         let depth = (k * RANK_DEPTH).max(k);
+
+        // Which half of the fusion this query's own text says to trust.
+        let shape = shape_of(query);
 
         let allowlist = self.allowlist(filter)?;
         if matches!(allowlist, Allowlist::Empty) {
@@ -1633,7 +1907,10 @@ impl Semlith {
             (
                 "keyword",
                 false,
-                keyword_ids.iter().map(|id| (*id, 1.0)).collect(),
+                keyword_ids
+                    .iter()
+                    .map(|id| (*id, shape.keyword_weight()))
+                    .collect(),
             ),
             (
                 "graph",
@@ -1661,9 +1938,18 @@ impl Semlith {
         // badges of whichever chunk happened to land in its slot.
         let mut ranked: Vec<Candidate> = fused.into_iter().zip(lists).collect();
         ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1));
-        ranked.truncate(k);
+        // Cut to the deeper list, not to `k`. Everything that reorders the
+        // answer below — the preference, and the rerank — needs each
+        // candidate's path and enclosing symbol, which only exist once the
+        // rows are fetched, and a candidate cut here can never be lifted.
+        ranked.truncate(depth.max(k));
 
         let mut hits = Vec::with_capacity(ranked.len());
+        // Kept beside the hits rather than on them: how near the graph walk
+        // put a chunk is an input to the ranking, not something a caller of
+        // `search` has any use for. Index-aligned with `hits`, which nothing
+        // between here and the rerank reorders.
+        let mut proximity: Vec<f32> = Vec::with_capacity(ranked.len());
         for (((is_image, id), score), found_by) in ranked {
             if is_image {
                 // An image hit carries its path and pixel size where a chunk
@@ -1691,6 +1977,7 @@ impl Semlith {
                         },
                         0.0,
                     ));
+                    proximity.push(0.0);
                 }
                 continue;
             }
@@ -1721,11 +2008,183 @@ impl Semlith {
                     },
                     similarity,
                 ));
+                proximity.push(
+                    graph_ids
+                        .iter()
+                        .find(|r| r.id == id)
+                        .map(|r| r.proximity)
+                        .unwrap_or(0.0),
+                );
             }
         }
         self.mark_freshness(&mut hits)?;
         self.name_enclosing_symbols(&mut hits)?;
+
+        // The rerank, and the preference with it. Both are applied here rather
+        // than inside the fusion because both are about things the fusion has
+        // no way to know — the file a chunk is in, the definition it sits
+        // inside, whether that file has been edited since — and all three are
+        // only known once the rows have been fetched.
+        //
+        // The fused score stays the dominant term. These are tiebreaks: a
+        // chunk the query matched badly does not climb over one it matched
+        // well because it happens to sit in a function.
+        for ((hit, _), proximity) in hits.iter_mut().zip(&proximity) {
+            hit.score *= 1.0 + GRAPH_PROXIMITY * proximity;
+            if !hit.fresh {
+                hit.score *= 1.0 - STALE_PENALTY;
+            }
+            hit.score *= prefer.multiplier(filter::is_code(&hit.path));
+        }
+        hits.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
+        hits.truncate(k);
         Ok(hits)
+    }
+
+    /// One span of one file, or the definitions to choose between.
+    ///
+    /// Answers only from the store's own chunks. Reading the file off disk
+    /// would answer for content semlith never indexed and was never allowed to
+    /// look at — the boundary that governs indexing has to govern reading, or
+    /// an agent holding the agent key could read `~/.ssh/id_rsa` by naming it
+    /// as a span.
+    pub fn read(&self, target: &Target, filter: &Filter) -> Result<Option<Read>> {
+        let (path, start, end) = match target {
+            Target::Span { path, start, end } => {
+                // A locate answer prints a store-relative path, so that is
+                // what comes back in. Two indexed files can end with the same
+                // suffix, and choosing one of them would be a guess.
+                let candidates = store::files_ending_with(&self.db, path, 8)?;
+                match candidates.len() {
+                    0 => return Ok(None),
+                    1 => (candidates[0].clone(), *start, *end),
+                    _ => anyhow::bail!(
+                        "{path:?} matches {} indexed files: {}. Name more of the path.",
+                        candidates.len(),
+                        candidates.join(", ")
+                    ),
+                }
+            }
+            Target::Symbol(name) => {
+                let found = store::symbols_named(&self.db, name, 200)?;
+                match found.len() {
+                    0 => return Ok(None),
+                    1 => {
+                        let only = &found[0];
+                        (only.path.clone(), only.start_line, only.end_line)
+                    }
+                    // Several definitions and nothing to choose between them.
+                    // The list is the answer.
+                    _ => return Ok(Some(Read::Choose(found))),
+                }
+            }
+        };
+
+        // The same eligibility the other surfaces use, through the same
+        // predicate, so a chunk a filter excludes cannot be read either.
+        let allowed = if filter.is_empty() {
+            None
+        } else {
+            Some(store::filtered_chunk_ids(&self.db, filter.groups())?)
+        };
+        let chunks: Vec<store::ChunkRow> = store::chunks_overlapping(&self.db, &path, start, end)?
+            .into_iter()
+            .filter(|c| match &allowed {
+                Some(ids) => ids.contains(&(c.id as u64)),
+                None => true,
+            })
+            .collect();
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+
+        // Chunks overlap by two lines, so they are stitched by line number
+        // rather than concatenated — concatenation would repeat the seam and
+        // the caller would read two copies of the same line as two lines.
+        let mut lines: Vec<(u32, String)> = Vec::new();
+        for chunk in &chunks {
+            for (offset, line) in chunk.text.lines().enumerate() {
+                let number = chunk.start_line + offset as u32;
+                if lines.iter().any(|(n, _)| *n == number) {
+                    continue;
+                }
+                lines.push((number, line.to_string()));
+            }
+        }
+        lines.sort_by_key(|(number, _)| *number);
+        lines.retain(|(number, _)| *number >= start && *number <= end);
+        if lines.is_empty() {
+            return Ok(None);
+        }
+
+        let first = lines.first().map(|(n, _)| *n).unwrap_or(start);
+        let last = lines.last().map(|(n, _)| *n).unwrap_or(end);
+        let text = lines
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut span = Span {
+            path,
+            start_line: first,
+            end_line: last,
+            text,
+            symbol: None,
+            symbol_kind: None,
+            fresh: true,
+            store: None,
+        };
+        self.name_enclosing_symbol(&mut span)?;
+        self.mark_span_freshness(&mut span)?;
+        Ok(Some(Read::One(span)))
+    }
+
+    /// The innermost definition a span sits inside, if any.
+    fn name_enclosing_symbol(&self, span: &mut Span) -> Result<()> {
+        let by_file = store::symbols_in_files(&self.db, std::slice::from_ref(&span.path))?;
+        let Some(symbols) = by_file.get(&span.path) else {
+            return Ok(());
+        };
+        // The same containment-then-overlap rule search uses, for the same
+        // reason: a span that begins in a function's doc comment is that
+        // function's.
+        let contains = symbols
+            .iter()
+            .filter(|(start, end, _, _)| *start <= span.start_line && *end >= span.start_line)
+            .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
+        let best = contains.or_else(|| {
+            symbols
+                .iter()
+                .filter(|(start, end, _, _)| *start <= span.end_line && *end >= span.start_line)
+                .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
+        });
+        if let Some((_, _, name, kind)) = best {
+            span.symbol = Some(name.clone());
+            span.symbol_kind = Some(kind.clone());
+        }
+        Ok(())
+    }
+
+    /// Whether the file a span came from still looks the way it did when it
+    /// was indexed. The same conservative rule search uses.
+    fn mark_span_freshness(&self, span: &mut Span) -> Result<()> {
+        let stamps = store::file_stamps(&self.db, std::slice::from_ref(&span.path))?;
+        let Some((bytes, indexed_at)) = stamps.get(&span.path) else {
+            return Ok(());
+        };
+        span.fresh = match std::fs::metadata(&span.path) {
+            Ok(meta) => {
+                meta.len() as i64 == *bytes
+                    && meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at)
+            }
+            Err(_) => false,
+        };
+        Ok(())
     }
 
     /// Give every hit the name of the definition it sits inside.
@@ -1744,10 +2203,17 @@ impl Semlith {
             let Some(symbols) = by_file.get(&hit.path) else {
                 continue;
             };
-            let best = symbols
+            // Containment first, overlap second, innermost within each.
+            let contains = symbols
                 .iter()
                 .filter(|(start, end, _, _)| *start <= hit.start_line && *end >= hit.start_line)
                 .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
+            let best = contains.or_else(|| {
+                symbols
+                    .iter()
+                    .filter(|(start, end, _, _)| *start <= hit.end_line && *end >= hit.start_line)
+                    .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
+            });
             if let Some((_, _, name, kind)) = best {
                 hit.symbol = Some(name.clone());
                 hit.symbol_kind = Some(kind.clone());
@@ -1986,6 +2452,169 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule is crude on purpose, so these are the whole of it.
+    #[test]
+    fn a_query_is_identifier_shaped_only_when_it_is_one_token_of_identifier() {
+        for identifier in [
+            "record_retrieval",
+            "store::edges_out",
+            "Semlith",
+            "self.index.search",
+            "format!",
+            "k8s",
+        ] {
+            assert_eq!(
+                shape_of(identifier),
+                Shape::Identifier,
+                "{identifier:?} is an identifier"
+            );
+        }
+        for question in [
+            "where does a retrieval get written down",
+            "record retrieval",
+            "how does indexing work?",
+            "",
+            "   ",
+            "42",
+        ] {
+            assert_eq!(shape_of(question), Shape::Question, "{question:?}");
+        }
+    }
+
+    /// An identifier leans on FTS5, which is exact about a name; a question
+    /// leaves the two halves level, because the embedding is the one that
+    /// reads a sentence.
+    #[test]
+    fn the_shape_decides_what_the_keyword_list_is_worth() {
+        assert_eq!(Shape::Identifier.keyword_weight(), 2.0);
+        assert_eq!(Shape::Question.keyword_weight(), 1.0);
+        assert_eq!(Shape::Identifier.weighting(), "keyword weighted 2×");
+        assert_eq!(Shape::Question.weighting(), "vector and keyword equal");
+    }
+
+    /// A bias, not a filter: the unpreferred side keeps its score rather than
+    /// being cut, so `prefer: code` over a corpus of prose still answers.
+    #[test]
+    fn prefer_lifts_one_side_and_never_removes_the_other() {
+        assert_eq!(Prefer::Any.multiplier(true), 1.0);
+        assert_eq!(Prefer::Any.multiplier(false), 1.0);
+        assert!(Prefer::Code.multiplier(true) > Prefer::Code.multiplier(false));
+        assert!(Prefer::Docs.multiplier(false) > Prefer::Docs.multiplier(true));
+        assert!(Prefer::Code.multiplier(false) > 0.0);
+        assert!(Prefer::Docs.multiplier(true) > 0.0);
+    }
+
+    /// A misspelled preference is told, not silently ignored: an agent that
+    /// passed `prefer: source` would otherwise read an unbiased answer as a
+    /// biased one.
+    #[test]
+    fn an_unknown_preference_is_an_error() {
+        assert_eq!(Prefer::parse("code").unwrap(), Prefer::Code);
+        assert_eq!(Prefer::parse("DOCS").unwrap(), Prefer::Docs);
+        assert_eq!(Prefer::parse("").unwrap(), Prefer::Any);
+        assert!(Prefer::parse("source").is_err());
+    }
+
+    /// The rerank is a tiebreak, not a second ranking. Every factor has to be
+    /// small enough that a chunk the query matched badly cannot climb over one
+    /// it matched well, and large enough to separate two that matched equally.
+    #[test]
+    fn every_rerank_factor_is_a_tiebreak_rather_than_a_ranking() {
+        let strongest = 1.0 + GRAPH_PROXIMITY;
+        let weakest = 1.0 - STALE_PENALTY;
+        assert!(
+            strongest / weakest < 1.5,
+            "the whole rerank spans {strongest}/{weakest}, which is a ranking rather than a \
+             tiebreak"
+        );
+        const { assert!(GRAPH_PROXIMITY > 0.0 && STALE_PENALTY > 0.0) };
+        // A stale hit is pushed down, never removed: the excerpt in hand may
+        // still be the best answer there is.
+        const { assert!(STALE_PENALTY < 1.0) };
+    }
+
+    /// A span and a name are told apart by shape, not by trying one and
+    /// falling back — a caller mistyping a path must not silently get a
+    /// symbol lookup for it.
+    #[test]
+    fn a_read_target_is_a_span_or_a_name_by_its_shape() {
+        assert_eq!(
+            Target::parse("src/store.rs:1041-1080"),
+            Target::Span {
+                path: "src/store.rs".to_string(),
+                start: 1041,
+                end: 1080
+            }
+        );
+        // One line is a span of one.
+        assert_eq!(
+            Target::parse("src/store.rs:12"),
+            Target::Span {
+                path: "src/store.rs".to_string(),
+                start: 12,
+                end: 12
+            }
+        );
+        // Backwards is still a span, in the order the file has.
+        assert_eq!(
+            Target::parse("a.rs:80-40"),
+            Target::Span {
+                path: "a.rs".to_string(),
+                start: 40,
+                end: 80
+            }
+        );
+        for name in [
+            "record_retrieval",
+            "store::edges_out",
+            "src/store.rs",
+            "a.rs:notanumber",
+        ] {
+            assert!(
+                matches!(Target::parse(name), Target::Symbol(_)),
+                "{name:?} is a name"
+            );
+        }
+    }
+
+    /// Chunking does not respect syntax: the chunk holding a function's
+    /// opening almost always starts a few lines above it, in the doc comment.
+    /// That is the most useful chunk in the function to label, and matching on
+    /// the hit's first line alone left exactly those unlabelled.
+    #[test]
+    fn a_hit_that_straddles_a_definitions_start_is_labelled_with_it() {
+        // (start, end, name, kind), as `symbols_in_files` returns them.
+        let symbols = [
+            (100u32, 180u32, "outer".to_string(), "function".to_string()),
+            (120u32, 140u32, "inner".to_string(), "function".to_string()),
+        ];
+        // A chunk from the doc comment above `inner` into its body.
+        let pick = |start: u32, end: u32| {
+            let contains = symbols
+                .iter()
+                .filter(|(s, e, _, _)| *s <= start && *e >= start)
+                .min_by_key(|(s, e, _, _)| e.saturating_sub(*s));
+            contains
+                .or_else(|| {
+                    symbols
+                        .iter()
+                        .filter(|(s, e, _, _)| *s <= end && *e >= start)
+                        .min_by_key(|(s, e, _, _)| e.saturating_sub(*s))
+                })
+                .map(|(_, _, name, _)| name.as_str())
+        };
+        // Straddling: line 115 is inside `outer` only, but the chunk reaches
+        // into `inner`. Containment wins, so it is `outer` — the rule prefers
+        // the definition the hit actually begins in.
+        assert_eq!(pick(115, 130), Some("outer"));
+        // Entirely above both definitions but overlapping `outer`: labelled.
+        assert_eq!(pick(90, 105), Some("outer"));
+        // Innermost wins when both contain the start.
+        assert_eq!(pick(125, 135), Some("inner"));
+        // Nothing near it at all.
+        assert_eq!(pick(200, 210), None);
+    }
 
     #[test]
     fn normalize_gives_unit_length() {

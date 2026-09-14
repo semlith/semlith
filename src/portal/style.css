@@ -105,6 +105,11 @@
   --sp-5: 20px;
   --sp-6: 24px;
 
+  /* What a pill-shaped control in a filter row stands at. The design holds
+   * every one of them to the same height, which is what makes a row of
+   * unrelated dials read as one instrument panel. */
+  --h-dial: 28px;
+
   /* Radius. Four steps. */
   --r-1: 4px;
   --r-2: 6px;
@@ -113,12 +118,19 @@
   --r-pill: 999px;
 
   /* Type. Every size in the product is one of these — there is no raw pixel
-   * font size anywhere below this block. The design bundle's half-pixel sizes
-   * (10.5, 12.5, 13.5) are artefacts of a mock with no scale; they snap to the
-   * nearest step here rather than being reproduced. */
+   * font size anywhere below this block.
+   *
+   * The three half steps are the v3 design's, and they are steps rather than
+   * artefacts: at ten to thirteen pixels half a pixel is the difference
+   * between a freshness word and the badge beside it, and snapping them to
+   * the whole steps merged pairs the design deliberately separated. They are
+   * half steps and not a second scale — nothing new sits between them. */
   --t-micro: 10px;
+  --t-micro-h: 10.5px;
   --t-tiny: 11px;
+  --t-tiny-h: 11.5px;
   --t-small: 12px;
+  --t-small-h: 12.5px;
   --t-body-sm: 13px;
   --t-body: 14px;
   --t-lead: 16px;
@@ -926,6 +938,14 @@ h2 {
   align-items: stretch;
 }
 
+/* Three equal columns that collapse together rather than one at a time: the
+ * ledger's command cards are a set, and two-above-one reads as a hierarchy
+ * they do not have. */
+.grid.three {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: stretch;
+}
+
 /* A grid that is the page's scrolling child scrolls its columns rather than
  * itself, so a long model table does not drag the fact cards up with it. */
 .grid.grow > * {
@@ -960,6 +980,13 @@ h2 {
   color: var(--muted);
   font-size: var(--t-small);
   line-height: var(--lh-prose);
+}
+
+/* The one figure a page argues for, ringed in the accent. Used on the ledger's
+ * measured ratio, which is the number a reader came to the page for and the one
+ * that must never be read without its coverage and tier beside it. */
+.stat.ringed {
+  border-color: var(--accent);
 }
 
 .rows {
@@ -1935,7 +1962,13 @@ pre.code {
 
 /* --------------------------------------------------------------- search */
 
+/* Sticky, because on a narrow window the two stages stack and the whole page
+ * scrolls: the box you type in should not be the thing that scrolls away
+ * while you read what it returned. */
 .search-band {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   padding: 20px var(--sp-5) var(--sp-4);
   flex-shrink: 0;
   border-bottom: 1px solid var(--line);
@@ -1943,6 +1976,25 @@ pre.code {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+}
+
+/* What the ranker read in the query and what it did about it — the answer's
+ * own words, so the page cannot describe a weighting the hits underneath it
+ * did not get. Hidden until the box has something in it. */
+.shape-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  color: var(--muted);
+}
+.shape-hint .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--blue);
+  flex-shrink: 0;
 }
 
 .search-field {
@@ -2245,9 +2297,6 @@ pre.code {
 .w-files {
   min-width: 680px;
 }
-.w-languages {
-  min-width: 520px;
-}
 .w-models {
   min-width: 480px;
 }
@@ -2300,10 +2349,17 @@ pre.code {
 
 /* Two stages, because a search answers "where" and a read answers "what", and
  * an answer that always does both is an answer that always costs both. The
- * list is a column of locator lines; the panel holds whichever one is open. */
+ * list is a column of locator cards; the panel holds whichever one is open.
+ *
+ * `auto-fit` rather than a breakpoint: the column that matters is this grid's
+ * own width, not the window's, and the window carries a sidebar of a width
+ * that is itself a state. The container query below is for the divider, which
+ * is the one thing that has to know whether the two columns are side by side. */
 .two-stage {
+  container-type: inline-size;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  align-items: stretch;
   gap: 0;
   flex-grow: 1;
   min-height: 0;
@@ -2313,76 +2369,113 @@ pre.code {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid var(--line);
 }
 .locate-list {
-  gap: var(--sp-4);
+  gap: var(--sp-3);
 }
+
+/* A file is a card, not a run of lines with a heading over it. Eight hits in
+ * one file are one file to open, and the card is what says so. */
 .locate-group {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  overflow: hidden;
   min-width: 0;
+  flex-shrink: 0;
 }
 .locate-file {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
+  padding: var(--sp-2h) var(--sp-3h);
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--soft);
   font-family: var(--mono);
-  font-size: var(--t-small);
+  font-size: var(--t-small-h);
   font-weight: 500;
-  padding-bottom: 4px;
   overflow-wrap: anywhere;
 }
 .locate-file .from {
   font-size: var(--t-tiny);
+  font-weight: 400;
+  color: var(--muted);
+}
+/* Which spans of this file are in the list, in the header rather than only in
+ * the rows: "three spans, 102-118, 140-149" is what a reader needs to decide
+ * whether to open the file at all. */
+.locate-file .span-summary {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  font-weight: 400;
   color: var(--muted);
 }
 
-.locate-line {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
 .locate-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: var(--sp-1);
   width: 100%;
   text-align: left;
-  padding: 6px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--r-3);
-  background: none;
+  padding: var(--sp-2h) var(--sp-3h);
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink);
   cursor: pointer;
-  font-family: var(--mono);
-  font-size: var(--t-tiny);
-  color: var(--ink-2);
+  min-width: 0;
   transition: background var(--d-fade) var(--e-in-out);
 }
+.locate-group > .locate-row:last-child {
+  border-bottom: 0;
+}
+/* Kept from before the v3 design, which draws no per-row hover. A row that
+ * opens a panel should say so under the pointer. */
 .locate-row:hover {
   background: var(--soft);
 }
 .locate-row[aria-pressed="true"] {
-  background: var(--soft);
-  border-color: var(--line);
+  background: var(--blue-soft);
+}
+.locate-row.static,
+.locate-row.static:hover {
+  background: transparent;
+  cursor: default;
+}
+.row-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+}
+.locate-row .lines {
+  color: var(--ink-2);
+  white-space: nowrap;
 }
 .locate-row .sym {
   color: var(--ink);
-  font-weight: 500;
   overflow-wrap: anywhere;
 }
-.locate-row .lines {
+.locate-row .from {
+  font-size: var(--t-tiny);
   color: var(--muted);
-  white-space: nowrap;
 }
+/* Inside the row rather than under it, so the two lines are one hit target.
+ * As a sibling, clicking the half of the block with the code in it did
+ * nothing at all. */
 .locate-excerpt {
   display: block;
-  padding: 0 10px 8px 10px;
   font-family: var(--mono);
-  font-size: var(--t-micro);
+  font-size: var(--t-tiny-h);
   line-height: var(--lh-code);
   color: var(--muted);
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2390,76 +2483,236 @@ pre.code {
 
 .locate-footer {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  align-items: center;
+  gap: var(--sp-2h);
   flex-wrap: wrap;
-  padding: 10px var(--sp-5) var(--sp-5);
+  padding: var(--sp-2h) var(--sp-5) var(--sp-5);
   font-family: var(--mono);
-  font-size: var(--t-tiny);
+  font-size: var(--t-tiny-h);
   color: var(--muted);
   flex-shrink: 0;
 }
 .locate-footer .truncated {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--t-micro-h);
+  padding: 2px 7px;
+  border-radius: var(--r-1);
+  background: var(--amber-soft);
   color: var(--amber-ink);
 }
 
-.body-panel {
+/* The right-hand stage has a ground of its own. Without one the two columns
+ * were one surface with a rule drawn down it, and which side a panel belonged
+ * to was something the reader worked out. */
+.body-col {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 18px var(--sp-5) var(--sp-6);
+  gap: var(--sp-3h);
+  padding: 18px var(--sp-5);
+  background: var(--soft);
+  border-left: 1px solid var(--line);
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
 }
-.body-head {
+@container (max-width: 719px) {
+  .body-col {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+}
+
+/* One span, wherever it is shown: the Search page's second stage and the Read
+ * page's whole answer are the same card. */
+.span-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  overflow: hidden;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.span-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-2h);
   flex-wrap: wrap;
+  padding: var(--sp-3h) var(--sp-3h) var(--sp-2h);
   font-family: var(--mono);
   font-size: var(--t-small);
 }
-.body-head .sym {
+.span-head .path {
+  font-size: var(--t-small-h);
   font-weight: 500;
   overflow-wrap: anywhere;
 }
-.body-head .lines {
+.span-head .lines {
+  color: var(--muted);
+}
+.span-head .from {
   font-size: var(--t-tiny);
   color: var(--muted);
 }
-.body-panel pre {
+.span-card .prov-note,
+.span-card .note {
   margin: 0;
-  font-family: var(--mono);
-  font-size: var(--t-small);
-  line-height: var(--lh-code);
-  color: var(--ink-2);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  padding: 0 var(--sp-3h) var(--sp-2h);
+  font-size: var(--t-small-h);
+  color: var(--muted);
+  text-wrap: pretty;
 }
-.body-panel .preview {
+.span-card .note {
+  color: var(--amber-ink);
+}
+/* The signature on a line of its own. It is the one line of a definition that
+ * answers "is this the thing I meant", and buried at the top of a code block
+ * it reads as code rather than as an answer. */
+.span-card .sig {
+  margin: 0 var(--sp-3h) var(--sp-3);
+  padding: 7px 9px;
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  color: var(--blue-ink);
+  background: var(--blue-soft);
+  border-radius: var(--r-2);
+  white-space: pre;
+  overflow-x: auto;
+}
+.span-card .preview {
   display: block;
   max-width: 100%;
   max-height: 320px;
+  margin: 0 var(--sp-3h) var(--sp-3h);
   border-radius: var(--r-3);
   border: 1px solid var(--line-soft);
   background: var(--soft);
   object-fit: contain;
 }
-.body-panel .note {
-  margin: 0;
+
+/* Numbered from the span's own first line, which is the coordinate every
+ * other surface prints. A gutter numbered from one would be a second
+ * coordinate system for a reader to convert between. */
+.gutter-code {
+  padding: var(--sp-3) 4px var(--sp-3) 0;
+  border-top: 1px solid var(--line-soft);
+  overflow: auto;
+  min-width: 0;
+  /* Capped so the span stays a span. "Read whole symbol" on a long function
+   * returns hundreds of lines, and without a ceiling the card pushed the ring
+   * below it off the bottom of the rail — the two are meant to be read
+   * together. */
+  max-height: 420px;
+  overscroll-behavior: contain;
+}
+.code-line {
+  display: flex;
+  gap: var(--sp-3);
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  line-height: var(--lh-code);
+}
+.code-line .ln {
+  width: 48px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+.code-line .lt {
+  white-space: pre;
+  color: var(--ink-2);
+}
+
+.span-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
+  padding: var(--sp-2h) var(--sp-3h);
+  border-top: 1px solid var(--line-soft);
+  background: var(--soft);
+}
+.body-meta {
+  font-family: var(--mono);
   font-size: var(--t-tiny);
-  color: var(--amber-ink);
+  color: var(--muted);
+}
+.span-foot .quiet {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  transition: color var(--d-hover) var(--e-in-out);
+}
+.span-foot .quiet:hover {
+  color: var(--blue);
+}
+
+/* One ring out and then one more, drawn beside the span rather than on a page
+ * the span is not on. */
+.around-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2h);
+  flex-shrink: 0;
+}
+.around-head .title {
+  font-weight: 600;
+}
+.around-head .sym {
+  font-family: var(--mono);
+}
+.around-head .meta {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+/* Tall enough for the ring to be a shape rather than a pile. At 260px a
+ * symbol with a dozen neighbours drew every label on top of every other, which
+ * is the one thing a graph is for. It grows with the rail rather than sitting
+ * at a fixed height, with a floor that keeps it legible on a short window. */
+.ego-panel {
+  position: relative;
+  flex: 1 1 340px;
+  min-height: 340px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  overflow: hidden;
+}
+.ego-hint {
+  position: absolute;
+  left: var(--sp-3);
+  bottom: var(--sp-2h);
+  font-family: var(--mono);
+  font-size: var(--t-micro);
+  color: var(--muted);
+  pointer-events: none;
 }
 
 /* Freshness. Amber rather than red: a stale hit is still the best answer
- * available, it just wants re-reading before it is quoted. */
+ * available, it just wants re-reading before it is quoted. The word is beside
+ * the dot rather than in its tooltip — a colour alone says nothing in a
+ * screenshot, and nothing at all to a reader who cannot hover. */
+.fresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: help;
+}
+.fresh .word {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--muted);
+}
 .fresh-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
-  cursor: help;
 }
 .fresh-dot.is-fresh {
   background: var(--green);
@@ -2468,45 +2721,123 @@ pre.code {
   background: var(--accent);
 }
 
-/* The reserved Prefer control. Shown disabled rather than hidden, so the
- * feature does not appear one release without warning. */
-.prefer {
+/* The dials: k, Prefer, lang, path and Budget. Every one of them is a pill of
+ * the same height carrying a micro-label and its control, because they are
+ * the same kind of thing — what the caller is asking for — and a row of
+ * differently shaped boxes says they are not. */
+.store-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.filters .rule {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+  margin: 0 var(--sp-1);
+  flex-shrink: 0;
+}
+.dial {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.prefer .seg {
-  font-family: var(--mono);
-  font-size: var(--t-micro);
-  padding: 2px 7px;
+  gap: 6px;
+  height: var(--h-dial);
+  padding: 0 var(--sp-2) 0 11px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--line);
-  border-radius: var(--r-1);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: var(--t-body-sm);
+}
+.dial:focus-within {
+  border-color: var(--blue);
+}
+.dial-label {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted);
 }
-.prefer .seg.is-on {
-  background: var(--chip);
-  color: var(--ink-2);
+.dial-prefix,
+.dial-value {
+  font-family: var(--mono);
+  font-size: var(--t-small-h);
 }
-
-.stepper {
-  width: 56px;
+.dial-prefix {
+  color: var(--muted);
+}
+.dial .unit {
   font-family: var(--mono);
   font-size: var(--t-tiny);
+  color: var(--muted);
 }
-.stepper.wide {
-  width: 72px;
+.dial .bare {
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-family: var(--mono);
+  font-size: var(--t-small-h);
+  color: var(--ink);
+  min-width: 0;
+}
+.dial .step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--soft);
+  color: var(--ink-2);
+  font-size: var(--t-body-sm);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
+}
+.dial .step:hover {
+  background: var(--chip);
+  color: var(--ink);
+}
+.dial .segs {
+  display: flex;
+  gap: 3px;
+}
+.dial .seg {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  cursor: pointer;
+  transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
+}
+.dial .seg:hover {
+  background: var(--chip);
+}
+.dial .seg[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--panel);
+}
+.dial-note {
+  color: var(--muted);
+  font-size: var(--t-small-h);
 }
 
-@media (max-width: 900px) {
-  .two-stage {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .locate-col {
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-  }
+/* Read and Pattern: one question, then the answer under it. */
+.read-out {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
 }
 
 /* ----------------------------------------------------------------- graph */
@@ -2740,6 +3071,56 @@ pre.code {
   color: var(--blue-ink);
 }
 
+/* Every name `--lang` accepts, on the About page rather than on a page of its
+ * own: it is a list to scan, and a page to navigate to was a click in front
+ * of forty-six lines. Two or three columns depending on the room. */
+.lang-card .lang-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--sp-1) var(--sp-4h);
+}
+.lang-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.lang-row .tick {
+  display: inline-flex;
+  justify-content: center;
+  width: 14px;
+  flex-shrink: 0;
+  font-size: var(--t-small);
+  color: var(--green);
+}
+.lang-row .name {
+  font-family: var(--mono);
+  font-size: var(--t-small-h);
+}
+
+/* The six that carry a grammar. A word beside the name rather than a second
+ * tick column: two columns of marks would have a reader working out which
+ * mark means what, and the thing being said is small enough to just say. */
+.lang-row .graph-mark {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--blue-ink);
+  background: var(--blue-soft);
+  border-radius: var(--r-2);
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+.lang-row .exts {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rail-group h3 {
   margin: 0 0 var(--sp-2);
   font: 500 var(--t-tiny) var(--mono);
@@ -2811,41 +3192,45 @@ pre.code {
 /* Confidence, everywhere it appears — and it appears everywhere, because a
  * hop or an edge without one is a hop a reader assumes was verified.
  *
- * Four values from 0.15.0. Never colour alone: each tier is distinguishable in
- * a greyscale screenshot too, which is why `ambiguous` is the dashed one. It
- * earns the dashes rather than `inferred`, because it is the value that says
- * the answer could be any of several things.
+ * Four values from 0.15.0. Never colour alone — the word is always in the
+ * badge, which is what carries the meaning into a greyscale screenshot and to
+ * a reader who cannot hover. The dashed border `ambiguous` used to wear was a
+ * second signal for something the word already said, and it made one badge a
+ * different shape from its three siblings in a row they are meant to be
+ * compared across.
  *
  * `extracted` and `resolved` share a tone deliberately. The difference between
  * them is how the target was settled, not how much it can be relied on: one
  * was named by an import, the other narrowed to exactly one definition. Both
- * are answers. `inferred` is neutral — a bare-name match, which is usually
- * right and is not evidence. `ambiguous` is amber, because it is not an answer
- * at all. */
+ * are answers, and blue is the tone this product gives an answer. `inferred`
+ * is neutral — a bare-name match, which is usually right and is not evidence.
+ * `ambiguous` is amber, because it is not an answer at all. */
 .conf {
+  display: inline-flex;
+  align-items: center;
   font-family: var(--mono);
   font-size: var(--t-micro);
-  padding: 1px var(--sp-2);
-  border-radius: var(--r-pill);
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: var(--r-1);
   white-space: nowrap;
   cursor: help;
 }
 
 .conf.extracted,
 .conf.resolved {
-  background: var(--green-soft);
-  color: var(--green-ink);
+  background: var(--blue-soft);
+  color: var(--blue-ink);
 }
 
 .conf.inferred {
   background: var(--chip);
-  color: var(--muted);
+  color: var(--ink-2);
 }
 
 .conf.ambiguous {
   background: var(--amber-soft);
   color: var(--amber-ink);
-  border: 1px dashed currentColor;
 }
 
 /* The legend under the rail: what the four badges claim, said once. */
@@ -2904,6 +3289,10 @@ pre.code {
   font-family: var(--mono);
   font-size: var(--t-tiny);
 }
+.client-breakdown .client-note {
+  color: var(--muted);
+}
+
 /* Each client is one unbreakable unit: a name and its count belong on one
  * line, and the wrapping happens between clients rather than inside one. */
 .client-breakdown .client {
@@ -3029,8 +3418,34 @@ pre.code {
   text-wrap: pretty;
 }
 
+/* The tool list's own price, boxed off from the list it prices. It is the one
+ * number on this page an agent pays whether or not it asks anything, so it
+ * reads as a fact about the server rather than as a caption under a heading. */
+.cost {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  background: var(--soft);
+  border-radius: var(--r-3);
+  padding: var(--sp-3) var(--sp-3h);
+}
+
+.cost-line {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-note {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--muted);
+}
+
+/* Tall enough that the twelve tools are a list rather than a peephole; the
+ * grid inside still scrolls once a future release outgrows it. */
 .tools {
-  max-height: 330px;
+  max-height: 460px;
 }
 
 .who {
@@ -3049,24 +3464,26 @@ pre.code {
 
 /* ----------------------------------------------------- fusion badges */
 
+/* The word, in a pill. A letter in a square needed a tooltip to mean
+ * anything, and the thing it meant — that a row was reached through the graph
+ * rather than matched — is the thing most worth not hiding. */
 .badges {
   display: inline-flex;
-  gap: var(--sp-1);
+  gap: 5px;
+  flex-wrap: wrap;
 }
 
 .badge {
-  width: 17px;
-  height: 17px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  padding: 2px 7px;
   border-radius: var(--r-1);
   font-family: var(--mono);
   font-size: var(--t-micro);
-  font-weight: 500;
+  letter-spacing: 0.04em;
   cursor: help;
   background: var(--chip);
-  color: var(--muted);
+  color: var(--ink-2);
 }
 
 .badge.vector {
@@ -3075,29 +3492,29 @@ pre.code {
 }
 
 .badge.keyword {
-  background: var(--green-soft);
-  color: var(--green-ink);
-}
-
-.badge.graph {
   background: var(--amber-soft);
   color: var(--amber-ink);
 }
 
-.hit-actions {
-  display: flex;
-  gap: var(--sp-3);
-  margin-top: var(--sp-2);
+.badge.graph {
+  background: var(--green-soft);
+  color: var(--green-ink);
 }
 
-.hit-actions .quiet {
-  font-size: var(--t-tiny);
-  color: var(--muted);
-  transition: color var(--d-hover) var(--e-in-out);
+/* The image list is the portal's own — the design has no image hits, so it
+ * has no role for one. Filled rather than tinted, so it is not mistaken for a
+ * fourth shade of the three text lists, and not left as the fallback grey,
+ * which reads as a badge that failed to load. */
+.badge.image {
+  background: var(--ink-2);
+  color: var(--panel);
 }
 
-.hit-actions .quiet:hover {
-  color: var(--accent-edge);
+/* A capture name from a tree-sitter pattern. Not a fusion list at all — it is
+ * what the pattern called the thing it caught. */
+.badge.capture {
+  background: var(--blue-soft);
+  color: var(--blue-ink);
 }
 
 /* --------------------------------------------------------------- narrow */
@@ -3117,7 +3534,6 @@ pre.code {
    * sideways. */
   .w-stores,
   .w-files,
-  .w-languages,
   .w-models,
   .w-agents {
     min-width: 0;
