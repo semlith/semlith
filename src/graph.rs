@@ -718,79 +718,416 @@ pub const MAX_NODES: usize = 2000;
 /// question someone asks.
 pub const DEPENDENCY_KINDS: [&str; 3] = ["calls", "imports", "references"];
 
-fn dependency_kinds() -> Vec<String> {
+pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
 }
 
 /// One edge of a path, as the path finder renders it.
+///
+/// Both ends carry a file and a line, and that is not decoration. A hop
+/// between two names says almost nothing when either name has several
+/// definitions: `index -> first_store` is true of some `index`, and until the
+/// row says which one, a reader cannot tell whether the chain holds together
+/// or quietly changed subject halfway through.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Step {
     pub from: String,
+    pub from_path: String,
+    pub from_line: u32,
     pub to: String,
+    pub to_path: String,
+    pub to_line: u32,
     pub kind: String,
     pub confidence: String,
+    /// How many definitions of `to` the store holds.
+    pub definitions: usize,
+}
+
+/// A chain, with what it is worth.
+///
+/// Named `Chain` rather than `Path` because this module already works with
+/// `std::path::Path` on every line that reads a file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Chain {
+    pub steps: Vec<Step>,
+    pub summary: Summary,
+}
+
+/// What the chain is made of, counted rather than described.
+///
+/// Every renderer prints this and none of them computes it, so the CLI, the
+/// MCP reply and the portal cannot drift into saying different things about
+/// one answer.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Summary {
+    pub hops: usize,
+    pub extracted: usize,
+    pub resolved: usize,
+    pub inferred: usize,
+    pub ambiguous: usize,
+    /// Joins where the chain left one definition of a name and picked up at
+    /// another. A seam is not a hop — it is the place two hops were welded
+    /// together, and the weld is the part that may not hold.
+    pub seams: usize,
+    /// The names welded at those seams, with how many definitions each has.
+    pub ambiguous_names: Vec<(String, usize)>,
+    /// Whether the honest word for this chain is "hypothesis".
+    ///
+    /// True when the chain has a seam, or when nothing on it was better than
+    /// a bare-name match. Either way the renderers say so in one line rather
+    /// than leaving a reader to work it out from the badges.
+    pub hypothesis: bool,
+}
+
+impl Summary {
+    /// Read the chain and count it.
+    fn of(steps: &[Step]) -> Self {
+        let mut summary = Summary {
+            hops: steps.len(),
+            ..Default::default()
+        };
+        for step in steps {
+            match step.confidence.as_str() {
+                EXTRACTED => summary.extracted += 1,
+                RESOLVED => summary.resolved += 1,
+                AMBIGUOUS => summary.ambiguous += 1,
+                _ => summary.inferred += 1,
+            }
+        }
+        // A seam sits between two hops: the first arrives at one definition of
+        // a name and the second leaves from another.
+        for pair in steps.windows(2) {
+            let (before, after) = (&pair[0], &pair[1]);
+            if (&before.to_path, before.to_line) == (&after.from_path, after.from_line) {
+                continue;
+            }
+            summary.seams += 1;
+            let name = before.to.clone();
+            if !summary.ambiguous_names.iter().any(|(n, _)| *n == name) {
+                summary
+                    .ambiguous_names
+                    .push((name, before.definitions.max(2)));
+            }
+        }
+        summary.hypothesis = summary.seams > 0
+            || (!steps.is_empty()
+                && steps
+                    .iter()
+                    .all(|s| s.confidence == INFERRED || s.confidence == AMBIGUOUS));
+        summary
+    }
 }
 
 /// What points at a symbol, and what it points at.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Neighbours {
     pub callers: Vec<crate::store::EdgeEnd>,
     pub callees: Vec<crate::store::EdgeEnd>,
+    /// Targets the store holds no definition for, listed only when asked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<crate::store::Unresolved>,
+    /// How many of those were left out. Non-zero only when they were, so a
+    /// reader is told the list is short rather than left to assume it is
+    /// complete.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hidden: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// One row per name an edge points at, rather than one row per definition that
+/// name could mean.
+///
+/// Only ambiguous rows are folded. A resolved edge already names one
+/// definition, and two resolved edges to the same name from two different
+/// definitions of the source are two real calls.
+pub fn collapse(callees: Vec<crate::store::EdgeEnd>) -> Vec<crate::store::EdgeEnd> {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    callees
+        .into_iter()
+        .filter(|end| {
+            if end.confidence != AMBIGUOUS {
+                return true;
+            }
+            seen.insert((end.symbol.name.clone(), end.kind.clone()))
+        })
+        .collect()
+}
+
+impl Chain {
+    /// The chain as every surface prints it.
+    ///
+    /// One renderer, called by the CLI and by the MCP reply, so the two cannot
+    /// drift into describing one answer differently. The portal draws the same
+    /// four parts from the same JSON.
+    ///
+    /// `bold` and `reset` are the terminal's escapes, or empty strings for a
+    /// surface that has none.
+    pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = String::new();
+        let width = self
+            .steps
+            .iter()
+            .map(|s| {
+                endpoint(&s.from, &shorten(&s.from_path), s.from_line)
+                    .chars()
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+
+        for (i, step) in self.steps.iter().enumerate() {
+            let left = endpoint(&step.from, &shorten(&step.from_path), step.from_line);
+            let right = endpoint(&step.to, &shorten(&step.to_path), step.to_line);
+            let pad = " ".repeat(width.saturating_sub(left.chars().count()));
+            out.push_str(&format!(
+                "{bold}{}{reset}  {left}{pad}  → {right}  {} · {}\n",
+                i + 1,
+                step.kind,
+                step.confidence,
+            ));
+            // The seam sits between two hops, because that is where it is: the
+            // chain arrived at one definition of a name and leaves from
+            // another. Drawing it as a hop of its own, as the first sketch of
+            // this did, inflates the hop count and hides the join.
+            if let Some(next) = self.steps.get(i + 1)
+                && (&step.to_path, step.to_line) != (&next.from_path, next.from_line)
+            {
+                out.push_str(&format!(
+                    "   ── seam · {}: {} definitions · continues from {}\n",
+                    step.to,
+                    step.definitions.max(2),
+                    endpoint(&next.from, &shorten(&next.from_path), next.from_line),
+                ));
+            }
+        }
+
+        out.push_str(&self.trailer());
+        out.push('\n');
+        if self.summary.hypothesis {
+            out.push_str("A hypothesis, not a finding.\n");
+        }
+        out
+    }
+
+    /// The counted line under the chain.
+    ///
+    /// Every number on it is read off the steps, so it cannot disagree with
+    /// what was printed above it.
+    pub fn trailer(&self) -> String {
+        let s = &self.summary;
+        // The four counts sum to the hop count, always. A trailer whose parts
+        // do not add up sends the reader looking for the hop it left out.
+        let mut line = format!(
+            "{} hop{} · {} extracted · {} resolved · {} inferred · {} ambiguous",
+            s.hops,
+            if s.hops == 1 { "" } else { "s" },
+            s.extracted,
+            s.resolved,
+            s.inferred,
+            s.ambiguous,
+        );
+        if s.seams > 0 {
+            let names = s
+                .ambiguous_names
+                .iter()
+                .map(|(name, count)| format!("{name}: {count} definitions"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            line.push_str(&format!(" · {} through ambiguous names ({names})", s.seams));
+        }
+        line
+    }
+}
+
+/// Leave a path exactly as the store recorded it.
+///
+/// What a surface with nothing better to do passes to [`Chain::render`]. The
+/// CLI passes something that strips the working directory, because a chain of
+/// six absolute paths is six copies of one prefix and one useful suffix.
+pub fn verbatim(path: &str) -> String {
+    path.to_string()
+}
+
+/// `name @ path:line`, or the bare name when the store could not say where.
+fn endpoint(name: &str, path: &str, line: u32) -> String {
+    if path.is_empty() {
+        return name.to_string();
+    }
+    format!("{name} @ {path}:{line}")
+}
+
+/// What to say when there is no chain.
+///
+/// The two sentences are different answers and must not be confused. Without
+/// `all_edges` the search refused to cross names it could not pin down, so the
+/// honest report is that nothing *it was willing to walk* connects the two —
+/// and it names the flag that widens the question. With `all_edges` it walked
+/// everything and still found nothing, which is as close to "no" as this tool
+/// gets.
+pub fn not_connected(from: &str, to: &str, depth: u32, all_edges: bool) -> String {
+    if all_edges {
+        format!("{from} and {to} are not connected within {depth} hops by any edge in the store.")
+    } else {
+        format!(
+            "{from} and {to} are not connected within {depth} hops by resolved edges. \
+             Ambiguous names were not crossed; --all-edges walks them and labels what it finds."
+        )
+    }
 }
 
 /// One hop in each direction around `name`.
-pub fn neighbours(db: &rusqlite::Connection, name: &str, kinds: &[String]) -> Result<Neighbours> {
+///
+/// `all` widens the answer in the two ways it is narrow. Without it, callees
+/// to a name with several definitions collapse to one row carrying the count:
+/// four rows saying `get` are four different functions, and printing them as
+/// four callees says this symbol calls `get` four times, which it does not.
+/// And without it, edges pointing outside the corpus are left out, as they
+/// always have been — with a count now, so a reader knows the list is short.
+///
+/// Callers are untouched in both states: an inbound edge came from a symbol
+/// id, so it is one definite place in one definite file.
+pub fn neighbours(
+    db: &rusqlite::Connection,
+    name: &str,
+    kinds: &[String],
+    all: bool,
+) -> Result<Neighbours> {
+    let callees = crate::store::edges_out(db, name, kinds)?;
+    let unresolved = crate::store::unresolved_out(db, name, kinds)?;
     Ok(Neighbours {
         callers: crate::store::edges_in(db, name, kinds)?,
-        callees: crate::store::edges_out(db, name, kinds)?,
+        callees: if all { callees } else { collapse(callees) },
+        hidden: if all { 0 } else { unresolved.len() },
+        unresolved: if all { unresolved } else { Vec::new() },
     })
 }
 
 /// The shortest chain of edges from `from` to `to`, if there is one.
 ///
 /// Breadth-first, so the first path found is a shortest one. `None` means the
-/// two are not connected within `depth` — which is an answer, not a failure,
-/// and is reported as one.
+/// two are not connected within `depth` by the edges this search was allowed
+/// to walk — which is an answer, not a failure, and is reported as one.
+///
+/// # What it will not walk
+///
+/// `all_edges` is false by default, and a search in that state refuses to
+/// cross an `ambiguous` name: one whose several definitions the source gave it
+/// no way to choose between. This is the release's central correction. The
+/// 0.14.0 finder crossed those names silently, so `call_tool` reached
+/// `record_retrieval` through a `record` that is two unrelated functions, and
+/// printed the result in exactly the format a real chain prints in. A wrong
+/// answer that looks like a right one is worse than no answer, so by default
+/// there is no answer.
+///
+/// With `all_edges` the old behaviour is available and labelled: the chain
+/// comes back with its seams marked, its confidences counted, and the sentence
+/// saying it is a hypothesis.
+///
+/// Within a depth, better-supported edges are expanded first, so a name
+/// reachable both ways is reached by the edge worth more. Without that the
+/// answer would depend on the order SQLite returned rows in.
 pub fn shortest_path(
     db: &rusqlite::Connection,
     from: &str,
     to: &str,
     depth: u32,
-) -> Result<Option<Vec<Step>>> {
+    all_edges: bool,
+) -> Result<Option<Chain>> {
     if from == to {
-        return Ok(Some(Vec::new()));
+        return Ok(Some(Chain {
+            steps: Vec::new(),
+            summary: Summary::default(),
+        }));
     }
-    // name -> the step that first reached it, for walking the chain back.
-    let mut came_from: std::collections::HashMap<String, Step> = std::collections::HashMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    seen.insert(from.to_string());
-    let mut frontier = vec![from.to_string()];
+    // A node is a definition, not a name. Two functions called `search` are
+    // two nodes, and a chain that arrives at one of them may only leave from
+    // that one.
+    //
+    // This is the whole correction. Refusing `ambiguous` edges is not enough
+    // on its own: on the semlith store every hop of `call_tool ->
+    // record_retrieval` resolves to exactly one definition, and the chain is
+    // still false, because hop 3 arrives at `search` in `lib.rs` and hop 4
+    // leaves from `search` in `routes.rs`. Each hop is true. The chain is not.
+    let mut came_from: std::collections::HashMap<Node, Step> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<Node> = std::collections::HashSet::new();
+    // The start is every definition of the name, because "does anything called
+    // `call_tool` reach this" is the question that was asked.
+    let start = Node::any(from);
+    seen.insert(start.clone());
+    let mut frontier = vec![start];
     let kinds = dependency_kinds();
 
     for _ in 0..depth {
-        let mut next = Vec::new();
+        // The whole level's edges, ordered by what they are worth, before any
+        // of them is taken. Ordering within one node would still let a weak
+        // edge out of the first node beat a strong edge out of the second.
+        let mut level: Vec<(Node, crate::store::EdgeEnd)> = Vec::new();
         for current in &frontier {
-            for edge in crate::store::edges_out(db, current, &kinds)? {
-                let name = edge.symbol.name.clone();
-                if !seen.insert(name.clone()) {
-                    continue;
+            for edge in crate::store::edges_out(db, &current.name, &kinds)? {
+                if !all_edges {
+                    if edge.confidence == AMBIGUOUS {
+                        continue;
+                    }
+                    // The edge has to leave from the definition the chain
+                    // actually reached. `edges_out` is asked about a name and
+                    // answers for every definition of it, which is right for
+                    // "what does this name call" and wrong for "what does
+                    // *this* function call".
+                    if !current.holds(edge.from_path.as_deref(), edge.from_line) {
+                        continue;
+                    }
                 }
-                came_from.insert(
-                    name.clone(),
-                    Step {
-                        from: current.clone(),
-                        to: name.clone(),
-                        kind: edge.kind,
-                        confidence: edge.confidence,
-                    },
-                );
-                if name == to {
-                    return Ok(Some(unwind(&came_from, from, to)));
+                level.push((current.clone(), edge));
+            }
+        }
+        level.sort_by_key(|(_, edge)| confidence_rank(&edge.confidence));
+
+        let mut next = Vec::new();
+        for (current, edge) in level {
+            // Strict walks definitions; `all_edges` walks names, which is what
+            // makes a seam possible and therefore visible. Keying the two the
+            // same way would quietly repair the chains this flag exists to
+            // show you.
+            let reached = if all_edges {
+                Node::any(&edge.symbol.name)
+            } else {
+                Node {
+                    name: edge.symbol.name.clone(),
+                    path: edge.symbol.path.clone(),
+                    line: edge.symbol.start_line,
                 }
-                next.push(name);
-                if seen.len() >= MAX_NODES {
-                    return Ok(None);
-                }
+            };
+            if !seen.insert(reached.clone()) {
+                continue;
+            }
+            came_from.insert(
+                reached.clone(),
+                Step {
+                    from: current.name.clone(),
+                    // An edge always knows which definition it leaves from.
+                    // The fallback is for a row an older store cannot supply,
+                    // and it says so rather than inventing a line.
+                    from_path: edge.from_path.unwrap_or_default(),
+                    from_line: edge.from_line.unwrap_or(0),
+                    to: reached.name.clone(),
+                    to_path: edge.symbol.path,
+                    to_line: edge.symbol.start_line,
+                    kind: edge.kind,
+                    confidence: edge.confidence,
+                    definitions: edge.definitions,
+                },
+            );
+            if reached.name == to {
+                let steps = unwind(&came_from, from, &reached);
+                let summary = Summary::of(&steps);
+                return Ok(Some(Chain { steps, summary }));
+            }
+            next.push(reached);
+            if seen.len() >= MAX_NODES {
+                return Ok(None);
             }
         }
         if next.is_empty() {
@@ -799,6 +1136,44 @@ pub fn shortest_path(
         frontier = next;
     }
     Ok(None)
+}
+
+/// One definition, as the traversal addresses it.
+///
+/// `path` empty means "any definition of this name", which is what the start
+/// of a search is and nothing else ever is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Node {
+    name: String,
+    path: String,
+    line: u32,
+}
+
+impl Node {
+    fn any(name: &str) -> Self {
+        Node {
+            name: name.to_string(),
+            path: String::new(),
+            line: 0,
+        }
+    }
+
+    /// Whether an edge leaving `(path, line)` leaves from this definition.
+    ///
+    /// A node with no path is the start of the search and holds every
+    /// definition. An edge with no recorded source is one an older store
+    /// wrote, and is allowed rather than silently dropped: the store predates
+    /// the column, so refusing it would turn every pre-0.15.0 store's path
+    /// finder off.
+    fn holds(&self, path: Option<&str>, line: Option<u32>) -> bool {
+        if self.path.is_empty() {
+            return true;
+        }
+        match (path, line) {
+            (Some(path), Some(line)) => path == self.path && line == self.line,
+            _ => true,
+        }
+    }
 }
 
 /// The graph a page draws, scoped so it is drawable.
@@ -894,19 +1269,29 @@ pub fn scoped(
     }))
 }
 
-fn unwind(
-    came_from: &std::collections::HashMap<String, Step>,
-    start: &str,
-    end: &str,
-) -> Vec<Step> {
+fn unwind(came_from: &std::collections::HashMap<Node, Step>, start: &str, end: &Node) -> Vec<Step> {
     let mut chain = Vec::new();
-    let mut cursor = end.to_string();
-    while cursor != start {
-        let Some(step) = came_from.get(&cursor) else {
+    let mut cursor = end.clone();
+    while cursor.name != start {
+        // The precise definition first, then the name: a strict walk keys its
+        // nodes by definition and an `all_edges` walk keys them by name.
+        let Some(step) = came_from
+            .get(&cursor)
+            .or_else(|| came_from.get(&Node::any(&cursor.name)))
+        else {
             break;
         };
         chain.push(step.clone());
-        cursor = step.from.clone();
+        cursor = Node {
+            name: step.from.clone(),
+            path: step.from_path.clone(),
+            line: step.from_line,
+        };
+        // The first hop leaves from the search's own start, which holds every
+        // definition of its name and is keyed that way.
+        if cursor.name == start {
+            break;
+        }
     }
     chain.reverse();
     chain
@@ -1177,7 +1562,7 @@ mod tests {
     #[test]
     fn neighbours_separates_the_two_directions() {
         let db = chain();
-        let n = neighbours(&db, "d", &[]).unwrap();
+        let n = neighbours(&db, "d", &[], false).unwrap();
         let mut callers: Vec<&str> = n.callers.iter().map(|e| e.symbol.name.as_str()).collect();
         callers.sort_unstable();
         assert_eq!(callers, ["c", "e"], "both callers of d");
@@ -1200,10 +1585,10 @@ mod tests {
         let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
         crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None).unwrap();
         // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
-        let path = shortest_path(&db, "a", "d", 50).unwrap();
+        let path = shortest_path(&db, "a", "d", 50, false).unwrap();
         assert!(path.is_some(), "a still reaches d");
         assert!(
-            path.unwrap().len() <= 4,
+            path.unwrap().steps.len() <= 4,
             "a cycle inflated the shortest path"
         );
     }
@@ -1211,25 +1596,145 @@ mod tests {
     #[test]
     fn the_shortest_path_is_the_short_one_and_names_every_edge() {
         let db = chain();
-        let path = shortest_path(&db, "a", "d", 10)
+        let path = shortest_path(&db, "a", "d", 10, false)
             .unwrap()
             .expect("a reaches d");
         let hops: Vec<(&str, &str)> = path
+            .steps
             .iter()
             .map(|s| (s.from.as_str(), s.to.as_str()))
             .collect();
         assert_eq!(hops, [("a", "b"), ("b", "c"), ("c", "d")]);
-        assert!(path.iter().all(|s| s.kind == "calls"));
-        assert!(path.iter().all(|s| s.confidence == EXTRACTED));
+        assert!(path.steps.iter().all(|s| s.kind == "calls"));
+        assert!(path.steps.iter().all(|s| s.confidence == EXTRACTED));
+        assert!(path.steps.iter().all(|s| !s.to_path.is_empty()));
+        assert_eq!(path.summary.extracted, 3);
+        assert_eq!(path.summary.seams, 0);
+        assert!(!path.summary.hypothesis, "every hop is extracted");
+    }
+
+    /// The shape the release exists for: `start` calls `record`, and `record`
+    /// is two unrelated functions in two files. One of them calls `finish`.
+    ///
+    /// The 0.14.0 finder walked out of one `record` and into the other without
+    /// a word, and printed `start -> record -> finish` in the same format a
+    /// real chain prints in.
+    fn forked_name() -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::store::prepare_for_tests(&db);
+        let define = |db: &rusqlite::Connection, path: &str, name: &str, line: u32| {
+            let file = crate::store::insert_file(db, path, path, 1, 0).unwrap_or_else(|_| {
+                db.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+                    .unwrap()
+            });
+            let symbol = Symbol {
+                kind: "function".to_string(),
+                name: name.to_string(),
+                qualified: name.to_string(),
+                start_line: line,
+                end_line: line + 1,
+            };
+            crate::store::insert_symbol(db, file, None, &symbol).unwrap()
+        };
+        let start = define(&db, "src/start.rs", "start", 10);
+        define(&db, "src/one.rs", "record", 20);
+        let second = define(&db, "src/two.rs", "record", 30);
+        define(&db, "src/finish.rs", "finish", 40);
+
+        // `start` calls a `record`, and nothing in its source says which.
+        crate::store::insert_edge(&db, start, "record", "calls", INFERRED, None).unwrap();
+        // Only the second `record` reaches `finish`.
+        crate::store::insert_edge(&db, second, "finish", "calls", INFERRED, None).unwrap();
+        db
+    }
+
+    /// By default the finder will not cross a name it cannot pin down, so the
+    /// answer is that there is no chain. This is the central correction of the
+    /// release: no answer beats a wrong answer dressed as a right one.
+    #[test]
+    fn a_chain_through_an_ambiguous_name_is_not_walked_by_default() {
+        let db = forked_name();
+        assert!(
+            shortest_path(&db, "start", "finish", 6, false)
+                .unwrap()
+                .is_none(),
+            "the only route crosses a name with two definitions"
+        );
+    }
+
+    /// With `all_edges` the chain comes back, and every part of it says what
+    /// it is worth: the hop is ambiguous, the join is a seam, the trailer
+    /// counts it, and the sentence names it a hypothesis.
+    #[test]
+    fn the_same_chain_with_all_edges_is_labelled_rather_than_asserted() {
+        let db = forked_name();
+        let chain = shortest_path(&db, "start", "finish", 6, true)
+            .unwrap()
+            .expect("all_edges walks the ambiguous name");
+
+        assert_eq!(chain.steps.len(), 2);
+        assert_eq!(chain.steps[0].confidence, AMBIGUOUS);
+        assert_eq!(chain.steps[0].definitions, 2);
+        assert_eq!(chain.summary.seams, 1, "{:?}", chain.steps);
+        assert_eq!(
+            chain.summary.ambiguous_names,
+            vec![("record".to_string(), 2)]
+        );
+        assert!(chain.summary.hypothesis);
+
+        let rendered = chain.render("", "", &verbatim);
+        assert!(rendered.contains("seam"), "{rendered}");
+        assert!(rendered.contains("record: 2 definitions"), "{rendered}");
+        assert!(
+            rendered.contains("A hypothesis, not a finding."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("src/start.rs:10"),
+            "every hop shows both endpoints: {rendered}"
+        );
+    }
+
+    /// A chain with nothing to doubt says nothing about doubt. The trailer is
+    /// still printed, because a reader should not have to know that silence
+    /// means "all extracted".
+    #[test]
+    fn an_all_extracted_chain_carries_no_hypothesis_line() {
+        let db = chain();
+        let rendered = shortest_path(&db, "a", "d", 10, false)
+            .unwrap()
+            .expect("a reaches d")
+            .render("", "", &verbatim);
+        assert!(!rendered.contains("hypothesis"), "{rendered}");
+        assert!(!rendered.contains("seam"), "{rendered}");
+        assert!(rendered.contains("3 hops"), "{rendered}");
+        assert!(rendered.contains("3 extracted"), "{rendered}");
+    }
+
+    /// The refusal and the failure are different sentences, because they are
+    /// different answers, and only one of them has a flag that widens it.
+    #[test]
+    fn the_refusal_names_the_flag_that_widens_the_question() {
+        let strict = not_connected("a", "b", 6, false);
+        assert!(strict.contains("by resolved edges"), "{strict}");
+        assert!(strict.contains("--all-edges"), "{strict}");
+
+        let walked = not_connected("a", "b", 6, true);
+        assert!(walked.contains("any edge in the store"), "{walked}");
+        assert!(!walked.contains("--all-edges"), "{walked}");
     }
 
     /// Not connected is an answer, and so is not connected *within this depth*.
     #[test]
     fn an_unconnected_pair_returns_nothing_rather_than_erroring() {
         let db = chain();
-        assert!(shortest_path(&db, "a", "lonely", 10).unwrap().is_none());
         assert!(
-            shortest_path(&db, "a", "d", 2).unwrap().is_none(),
+            shortest_path(&db, "a", "lonely", 10, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            shortest_path(&db, "a", "d", 2, false).unwrap().is_none(),
             "d is three hops away, so a depth of two does not reach it"
         );
     }

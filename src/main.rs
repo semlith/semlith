@@ -290,6 +290,17 @@ enum Command {
         #[arg(long, short)]
         kind: Vec<String>,
 
+        /// Show every definition behind a collapsed row, and the targets this
+        /// store holds no definition for.
+        ///
+        /// Off by default. A name with four definitions is one row saying so,
+        /// because four rows would read as four calls; and a call into a
+        /// dependency that was never indexed is left out, because a list of
+        /// names the store knows nothing about is noise in an answer about
+        /// this codebase.
+        #[arg(long)]
+        all: bool,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -306,6 +317,22 @@ enum Command {
         /// Most hops to search before giving up.
         #[arg(long, short, default_value_t = 6)]
         depth: u32,
+
+        /// Walk names with several definitions too, and label what that found.
+        ///
+        /// Off by default. A name like `record` or `index` can be several
+        /// unrelated functions, and a chain that crosses one has changed
+        /// subject halfway through without saying so. This prints those chains
+        /// with the join marked and the sentence that says what they are worth.
+        #[arg(long)]
+        all_edges: bool,
+
+        /// Refuse to cross a name with several definitions. On by default.
+        ///
+        /// Here so a script can state the default rather than rely on it. When
+        /// both this and --all-edges are given, this one wins.
+        #[arg(long)]
+        strict: bool,
 
         /// Emit JSON instead of formatted text.
         #[arg(long)]
@@ -747,7 +774,12 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Neighbors { name, kind, json } => {
+        Command::Neighbors {
+            name,
+            kind,
+            all,
+            json,
+        } => {
             for k in &kind {
                 if !semlith::graph::KINDS.contains(&k.as_str()) {
                     anyhow::bail!(
@@ -757,7 +789,7 @@ fn main() -> Result<()> {
                 }
             }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let neighbours = fleet.neighbours_in(None, &name, &kind)?;
+            let neighbours = fleet.neighbours_in(None, &name, &kind, all)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&neighbours)?);
             } else if neighbours.callers.is_empty() && neighbours.callees.is_empty() {
@@ -766,6 +798,20 @@ fn main() -> Result<()> {
                 let mut out = std::io::stdout().lock();
                 print_ends(&mut out, "callers", &neighbours.callers)?;
                 print_ends(&mut out, "callees", &neighbours.callees)?;
+                if neighbours.hidden > 0 {
+                    writeln!(
+                        out,
+                        "\n{} target{} outside this store, not listed (--all)",
+                        neighbours.hidden,
+                        if neighbours.hidden == 1 { "" } else { "s" },
+                    )?;
+                }
+                if !neighbours.unresolved.is_empty() {
+                    writeln!(out, "\n{}outside this store{}", bold(), reset())?;
+                    for end in &neighbours.unresolved {
+                        writeln!(out, "  {} via {}", end.name, end.kind)?;
+                    }
+                }
             }
         }
 
@@ -773,52 +819,33 @@ fn main() -> Result<()> {
             from,
             to,
             depth,
+            all_edges,
+            strict,
             json,
         } => {
+            let all_edges = all_edges && !strict;
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let path = fleet.path_in(None, &from, &to, depth)?;
+            let chain = fleet.path_in(None, &from, &to, depth, all_edges)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&path)?);
+                println!("{}", serde_json::to_string_pretty(&chain)?);
             } else {
-                match path {
+                match chain {
                     // An empty chain is `from == to`, which is a path of no
                     // hops rather than no path.
-                    Some(steps) if steps.is_empty() => {
+                    Some(chain) if chain.steps.is_empty() => {
                         println!("{from} is {to}");
                     }
-                    Some(steps) => {
+                    Some(chain) => {
                         let mut out = std::io::stdout().lock();
-                        for (i, step) in steps.iter().enumerate() {
-                            writeln!(
-                                out,
-                                "{}{}.{} {} --{}--> {}  ({})",
-                                bold(),
-                                i + 1,
-                                reset(),
-                                step.from,
-                                step.kind,
-                                step.to,
-                                step.confidence,
-                            )?;
-                        }
-                        let all = steps
-                            .iter()
-                            .all(|s| s.confidence == semlith::graph::EXTRACTED);
-                        writeln!(
+                        write!(
                             out,
-                            "{} hop{}, {}",
-                            steps.len(),
-                            if steps.len() == 1 { "" } else { "s" },
-                            if all {
-                                "all extracted"
-                            } else {
-                                "some inferred by name"
-                            },
+                            "{}",
+                            chain.render(bold(), reset(), &|p| display(std::path::Path::new(p)))
                         )?;
                     }
                     None => eprintln!(
-                        "no chain from {from} to {to} within {depth} hops \
-                         (a longer --depth may find one)"
+                        "{}",
+                        semlith::graph::not_connected(&from, &to, depth, all_edges)
                     ),
                 }
             }
@@ -1431,6 +1458,17 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
         return Ok(());
     }
     for end in ends {
+        // A collapsed row stands for every definition of the name, so it says
+        // how many rather than pointing at whichever one came back first —
+        // which would read as a fact about where the call goes.
+        if end.confidence == semlith::graph::AMBIGUOUS {
+            writeln!(
+                out,
+                "  {} via {} ({}) · {} definitions",
+                end.symbol.name, end.kind, end.confidence, end.definitions,
+            )?;
+            continue;
+        }
         writeln!(
             out,
             "  {} via {} ({})  {}{}:{}",

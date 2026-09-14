@@ -875,6 +875,20 @@ pub struct EdgeEnd {
     /// choose between, which is the difference between "there was only one"
     /// and "there were four and the source said which".
     pub definitions: usize,
+    /// The definition this edge actually leaves from.
+    ///
+    /// [`edges_out`] is asked about a name, and a name can have several
+    /// definitions, each with its own edges. Without this the answer says only
+    /// that *something* called `index` reaches here — which is how a path
+    /// finder ends up walking out of one definition of a name and into
+    /// another without anything on the page saying so.
+    ///
+    /// `None` from [`edges_in`], where the queried name is the far end of the
+    /// edge and there is no single row it leaves from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_line: Option<u32>,
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -1045,7 +1059,7 @@ pub fn symbols_by_names(
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
     let sql = format!(
-        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line
          FROM symbols src
          JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
@@ -1064,6 +1078,7 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
             confidence: r.get(9)?,
             hint: r.get(10)?,
             src_path: r.get(11)?,
+            src_line: r.get(12)?,
         })
     })?;
     let reached = rows.collect::<Result<Vec<_>, _>>()?;
@@ -1078,6 +1093,7 @@ struct Reached {
     confidence: String,
     hint: Option<String>,
     src_path: String,
+    src_line: u32,
 }
 
 /// Turn candidate rows into resolved edges.
@@ -1132,6 +1148,8 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 kind: row.kind,
                 confidence: confidence.to_string(),
                 definitions,
+                from_path: Some(row.src_path),
+                from_line: Some(row.src_line),
             });
             continue;
         }
@@ -1175,6 +1193,8 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 kind: row.kind,
                 confidence: confidence.to_string(),
                 definitions,
+                from_path: Some(row.src_path),
+                from_line: Some(row.src_line),
             });
         }
     }
@@ -1247,6 +1267,46 @@ fn file_imports(db: &Connection, path: &str) -> Result<Vec<String>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// Targets of `name`'s edges that the store holds no definition for.
+///
+/// [`edges_out`] joins to `symbols`, so an edge pointing at something outside
+/// the corpus — a standard-library call, a crate that was never indexed —
+/// simply does not appear there. That is the right default: a list of names
+/// the store knows nothing about is noise in an answer about this codebase.
+/// It is not the right *only* option, because "semlith shows no callees" and
+/// "everything this calls lives outside the index" are different facts, and
+/// only one of them means the graph is working.
+pub fn unresolved_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Unresolved>> {
+    let filter = kind_predicate(kinds, "e.kind");
+    let sql = format!(
+        "SELECT DISTINCT e.dst, e.kind, e.confidence
+         FROM symbols src
+         JOIN edges e ON e.src = src.id
+         WHERE src.name = ?1 AND {filter}
+           AND NOT EXISTS (SELECT 1 FROM symbols s WHERE s.name = e.dst)
+         ORDER BY e.dst"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
+    binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+        Ok(Unresolved {
+            name: r.get(0)?,
+            kind: r.get(1)?,
+            confidence: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// An edge whose target this store has no definition for.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Unresolved {
+    pub name: String,
+    pub kind: String,
+    pub confidence: String,
+}
+
 /// What points at `name`: callers, importers, references in.
 ///
 /// The direction a reverse walk takes, and the reason `edges_dst` exists —
@@ -1273,6 +1333,8 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
             // own `src` id, so there is nothing to resolve and nothing to be
             // ambiguous about. This direction is unchanged from 0.14.0.
             definitions: 1,
+            from_path: None,
+            from_line: None,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1452,6 +1514,65 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
         expected = hash;
     }
     Ok(None)
+}
+
+/// One definition's span and identity: `(start, end, name, kind)`.
+pub type SymbolSpan = (u32, u32, String, String);
+
+/// Every symbol defined in each of `paths`.
+///
+/// What turns a line range into a place a person recognises. A hit that says
+/// `src/store.rs:1041-1090` makes a reader open the file to find out what is
+/// there; one that says `record_retrieval` does not.
+///
+/// Read per file rather than per hit, because eight hits in one file are one
+/// question about that file.
+pub fn symbols_in_files(
+    db: &Connection,
+    paths: &[String],
+) -> Result<std::collections::HashMap<String, Vec<SymbolSpan>>> {
+    let mut out: std::collections::HashMap<String, Vec<SymbolSpan>> = Default::default();
+    if paths.is_empty() {
+        return Ok(out);
+    }
+    let holes = vec!["?"; paths.len()].join(", ");
+    let sql = format!(
+        "SELECT f.path, s.start_line, s.end_line, s.name, s.kind
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE f.path IN ({holes}) AND s.kind != 'module'
+         ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let args = paths.iter().cloned().map(Value::Text);
+    let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
+    while let Some(r) = rows.next()? {
+        let path: String = r.get(0)?;
+        out.entry(path)
+            .or_default()
+            .push((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?));
+    }
+    Ok(out)
+}
+
+/// `(bytes, indexed_at)` for each of `paths` the store knows.
+///
+/// The cheap half of a freshness check: what the store recorded about a file
+/// when it read it. The other half is one `stat` of the file as it is now.
+pub fn file_stamps(
+    db: &Connection,
+    paths: &[String],
+) -> Result<std::collections::HashMap<String, (i64, i64)>> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let holes = vec!["?"; paths.len()].join(", ");
+    let sql = format!("SELECT path, bytes, indexed_at FROM files WHERE path IN ({holes})");
+    let mut stmt = db.prepare(&sql)?;
+    let args = paths.iter().cloned().map(Value::Text);
+    let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
+        Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+    })?;
+    Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
 }
 
 /// `(symbols, edges)` — the graph's size, for `stats` and the portal.

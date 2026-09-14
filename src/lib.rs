@@ -156,6 +156,22 @@ fn checkpoint_interval() -> std::time::Duration {
     }
 }
 
+/// What a chunk reached through a bare-name edge is worth against one reached
+/// through an edge the source resolved.
+const INFERRED_EXPANSION: f32 = 0.5;
+
+/// A chunk the third list reached, with how it got there.
+struct Reached {
+    id: u64,
+    weight: f32,
+    tier: String,
+}
+
+/// The tier of the edge that reached `id`, if the graph list reached it at all.
+fn provenance_of(graph: &[Reached], id: u64) -> Option<String> {
+    graph.iter().find(|r| r.id == id).map(|r| r.tier.clone())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub score: f32,
@@ -185,6 +201,37 @@ pub struct Hit {
     /// of `--json` and of the MCP output sees exactly the shape it saw before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<Pixels>,
+    /// Whether the file still looks the way it did when it was indexed.
+    ///
+    /// A store being watched is a moving target, and a store that is not being
+    /// watched goes out of date the moment someone saves. Either way the
+    /// failure is the same and it is silent: an agent quotes an excerpt, the
+    /// line numbers are wrong, and nothing in the answer said so.
+    ///
+    /// Decided by one `stat` per distinct path: the size and the modification
+    /// time against what the store recorded when it read the file. That is
+    /// deliberately conservative — a `touch` with no edit reads as stale — and
+    /// conservative is the right direction, because the cost of a false "check
+    /// this" is a reread and the cost of a false "this is current" is a wrong
+    /// quotation.
+    pub fresh: bool,
+    /// The definition this chunk sits inside, and what kind of definition it
+    /// is.
+    ///
+    /// `None` for prose, for a file in a language that carries no symbols, and
+    /// for a chunk that falls between definitions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_kind: Option<String>,
+    /// For a hit the graph list reached: how well supported the edge that
+    /// reached it was.
+    ///
+    /// A chunk that arrives through a `resolved` edge is a neighbour the
+    /// source vouches for. One that arrives through a bare-name match is a
+    /// guess about a neighbour, and an agent should weigh it as one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
 }
 
 /// An image's pixel size.
@@ -1153,13 +1200,27 @@ impl Semlith {
     /// through the same `symbols_by_names` predicate — so the one-id-set
     /// invariant `filter.rs` documents holds across all three lists rather than
     /// two. A chunk outside the filter cannot arrive through the graph.
+    /// What a chunk reached through one edge is worth in the fusion.
+    ///
+    /// The third list is evidence about the code, not about the query, and how
+    /// good the evidence is varies: an edge the syntax tree resolved says this
+    /// chunk really is related, and an edge matched by bare name says it might
+    /// be. Ranking both at 1.0, as 0.14.0 did, spends the same confidence on
+    /// both claims.
+    fn expansion_weight(confidence: &str) -> f32 {
+        match confidence {
+            graph::EXTRACTED | graph::RESOLVED => 1.0,
+            _ => INFERRED_EXPANSION,
+        }
+    }
+
     fn graph_expansion(
         &self,
         dense: &[u64],
         keyword: &[u64],
         depth: usize,
         filter: &Filter,
-    ) -> Result<Vec<u64>> {
+    ) -> Result<Vec<Reached>> {
         // Seeded from the best of each list rather than all of it. Expanding
         // from a chunk ranked fortieth is expansion from noise.
         const SEEDS: usize = 8;
@@ -1178,14 +1239,39 @@ impl Semlith {
             return Ok(Vec::new());
         }
 
-        let mut neighbours: Vec<String> = Vec::new();
+        // Only the kinds that mean "depends on". `defines` and `contains` say
+        // a symbol sits inside a file or another symbol, which is true and
+        // useless here: following them pulls in every symbol that shares a
+        // file with a hit, so the third list fills with neighbours-by-accident
+        // and the two lists that answered the question get diluted.
+        let kinds = graph::dependency_kinds();
+        let mut neighbours: Vec<(String, f32, String)> = Vec::new();
         for name in &names {
-            for end in store::edges_out(&self.db, name, &[])?
+            for end in store::edges_out(&self.db, name, &kinds)?
                 .into_iter()
-                .chain(store::edges_in(&self.db, name, &[])?)
+                .chain(store::edges_in(&self.db, name, &kinds)?)
             {
-                if !neighbours.contains(&end.symbol.name) {
-                    neighbours.push(end.symbol.name);
+                // An ambiguous name is several unrelated definitions wearing
+                // one label. Expanding through it returns whichever chunk the
+                // join reached first, as a hit that claims the code says it is
+                // related — which is the same wrong answer the path finder
+                // used to give, in the search results instead.
+                if end.confidence == graph::AMBIGUOUS {
+                    continue;
+                }
+                let weight = Self::expansion_weight(&end.confidence);
+                match neighbours
+                    .iter_mut()
+                    .find(|(n, _, _)| *n == end.symbol.name)
+                {
+                    // Reached twice, by edges worth different amounts: the
+                    // better one is what it is worth, and what it is labelled.
+                    Some((_, best, tier)) if weight > *best => {
+                        *best = weight;
+                        *tier = end.confidence;
+                    }
+                    Some(_) => {}
+                    None => neighbours.push((end.symbol.name, weight, end.confidence)),
                 }
             }
             if neighbours.len() >= depth * 4 {
@@ -1193,16 +1279,22 @@ impl Semlith {
             }
         }
 
-        let mut ids = Vec::new();
-        for symbol in store::symbols_by_names(&self.db, &neighbours, filter.groups())? {
+        let names: Vec<String> = neighbours.iter().map(|(n, _, _)| n.clone()).collect();
+        let mut ids: Vec<Reached> = Vec::new();
+        for symbol in store::symbols_by_names(&self.db, &names, filter.groups())? {
             let Some(chunk_id) = symbol.chunk_id else {
                 continue;
             };
             let id = chunk_id as u64;
+            let found = neighbours.iter().find(|(n, _, _)| *n == symbol.name);
+            let weight = found.map(|(_, w, _)| *w).unwrap_or(INFERRED_EXPANSION);
+            let tier = found
+                .map(|(_, _, t)| t.clone())
+                .unwrap_or_else(|| graph::INFERRED.to_string());
             // A chunk the other two lists already ranked gains nothing from
             // being re-ranked here; the fusion adds the contribution anyway.
-            if !ids.contains(&id) {
-                ids.push(id);
+            if !ids.iter().any(|r| r.id == id) {
+                ids.push(Reached { id, weight, tier });
             }
             if ids.len() >= depth {
                 break;
@@ -1531,7 +1623,7 @@ impl Semlith {
             (
                 "graph",
                 false,
-                graph_ids.iter().map(|id| (*id, 1.0)).collect(),
+                graph_ids.iter().map(|r| (r.id, r.weight)).collect(),
             ),
         ] {
             for (rank, (id, weight)) in ranking.iter().enumerate() {
@@ -1575,6 +1667,12 @@ impl Semlith {
                                 width: row.width,
                                 height: row.height,
                             }),
+                            // Filled in below, once every path in the answer
+                            // is known and each can be stat'd once.
+                            fresh: true,
+                            symbol: None,
+                            symbol_kind: None,
+                            provenance: None,
                         },
                         0.0,
                     ));
@@ -1601,12 +1699,97 @@ impl Semlith {
                         store: None,
                         lists: found_by,
                         image: None,
+                        fresh: true,
+                        symbol: None,
+                        symbol_kind: None,
+                        provenance: provenance_of(&graph_ids, id),
                     },
                     similarity,
                 ));
             }
         }
+        self.mark_freshness(&mut hits)?;
+        self.name_enclosing_symbols(&mut hits)?;
         Ok(hits)
+    }
+
+    /// Give every hit the name of the definition it sits inside.
+    ///
+    /// One query for the whole answer, and the innermost definition wins: a
+    /// method inside a class is more use to a reader than the class.
+    fn name_enclosing_symbols(&self, hits: &mut [(Hit, f32)]) -> Result<()> {
+        let mut paths: Vec<String> = Vec::new();
+        for (hit, _) in hits.iter() {
+            if hit.image.is_none() && !paths.contains(&hit.path) {
+                paths.push(hit.path.clone());
+            }
+        }
+        let by_file = store::symbols_in_files(&self.db, &paths)?;
+        for (hit, _) in hits.iter_mut() {
+            let Some(symbols) = by_file.get(&hit.path) else {
+                continue;
+            };
+            let best = symbols
+                .iter()
+                .filter(|(start, end, _, _)| *start <= hit.start_line && *end >= hit.start_line)
+                .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
+            if let Some((_, _, name, kind)) = best {
+                hit.symbol = Some(name.clone());
+                hit.symbol_kind = Some(kind.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Say, for every hit, whether its file still looks the way it did when it
+    /// was indexed.
+    ///
+    /// One `stat` per distinct path in the answer, never one per hit: a search
+    /// that returns eight chunks of one file asks the filesystem about that
+    /// file once.
+    fn mark_freshness(&self, hits: &mut [(Hit, f32)]) -> Result<()> {
+        if hits.is_empty() {
+            return Ok(());
+        }
+        let paths: Vec<String> = {
+            let mut seen: Vec<String> = Vec::new();
+            for (hit, _) in hits.iter() {
+                if !seen.contains(&hit.path) {
+                    seen.push(hit.path.clone());
+                }
+            }
+            seen
+        };
+        let stamps = store::file_stamps(&self.db, &paths)?;
+        let mut fresh: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
+        for path in &paths {
+            let Some((bytes, indexed_at)) = stamps.get(path) else {
+                // The store has no row for this path. It cannot be said to
+                // have changed, and claiming it had would be a warning about
+                // nothing.
+                fresh.insert(path.as_str(), true);
+                continue;
+            };
+            let state = match std::fs::metadata(path) {
+                Ok(meta) => {
+                    let size_matches = meta.len() as i64 == *bytes;
+                    let unmodified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .is_none_or(|d| d.as_secs() as i64 <= *indexed_at);
+                    size_matches && unmodified
+                }
+                // Gone or unreadable. The excerpt in hand is the only copy
+                // there is, and it is certainly not current.
+                Err(_) => false,
+            };
+            fresh.insert(path.as_str(), state);
+        }
+        for (hit, _) in hits.iter_mut() {
+            hit.fresh = fresh.get(hit.path.as_str()).copied().unwrap_or(true);
+        }
+        Ok(())
     }
 
     /// The image half of a search: the query in CLIP's text space, against the

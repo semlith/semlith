@@ -397,6 +397,12 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     // because the portal always has the possibility of more than one.
     let single = fleet.len() == 1;
     let label = fleet.labels().first().map(|s| s.to_string());
+    // `format=locate` leaves the text out, for a caller paying for it. The
+    // portal asks for it on the list and fetches the body when a row is
+    // opened, which is the two-stage shape its Search page is built around.
+    let locate = request
+        .query("format")
+        .is_some_and(|f| f.eq_ignore_ascii_case("locate"));
     let out: Vec<Value> = hits
         .iter()
         .map(|h| {
@@ -405,10 +411,14 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
                 "path": h.path,
                 "start_line": h.start_line,
                 "end_line": h.end_line,
-                "text": h.text,
+                "text": if locate { String::new() } else { h.text.clone() },
                 "store": h.store.clone().or_else(|| single.then(|| label.clone()).flatten()),
                 "lists": h.lists,
                 "image": h.image.map(|px| json!({ "width": px.width, "height": px.height })),
+                "fresh": h.fresh,
+                "symbol": h.symbol,
+                "symbol_kind": h.symbol_kind,
+                "provenance": h.provenance,
             })
         })
         .collect();
@@ -1124,13 +1134,17 @@ fn neighbors(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &format!("unknown edge kind {bad:?}"));
     }
     let only = request.query_all("store");
+    let all = request
+        .query("all")
+        .is_some_and(|v| v == "1" || v == "true");
     let empty = json!({ "callers": [], "callees": [] });
     with_fleet(state, empty, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         Ok(json!(fleet.neighbours_in(
             only.as_deref(),
             &name,
-            &kinds
+            &kinds,
+            all
         )?))
     })
 }
@@ -1146,9 +1160,23 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
         .unwrap_or(6)
         .clamp(1, 20);
     let only = request.query_all("store");
+    // Resolved edges only unless the caller asks otherwise, the same default
+    // the CLI and the MCP tool take. The portal's Graph page sends
+    // `all_edges=1` behind its own control and labels what comes back.
+    let all_edges = request
+        .query("all_edges")
+        .is_some_and(|v| v == "1" || v == "true");
     with_fleet(state, json!({ "path": null }), move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        Ok(json!({ "path": fleet.path_in(only.as_deref(), &from, &to, depth)? }))
+        let chain = fleet.path_in(only.as_deref(), &from, &to, depth, all_edges)?;
+        // `path` keeps its name and its shape — an array of steps or null —
+        // so a 0.14.0 reader of this endpoint still finds what it looks for.
+        // The counts arrive beside it rather than inside it.
+        Ok(json!({
+            "path": chain.as_ref().map(|c| &c.steps),
+            "summary": chain.as_ref().map(|c| &c.summary),
+            "all_edges": all_edges,
+        }))
     })
 }
 

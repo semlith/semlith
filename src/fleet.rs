@@ -266,10 +266,24 @@ impl Fleet {
         only: Option<&[String]>,
         name: &str,
         kinds: &[String],
+        all: bool,
     ) -> Result<crate::graph::Neighbours> {
         let callers = self.graph_in(only, |s| crate::store::edges_in(s.db(), name, kinds))?;
         let callees = self.graph_in(only, |s| crate::store::edges_out(s.db(), name, kinds))?;
-        Ok(crate::graph::Neighbours { callers, callees })
+        let unresolved =
+            self.graph_in(only, |s| crate::store::unresolved_out(s.db(), name, kinds))?;
+        // Collapsed after the stores are joined, not inside each of them: one
+        // name with two definitions in two stores is still one name.
+        Ok(crate::graph::Neighbours {
+            callers,
+            callees: if all {
+                callees
+            } else {
+                crate::graph::collapse(callees)
+            },
+            hidden: if all { 0 } else { unresolved.len() },
+            unresolved: if all { unresolved } else { Vec::new() },
+        })
     }
 
     /// The shortest chain from `from` to `to`, in the first store that has one.
@@ -283,14 +297,17 @@ impl Fleet {
         from: &str,
         to: &str,
         depth: u32,
-    ) -> Result<Option<Vec<crate::graph::Step>>> {
-        let mut best: Option<Vec<crate::graph::Step>> = None;
+        all_edges: bool,
+    ) -> Result<Option<crate::graph::Chain>> {
+        let mut best: Option<crate::graph::Chain> = None;
         for i in self.chosen(only)? {
-            if let Some(path) =
-                crate::graph::shortest_path(self.members[i].store.db(), from, to, depth)?
-                && best.as_ref().is_none_or(|b| path.len() < b.len())
+            if let Some(chain) =
+                crate::graph::shortest_path(self.members[i].store.db(), from, to, depth, all_edges)?
+                && best
+                    .as_ref()
+                    .is_none_or(|b| chain.steps.len() < b.steps.len())
             {
-                best = Some(path);
+                best = Some(chain);
             }
         }
         Ok(best)
@@ -509,6 +526,12 @@ impl Labelled for crate::store::EdgeEnd {
     }
 }
 
+impl Labelled for crate::store::Unresolved {
+    /// Nothing to label. The row is a name the store does *not* hold, so
+    /// saying which store did not hold it would be noise: none of them did.
+    fn label(&mut self, _store: &str) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +546,10 @@ mod tests {
             store: None,
             lists: vec!["vector"],
             image: None,
+            fresh: true,
+            symbol: None,
+            symbol_kind: None,
+            provenance: None,
         }
     }
 

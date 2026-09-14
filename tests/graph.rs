@@ -342,7 +342,7 @@ fn the_three_commands_answer_and_neighbours_agrees_with_a_sweep() {
         .iter()
         .map(|k| k.to_string())
         .collect();
-    let around = semlith::graph::neighbours(s.db(), "release", &kinds).unwrap();
+    let around = semlith::graph::neighbours(s.db(), "release", &kinds, false).unwrap();
     let names: Vec<String> = around
         .callers
         .iter()
@@ -373,6 +373,111 @@ fn the_impact_command_no_longer_exists() {
     );
 }
 
+/// The shape the release exists for, end to end through the binary: `start`
+/// calls a `record`, there are two unrelated `record`s, and only one of them
+/// reaches `finish`.
+///
+/// The 0.14.0 finder printed `start -> record -> finish` here, in the format a
+/// real chain prints in, with nothing on the page to tell a reader it had
+/// changed subject halfway through.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_path_through_a_name_with_two_definitions_is_refused_and_then_labelled() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "start.rs", "fn start() { record(); }\n");
+    write(
+        corpus.path(),
+        "one.rs",
+        "fn record() { nothing(); }\nfn nothing() {}\n",
+    );
+    write(
+        corpus.path(),
+        "two.rs",
+        "fn record() { finish(); }\nfn finish() {}\n",
+    );
+    index(store.path(), corpus.path());
+
+    let refused = cli(store.path(), &["path", "start", "finish"]);
+    assert!(
+        refused.contains("not connected"),
+        "the only route crosses a name with two definitions: {refused}"
+    );
+    assert!(refused.contains("--all-edges"), "{refused}");
+
+    let walked = cli(store.path(), &["path", "start", "finish", "--all-edges"]);
+    assert!(walked.contains("seam"), "{walked}");
+    assert!(walked.contains("record: 2 definitions"), "{walked}");
+    assert!(walked.contains("A hypothesis, not a finding."), "{walked}");
+    assert!(
+        walked.contains("start.rs:1"),
+        "every hop shows both endpoints: {walked}"
+    );
+}
+
+/// A name with several definitions is one row saying so, not one row per
+/// definition. Four rows saying `record` read as four calls, and the symbol
+/// makes one.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn ambiguous_callees_collapse_to_one_row_and_expand_with_all() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "start.rs", "fn start() { record(); }\n");
+    for (i, name) in ["one", "two", "three"].iter().enumerate() {
+        write(
+            corpus.path(),
+            &format!("{name}.rs"),
+            &format!("fn record() {{ let _ = {i}; }}\n"),
+        );
+    }
+    index(store.path(), corpus.path());
+
+    let collapsed = cli(store.path(), &["neighbors", "start"]);
+    assert_eq!(
+        collapsed.matches("record").count(),
+        1,
+        "one row stands for all three definitions: {collapsed}"
+    );
+    assert!(collapsed.contains("3 definitions"), "{collapsed}");
+
+    let expanded = cli(store.path(), &["neighbors", "start", "--all"]);
+    assert_eq!(
+        expanded.matches("record").count(),
+        3,
+        "--all shows every definition behind the collapsed row: {expanded}"
+    );
+}
+
+/// A call into something the store does not hold is left out of the answer and
+/// counted, rather than left out silently. "semlith shows no callees" and
+/// "everything this calls lives outside the index" are different facts.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn targets_outside_the_store_are_counted_and_shown_only_with_all() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "start.rs",
+        "fn start() { somewhere_else(); }\n",
+    );
+    index(store.path(), corpus.path());
+
+    let narrow = cli(store.path(), &["neighbors", "start"]);
+    assert!(
+        !narrow.contains("somewhere_else"),
+        "not listed by default: {narrow}"
+    );
+    assert!(
+        narrow.contains("outside this store"),
+        "but the reader is told the list is short: {narrow}"
+    );
+
+    let wide = cli(store.path(), &["neighbors", "start", "--all"]);
+    assert!(wide.contains("somewhere_else"), "{wide}");
+}
+
 /// Every graph answer is the same whether it came from the library or the
 /// command line, so an agent and a person are never told different things.
 #[test]
@@ -387,7 +492,8 @@ fn the_json_output_matches_what_the_library_returns() {
         serde_json::from_str(&cli(store.path(), &["path", "a", "b", "--json"])).unwrap();
     let s = Semlith::open(store.path(), None).unwrap();
     let direct =
-        serde_json::to_value(semlith::graph::shortest_path(s.db(), "a", "b", 6).unwrap()).unwrap();
+        serde_json::to_value(semlith::graph::shortest_path(s.db(), "a", "b", 6, false).unwrap())
+            .unwrap();
     assert_eq!(printed, direct);
 }
 
