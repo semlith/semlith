@@ -35,7 +35,14 @@ use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
 /// Edge kinds, as stored in `edges.kind`.
-pub const KINDS: [&str; 6] = ["defines", "calls", "imports", "references", "contains", "aliases"];
+pub const KINDS: [&str; 6] = [
+    "defines",
+    "calls",
+    "imports",
+    "references",
+    "contains",
+    "aliases",
+];
 
 /// Stored on the edge: the syntax tree said where the target came from.
 pub const EXTRACTED: &str = "extracted";
@@ -822,6 +829,104 @@ pub const DEPENDENCY_KINDS: [&str; 4] = ["calls", "imports", "references", "alia
 
 pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
+}
+
+/// How much of a symbol's score flows on to its neighbours each round.
+///
+/// PageRank's own default, and there is no reason here to disagree with it.
+/// The 0.15 that does not flow is what keeps the walk anchored to the chunks
+/// the query actually found — the whole difference between a personalised
+/// PageRank and a plain one, which would rank the repository's most-called
+/// utility first for every query ever asked.
+const DAMPING: f32 = 0.85;
+
+/// How many rounds the score is pushed outward from the seeds.
+///
+/// Three carries mass two hops out and leaves a third of it there. Each extra
+/// round costs another pass over the frontier and moves the ordering less than
+/// the one before it.
+const ROUNDS: usize = 3;
+
+/// Rank the neighbourhood of a set of seed symbols by personalised PageRank.
+///
+/// `personal` is the seed mass per symbol name — for search, the fusion
+/// contribution of the chunks each name was found in. `neighbours` is asked for
+/// one name's dependency edges at a time, as `(name, weight, confidence)`, and
+/// is asked at most once per name however many rounds run: the walk holds the
+/// frontier it has visited and never the whole graph, which is what keeps peak
+/// memory flat as the corpus grows.
+///
+/// Returns the reached names, best first, with the confidence of the best edge
+/// that reached each. Seeds are not in the result — they are what the other two
+/// lists already found.
+///
+/// Why this rather than the flat hop it replaces: one hop treats every
+/// neighbour of every seed as equally related, so a symbol reached once from a
+/// weak seed ranks with one reached from three strong ones. That is not a
+/// ranking, it is a set.
+pub fn expand(
+    personal: &std::collections::HashMap<String, f32>,
+    mut neighbours: impl FnMut(&str) -> Result<Vec<(String, f32, String)>>,
+) -> Result<Vec<(String, f32, String)>> {
+    if personal.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut edges: std::collections::HashMap<String, Vec<(String, f32, String)>> =
+        std::collections::HashMap::new();
+    // The best edge that reached each name, which is what it is labelled with.
+    let mut tiers: std::collections::HashMap<String, (f32, String)> =
+        std::collections::HashMap::new();
+    let mut score = personal.clone();
+
+    for _ in 0..ROUNDS {
+        let mut next: std::collections::HashMap<String, f32> = personal
+            .iter()
+            .map(|(name, mass)| (name.clone(), (1.0 - DAMPING) * mass))
+            .collect();
+
+        for (name, mass) in &score {
+            if *mass <= 0.0 {
+                continue;
+            }
+            if !edges.contains_key(name) {
+                // The budget is on names visited, not on rows read, because
+                // that is what bounds both the queries and the memory.
+                if edges.len() >= MAX_NODES {
+                    continue;
+                }
+                edges.insert(name.clone(), neighbours(name)?);
+            }
+            let out = &edges[name];
+            let total: f32 = out.iter().map(|(_, weight, _)| *weight).sum();
+            if total <= 0.0 {
+                continue;
+            }
+            for (to, weight, confidence) in out {
+                *next.entry(to.clone()).or_default() += DAMPING * mass * weight / total;
+                match tiers.get(to) {
+                    Some((best, _)) if *best >= *weight => {}
+                    _ => {
+                        tiers.insert(to.clone(), (*weight, confidence.clone()));
+                    }
+                }
+            }
+        }
+        score = next;
+    }
+
+    let mut ranked: Vec<(String, f32, String)> = score
+        .into_iter()
+        .filter(|(name, _)| !personal.contains_key(name))
+        .filter_map(|(name, mass)| {
+            let (weight, confidence) = tiers.get(&name)?.clone();
+            Some((name, mass, (weight, confidence)))
+        })
+        .map(|(name, mass, (_, confidence))| (name, mass, confidence))
+        .collect();
+    // Ties break by name so two runs over one store return one order.
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Ok(ranked)
 }
 
 /// One edge of a path, as the path finder renders it.
@@ -1703,11 +1808,7 @@ mod tests {
 
         // Nothing this release extracts may leave the column empty: a NULL is
         // reserved for a row an older binary wrote.
-        assert!(
-            e.edges.iter().all(|x| x.line.is_some()),
-            "{:?}",
-            e.edges
-        );
+        assert!(e.edges.iter().all(|x| x.line.is_some()), "{:?}", e.edges);
     }
 
     /// A re-export is the only thing between the name a caller wrote and the
@@ -1747,6 +1848,104 @@ mod tests {
             "{:?}",
             e.edges
         );
+    }
+
+    /// The defect the flat hop had: `near` is one hop from a single weak seed
+    /// and `hub` is two hops from three strong ones, and one hop ranked them
+    /// the same because both were simply "reached". The walk has to prefer the
+    /// one the query's own hits agree about.
+    #[test]
+    fn a_symbol_three_seeds_agree_on_outranks_one_a_single_seed_reached() {
+        let adjacency: std::collections::HashMap<&str, Vec<&str>> = [
+            ("a", vec!["mid_a"]),
+            ("b", vec!["mid_b"]),
+            ("c", vec!["mid_c"]),
+            ("mid_a", vec!["hub"]),
+            ("mid_b", vec!["hub"]),
+            ("mid_c", vec!["hub"]),
+            ("weak", vec!["near"]),
+            ("hub", vec![]),
+            ("near", vec![]),
+        ]
+        .into_iter()
+        .collect();
+
+        let personal: std::collections::HashMap<String, f32> = [
+            ("a".to_string(), 1.0),
+            ("b".to_string(), 1.0),
+            ("c".to_string(), 1.0),
+            ("weak".to_string(), 0.2),
+        ]
+        .into_iter()
+        .collect();
+
+        let ranked = expand(&personal, |name| {
+            Ok(adjacency
+                .get(name)
+                .into_iter()
+                .flatten()
+                .map(|to| (to.to_string(), 1.0, EXTRACTED.to_string()))
+                .collect())
+        })
+        .unwrap();
+
+        let place = |name: &str| ranked.iter().position(|(n, _, _)| n == name);
+        let hub = place("hub").unwrap_or_else(|| panic!("hub was not reached: {ranked:?}"));
+        let near = place("near").unwrap_or_else(|| panic!("near was not reached: {ranked:?}"));
+        assert!(
+            hub < near,
+            "two hops from three seeds must outrank one hop from a weak seed: {ranked:?}"
+        );
+        assert!(
+            ranked.iter().all(|(n, _, _)| !personal.contains_key(n)),
+            "a seed is what the other lists already found: {ranked:?}"
+        );
+    }
+
+    /// A name is asked about once however many rounds run. Without the cache
+    /// the walk would re-query the whole frontier every round, which is the
+    /// cost that would have made this unshippable.
+    #[test]
+    fn the_walk_asks_about_each_name_once() {
+        let mut asked: Vec<String> = Vec::new();
+        let personal: std::collections::HashMap<String, f32> =
+            [("a".to_string(), 1.0)].into_iter().collect();
+        expand(&personal, |name| {
+            asked.push(name.to_string());
+            Ok(match name {
+                "a" => vec![("b".to_string(), 1.0, EXTRACTED.to_string())],
+                "b" => vec![("c".to_string(), 1.0, INFERRED.to_string())],
+                _ => Vec::new(),
+            })
+        })
+        .unwrap();
+        let mut unique = asked.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(asked.len(), unique.len(), "asked twice: {asked:?}");
+    }
+
+    /// The label on a reached name is the best edge that reached it, not the
+    /// last one read.
+    #[test]
+    fn a_reached_name_is_labelled_by_the_best_edge_that_reached_it() {
+        let personal: std::collections::HashMap<String, f32> =
+            [("weak".to_string(), 1.0), ("strong".to_string(), 1.0)]
+                .into_iter()
+                .collect();
+        let ranked = expand(&personal, |name| {
+            Ok(match name {
+                "weak" => vec![("target".to_string(), 0.5, INFERRED.to_string())],
+                "strong" => vec![("target".to_string(), 1.0, EXTRACTED.to_string())],
+                _ => Vec::new(),
+            })
+        })
+        .unwrap();
+        let (_, _, tier) = ranked
+            .iter()
+            .find(|(n, _, _)| n == "target")
+            .expect("target reached");
+        assert_eq!(tier, EXTRACTED);
     }
 
     #[test]

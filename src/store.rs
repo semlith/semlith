@@ -2042,7 +2042,16 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None, None).unwrap();
+        insert_edge(
+            &db,
+            src,
+            "crate::b::callee",
+            "imports",
+            "extracted",
+            None,
+            None,
+        )
+        .unwrap();
         call(&db, None);
         let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
@@ -2060,7 +2069,16 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(&db, src, "crate::b::callee", "imports", "extracted", None, None).unwrap();
+        insert_edge(
+            &db,
+            src,
+            "crate::b::callee",
+            "imports",
+            "extracted",
+            None,
+            None,
+        )
+        .unwrap();
         call(&db, Some("a"));
         let out = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
@@ -2076,7 +2094,16 @@ mod tests {
                 r.get(0)
             })
             .unwrap();
-        insert_edge(&db, src, "callee", "calls", "extracted", Some("store"), None).unwrap();
+        insert_edge(
+            &db,
+            src,
+            "callee",
+            "calls",
+            "extracted",
+            Some("store"),
+            None,
+        )
+        .unwrap();
         let out = edges_out(&db, "caller", &[]).unwrap();
         assert_eq!(out[0].confidence, crate::graph::EXTRACTED);
     }
@@ -2436,7 +2463,10 @@ mod tests {
 
         let out = edges_out(&db, "caller", &[]).unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
-        assert_eq!(out[0].line, None, "a 0.15.0 row must not invent a call site");
+        assert_eq!(
+            out[0].line, None,
+            "a 0.15.0 row must not invent a call site"
+        );
         assert_eq!(
             crate::graph::call_site(&out[0], &crate::graph::verbatim),
             "",

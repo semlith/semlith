@@ -1206,10 +1206,12 @@ impl Semlith {
     ///
     /// Seeded from the chunks the other two lists already found, mapped to the
     /// symbols defined in them, expanded one hop in both directions, and
-    /// resolved back to the chunks those neighbours live in. One hop, not a
-    /// ranked walk: a personalized PageRank over the graph is a real idea and
-    /// a change to be justified by a recall measurement, not shipped untested
-    /// inside a release that is already large.
+    /// resolved back to the chunks those neighbours live in — ranked, from
+    /// 0.16.0, by a personalised PageRank seeded with each hit's own fusion
+    /// contribution rather than by one flat hop. 0.15.0 left this as "a real
+    /// idea and a change to be justified by a recall measurement"; the
+    /// measurement is `tests/retrieval.rs`, and the marginal contribution of
+    /// this list is one of the numbers it prints.
     ///
     /// Everything here is gated by the same `Filter` the other two halves use,
     /// through the same `symbols_by_names` predicate — so the one-id-set
@@ -1239,18 +1241,38 @@ impl Semlith {
         // Seeded from the best of each list rather than all of it. Expanding
         // from a chunk ranked fortieth is expansion from noise.
         const SEEDS: usize = 8;
-        let seeds: Vec<u64> = dense
-            .iter()
-            .take(SEEDS)
-            .chain(keyword.iter().take(SEEDS))
-            .copied()
-            .collect();
-        if seeds.is_empty() {
+
+        // The seed mass is the fusion contribution each chunk is about to
+        // carry, so the walk starts out already knowing which hits the query
+        // answered best. A chunk both lists found seeds twice as hard as one
+        // only a single list found, which is the same judgement the fusion
+        // makes a few lines later.
+        let mut mass: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
+        for list in [dense, keyword] {
+            for (rank, id) in list.iter().take(SEEDS).enumerate() {
+                *mass.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
+            }
+        }
+        if mass.is_empty() {
             return Ok(Vec::new());
         }
 
-        let names = store::symbols_in_chunks(&self.db, &seeds)?;
-        if names.is_empty() {
+        // Per chunk rather than in one query, because which symbol carries
+        // which chunk's mass is the whole point of a personalised walk. A
+        // chunk holding three symbols splits its mass between them rather than
+        // seeding each of them as though it were a hit of its own.
+        let mut personal: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        for (id, mass) in &mass {
+            let names = store::symbols_in_chunks(&self.db, &[*id])?;
+            if names.is_empty() {
+                continue;
+            }
+            let share = mass / names.len() as f32;
+            for name in names {
+                *personal.entry(name).or_default() += share;
+            }
+        }
+        if personal.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -1260,8 +1282,8 @@ impl Semlith {
         // file with a hit, so the third list fills with neighbours-by-accident
         // and the two lists that answered the question get diluted.
         let kinds = graph::dependency_kinds();
-        let mut neighbours: Vec<(String, f32, String)> = Vec::new();
-        for name in &names {
+        let ranked = graph::expand(&personal, |name| {
+            let mut out = Vec::new();
             for end in store::edges_out(&self.db, name, &kinds)?
                 .into_iter()
                 .chain(store::edges_in(&self.db, name, &kinds)?)
@@ -1275,37 +1297,34 @@ impl Semlith {
                     continue;
                 }
                 let weight = Self::expansion_weight(&end.confidence);
-                match neighbours
-                    .iter_mut()
-                    .find(|(n, _, _)| *n == end.symbol.name)
-                {
-                    // Reached twice, by edges worth different amounts: the
-                    // better one is what it is worth, and what it is labelled.
-                    Some((_, best, tier)) if weight > *best => {
-                        *best = weight;
-                        *tier = end.confidence;
-                    }
-                    Some(_) => {}
-                    None => neighbours.push((end.symbol.name, weight, end.confidence)),
-                }
+                out.push((end.symbol.name, weight, end.confidence));
             }
-            if neighbours.len() >= depth * 4 {
-                break;
-            }
-        }
+            Ok(out)
+        })?;
 
-        let names: Vec<String> = neighbours.iter().map(|(n, _, _)| n.clone()).collect();
+        let names: Vec<String> = ranked.iter().map(|(name, _, _)| name.clone()).collect();
+        let place: std::collections::HashMap<&str, usize> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), i))
+            .collect();
+
+        // The store answers in its own order; the walk's order is the answer,
+        // so the rows are put back into it before the budget is applied.
+        let mut symbols = store::symbols_by_names(&self.db, &names, filter.groups())?;
+        symbols.sort_by_key(|s| place.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
+
         let mut ids: Vec<Reached> = Vec::new();
-        for symbol in store::symbols_by_names(&self.db, &names, filter.groups())? {
+        for symbol in symbols {
             let Some(chunk_id) = symbol.chunk_id else {
                 continue;
             };
             let id = chunk_id as u64;
-            let found = neighbours.iter().find(|(n, _, _)| *n == symbol.name);
-            let weight = found.map(|(_, w, _)| *w).unwrap_or(INFERRED_EXPANSION);
+            let found = ranked.iter().find(|(name, _, _)| *name == symbol.name);
             let tier = found
-                .map(|(_, _, t)| t.clone())
+                .map(|(_, _, tier)| tier.clone())
                 .unwrap_or_else(|| graph::INFERRED.to_string());
+            let weight = Self::expansion_weight(&tier);
             // A chunk the other two lists already ranked gains nothing from
             // being re-ranked here; the fusion adds the contribution anyway.
             if !ids.iter().any(|r| r.id == id) {

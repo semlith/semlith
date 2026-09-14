@@ -701,7 +701,11 @@ fn write(dir: &Path, name: &str, body: &str) {
 fn a_path_crosses_a_re_export_and_neighbours_names_the_call_site() {
     let corpus = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
-    write(corpus.path(), "alias.rs", "pub use real::worker as helper;\n");
+    write(
+        corpus.path(),
+        "alias.rs",
+        "pub use real::worker as helper;\n",
+    );
     write(
         corpus.path(),
         "real.rs",
