@@ -865,7 +865,18 @@ fn call_tool(
             let only = strings(&args, "store");
             let all = args.get("all").and_then(Value::as_bool).unwrap_or(false);
             match stores.neighbours_in(Some(&only), name, &kinds, all) {
-                Ok(n) if n.callers.is_empty() && n.callees.is_empty() => empty_graph(stores, name),
+                // Only when there is genuinely nothing. A symbol whose every
+                // target lies outside the corpus has something to say, and
+                // saying "the graph does not have this" about it is the exact
+                // confusion the hidden count exists to end.
+                Ok(n)
+                    if n.callers.is_empty()
+                        && n.callees.is_empty()
+                        && n.hidden == 0
+                        && n.unresolved.is_empty() =>
+                {
+                    empty_graph(stores, name)
+                }
                 Ok(n) => {
                     let mut body = format!(
                         "callers of {name} ({}):\n{}\n\ncallees of {name} ({}):\n{}",

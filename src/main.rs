@@ -843,7 +843,11 @@ fn main() -> Result<()> {
             );
             if json {
                 println!("{}", serde_json::to_string_pretty(&neighbours)?);
-            } else if neighbours.callers.is_empty() && neighbours.callees.is_empty() {
+            } else if neighbours.callers.is_empty()
+                && neighbours.callees.is_empty()
+                && neighbours.hidden == 0
+                && neighbours.unresolved.is_empty()
+            {
                 eprintln!("{}", nothing_known(&fleet, &name));
             } else {
                 let mut out = std::io::stdout().lock();
@@ -1509,6 +1513,13 @@ fn reset() -> &'static str {
 /// A store with an empty graph and a store that simply does not contain the
 /// symbol are different facts, and only one of them means "run index". Saying
 /// "not found" for both is how someone concludes the feature is broken.
+/// What to say when the graph has nothing to show for a name.
+///
+/// Only reached when there is genuinely nothing — no caller, no callee, and
+/// nothing hidden. A symbol whose every target lies outside the corpus has
+/// something to say and used to be reported here as though it did not exist,
+/// which is the confusion between "semlith shows no callees" and "everything
+/// this calls is outside the index" that the hidden count exists to end.
 fn nothing_known(fleet: &semlith::fleet::Fleet, name: &str) -> String {
     let symbols: i64 = fleet
         .each()

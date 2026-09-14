@@ -313,12 +313,26 @@ fn the_three_commands_answer_and_neighbours_agrees_with_a_sweep() {
     assert!(out.contains("acquire"), "hold's caller is missing: {out}");
     assert!(out.contains("release"), "hold's callee is missing: {out}");
 
+    // Both endpoints on every hop, from 0.15.0: a hop between two bare names
+    // says almost nothing when either name could mean several things.
     let out = cli(store.path(), &["path", "acquire", "release"]);
-    assert!(out.contains("acquire --calls--> hold"), "{out}");
-    assert!(out.contains("hold --calls--> release"), "{out}");
+    assert!(out.contains("acquire @"), "{out}");
+    assert!(out.contains("hold @"), "{out}");
+    assert!(out.contains("release @"), "{out}");
+    assert!(
+        out.contains("2 hops"),
+        "the trailer counts the chain: {out}"
+    );
+    assert!(
+        !out.contains("hypothesis"),
+        "every hop here resolves, so there is nothing to qualify: {out}"
+    );
 
     let out = cli(store.path(), &["path", "acquire", "alone"]);
-    assert!(out.contains("no chain"), "unconnected must say so: {out}");
+    assert!(
+        out.contains("not connected"),
+        "unconnected must say so: {out}"
+    );
 
     // Depth 1 against the sweep: `release` is called once, by `hold`.
     let body = fs::read_to_string(corpus.path().join("lock.rs")).unwrap();
