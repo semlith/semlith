@@ -276,24 +276,53 @@ fn measure_multi_store_search() {
     // read whatever the process happened to have allocated by then: the first
     // version of this slept 15 seconds and reported 17 MB for both, because
     // under load neither had finished loading its model.
-    one.answer_one_query();
-    three.answer_one_query();
-    let one_rss = one.rss_kb();
-    let three_rss = three.rss_kb();
+    // Several queries, and the largest reading of several, because one query
+    // and one `ps` is not a measurement. A single instantaneous RSS on a loaded
+    // machine swung between 142 MB and 219 MB for the same one-store server
+    // across consecutive runs, and twice reported three stores as *smaller*
+    // than one — a reading that cannot be true of two warm servers and was the
+    // fault of reading too early rather than of anything semlith did.
+    let one_rss = one.warm_peak_rss_kb();
+    let three_rss = three.warm_peak_rss_kb();
     println!(
         "mcp on 1 store: {} MB; on 3 stores: {} MB (+{} MB)",
         one_rss / 1024,
         three_rss / 1024,
         three_rss.saturating_sub(one_rss) / 1024,
     );
-    // Three copies of the weights would be roughly three times a one-store
-    // server. Half again as much is the ceiling this asserts: the extra is two
-    // more SQLite connections and two more vector indexes, not two more models.
+    // What an extra store costs, which is the number the claim is about: two
+    // more SQLite connections and two more vector indexes, not two more copies
+    // of the weights.
+    //
+    // Asserted against the model's own size rather than as a fraction of the
+    // one-store total. A ratio measures the wrong thing here — it tightens
+    // whenever the base case gets *lighter*, so making a one-store reader
+    // cheaper would fail a test about model duplication. 0.16.0 did exactly
+    // that: one store fell from 152 MB to 142 MB while three stayed at 220,
+    // and `three < one * 1.5` went from passing by 8 MB to failing by 7 with
+    // nothing about model loading having changed.
+    //
+    // The embedding model is ~52 MB of weights before its runtime allocates
+    // anything, so a store that loaded its own copy could not come in under
+    // this. An extra store measures ~39 MB.
+    const MODEL_MB: u64 = 50;
+    // Two warm servers, one holding three of the same stores the other holds
+    // one of: three cannot be smaller. When it reads that way the sample is
+    // wrong, and a wrong sample must fail rather than sail through a
+    // `saturating_sub` as a comfortable zero.
     assert!(
-        three_rss < one_rss + one_rss / 2,
-        "3 stores cost {} MB against {} MB for one — that looks like three models",
+        three_rss >= one_rss,
+        "three stores read {} MB against {} MB for one, which cannot be true of two warm \
+         servers — the measurement did not settle",
         three_rss / 1024,
         one_rss / 1024,
+    );
+    let per_store_mb = ((three_rss - one_rss) / 2) / 1024;
+    println!("each extra store: {per_store_mb} MB (a second model would be {MODEL_MB}+)");
+    assert!(
+        per_store_mb < MODEL_MB,
+        "each extra store cost {per_store_mb} MB, at or above the {MODEL_MB} MB a second copy \
+         of the weights would take — that looks like a model per store",
     );
     one.stop();
     three.stop();
@@ -972,6 +1001,23 @@ impl McpServer {
 
     /// Drive one real search to completion, so the process being measured is one
     /// that has loaded its model and answered — not one that is still starting.
+    /// Query until the server has everything it will load, then report the
+    /// largest resident size seen.
+    ///
+    /// The model loads on the first search and the vector index on the first
+    /// one that needs it, so a reading taken after a single query catches a
+    /// process that has not finished growing. Taking the peak of several also
+    /// steps around the allocator handing pages back between samples.
+    fn warm_peak_rss_kb(&mut self) -> u64 {
+        const SAMPLES: usize = 4;
+        let mut peak = 0;
+        for _ in 0..SAMPLES {
+            self.answer_one_query();
+            peak = peak.max(self.rss_kb());
+        }
+        peak
+    }
+
     fn answer_one_query(&mut self) {
         let _ = self.request(
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
