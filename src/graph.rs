@@ -866,8 +866,10 @@ const ROUNDS: usize = 3;
 /// memory flat as the corpus grows.
 ///
 /// Returns the reached names, best first, with the confidence of the best edge
-/// that reached each. Seeds are not in the result — they are what the other two
-/// lists already found.
+/// that reached each. A name the walk never reached through an edge is not in
+/// the result, however much seed mass it started with: the third list is about
+/// what the code says, and a seed nothing points at is only what the query
+/// said.
 ///
 /// Why this rather than the flat hop it replaces: one hop treats every
 /// neighbour of every seed as equally related, so a symbol reached once from a
@@ -924,9 +926,13 @@ pub fn expand(
         score = next;
     }
 
+    // Reached through an edge, which `tiers` is the record of. A seed the walk
+    // never left and came back to is not a neighbour of anything and carries no
+    // confidence to label it with; a seed that *is* reached — the query matched
+    // a chunk and the code points at it as well — stays, because the graph
+    // really did find it and the badge on the hit says so.
     let mut ranked: Vec<(String, f32, String)> = score
         .into_iter()
-        .filter(|(name, _)| !personal.contains_key(name))
         .filter_map(|(name, mass)| {
             let (weight, confidence) = tiers.get(&name)?.clone();
             Some((name, mass, (weight, confidence)))
@@ -2075,9 +2081,39 @@ mod tests {
             hub < near,
             "two hops from three seeds must outrank one hop from a weak seed: {ranked:?}"
         );
+        // Nothing points at a seed in this fixture, so no seed is reached and
+        // none is in the result. A seed the code *does* point at would stay —
+        // see `a_seed_the_code_points_at_is_still_reached`.
         assert!(
             ranked.iter().all(|(n, _, _)| !personal.contains_key(n)),
-            "a seed is what the other lists already found: {ranked:?}"
+            "no edge reaches a seed in this fixture: {ranked:?}"
+        );
+    }
+
+    /// The query matched a chunk and the code points at it as well. That is
+    /// two independent reasons to return it, and the hit has to say so — a
+    /// two-file corpus where every name is a seed is exactly where an
+    /// exclude-the-seeds rule silently empties the third list.
+    #[test]
+    fn a_seed_the_code_points_at_is_still_reached() {
+        let personal: std::collections::HashMap<String, f32> =
+            [("knead".to_string(), 1.0), ("autolyse".to_string(), 1.0)]
+                .into_iter()
+                .collect();
+        let ranked = expand(&personal, |name| {
+            Ok(match name {
+                "knead" => vec![("autolyse".to_string(), 1.0, EXTRACTED.to_string())],
+                _ => Vec::new(),
+            })
+        })
+        .unwrap();
+        assert!(
+            ranked.iter().any(|(n, _, _)| n == "autolyse"),
+            "a seed an edge reaches is still a neighbour: {ranked:?}"
+        );
+        assert!(
+            ranked.iter().all(|(n, _, _)| n != "knead"),
+            "nothing points at knead, so the walk did not reach it: {ranked:?}"
         );
     }
 
