@@ -1138,17 +1138,23 @@ questions:
   - id: shape-pair-ppr-identifier
     shape: identifier
     tool: search
-    query: personalised_pagerank
-    grep: grep -rn 'fn expand' src/graph.rs
+    query: DAMPING
+    grep: grep -rn 'DAMPING' src/graph.rs
     spans:
       - path: src/graph.rs
         symbol: expand
         start_line: 876
         end_line: 939
     note: >-
-      The identifier half of the pair. The name a programmer would type for the
-      walk that replaced the flat hop. Its question-shaped twin is
-      `shape-pair-ppr-question`; both ask for `graph::expand`.
+      The identifier half of the pair. Its question-shaped twin is
+      `shape-pair-ppr-question`; both ask for `graph::expand`. Written first as
+      the query `personalised_pagerank`, which was a mistake and is recorded
+      here rather than quietly corrected: no such identifier exists in the
+      crate, so the question asked for a term the corpus does not contain and
+      could only ever be a miss. `DAMPING` is what a programmer who knows this
+      code would actually type. The file's own rule is to fix a question that is
+      wrong about the code and say so, not to widen a span until something
+      passes.
 
   - id: shape-pair-ppr-question
     shape: concept

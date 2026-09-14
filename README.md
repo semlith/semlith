@@ -166,12 +166,14 @@ just those lines instead of the whole file.
 |---|---|
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--include-secrets` indexes what the deny-list otherwise refuses. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
-| `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
+| `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it, `--prefer code\|docs\|any` to lift one side of the corpus. |
+| `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
+| `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required. |
 | `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
 | `semlith files` | List indexed files. |
 | `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
 | `semlith forget <PATH>` | Drop one file from the store. |
-| `semlith symbol <NAME>` | Where a symbol is defined, by exact name, from the parsed syntax tree rather than a grep for `fn name`. |
+| `semlith symbol <NAME>` | The definition, its callers and callees, and the ring two hops out, in one answer. From the parsed syntax tree rather than a grep for `fn name`. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
 | `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. Needs no key. |
@@ -548,6 +550,67 @@ search_in and record_retrieval are not connected within 6 hops by resolved
 edges. Ambiguous names were not crossed; --all-edges walks them and labels
 what it finds.
 ```
+
+From 0.16.0 `semlith symbol` answers with all of that at once — the definition,
+the resolved callers and callees, and the ring two hops out — because asking what
+a symbol is used to cost three calls, two of which you had to make before you
+knew whether the first had found the right symbol. Every edge that has one also
+names the line the call was written on, which is not the line the calling
+function starts on. And a chain may cross a re-export: `pub use x as y`,
+`export { x as y }`, `from x import y as z` and Go's aliased import become
+`aliases` edges, so a walk that would once have said "not connected" about code
+joined by a rename now follows it and says it did.
+
+### Reading one span, and asking for a shape
+
+A search answers *where*. `semlith read` is the second half of that:
+
+```console
+$ semlith read src/store.rs:1041-1080     # exactly those lines
+$ semlith read record_retrieval           # exactly that symbol
+$ semlith read shared
+2 definitions of this name:
+  shared function  src/one.rs:4-4
+  shared function  src/two.rs:1-1
+```
+
+A name with several definitions gives you the list rather than picking one.
+Reads come out of the store's own chunks, never off disk, so `read` can only
+return what semlith was allowed to index in the first place.
+
+`semlith pattern` asks the question a regex cannot:
+
+```console
+$ semlith pattern --lang rust '(call_expression function: (identifier) @called)'
+src/lib.rs:1461-1461 @called  normalize(&mut vector)
+...
+```
+
+The grammar is the one the graph already uses, so a language `pattern` accepts is
+a language the graph carries edges for. A pattern that does not compile gives you
+tree-sitter's own error, not an empty list — "no matches" would read as "the code
+does not contain this shape".
+
+### How a query is read
+
+semlith looks at the shape of what you typed before it ranks anything. One token
+of identifier characters is read as an identifier and weights the keyword half of
+the search twice; anything else is read as a question and leaves the two halves
+level. Every answer says which it decided:
+
+```console
+$ semlith search record_retrieval
+...
+identifier-shaped · keyword weighted 2×
+
+$ semlith search 'where does a retrieval get written down' --prefer code
+...
+question-shaped · vector and keyword equal · prefer code
+```
+
+`--prefer code` lifts implementation over the prose about it and `--prefer docs`
+does the opposite. Both are a bias rather than a filter, so `--prefer code` over a
+corpus of prose still answers with the prose.
 
 **Reverse reachability is not currently part of the product.** `neighbors`
 answers what calls a symbol one hop back; walking every caller of every caller

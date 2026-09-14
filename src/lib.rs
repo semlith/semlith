@@ -216,17 +216,15 @@ impl Prefer {
 ///
 /// Small on purpose. The fusion already knows what the query matched; this is
 /// the code's opinion about what else is relevant, and it is a tiebreak rather
-/// than a second ranking. There is no model behind any of these three and
-/// there is not going to be one — every input is something the store already
-/// holds.
-const GRAPH_PROXIMITY: f32 = 0.15;
-
-/// How much a chunk that sits inside a named definition is lifted over one
-/// that does not.
+/// than a second ranking. There is no model behind either of these and there is
+/// not going to be one — every input is something the store already holds.
 ///
-/// A hit inside `fn record_retrieval` is a place a reader can act on; a hit in
-/// the prose between two functions usually is not, even when it matched.
-const KIND_LIFT: f32 = 0.10;
+/// Measured: removing this factor costs two hits at k@1 and one at k@3 on the
+/// harness's question set, so it stays. A third factor, a lift for a chunk
+/// inside a named definition, was measured out of the release — in a code
+/// repository it is a second and blunter `prefer: code` applied to every query,
+/// and it fights the real one (US-SEMLITH-0.16.0-I02).
+const GRAPH_PROXIMITY: f32 = 0.15;
 
 /// How much a chunk from a file edited since it was indexed is pushed down.
 ///
@@ -2033,9 +2031,6 @@ impl Semlith {
         // well because it happens to sit in a function.
         for ((hit, _), proximity) in hits.iter_mut().zip(&proximity) {
             hit.score *= 1.0 + GRAPH_PROXIMITY * proximity;
-            if hit.symbol_kind.is_some() {
-                hit.score *= 1.0 + KIND_LIFT;
-            }
             if !hit.fresh {
                 hit.score *= 1.0 - STALE_PENALTY;
             }
@@ -2510,14 +2505,14 @@ mod tests {
     /// it matched well, and large enough to separate two that matched equally.
     #[test]
     fn every_rerank_factor_is_a_tiebreak_rather_than_a_ranking() {
-        let strongest = (1.0 + GRAPH_PROXIMITY) * (1.0 + KIND_LIFT);
+        let strongest = 1.0 + GRAPH_PROXIMITY;
         let weakest = 1.0 - STALE_PENALTY;
         assert!(
             strongest / weakest < 1.5,
             "the whole rerank spans {strongest}/{weakest}, which is a ranking rather than a \
              tiebreak"
         );
-        const { assert!(GRAPH_PROXIMITY > 0.0 && KIND_LIFT > 0.0 && STALE_PENALTY > 0.0) };
+        const { assert!(GRAPH_PROXIMITY > 0.0 && STALE_PENALTY > 0.0) };
         // A stale hit is pushed down, never removed: the excerpt in hand may
         // still be the best answer there is.
         const { assert!(STALE_PENALTY < 1.0) };
