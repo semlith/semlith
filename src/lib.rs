@@ -2146,11 +2146,20 @@ impl Semlith {
         let Some(symbols) = by_file.get(&span.path) else {
             return Ok(());
         };
-        if let Some((_, _, name, kind)) = symbols
+        // The same containment-then-overlap rule search uses, for the same
+        // reason: a span that begins in a function's doc comment is that
+        // function's.
+        let contains = symbols
             .iter()
             .filter(|(start, end, _, _)| *start <= span.start_line && *end >= span.start_line)
-            .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
-        {
+            .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
+        let best = contains.or_else(|| {
+            symbols
+                .iter()
+                .filter(|(start, end, _, _)| *start <= span.end_line && *end >= span.start_line)
+                .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
+        });
+        if let Some((_, _, name, kind)) = best {
             span.symbol = Some(name.clone());
             span.symbol_kind = Some(kind.clone());
         }
@@ -2194,10 +2203,17 @@ impl Semlith {
             let Some(symbols) = by_file.get(&hit.path) else {
                 continue;
             };
-            let best = symbols
+            // Containment first, overlap second, innermost within each.
+            let contains = symbols
                 .iter()
                 .filter(|(start, end, _, _)| *start <= hit.start_line && *end >= hit.start_line)
                 .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
+            let best = contains.or_else(|| {
+                symbols
+                    .iter()
+                    .filter(|(start, end, _, _)| *start <= hit.end_line && *end >= hit.start_line)
+                    .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
+            });
             if let Some((_, _, name, kind)) = best {
                 hit.symbol = Some(name.clone());
                 hit.symbol_kind = Some(kind.clone());
@@ -2560,6 +2576,44 @@ mod tests {
                 "{name:?} is a name"
             );
         }
+    }
+
+    /// Chunking does not respect syntax: the chunk holding a function's
+    /// opening almost always starts a few lines above it, in the doc comment.
+    /// That is the most useful chunk in the function to label, and matching on
+    /// the hit's first line alone left exactly those unlabelled.
+    #[test]
+    fn a_hit_that_straddles_a_definitions_start_is_labelled_with_it() {
+        // (start, end, name, kind), as `symbols_in_files` returns them.
+        let symbols = [
+            (100u32, 180u32, "outer".to_string(), "function".to_string()),
+            (120u32, 140u32, "inner".to_string(), "function".to_string()),
+        ];
+        // A chunk from the doc comment above `inner` into its body.
+        let pick = |start: u32, end: u32| {
+            let contains = symbols
+                .iter()
+                .filter(|(s, e, _, _)| *s <= start && *e >= start)
+                .min_by_key(|(s, e, _, _)| e.saturating_sub(*s));
+            contains
+                .or_else(|| {
+                    symbols
+                        .iter()
+                        .filter(|(s, e, _, _)| *s <= end && *e >= start)
+                        .min_by_key(|(s, e, _, _)| e.saturating_sub(*s))
+                })
+                .map(|(_, _, name, _)| name.as_str())
+        };
+        // Straddling: line 115 is inside `outer` only, but the chunk reaches
+        // into `inner`. Containment wins, so it is `outer` — the rule prefers
+        // the definition the hit actually begins in.
+        assert_eq!(pick(115, 130), Some("outer"));
+        // Entirely above both definitions but overlapping `outer`: labelled.
+        assert_eq!(pick(90, 105), Some("outer"));
+        // Innermost wins when both contain the start.
+        assert_eq!(pick(125, 135), Some("inner"));
+        // Nothing near it at all.
+        assert_eq!(pick(200, 210), None);
     }
 
     #[test]
