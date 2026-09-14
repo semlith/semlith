@@ -398,7 +398,7 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Semantic and keyword search. Returns where the matches are; format \"excerpt\" adds the text.",
+            "description": "Semantic + keyword search. Returns where; format excerpt adds the text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,9 +406,10 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs. A wrong guess hides the answer." },
+                    "path": { "type": "array", "items": { "type": "string" }, "description": "Globs; a wrong guess hides the answer." },
                     "ext": { "type": "array", "items": { "type": "string" } },
                     "lang": { "type": "array", "items": { "type": "string" }, "description": "See semlith_languages." },
+                    "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Lift code or prose. Default any." },
                     "store": { "type": "array", "items": { "type": "string" }, "description": store_arg }
                 },
                 "required": ["query"]
@@ -423,13 +424,13 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_languages",
-            "description": "The languages lang accepts, and which carry graph edges.",
+            "description": "The languages lang accepts, and which carry edges.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_files",
-            "description": "List indexed files. Tells \"not indexed\" apart from \"not discussed\".",
+            "description": "List indexed files: \"not indexed\" is not \"not discussed\".",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -444,7 +445,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_index",
-            "description": "Index paths into an open store. Only what changed is re-embedded; a long run says how much is left.",
+            "description": "Index paths. Only what changed is re-embedded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -453,11 +454,10 @@ fn tool_defs(open: &str) -> Value {
                 },
                 "required": ["path"]
             },
-            "annotations": {}
         },
         {
             "name": "semlith_add",
-            "description": "Fetch one https URL into the store. Nothing is crawled, no credential sent. Refused under --airgap.",
+            "description": "Fetch one https URL into the store. No crawling. Refused under --airgap.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -483,7 +483,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "Where a symbol is defined, from the parsed syntax tree rather than matched in text.",
+            "description": "Where a symbol is defined, from the syntax tree rather than matched text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -497,7 +497,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_neighbors",
-            "description": "What calls a symbol and what it calls. Each edge is extracted, resolved, inferred or ambiguous; only the first two are certain.",
+            "description": "What calls a symbol and what it calls. Edges are extracted, resolved, inferred or ambiguous; only the first two are certain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -512,7 +512,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_path",
-            "description": "The shortest chain between two symbols, or a statement that there is none. A name with several definitions is not crossed unless you ask.",
+            "description": "The shortest chain between two symbols, or a statement that there is none. An ambiguous name is not crossed unless you ask.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -586,10 +586,24 @@ fn call_tool(
                     .and_then(Value::as_u64)
                     .map(|v| v as usize)
                     .unwrap_or(DEFAULT_LOCATE_TOKENS);
-                match stores.search_in(Some(&only), query, k.clamp(1, 50), &filter) {
+                let prefer = match args.get("prefer").and_then(Value::as_str) {
+                    Some(raw) => match crate::Prefer::parse(raw) {
+                        Ok(p) => p,
+                        Err(e) => return Ok(tool_error(&e.to_string())),
+                    },
+                    None => crate::Prefer::default(),
+                };
+                match stores.search_preferring(Some(&only), query, k.clamp(1, 50), &filter, prefer)
+                {
                     Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
-                    Ok(hits) if excerpts => render(&hits),
-                    Ok(hits) => locate(&hits, query, max_tokens),
+                    Ok(hits) if excerpts => {
+                        format!("{}\n{}", reading(query, prefer), render(&hits))
+                    }
+                    Ok(hits) => format!(
+                        "{}\n{}",
+                        reading(query, prefer),
+                        locate(&hits, query, max_tokens)
+                    ),
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
@@ -1169,6 +1183,24 @@ fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
         out.push_str(&format!("truncated: {shown} of {total}\n"));
     }
     out.trim_end().to_string()
+}
+
+/// How the query was read, in one short line above the hits.
+///
+/// An agent cannot correct a shape that was read wrongly unless it is told
+/// which one was read, and `prefer` is the correction — so the line names both
+/// and costs about eight tokens.
+fn reading(query: &str, prefer: crate::Prefer) -> String {
+    let shape = crate::shape_of(query);
+    match prefer {
+        crate::Prefer::Any => format!("{} · {}", shape.as_str(), shape.weighting()),
+        chosen => format!(
+            "{} · {} · prefer {}",
+            shape.as_str(),
+            shape.weighting(),
+            chosen.as_str()
+        ),
+    }
 }
 
 /// One line of `where`, and one line of `what`.

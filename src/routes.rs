@@ -384,9 +384,17 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         return Response::json(&json!({ "hits": [], "selected": 0, "chunks": fleet.chunks() }));
     }
 
+    let prefer = match request.query("prefer") {
+        Some(raw) => match crate::Prefer::parse(raw) {
+            Ok(p) => p,
+            Err(e) => return Response::error(400, &e.to_string()),
+        },
+        None => crate::Prefer::default(),
+    };
+
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
-    let hits = match fleet.search_in(only.as_deref(), query, k, &filter) {
+    let hits = match fleet.search_preferring(only.as_deref(), query, k, &filter, prefer) {
         Ok(h) => h,
         Err(e) => return Response::error(500, &e.to_string()),
     };
@@ -438,11 +446,19 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         );
     }
 
+    // The page draws the shape hint from these two rather than re-deriving the
+    // rule in JavaScript, so there is one classifier and it is the one that
+    // ranked the answer.
+    let shape = crate::shape_of(query);
     Response::json(&json!({
         "hits": out,
         "selected": selected,
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
+        "shape": shape,
+        "shape_label": shape.as_str(),
+        "weighting": shape.weighting(),
+        "prefer": prefer,
     }))
 }
 

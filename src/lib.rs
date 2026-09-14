@@ -91,6 +91,125 @@ const GENERATION: &str = "index_generation";
 /// flattens the curve enough that a result ranked third is not dismissed.
 const RRF_K: f32 = 60.0;
 
+/// What a query looks like, which decides which half of the fusion is trusted.
+///
+/// Read off the query's own text, deterministically, with no model: an agent
+/// that pastes `record_retrieval` and an agent that asks "where does a
+/// retrieval get written down" want the same code, and until 0.16.0 both were
+/// scored as though the two halves were equally likely to know. They are not —
+/// FTS5 is exact about an identifier and vague about a sentence, and the
+/// embedding is the other way round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Shape {
+    /// One token that is shaped like something a programmer typed.
+    Identifier,
+    /// Anything else, which in practice is a sentence.
+    Question,
+}
+
+impl Shape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Identifier => "identifier-shaped",
+            Self::Question => "question-shaped",
+        }
+    }
+
+    /// What the shape did to the fusion, in the words the portal prints.
+    pub fn weighting(self) -> &'static str {
+        match self {
+            Self::Identifier => "keyword weighted 2×",
+            Self::Question => "vector and keyword equal",
+        }
+    }
+
+    /// The multiplier this shape gives the keyword list.
+    fn keyword_weight(self) -> f32 {
+        match self {
+            Self::Identifier => 2.0,
+            Self::Question => 1.0,
+        }
+    }
+}
+
+/// Whether a query is shaped like an identifier or like a question.
+///
+/// The rule is deliberately crude and entirely inspectable: one token, made of
+/// the characters an identifier is made of, is an identifier. Everything else
+/// is a question. A crude rule that a user can predict beats an accurate one
+/// they cannot, because the shape is reported in the answer and `prefer` is
+/// there to overrule it.
+pub fn shape_of(query: &str) -> Shape {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.split_whitespace().count() > 1 {
+        return Shape::Question;
+    }
+    let identifier = trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.' || c == '!');
+    if identifier && trimmed.chars().any(|c| c.is_alphabetic()) {
+        Shape::Identifier
+    } else {
+        Shape::Question
+    }
+}
+
+/// Which side of the corpus a caller would rather be given.
+///
+/// The automatic weighting above is about *how* the query was written;
+/// this is about what the caller is looking for, which the query text cannot
+/// say. "How does indexing work" matches the architecture document and the
+/// function that does it equally well, and an agent about to edit code wants
+/// the second one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Prefer {
+    /// No bias. The default, and what every release before 0.16.0 did.
+    #[default]
+    Any,
+    /// The implementation rather than the prose about it.
+    Code,
+    /// The prose rather than the implementation.
+    Docs,
+}
+
+impl Prefer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Code => "code",
+            Self::Docs => "docs",
+        }
+    }
+
+    /// Parse the argument every surface takes, rejecting anything else by
+    /// name: a caller that passed `prefer: source` has to be told, or it reads
+    /// the unbiased answer as a biased one.
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "any" | "" => Ok(Self::Any),
+            "code" => Ok(Self::Code),
+            "docs" | "doc" => Ok(Self::Docs),
+            other => anyhow::bail!("prefer is code, docs or any, not {other:?}"),
+        }
+    }
+
+    /// What a hit's score is multiplied by under this preference.
+    ///
+    /// A bias, not a filter. A preferred hit is lifted and the rest keep their
+    /// place, so `prefer: code` over a corpus with no code still answers with
+    /// the prose rather than with nothing.
+    fn multiplier(self, is_code: bool) -> f32 {
+        const LIFT: f32 = 1.5;
+        match (self, is_code) {
+            (Self::Any, _) => 1.0,
+            (Self::Code, true) | (Self::Docs, false) => LIFT,
+            _ => 1.0,
+        }
+    }
+}
+
 /// One candidate in the fusion: which id space it is in, its id, the score it
 /// has accumulated, and which lists put it there.
 ///
@@ -1571,6 +1690,23 @@ impl Semlith {
         k: usize,
         filter: &Filter,
     ) -> Result<Vec<(Hit, f32)>> {
+        self.search_preferring(query, vector, k, filter, Prefer::default())
+    }
+
+    /// [`Semlith::search_ranked`] with the caller's preference applied.
+    ///
+    /// The query's shape is read here rather than passed in, because it is a
+    /// function of the query text and nothing else — every surface that wants
+    /// to print it calls [`shape_of`] on the same string and gets the same
+    /// answer, with no second source of truth to drift.
+    pub fn search_preferring(
+        &mut self,
+        query: &str,
+        vector: &[f32],
+        k: usize,
+        filter: &Filter,
+        prefer: Prefer,
+    ) -> Result<Vec<(Hit, f32)>> {
         // A store being watched changes under a long-lived reader. Answering
         // from the index this process happened to load at startup is how an
         // agent ends up quoting a function that no longer exists.
@@ -1587,6 +1723,9 @@ impl Semlith {
         // given, and a chunk that is second on one side and absent from the
         // other still deserves to be considered.
         let depth = (k * RANK_DEPTH).max(k);
+
+        // Which half of the fusion this query's own text says to trust.
+        let shape = shape_of(query);
 
         let allowlist = self.allowlist(filter)?;
         if matches!(allowlist, Allowlist::Empty) {
@@ -1653,7 +1792,10 @@ impl Semlith {
             (
                 "keyword",
                 false,
-                keyword_ids.iter().map(|id| (*id, 1.0)).collect(),
+                keyword_ids
+                    .iter()
+                    .map(|id| (*id, shape.keyword_weight()))
+                    .collect(),
             ),
             (
                 "graph",
@@ -1681,7 +1823,11 @@ impl Semlith {
         // badges of whichever chunk happened to land in its slot.
         let mut ranked: Vec<Candidate> = fused.into_iter().zip(lists).collect();
         ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1));
-        ranked.truncate(k);
+        // Cut to the deeper list, not to `k`. Everything that reorders the
+        // answer below — the preference, and the rerank — needs each
+        // candidate's path and enclosing symbol, which only exist once the
+        // rows are fetched, and a candidate cut here can never be lifted.
+        ranked.truncate(depth.max(k));
 
         let mut hits = Vec::with_capacity(ranked.len());
         for (((is_image, id), score), found_by) in ranked {
@@ -1745,6 +1891,17 @@ impl Semlith {
         }
         self.mark_freshness(&mut hits)?;
         self.name_enclosing_symbols(&mut hits)?;
+
+        // The preference is applied here rather than inside the fusion because
+        // it is about the file a chunk is in, which the fusion has no way to
+        // know: it ranks ids.
+        if prefer != Prefer::Any {
+            for (hit, _) in hits.iter_mut() {
+                hit.score *= prefer.multiplier(filter::is_code(&hit.path));
+            }
+            hits.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
+        }
+        hits.truncate(k);
         Ok(hits)
     }
 
@@ -2006,6 +2163,69 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule is crude on purpose, so these are the whole of it.
+    #[test]
+    fn a_query_is_identifier_shaped_only_when_it_is_one_token_of_identifier() {
+        for identifier in [
+            "record_retrieval",
+            "store::edges_out",
+            "Semlith",
+            "self.index.search",
+            "format!",
+            "k8s",
+        ] {
+            assert_eq!(
+                shape_of(identifier),
+                Shape::Identifier,
+                "{identifier:?} is an identifier"
+            );
+        }
+        for question in [
+            "where does a retrieval get written down",
+            "record retrieval",
+            "how does indexing work?",
+            "",
+            "   ",
+            "42",
+        ] {
+            assert_eq!(shape_of(question), Shape::Question, "{question:?}");
+        }
+    }
+
+    /// An identifier leans on FTS5, which is exact about a name; a question
+    /// leaves the two halves level, because the embedding is the one that
+    /// reads a sentence.
+    #[test]
+    fn the_shape_decides_what_the_keyword_list_is_worth() {
+        assert_eq!(Shape::Identifier.keyword_weight(), 2.0);
+        assert_eq!(Shape::Question.keyword_weight(), 1.0);
+        assert_eq!(Shape::Identifier.weighting(), "keyword weighted 2×");
+        assert_eq!(Shape::Question.weighting(), "vector and keyword equal");
+    }
+
+    /// A bias, not a filter: the unpreferred side keeps its score rather than
+    /// being cut, so `prefer: code` over a corpus of prose still answers.
+    #[test]
+    fn prefer_lifts_one_side_and_never_removes_the_other() {
+        assert_eq!(Prefer::Any.multiplier(true), 1.0);
+        assert_eq!(Prefer::Any.multiplier(false), 1.0);
+        assert!(Prefer::Code.multiplier(true) > Prefer::Code.multiplier(false));
+        assert!(Prefer::Docs.multiplier(false) > Prefer::Docs.multiplier(true));
+        assert!(Prefer::Code.multiplier(false) > 0.0);
+        assert!(Prefer::Docs.multiplier(true) > 0.0);
+    }
+
+    /// A misspelled preference is told, not silently ignored: an agent that
+    /// passed `prefer: source` would otherwise read an unbiased answer as a
+    /// biased one.
+    #[test]
+    fn an_unknown_preference_is_an_error() {
+        assert_eq!(Prefer::parse("code").unwrap(), Prefer::Code);
+        assert_eq!(Prefer::parse("DOCS").unwrap(), Prefer::Docs);
+        assert_eq!(Prefer::parse("").unwrap(), Prefer::Any);
+        assert!(Prefer::parse("source").is_err());
+    }
 
     #[test]
     fn normalize_gives_unit_length() {

@@ -188,6 +188,22 @@ impl Fleet {
         k: usize,
         filter: &Filter,
     ) -> Result<Vec<Hit>> {
+        self.search_preferring(only, query, k, filter, crate::Prefer::default())
+    }
+
+    /// [`Fleet::search_in`] with the caller's preference applied.
+    ///
+    /// The preference reaches each store rather than being applied to the
+    /// merged list, because a store that holds only prose should still lift
+    /// its best prose under `prefer: docs`, and the merge is by score.
+    pub fn search_preferring(
+        &mut self,
+        only: Option<&[String]>,
+        query: &str,
+        k: usize,
+        filter: &Filter,
+        prefer: crate::Prefer,
+    ) -> Result<Vec<Hit>> {
         let chosen = self.chosen(only)?;
         // Labels are worth their tokens only when there is something to tell
         // apart. One store means the output is what it was before stores could
@@ -211,7 +227,7 @@ impl Fleet {
 
             let hits = self.members[i]
                 .store
-                .search_ranked(query, &vector, k, filter)?;
+                .search_preferring(query, &vector, k, filter, prefer)?;
             let label = self.members[i].label.clone();
             queues.push(
                 hits.into_iter()

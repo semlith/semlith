@@ -180,6 +180,11 @@ enum Command {
         #[arg(long, short)]
         lang: Vec<String>,
 
+        /// Lift the implementation (`code`), the prose about it (`docs`), or
+        /// neither (`any`, the default). A bias, not a filter.
+        #[arg(long, default_value = "any")]
+        prefer: String,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -594,11 +599,15 @@ fn main() -> Result<()> {
             path,
             ext,
             lang,
+            prefer,
             json,
         } => {
             // Built before any store is opened, so an unknown language name
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
+            // Parsed before the model loads, like the filter, so a typo in the
+            // argument costs nothing.
+            let prefer = semlith::Prefer::parse(&prefer)?;
 
             let mut fleet = read_fleet(&cli.store, &cwd, false)?;
             fleet.quiet = json;
@@ -624,7 +633,7 @@ fn main() -> Result<()> {
             }
 
             let started = Instant::now();
-            let hits = fleet.search_filtered(&query, k, &filter)?;
+            let hits = fleet.search_preferring(None, &query, k, &filter, prefer)?;
             let elapsed = started.elapsed();
             // The command line is a client like any other, and its retrievals
             // count for exactly as much as an agent's. Recorded under `cli`, in
@@ -705,6 +714,21 @@ fn main() -> Result<()> {
                         fleet.files()?,
                     ),
                     None => eprintln!("{} hits in {:?}{across}", hits.len(), elapsed),
+                }
+                // How the query was read, and what that did. Printed on every
+                // answer rather than only when it was surprising: a caller can
+                // only correct a misread shape if it can see one happened.
+                let shape = semlith::shape_of(&query);
+                match prefer {
+                    semlith::Prefer::Any => {
+                        eprintln!("{} · {}", shape.as_str(), shape.weighting())
+                    }
+                    chosen => eprintln!(
+                        "{} · {} · prefer {}",
+                        shape.as_str(),
+                        shape.weighting(),
+                        chosen.as_str()
+                    ),
                 }
                 // Only when it happened. A store inside its budget never sees
                 // this line, and a store past it should not have to guess why
