@@ -133,8 +133,8 @@ advertised tool count drops from ten to nine.
   unrecognised-subcommand message. There is no shim and no deprecation period,
   by choice: a tool that answers with an apology is a tool an agent keeps
   calling.
-- **Why.** Reverse reachability returns in 0.18.0, rebuilt and free. Leaving
-  half of it in place — the command without the page, or the page
+- **Why.** Reverse reachability returns in 0.14.0 as a paid surface. Leaving
+  half of it in the free product — the command without the page, or the page
   without the command — would have made 0.14.0 a decision half-made across two
   releases.
 - **What to do instead.** `semlith neighbors <symbol>` gives the direct callers
