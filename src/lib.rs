@@ -1250,7 +1250,14 @@ impl Semlith {
             let Some(src) = ids.get(edge.from.as_str()) else {
                 continue;
             };
-            store::insert_edge(&self.db, *src, &edge.to, &edge.kind, &edge.confidence)?;
+            store::insert_edge(
+                &self.db,
+                *src,
+                &edge.to,
+                &edge.kind,
+                &edge.confidence,
+                edge.hint.as_deref(),
+            )?;
             written += 1;
         }
 

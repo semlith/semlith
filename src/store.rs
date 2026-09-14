@@ -96,11 +96,18 @@ CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
 -- `confidence` is `extracted` when an import in the source file named where the
 -- target came from, and `inferred` when the target was matched by bare name.
 -- Nothing that displays an edge may present the second as the first.
+-- `hint` is what the source text said about where `dst` lives, when it said
+-- anything: the module of a scoped call, the receiver of a method call, the
+-- object of a qualified one. Nullable, and NULL on every row an older binary
+-- wrote, which is why the format version does not move for it. It is a lead,
+-- not an address, and `edges_out` treats it as one ranking signal among
+-- several — see `resolve`.
 CREATE TABLE IF NOT EXISTS edges (
     src        INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
     dst        TEXT NOT NULL,
     kind       TEXT NOT NULL,
-    confidence TEXT NOT NULL
+    confidence TEXT NOT NULL,
+    hint       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
@@ -172,6 +179,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "foreign_keys", "ON")?;
     defensive(&db)?;
     db.execute_batch(SCHEMA)?;
+    add_columns(&db)?;
     check_format(&db)?;
     backfill_fts(&db)?;
     // Everything above is the schema this binary needs in place before the
@@ -304,6 +312,54 @@ const FTS_BUILT: &str = "fts_built";
 /// A 0.1.0 store has chunks but no FTS index, and the triggers only fire on new
 /// writes. Rebuilding from the text already in SQLite costs no embedding and
 /// leaves the vectors untouched.
+/// Columns added to tables that already exist in a store written by an older
+/// binary.
+///
+/// `CREATE TABLE IF NOT EXISTS` is how every table here arrives, and it does
+/// nothing at all to a table that is already there — so a column added to the
+/// schema above reaches a fresh store and no other. This is the other half:
+/// one `ALTER TABLE ADD COLUMN` per column, run on every open, skipped when
+/// the column is present.
+///
+/// Every column here must be nullable with no default, which is what makes the
+/// operation an O(1) catalogue edit rather than a table rewrite, and what lets
+/// an older binary keep reading the store afterwards: it selects by name and
+/// never sees them. That is the whole reason `format_version` does not move —
+/// the same reasoning `docs/compatibility.md` records for the graph tables.
+fn add_columns(db: &Connection) -> Result<()> {
+    const ADDITIONS: [(&str, &str, &str); 5] = [
+        ("edges", "hint", "TEXT"),
+        // The ledger's 0.15.0 columns. `session` groups the retrievals of one
+        // agent conversation, `tool` says which tool was asked, `stale_hits`
+        // counts the answers that came from a file edited since it was
+        // indexed, and `tokenizer` names what counted the two token figures so
+        // rows counted two different ways are never summed together.
+        ("retrievals", "session", "TEXT"),
+        ("retrievals", "tool", "TEXT"),
+        ("retrievals", "stale_hits", "INTEGER"),
+        ("retrievals", "tokenizer", "TEXT"),
+    ];
+    for (table, column, kind) in ADDITIONS {
+        if has_column(db, table, column)? {
+            continue;
+        }
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind};"))?;
+    }
+    Ok(())
+}
+
+fn has_column(db: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn backfill_fts(db: &Connection) -> Result<()> {
     if get_meta(db, FTS_BUILT)?.is_some() {
         return Ok(());
@@ -810,6 +866,15 @@ pub struct EdgeEnd {
     pub symbol: SymbolRow,
     pub kind: String,
     pub confidence: String,
+    /// How many definitions of this name the store holds.
+    ///
+    /// `1` for an edge that could only ever mean one thing. Greater than one
+    /// on an `ambiguous` row, where it is the number a renderer prints instead
+    /// of listing every candidate as though each were a separate call — and on
+    /// a `resolved` row, where it is how many candidates the ranking had to
+    /// choose between, which is the difference between "there was only one"
+    /// and "there were four and the source said which".
+    pub definitions: usize,
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -857,10 +922,11 @@ pub fn insert_edge(
     dst: &str,
     kind: &str,
     confidence: &str,
+    hint: Option<&str>,
 ) -> Result<()> {
     db.execute(
-        "INSERT INTO edges (src, dst, kind, confidence) VALUES (?1, ?2, ?3, ?4)",
-        params![src, dst, kind, confidence],
+        "INSERT INTO edges (src, dst, kind, confidence, hint) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![src, dst, kind, confidence, hint],
     )?;
     Ok(())
 }
@@ -1228,7 +1294,7 @@ mod tests {
     fn deleting_a_file_deletes_its_symbols_and_its_outgoing_edges() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
+        insert_edge(&db, caller, "callee", "calls", "inferred", None).unwrap();
         assert_eq!(graph_stats(&db).unwrap(), (1, 1));
 
         delete_file(&db, "a.rs").unwrap();
@@ -1249,7 +1315,7 @@ mod tests {
     fn re_indexing_the_target_file_leaves_edges_into_it_intact() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "callee", "calls", "inferred").unwrap();
+        insert_edge(&db, caller, "callee", "calls", "inferred", None).unwrap();
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
         insert_symbol(&db, b, None, &sym("callee")).unwrap();
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 1);
@@ -1278,8 +1344,8 @@ mod tests {
         let caller = one_symbol(&db, "a.rs", "caller");
         let b = insert_file(&db, "b.rs", "h", 1, 0).unwrap();
         insert_symbol(&db, b, None, &sym("callee")).unwrap();
-        insert_edge(&db, caller, "callee", "calls", "extracted").unwrap();
-        insert_edge(&db, caller, "callee", "references", "inferred").unwrap();
+        insert_edge(&db, caller, "callee", "calls", "extracted", None).unwrap();
+        insert_edge(&db, caller, "callee", "references", "inferred", None).unwrap();
 
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 2);
         let calls = edges_out(&db, "caller", &["calls".to_string()]).unwrap();
@@ -1301,7 +1367,7 @@ mod tests {
     fn an_edge_to_an_unindexed_target_resolves_to_nothing_without_erroring() {
         let db = Connection::open_in_memory().unwrap();
         let caller = one_symbol(&db, "a.rs", "caller");
-        insert_edge(&db, caller, "println", "calls", "inferred").unwrap();
+        insert_edge(&db, caller, "println", "calls", "inferred", None).unwrap();
         assert!(edges_out(&db, "caller", &[]).unwrap().is_empty());
         assert_eq!(graph_stats(&db).unwrap().1, 1, "but the edge row is there");
     }

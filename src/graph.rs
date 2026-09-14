@@ -37,8 +37,34 @@ use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 /// Edge kinds, as stored in `edges.kind`.
 pub const KINDS: [&str; 5] = ["defines", "calls", "imports", "references", "contains"];
 
+/// Stored on the edge: the syntax tree said where the target came from.
 pub const EXTRACTED: &str = "extracted";
+/// Stored on the edge: the target was matched by bare name alone.
 pub const INFERRED: &str = "inferred";
+/// Computed at query time: the name had several definitions and the hint,
+/// the source file, or its imports picked exactly one of them.
+pub const RESOLVED: &str = "resolved";
+/// Computed at query time: the name had several definitions and nothing in
+/// the source narrowed it to one. An answer that crosses one of these is a
+/// guess, and every surface says so.
+pub const AMBIGUOUS: &str = "ambiguous";
+
+/// Every confidence value a renderer can be handed, strongest first.
+///
+/// Two are written to `edges.confidence` and two are decided when the edge is
+/// read, because a stored `resolved` would go stale the moment a second
+/// definition of the name was indexed somewhere else.
+pub const CONFIDENCES: [&str; 4] = [EXTRACTED, RESOLVED, INFERRED, AMBIGUOUS];
+
+/// How much a confidence value is worth when something has to be ordered by
+/// it: lower is better. An unknown value sorts last rather than panicking, so
+/// a store written by a newer binary still renders.
+pub fn confidence_rank(confidence: &str) -> usize {
+    CONFIDENCES
+        .iter()
+        .position(|c| *c == confidence)
+        .unwrap_or(CONFIDENCES.len())
+}
 
 /// A symbol found in a file, before it has an id.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +86,15 @@ pub struct Edge {
     pub to: String,
     pub kind: String,
     pub confidence: String,
+    /// What the source text said about where the target lives, when it said
+    /// anything: the module of a scoped call, the receiver of a method call,
+    /// the object of a qualified one. `None` for a bare call, for an import,
+    /// and for every structural edge.
+    ///
+    /// It is a lead, not an address — `self.index.search` yields `index`,
+    /// which may name a field, a module or neither. The resolver treats it as
+    /// one ranking signal among several rather than as truth.
+    pub hint: Option<String>,
 }
 
 /// What one file yielded.
@@ -109,18 +144,28 @@ fn supplement(lang: &str) -> &'static str {
         "rust" => {
             r#"
             (use_declaration argument: (_) @reference.import)
-            ; A scoped call names two things worth an edge: the type or module
-            ; it went through, and the function itself. `File::create` is most
-            ; useful as an edge to `File`; `store::record_retrieval` is most
-            ; useful as an edge to `record_retrieval`. Capture both rather than
-            ; guess which kind of path this is.
+            ; A scoped call names the function and the thing it went through.
+            ; Only the function earns an edge: `store::edges_out` is a call to
+            ; `edges_out`, and `store` is what says *which* `edges_out`. Until
+            ; 0.15.0 the path segment was emitted as a second `calls` edge,
+            ; which recorded a call the source does not make and put a module
+            ; name into every path the finder walked. It is a hint now.
             (call_expression
-              function: (scoped_identifier path: (identifier) @name) @reference.call)
+              function: (scoped_identifier
+                path: (identifier) @hint
+                name: (identifier) @name)) @reference.call
+            ; A longer path, `crate::store::edges_out`: the hint is the segment
+            ; nearest the name, because that is the one that names the module.
             (call_expression
-              function: (scoped_identifier name: (identifier) @name) @reference.call)
-            ; A method call: `self.flush()`, `store.db()`.
+              function: (scoped_identifier
+                path: (scoped_identifier name: (identifier) @hint)
+                name: (identifier) @name)) @reference.call
+            ; A method call: `self.flush()`, `store.db()`, `self.index.search()`.
+            ; The receiver is the hint, reduced to its last identifier.
             (call_expression
-              function: (field_expression field: (field_identifier) @name) @reference.call)
+              function: (field_expression
+                value: (_) @hint
+                field: (field_identifier) @name)) @reference.call
         "#
         }
         // TypeScript's bundled query matches nothing on ordinary unexported
@@ -137,14 +182,24 @@ fn supplement(lang: &str) -> &'static str {
               name: (identifier) @name
               value: [(arrow_function) (function_expression)]) @definition.function
             (call_expression function: (identifier) @name) @reference.call
+            ; `store.search(...)`, `this.index.search(...)`: the object is the
+            ; hint, reduced to its last identifier.
             (call_expression
-              function: (member_expression property: (property_identifier) @name)) @reference.call
+              function: (member_expression
+                object: (_) @hint
+                property: (property_identifier) @name)) @reference.call
         "#
         }
         "python" => {
             r#"
             (import_statement name: (_) @reference.import)
             (import_from_statement module_name: (_) @reference.import)
+            ; `json.loads(...)`, `self.store.search(...)`: the object names the
+            ; module or the attribute the call went through.
+            (call
+              function: (attribute
+                object: (_) @hint
+                attribute: (identifier) @name)) @reference.call
         "#
         }
         "go" => {
@@ -231,6 +286,7 @@ struct Ref {
     name: String,
     kind: &'static str,
     at: usize,
+    hint: Option<String>,
 }
 
 /// Symbols and edges for one file.
@@ -326,12 +382,14 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
                 to: def.name.clone(),
                 kind: "contains".to_string(),
                 confidence: EXTRACTED.to_string(),
+                hint: None,
             }),
             None => edges.push(Edge {
                 from: module.clone(),
                 to: def.name.clone(),
                 kind: "defines".to_string(),
                 confidence: EXTRACTED.to_string(),
+                hint: None,
             }),
         }
     }
@@ -353,21 +411,53 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         if from == reference.name {
             continue; // direct recursion adds a self-edge and no information
         }
-        let confidence = if reference.kind == "imports" || imported.contains(&reference.name) {
-            EXTRACTED
-        } else {
-            INFERRED
-        };
+        // The file said where this came from, one way or the other: it
+        // imported the name itself (`use ...::edges_out;` then `edges_out()`),
+        // or it imported the thing the call went through (`use ...::store;`
+        // then `store::edges_out()`). The second is exactly as determined as
+        // the first — the module the call names is in the file's own imports —
+        // and reading it as inferred is what left Rust at 2% extracted while
+        // the source was perfectly explicit.
+        let named_by_file = reference.kind == "imports"
+            || imported.contains(&reference.name)
+            || reference
+                .hint
+                .as_ref()
+                .is_some_and(|h| imported.contains(h));
+        let confidence = if named_by_file { EXTRACTED } else { INFERRED };
         edges.push(Edge {
             from,
             to: reference.name.clone(),
             kind: reference.kind.to_string(),
             confidence: confidence.to_string(),
+            hint: reference.hint.clone(),
         });
     }
 
-    edges.sort_by(|a, b| (&a.from, &a.to, &a.kind).cmp(&(&b.from, &b.to, &b.kind)));
-    edges.dedup();
+    // One call can be captured by both the bundled query and the supplement,
+    // and only the supplement carries a hint. Deduplicating on the triple
+    // alone would keep whichever landed first; ordering by confidence and then
+    // by whether a hint is present makes the best-informed copy of each edge
+    // the one that survives.
+    edges.sort_by(|a, b| {
+        (
+            &a.from,
+            &a.to,
+            &a.kind,
+            confidence_rank(&a.confidence),
+            a.hint.is_none(),
+            &a.hint,
+        )
+            .cmp(&(
+                &b.from,
+                &b.to,
+                &b.kind,
+                confidence_rank(&b.confidence),
+                b.hint.is_none(),
+                &b.hint,
+            ))
+    });
+    edges.dedup_by(|a, b| (&a.from, &a.to, &a.kind) == (&b.from, &b.to, &b.kind));
 
     Ok(Some(Extraction { symbols, edges }))
 }
@@ -391,6 +481,7 @@ fn collect(
         // capture.
         let mut span: Option<(&str, tree_sitter::Node)> = None;
         let mut name: Option<tree_sitter::Node> = None;
+        let mut hint: Option<tree_sitter::Node> = None;
         let mut references: Vec<(&str, tree_sitter::Node)> = Vec::new();
         for capture in m.captures() {
             let capture_name = names[capture.index as usize];
@@ -398,6 +489,8 @@ fn collect(
                 span = Some((kind, capture.node));
             } else if capture_name == "name" {
                 name = Some(capture.node);
+            } else if capture_name == "hint" {
+                hint = Some(capture.node);
             } else if let Some(kind) = capture_name.strip_prefix("reference.") {
                 references.push((kind, capture.node));
             }
@@ -429,6 +522,7 @@ fn collect(
                 name: target,
                 kind,
                 at: node.start_byte(),
+                hint: hint.and_then(|h| hint_text(h, text)),
             });
         }
 
@@ -444,6 +538,23 @@ fn collect(
             });
         }
     }
+}
+
+/// The lead a `@hint` capture carries, or `None` when it carries none worth
+/// storing.
+///
+/// The capture is whatever stood to the left of the call — `store`, `self`,
+/// `self.index`, `crate::store`, `this.client` — so it is reduced to its last
+/// identifier the same way a reference is. Three of them are dropped rather
+/// than stored: `self`, `this` and `super` name the file the call is already
+/// in, so they rank nothing, and `crate` names the whole tree.
+fn hint_text(node: tree_sitter::Node, text: &str) -> Option<String> {
+    const USELESS: [&str; 5] = ["self", "this", "super", "crate", "cls"];
+    let name = reference_name(node, text)?;
+    if name.is_empty() || USELESS.contains(&name.as_str()) {
+        return None;
+    }
+    Some(name)
 }
 
 /// The identifier an edge should point at, out of whatever node the query
@@ -855,16 +966,88 @@ mod tests {
         );
     }
 
-    /// The two halves of the confidence column, in one file: `File` is
-    /// imported by name, `helper` is not.
+    /// The two halves of the stored confidence column, in one file. The call
+    /// is to `create`, and the file imported the `File` it goes through, so
+    /// the source named where it came from; `helper` is a bare name and did
+    /// not.
     #[test]
     fn an_imported_name_is_extracted_and_a_bare_one_is_inferred() {
         let e = run(
             "a.rs",
             "use std::fs::File;\nfn go() { File::create(\"x\"); helper(); }\nfn helper() {}\n",
         );
-        assert_eq!(confidence_of(&e, "File", "calls"), EXTRACTED);
+        assert_eq!(confidence_of(&e, "create", "calls"), EXTRACTED);
         assert_eq!(confidence_of(&e, "helper", "calls"), INFERRED);
+    }
+
+    fn hint_of(e: &Extraction, to: &str, kind: &str) -> Option<String> {
+        e.edges
+            .iter()
+            .find(|x| x.to == to && x.kind == kind)
+            .unwrap_or_else(|| panic!("no {kind} edge to {to} in {:?}", e.edges))
+            .hint
+            .clone()
+    }
+
+    /// A scoped call is a call to the function, and the path in front of it is
+    /// a lead about which definition of that function was meant. Until 0.15.0
+    /// the path segment was a second `calls` edge, which recorded a call the
+    /// source never makes and gave the path finder a module to walk through.
+    #[test]
+    fn a_scoped_rust_call_hints_at_its_module_and_does_not_call_it() {
+        let e = run("a.rs", "fn go() { store::edges_out(db, name); }\n");
+        assert!(has_edge(&e, "go", "edges_out", "calls"), "{:?}", e.edges);
+        assert_eq!(hint_of(&e, "edges_out", "calls").as_deref(), Some("store"));
+        assert!(
+            !has_edge(&e, "go", "store", "calls"),
+            "the module is not called: {:?}",
+            e.edges
+        );
+    }
+
+    /// A longer path hints with the segment nearest the name, because that is
+    /// the one that names the module the definition lives in.
+    #[test]
+    fn a_longer_rust_path_hints_with_the_segment_nearest_the_name() {
+        let e = run("a.rs", "fn go() { crate::store::edges_out(db); }\n");
+        assert_eq!(hint_of(&e, "edges_out", "calls").as_deref(), Some("store"));
+    }
+
+    /// A method call's receiver is a lead too, reduced to its last identifier.
+    /// `self` is dropped: it names the file the call is already in, so it
+    /// ranks nothing.
+    #[test]
+    fn a_rust_method_call_hints_with_its_receiver() {
+        let e = run(
+            "a.rs",
+            "fn go(&self) { self.index.search(v); self.flush(); }\n",
+        );
+        assert_eq!(hint_of(&e, "search", "calls").as_deref(), Some("index"));
+        assert_eq!(hint_of(&e, "flush", "calls"), None);
+    }
+
+    #[test]
+    fn python_and_typescript_qualified_calls_carry_the_object_as_a_hint() {
+        let py = run("m.py", "def go():\n    json.loads(raw)\n");
+        assert_eq!(hint_of(&py, "loads", "calls").as_deref(), Some("json"));
+
+        let ts = run("app.ts", "function go(){ store.search(q); }\n");
+        assert_eq!(hint_of(&ts, "search", "calls").as_deref(), Some("store"));
+    }
+
+    /// One call reaches the extractor twice — once from the bundled query,
+    /// once from the supplement — and only one of the two carries the hint.
+    /// The edge that survives has to be the informed one.
+    #[test]
+    fn the_hinted_copy_of_a_doubly_captured_call_is_the_one_kept() {
+        let e = run("a.rs", "fn go() { store::edges_out(db); }\n");
+        let calls: Vec<&Edge> = e
+            .edges
+            .iter()
+            .filter(|x| x.to == "edges_out" && x.kind == "calls")
+            .collect();
+        assert_eq!(calls.len(), 1, "{:?}", e.edges);
+        assert_eq!(calls[0].hint.as_deref(), Some("store"));
     }
 
     /// A nested definition hangs off its parent, not off the file.
@@ -986,7 +1169,7 @@ mod tests {
             );
         }
         for (from, to) in [("a", "b"), ("b", "c"), ("c", "d"), ("e", "d")] {
-            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED).unwrap();
+            crate::store::insert_edge(&db, id[from], to, "calls", EXTRACTED, None).unwrap();
         }
         db
     }
@@ -1015,7 +1198,7 @@ mod tests {
             end_line: 2,
         };
         let d = crate::store::insert_symbol(&db, file, None, &symbol).unwrap();
-        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED).unwrap();
+        crate::store::insert_edge(&db, d, "a", "calls", EXTRACTED, None).unwrap();
         // d -> a -> b -> c -> d is now a cycle; a large depth must still return.
         let path = shortest_path(&db, "a", "d", 50).unwrap();
         assert!(path.is_some(), "a still reaches d");
