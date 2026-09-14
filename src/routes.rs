@@ -938,10 +938,6 @@ fn about(state: &Arc<State>) -> Response {
         "binary_bytes": std::fs::metadata(&binary).map(|m| m.len()).unwrap_or(0),
         "target": format!("{} · {}", std::env::consts::ARCH, std::env::consts::OS),
         "bind": format!("127.0.0.1:{}", state.server.port()),
-        // What the tool list costs an agent, once per session, before it has
-        // asked anything. A cost a user should be able to see rather than one
-        // they would have to capture traffic to discover.
-        "tool_list_bytes": crate::mcp::tool_list_bytes(),
         "revisions": crate::mcp::SUPPORTED,
         "port": state.server.port(),
         "pid": std::process::id(),
@@ -992,6 +988,10 @@ fn agents(state: &Arc<State>) -> Response {
             .into_iter()
             .map(|(name, about)| json!({ "name": name, "about": about }))
             .collect::<Vec<_>>(),
+        // What the tool list costs an agent, once per session, before it has
+        // asked anything. A cost a user should be able to see rather than one
+        // they would have to capture traffic to discover.
+        "tool_list_bytes": crate::mcp::tool_list_bytes(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         "endpoint": {

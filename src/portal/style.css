@@ -2904,6 +2904,13 @@ pre.code {
   font-family: var(--mono);
   font-size: var(--t-tiny);
 }
+/* Each client is one unbreakable unit: a name and its count belong on one
+ * line, and the wrapping happens between clients rather than inside one. */
+.client-breakdown .client {
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+}
 .client-breakdown .who {
   color: var(--ink-2);
 }
