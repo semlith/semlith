@@ -23,7 +23,20 @@ use std::time::Duration;
 /// `start` is the daemon serving the portal — a view of itself is the portal.
 /// `mcp` is a stdio protocol server; the Agents view documents it, but it has
 /// no state of its own for a route to report.
-const NO_VIEW: [&str; 2] = ["start", "mcp"];
+///
+/// `pattern` takes a tree-sitter query in S-expression syntax. Nobody writes
+/// one of those from memory, so a page for it is a box you can only fill by
+/// pasting from documentation — which makes it a worse manual, not a view. The
+/// capability is real and stays on the CLI and over MCP, where the caller is an
+/// agent that can write the query; the Agents page lists the tool and says what
+/// it does.
+///
+/// `read` has a view, and it is the Search page. Reading one span is the second
+/// stage of a search — the button is on the hit that raised the question, with
+/// the span already in hand. A page of its own could only be started by
+/// retyping a coordinate you got from Search, which is why there is no longer
+/// one. `/api/read` is what that button calls.
+const NO_VIEW: [&str; 4] = ["start", "mcp", "pattern", "read"];
 
 /// Which route is a command's portal view. Adding a command means adding a
 /// line here, which is the whole point: the compiler cannot notice a missing
@@ -48,8 +61,6 @@ const VIEWS: &[(&str, &str)] = &[
     // still what fills it; the route named here is the page's own, because a
     // parity row has to point at a view somebody can open.
     ("languages", "/api/about"),
-    ("read", "/api/read"),
-    ("pattern", "/api/pattern"),
     ("setup", "/api/setup"),
     // A check and an install both reach the network, so neither is something a
     // route answers to a GET that a browser might replay.
@@ -71,8 +82,12 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
     // As above: the table moved to About, so that is where the view is.
     ("semlith_languages", "/api/about"),
     ("semlith_files", "/api/files"),
-    ("semlith_read", "/api/read"),
-    ("semlith_pattern", "/api/pattern"),
+    // Both tools are agent-facing and neither has a page: `semlith_read` is the
+    // Search page's second stage, and `semlith_pattern` is a query syntax no
+    // one types into a browser. The Agents page is where a person sees that
+    // they exist and what they are for, so that is the view named here.
+    ("semlith_read", "/api/agents"),
+    ("semlith_pattern", "/api/agents"),
     ("semlith_index", "/api/index"),
     ("semlith_add", "/api/add"),
     ("semlith_forget", "/api/forget"),

@@ -455,6 +455,13 @@ holding rows of both kinds verifies end to end. A verify that reported every
 
 Three, none of which needs a re-index and none of which changes the store format.
 
+**No portal page is added for `read` or `pattern`.** Not a break — they are new
+in this release and never had one — but worth stating, because portal parity
+otherwise implies it. `read`'s view is the Search page's second stage and
+`pattern` is an agent-facing query surface; both are on the CLI and over MCP,
+and the Agents page lists them. `/api/read` and `/api/pattern` exist and are
+covered by the same stability promise as the rest of `/api`.
+
 **The portal's Languages page is gone.** Its content — the language list, with
 which of them carry graph edges — is on the About page, where the design puts it.
 `semlith languages`, `semlith_languages` and `/api/languages` are unchanged, so

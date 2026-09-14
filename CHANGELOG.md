@@ -85,7 +85,17 @@ ranking itself, and reports what the harness said — including where it said no
 
 ### The portal
 
-- Views for `read` and `pattern`, built to the design.
+- **Neither new tool gets a page, and that is the decision rather than an
+  omission.** `read` already has a view: it is the Search page's second stage,
+  where the button sits on the hit that raised the question with the span
+  already in hand. A page of its own could only be started by retyping a
+  coordinate you got from Search. `pattern` takes a tree-sitter query in
+  S-expression syntax, which nobody writes from memory — a page for it is a box
+  you can only fill by pasting from documentation, which is a worse manual
+  rather than a view. Both tools work on the CLI and over MCP, where the caller
+  is an agent that can write the query, and the Agents page lists both with what
+  they are for. `tests/portal.rs` records the reasoning beside `start` and `mcp`,
+  which are exempt for their own reasons.
 - The Search page rebuilt to that design: the query-shape hint, file cards with
   span summaries, word-pill fusion badges, the provenance sentence, a signature
   strip, a line-number gutter, a read-whole-symbol control, and an ego-graph

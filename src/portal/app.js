@@ -233,8 +233,6 @@ const NAV_ICONS = {
   files: "M6 3h7l5 5v13H6z|M13 3v5h5",
   index: "M4 6h16|M4 12h10|M4 18h13",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
-  read: "M6 3h9l4 4v14H6z|M15 3v4h4|M9 12h7|M9 16h4",
-  pattern: "M9 5 5 12l4 7|M15 5l4 7-4 7|M13.4 8.5l-2.8 7",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
   ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
@@ -915,8 +913,6 @@ const VIEWS = [
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
   { group: "Workspace", id: "index", label: "Index", title: "Index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
-  { group: "Explore", id: "read", label: "Read", title: "Read" },
-  { group: "Explore", id: "pattern", label: "Pattern", title: "Pattern" },
   { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
@@ -2941,294 +2937,6 @@ function spanCard(span) {
     codeGutter(span.text, span.start_line),
   );
 }
-
-async function readView() {
-  await refreshStores();
-
-  const out = el("div", { class: "read-out" });
-  const meta = el("span", { class: "search-meta" });
-  const input = el("input", {
-    type: "search",
-    placeholder: "path:start-end, path:line, or a symbol name",
-    onkeydown: (e) => {
-      if (e.key === "Enter") run();
-    },
-  });
-  const picker = storePicker("", () => run());
-  /* Which request the page is showing. Changing the store while a read is in
-   * flight starts a second one, and without this the slower of the two wins
-   * whichever question it was answering. */
-  let generation = 0;
-
-  const nothing = () =>
-    empty(
-      "A span or a name. src/store.rs:1041-1080 reads those lines, src/store.rs:1041 reads the chunk around one, and a bare name reads the definition.",
-    );
-
-  async function run(target) {
-    if (target !== undefined) input.value = target;
-    const want = input.value.trim();
-    const mine = ++generation;
-    if (!want) {
-      meta.textContent = "";
-      return fill(out, nothing());
-    }
-
-    const params = new URLSearchParams({ target: want });
-    for (const store of picker.stores()) params.append("store", store);
-    meta.textContent = "reading…";
-    let data;
-    try {
-      data = await api(`/api/read?${params}`);
-    } catch (e) {
-      if (mine !== generation) return;
-      meta.textContent = "";
-      return fill(out, error(e.message));
-    }
-    if (mine !== generation) return;
-    meta.textContent = "";
-
-    if (data.span) return fill(out, spanCard(data.span));
-
-    const rows = data.definitions || [];
-    if (!rows.length) {
-      return fill(
-        out,
-        empty(
-          `Nothing indexed at ${want}. Files lists what is; a name has to be one the graph extracted, which is the six languages the About page ticks.`,
-        ),
-      );
-    }
-    // Several definitions carry this name, and which one was meant is the
-    // reader's to say. Choosing here is how a confident answer about the
-    // wrong function gets quoted.
-    fill(
-      out,
-      el(
-        "div",
-        { class: "locate-group" },
-        el(
-          "div",
-          { class: "locate-file" },
-          el("span", { class: "file", text: `${rows.length} definitions of this name` }),
-          el("span", { class: "spacer" }),
-          el("span", { class: "span-summary", text: "pick one" }),
-        ),
-        rows.map((row) =>
-          el(
-            "button",
-            {
-              class: "locate-row",
-              type: "button",
-              onclick: () => run(`${row.path}:${row.start_line}-${row.end_line}`),
-            },
-            el(
-              "span",
-              { class: "row-top" },
-              el("span", { class: "lines", text: `${row.start_line}-${row.end_line}` }),
-              el("span", { class: "sym", text: `${row.kind} ${row.name}`.trim() }),
-              el("span", { class: "spacer" }),
-              row.store ? el("span", { class: "from", text: row.store }) : null,
-            ),
-            el("span", { class: "locate-excerpt", text: row.qualified || row.path }),
-          ),
-        ),
-      ),
-    );
-  }
-
-  fill(out, nothing());
-  setTimeout(() => input.focus(), 0);
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Read",
-      "The second stage. Search says where; this says what, and nothing around it.",
-    ),
-    el(
-      "div",
-      { class: "card pad rows" },
-      el("div", { class: "search-field" }, icon(ICONS.file, 18), labelled("read-target", "Target", input), meta),
-      picker.node,
-    ),
-    out,
-  );
-}
-
-async function patternView() {
-  await refreshStores();
-
-  let about;
-  try {
-    about = await api("/api/about");
-  } catch (e) {
-    return el("div", { class: "view" }, pageHead("Pattern"), error(e.message));
-  }
-  // Only the grammars exist here: a tree-sitter query needs a tree, and the
-  // languages with one are the languages the graph is extracted from.
-  const languages = about.graph_languages || [];
-
-  const out = el("div", { class: "read-out" });
-  const meta = el("span", { class: "search-meta" });
-  const input = el("input", {
-    type: "search",
-    placeholder: "(call_expression function: (identifier) @f)",
-    onkeydown: (e) => {
-      if (e.key === "Enter") run();
-    },
-  });
-  const langField = el(
-    "select",
-    { class: "field", onchange: () => run() },
-    languages.map((name) => el("option", { value: name, text: name })),
-  );
-  const picker = storePicker("", () => run());
-  /* As on the Read page: changing the language or the store while a match is
-   * in flight starts a second one, and the slower must not win. */
-  let generation = 0;
-
-  const nothing = () =>
-    empty(
-      "A tree-sitter query, in its own S-expression syntax. Every capture it names comes back with the lines it sat on.",
-    );
-
-  async function run() {
-    const query = input.value.trim();
-    const mine = ++generation;
-    if (!query) {
-      meta.textContent = "";
-      return fill(out, nothing());
-    }
-    const lang = langField.value || languages[0] || "rust";
-    const params = new URLSearchParams({ query, lang });
-    for (const store of picker.stores()) params.append("store", store);
-    meta.textContent = "matching…";
-    let data;
-    try {
-      data = await api(`/api/pattern?${params}`);
-    } catch (e) {
-      if (mine !== generation) return;
-      meta.textContent = "";
-      return fill(out, error(e.message));
-    }
-    if (mine !== generation) return;
-
-    // The parser's own words, never "no matches": a caller told the corpus
-    // does not contain the shape stops looking for it, and a mistyped pattern
-    // would have said exactly that.
-    if (data.error) {
-      meta.textContent = "";
-      return fill(out, error(data.error));
-    }
-
-    const matches = data.matches || [];
-    meta.textContent = `${matches.length} match${matches.length === 1 ? "" : "es"} · ${n(
-      data.files,
-    )} file${data.files === 1 ? "" : "s"} parsed`;
-
-    if (!matches.length) {
-      // Two different facts, and only the second one is about the pattern.
-      return fill(
-        out,
-        empty(
-          data.files
-            ? `${n(data.files)} ${lang} file${data.files === 1 ? "" : "s"} parsed, and none holds that shape.`
-            : `No ${lang} file is indexed in the selected stores, so nothing was parsed. This is not an answer about your pattern.`,
-        ),
-      );
-    }
-
-    const groups = [];
-    for (const found of matches) {
-      const seen = groups.find((g) => g.path === found.path && g.store === found.store);
-      if (seen) seen.rows.push(found);
-      else groups.push({ path: found.path, store: found.store, rows: [found] });
-    }
-
-    fill(
-      out,
-      el(
-        "div",
-        { class: "locate-list results" },
-        groups.map((group) =>
-          el(
-            "div",
-            { class: "locate-group" },
-            el(
-              "div",
-              { class: "locate-file" },
-              // The tail, not the whole absolute path. A store indexed from
-            // `/Users/someone/Documents/work` repeats that prefix on every
-            // row, where it is the one part they all share; the full path is a
-            // hover away.
-            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
-              group.store ? el("span", { class: "from", text: group.store }) : null,
-              el("span", { class: "spacer" }),
-              el("span", {
-                class: "span-summary",
-                text: `${group.rows.length} match${group.rows.length === 1 ? "" : "es"}`,
-              }),
-            ),
-            group.rows.map((row) =>
-              el(
-                "div",
-                { class: "locate-row static" },
-                el(
-                  "span",
-                  { class: "row-top" },
-                  el("span", { class: "lines", text: `${row.start_line}-${row.end_line}` }),
-                  el("span", { class: "badges" }, el("span", { class: "badge capture", text: row.capture })),
-                ),
-                el("span", { class: "locate-excerpt", text: row.text }),
-              ),
-            ),
-          ),
-        ),
-        data.truncated
-          ? el(
-              "div",
-              { class: "locate-footer" },
-              el("span", { class: "truncated", text: "truncated — the cap was reached before the corpus ran out" }),
-            )
-          : null,
-      ),
-    );
-  }
-
-  fill(out, nothing());
-  setTimeout(() => input.focus(), 0);
-
-  return el(
-    "div",
-    { class: "view" },
-    pageHead(
-      "Pattern",
-      "A structural query, not a regular expression. It matches the syntax tree, so a call is a call wherever it is written.",
-    ),
-    el(
-      "div",
-      { class: "card pad rows" },
-      el(
-        "div",
-        { class: "search-field" },
-        icon(ICONS.search, 18),
-        labelled("pattern-query", "Pattern", input),
-        meta,
-      ),
-      el(
-        "div",
-        { class: "filters" },
-        labelled("pattern-lang", "Language", langField),
-        el("span", { class: "rule" }),
-        picker.node,
-      ),
-    ),
-    out,
-  );
-}
-
 // ---------------------------------------------------------------- search
 
 /* Which of the ranked lists found a hit. The word rather than an initial: a
@@ -3368,10 +3076,24 @@ async function searchView() {
   });
   const stage = el(
     "div",
-    { class: "ego-panel" },
+    { class: "ego-panel", hidden: true },
     ego.node,
     el("span", { class: "ego-hint", text: "drag a node · click to select" }),
   );
+  /* Both hidden until a row is open. The panel is tall enough to be a graph
+   * rather than a thumbnail, which makes it a large empty box on a page nobody
+   * has searched yet — and "Around" with nothing after it is a heading for
+   * something that is not there. */
+  const aroundHead = el(
+    "div",
+    { class: "around-head", hidden: true },
+    el("span", { class: "title" }, "Around ", aroundName),
+    el("span", { class: "meta", text: "graph expansion" }),
+  );
+  const showRing = (on) => {
+    stage.hidden = !on;
+    aroundHead.hidden = !on;
+  };
 
   // The dials, in the design's order. Each is the same control an agent sets
   // on the tool, shown here so a person can see what the agent is holding.
@@ -3719,6 +3441,7 @@ async function searchView() {
         bodyCard,
         empty("Pick a row. The span opens here, with what it is called and how it was found."),
       );
+      showRing(false);
       return;
     }
     const showing = whole && wholeSpan ? wholeSpan : hit;
@@ -3800,7 +3523,13 @@ async function searchView() {
   async function drawAround(hit, mine) {
     const name = hit.symbol || symbolIn(hit);
     aroundName.textContent = name || "—";
-    if (!name) return ego.draw({ nodes: [], edges: [] }, null);
+    // A hit in prose sits inside no definition, so there is no ring to draw
+    // and no heading worth showing over an empty canvas.
+    if (!name) {
+      showRing(false);
+      return ego.draw({ nodes: [], edges: [] }, null);
+    }
+    showRing(true);
     const params = new URLSearchParams({ name });
     if (hit.store) params.append("store", hit.store);
     let data;
@@ -3868,12 +3597,7 @@ async function searchView() {
         "div",
         { class: "body-col" },
         bodyCard,
-        el(
-          "div",
-          { class: "around-head" },
-          el("span", { class: "title" }, "Around ", aroundName),
-          el("span", { class: "meta", text: "graph expansion" }),
-        ),
+        aroundHead,
         stage,
       ),
     ),
@@ -5110,7 +4834,7 @@ function langCard(languages, withEdges) {
       el("span", { class: "card-title", text: `${languages.length} languages` }),
       el("span", {
         class: "subtitle",
-        text: "Search filters and the code graph read the same table, so the two cannot disagree.",
+        text: `Search filters and the code graph read the same table, so the two cannot disagree. ${edges.size} of ${languages.length} carry graph edges.`,
       }),
     ),
     el(
@@ -5124,19 +4848,30 @@ function langCard(languages, withEdges) {
         return el(
           "div",
           { class: "lang-row" },
+          // Every row is ticked, because every row is true of the thing the
+          // tick says: the language is indexed and `--lang` selects it. The
+          // six that also carry graph edges say so beside their name rather
+          // than by being the only ones with a mark — a column where forty of
+          // forty-six are blank reads as forty unsupported languages, which is
+          // the opposite of the fact.
           el("span", {
-            class: `tick ${has ? "on" : "off"}`,
-            title: has ? "graph edges as well as search" : "search only",
-            text: has ? "✓" : "",
+            class: "tick on",
+            title: "indexed, and --lang selects it",
+            text: "✓",
           }),
           el("span", { class: "name", text: lang.name }),
+          has ? el("span", { class: "graph-mark", text: "graph" }) : null,
           el("span", { class: "spacer" }),
           el("span", { class: "exts", text: names.join(" ") }),
         );
       }),
     ),
     says(
-      "A tick means the grammar carries graph edges as well as search; everything else is indexed and searchable, it just has no edges yet. ",
+      `All ${languages.length} are indexed and selectable with `,
+      mono("--lang"),
+      `. The ${edges.size} marked `,
+      mono("graph"),
+      " carry symbols and edges as well, from a tree-sitter grammar; the rest are searched as text. ",
       mono("semlith languages"),
       " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built.",
     ),
@@ -5332,8 +5067,6 @@ const RENDER = {
   files: filesView,
   index: indexView,
   search: searchView,
-  read: readView,
-  pattern: patternView,
   agents: agentsView,
   privacy: privacyView,
   about: aboutView,

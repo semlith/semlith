@@ -457,7 +457,16 @@ names a store.
 
 **A CLI command or an MCP tool is not done until its portal view exists.** Every
 release that adds one adds the view in the same release; parity debt is not a
-thing this repository carries. `tests/portal.rs` is the gate: it reads the
+thing this repository carries.
+
+A *view* is not always a page. `semlith languages` is the About page's table and
+`semlith_read` is the Search page's second stage — both have a surface a person
+can open, which is what the rule is for. What the rule forbids is a capability
+with no surface at all, and the exemption list in `tests/portal.rs` is where a
+deliberate absence is argued rather than assumed: `start` and `mcp` have no
+state of their own to show, and `pattern` takes a tree-sitter query that nobody
+writes into a browser box. Adding a row there is allowed; adding one without the
+reasoning beside it is not. `tests/portal.rs` is the gate: it reads the
 subcommand list out of `--help` and the tool list off a running daemon, and
 fails if any of them — bar `start` and `mcp`, which have their reasons recorded
 there — has no route.

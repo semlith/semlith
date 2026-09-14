@@ -3099,6 +3099,19 @@ pre.code {
   font-family: var(--mono);
   font-size: var(--t-small-h);
 }
+
+/* The six that carry a grammar. A word beside the name rather than a second
+ * tick column: two columns of marks would have a reader working out which
+ * mark means what, and the thing being said is small enough to just say. */
+.lang-row .graph-mark {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--blue-ink);
+  background: var(--blue-soft);
+  border-radius: var(--r-2);
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
 .lang-row .exts {
   font-family: var(--mono);
   font-size: var(--t-tiny);
