@@ -83,6 +83,19 @@ ranking itself, and reports what the harness said — including where it said no
   making every tool need an approval prompt is the opposite of what the budget is
   for.
 
+### A store has one name
+
+- **The portal drew store chips the search route then refused.** `/api/stores`
+  reports the name the daemon registered — what a person typed, and what the
+  chips are made of — while the fleet every route answers from derived its own
+  label from the store directory's basename. The two agree for a store in
+  `~/.semlith/stores/<name>`, where the directory *is* the name, and disagree
+  for every store opened by path: clicking the chip returned "no store called
+  work is open; these are: store". All three fleets the daemon builds — the one
+  it starts with, the one the portal opens lazily, and the reader forwarded MCP
+  calls answer from — now take their names from the registry, so `store:` means
+  the same thing on every surface.
+
 ### The portal
 
 - **Neither new tool gets a page, and that is the decision rather than an

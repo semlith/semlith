@@ -63,6 +63,27 @@ impl Fleet {
         }
     }
 
+    /// Give each member the name its owner already knows it by.
+    ///
+    /// A store has one name, and until 0.16.0 it had two: the daemon's, from
+    /// the registry, which `/api/stores` reports and the portal draws its chips
+    /// from; and the fleet's, derived from the store directory's own basename.
+    /// They agree for a store in the store home, where the directory *is* the
+    /// name, and disagree for every store opened by path — so the portal drew a
+    /// chip the search route then refused, naming stores the user had never
+    /// heard of. The fleet is the one that gives way: the registry's name is
+    /// the one a person typed.
+    ///
+    /// A directory the caller says nothing about keeps the derived label, so a
+    /// fleet opened from the command line is unchanged.
+    pub fn name_from(&mut self, named: &[(PathBuf, String)]) {
+        for member in &mut self.members {
+            if let Some(name) = name_for(member.store.dir(), named) {
+                member.label = name;
+            }
+        }
+    }
+
     /// Open every store in `dirs`, which must all already be stores.
     ///
     /// The same store named twice — the flag repeated, a relative path beside
@@ -667,6 +688,20 @@ fn label(dir: &Path) -> String {
     }
 }
 
+/// The caller's name for a store directory, if it gave one worth having.
+///
+/// Split out from [`Fleet::name_from`] so the rule is testable without opening
+/// a store: an empty name is not a name and must not blank a good label, and a
+/// directory the caller said nothing about keeps what it had.
+fn name_for(dir: &Path, named: &[(PathBuf, String)]) -> Option<String> {
+    let dir = canonical(dir);
+    named
+        .iter()
+        .find(|(at, _)| canonical(at) == dir)
+        .map(|(_, name)| name.clone())
+        .filter(|name| !name.is_empty())
+}
+
 /// Two checkouts of the same repository produce the same label, and a label
 /// that names two stores is worse than a long one.
 fn disambiguate(members: &mut [Member], keys: &[PathBuf]) {
@@ -710,6 +745,28 @@ impl Labelled for crate::store::Unresolved {
 
 #[cfg(test)]
 mod tests {
+    use super::name_for;
+
+    /// A store has one name. The daemon's — the registry's, the one a person
+    /// typed and the one the portal's chips are made of — wins over the label
+    /// derived from the directory's basename, because the two disagreeing is
+    /// how the portal came to draw a chip the search route then refused.
+    #[test]
+    fn a_daemon_name_replaces_the_label_derived_from_the_directory() {
+        let dir = std::env::temp_dir().join("semlith-fleet-name-test");
+        let named = vec![(dir.clone(), "semlith-review".to_string())];
+        assert_eq!(name_for(&dir, &named).as_deref(), Some("semlith-review"));
+
+        // A directory the caller says nothing about keeps what it had, so a
+        // fleet opened from the command line is unchanged.
+        let elsewhere = std::env::temp_dir().join("semlith-fleet-name-other");
+        assert_eq!(name_for(&elsewhere, &named), None);
+
+        // An empty name is not a name, and must not blank a good label.
+        let blank = vec![(dir.clone(), String::new())];
+        assert_eq!(name_for(&dir, &blank), None);
+    }
+
     use super::*;
 
     fn hit(path: &str, score: f32) -> Hit {

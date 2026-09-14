@@ -387,6 +387,19 @@ pub struct State {
 /// How recently a proxy must have called to count as connected.
 const PROXY_FRESH: u64 = 120;
 
+/// Each open store's directory beside the name the daemon knows it by.
+///
+/// The fleet derives a label from the store directory's basename, which is the
+/// registered name only for a store living in the store home. Everywhere else
+/// the two differ, and the portal — which draws its chips from `/api/stores` —
+/// ended up naming stores the search route said were not open.
+fn named(stores: &[Arc<Store>]) -> Vec<(PathBuf, String)> {
+    stores
+        .iter()
+        .map(|s| (s.dir.clone(), s.name.clone()))
+        .collect()
+}
+
 /// One MCP client, as the Agents page shows it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Client {
@@ -620,11 +633,15 @@ impl State {
         if fleet.is_some() {
             return Ok(());
         }
-        let dirs: Vec<PathBuf> = self.stores().iter().map(|s| s.dir.clone()).collect();
+        let open = self.stores();
+        let dirs: Vec<PathBuf> = open.iter().map(|s| s.dir.clone()).collect();
         if dirs.is_empty() {
             bail!("this daemon has no store open");
         }
         let mut opened = Fleet::open(&dirs)?;
+        // An agent scoping a tool call with `store:` names it the way the
+        // portal and `/api/stores` do. See `open_fleet`.
+        opened.name_from(&named(&open));
         opened.quiet = true;
         *fleet = Some(opened);
         Ok(())
@@ -716,11 +733,17 @@ impl State {
         if fleet.is_some() {
             return Ok(());
         }
-        let dirs: Vec<PathBuf> = self.stores().iter().map(|s| s.dir.clone()).collect();
+        let open = self.stores();
+        let dirs: Vec<PathBuf> = open.iter().map(|s| s.dir.clone()).collect();
         if dirs.is_empty() {
             return Ok(());
         }
         let mut opened = Fleet::open(&dirs)?;
+        // The daemon already knows what each store is called — it is what
+        // `/api/stores` reports and what the portal's chips are made of. Handing
+        // those names to the fleet is what stops the two from disagreeing, and
+        // a chip from naming a store the search route says is not open.
+        opened.name_from(&named(&open));
         opened.quiet = true;
         *fleet = Some(opened);
         Ok(())
@@ -896,6 +919,9 @@ pub fn run(
         None
     } else {
         let mut fleet = Fleet::open(dirs)?;
+        // The fleet every route answers from, so this is the one that has to
+        // agree with `/api/stores` about what each store is called.
+        fleet.name_from(&named(&stores));
         // stderr is this process's log, and a model download progress bar in
         // the middle of it is noise; the Stores view reports readiness.
         fleet.quiet = true;
