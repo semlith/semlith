@@ -53,14 +53,19 @@ jobs:
           # `libonnxruntime.so` from beside the binary, and Microsoft's release
           # of the same library needs only glibc 2.27.
           #
-          # `ubuntu-latest` is fine for the build now, because what the build
-          # links against is no longer what decides the floor. The step below
-          # asserts the floor over the packaged pair rather than recording it.
-          - os: ubuntu-latest
+          # And the runner has to be the old one. Not linking ONNX Runtime is
+          # what makes 22.04 *possible* — that is why 0.13.0's attempt failed to
+          # link — but it is the runner that decides the floor: a Rust binary
+          # references whatever symbol versions the glibc it was built against
+          # provides, so one built on 24.04 needs 2.39 whatever else it links.
+          # The first run of this job with `dynamic-ort` proved exactly that:
+          # GLIBCXX fell from 3.4.32 to 3.4.22, which is Microsoft's library,
+          # and GLIBC stayed at 2.39, which was the binary. 22.04 is glibc 2.35.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             runtime: onnxruntime-linux-x64-1.24.4
             runtime_sha: 3a211fbea252c1e66290658f1b735b772056149f28321e71c308942cdb54b747
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             runtime: onnxruntime-linux-aarch64-1.24.4
             runtime_sha: 866109a9248d057671a039b9d725be4bd86888e3754140e6701ec621be9d4d7e

@@ -333,6 +333,16 @@ pair — and **fails above `GLIBC_2.35`**. It printed a number for three release
 and the floor rose to 2.39 without failing a build; a gate that does not exit
 non-zero is not a gate.
 
+The runner matters as much as the feature, and the two are easy to confuse. Not
+linking ONNX Runtime is what makes `ubuntu-22.04` *possible* — 0.13.0 tried it
+and the link failed. It is the runner that then sets the floor: a Rust binary
+references whatever symbol versions the glibc it was built against provides, so
+one built on 24.04 needs 2.39 no matter what else it links. The first tagged run
+with `dynamic-ort` demonstrated exactly that — GLIBCXX fell from 3.4.32 to
+3.4.22, which is Microsoft's library, and GLIBC stayed at 2.39, which was the
+binary. Both Linux jobs build on 22.04 for that reason; moving either forward
+moves the floor.
+
 `cargo install`, macOS and Windows link ONNX Runtime as they always have. The
 two Linux release binaries are the only build that differs, which is why
 `link_runtime` is a no-op everywhere else.
