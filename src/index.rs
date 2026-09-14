@@ -336,6 +336,7 @@ impl Single {
             .write(&tmp)
             .with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)?;
+        crate::home::tighten_file(&path);
         Ok(())
     }
 }
@@ -651,6 +652,7 @@ impl Sharded {
         if !self.shards.iter().any(|s| s.dirty) {
             return Ok(());
         }
+        crate::home::tighten_dir(&self.dir);
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
         for shard in &mut self.shards {
@@ -665,6 +667,10 @@ impl Sharded {
                 .write(&tmp)
                 .with_context(|| format!("writing {}", tmp.display()))?;
             std::fs::rename(&tmp, &shard.path)?;
+            // A shard holds the vectors of the corpus, so it is worth what the
+            // corpus is worth. Applied after the rename, because the mode
+            // travels with the file rather than with the name.
+            crate::home::tighten_file(&shard.path);
             shard.dirty = false;
         }
         Ok(())

@@ -28,6 +28,9 @@
 //! surfaces. Nothing may present one as the other.
 
 use anyhow::Result;
+
+/// How long one file's parse may take before it is given up on.
+const PARSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -200,7 +203,7 @@ fn queries(lang: &'static str, language: &Language, tags: &str) -> &'static [Que
         std::sync::Mutex<std::collections::HashMap<&'static str, &'static [Query]>>,
     > = std::sync::LazyLock::new(Default::default);
 
-    let mut cache = CACHE.lock().expect("query cache is never poisoned");
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     cache.entry(lang).or_insert_with(|| {
         let compiled: Vec<Query> = [tags, supplement(lang)]
             .iter()
@@ -245,7 +248,24 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
 
     let mut parser = Parser::new();
     parser.set_language(&language)?;
-    let Some(tree) = parser.parse(text, None) else {
+    // Bounded. A tree-sitter grammar can take superlinear time on input that
+    // is valid and pathological — a deeply nested expression, a file of
+    // brackets — and this runs inside the store's write lock, so a parser that
+    // does not come back is a store nothing else can write to. Two seconds is
+    // far more than any real file takes, and expiry means "no graph for this
+    // file", which is what an unsupported language already means.
+    let deadline = std::time::Instant::now() + PARSE_TIMEOUT;
+    let mut expired = |_: &tree_sitter::ParseState| {
+        if std::time::Instant::now() >= deadline {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::ParseOptions::default().progress_callback(&mut expired);
+    let parsed =
+        parser.parse_with_options(&mut |at, _| &text.as_bytes()[at..], None, Some(options));
+    let Some(tree) = parsed else {
         return Ok(None);
     };
 

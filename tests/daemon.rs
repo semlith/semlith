@@ -152,14 +152,14 @@ impl Daemon {
 
     fn get(&self, path: &str) -> Answer {
         self.raw(&format!(
-            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={}\r\nConnection: close\r\n\r\n",
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
             self.port, self.token
         ))
     }
 
     fn post(&self, path: &str, body: &str) -> Answer {
         self.raw(&format!(
-            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={}\r\n\
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
              Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             self.port,
             self.token,
@@ -167,8 +167,38 @@ impl Daemon {
         ))
     }
 
+    /// A POST exactly as a page on another 127.0.0.1 port would make it: the
+    /// fetch metadata a browser attaches for a same-site-but-not-same-origin
+    /// request, and whatever credential the attacker guessed at.
+    fn cross_origin(&self, path: &str, token: &str) -> Answer {
+        let body = "{}";
+        self.raw(&format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {token}\r\n\
+             Origin: http://127.0.0.1:{}\r\nSec-Fetch-Site: same-site\r\n\
+             Content-Type: text/plain;charset=UTF-8\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            self.port,
+            self.port + 1,
+            body.len()
+        ))
+    }
+
     fn store_dir(&self, name: &str) -> PathBuf {
         self.home.join("stores").join(name)
+    }
+
+    /// The daemon's resident memory in bytes, read from the OS rather than
+    /// guessed at. `ps` is on every platform these tests run on.
+    fn rss(&self) -> Option<u64> {
+        let out = Command::new("ps")
+            .args(["-o", "rss=", "-p", &self.child.id().to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .map(|kib| kib * 1024)
     }
 }
 
@@ -243,32 +273,239 @@ fn the_token_and_the_host_check_guard_every_route() {
     );
 
     let wrong_token = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token=not-it\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: not-it\r\nConnection: close\r\n\r\n",
         daemon.port
     ));
     assert_eq!(wrong_token.status, 401);
 
+    // The cookie is gone from 0.14.0, so a request carrying one is a request
+    // carrying no credential at all.
+    let by_cookie = daemon.raw(&format!(
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={}\r\n\
+         Connection: close\r\n\r\n",
+        daemon.port, daemon.token
+    ));
+    assert_eq!(
+        by_cookie.status, 401,
+        "a cookie still opened a route: the session is header-borne"
+    );
+
     // A page on another origin cannot read a cross-origin response, but it can
-    // send the request — with this browser's cookies attached. The Host check
-    // is what stops that reaching a route at all.
+    // send the request. The Host check is what stops a name that resolves to
+    // 127.0.0.1 reaching a route at all.
     let foreign = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: evil.example\r\nCookie: semlith_token={}\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: evil.example\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
         daemon.token
     ));
     assert_eq!(foreign.status, 400);
 
     let allowed = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: localhost:{}\r\nCookie: semlith_token={}\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: localhost:{}\r\nSemlith-Token: {}\r\nConnection: close\r\n\r\n",
         daemon.port, daemon.token
     ));
     assert_eq!(allowed.status, 200);
 }
 
-/// The URL the daemon prints is the one request allowed to carry the token in
-/// the query, because it is the request that turns it into a cookie.
+/// A refused request must cost the daemon nothing that adds up. A thousand of
+/// them are answered from the head alone — no body is ever read — so the
+/// process is the size it was when it started.
 #[test]
-fn the_printed_url_sets_the_cookie_and_nothing_else_needs_to() {
-    let daemon = Daemon::start("cookie", &[]);
+#[ignore = "makes a thousand requests and reads the process's memory, so it is slow"]
+fn a_thousand_refusals_do_not_grow_the_daemon() {
+    let daemon = Daemon::start("flood", &[]);
+
+    let idle = daemon.rss().expect("the daemon's resident memory");
+
+    // A megabyte of body on every one of them, declared and never sent: a
+    // server that allocated before it refused would be holding a gigabyte.
+    let body = "x".repeat(64 * 1024);
+    for _ in 0..1000 {
+        let answer = daemon.raw(&format!(
+            "POST /api/index HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+             Origin: http://127.0.0.1:{}\r\nSec-Fetch-Site: same-site\r\n\
+             Content-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            daemon.port,
+            daemon.token,
+            daemon.port + 1,
+            body.len()
+        ));
+        assert_eq!(answer.status, 403);
+    }
+
+    let after = daemon.rss().expect("the daemon's resident memory");
+    let grew = after.saturating_sub(idle);
+    assert!(
+        grew < 10 * 1024 * 1024,
+        "a thousand refusals grew the daemon by {} KiB, from {} to {}",
+        grew / 1024,
+        idle,
+        after
+    );
+}
+
+/// The Files route's offset is paid before the page is cut, so it is bounded
+/// rather than clamped: a number past the end is a mistake worth saying so.
+#[test]
+fn the_files_route_refuses_an_offset_it_would_have_to_allocate() {
+    let daemon = Daemon::start("offset", &[]);
+
+    let far = daemon.get("/api/files?offset=4000000000");
+    assert_eq!(far.status, 400);
+    assert!(
+        far.json()["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("10000"),
+        "the refusal does not say what the limit is: {}",
+        far.body
+    );
+
+    assert_eq!(daemon.get("/api/files?offset=-1").status, 400);
+    assert_eq!(daemon.get("/api/files?offset=10000").status, 200);
+    assert_eq!(daemon.get("/api/files?offset=10001").status, 400);
+}
+
+/// A panicking route used to cost a worker permanently and poison every lock
+/// it held, so one malformed request took an eighth of the server and eight of
+/// them took all of it. It now costs one 500 and nothing else.
+///
+/// Only in a debug build: the route that panics is compiled out of the binary
+/// a user installs, so there is nothing to drive in a release run.
+#[test]
+#[cfg(debug_assertions)]
+fn a_panicking_route_costs_one_request_and_not_the_daemon() {
+    let daemon = Daemon::start("panic", &[]);
+
+    // More panics than the pool has workers, so a pool that lost one per panic
+    // would have none left.
+    for attempt in 0..12 {
+        let boom = daemon.get("/api/panic");
+        assert_eq!(boom.status, 500, "panic {attempt} answered {}", boom.status);
+        assert!(boom.body.is_empty(), "the 500 leaked a body: {}", boom.body);
+    }
+
+    // The same route, still answering. Then a route that reads the state the
+    // panicking one was holding when it died.
+    assert_eq!(daemon.get("/api/panic").status, 500);
+    let about = daemon.get("/api/about");
+    assert_eq!(
+        about.status, 200,
+        "the daemon stopped answering after a panic"
+    );
+    assert_eq!(about.json()["version"], env!("CARGO_PKG_VERSION"));
+
+    let stores = daemon.get("/api/stores");
+    assert_eq!(
+        stores.status, 200,
+        "the store locks did not survive the panics"
+    );
+
+    // And a write, which takes more of the daemon's state than a read does.
+    let endpoint = daemon.post("/api/endpoint", r#"{"open":false}"#);
+    assert_eq!(
+        endpoint.status, 200,
+        "a write after a panic: {}",
+        endpoint.body
+    );
+}
+
+/// Guessing costs time, and the cost grows with the run. The numbers come off
+/// the test's own clock rather than out of the constants, because a delay that
+/// is configured and never applied looks identical to one that works.
+#[test]
+#[ignore = "measures a real delay, so it takes the delay"]
+fn a_run_of_wrong_tokens_gets_slower_and_a_single_one_does_not() {
+    let daemon = Daemon::start("throttle", &[]);
+
+    let one = Instant::now();
+    let refused = daemon.raw(&format!(
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: not-it\r\nConnection: close\r\n\r\n",
+        daemon.port
+    ));
+    let single = one.elapsed();
+    assert_eq!(refused.status, 401);
+    assert!(
+        single >= Duration::from_millis(250),
+        "one wrong token was answered in {single:?}, so nothing is being held"
+    );
+    assert!(
+        single < Duration::from_millis(1200),
+        "one mistyped URL cost {single:?}; a single mistake must not be \
+         punished like a run of guesses"
+    );
+
+    // Sixty in a row: twenty at a quarter of a second, twenty at half, twenty
+    // at a second. Thirty-five seconds is the floor that arithmetic gives, and
+    // the first request above has already been charged to the same window.
+    let run = Instant::now();
+    for _ in 0..59 {
+        let answer = daemon.raw(&format!(
+            "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: not-it\r\n\
+             Connection: close\r\n\r\n",
+            daemon.port
+        ));
+        assert_eq!(answer.status, 401);
+        assert!(answer.body.is_empty(), "a refusal leaked a body");
+    }
+    let elapsed = run.elapsed();
+    assert!(
+        elapsed >= Duration::from_secs(34),
+        "sixty wrong tokens took {elapsed:?}; the delay is not escalating"
+    );
+}
+
+/// The throttle must not become the denial of service it exists to prevent: a
+/// connection being held costs the thread that holds it and nothing else.
+#[test]
+#[ignore = "measures a real delay, so it takes the delay"]
+fn a_held_refusal_does_not_delay_anybody_else() {
+    let daemon = Daemon::start("interleave", &[]);
+    let port = daemon.port;
+
+    // More wrong tokens at once than the server has workers. If the delay were
+    // answered on a worker, these would hold every one of them.
+    let floods: Vec<_> = (0..16)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut stream =
+                    TcpStream::connect(("127.0.0.1", port)).expect("the daemon listens");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let request = format!(
+                    "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                     Semlith-Token: not-it\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(request.as_bytes()).unwrap();
+                stream.flush().unwrap();
+                let mut raw = Vec::new();
+                let _ = stream.read_to_end(&mut raw);
+            })
+        })
+        .collect();
+
+    // Long enough for all sixteen to be parsed, refused and put on hold.
+    std::thread::sleep(Duration::from_millis(120));
+
+    let good = Instant::now();
+    let answer = daemon.get("/api/stores");
+    let waited = good.elapsed();
+    assert_eq!(answer.status, 200);
+    assert!(
+        waited < Duration::from_millis(400),
+        "a correct request waited {waited:?} behind sixteen held refusals"
+    );
+
+    for flood in floods {
+        let _ = flood.join();
+    }
+}
+
+/// The printed URL hands the token to the page and sets nothing. The query form
+/// opens the page, which needs no credential anyway, and opens nothing else.
+#[test]
+fn the_printed_url_hands_the_token_over_and_sets_no_cookie() {
+    let daemon = Daemon::start("bootstrap", &[]);
 
     let first = daemon.raw(&format!(
         "GET /?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
@@ -276,12 +513,119 @@ fn the_printed_url_sets_the_cookie_and_nothing_else_needs_to() {
     ));
     assert_eq!(first.status, 200);
     assert!(
-        first.headers.contains("Set-Cookie: semlith_token=")
-            && first.headers.contains("SameSite=Strict")
-            && first.headers.contains("HttpOnly"),
-        "the first request did not hand over a strict cookie:\n{}",
+        !first.headers.contains("Set-Cookie"),
+        "the bootstrap set a cookie:\n{}",
         first.headers
     );
+
+    // The same token in the query of a route that answers about this machine is
+    // not a credential. This is the form a link, a bookmark or a referrer leaks.
+    let by_query = daemon.raw(&format!(
+        "GET /api/stores?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        daemon.token, daemon.port
+    ));
+    assert_eq!(by_query.status, 401);
+
+    let by_header = daemon.get("/api/stores");
+    assert_eq!(by_header.status, 200);
+
+    // A reload carries no token anywhere: the page comes back and asks for its
+    // data with the header it kept.
+    let reload = daemon.raw(&format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        daemon.port
+    ));
+    assert_eq!(reload.status, 200);
+}
+
+/// The whole of H2, from the attacker's side: a page served by anything else on
+/// 127.0.0.1 sends what a browser would send for it, and every write is refused
+/// before a handler runs.
+#[test]
+fn a_page_on_another_local_port_cannot_write() {
+    let daemon = Daemon::start("cross-origin", &[]);
+
+    for route in [
+        "/api/index",
+        "/api/add",
+        "/api/forget",
+        "/api/adopt",
+        "/api/rotate",
+        "/api/mcp",
+        "/api/endpoint",
+        "/api/key",
+        "/api/root",
+        "/api/store/delete",
+        "/api/index/control",
+        "/api/upgrade",
+    ] {
+        // Even with the right token — which it cannot have, but the refusal
+        // must not be what tells it so.
+        let guessed = daemon.cross_origin(route, &daemon.token);
+        assert_eq!(guessed.status, 403, "{route} answered a cross-origin write");
+        assert!(
+            guessed.body.is_empty(),
+            "{route} leaked a body to a cross-origin write: {}",
+            guessed.body
+        );
+
+        let blind = daemon.cross_origin(route, "not-it");
+        assert_eq!(
+            blind.status, 403,
+            "{route} told a guess apart from a right answer"
+        );
+    }
+}
+
+/// The three things a write must carry, taken away one at a time. A script is
+/// not a browser and keeps working: it sends no fetch metadata at all.
+#[test]
+fn a_write_needs_same_origin_metadata_and_a_json_body() {
+    let daemon = Daemon::start("writes", &[]);
+    let body = r#"{"open":true}"#;
+
+    let wrong_type = daemon.raw(&format!(
+        "POST /api/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+         Sec-Fetch-Site: same-origin\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        daemon.port,
+        daemon.token,
+        body.len()
+    ));
+    assert_eq!(wrong_type.status, 403, "a text/plain body was read");
+
+    let foreign_origin = daemon.raw(&format!(
+        "POST /api/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+         Origin: http://127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        daemon.port,
+        daemon.token,
+        daemon.port + 1,
+        body.len()
+    ));
+    assert_eq!(
+        foreign_origin.status, 403,
+        "another origin's write was read"
+    );
+
+    // curl: the token, a JSON body, and no fetch metadata.
+    let script = daemon.post("/api/endpoint", body);
+    assert_eq!(
+        script.status, 200,
+        "a script with the token was refused: {}",
+        script.body
+    );
+
+    let page = daemon.raw(&format!(
+        "POST /api/endpoint HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+         Origin: http://127.0.0.1:{}\r\nSec-Fetch-Site: same-origin\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        daemon.port,
+        daemon.token,
+        daemon.port,
+        body.len()
+    ));
+    assert_eq!(page.status, 200, "the portal's own write was refused");
 }
 
 /// Every response carries a policy that allows only `'self'`, and no CORS
@@ -544,7 +888,14 @@ fn the_files_route_reports_the_reader_and_honours_the_filters() {
 fn indexing_from_the_portal_streams_progress_and_then_lists_the_files() {
     let (dir, home, work) = sandbox("index-route");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
 
@@ -671,7 +1022,7 @@ fn rotating_the_token_invalidates_the_old_one_immediately() {
     assert_eq!(daemon.get("/api/stores").status, 401);
 
     let with_new = daemon.raw(&format!(
-        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: semlith_token={fresh}\r\nConnection: close\r\n\r\n",
+        "GET /api/stores HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {fresh}\r\nConnection: close\r\n\r\n",
         daemon.port
     ));
     assert_eq!(with_new.status, 200);
@@ -715,7 +1066,11 @@ fn the_privacy_route_reports_what_this_process_actually_does() {
     assert_eq!(privacy["cors"], serde_json::json!(false));
     assert_eq!(privacy["airgap"], serde_json::json!(true));
     assert_eq!(privacy["csp"], "default-src 'self'");
-    assert_eq!(privacy["token_cookie"], "semlith_token");
+    assert_eq!(privacy["token_header"], "Semlith-Token");
+    assert!(
+        privacy.get("token_cookie").is_none(),
+        "the Privacy page still describes a cookie"
+    );
 }
 
 // ---------------------------------------------------------------- T11
@@ -884,7 +1239,14 @@ fn the_write_tools_work_through_the_proxy_while_the_daemon_holds_the_lock() {
     let (dir, home, work) = sandbox("proxy-writes");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
     let root = work.join("api");
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
 
@@ -1077,7 +1439,7 @@ fn post_to(port: u16, token: &str, path: &str, body: &str) -> String {
         .set_read_timeout(Some(Duration::from_secs(120)))
         .unwrap();
     let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: semlith_token={token}\r\n\
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nSemlith-Token: {token}\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
@@ -1098,7 +1460,14 @@ fn a_stopped_index_run_undoes_itself() {
 
     // Outside the watched root, so the watcher cannot index it behind the
     // run's back and the count belongs to the run alone.
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     for i in 0..60 {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(120));
@@ -1165,7 +1534,14 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(200));
         std::fs::write(root.join(format!("n{i:03}.md")), body).unwrap();
     }
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("one.md"), "# One\n\nA single file.\n").unwrap();
 
@@ -1221,7 +1597,14 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
 fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
     let (dir, home, work) = sandbox("slices");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    let extra = work.join("extra");
+    // Under the home rather than beside the corpus. From 0.14.0 the portal and
+    // a forwarded `semlith_index` index only under the store's registered roots
+    // or the home directory, and a sibling of the corpus is neither — which is
+    // the rule rather than an accident of this fixture, and
+    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
+    // inside the root either: the watcher would index it at startup, and these
+    // tests are about a run they ask for.
+    let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     for i in 0..12 {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(80));
@@ -1257,5 +1640,105 @@ fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
         daemon.get("/api/files").json()["total"].as_i64().unwrap(),
         before + 12,
         "not every file was indexed"
+    );
+}
+
+/// A session id arrives from a client and goes back out in a response header,
+/// so what a client may send is exactly what the server produces.
+#[test]
+fn a_session_id_is_sixteen_hex_characters_or_it_is_replaced() {
+    let daemon = Daemon::start("session", &[]);
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"#;
+
+    let send = |id: &str| -> Answer {
+        daemon.raw(&format!(
+            "POST /api/mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+             Mcp-Session-Id: {id}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{init}",
+            daemon.port,
+            daemon.token,
+            init.len()
+        ))
+    };
+
+    // A well-formed one is echoed back.
+    let good = send("0123456789abcdef");
+    assert_eq!(good.status, 200, "{}", good.body);
+    assert!(
+        good.headers.contains("Mcp-Session-Id: 0123456789abcdef"),
+        "a valid session id was not kept:\n{}",
+        good.headers
+    );
+
+    for bad in [
+        "not-hex-at-all!!",
+        "0123456789abcdefg",
+        "short",
+        "0123456789abcde\u{7f}",
+    ] {
+        let answer = send(bad);
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        assert!(
+            !answer.headers.contains(bad),
+            "a malformed session id was reflected into a response header:\n{}",
+            answer.headers
+        );
+        // Replaced rather than dropped: the client is told the id it will be
+        // known by, the same way it would be told a first one.
+        let line = answer
+            .headers
+            .lines()
+            .find(|l| l.starts_with("Mcp-Session-Id: "))
+            .unwrap_or_else(|| panic!("no session id was handed back:\n{}", answer.headers));
+        let fresh = line.trim_start_matches("Mcp-Session-Id: ").trim();
+        assert_eq!(
+            fresh.len(),
+            16,
+            "the replacement is not a session id: {fresh}"
+        );
+        assert!(fresh.chars().all(|c| c.is_ascii_hexdigit()), "{fresh}");
+    }
+}
+
+/// The other half of the index boundary: the portal and a forwarded
+/// `semlith_index` are held to it too, not only the stdio MCP server. A path
+/// outside the store's roots and outside the home is refused by name.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn the_index_boundary_holds_through_the_portal() {
+    let (dir, home, work) = sandbox("portal-boundary");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    // A sibling of the corpus: not under the store's root, not under HOME.
+    let outside = work.join("somebody-elses");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("notes.md"), "Ownership and borrowing.\n").unwrap();
+
+    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+
+    let body = format!(
+        "{{\"path\":{}}}",
+        serde_json::to_string(&outside.display().to_string()).unwrap()
+    );
+    let answer = daemon.post("/api/index", &body);
+    assert_eq!(answer.status, 200, "the route should stream, not fail");
+
+    // Refused by name, with the rule, in the stream the page reads.
+    assert!(
+        answer.body.contains("refused") && answer.body.contains("outside"),
+        "the run did not report the refusal:\n{}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("somebody-elses"),
+        "the refusal does not name the path:\n{}",
+        answer.body
+    );
+
+    // And nothing from it reached the store.
+    let files = daemon.get("/api/files").json();
+    let listed = serde_json::to_string(&files).unwrap();
+    assert!(
+        !listed.contains("notes.md"),
+        "a refused file is in the store:\n{listed}"
     );
 }

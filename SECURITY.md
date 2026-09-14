@@ -2,12 +2,11 @@
 
 ## Supported versions
 
-semlith is pre-1.0. Only the latest release receives security fixes.
+semlith is pre-1.0. **Only the latest release receives security fixes**, and
+that is the whole policy — the table this section used to carry named a version
+that was already two behind by the time anybody read it.
 
-| Version | Supported |
-|---|---|
-| 0.12.x | ✅ |
-| < 0.12 | ❌ |
+`semlith upgrade --check` says whether you are on it.
 
 ## Reporting a vulnerability
 
@@ -46,9 +45,24 @@ Worth being explicit, because it determines what is and is not a vulnerability
 here.
 
 **Nothing is sent anywhere at query time.** semlith embeds and searches locally.
-The only network access it ever makes is downloading the ONNX embedding model
-and the ONNX Runtime binaries, once, from Hugging Face and the ONNX Runtime
-release page. After that it runs fully offline.
+It makes exactly four kinds of outbound request, all of them because somebody
+asked:
+
+- **Model weights**, once per model, from Hugging Face, at a pinned commit and
+  verified against a digest recorded in [`docs/models.md`](docs/models.md).
+- **`semlith add <url>`**, one request for exactly that URL. No crawling, no
+  credential, and from 0.14.0 no address that is not on the public internet.
+- **`semlith upgrade`**, from `https://github.com` and nowhere else — a release
+  binary has no way to be told another origin.
+- **At build time only**, ONNX Runtime itself. A `cargo install` or a
+  from-source build downloads it from `cdn.pyke.io` through the `ort-sys` crate,
+  which hash-pins what it fetches. The prebuilt Linux binaries do not use it at
+  all: from 0.14.0 they ship Microsoft's own ONNX Runtime release beside them,
+  verified against the checksum GitHub publishes with it.
+
+`--airgap`, or `SEMLITH_AIRGAP=1`, refuses all of the runtime ones and exits
+naming what it refused. After the weights are cached, semlith runs fully
+offline.
 
 **The store is not encrypted.** `store.db` contains the plain text of every
 chunk you indexed, and `index.tv` contains vectors derived from it. Anyone who
@@ -56,27 +70,45 @@ can read the store directory can read your indexed content — treat the store
 with the same care as the files that went into it. If you index secrets, the
 store holds secrets.
 
-**semlith indexes whatever you point it at.** It honours `.gitignore` and skips
-hidden files, but that is a convenience, not a security boundary. Check what
-`semlith files` lists if you are unsure.
+**semlith indexes whatever *you* point it at — an agent is bounded.** On the
+command line, `.gitignore` and the hidden-file rule are a convenience rather
+than a boundary, and `semlith files` is how you check what went in. Through the
+MCP tools or the portal it is a boundary: from 0.14.0 those index only under the
+store's registered roots or your home directory, and never a credential
+directory or a file named like a credential. [`docs/security.md`](docs/security.md)
+has the list and the reasoning.
 
 **`semlith start` listens on a port, and only on this machine.** Since 0.9.0 the
 daemon serves a portal over HTTP. It binds `127.0.0.1` and there is no flag to
-change that. Every request needs the per-run token the daemon prints once in its
-URL, carried in a `SameSite=Strict; HttpOnly` cookie; without it the answer is
-401 and an empty body. The `Host` header must be `localhost`, `127.0.0.1` or
-`::1`, so a page on another origin cannot reach the daemon through a name that
-resolves to loopback — every other `Host` gets 400 before any route runs. Every
-response carries a `Content-Security-Policy` allowing only `'self'`, and no CORS
-header is sent anywhere. Every byte the page loads is compiled into the binary,
-so it fetches nothing. `--airgap`, or `SEMLITH_AIRGAP=1`, refuses even the model
-download and exits naming the cache path.
+change that.
+
+Every `/api/*` request needs the per-run token the daemon prints once in its
+URL, sent back in a **`Semlith-Token` header**. It was a `SameSite=Strict`
+cookie until 0.14.0, and a cookie was the wrong container: every port on
+`localhost` is the same site, so the browser would attach it for a page served
+by anything else on `127.0.0.1`. Without the token the answer is 401 and an
+empty body. A request that is not a GET additionally needs a JSON content type
+and, from any client that sends fetch metadata, `Sec-Fetch-Site: same-origin`;
+both are checked before the token, and a failure is 403 with an empty body
+before any route runs.
+
+The page itself and its own static assets are served without a credential,
+because a browser attaches no header to a stylesheet, a font or a favicon. They
+are the same bytes in every copy of the binary.
+
+The `Host` header must be `localhost`, `127.0.0.1` or `::1`, so a page cannot
+reach the daemon through a name that resolves to loopback — every other `Host`
+gets 400 before any route runs. Every response carries a
+`Content-Security-Policy` allowing only `'self'`, and no CORS header is sent
+anywhere. Every byte the page loads is compiled into the binary.
 
 The token grants full access to every store the daemon opened. It lives in the
-URL the daemon prints and in `daemon.json` inside each store directory, which is
-written `0600` on Unix. Anyone who can read that file can read the token, and
-therefore the stores — the same trust boundary as the store itself. The Privacy
-page has a Rotate button that invalidates the current token immediately.
+URL the daemon prints and in `daemon.json` inside each store directory, written
+`0600` and — from 0.14.0 — read back only from a store you trust, only when it
+is owned by you and names a live process. Anyone who can read that file can read
+the token, and therefore the stores: the same trust boundary as the store
+itself. The Privacy page has a Rotate button that invalidates the current token
+immediately, and a row per rule with the daemon's own check of it.
 
 **The MCP server exposes the whole store.** `semlith mcp` speaks over stdio to
 whatever process launched it and will return any indexed chunk that matches a
@@ -98,10 +130,12 @@ If you are looking for somewhere to dig, these are the honest weak points:
   bug, and we would like to know about it.
 - **The hand-written HTTP server.** `src/http.rs` parses requests itself rather
   than through a crate. Request line and header parsing, the chunked response
-  writer, the cookie reader and the `Host` check are all semlith's code, and a
-  request that gets past the token or the `Host` check, or that wedges a worker
-  thread, is exactly the kind of thing worth reporting. Header and body sizes
-  are capped and sockets carry read and write timeouts, but this is new code.
+  writer, the header reader and the `Host` check are all semlith's code, and a
+  request that gets past the token, the same-origin rule or the `Host` check, or
+  that wedges a worker thread, is exactly the kind of thing worth reporting.
+  Header and body sizes are capped, a request has ten seconds to arrive in full,
+  connections are capped at 32 at once, and a panicking route answers 500
+  without taking its worker — but this is still hand-written code on a socket.
 - **The directory-listing route.** The portal's folder picker can list
   directories under `$HOME`. It canonicalises before checking containment, so
   `..` and symlinks are resolved first — a path that escapes that check is a
@@ -109,11 +143,12 @@ If you are looking for somewhere to dig, these are the honest weak points:
 
 ## Out of scope
 
-- The store being readable by other users on the same machine. Set directory
-  permissions appropriately; semlith does not attempt to protect against a
-  local attacker who can already read your files. The daemon's token is in that
-  same category: it sits in `daemon.json` inside the store directory, and a
-  local attacker who can read the store does not need the token anyway.
+- The store being readable by a local attacker who can already read your files.
+  From 0.14.0 semlith creates everything it owns `0700`/`0600` and narrows
+  anything looser on open — see [`docs/security.md`](docs/security.md) — but
+  that is defence against an accident and a shared machine's defaults, not
+  against somebody who can read your home directory. The daemon's token is in
+  that same category: a local attacker who can read the store does not need it.
 - Another process on this machine connecting to the daemon with a token it
   obtained legitimately. The token guards against a web page and a stray
   process, not against a user who can already read your home directory.

@@ -907,7 +907,11 @@ pub(crate) fn unpercent(s: &str) -> String {
             out.push(byte);
             continue;
         }
-        match hex_byte(&rest[..2]) {
+        // `get` rather than a slice: the length was checked one line above, so
+        // this is the same answer — but a fixed offset guarded by a check
+        // somewhere else is the shape that breaks when somebody edits the
+        // check, and this one cannot.
+        match rest.get(..2).and_then(hex_byte) {
             Some(decoded) => {
                 out.push(decoded);
                 rest = &rest[2..];

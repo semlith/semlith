@@ -7,6 +7,7 @@
 //! about which chunks were eligible.
 
 use anyhow::{Result, bail};
+use std::path::{Path, PathBuf};
 
 /// One `--lang` name and everything that counts as it.
 pub struct Language {
@@ -324,5 +325,243 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- the deny-list
+
+/// Directories under the home whose contents are credentials, and nothing else.
+///
+/// Relative to the home directory, because that is where each of them lives and
+/// where an agent asked to "index my config" would find them. A deny-list is a
+/// blunt instrument and this one is deliberately short: every entry is a
+/// directory whose whole purpose is to hold secrets, so refusing it costs a user
+/// nothing they meant to index.
+pub const DENIED_DIRS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".config/gcloud",
+    ".azure",
+    ".docker",
+    "Library/Keychains",
+    ".password-store",
+    ".local/share/keyrings",
+];
+
+/// File names that are a credential wherever they are.
+///
+/// Matched against the file name alone, case-insensitively, with `*` matching
+/// any run of characters. These are not about where a file lives: a `.env` in a
+/// repository is the same kind of thing as a `.env` in a home directory, and an
+/// agent that indexed one has put the contents of every environment variable a
+/// service needs into a store it can then be asked to search.
+pub const DENIED_NAMES: &[&str] = &[
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "id_rsa*",
+    "id_ed25519*",
+    "*credentials*",
+    "*secret*",
+    "*.tfstate",
+    "*.kdbx",
+];
+
+/// Why a path was not indexed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Denied {
+    /// Under a directory whose contents are credentials.
+    Directory(&'static str),
+    /// Named like a credential.
+    Name(&'static str),
+    /// A dotfile, which the walker skips and an explicit path used to slip
+    /// past.
+    Hidden,
+}
+
+impl Denied {
+    /// One line an agent can act on, naming the rule rather than restating the
+    /// path.
+    pub fn reason(&self) -> String {
+        match self {
+            Denied::Directory(dir) => {
+                format!("under ~/{dir}, which holds credentials — semlith does not index it")
+            }
+            Denied::Name(pattern) => {
+                format!("matches {pattern}, which names a credential — semlith does not index it")
+            }
+            Denied::Hidden => "is a hidden file, which semlith skips when walking and does not \
+                 index when named"
+                .to_string(),
+        }
+    }
+}
+
+/// Whether this path is one semlith refuses to index, and why.
+///
+/// Applied to every walked entry and to every explicitly named path alike,
+/// which is the point: the walker already skipped hidden files and the denied
+/// directories under them, and an explicit `semlith_index ~/.ssh/id_rsa` went
+/// straight past all of it.
+pub fn denied(path: &Path) -> Option<Denied> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = home {
+        let home = crate::canonical(&home);
+        let real = crate::canonical(path);
+        for dir in DENIED_DIRS {
+            if real.starts_with(home.join(dir)) {
+                return Some(Denied::Directory(dir));
+            }
+        }
+    }
+
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    for pattern in DENIED_NAMES {
+        if glob_match(pattern, &name) {
+            return Some(Denied::Name(pattern));
+        }
+    }
+    if name.starts_with('.') && name.len() > 1 {
+        return Some(Denied::Hidden);
+    }
+    None
+}
+
+/// `*` against a name, with everything else literal.
+///
+/// Small enough to read, which matters more here than generality: this is the
+/// predicate deciding whether a credential reaches a store, and a pattern
+/// language with surprises in it is a rule nobody can check.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == name;
+    }
+    let mut rest = name;
+    // The first segment has to be at the start, and the last at the end.
+    if let Some(first) = parts.first()
+        && !first.is_empty()
+    {
+        match rest.strip_prefix(first) {
+            Some(tail) => rest = tail,
+            None => return false,
+        }
+    }
+    if let Some(last) = parts.last()
+        && !last.is_empty()
+    {
+        match rest.strip_suffix(last) {
+            Some(head) => rest = head,
+            None => return false,
+        }
+    }
+    for middle in &parts[1..parts.len().saturating_sub(1)] {
+        if middle.is_empty() {
+            continue;
+        }
+        match rest.find(middle) {
+            Some(at) => rest = &rest[at + middle.len()..],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Whether a path is inside a boundary an agent may index.
+///
+/// The roots the target store is registered against, or the home directory. An
+/// agent holding the key can index a repository it was pointed at; it cannot
+/// index `/etc`, another user's home, or a directory nobody told semlith about.
+/// The person typing `semlith index` on the command line is the owner of the
+/// machine and is not held to this — which is the one asymmetry in the rule,
+/// and it is deliberate.
+pub fn within_boundary(path: &Path, roots: &[PathBuf]) -> bool {
+    let real = crate::canonical(path);
+    if roots
+        .iter()
+        .any(|root| real.starts_with(crate::canonical(root)))
+    {
+        return true;
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| real.starts_with(crate::canonical(&home)))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod deny_tests {
+    use super::*;
+
+    #[test]
+    fn a_star_matches_a_run_of_anything() {
+        assert!(glob_match(".env", ".env"));
+        assert!(glob_match(".env.*", ".env.production"));
+        assert!(!glob_match(".env.*", ".environment"));
+        assert!(glob_match("*.pem", "server.pem"));
+        assert!(!glob_match("*.pem", "pem"));
+        assert!(glob_match("id_rsa*", "id_rsa"));
+        assert!(glob_match("id_rsa*", "id_rsa.pub"));
+        assert!(glob_match(
+            "*credentials*",
+            "service-account-credentials.json"
+        ));
+        assert!(glob_match("*secret*", "my-secrets.yaml"));
+        assert!(!glob_match("*secret*", "secrat"));
+        assert!(glob_match("*.tfstate", "terraform.tfstate"));
+    }
+
+    /// The case the finding is about: a file an agent asked for by name, which
+    /// the walker's rules never saw.
+    #[test]
+    fn a_credential_is_denied_wherever_it_is_named() {
+        assert!(matches!(
+            denied(Path::new("/work/api/.env")),
+            Some(Denied::Name(".env"))
+        ));
+        assert!(matches!(
+            denied(Path::new("/work/api/service-account-credentials.json")),
+            Some(Denied::Name("*credentials*"))
+        ));
+        assert!(matches!(
+            denied(Path::new("/work/api/tls/server.pem")),
+            Some(Denied::Name("*.pem"))
+        ));
+        // The hidden-file rule the walker applies, applied to an explicit path.
+        assert!(matches!(
+            denied(Path::new("/work/api/.hidden-notes")),
+            Some(Denied::Hidden)
+        ));
+        // An ordinary file is an ordinary file.
+        assert_eq!(denied(Path::new("/work/api/src/lib.rs")), None);
+        assert_eq!(denied(Path::new("/work/api/README.md")), None);
+        // `.` and `..` are not hidden files.
+        assert_eq!(denied(Path::new("/work/api/.")), None);
+    }
+
+    #[test]
+    fn a_refusal_names_the_rule_rather_than_the_path() {
+        assert!(Denied::Name("*.pem").reason().contains("*.pem"));
+        assert!(Denied::Directory(".ssh").reason().contains(".ssh"));
+        assert!(Denied::Hidden.reason().contains("hidden"));
+    }
+
+    #[test]
+    fn the_boundary_is_the_roots_and_the_home() {
+        let roots = vec![PathBuf::from("/work/api")];
+        assert!(within_boundary(Path::new("/work/api/src/lib.rs"), &roots));
+        assert!(within_boundary(Path::new("/work/api"), &roots));
+        assert!(!within_boundary(Path::new("/etc/hosts"), &roots));
+        assert!(!within_boundary(Path::new("/work/other"), &roots));
     }
 }

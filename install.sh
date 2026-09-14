@@ -6,7 +6,10 @@
 # SEMLITH_YES=1            answer yes to every `semlith setup` prompt
 set -eu
 repo=semlith/semlith
-origin=${SEMLITH_RELEASES_ORIGIN:-https://github.com}  # redirected by the tests
+# One origin, with no way to be told another: a script that read one from the
+# environment would install whatever a hostile shell profile pointed it at.
+# `tests/install.rs` rewrites this line in a copy rather than setting a variable.
+origin=https://github.com
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -135,8 +138,15 @@ tar xzf "$tmp/$archive" -C "$tmp"
 
 bin_dir="${SEMLITH_HOME:-$HOME/.semlith}/bin"
 mkdir -p "$bin_dir"
+chmod 700 "$bin_dir" 2>/dev/null || :
 mv "$tmp/$name/semlith" "$bin_dir/semlith"
 chmod +x "$bin_dir/semlith"
+# The Linux archives carry ONNX Runtime beside the binary, which is where it is
+# loaded from at start (issue #57). macOS links its runtime in.
+if [ -f "$tmp/$name/libonnxruntime.so" ]; then
+  mv "$tmp/$name/libonnxruntime.so" "$bin_dir/libonnxruntime.so"
+  say "Installed $bin_dir/libonnxruntime.so"
+fi
 say "Installed $bin_dir/semlith"
 
 if "$bin_dir/semlith" setup --help >/dev/null 2>&1; then

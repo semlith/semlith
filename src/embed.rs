@@ -115,6 +115,7 @@ impl Model {
         }
         match self {
             Model::Builtin(m) => {
+                link_runtime()?;
                 let opts = TextInitOptions::new(m.clone())
                     .with_show_download_progress(!quiet)
                     .with_max_length(max_length)
@@ -127,19 +128,113 @@ impl Model {
     }
 }
 
+/// Point ONNX Runtime at the library shipped beside this binary.
+///
+/// Only in a `dynamic-ort` build, which is the two Linux release binaries and
+/// nothing else. Every other build — `cargo install`, macOS, Windows, a
+/// developer's own `cargo build` — links the library `ort` downloads at build
+/// time and this function does nothing.
+///
+/// The reason the Linux artifacts differ is issue #57: the library `ort`
+/// downloads references glibc 2.38 symbols, so the binary built against it
+/// cannot start on Debian 12, Ubuntu 22.04 LTS, RHEL 9 or Amazon Linux 2023,
+/// and building on an older runner cannot lower a floor the vendored library
+/// sets. Microsoft's own ONNX Runtime release needs glibc 2.27, so the release
+/// jobs pack that beside the binary and this loads it.
+///
+/// Run once, before anything asks for a model.
+pub fn link_runtime() -> Result<()> {
+    #[cfg(feature = "dynamic-ort")]
+    {
+        use std::sync::OnceLock;
+        static ONCE: OnceLock<Result<(), String>> = OnceLock::new();
+        return ONCE
+            .get_or_init(|| {
+                let Ok(exe) = std::env::current_exe() else {
+                    return Err("the running binary could not be located".to_string());
+                };
+                let beside = exe
+                    .parent()
+                    .map(|dir| dir.join(RUNTIME_FILE))
+                    .unwrap_or_else(|| PathBuf::from(RUNTIME_FILE));
+                if !beside.exists() {
+                    return Err(format!(
+                        "{} is not beside the semlith binary. The Linux release \
+                         archive carries it next to `semlith`, and `install.sh` \
+                         puts both in the same directory — a binary copied out of \
+                         the archive on its own cannot embed anything. Unpack the \
+                         archive again, or install with the one-liner in the \
+                         README.",
+                        beside.display()
+                    ));
+                }
+                ort::init_from(beside.to_string_lossy().as_ref())
+                    .map_err(|e| format!("loading {}: {e}", beside.display()))?
+                    .commit();
+                // `commit` answers whether this call was the one that
+                // installed the environment; a second caller getting `false`
+                // is the OnceLock doing its job, not a failure.
+                Ok(())
+            })
+            .clone()
+            .map_err(anyhow::Error::msg);
+    }
+    #[cfg(not(feature = "dynamic-ort"))]
+    Ok(())
+}
+
+/// What a `dynamic-ort` build looks for beside itself.
+#[cfg(feature = "dynamic-ort")]
+const RUNTIME_FILE: &str = if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else if cfg!(windows) {
+    "onnxruntime.dll"
+} else {
+    "libonnxruntime.so"
+};
+
 fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<TextEmbedding> {
+    link_runtime()?;
+    check_cache_dir(&cache_dir)?;
+    let cache = cache_dir.clone();
+
+    // Whether this cache has already been checked against this pin, with every
+    // file still the size and age it was. Asked once here rather than per file,
+    // because the answer is about the set.
+    let checked = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION)
+        .is_some_and(|dir| already_verified(&dir, GRANITE_REVISION, GRANITE_FILES));
+
+    // A revision rather than a branch. `main` is a name somebody else controls;
+    // a commit is the bytes this release was built against.
     let repo = hf_hub::api::sync::ApiBuilder::new()
         .with_cache_dir(cache_dir)
         .with_progress(!quiet)
         .build()
         .context("building the Hugging Face client")?
-        .model(GRANITE_REPO.to_string());
+        .repo(hf_hub::Repo::with_revision(
+            GRANITE_REPO.to_string(),
+            hf_hub::RepoType::Model,
+            GRANITE_REVISION.to_string(),
+        ));
 
     let fetch = |name: &str| -> Result<Vec<u8>> {
         let path = repo
             .get(name)
             .with_context(|| format!("fetching {name} from {GRANITE_REPO}"))?;
-        std::fs::read(&path).with_context(|| format!("reading {}", path.display()))
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        if checked {
+            return Ok(bytes);
+        }
+        // Verified whether it was just fetched or was already in the cache: a
+        // cache is a directory on disk, and the point of a digest is that it
+        // does not matter how the bytes got there.
+        let expected = GRANITE_FILES
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, digest)| *digest)
+            .with_context(|| format!("{name} is not a file semlith pins a digest for"))?;
+        verify(name, &bytes, expected)?;
+        Ok(bytes)
     };
 
     let tokenizer_files = TokenizerFiles {
@@ -162,6 +257,13 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
                 .into_owned(),
             fetch(GRANITE_WEIGHTS)?,
         );
+
+    // Recorded after every file has been read and checked, and only when this
+    // run did the checking — the fetch above may have created the snapshot
+    // directory that did not exist when `checked` was read.
+    if !checked && let Some(dir) = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION) {
+        record_verified(&dir, GRANITE_REVISION, GRANITE_FILES);
+    }
 
     let opts = InitOptionsUserDefined::new()
         .with_max_length(max_length)
@@ -239,10 +341,90 @@ pub fn model_is_cached(cache_dir: &Path, model: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the default model is cached, with the right bytes.
+///
+/// "Is there anything here" until 0.14.0, which answered yes for a cache
+/// holding half a download or somebody else's files. It now asks the question
+/// the airgap check needs answered: can this run load the model without
+/// reaching the network, and is what it would load the model this release pins.
+///
+/// A digest per file is the expensive form and this is called on every airgap
+/// check, so the size is the cheap first pass: a file of the right length whose
+/// digest is wrong is the case `load_granite` refuses by name a moment later.
 pub fn is_cached(cache_dir: &Path) -> bool {
-    std::fs::read_dir(cache_dir)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false)
+    let snapshot = match snapshot_dir(cache_dir, GRANITE_REPO, GRANITE_REVISION) {
+        Some(dir) => dir,
+        None => return false,
+    };
+    GRANITE_FILES
+        .iter()
+        .all(|(name, _)| snapshot.join(name).exists())
+}
+
+/// Where hf-hub puts one revision of one repository.
+///
+/// `<cache>/models--<org>--<name>/snapshots/<revision>`. Derived rather than
+/// guessed at: hf-hub writes it, and a naming change upstream should read as
+/// "not cached", which refuses, rather than as "cached", which would not.
+fn snapshot_dir(cache_dir: &Path, repo: &str, revision: &str) -> Option<PathBuf> {
+    let dir = cache_dir
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots")
+        .join(revision);
+    dir.is_dir().then_some(dir)
+}
+
+/// Verify every pinned file of a repository that fastembed fetched itself.
+///
+/// `load_granite` verifies as it reads, because semlith does that fetching. The
+/// image models are fastembed's own built-ins: it resolves and caches them
+/// through its own client, so the check happens against what landed in the
+/// cache rather than against bytes passing through semlith's hands. The
+/// property is the same — a file that is not the one this release pins is
+/// refused by name — and it is checked before the model is used.
+pub fn verify_cached(
+    cache_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[(&str, &str)],
+) -> Result<()> {
+    check_cache_dir(cache_dir)?;
+    let _ = revision;
+    // Every snapshot under this repository, not only the pinned one. fastembed
+    // resolves its built-in models at `main`, so a repository that moved leaves
+    // its new commit here under a different name — and checking only the pinned
+    // directory would pass by finding nothing. What is checked is what is on
+    // disk to be loaded.
+    let snapshots = cache_dir
+        .join(format!("models--{}", repo.replace('/', "--")))
+        .join("snapshots");
+    let Ok(entries) = std::fs::read_dir(&snapshots) else {
+        // Nothing cached. fastembed will fetch, and the next call through this
+        // function is the one that checks what it fetched.
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        // The same stamp the text model uses: the CLIP weights are 350 MB and
+        // 254 MB, so hashing them on every load would cost more than loading
+        // them does.
+        if already_verified(&dir, revision, files) {
+            continue;
+        }
+        let mut read_all = true;
+        for (name, expected) in files {
+            let path = dir.join(name);
+            let Ok(bytes) = std::fs::read(&path) else {
+                read_all = false;
+                continue;
+            };
+            verify(&format!("{repo}/{name}"), &bytes, expected)?;
+        }
+        if read_all {
+            record_verified(&dir, revision, files);
+        }
+    }
+    Ok(())
 }
 
 pub fn embed_threads() -> usize {
@@ -283,6 +465,197 @@ fn performance_cores() -> Option<usize> {
 #[cfg(not(target_os = "macos"))]
 fn performance_cores() -> Option<usize> {
     None
+}
+
+// ---------------------------------------------------------------- pinned weights
+
+/// The commit each model repository is fetched at.
+///
+/// A Hugging Face repository is a git repository somebody else can push to, and
+/// before 0.14.0 semlith fetched from whatever `main` pointed at. The weights
+/// are what computes every vector in every store: a model that changed under a
+/// user would change what their corpus means without changing anything they can
+/// see, and a model that was replaced would do it on purpose.
+pub const GRANITE_REVISION: &str = "1dc7835ba0cb9c76a3618d0bf0c427c97671b3c8";
+
+/// Every file semlith fetches from [`GRANITE_REPO`], with its SHA-256.
+///
+/// Resolved against the repository at [`GRANITE_REVISION`] and recorded in
+/// `docs/models.md` with the commit URL, so the number in this table can be
+/// checked against the one Hugging Face publishes without reading this file.
+pub const GRANITE_FILES: &[(&str, &str)] = &[
+    (
+        "tokenizer.json",
+        "feeb83348dcb033bc6b9d2e1f7906ca9eb2d122845000c9416d894d7c2927149",
+    ),
+    (
+        "config.json",
+        "1a1710c20911da8c96179716bf44058e54cca6fa7952cce77be83ef05edae3ee",
+    ),
+    (
+        "special_tokens_map.json",
+        "ea97ecdbcc73713039d8d64dbb05e3689495c96657fbd9a18f5bed381be81049",
+    ),
+    (
+        "tokenizer_config.json",
+        "ce06781b38bb393db68c9e0709bddd31ef5d88f2c6fbb3fd9f369778fb85e451",
+    ),
+    (
+        GRANITE_ONNX,
+        "a3fad524afc3f060216a8ddbb1ac89c9b6498fba8995b5718bde879076a2e9ba",
+    ),
+    (
+        GRANITE_WEIGHTS,
+        "1f4cf47e4adec7f7ae09db03d071ba8667e07f9a4203142c7efa8d37fe453597",
+    ),
+];
+
+/// What a cache directory records about the files this release already verified.
+///
+/// Hashing every pinned file on every load is 52 MB of SHA-256 before a process
+/// can answer anything — measured at 276 ms on an M1, which is most of what a
+/// `semlith search` from the command line costs. So the digests are checked
+/// once and the result recorded here, keyed by the pin and by each file's size
+/// and modification time: if all three still match, the bytes are the ones that
+/// were verified.
+///
+/// This does not weaken the check it replaces. The attacker it would have to
+/// let through is one who can write this cache *and* preserve each file's size
+/// and mtime — and a cache anybody but this user can write to is already
+/// refused by [`check_cache_dir`], so that attacker is this user. What the
+/// digests are actually for — a corrupted download, and an upstream repository
+/// whose bytes changed — moves a file's size or mtime every time.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Verified {
+    revision: String,
+    /// File name to `(size, mtime nanoseconds, the digest it was checked
+    /// against)`.
+    files: std::collections::BTreeMap<String, (u64, u128, String)>,
+}
+
+const STAMP: &str = ".semlith-verified";
+
+/// What a file looks like on disk right now, for the stamp.
+fn fingerprint(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((meta.len(), modified))
+}
+
+/// Whether every pinned file was verified at this revision and has not moved.
+fn already_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(STAMP)) else {
+        return false;
+    };
+    let Ok(stamp) = serde_json::from_str::<Verified>(&text) else {
+        return false;
+    };
+    if stamp.revision != revision {
+        return false;
+    }
+    files.iter().all(|(name, expected)| {
+        stamp
+            .files
+            .get(*name)
+            .zip(fingerprint(&dir.join(name)))
+            .is_some_and(|((size, mtime, digest), (now_size, now_mtime))| {
+                digest == expected && *size == now_size && *mtime == now_mtime
+            })
+    })
+}
+
+/// Record that every pinned file has been checked, so the next process need not.
+fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
+    let mut stamp = Verified {
+        revision: revision.to_string(),
+        files: std::collections::BTreeMap::new(),
+    };
+    for (name, expected) in files {
+        let Some((size, mtime)) = fingerprint(&dir.join(name)) else {
+            // A file that cannot be measured is one the next run should check
+            // again, so the stamp is not written at all.
+            return;
+        };
+        stamp
+            .files
+            .insert((*name).to_string(), (size, mtime, (*expected).to_string()));
+    }
+    let Ok(body) = serde_json::to_vec(&stamp) else {
+        return;
+    };
+    // Best effort: a cache that cannot be written to is one that gets verified
+    // every time, which is slower and not wrong.
+    let _ = crate::home::write_private(&dir.join(STAMP), &body);
+}
+
+/// The SHA-256 of some bytes, as lowercase hex.
+pub fn digest(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Check bytes against the digest recorded for them, or say which file failed.
+pub fn verify(name: &str, bytes: &[u8], expected: &str) -> Result<()> {
+    let actual = digest(bytes);
+    if actual != expected {
+        bail!(
+            "{name} does not match the digest semlith pins for it.\n  \
+             expected {expected}\n  got      {actual}\n\
+             The model cache holds a file that is not the one this release was \
+             built against. Delete the cache and let semlith fetch it again; if \
+             it happens twice, the file upstream has changed and semlith needs a \
+             release rather than a retry."
+        );
+    }
+    Ok(())
+}
+
+/// Refuse a model cache that somebody else on this machine can write to.
+///
+/// The cache is weights, and the weights are what every vector is computed by.
+/// A directory another account can write to is a model another account
+/// chooses — and the choosing is invisible, because a corpus embedded by a
+/// different model still answers, just differently.
+pub fn check_cache_dir(cache: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = std::fs::metadata(cache) else {
+            return Ok(());
+        };
+        // SAFETY: `getuid` reads this process's own id and cannot fail.
+        let me = unsafe { libc::getuid() };
+        if meta.uid() != me {
+            bail!(
+                "{} is owned by uid {} rather than by you. semlith will not load \
+                 model weights from a directory somebody else owns — run `chown -R \
+                 {me} {}`, or point {} somewhere you own.",
+                cache.display(),
+                meta.uid(),
+                cache.display(),
+                crate::MODEL_CACHE_ENV,
+            );
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o022 != 0 {
+            bail!(
+                "{} is mode {mode:o}, so other users on this machine can write to \
+                 it. semlith will not load model weights from it — run `chmod 700 \
+                 {}`.",
+                cache.display(),
+                cache.display(),
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = cache;
+    Ok(())
 }
 
 #[cfg(test)]

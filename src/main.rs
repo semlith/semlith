@@ -50,6 +50,14 @@ enum Command {
         /// prove this process never reached the network.
         #[arg(long)]
         airgap: bool,
+
+        /// Index files semlith otherwise refuses: `.env`, private keys,
+        /// anything under `~/.ssh` and the rest of the deny-list. Off by
+        /// default, because indexing a private key by accident is a mistake and
+        /// this flag is how you say you meant it. It has no effect on the MCP
+        /// tools or the portal, which are held to the boundary either way.
+        #[arg(long)]
+        include_secrets: bool,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -107,6 +115,22 @@ enum Command {
         /// Name it in the home explicitly.
         #[arg(long)]
         name: Option<String>,
+    },
+
+    /// Say that a store directory outside the store home may be opened.
+    ///
+    /// A `.semlith` directory can arrive inside a repository somebody else
+    /// wrote, and a store is what semlith answers from — so one that semlith
+    /// did not create is opened only after you have said so, once. Nothing is
+    /// moved and nothing is re-embedded; `semlith adopt` is the command that
+    /// moves a store into the home.
+    Trust {
+        /// The store directory to trust — usually `./.semlith`.
+        store_dir: Option<PathBuf>,
+
+        /// Print what is trusted and change nothing.
+        #[arg(long)]
+        list: bool,
     },
 
     /// Keep the store current: re-embed files as they are saved. Runs until
@@ -366,6 +390,7 @@ fn main() -> Result<()> {
             name,
             quiet,
             airgap,
+            include_secrets,
         } => {
             arm_airgap(airgap);
             let model = model
@@ -389,6 +414,13 @@ fn main() -> Result<()> {
             let dir = choice.one()?;
             let mut store = Semlith::open(&dir, model)?;
             store.quiet = quiet;
+            // No confinement on the command line: the person typing it owns the
+            // machine. The deny-list still applies, because indexing a private
+            // key by accident is a mistake rather than a decision.
+            store.boundary = semlith::Boundary {
+                roots: None,
+                allow_secrets: include_secrets,
+            };
 
             let started = Instant::now();
             // Throttled, not per file: a corpus large enough to need an
@@ -401,6 +433,9 @@ fn main() -> Result<()> {
                 }
                 if p.outcome == semlith::FileOutcome::Indexing {
                     eprintln!("  + {}", display(path));
+                }
+                if p.outcome == semlith::FileOutcome::Refused {
+                    eprintln!("  - {}", display(path));
                 }
                 if spoke.elapsed() >= PROGRESS_INTERVAL {
                     spoke = Instant::now();
@@ -423,6 +458,14 @@ fn main() -> Result<()> {
             } else {
                 String::new()
             };
+            // Named one per line. A refusal reported as a count is one the
+            // person retries with the same arguments.
+            for (path, why) in &report.refused {
+                eprintln!("refused: {path} — {why}");
+            }
+            if !report.refused.is_empty() && !include_secrets {
+                eprintln!("  `--include-secrets` indexes these anyway, if you meant to.");
+            }
             eprintln!(
                 "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped, {} removed",
                 report.indexed,
@@ -810,6 +853,17 @@ fn main() -> Result<()> {
                 // The store's own directory, not the flag order: a store named
                 // twice was opened once.
                 println!("store    {}", store.dir().display());
+                // Said where somebody will see it. A store directory other
+                // accounts on this machine can read holds the text of every
+                // file it indexed, and one made before 0.14.0 is loose until
+                // this binary opens it.
+                if let Some(mode) = home::loose_mode(store.dir()) {
+                    println!(
+                        "warning  the store directory is mode {mode:o}; other users on this \
+                         machine can read what it indexed. Opening it with this semlith \
+                         narrows it to 700."
+                    );
+                }
                 println!("model    {} ({} dim)", store.model(), store.dim());
                 println!("files    {files}");
                 println!("chunks   {chunks}");
@@ -1040,8 +1094,13 @@ fn main() -> Result<()> {
                 // Claude Code is the one client semlith writes a config for,
                 // because it has a CLI for it. Everything else is named.
                 if semlith::setup::claude_present() {
-                    if semlith::setup::register_claude_http(&fresh, &url) {
-                        println!("Claude Code was re-registered against {url}.");
+                    if semlith::setup::register_claude_http(&url) {
+                        println!(
+                            "Claude Code was re-registered against {url}, naming \
+                             ${{{}}} rather than the key itself, so this is the last \
+                             rotation that needed it touched.",
+                            semlith::setup::KEY_ENV
+                        );
                     } else {
                         println!(
                             "Claude Code is installed but `claude mcp add` failed; paste the stanza below."
@@ -1066,6 +1125,38 @@ fn main() -> Result<()> {
                 }
             }
         },
+
+        Command::Trust { store_dir, list } => {
+            let mut registry = home::Registry::load()?;
+            if list || store_dir.is_none() {
+                if registry.trusted.is_empty() {
+                    eprintln!(
+                        "no store outside {} is trusted. Every store semlith made is \
+                         opened without asking; a `.semlith` that arrived some other \
+                         way needs `semlith trust <dir>` once.",
+                        home::home().display()
+                    );
+                } else {
+                    for dir in &registry.trusted {
+                        let missing = if dir.join("store.db").exists() {
+                            ""
+                        } else {
+                            "  (gone)"
+                        };
+                        println!("{}{missing}", dir.display());
+                    }
+                }
+                return Ok(());
+            }
+            let dir = registry.trust(store_dir.as_deref().expect("checked above"))?;
+            eprintln!(
+                "{} is trusted. semlith will open it from this directory without \
+                 --store; `semlith adopt` moves it into {} if you would rather it \
+                 lived with the others.",
+                dir.display(),
+                home::stores_root().display()
+            );
+        }
 
         Command::Adopt {
             store_dir,

@@ -14,7 +14,7 @@ leaving the machine.
 [![downloads](https://img.shields.io/crates/d/semlith.svg)](https://crates.io/crates/semlith)
 [![docs.rs](https://img.shields.io/docsrs/semlith?logo=docsdotrs&label=docs.rs)](https://docs.rs/semlith)
 
-[![msrv](https://img.shields.io/badge/rust-1.89%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
+[![msrv](https://img.shields.io/badge/rust-1.90%2B-orange.svg?logo=rust)](https://www.rust-lang.org)
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](#install)
 [![mcp](https://img.shields.io/badge/MCP-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -123,7 +123,7 @@ semlith --version
 
 On Windows, unpack the `.zip` and move `semlith.exe` somewhere on your `PATH`.
 
-**From source**, with a Rust toolchain (1.89+):
+**From source**, with a Rust toolchain (1.90+):
 
 ```sh
 cargo install --git https://github.com/semlith/semlith
@@ -164,7 +164,7 @@ just those lines instead of the whole file.
 
 | Command | What it does |
 |---|---|
-| `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. |
+| `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--include-secrets` indexes what the deny-list otherwise refuses. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it. |
 | `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
@@ -178,6 +178,7 @@ just those lines instead of the whole file.
 | `semlith start [PATHS...]` | Own every registered store, keep them current, serve the portal on `127.0.0.1:7365` and answer MCP at `/mcp`. `--port`, `--debounce`, `--airgap`, `--ledger`, `--no-mcp-http`. |
 | `semlith key show` \| `rotate` | Print the agent key that opens the HTTP MCP endpoint, and the stanza around it, or mint a new one. `--now` on `rotate` drops the previous key immediately. |
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
+| `semlith trust <DIR>` | Say that a store outside the store home may be opened, once. Nothing is moved. `--list` prints what is trusted. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. |
 | `semlith languages` | List the language names `--lang` accepts. |
@@ -711,16 +712,24 @@ plus a `.semlith` beside the directory the agent was started in, if there is
 one. Index another repository and the agent that is already configured can
 search it, with no edit to any of these files.
 
-Wherever a stanza carries `sml_YOURKEY`, paste the agent key in its place.
-`semlith key show` prints it, and the next section explains where it comes from
-and how to rotate it. The endpoint answers a request without that header with
-401 and nothing else, so a stanza that drops it fails to connect rather than
-failing to find anything.
+Every stanza below names `${SEMLITH_AGENT_KEY}` rather than the key itself. The
+client expands it from the environment at start, and `semlith setup` writes a
+block in your shell startup file that exports it by reading
+`~/.semlith/agent.key` — so a rotation needs no file here rewritten, and no
+configuration file on the machine carries the credential. `semlith key show`
+prints the key if you would rather paste the literal value; the next section
+explains where it comes from and how to rotate it. The endpoint answers a
+request without that header with 401 and nothing else, so a stanza that drops it
+fails to connect rather than failing to find anything.
 
 `--store` still works and still wins when it is given: repeat it to open a
 chosen set of stores, or set `SEMLITH_STORE` to a path-separator-delimited
 list. A store that sits beside its corpus keeps working where it is, and
-`semlith adopt ./.semlith` moves it into the home so these stanzas reach it.
+`semlith trust ./.semlith` is enough to keep using it where it is — from 0.14.0
+a store semlith did not create is not opened until you have said so once,
+because a `.semlith` directory can arrive inside a repository you cloned.
+`semlith adopt ./.semlith` moves it into the home instead, so these stanzas
+reach it with no flags.
 
 `cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
 your `PATH` in a shell but often not in an editor launched from a desktop icon
@@ -739,14 +748,14 @@ own flags.
     "semlith": {
       "type": "http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
 ```
 
 ```sh
-claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 Or as a subprocess, which needs no key:
@@ -760,14 +769,14 @@ and the desktop app. TOML, and the table is `mcp_servers` with an underscore. A
 table with a `url` in it is a streamable-HTTP server; the header goes in an
 inline `http_headers` table. `codex mcp add` writes the same entry, but it has
 no flag for an arbitrary header: it takes the key from an environment variable
-instead, so `export SEMLITH_KEY=sml_YOURKEY` has to live in your shell profile
+instead, so `export SEMLITH_KEY="$SEMLITH_AGENT_KEY"` has to live in your shell profile
 rather than in the one command —
 `codex mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
 
 ```toml
 [mcp_servers.semlith]
 url = "http://127.0.0.1:7365/mcp"
-http_headers = { Authorization = "Bearer sml_YOURKEY" }
+http_headers = { Authorization = "Bearer ${SEMLITH_AGENT_KEY}" }
 ```
 
 **OpenCode** — `opencode.json` in the project root, or the same file under
@@ -781,14 +790,14 @@ http_headers = { Authorization = "Bearer sml_YOURKEY" }
       "type": "remote",
       "url": "http://127.0.0.1:7365/mcp",
       "enabled": true,
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
 ```
 
 ```sh
-opencode mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer sml_YOURKEY"
+opencode mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **IO CLI** — `io.local.toml` in the project root. The servers are an array of
@@ -799,11 +808,11 @@ is a field inside it.
 [[mcp]]
 id = "semlith"
 url = "http://127.0.0.1:7365/mcp"
-headers = { Authorization = "Bearer sml_YOURKEY" }
+headers = { Authorization = "Bearer ${SEMLITH_AGENT_KEY}" }
 ```
 
 ```sh
-io mcp add semlith --url http://127.0.0.1:7365/mcp --header 'Authorization=Bearer sml_YOURKEY'
+io mcp add semlith --url http://127.0.0.1:7365/mcp --header 'Authorization=Bearer ${SEMLITH_AGENT_KEY}'
 ```
 
 **GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
@@ -816,7 +825,7 @@ remote server is the ordinary `http`.
     "semlith": {
       "type": "http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
       "tools": ["*"]
     }
   }
@@ -824,7 +833,7 @@ remote server is the ordinary `http`.
 ```
 
 ```sh
-copilot mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+copilot mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **Gemini CLI** — `~/.gemini/settings.json`. The key for a streamable-HTTP
@@ -836,14 +845,14 @@ transport and the connection fails.
   "mcpServers": {
     "semlith": {
       "httpUrl": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
 ```
 
 ```sh
-gemini mcp add --transport http --header "Authorization: Bearer sml_YOURKEY" semlith http://127.0.0.1:7365/mcp
+gemini mcp add --transport http --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}" semlith http://127.0.0.1:7365/mcp
 ```
 
 **Qwen Code** — `~/.qwen/settings.json`, the same schema as Gemini CLI down to
@@ -854,14 +863,14 @@ gemini mcp add --transport http --header "Authorization: Bearer sml_YOURKEY" sem
   "mcpServers": {
     "semlith": {
       "httpUrl": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
 ```
 
 ```sh
-qwen mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+qwen mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **Amp** — `~/.config/amp/settings.json`, or the editor extension's own
@@ -874,7 +883,7 @@ own.
   "amp.mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -895,7 +904,7 @@ editing.
     "semlith": {
       "type": "http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -903,7 +912,7 @@ editing.
 
 **Droid** — `~/.factory/mcp.json` for every project, or `.factory/mcp.json` in
 one repository. `droid mcp add semlith http://127.0.0.1:7365/mcp --type http
---header "Authorization: Bearer sml_YOURKEY"` writes the same object.
+--header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"` writes the same object.
 
 ```json
 {
@@ -911,14 +920,14 @@ one repository. `droid mcp add semlith http://127.0.0.1:7365/mcp --type http
     "semlith": {
       "type": "http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
 ```
 
 ```sh
-droid mcp add semlith http://127.0.0.1:7365/mcp --type http --header "Authorization: Bearer sml_YOURKEY"
+droid mcp add semlith http://127.0.0.1:7365/mcp --type http --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **Goose** — `goose configure` → Add Extension → Remote Extension, or
@@ -934,7 +943,7 @@ extensions:
     enabled: true
     uri: "http://127.0.0.1:7365/mcp"
     headers:
-      Authorization: "Bearer sml_YOURKEY"
+      Authorization: "Bearer ${SEMLITH_AGENT_KEY}"
     timeout: 300
 ```
 
@@ -969,7 +978,7 @@ under `mcp` then `servers`, and the transport field is called `transport`, not
       "semlith": {
         "transport": "streamable-http",
         "url": "http://127.0.0.1:7365/mcp",
-        "headers": { "Authorization": "Bearer sml_YOURKEY" }
+        "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
       }
     }
   }
@@ -977,7 +986,7 @@ under `mcp` then `servers`, and the transport field is called `transport`, not
 ```
 
 ```sh
-openclaw mcp add semlith --url http://127.0.0.1:7365/mcp --transport streamable-http --header "Authorization=Bearer sml_YOURKEY"
+openclaw mcp add semlith --url http://127.0.0.1:7365/mcp --transport streamable-http --header "Authorization=Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **DeepSeek** — `~/.deepseek/mcp.json`, read by DeepSeek-TUI, which has since
@@ -985,7 +994,7 @@ renamed itself Codewhale and now looks in `~/.codewhale/mcp.json` first and
 falls back to the old path. Either file takes `servers` or `mcpServers` as the
 root key, and needs no transport field: a `url` is enough. `codewhale mcp add`
 has no header flag, so the key goes in the environment:
-`export SEMLITH_KEY=sml_YOURKEY`, then
+`export SEMLITH_KEY="$SEMLITH_AGENT_KEY"`, then
 `codewhale mcp add semlith --url "http://127.0.0.1:7365/mcp" --bearer-token-env-var SEMLITH_KEY`.
 
 ```json
@@ -993,7 +1002,7 @@ has no header flag, so the key goes in the environment:
   "mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -1008,7 +1017,7 @@ rejects one holding both.
   "mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
       "start_on_launch": true
     }
   }
@@ -1027,14 +1036,14 @@ profile copy that `MCP: Open User Configuration` opens. The root key is
     "semlith": {
       "type": "http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
 ```
 
 ```sh
-code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp","headers":{"Authorization":"Bearer sml_YOURKEY"}}'
+code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp","headers":{"Authorization":"Bearer ${SEMLITH_AGENT_KEY}"}}'
 ```
 
 **Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one
@@ -1046,7 +1055,7 @@ field of its own; adding one copied from another client confuses it.
   "mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -1061,7 +1070,7 @@ restart, not on a window reload.
   "mcpServers": {
     "semlith": {
       "serverUrl": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -1095,7 +1104,7 @@ with a hyphen.
     "semlith": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -1112,7 +1121,7 @@ falls back to SSE and the endpoint answers 405.
     "semlith": {
       "type": "streamableHttp",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
       "disabled": false,
       "autoApprove": []
     }
@@ -1121,7 +1130,7 @@ falls back to SSE and the endpoint answers 405.
 ```
 
 ```sh
-cline mcp add semlith --transport http --header "Authorization: Bearer sml_YOURKEY" http://127.0.0.1:7365/mcp --yes
+cline mcp add semlith --transport http --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}" http://127.0.0.1:7365/mcp --yes
 ```
 
 **Roo Code** — `.roo/mcp.json` in the project, or the global file the MCP
@@ -1134,7 +1143,7 @@ hyphen, which is the one thing that does not copy across from a Cline config.
     "semlith": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
       "alwaysAllow": ["semlith_search"]
     }
   }
@@ -1151,7 +1160,7 @@ SSE and the connection fails.
     "semlith": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
       "alwaysAllow": ["semlith_search"],
       "disabled": false
     }
@@ -1160,7 +1169,7 @@ SSE and the connection fails.
 ```
 
 ```sh
-kilo mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer sml_YOURKEY"
+kilo mcp add semlith --url http://127.0.0.1:7365/mcp --header "Authorization=Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **Continue** — one block file per server at
@@ -1178,7 +1187,7 @@ mcpServers:
     url: "http://127.0.0.1:7365/mcp"
     requestOptions:
       headers:
-        Authorization: "Bearer sml_YOURKEY"
+        Authorization: "Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 **Kiro** — `.kiro/settings/mcp.json` in the workspace, or
@@ -1191,7 +1200,7 @@ the one you just edited.
   "mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" },
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" },
       "disabled": false,
       "autoApprove": ["semlith_search"]
     }
@@ -1214,7 +1223,7 @@ transport field and a `url` is enough.
   "mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }
@@ -1257,7 +1266,7 @@ the command and the page list what they changed. A client configured somewhere
 else still needs the new stanza pasted in.
 
 ```sh
-claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer sml_YOURKEY"
+claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 ```json
@@ -1265,7 +1274,7 @@ claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Auth
   "mcpServers": {
     "semlith": {
       "url": "http://127.0.0.1:7365/mcp",
-      "headers": { "Authorization": "Bearer sml_YOURKEY" }
+      "headers": { "Authorization": "Bearer ${SEMLITH_AGENT_KEY}" }
     }
   }
 }

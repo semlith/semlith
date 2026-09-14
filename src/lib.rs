@@ -40,7 +40,7 @@ pub mod store;
 pub mod upgrade;
 pub mod watch;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use embed::Model;
 use fastembed::TextEmbedding;
 use filter::Filter;
@@ -210,6 +210,13 @@ pub enum FileOutcome {
     Skipped,
     /// Gone from disk, so its chunks were evicted.
     Removed,
+    /// Named a credential, or sat outside the boundary this caller may index.
+    ///
+    /// Told apart from `Skipped` because the two mean different things to
+    /// whoever reads the line: a skipped file is one semlith has no reader for,
+    /// and a refused one is a file semlith will not read. An agent that asked
+    /// for it needs to know which.
+    Refused,
 }
 
 impl FileOutcome {
@@ -220,7 +227,59 @@ impl FileOutcome {
             Self::Unchanged => "unchanged",
             Self::Skipped => "skipped",
             Self::Removed => "removed",
+            Self::Refused => "refused",
         }
+    }
+}
+
+/// What this caller is allowed to index.
+///
+/// Two different callers, two different answers. The person typing `semlith
+/// index` owns the machine: they are held to the deny-list, because indexing a
+/// private key by accident is a mistake rather than a decision, and
+/// `--include-secrets` is how they say they meant it. An agent holding the
+/// agent key is held to both the deny-list and a boundary, because the whole of
+/// what that key can reach is what a leaked key can reach — and "every file this
+/// user can read" is too much for a credential that lives in a config file.
+///
+/// The default is the CLI's: the deny-list, and no confinement.
+#[derive(Debug, Default, Clone)]
+pub struct Boundary {
+    /// Directories a path must be under. `None` means anywhere, which is what
+    /// the command line gets.
+    pub roots: Option<Vec<PathBuf>>,
+    /// Whether the deny-list is off for this run, which only the command line
+    /// can ask for.
+    pub allow_secrets: bool,
+}
+
+impl Boundary {
+    /// Confine to these roots, and to the home directory.
+    pub fn within(roots: Vec<PathBuf>) -> Self {
+        Self {
+            roots: Some(roots),
+            allow_secrets: false,
+        }
+    }
+
+    /// Why this path may not be indexed, in a line naming the rule.
+    pub fn refuses(&self, path: &Path) -> Option<String> {
+        if let Some(roots) = &self.roots
+            && !filter::within_boundary(path, roots)
+        {
+            return Some(
+                "is outside this store's roots and outside the home directory, so \
+                 semlith will not index it. Add it as a root first, or index it \
+                 from the command line."
+                    .to_string(),
+            );
+        }
+        if !self.allow_secrets
+            && let Some(why) = filter::denied(path)
+        {
+            return Some(why.reason());
+        }
+        None
     }
 }
 
@@ -258,6 +317,13 @@ pub struct IndexReport {
     /// Paths a time-bounded run never reached. Zero unless a budget cut the
     /// run short — an unbounded `index_paths` always finishes what it walked.
     pub remaining: usize,
+    /// Paths refused, each with the rule that refused it.
+    ///
+    /// Listed rather than counted: "three paths were refused" is not something
+    /// an agent or a person can act on, and a refusal that is not named reads
+    /// as a file that quietly failed to index.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<(String, String)>,
     /// Symbols extracted in this run, and the edges between them.
     pub symbols: usize,
     pub edges: usize,
@@ -316,6 +382,9 @@ pub struct Semlith {
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
+    /// What this caller may index. The default is the command line's: the
+    /// deny-list, and no confinement.
+    pub boundary: Boundary,
 }
 
 impl Semlith {
@@ -326,10 +395,19 @@ impl Semlith {
     /// comparable.
     pub fn open(dir: impl AsRef<Path>, model: Option<Model>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating store directory {}", dir.display()))?;
+        // Owner-only, and narrowed on every open rather than only at creation:
+        // a store holds the text of every file it indexed, and one made by an
+        // older semlith is already readable by everyone on the machine.
+        home::secure_dir(&dir)?;
 
-        let db = store::open(&dir.join("store.db"))?;
+        let db_path = dir.join("store.db");
+        let db = store::open(&db_path)?;
+        home::tighten_file(&db_path);
+        // The write-ahead log and its index carry the same rows as the database
+        // and are created by SQLite rather than by semlith.
+        for beside in ["store.db-wal", "store.db-shm"] {
+            home::tighten_file(&dir.join(beside));
+        }
 
         let model = match store::get_meta(&db, "model")? {
             Some(existing) => {
@@ -347,6 +425,10 @@ impl Semlith {
             }
             None => {
                 let m = model.unwrap_or_else(default_model);
+                // Creating a store is a write, and it is the one write that
+                // happens before there is a `Semlith` to ask for permission
+                // through. See `store::read_only`.
+                let _writing = store::Writing::begin(&db)?;
                 store::set_meta(&db, "model", &m.to_string())?;
                 // Only here, where a store is being created. Stamping it on
                 // open would rewrite every store this binary ever reads, and
@@ -381,6 +463,7 @@ impl Semlith {
             clip: image::Clip::default(),
             generation,
             quiet: false,
+            boundary: Boundary::default(),
         })
     }
 
@@ -638,6 +721,34 @@ impl Semlith {
         sweep: bool,
         deadline: Option<std::time::Instant>,
         control: Option<&dyn Fn() -> Flow>,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        // Every path that writes to this store funnels through here, so this is
+        // where the connection stops refusing writes — and, when this returns,
+        // starts refusing them again. See `store::Writing` and `writing` below.
+        self.writing(move |me| me.index_set_writing(paths, sweep, deadline, control, on_file))
+    }
+
+    /// Do something that writes, with the connection's refusal lifted for
+    /// exactly as long as it takes.
+    ///
+    /// A closure rather than a guard because the body needs `&mut self` and a
+    /// guard would be holding `&self.db` for its whole life. The restore runs
+    /// whether the body succeeded or not: a store left writable after a failed
+    /// run is the state this is here to prevent.
+    fn writing<T>(&mut self, body: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        store::read_only(&self.db, false)?;
+        let out = body(self);
+        let _ = store::read_only(&self.db, true);
+        out
+    }
+
+    fn index_set_writing(
+        &mut self,
+        paths: Vec<PathBuf>,
+        sweep: bool,
+        deadline: Option<std::time::Instant>,
+        control: Option<&dyn Fn() -> Flow>,
         mut on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         // A run killed mid-save leaves a temp index behind. Removing it here
@@ -658,7 +769,41 @@ impl Semlith {
         let interval = checkpoint_interval();
         let mut last_checkpoint = std::time::Instant::now();
 
-        let total = paths.len();
+        // Refused before anything is read. A path that names a credential or
+        // sits outside this caller's boundary is reported by name with the rule
+        // that refused it, rather than dropped from the walk — an agent that
+        // asked for a file and got silence cannot tell that from a file that
+        // was not there.
+        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, String)>) = {
+            let mut allowed = Vec::with_capacity(paths.len());
+            let mut refused = Vec::new();
+            for path in paths {
+                match self.boundary.refuses(&path) {
+                    Some(why) => refused.push((path, why)),
+                    None => allowed.push(path),
+                }
+            }
+            (allowed, refused)
+        };
+        let total = paths.len() + refused.len();
+        for (path, why) in &refused {
+            report
+                .refused
+                .push((path.display().to_string(), why.clone()));
+            report.scanned += 1;
+            on_file(
+                path,
+                IndexProgress {
+                    outcome: FileOutcome::Refused,
+                    scanned: report.scanned,
+                    indexed: report.indexed,
+                    chunks: report.chunks,
+                    total,
+                    symbols: report.symbols,
+                },
+            );
+        }
+
         for (seen, path) in paths.into_iter().enumerate() {
             // Only ever after something was embedded: a budget too small for
             // any work at all must still make progress, or calling again is
@@ -703,10 +848,14 @@ impl Semlith {
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
 
-            // Size check before the read, so a multi-gigabyte blob is never
-            // pulled into memory just to be rejected.
-            match std::fs::metadata(&path) {
-                Ok(m) if m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
+            // Opened once, and the size read off the open handle rather than
+            // off the name. Two `stat`s and a `read` of the same path are three
+            // answers about three moments: a file that grew between the check
+            // and the read was read in full anyway, so the cap was advisory.
+            let opened = std::fs::File::open(&path);
+            let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
+            match measured {
+                Some(m) if m.is_file() && m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
                 _ => {
                     // A batch of events can name a file that has just been
                     // deleted or renamed away. Evicting it here is what makes
@@ -747,20 +896,33 @@ impl Semlith {
                     continue;
                 }
             }
-            let Ok(bytes) = std::fs::read(&path) else {
-                report.skipped += 1;
-                on_file(
-                    &path,
-                    IndexProgress {
-                        outcome: FileOutcome::Skipped,
-                        scanned: report.scanned,
-                        indexed: report.indexed,
-                        chunks: report.chunks,
-                        total,
-                        symbols: report.symbols,
-                    },
-                );
-                continue;
+            // From the handle that was measured, through a reader that stops
+            // one byte past the cap: a file that grew between the two is
+            // refused by the `take` rather than read whole.
+            let read = opened.and_then(|file| {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                file.take(chunk::MAX_FILE_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map(|_| bytes)
+            });
+            let bytes = match read {
+                Ok(bytes) if bytes.len() as u64 <= chunk::MAX_FILE_BYTES => bytes,
+                _ => {
+                    report.skipped += 1;
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Skipped,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
+                    continue;
+                }
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -786,6 +948,25 @@ impl Semlith {
             // Handled before `chunk::extract`, which reads a PNG as binary and
             // rejects it.
             if image::is_image(&path) {
+                // Before the decoder sees it. A header claiming 60,000 by
+                // 60,000 pixels is a few hundred bytes on disk and fourteen
+                // gigabytes in memory, and the refusal says which file and how
+                // big it claimed to be.
+                if let Some(why) = image::too_large(&bytes) {
+                    report.refused.push((path.display().to_string(), why));
+                    on_file(
+                        &path,
+                        IndexProgress {
+                            outcome: FileOutcome::Refused,
+                            scanned: report.scanned,
+                            indexed: report.indexed,
+                            chunks: report.chunks,
+                            total,
+                            symbols: report.symbols,
+                        },
+                    );
+                    continue;
+                }
                 let Some((width, height)) = image::dimensions(&bytes) else {
                     report.skipped += 1;
                     on_file(
@@ -1120,6 +1301,10 @@ impl Semlith {
     /// [`Semlith::forget`] without taking the lock, for a caller that already
     /// holds it.
     pub(crate) fn forget_held(&mut self, path: &Path) -> Result<(usize, usize)> {
+        self.writing(|me| me.forget_writing(path))
+    }
+
+    fn forget_writing(&mut self, path: &Path) -> Result<(usize, usize)> {
         let key = canonical(path).to_string_lossy().into_owned();
         // Read before the delete: the cascade that removes the rows is what
         // makes their ids unreadable, and the vectors they address still have
@@ -1536,10 +1721,13 @@ pub fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Overrides [`model_cache_dir`].
+pub const MODEL_CACHE_ENV: &str = "SEMLITH_MODEL_CACHE";
+
 /// Where ONNX model weights are cached. Shared across stores — the weights are
 /// large and identical for a given model.
 pub fn model_cache_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("SEMLITH_MODEL_CACHE") {
+    if let Ok(dir) = std::env::var(MODEL_CACHE_ENV) {
         return PathBuf::from(dir);
     }
     let base = std::env::var("HOME")

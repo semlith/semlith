@@ -170,10 +170,76 @@ pub fn open(path: &Path) -> Result<Connection> {
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.pragma_update(None, "foreign_keys", "ON")?;
+    defensive(&db)?;
     db.execute_batch(SCHEMA)?;
     check_format(&db)?;
     backfill_fts(&db)?;
+    // Everything above is the schema this binary needs in place before the
+    // store is usable at all; from here the connection writes only when a
+    // writer asks.
+    read_only(&db, true)?;
     Ok(db)
+}
+
+/// Treat the file as data rather than as a program.
+///
+/// A SQLite file is a schema as well as rows, and a schema can carry views,
+/// triggers and generated columns that run when the database is merely opened
+/// or read. semlith opens store files it did not necessarily write — a
+/// `.semlith` that a user has trusted arrived from somewhere, and `--store`
+/// opens anything the user names — so both settings are on for every
+/// connection:
+///
+/// - `trusted_schema=OFF` stops a view or a trigger calling the functions
+///   SQLite marks as unsafe for a schema it does not trust;
+/// - `SQLITE_DBCONFIG_DEFENSIVE` refuses writes to shadow tables and to
+///   `sqlite_schema`, which is how a corrupted or crafted FTS5 index turns a
+///   read into something else.
+///
+/// Both are cheap and neither affects a query semlith itself issues, which is
+/// what `tests/measure.rs` is there to keep true.
+fn defensive(db: &Connection) -> Result<()> {
+    db.pragma_update(None, "trusted_schema", "OFF")?;
+    db.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    Ok(())
+}
+
+/// Make this connection refuse writes until a writer says otherwise.
+///
+/// `query_only` rather than `SQLITE_OPEN_READ_ONLY`, because semlith opens one
+/// connection per store and writes through the same handle it reads through:
+/// a read-only open would mean two connections per store and a second answer to
+/// "who holds the writer", which is the one thing the store's design keeps
+/// singular. The property is the same from the file's point of view — a
+/// connection in this state cannot write, whatever it is asked to do — and it
+/// is lifted only by [`Writing`], which the three write paths take.
+pub fn read_only(db: &Connection, on: bool) -> Result<()> {
+    db.pragma_update(None, "query_only", if on { "ON" } else { "OFF" })?;
+    Ok(())
+}
+
+/// Permission to write, given back when it goes out of scope.
+///
+/// Taken by the three methods that write — indexing, forgetting, and recording
+/// a retrieval in the ledger — so every other path through the store is a path
+/// SQLite itself will refuse to write from.
+pub struct Writing<'a>(&'a Connection);
+
+impl<'a> Writing<'a> {
+    pub fn begin(db: &'a Connection) -> Result<Self> {
+        read_only(db, false)?;
+        Ok(Self(db))
+    }
+}
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        // Best effort on purpose: a connection that cannot be put back into
+        // read-only mode is one whose next statement will fail anyway, and a
+        // panic in a destructor would replace a clear error with a confusing
+        // one.
+        let _ = read_only(self.0, true);
+    }
 }
 
 /// The store layout this binary understands.
@@ -981,6 +1047,10 @@ pub fn record_retrieval(
     excerpt_tokens: i64,
     whole_file_tokens: i64,
 ) -> Result<()> {
+    // The ledger is the one write that happens on a read: a retrieval is
+    // recorded by the search that answered it. It asks for the same permission
+    // an index run does.
+    let _writing = Writing::begin(db)?;
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

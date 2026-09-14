@@ -138,12 +138,19 @@ fn the_http_stanzas_name_the_endpoint_and_carry_a_credential() {
             "a {language} HTTP stanza does not name the endpoint:\n{body}"
         );
         assert!(
-            body.contains("Authorization") && body.contains("Bearer sml_"),
-            "a {language} HTTP stanza does not carry the agent key:\n{body}"
+            body.contains("Authorization") && body.contains("Bearer ${SEMLITH_AGENT_KEY}"),
+            "a {language} HTTP stanza does not name the agent key variable:\n{body}"
         );
         assert!(
             !body.contains(NO_PATHS),
             "a {language} HTTP stanza carries {NO_PATHS}:\n{body}"
+        );
+        // The literal key belongs in one file with one set of permissions, not
+        // in a dozen configuration files a rotation then has to find.
+        assert!(
+            !body.contains("sml_"),
+            "a {language} HTTP stanza carries a literal key rather than the \
+             variable:\n{body}"
         );
     }
 }

@@ -3125,3 +3125,71 @@ td.row-end {
   width: 18px;
   height: 18px;
 }
+
+/* The Privacy page's Rules section.
+ *
+ * One row per rule, with the daemon's own reading of it on the right. The
+ * reading is the point: a row that only stated the rule would be a sentence
+ * somebody wrote, and these are meant to be checkable. */
+.rules {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.rule-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-3) 0 0;
+  border-top: 1px solid var(--line);
+}
+.rule-row:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.rule-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.rule-id {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.rule-text {
+  color: var(--muted);
+  margin: 0;
+  max-width: 68ch;
+}
+/* What the daemon found, under the rule it is about. A column beside the rule
+ * spends the card's whole width on the one row whose reading is a path, and
+ * wraps every other one into ragged thirds. */
+.rule-found {
+  align-items: baseline;
+  display: flex;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.rule-found .eyebrow {
+  flex-shrink: 0;
+}
+.rule-check {
+  color: var(--fg);
+  font-size: 0.85em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rule-row.bad .rule-check {
+  color: var(--red);
+}
+
+/* A path that was refused rather than skipped. A skipped file is one semlith
+ * has no reader for; a refused one is a file semlith will not read, and the
+ * difference is the whole reason the outcome is its own word. */
+.log .line.refused .outcome {
+  color: var(--red);
+}
+.log .line.refused {
+  opacity: 1;
+}

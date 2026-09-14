@@ -224,3 +224,202 @@ fn top(s: &mut Semlith, query: &str) -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// The weights are what computes every vector in every store, so a cache
+/// holding a file that is not the one this release pins is refused by name
+/// rather than loaded. A model that changed under a user would change what
+/// their corpus means without changing anything they can see.
+#[test]
+#[ignore = "copies the real model cache, so it needs one"]
+fn a_model_file_that_is_not_the_pinned_one_is_refused_by_name() {
+    let real = real_cache();
+    let snapshot = real
+        .join("models--onnx-community--granite-embedding-small-english-r2-ONNX")
+        .join("snapshots")
+        .join(semlith::embed::GRANITE_REVISION);
+    if !snapshot.is_dir() {
+        eprintln!(
+            "no cached granite snapshot at {}; run the suite once first",
+            snapshot.display()
+        );
+        return;
+    }
+
+    let cache = tempfile::tempdir().unwrap();
+    let into = cache
+        .path()
+        .join("models--onnx-community--granite-embedding-small-english-r2-ONNX")
+        .join("snapshots")
+        .join(semlith::embed::GRANITE_REVISION);
+    copy_tree(&snapshot, &into);
+
+    // One byte. A corrupted download and a substituted one look the same from
+    // here, which is the point.
+    let tokenizer = into.join("tokenizer.json");
+    let mut bytes = fs::read(&tokenizer).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0x01;
+    fs::write(&tokenizer, &bytes).unwrap();
+
+    let corpus = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "a.md",
+        "Ownership means each value has one owner.",
+    );
+    let store = tempfile::tempdir().unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", corpus.path().to_str().unwrap(), "--quiet"])
+        .arg("--store")
+        .arg(store.path())
+        .env("SEMLITH_MODEL_CACHE", cache.path())
+        .output()
+        .expect("running semlith index");
+    assert!(!out.status.success(), "a tampered model file was loaded");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("tokenizer.json") && said.contains("does not match the digest"),
+        "the refusal does not name the file and the digest:\n{said}"
+    );
+    assert!(
+        said.contains("expected") && said.contains("got"),
+        "the refusal does not show both digests:\n{said}"
+    );
+}
+
+/// A cache another account can write to is a model another account chooses, and
+/// the choosing is invisible: a corpus embedded by a different model still
+/// answers, just differently.
+#[test]
+#[cfg(unix)]
+fn a_model_cache_anyone_can_write_to_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let cache = tempfile::tempdir().unwrap();
+    fs::set_permissions(cache.path(), fs::Permissions::from_mode(0o777)).unwrap();
+
+    let corpus = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "a.md",
+        "Ownership means each value has one owner.",
+    );
+    let store = tempfile::tempdir().unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", corpus.path().to_str().unwrap(), "--quiet"])
+        .arg("--store")
+        .arg(store.path())
+        .env("SEMLITH_MODEL_CACHE", cache.path())
+        .output()
+        .expect("running semlith index");
+    assert!(
+        !out.status.success(),
+        "a world-writable model cache was used"
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("777") && said.contains("chmod 700"),
+        "the refusal should name the mode and the fix:\n{said}"
+    );
+}
+
+fn real_cache() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("SEMLITH_MODEL_CACHE") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".cache")
+        .join("semlith")
+        .join("models")
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            // The cache is symlinks into `blobs/`, so the bytes are copied
+            // rather than the links, which is what makes the tamper local to
+            // this test's own cache.
+            let bytes = fs::read(entry.path()).unwrap();
+            fs::write(&target, bytes).unwrap();
+        }
+    }
+}
+
+/// The stamp that keeps a load from hashing 52 MB every time must not become a
+/// way to skip the check. A file that changed is a file whose size or age
+/// changed, so the stamp stops matching and the digests are read again.
+#[test]
+#[ignore = "copies the real model cache, so it needs one"]
+fn the_verification_stamp_does_not_outlive_the_bytes_it_is_about() {
+    let real = real_cache();
+    let snapshot = real
+        .join("models--onnx-community--granite-embedding-small-english-r2-ONNX")
+        .join("snapshots")
+        .join(semlith::embed::GRANITE_REVISION);
+    if !snapshot.is_dir() {
+        eprintln!("no cached granite snapshot; run the suite once first");
+        return;
+    }
+
+    let cache = tempfile::tempdir().unwrap();
+    let into = cache
+        .path()
+        .join("models--onnx-community--granite-embedding-small-english-r2-ONNX")
+        .join("snapshots")
+        .join(semlith::embed::GRANITE_REVISION);
+    copy_tree(&snapshot, &into);
+
+    let corpus = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "a.md",
+        "Ownership means each value has one owner.",
+    );
+
+    let index = |store: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(["index", corpus.path().to_str().unwrap(), "--quiet"])
+            .arg("--store")
+            .arg(store)
+            .env("SEMLITH_MODEL_CACHE", cache.path())
+            .output()
+            .expect("running semlith index")
+    };
+
+    // The first run verifies and leaves a stamp; the second trusts it.
+    let first = tempfile::tempdir().unwrap();
+    assert!(index(first.path()).status.success());
+    assert!(
+        into.join(".semlith-verified").exists(),
+        "the first load left no stamp, so every load pays for the digests"
+    );
+
+    let second = tempfile::tempdir().unwrap();
+    assert!(index(second.path()).status.success());
+
+    // Now change a file without touching the stamp. Its size and age move, so
+    // the stamp no longer describes it and the digest is read again.
+    let tokenizer = into.join("tokenizer.json");
+    let mut bytes = fs::read(&tokenizer).unwrap();
+    let at = bytes.len() / 2;
+    bytes[at] ^= 0x01;
+    fs::write(&tokenizer, &bytes).unwrap();
+
+    let third = tempfile::tempdir().unwrap();
+    let out = index(third.path());
+    assert!(
+        !out.status.success(),
+        "the stamp let a changed file through"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("does not match the digest"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
