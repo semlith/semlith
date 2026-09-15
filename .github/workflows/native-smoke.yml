@@ -1,0 +1,120 @@
+name: native-smoke
+
+# Exploratory native runs on the three operating systems semlith ships for.
+# Nothing here uses the repo toolchain: the binary comes from the same
+# installer a user runs, so what breaks here breaks for them.
+#
+# Three modes, picked at dispatch:
+#   smoke  always: install the release, drive every command, upload the log.
+#   ssh    open a tmate shell on each runner after the smoke, for poking by
+#          hand. The session is tied to the dispatching user's SSH keys.
+#   hunt   let Claude Code loose on the installed binary with a bug-finding
+#          brief, and upload its report. Needs the ANTHROPIC_API_KEY secret.
+
+on:
+  # TEMPORARY: lets the branch run before the file exists on main. Remove before merge.
+  push:
+    branches: [feat/native-smoke]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to install (empty = latest)
+        default: ""
+      os:
+        description: Which runners
+        type: choice
+        default: all
+        options: [all, ubuntu-latest, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+      ssh:
+        description: Open an SSH shell on each runner after the smoke
+        type: boolean
+        default: false
+      hunt:
+        description: Run the Claude Code bug hunt after the smoke
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          if [ "${{ inputs.os || 'all' }}" = all ]; then
+            echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["${{ inputs.os }}"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  smoke:
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    # Six hours is the hosted-runner ceiling; the SSH session lives inside it.
+    timeout-minutes: ${{ inputs.ssh && 360 || 45 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    env:
+      SEMLITH_VERSION: ${{ inputs.version }}
+      SEMLITH_YES: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install the release the way a user does
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh install.sh
+          echo "$HOME/.semlith/bin" >> "$GITHUB_PATH"
+
+      - name: Install the release the way a user does
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\install.ps1
+          Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
+
+      - name: Smoke
+        id: smoke
+        shell: bash
+        run: bash .github/smoke.sh 2>&1 | tee "smoke-${{ matrix.os }}.log"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: smoke-${{ matrix.os }}
+          path: smoke-${{ matrix.os }}.log
+
+      - name: Bug hunt
+        if: inputs.hunt && always()
+        shell: bash
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude -p "$(cat .github/hunt-prompt.md)" \
+            --allowedTools "Bash,Read,Write,Glob,Grep" \
+            --max-turns 80 \
+            > "hunt-${{ matrix.os }}.md"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: inputs.hunt && always()
+        with:
+          name: hunt-${{ matrix.os }}
+          path: hunt-${{ matrix.os }}.md
+
+      # Last, so a failed smoke still hands over a shell with the failure in
+      # place. Ends when you `touch continue` (or `sudo touch /continue`),
+      # or ten minutes after the last client disconnects.
+      - name: SSH shell
+        if: inputs.ssh && always()
+        uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113 # v3.24
+        with:
+          limit-access-to-actor: true
