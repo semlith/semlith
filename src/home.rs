@@ -62,10 +62,9 @@ pub fn user_home() -> Result<PathBuf> {
         }
         let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
         let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
-        if let (Some(drive), Some(path)) = (drive, path) {
-            let mut joined = std::ffi::OsString::from(drive);
-            joined.push(path);
-            return Ok(PathBuf::from(joined));
+        if let (Some(mut drive), Some(path)) = (drive, path) {
+            drive.push(path);
+            return Ok(PathBuf::from(drive));
         }
         bail!(
             "none of HOME, USERPROFILE or HOMEDRIVE+HOMEPATH is set, so semlith does \

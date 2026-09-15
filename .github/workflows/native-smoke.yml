@@ -88,6 +88,39 @@ jobs:
           .\install.ps1
           Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
 
+      # On a pull request, the checks are about the code under review, so the
+      # installed release is replaced by this branch's own build. The installer
+      # still ran: PATH, the store home and the model download are its work, and
+      # what changes is only which binary sits in `~/.semlith/bin`.
+      #
+      # Without this the harness re-measured the last published release on every
+      # pull request, which is a run that cannot fail for anything in the diff --
+      # and `known-failures.txt` says a fix cannot land without its row coming
+      # out in the same breath, which only means anything if the fix is what ran.
+      # A dispatch with a version still installs and tests that release.
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: github.event_name == 'pull_request'
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        if: github.event_name == 'pull_request'
+
+      - name: Build this branch and put it where the installer put its binary
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          cargo build --release --locked
+          if [ "$RUNNER_OS" = Windows ]; then
+            built=target/release/semlith.exe
+            # install.ps1 wrote into PowerShell's $HOME, which is USERPROFILE.
+            # cygpath turns that into the form this shell can copy to.
+            target="$(cygpath -u "$USERPROFILE")/.semlith/bin/semlith.exe"
+          else
+            built=target/release/semlith
+            target="$HOME/.semlith/bin/semlith"
+          fi
+          cp "$built" "$target"
+          "$target" --version
+
       # First, and under PowerShell on every operating system. Git Bash sets
       # HOME and Windows does not, so a check that only ever runs under bash
       # cannot see what a person launching the daemon from PowerShell hits.
