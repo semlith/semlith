@@ -10,12 +10,4 @@
 # Columns: id, platform, issue number, note.
 # Platform is one of: all, unix, windows, linux, macos.
 
-# #74 Windows locators are printed as \\?\ verbatim paths.
-cli/files/no-verbatim-paths     windows   74   canonicalize returns the verbatim form
-cli/search/no-verbatim-paths    windows   74   same prefix on every hit
-cli/read/span                   windows   74   a corpus-relative target does not resolve
-cli/read/line                   windows   74   the same, for path:line
-cli/read/json                   windows   74   the same, for --json
-portal/search/no-verbatim       windows   74   the same prefix through the portal
-
 

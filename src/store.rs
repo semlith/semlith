@@ -605,7 +605,7 @@ pub fn chunks_overlapping(
     let rows = stmt.query_map(params![path, end, start], |r| {
         Ok(ChunkRow {
             id: r.get(0)?,
-            path: r.get(1)?,
+            path: crate::plain(&r.get::<_, String>(1)?),
             ord: r.get(2)?,
             start_line: r.get(3)?,
             end_line: r.get(4)?,
@@ -625,7 +625,7 @@ pub fn chunk(db: &Connection, id: u64) -> Result<Option<ChunkRow>> {
             |r| {
                 Ok(ChunkRow {
                     id: r.get(0)?,
-                    path: r.get(1)?,
+                    path: crate::plain(&r.get::<_, String>(1)?),
                     ord: r.get(2)?,
                     start_line: r.get(3)?,
                     end_line: r.get(4)?,
@@ -726,7 +726,7 @@ pub fn file_rows(
     args.push(Value::Integer(take.max(0)));
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
         Ok(FileRow {
-            path: r.get(0)?,
+            path: crate::plain(&r.get::<_, String>(0)?),
             bytes: r.get(1)?,
             chunks: r.get(2)?,
             lines: r.get(3)?,
@@ -813,7 +813,7 @@ pub fn image(db: &Connection, id: i64) -> Result<Option<ImageRow>> {
             |r| {
                 Ok(ImageRow {
                     id: r.get(0)?,
-                    path: r.get(1)?,
+                    path: crate::plain(&r.get::<_, String>(1)?),
                     width: r.get(2)?,
                     height: r.get(3)?,
                 })
@@ -961,7 +961,7 @@ const SYMBOL_COLUMNS: &str =
 fn symbol_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolRow> {
     Ok(SymbolRow {
         id: r.get(0)?,
-        path: r.get(1)?,
+        path: crate::plain(&r.get::<_, String>(1)?),
         kind: r.get(2)?,
         name: r.get(3)?,
         qualified: r.get(4)?,
@@ -1146,7 +1146,7 @@ pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Ed
             kind: r.get(8)?,
             confidence: r.get(9)?,
             hint: r.get(10)?,
-            src_path: r.get(11)?,
+            src_path: crate::plain(&r.get::<_, String>(11)?),
             src_line: r.get(12)?,
             line: r.get(13)?,
         })

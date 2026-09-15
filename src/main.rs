@@ -1783,11 +1783,14 @@ fn not_indexed(path: &std::path::Path) -> String {
 }
 
 fn display(path: &std::path::Path) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    path.strip_prefix(&cwd)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    // Both sides canonicalised, or neither matches on Windows: the file comes
+    // back from `canonicalize` in the verbatim form and the working directory
+    // does not, so `strip_prefix` never fired and every hit printed absolute —
+    // in a form nothing can open (#74).
+    let cwd = semlith::canonical(&std::env::current_dir().unwrap_or_default());
+    let real = semlith::canonical(path);
+    let shown = real.strip_prefix(&cwd).unwrap_or(&real);
+    semlith::plain(&shown.display().to_string())
 }
 
 fn bold() -> &'static str {

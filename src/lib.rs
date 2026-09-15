@@ -1970,7 +1970,7 @@ impl Semlith {
                     hits.push((
                         Hit {
                             score,
-                            path: row.path,
+                            path: plain(&row.path),
                             start_line: 0,
                             end_line: 0,
                             text: String::new(),
@@ -2004,7 +2004,7 @@ impl Semlith {
                 hits.push((
                     Hit {
                         score,
-                        path: row.path,
+                        path: plain(&row.path),
                         start_line: row.start_line,
                         end_line: row.end_line,
                         text: row.text,
@@ -2404,6 +2404,38 @@ pub fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// A path as a person or an agent should read it.
+///
+/// `std::fs::canonicalize` on Windows returns the verbatim form —
+/// `\\?\C:\work\api\src\lock.rs`, or `\\?\UNC\server\share\...` for a network
+/// path — which is what the store holds and what the long-path APIs need. It is
+/// not what an editor opens, what a shell completes, or what anybody pastes
+/// back: every locator semlith printed on Windows was unusable (#74).
+///
+/// The store keeps the verbatim form, because that is what makes a path longer
+/// than 260 characters work. Only the text on its way out is plain, and
+/// `semlith read` takes either.
+///
+/// A dozen lines rather than a crate: this runs on every hit and every row, and
+/// the rule is two prefixes.
+pub fn plain(text: &str) -> String {
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match text.strip_prefix(r"\\?\") {
+        // Only a drive-letter path. `\\?\Volume{...}` names a volume with no
+        // mount point, and shortening that would make it name nothing.
+        Some(rest)
+            if rest.len() >= 2
+                && rest.as_bytes()[0].is_ascii_alphabetic()
+                && rest.as_bytes()[1] == b':' =>
+        {
+            rest.to_string()
+        }
+        _ => text.to_string(),
+    }
+}
+
 /// Overrides [`model_cache_dir`].
 pub const MODEL_CACHE_ENV: &str = "SEMLITH_MODEL_CACHE";
 
@@ -2741,5 +2773,41 @@ mod tests {
         let d = std::env::temp_dir().join(format!("semlith-test-b-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+}
+
+#[cfg(test)]
+mod plain_path_tests {
+    use super::plain;
+
+    /// Runs on every platform against literal strings, because the bug is about
+    /// text and a macOS machine can still prove the rule (#74).
+    #[test]
+    fn a_verbatim_prefix_is_not_what_anybody_pastes_back() {
+        assert_eq!(
+            plain(r"\\?\C:\work\api\src\lock.rs"),
+            r"C:\work\api\src\lock.rs"
+        );
+        assert_eq!(plain(r"\\?\c:\work"), r"c:\work");
+        // A UNC path keeps both leading slashes, which is the form that opens.
+        assert_eq!(
+            plain(r"\\?\UNC\server\share\notes.md"),
+            r"\\server\share\notes.md"
+        );
+        // A volume with no mount point is named by that GUID and by nothing
+        // else, so shortening it would leave a path that names nothing.
+        let volume = r"\\?\Volume{9f8a7b6c-0000-0000-0000-000000000000}\data";
+        assert_eq!(plain(volume), volume);
+        // Everything else is left exactly as it is.
+        assert_eq!(
+            plain("/home/someone/api/src/lock.rs"),
+            "/home/someone/api/src/lock.rs"
+        );
+        assert_eq!(plain(r"C:\work\api"), r"C:\work\api");
+        assert_eq!(
+            plain(r"\\server\share\notes.md"),
+            r"\\server\share\notes.md"
+        );
+        assert_eq!(plain(""), "");
     }
 }
