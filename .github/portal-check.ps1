@@ -132,28 +132,17 @@ $script:nativeIndex = $false
 Check 'portal/env/native-shell-index' 'index works in the native shell' -When $script:repoReady {
     $out = & semlith index --quiet $repo 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Fail "semlith index exited $LASTEXITCODE`n$($out.Trim())" }
-    if ($out -match 'neither SEMLITH_HOME nor HOME is set') {
+    if ($out -match 'does not know where') {
         Fail "no store home in this shell's environment`n$($out.Trim())"
     }
     $script:nativeIndex = $true
 }
 
-# The check above is the record that the native lookup is broken. Leaving it
-# there would then skip every portal check that needs a store, which on Windows
-# is most of them -- so the platform carrying the most bugs would be the one
-# with the least coverage. SEMLITH_HOME stands in from here.
-#
-# Only SEMLITH_HOME, never HOME: the directory browser reads HOME itself, so
-# leaving it unset keeps #71 reproducing rather than papering over it too.
-if ($script:repoReady -and -not $script:nativeIndex) {
-    $env:SEMLITH_HOME = Join-Path $HOME '.semlith'
-    Write-Host "note: the native lookup failed, so SEMLITH_HOME is set to $($env:SEMLITH_HOME)"
-    Write-Host "      from here, to exercise the rest of the portal rather than skip it."
-    $out = & semlith index --quiet $repo 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "      the fallback index also failed: $($out.Trim())"
-    }
-}
+# No SEMLITH_HOME fallback from here. It existed because the native lookup
+# failed on Windows and every later check that needs a store would otherwise
+# have been skipped -- 22 of 34 in the first full run. 0.17.1 resolves the home
+# from USERPROFILE, so the native lookup is the thing that provides the store
+# and there is nothing to stand in for it (#82).
 
 Check 'portal/env/no-store-in-cwd' 'no store is written to the working directory' {
     if (Test-Path (Join-Path $PWD.Path '.semlith')) {
@@ -451,12 +440,21 @@ Check 'portal/search/k' 'k bounds the hit count' -When $script:hasData {
     if ($n -eq 0) { Fail "k=2 returned nothing" }
 }
 
+# A page is cut out of one search, so the comparison is against that search and
+# not against a shallower one. Rank fusion combines each list's top-k, so the
+# ranking for k=1 is not the first row of the ranking for k=2 -- asking for
+# "offset=1 differs from k=1" would be asking the engine for a property it does
+# not have, and passing it would mean the ranking had stopped depending on k.
 Check 'portal/search/offset' 'offset moves the window' -When $script:hasData {
-    $a = (Get-Json '/api/search?query=store&k=1').hits[0]
-    $b = (Get-Json '/api/search?query=store&k=1&offset=1').hits[0]
-    if ($null -eq $a -or $null -eq $b) { Fail "one of the two requests returned no hit" }
-    if ("$($a.path):$($a.start_line)" -eq "$($b.path):$($b.start_line)") {
-        Fail "offset=1 returned the same hit: $($a.path):$($a.start_line)"
+    $page = Get-Json '/api/search?query=store&k=2'
+    $second = $page.hits[1]
+    if ($null -eq $second) { Fail "k=2 returned fewer than two hits, so this proves nothing" }
+    $body = Get-Json '/api/search?query=store&k=1&offset=1'
+    $b = $body.hits[0]
+    if ($null -eq $b) { Fail "offset=1 returned no hit" }
+    if ($body.offset -ne 1) { Fail "the response does not echo the offset: $($body.offset)" }
+    if ("$($b.path):$($b.start_line)" -ne "$($second.path):$($second.start_line)") {
+        Fail "offset=1 gave $($b.path):$($b.start_line), not the second hit $($second.path):$($second.start_line)"
     }
 }
 
@@ -531,7 +529,9 @@ Check 'portal/add/bad-scheme' 'a non-https URL is refused' -When $script:hasData
 }
 
 Check 'portal/forget/removes' 'forget drops a file from the store' -When $script:hasData {
-    $target = (Get-Json '/api/files').files |
+    # The whole listing, not the default first page: the page is path-sorted and
+    # a corpus whose first fifteen files are prose has no Rust file on it.
+    $target = (Get-Json '/api/files?limit=500').files |
         Where-Object { "$_" -match '\.rs$' -or $_.path -match '\.rs$' } |
         Select-Object -First 1
     $path = if ($target -is [string]) { $target } else { $target.path }

@@ -527,7 +527,10 @@ fn owned(current: &Path) -> bool {
         return false;
     };
     let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    real(parent) == real(&home::bin_dir())
+    // An unresolvable home owns nothing: the question is whether this binary
+    // sits in the directory the installer manages, and with no home there is no
+    // such directory to be in.
+    home::bin_dir().is_ok_and(|bin| real(parent) == real(&bin))
 }
 
 /// `releases/latest` redirects to the newest tag; the tag is the last segment

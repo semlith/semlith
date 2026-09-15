@@ -423,3 +423,250 @@ fn the_verification_stamp_does_not_outlive_the_bytes_it_is_about() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `forget` has to remove the file the listing just printed.
+///
+/// The library-level cycle above already covers `Semlith::forget`, and it
+/// passes — which is exactly why this one goes through the binary. The command
+/// resolves its store from the working directory rather than from the path it
+/// was handed, so a `forget` run from anywhere but the corpus asks a store that
+/// has never heard of the file, removes nothing, and says so while exiting 0.
+/// That is #77, and a caller that believes the exit status believes the file is
+/// gone.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn forget_removes_the_file_the_listing_printed() {
+    let corpus = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    // Deliberately not the corpus: a user forgetting a file is usually standing
+    // somewhere else, and so is every agent.
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough starter needs flour and water fed daily.",
+    );
+    write(
+        corpus.path(),
+        "cells.md",
+        "Mitochondria are the powerhouse of the cell.",
+    );
+
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(args)
+            .current_dir(elsewhere.path())
+            .env("SEMLITH_HOME", home.path())
+            .output()
+            .unwrap()
+    };
+
+    let indexed = run(&["index", "--quiet", &corpus.path().display().to_string()]);
+    assert!(
+        indexed.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let before = run(&["files"]);
+    let listing = String::from_utf8_lossy(&before.stdout).into_owned();
+    let target = listing
+        .lines()
+        .find(|line| line.trim().ends_with("bread.md"))
+        .unwrap_or_else(|| {
+            panic!("bread.md is not in the listing, so this proves nothing:\n{listing}")
+        })
+        .trim()
+        .to_string();
+
+    let forgotten = run(&["forget", &target]);
+    let said = String::from_utf8_lossy(&forgotten.stderr).into_owned();
+    assert!(
+        forgotten.status.success(),
+        "forget of a listed path failed: {said}"
+    );
+    assert!(
+        !said.contains("nothing"),
+        "forget removed nothing from the store that holds the file: {said}"
+    );
+
+    let after = String::from_utf8_lossy(&run(&["files"]).stdout).into_owned();
+    assert!(
+        !after.lines().any(|line| line.trim().ends_with("bread.md")),
+        "still listed after forget:\n{after}"
+    );
+    assert!(
+        after.lines().any(|line| line.trim().ends_with("cells.md")),
+        "forget took the wrong file with it:\n{after}"
+    );
+
+    // And a path nothing ever indexed is not a success.
+    let missing = corpus.path().join("there-is-no-such-file.md");
+    let out = run(&["forget", &missing.display().to_string()]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "forgetting an unindexed path exited 0: {said}"
+    );
+    assert!(
+        said.contains("nothing to forget"),
+        "the message should name what did not happen: {said}"
+    );
+}
+
+/// `drop` is checked in the same pass as `forget`, because it is the same
+/// shape of claim: the command says a store is gone, so the directory and the
+/// registry entry both have to be.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn drop_removes_the_directory_and_the_registry_entry() {
+    let corpus = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough starter needs flour and water fed daily.",
+    );
+
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(args)
+            .current_dir(elsewhere.path())
+            .env("SEMLITH_HOME", home.path())
+            .output()
+            .unwrap()
+    };
+
+    let indexed = run(&["index", "--quiet", &corpus.path().display().to_string()]);
+    assert!(
+        indexed.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let registry = home.path().join("registry.json");
+    let named: Vec<String> =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&registry).unwrap()).unwrap()
+            ["stores"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+    let [name] = named.as_slice() else {
+        panic!("one index run should make one store, not {named:?}");
+    };
+    let dir = home.path().join("stores").join(name);
+    assert!(dir.is_dir(), "{} was never created", dir.display());
+
+    let dropped = run(&["drop", name, "--yes"]);
+    assert!(
+        dropped.status.success(),
+        "drop failed: {}",
+        String::from_utf8_lossy(&dropped.stderr)
+    );
+    assert!(!dir.exists(), "{} is still on disk", dir.display());
+    let after =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&registry).unwrap()).unwrap();
+    assert!(
+        after["stores"].as_object().unwrap().is_empty(),
+        "the registry still lists the dropped store: {after}"
+    );
+}
+
+/// A path that cannot be read creates nothing, registers nothing, and exits
+/// non-zero.
+///
+/// Opening a store is what creates it, so a check that came after the open left
+/// an empty store registered under the typo's own name and reported success
+/// (#76).
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn indexing_a_path_that_cannot_be_read_leaves_nothing_behind() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let missing = elsewhere.path().join("there-is-no-such-directory");
+
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(args)
+            .current_dir(elsewhere.path())
+            .env("SEMLITH_HOME", home.path())
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["index", "--quiet", &missing.display().to_string()]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a missing path indexed cleanly: {said}"
+    );
+    assert!(
+        said.contains("there-is-no-such-directory"),
+        "the error should name the path: {said}"
+    );
+    assert!(
+        !home.path().join("stores").exists(),
+        "a store directory was created for a path that cannot be read"
+    );
+    assert!(
+        !home.path().join("registry.json").exists(),
+        "the registry records a store for a path that cannot be read"
+    );
+
+    // A readable root beside an unreadable one is still indexed, and the run
+    // still fails, so a script sees it.
+    let good = elsewhere.path().join("good");
+    std::fs::create_dir_all(&good).unwrap();
+    write(
+        &good,
+        "notes.md",
+        "Sourdough starter needs flour and water.",
+    );
+
+    let out = run(&[
+        "index",
+        "--quiet",
+        &good.display().to_string(),
+        &missing.display().to_string(),
+    ]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a partial failure reported success: {said}"
+    );
+    assert!(
+        said.contains("there-is-no-such-directory"),
+        "the unreadable root is not named: {said}"
+    );
+
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.path().join("registry.json")).unwrap())
+            .unwrap();
+    let recorded = registry["stores"].as_object().unwrap();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "one readable root, one store: {registry}"
+    );
+    let roots = recorded.values().next().unwrap()["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        roots.iter().all(|r| !r.contains("there-is-no-such")),
+        "an unreadable root was registered: {roots:?}"
+    );
+
+    let listed = String::from_utf8_lossy(&run(&["files"]).stdout).into_owned();
+    assert!(
+        listed.lines().any(|l| l.trim().ends_with("notes.md")),
+        "the readable root was not indexed:\n{listed}"
+    );
+}

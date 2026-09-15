@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-09-15
+
+Ten bugs. Four of them are one bug: Windows sets no `HOME`, and semlith read it
+in nine places that each had a different answer when it was missing. The rest are
+what a person meets on the first day — a path printed in a form nothing opens, a
+pipe closed early, a root that cannot be read, a forget that removes nothing, a
+page parameter checked and ignored. No new command, no new tool, no new argument
+and no schema change.
+
+### One home-directory helper
+
+- **#70 — the store home resolves on Windows.** `semlith::home::user_home()` is
+  the only place in `src/` that reads the environment for a home directory:
+  `HOME`, then `USERPROFILE`, then `HOMEDRIVE` plus `HOMEPATH`, and an error
+  naming `SEMLITH_HOME` when it knows none of them. `stores_root`, `bin_dir`,
+  `registry_path`, `agent_key_path`, `Registry::dir_of` and `model_cache_dir`
+  return a `Result` and every caller propagates it. The Windows store home is
+  `%USERPROFILE%\.semlith`, the directory `install.ps1` already puts the binary
+  in.
+- **#71 — the portal's directory browser refuses instead of rooting at the
+  drive.** `GET /api/dirs` answered from the filesystem root when the home was
+  unknown, and then refused the user's own profile as outside it. It answers 500
+  and names the variables to set.
+- **#72 — the directory deny-list fails closed.** A path that cannot be checked
+  against `~/.ssh`, `~/.kube` and the rest is refused rather than waved through.
+  On Windows, where the home never resolved, those rules had never run at all.
+- **#73 — a run with no home is an error, not a store in the working
+  directory.** `home()` and its silent `./.semlith` fallback are deleted. They
+  were writing a store, a registry, an agent key and 52 MB of model weights
+  wherever the process happened to start.
+
+### Fixed
+
+- **#74 — paths print in the form the platform opens.** `canonicalize` returns
+  the verbatim form on Windows, so every locator began `\\?\` — which no editor
+  opens and nobody pastes back. The prefix is stripped where a path becomes
+  text — search hits, file rows, image rows, symbol rows, call-site paths — on
+  the CLI and its `--json`, in MCP tool results and in the portal's
+  `/api/search` and `/api/files`. The store keeps the verbatim form, which is
+  what makes a path over 260 characters work, and `semlith read` accepts either.
+- **#75 — `semlith files | head` exits quietly.** It printed a panic and exited
+  non-zero. On unix the default `SIGPIPE` disposition is restored at the top of
+  `main`; on Windows, which has no `SIGPIPE`, a hook turns that one panic — a
+  failed print to a closed pipe, and nothing else — into a silent exit 0.
+- **#76 — an unreadable index root creates nothing and registers nothing.**
+  Opening a store is what creates it, so checking the paths afterwards left an
+  empty store behind for a typo and exited 0. The roots are checked first, and
+  the CLI, `POST /api/index` and `semlith_index` all refuse before a store is
+  chosen. A run with a mix indexes the readable roots, names each unreadable one,
+  records only the readable roots, and still exits 1.
+- **#77 — `semlith forget` forgets the file the listing printed, and `semlith
+  drop` runs at all.** `forget` resolved its store from the working directory
+  rather than from the path it was handed, so a run from anywhere but the corpus
+  removed nothing and exited 0; it is anchored on the path now, and a path no
+  store holds is `nothing to forget: <path> is not indexed` on stderr with a
+  non-zero status. `POST /api/forget` answers 404 for that case instead of 200
+  with a zero count. `drop` panicked before deleting anything, because its
+  positional argument shared the id `store` with the global `--store` flag, which
+  clap refuses; the argument is called `name` and the usage line is unchanged.
+- **#78 — `GET /api/search` applies the offset it validates.** It asks for
+  offset + k hits and returns the page from offset, echoing `offset` back the way
+  `/api/files` already does. The other read routes were audited in the same pass:
+  every other parameter they validate is used.
+
+### Notes
+
+- **Five answers change where the old one reported success:** a blocked `index`
+  run, a `forget` of a path that is not indexed, `POST /api/forget` on the same
+  case, the rows `GET /api/search` returns for an `offset`, and the status a
+  process ends with when the reader of its pipe goes away.
+  `docs/compatibility.md` records each one with what it returned before.
+- **A Windows user may have a stray `.semlith`.** Everything #73 wrote into the
+  working directory is still there: look in whatever directory semlith was first
+  run from, for a `.semlith` holding the stores, the registry and the model
+  cache. This release stops creating it and does not move the one already there.
+  A user who worked around #70 by setting `SEMLITH_HOME` is unaffected — it is
+  still read first, and their stores do not move.
+- **#82 — the harness ledger is empty of real rows.** Every entry in
+  `.github/known-failures.txt` was a check one of these issues closes, so it goes
+  back to holding only its header, and `portal-check.ps1` loses the
+  `SEMLITH_HOME` fallback that stood in for the broken lookup.
+- **No store format change.** `FORMAT_VERSION` stays 2, no table and no column is
+  added, and a 0.17.0 store and a 0.17.1 store are byte-compatible in both
+  directions.
+
 ## [0.17.0] - 2026-09-15
 
 The code graph covered six of the forty-six languages `--lang` accepts. That gap
