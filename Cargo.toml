@@ -43,11 +43,10 @@ serde_json = "1.0.151"
 sha2 = "0.10.9"
 turbovec = "1.0.0"
 notify = "8.2.0"
-# The structure half of the store. One parser plus a grammar per language that
-# carries edges; each grammar's own `TAGS_QUERY` supplies the definitions, and
-# `graph.rs` adds a short query per language for what that query leaves out —
-# none of the six ship import captures, and TypeScript and C ship no call
-# captures either.
+# The structure half of the store. One parser plus a grammar for every language
+# `filter::LANGUAGES` advertises. Where a grammar ships its own `TAGS_QUERY`
+# that supplies the definitions and `graph.rs` adds a short supplement for what
+# it leaves out; where it ships none, the query lives in `queries/<language>/`.
 tree-sitter = "0.27.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"

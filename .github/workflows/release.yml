@@ -184,7 +184,10 @@ jobs:
           if [ -d runtime ]; then
             cp runtime/libonnxruntime.so "dist/$name/"
           fi
-          cp README.md LICENSE CHANGELOG.md "dist/$name/"
+          # THIRD-PARTY-NOTICES is an obligation of the grammar licences the
+          # binary links, so it travels with the binary rather than only with
+          # the source.
+          cp README.md LICENSE CHANGELOG.md THIRD-PARTY-NOTICES "dist/$name/"
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "$name.zip" "$name"
