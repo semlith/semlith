@@ -241,7 +241,14 @@ enum Command {
     /// entry naming it. The files it indexed are not touched.
     Drop {
         /// The registered store's name, as `semlith stats` prints it.
-        store: String,
+        ///
+        /// Called `name` rather than `store` because `--store` is a global
+        /// argument: two arguments with the same id in one subcommand is a
+        /// clap panic at parse time, so every `semlith drop` panicked instead
+        /// of deleting anything. The value name keeps the usage line reading
+        /// `semlith drop <STORE>`.
+        #[arg(value_name = "STORE")]
+        name: String,
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
@@ -1255,16 +1262,30 @@ fn main() -> Result<()> {
         }
 
         Command::Forget { path } => {
-            let choice = home::resolve(&cli.store, &cwd, None)?;
+            // Anchored on the file, the way `index` is anchored on the path it
+            // is given. Resolving from the working directory asked whichever
+            // store covers wherever the user happened to be standing, which for
+            // a forget run from anywhere but the corpus is a store that has
+            // never held the file: it removed nothing, said so, and exited 0
+            // (#77). A caller that believes the exit status believes the file
+            // is gone.
+            let choice = home::resolve(&cli.store, &path, None)?;
             if let Some(hint) = choice.hint() {
                 eprintln!("{hint}");
             }
+            // `New` is the store that *would* be created for this path. Opening
+            // it would create an empty store directory to delete nothing from.
+            if matches!(choice, home::Choice::New { .. }) {
+                anyhow::bail!(not_indexed(&path));
+            }
             let mut store = Semlith::open(&choice.one()?, None)?;
             let (chunks, images) = store.forget(&path)?;
+            if chunks == 0 && images == 0 {
+                anyhow::bail!(not_indexed(&path));
+            }
             // An image has no chunks, so a message counting only chunks would
             // report a successful forget as having done nothing.
             let what = match (chunks, images) {
-                (0, 0) => "nothing — it was not indexed".to_string(),
                 (0, images) => format!("{images} image vector(s)"),
                 (chunks, 0) => format!("{chunks} chunks"),
                 (chunks, images) => format!("{chunks} chunks and {images} image vector(s)"),
@@ -1272,7 +1293,7 @@ fn main() -> Result<()> {
             eprintln!("removed {what} for {}", path.display());
         }
 
-        Command::Drop { store, yes } => {
+        Command::Drop { name: store, yes } => {
             let dir = semlith::home::Registry::dir_of(&store);
             if !semlith::home::Registry::load()?.stores.contains_key(&store) {
                 anyhow::bail!("no registered store called {store}");
@@ -1671,6 +1692,14 @@ const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
     client: "cli",
     session: "cli",
 };
+
+/// What a forget of a path no store holds says, on stderr, before exiting 1.
+///
+/// One sentence rather than a suggestion: the path is either a typo or already
+/// gone, and semlith cannot tell which.
+fn not_indexed(path: &std::path::Path) -> String {
+    format!("nothing to forget: {} is not indexed", path.display())
+}
 
 fn display(path: &std::path::Path) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();

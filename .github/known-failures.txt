@@ -38,10 +38,6 @@ cli/pipe/survives-truncation    all       75   panics instead of exiting quietly
 # #76 A path that cannot be read still creates and registers a store.
 cli/index/missing-registers-nothing  all   76   an empty store is left behind
 
-# #77 forget removes nothing and still exits 0.
-cli/forget/removes                   all   77   the file is still listed afterwards
-portal/forget/removes                all   77   the same route, the same no-op
-
 # #78 The search route validates an offset it never applies.
 portal/search/offset                 all   78   offset=1 returns the same hit
 

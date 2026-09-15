@@ -1512,20 +1512,27 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
             Ok(v) => v,
             Err(_) => return Response::error(500, "the writer stopped before answering"),
         };
+        let chunks = value.get("forgot").and_then(Value::as_i64).unwrap_or(0);
+        let pictures = value.get("images").and_then(Value::as_i64).unwrap_or(0);
         // One path keeps the answer it has always had, so the MCP tool and
-        // every existing caller read the same shape.
+        // every existing caller read the same shape — except that a path the
+        // store never held is a 404 rather than a 200 saying zero. A client
+        // that reads the status and not the body used to be told the file was
+        // gone (#77).
         if single {
+            if chunks == 0 && pictures == 0 {
+                return Response::error(404, &format!("{path} is not indexed"));
+            }
             return Response::json(&value);
         }
-        let chunks = value.get("forgot").and_then(Value::as_i64).unwrap_or(0);
-        if chunks == 0 && value.get("images").and_then(Value::as_i64).unwrap_or(0) == 0 {
+        if chunks == 0 && pictures == 0 {
             missing.push(path.clone());
         }
         forgot += chunks;
-        images += value.get("images").and_then(Value::as_i64).unwrap_or(0);
+        images += pictures;
     }
     let kept = paths.len() - missing.len();
-    Response::json(&json!({
+    let body = json!({
         "files": kept,
         "asked": paths.len(),
         "forgot": forgot,
@@ -1536,7 +1543,13 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
             if kept == 1 { "" } else { "s" },
             if forgot == 1 { "" } else { "s" },
         ),
-    }))
+    });
+    // A set where nothing was removed is not a success either, and the body
+    // already names which paths were not indexed.
+    if kept == 0 {
+        return Response::new(404, "application/json", body.to_string().into_bytes());
+    }
+    Response::json(&body)
 }
 
 /// Delete a store: everything semlith derived from a corpus, and the registry
