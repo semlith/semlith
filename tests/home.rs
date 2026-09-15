@@ -133,11 +133,22 @@ fn a_local_store_still_wins_and_says_how_to_move_it() {
     assert!(trusted.status.success(), "{}", text(&trusted));
 
     // `forget` writes, so it goes through the same single-store resolution
-    // `index` does — and unlike `index` it embeds nothing.
+    // `index` does — and unlike `index` it embeds nothing. From 0.17.1 a path
+    // the store does not hold exits non-zero rather than reporting a removal
+    // of nothing, so what this asserts is the resolution and the hint, not the
+    // status (#77).
     let out = s.run(&s.work, &["forget", "nothing.md"]);
-    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        !out.status.success(),
+        "forgetting a path no store holds is not a success: {}",
+        text(&out)
+    );
 
     let said = text(&out);
+    assert!(
+        said.contains("nothing to forget"),
+        "the refusal should say what did not happen: {said}"
+    );
     assert!(
         said.contains(".semlith") && said.contains("semlith adopt"),
         "a local store must be reported with the adopt hint: {said}"
@@ -677,12 +688,12 @@ fn a_run_with_no_home_at_all_is_an_error_naming_both_variables() {
 fn a_registry_name_cannot_name_a_directory_outside_the_home() {
     use semlith::home::Registry;
 
-    let inside = Registry::dir_of("api");
+    let inside = Registry::dir_of("api").unwrap();
     assert!(inside.ends_with("stores/api"), "{}", inside.display());
 
     for hostile in ["../../etc", "..", "a/b", "/etc/passwd"] {
-        let dir = Registry::dir_of(hostile);
-        let stores = semlith::home::stores_root();
+        let dir = Registry::dir_of(hostile).unwrap();
+        let stores = semlith::home::stores_root().unwrap();
         assert!(
             dir.starts_with(&stores),
             "{hostile} escaped the store root: {}",
@@ -695,4 +706,140 @@ fn a_registry_name_cannot_name_a_directory_outside_the_home() {
             dir.display()
         );
     }
+}
+
+/// A machine with no home is an error, everywhere, rather than a store in the
+/// working directory.
+///
+/// Before 0.17.1 `home()` fell back to `./.semlith`, so a run with no
+/// environment — a Windows shell, a container entrypoint, a cron job — wrote a
+/// store, a registry and an agent key into whatever directory it started in and
+/// said nothing (#73). On Windows that was every ordinary run, because nothing
+/// sets `HOME` there (#70).
+#[test]
+fn a_missing_home_is_an_error_and_never_the_working_directory() {
+    let work = tempfile::Builder::new()
+        .prefix("semlith-no-home-")
+        .tempdir()
+        .unwrap();
+    let corpus = work.path().join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("notes.md"), "Sourdough needs flour.").unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", "--quiet", &corpus.display().to_string()])
+        .current_dir(work.path())
+        .env_remove("HOME")
+        .env_remove("SEMLITH_HOME")
+        .env_remove("SEMLITH_STORE")
+        .env_remove("USERPROFILE")
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
+        .output()
+        .expect("semlith runs");
+
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "indexing with no home anywhere succeeded: {said}"
+    );
+    assert!(
+        said.contains("SEMLITH_HOME"),
+        "the error should name the variable that fixes it: {said}"
+    );
+    assert!(
+        !work.path().join(".semlith").exists(),
+        "a store was written into the working directory"
+    );
+    assert!(
+        !work.path().join(".cache").exists(),
+        "the model cache was written into the working directory"
+    );
+}
+
+/// Every platform's home resolution reads one variable, and on Windows the one
+/// the installer used.
+#[test]
+fn the_store_home_follows_the_home_directory() {
+    let home = tempfile::Builder::new()
+        .prefix("semlith-home-var-")
+        .tempdir()
+        .unwrap();
+    let work = tempfile::Builder::new()
+        .prefix("semlith-home-work-")
+        .tempdir()
+        .unwrap();
+    let corpus = work.path().join("corpus");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("notes.md"), "Sourdough needs flour.").unwrap();
+
+    // The variable the platform actually sets: `HOME` on unix, `USERPROFILE` on
+    // Windows, where `install.ps1` put the binary under the same profile.
+    let variable = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["stats"])
+        .current_dir(work.path())
+        .env_remove("SEMLITH_HOME")
+        .env_remove("SEMLITH_STORE")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
+        .env(variable, home.path())
+        .output()
+        .expect("semlith runs");
+
+    let said =
+        String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains(&home.path().join(".semlith").display().to_string())
+            || said.contains(&home.path().display().to_string()),
+        "the store home did not follow {variable}: {said}"
+    );
+    assert!(
+        !work.path().join(".semlith").exists(),
+        "a store was written into the working directory"
+    );
+}
+
+/// One home-directory helper, and a test that stops a tenth lookup being added.
+///
+/// The nine `HOME` lookups that disagreed with each other are what #70 to #73
+/// are: the store home, the model cache, the portal's directory browser, the
+/// deny-list, the index boundary and `semlith setup` each asked the environment
+/// themselves and each had a different answer when it was not there.
+#[test]
+fn home_is_read_in_exactly_one_place() {
+    let mut found: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (number, line) in text.lines().enumerate() {
+            // Prose about the rule is not a second reader of the variable.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains(r#"var_os("HOME")"#) || line.contains(r#"var("HOME")"#) {
+                found.push(format!(
+                    "{}:{}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    number + 1
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        found.len(),
+        1,
+        "HOME is read in {} places, and they will disagree: {found:?}",
+        found.len()
+    );
+    assert!(
+        found[0].starts_with("home.rs"),
+        "the one lookup must be the helper in home.rs, not {}",
+        found[0]
+    );
 }

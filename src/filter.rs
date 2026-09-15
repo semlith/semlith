@@ -457,6 +457,11 @@ pub enum Denied {
     /// A dotfile, which the walker skips and an explicit path used to slip
     /// past.
     Hidden,
+    /// The home directory could not be determined, so whether this path is
+    /// under one of the credential directories is not knowable. The rule fails
+    /// closed: on Windows, where nothing sets `HOME`, it used to be skipped
+    /// entirely and `~/.kube/config` was indexed like any other file (#72).
+    NoHome,
 }
 
 impl Denied {
@@ -473,6 +478,9 @@ impl Denied {
             Denied::Hidden => "is a hidden file, which semlith skips when walking and does not \
                  index when named"
                 .to_string(),
+            Denied::NoHome => "cannot be checked against the credential directories, because \
+                 semlith cannot tell where your home directory is — set SEMLITH_HOME, or HOME"
+                .to_string(),
         }
     }
 }
@@ -484,14 +492,25 @@ impl Denied {
 /// directories under them, and an explicit `semlith_index ~/.ssh/id_rsa` went
 /// straight past all of it.
 pub fn denied(path: &Path) -> Option<Denied> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if let Some(home) = home {
-        let home = crate::canonical(&home);
-        let real = crate::canonical(path);
-        for dir in DENIED_DIRS {
-            if real.starts_with(home.join(dir)) {
-                return Some(Denied::Directory(dir));
-            }
+    denied_against(path, crate::home::user_home().ok().as_deref())
+}
+
+/// [`denied`] against a home given rather than resolved, so the case that
+/// matters — there is no home — is a test rather than an environment variable
+/// three threads are fighting over.
+///
+/// Fails closed. An unknown home used to mean the directory rules were skipped
+/// and everything under them sailed through, which on Windows — where nothing
+/// sets `HOME` — was every run (#72).
+pub(crate) fn denied_against(path: &Path, home: Option<&Path>) -> Option<Denied> {
+    let Some(home) = home else {
+        return Some(Denied::NoHome);
+    };
+    let home = crate::canonical(home);
+    let real = crate::canonical(path);
+    for dir in DENIED_DIRS {
+        if real.starts_with(home.join(dir)) {
+            return Some(Denied::Directory(dir));
         }
     }
 
@@ -567,10 +586,9 @@ pub fn within_boundary(path: &Path, roots: &[PathBuf]) -> bool {
     {
         return true;
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| real.starts_with(crate::canonical(&home)))
-        .unwrap_or(false)
+    // An unknown home makes this stricter rather than looser: nothing is inside
+    // a boundary semlith cannot locate.
+    crate::home::user_home().is_ok_and(|home| real.starts_with(crate::canonical(&home)))
 }
 
 #[cfg(test)]
@@ -593,6 +611,35 @@ mod deny_tests {
         assert!(glob_match("*secret*", "my-secrets.yaml"));
         assert!(!glob_match("*secret*", "secrat"));
         assert!(glob_match("*.tfstate", "terraform.tfstate"));
+    }
+
+    /// The rule that refuses `~/.ssh` and `~/.kube` has to hold when semlith
+    /// cannot tell where home is, not be skipped. On Windows nothing sets
+    /// `HOME`, so before 0.17.1 this was every run on that platform: the
+    /// deny-list was documented on the Privacy page and did not run (#72).
+    #[test]
+    fn a_path_is_refused_when_the_home_directory_is_unknown() {
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            denied_against(&home.join(".kube").join("config"), Some(home)),
+            Some(Denied::Directory(".kube")),
+            "the rule does not hold with a home"
+        );
+        assert_eq!(
+            denied_against(Path::new("/srv/corpus/notes.md"), None),
+            Some(Denied::NoHome),
+            "an unknown home let an ordinary path through, so it let ~/.kube through too"
+        );
+        assert_eq!(
+            denied_against(&home.join(".kube").join("config"), None),
+            Some(Denied::NoHome),
+            "the credential itself must not slip past either"
+        );
+        let refusal = Denied::NoHome.reason();
+        assert!(
+            refusal.contains("home directory"),
+            "the reason should say what semlith could not determine: {refusal}"
+        );
     }
 
     /// The case the finding is about: a file an agent asked for by name, which

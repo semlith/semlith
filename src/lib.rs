@@ -865,7 +865,7 @@ impl Semlith {
             // chunk (base64, minified JS) blow up attention memory for no
             // retrieval benefit; two characters per token is a safe floor for
             // real text and code.
-            let cache = model_cache_dir();
+            let cache = model_cache_dir()?;
             // Read from the same cache, in the same breath. The ledger counts
             // tokens with it, so it is loaded exactly when the model is and
             // never fetched on its own.
@@ -2409,14 +2409,18 @@ pub const MODEL_CACHE_ENV: &str = "SEMLITH_MODEL_CACHE";
 
 /// Where ONNX model weights are cached. Shared across stores — the weights are
 /// large and identical for a given model.
-pub fn model_cache_dir() -> PathBuf {
+///
+/// An error rather than `.` when there is no home: 52 MB of weights written
+/// into whatever directory the process started in is not a cache, it is litter
+/// that the next run does not find either (#73).
+pub fn model_cache_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var(MODEL_CACHE_ENV) {
-        return PathBuf::from(dir);
+        return Ok(PathBuf::from(dir));
     }
-    let base = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    base.join(".cache").join("semlith").join("models")
+    Ok(home::user_home()?
+        .join(".cache")
+        .join("semlith")
+        .join("models"))
 }
 
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns

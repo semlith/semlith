@@ -29,51 +29,87 @@ use std::path::{Path, PathBuf};
 /// platform conventions, and anyone who disagrees sets this.
 pub const HOME_ENV: &str = "SEMLITH_HOME";
 
-/// Where stores live: `~/.semlith`, or whatever [`HOME_ENV`] names.
+/// The variable [`user_home`] starts from, named so that a test which has to
+/// save and restore it does not become a second place that reads it. The
+/// invariant is that `var_os("HOME")` appears once in `src/`, inside
+/// [`user_home`], and `tests/home.rs` asserts exactly that.
+pub const HOME_VAR: &str = "HOME";
+
+/// The user's home directory, per platform. The only place in `src/` that
+/// reads `HOME`.
 ///
-/// With neither variable set this used to fall back to `.` — so a semlith run
-/// by a daemon supervisor, a cron job or a container entrypoint with no
-/// environment created `./.semlith` in whatever directory it happened to start
-/// in, and wrote the registry and the agent key there. [`home_or_error`] is the
-/// form that says so; this one keeps the fallback for the callers that only
-/// want a path to show.
-pub fn home() -> PathBuf {
-    home_or_error().unwrap_or_else(|_| PathBuf::from(".").join(".semlith"))
+/// `HOME` when it is set and non-empty, which covers unix and every Windows
+/// shell that sets it (Git Bash, MSYS, WSL). On Windows nothing sets it by
+/// default, so `USERPROFILE` comes next — it is what `install.ps1` used to
+/// place the binary and what PowerShell derives `$HOME` from, so matching it
+/// is what makes the installer and the runtime agree — and then the
+/// `HOMEDRIVE` + `HOMEPATH` pair that predates it. Nothing else: a resolution
+/// order with a default at the end is the bug this function exists to remove
+/// (#70, #73).
+///
+/// There is deliberately no variant of this that returns a path when it does
+/// not know one. Every caller takes the `Result`, so a machine with no home
+/// gets an error naming the variables rather than a store, a registry and an
+/// agent key written into whatever directory the process started in.
+pub fn user_home() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(dir) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+            return Ok(PathBuf::from(dir));
+        }
+        let drive = std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty());
+        let path = std::env::var_os("HOMEPATH").filter(|v| !v.is_empty());
+        if let (Some(drive), Some(path)) = (drive, path) {
+            let mut joined = std::ffi::OsString::from(drive);
+            joined.push(path);
+            return Ok(PathBuf::from(joined));
+        }
+        bail!(
+            "none of HOME, USERPROFILE or HOMEDRIVE+HOMEPATH is set, so semlith does \
+             not know where your home directory is. Set {HOME_ENV} to the directory \
+             you want its stores in."
+        );
+    }
+    #[cfg(not(windows))]
+    bail!(
+        "HOME is not set, so semlith does not know where your home directory is. \
+         Set {HOME_ENV} to the directory you want its stores in."
+    )
 }
 
-/// The store home, or an error naming both variables.
+/// The store home: [`HOME_ENV`] when set, else `<home>/.semlith`.
+///
+/// With neither available this is an error rather than `./.semlith`. A semlith
+/// run by a daemon supervisor, a cron job, a container entrypoint or a Windows
+/// shell with no environment used to create a store, a registry and an agent
+/// key in whatever directory it happened to start in, and say nothing.
 pub fn home_or_error() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os(HOME_ENV).filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(dir));
     }
-    match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
-        Some(base) => Ok(PathBuf::from(base).join(".semlith")),
-        None => bail!(
-            "neither {HOME_ENV} nor HOME is set, so semlith does not know where its \
-             stores live. Set {HOME_ENV} to the directory you want them in — \
-             writing them into the working directory would put a store, a registry \
-             and an agent key wherever this process happened to start."
-        ),
-    }
+    Ok(user_home()?.join(".semlith"))
 }
 
 /// The directory holding one subdirectory per store.
-pub fn stores_root() -> PathBuf {
-    home().join("stores")
+pub fn stores_root() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("stores"))
 }
 
 /// Where the install scripts put the binary, and where `semlith setup` looks
 /// for it. Inside the home rather than beside it so that `SEMLITH_HOME` moves
 /// one directory and not two, and so an uninstall is one `rm -rf`.
-pub fn bin_dir() -> PathBuf {
-    home().join("bin")
+pub fn bin_dir() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("bin"))
 }
 
 /// The registry file. Model weights deliberately do not live under the home:
 /// a cache is deletable and a store is not, so weights stay in
 /// `~/.cache/semlith/models`.
-pub fn registry_path() -> PathBuf {
-    home().join("registry.json")
+pub fn registry_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("registry.json"))
 }
 
 /// Where the agent key lives.
@@ -82,8 +118,8 @@ pub fn registry_path() -> PathBuf {
 /// endpoint, which serves every store the daemon opened, and a credential that
 /// moved when a store was adopted would be a credential every client had to be
 /// told about again.
-pub fn agent_key_path() -> PathBuf {
-    home().join("agent.key")
+pub fn agent_key_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("agent.key"))
 }
 
 /// The prefix every agent key carries, so one is recognisable in a config file
@@ -99,7 +135,7 @@ pub const AGENT_KEY_PREFIX: &str = "sml_";
 /// write — `setup.rs` already records that only Claude Code's config is safe
 /// to write to.
 pub fn agent_key() -> Result<String> {
-    let path = agent_key_path();
+    let path = agent_key_path()?;
     if path.exists() {
         let key = std::fs::read_to_string(&path)
             .with_context(|| format!("reading the agent key at {}", path.display()))?
@@ -154,7 +190,7 @@ fn new_agent_key() -> String {
 }
 
 fn write_agent_key(key: &str) -> Result<()> {
-    let path = agent_key_path();
+    let path = agent_key_path()?;
     if let Some(parent) = path.parent() {
         secure_dir(parent)?;
     }
@@ -347,7 +383,7 @@ impl Registry {
     /// corpus that already has one, and the first store's vectors would then
     /// quietly stop being updated.
     pub fn load() -> Result<Self> {
-        let path = registry_path();
+        let path = registry_path()?;
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
@@ -366,7 +402,7 @@ impl Registry {
     /// Written to a temporary file and renamed, so a process killed mid-write
     /// leaves the previous registry rather than half of a new one.
     pub fn save(&self) -> Result<()> {
-        let path = registry_path();
+        let path = registry_path()?;
         let dir = path.parent().unwrap_or(Path::new("."));
         secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
         // A name of this process's own. `registry.json.new` was one fixed name
@@ -390,12 +426,12 @@ impl Registry {
     /// public function taking a string that becomes a path, and a registry
     /// somebody edited by hand — which is not supported, and happens — should
     /// not be able to name `../..`.
-    pub fn dir_of(name: &str) -> PathBuf {
-        stores_root().join(sanitize(name))
+    pub fn dir_of(name: &str) -> Result<PathBuf> {
+        Ok(stores_root()?.join(sanitize(name)))
     }
 
     /// Every registered store's directory, in name order.
-    pub fn dirs(&self) -> Vec<PathBuf> {
+    pub fn dirs(&self) -> Result<Vec<PathBuf>> {
         self.stores.keys().map(|n| Self::dir_of(n)).collect()
     }
 
@@ -425,7 +461,7 @@ impl Registry {
         self.stores
             .keys()
             .map(String::as_str)
-            .find(|n| crate::canonical(&Self::dir_of(n)) == dir)
+            .find(|n| Self::dir_of(n).is_ok_and(|theirs| crate::canonical(&theirs) == dir))
     }
 
     /// Record a store and the root it covers, creating the entry if new.
@@ -461,7 +497,7 @@ impl Registry {
     /// there. Anything else has to be in the list.
     pub fn trusts(&self, dir: &Path) -> bool {
         let dir = crate::canonical(dir);
-        if dir.starts_with(crate::canonical(&home())) {
+        if home_or_error().is_ok_and(|home| dir.starts_with(crate::canonical(&home))) {
             return true;
         }
         self.trusted.iter().any(|t| crate::canonical(t) == dir)
@@ -495,7 +531,8 @@ impl Registry {
     /// merging them would make every search answer about the wrong one.
     pub fn free_name(&self, stem: &str) -> String {
         let stem = sanitize(stem);
-        let taken = |n: &str| self.stores.contains_key(n) || Self::dir_of(n).exists();
+        let taken =
+            |n: &str| self.stores.contains_key(n) || Self::dir_of(n).is_ok_and(|d| d.exists());
         if !taken(&stem) {
             return stem;
         }
@@ -571,7 +608,7 @@ impl Choice {
                  so `semlith mcp` and `semlith start` find it with no flags",
                 dir.display(),
                 dir.display(),
-                stores_root().display(),
+                store_home_for_humans(),
             )),
             _ => None,
         }
@@ -613,7 +650,7 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
     // the store to use or to create, and nothing else may answer for it.
     if let Some(name) = name {
         let name = sanitize(name);
-        let dir = Registry::dir_of(&name);
+        let dir = Registry::dir_of(&name)?;
         return Ok(if registry.stores.contains_key(&name) {
             Choice::Registered { name, dir }
         } else {
@@ -637,7 +674,7 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
     if let Some((name, _)) = registry.covering(&canonical_anchor) {
         return Ok(Choice::Registered {
             name: name.to_string(),
-            dir: Registry::dir_of(name),
+            dir: Registry::dir_of(name)?,
         });
     }
 
@@ -648,7 +685,7 @@ pub fn resolve(flags: &[PathBuf], anchor: &Path, name: Option<&str>) -> Result<C
         .unwrap_or_else(|| "store".to_string());
     let name = registry.free_name(&stem);
     Ok(Choice::New {
-        dir: Registry::dir_of(&name),
+        dir: Registry::dir_of(&name)?,
         name,
         root: canonical_anchor,
     })
@@ -717,7 +754,7 @@ pub fn all_dirs(flags: &[PathBuf], cwd: &Path) -> Result<Vec<PathBuf>> {
         }
         out.push(local);
     }
-    for dir in registry.dirs() {
+    for dir in registry.dirs()? {
         if dir.join("store.db").exists() {
             out.push(dir);
         }
@@ -775,8 +812,18 @@ fn untrusted(dir: &Path) -> String {
         dir.display(),
         dir.display(),
         dir.display(),
-        stores_root().display(),
+        store_home_for_humans(),
     )
+}
+
+/// The store home as a sentence fragment, for a message that is advice rather
+/// than an answer. A hint is not worth failing a command over, and naming a
+/// path semlith cannot resolve would be worse than naming none.
+fn store_home_for_humans() -> String {
+    match stores_root() {
+        Ok(dir) => dir.display().to_string(),
+        Err(_) => "the store home".to_string(),
+    }
 }
 
 /// Move an existing store directory into the home and register it.
@@ -816,9 +863,9 @@ pub fn adopt(source: &Path, root: Option<&Path>, name: Option<&str>) -> Result<(
         None => label_for(&source),
     };
     let name = registry.free_name(&stem);
-    let target = Registry::dir_of(&name);
+    let target = Registry::dir_of(&name)?;
 
-    secure_dir(&stores_root())?;
+    secure_dir(&stores_root()?)?;
     match std::fs::rename(&source, &target) {
         Ok(()) => {}
         Err(_) => {
@@ -890,7 +937,7 @@ pub fn delete_store(name: &str) -> Result<PathBuf> {
                 .join(", ")
         );
     }
-    let dir = Registry::dir_of(name);
+    let dir = Registry::dir_of(name)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
     }
@@ -1094,7 +1141,7 @@ mod agent_key_tests {
         let home = tempfile::tempdir().unwrap();
         temp_env(home.path(), || {
             agent_key().unwrap();
-            let mode = std::fs::metadata(agent_key_path())
+            let mode = std::fs::metadata(agent_key_path().unwrap())
                 .unwrap()
                 .permissions()
                 .mode()
@@ -1111,7 +1158,7 @@ mod agent_key_tests {
         let home = tempfile::tempdir().unwrap();
         temp_env(home.path(), || {
             agent_key().unwrap();
-            let path = agent_key_path();
+            let path = agent_key_path().unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
             let refused = agent_key().unwrap_err().to_string();
             assert!(refused.contains("is mode 644"), "{refused}");

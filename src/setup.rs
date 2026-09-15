@@ -84,14 +84,20 @@ pub const INSTALL_PS1: &str =
 
 /// Read-only. Every field is a question the portal asks and `run` answers.
 pub fn status() -> Status {
+    // The one place in this file that cannot return an error: the portal asks
+    // for a status and gets one. An unresolvable home makes every step report
+    // what it could not find, rather than reporting a path semlith made up.
     let bin = home::bin_dir();
+    let bin_path = bin.as_deref().unwrap_or(Path::new(""));
     let rc = rc_file();
     let block = rc
         .as_deref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|text| text.contains(BEGIN))
         .unwrap_or(false);
-    let cache = model_cache_dir();
+    // A cache that cannot be resolved is a cache with nothing in it, which is
+    // what the model step already reports.
+    let cache = model_cache_dir().unwrap_or_default();
 
     // Each of these is asked once and then reused. `claude_registered` spawns
     // `claude mcp list` and waits for it, and this function used to call it
@@ -99,8 +105,8 @@ pub fn status() -> Status {
     // once for its detail. On a machine where that CLI is slow it turned the
     // portal's Agents page into a twenty-second wait that looked like a hang.
     let registered = claude_registered();
-    let installed = bin.join(exe_name()).exists();
-    let path_has_bin = on_path(&bin);
+    let installed = bin.is_ok() && bin_path.join(exe_name()).exists();
+    let path_has_bin = bin.is_ok() && on_path(bin_path);
     let model_cached = embed::is_cached(&cache);
 
     let steps = vec![
@@ -111,7 +117,10 @@ pub fn status() -> Status {
             } else {
                 State::Skipped
             },
-            detail: bin.join(exe_name()).display().to_string(),
+            detail: match &bin {
+                Ok(dir) => dir.join(exe_name()).display().to_string(),
+                Err(e) => e.to_string(),
+            },
         },
         Step {
             name: "path",
@@ -156,7 +165,7 @@ pub fn status() -> Status {
     ];
 
     Status {
-        bin_dir: bin.display().to_string(),
+        bin_dir: bin_path.display().to_string(),
         binary_installed: installed,
         on_path: path_has_bin,
         rc_file: rc.map(|p| p.display().to_string()),
@@ -195,7 +204,9 @@ pub fn run(yes: bool, airgap: bool) -> Result<()> {
         "Next: `semlith index .` to index this directory, then `semlith start` \
          for the portal on http://127.0.0.1:7365\n  Open a new shell first if \
          {} was only just added to PATH.",
-        home::bin_dir().display()
+        home::bin_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|e| e.to_string())
     ));
     Ok(())
 }
@@ -230,7 +241,7 @@ fn on_path(bin: &Path) -> bool {
 /// Step 1. The scripts put the binary here themselves; this covers the person
 /// who downloaded an archive by hand and then ran `semlith setup` out of it.
 fn step_binary(yes: bool) -> Result<Step> {
-    let bin = home::bin_dir();
+    let bin = home::bin_dir()?;
     let target = bin.join(exe_name());
     let running = std::env::current_exe().context("locating the running binary")?;
 
@@ -273,7 +284,7 @@ fn step_binary(yes: bool) -> Result<Step> {
 /// binary off `PATH` after an otherwise perfect install. Only a missing HOME
 /// means there is genuinely nowhere to write.
 fn rc_file() -> Option<PathBuf> {
-    let base = PathBuf::from(std::env::var_os("HOME")?);
+    let base = home::user_home().ok()?;
     let shell = std::env::var("SHELL").unwrap_or_default();
     let name = Path::new(&shell)
         .file_name()
@@ -307,7 +318,7 @@ pub fn run_path_step() -> Result<Step> {
 }
 
 fn step_path(yes: bool) -> Result<Step> {
-    let bin = home::bin_dir();
+    let bin = home::bin_dir()?;
     if on_path(&bin) {
         return Ok(Step {
             name: "path",
@@ -404,7 +415,7 @@ fn path_line(bin: &Path) -> Result<String> {
     let is_fish = std::env::var("SHELL")
         .map(|s| s.ends_with("fish"))
         .unwrap_or(false);
-    let key = home::agent_key_path().display().to_string();
+    let key = home::agent_key_path()?.display().to_string();
     if key.contains('\n') || key.contains('\r') || key.contains('\0') {
         bail!(
             "the agent key path contains a newline, so it cannot be written into a shell startup file"
@@ -510,7 +521,7 @@ fn step_path_windows(bin: &Path, yes: bool) -> Result<Step> {
 /// itself when it is not told to be quiet, so this reuses the loader every
 /// other command uses rather than plumbing a second progress path.
 fn step_model(yes: bool, airgap: bool) -> Result<Step> {
-    let cache = model_cache_dir();
+    let cache = model_cache_dir()?;
     if embed::is_cached(&cache) {
         return Ok(Step {
             name: "model",
@@ -714,7 +725,7 @@ fn claude_registered() -> Option<bool> {
 /// Step 5. Runs the binary that was just installed, not this process, because
 /// the question is whether the installed one works.
 fn step_verify() -> Result<Step> {
-    let target = home::bin_dir().join(exe_name());
+    let target = home::bin_dir()?.join(exe_name());
     let which = if target.exists() {
         target
     } else {
@@ -813,7 +824,7 @@ pub fn recarry_key(previous: &str, fresh: &str) -> Vec<PathBuf> {
 /// costs nothing and missing one costs a manual edit after a rotation.
 fn client_configs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(home_dir) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Ok(home_dir) = home::user_home() {
         for rest in [
             // Claude Code writes the user scope here, and `claude mcp add`
             // does too.
@@ -907,12 +918,12 @@ mod rotation_tests {
 
         // `HOME` is process-wide, so this test is serialised with the others
         // that set it by living in its own module and setting it back.
-        let was = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", &home_dir) };
+        let was = std::env::var_os(home::HOME_VAR);
+        unsafe { std::env::set_var(home::HOME_VAR, &home_dir) };
         let changed = recarry_key(&previous, &fresh);
         match was {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
+            Some(v) => unsafe { std::env::set_var(home::HOME_VAR, v) },
+            None => unsafe { std::env::remove_var(home::HOME_VAR) },
         }
 
         assert_eq!(changed, vec![carries.clone()], "{changed:?}");

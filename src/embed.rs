@@ -378,7 +378,7 @@ pub fn airgap() -> bool {
 /// the first image a store indexed open a socket on a machine whose whole point
 /// is that it does not.
 pub fn refuse_if_airgapped(model: &str) -> Result<()> {
-    let cache = crate::model_cache_dir();
+    let cache = crate::model_cache_dir()?;
     if airgap() && !model_is_cached(&cache, model) {
         bail!(
             "{AIRGAP_ENV} is set and {model} is not cached at {} — \

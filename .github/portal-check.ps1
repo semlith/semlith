@@ -132,28 +132,17 @@ $script:nativeIndex = $false
 Check 'portal/env/native-shell-index' 'index works in the native shell' -When $script:repoReady {
     $out = & semlith index --quiet $repo 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Fail "semlith index exited $LASTEXITCODE`n$($out.Trim())" }
-    if ($out -match 'neither SEMLITH_HOME nor HOME is set') {
+    if ($out -match 'does not know where') {
         Fail "no store home in this shell's environment`n$($out.Trim())"
     }
     $script:nativeIndex = $true
 }
 
-# The check above is the record that the native lookup is broken. Leaving it
-# there would then skip every portal check that needs a store, which on Windows
-# is most of them -- so the platform carrying the most bugs would be the one
-# with the least coverage. SEMLITH_HOME stands in from here.
-#
-# Only SEMLITH_HOME, never HOME: the directory browser reads HOME itself, so
-# leaving it unset keeps #71 reproducing rather than papering over it too.
-if ($script:repoReady -and -not $script:nativeIndex) {
-    $env:SEMLITH_HOME = Join-Path $HOME '.semlith'
-    Write-Host "note: the native lookup failed, so SEMLITH_HOME is set to $($env:SEMLITH_HOME)"
-    Write-Host "      from here, to exercise the rest of the portal rather than skip it."
-    $out = & semlith index --quiet $repo 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "      the fallback index also failed: $($out.Trim())"
-    }
-}
+# No SEMLITH_HOME fallback from here. It existed because the native lookup
+# failed on Windows and every later check that needs a store would otherwise
+# have been skipped -- 22 of 34 in the first full run. 0.17.1 resolves the home
+# from USERPROFILE, so the native lookup is the thing that provides the store
+# and there is nothing to stand in for it (#82).
 
 Check 'portal/env/no-store-in-cwd' 'no store is written to the working directory' {
     if (Test-Path (Join-Path $PWD.Path '.semlith')) {

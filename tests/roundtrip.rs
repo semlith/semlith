@@ -474,7 +474,9 @@ fn forget_removes_the_file_the_listing_printed() {
     let target = listing
         .lines()
         .find(|line| line.trim().ends_with("bread.md"))
-        .unwrap_or_else(|| panic!("bread.md is not in the listing, so this proves nothing:\n{listing}"))
+        .unwrap_or_else(|| {
+            panic!("bread.md is not in the listing, so this proves nothing:\n{listing}")
+        })
         .trim()
         .to_string();
 
@@ -546,15 +548,14 @@ fn drop_removes_the_directory_and_the_registry_entry() {
     );
 
     let registry = home.path().join("registry.json");
-    let named: Vec<String> = serde_json::from_str::<serde_json::Value>(
-        &fs::read_to_string(&registry).unwrap(),
-    )
-    .unwrap()["stores"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
+    let named: Vec<String> =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&registry).unwrap()).unwrap()
+            ["stores"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
     let [name] = named.as_slice() else {
         panic!("one index run should make one store, not {named:?}");
     };
@@ -568,8 +569,8 @@ fn drop_removes_the_directory_and_the_registry_entry() {
         String::from_utf8_lossy(&dropped.stderr)
     );
     assert!(!dir.exists(), "{} is still on disk", dir.display());
-    let after = serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&registry).unwrap())
-        .unwrap();
+    let after =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&registry).unwrap()).unwrap();
     assert!(
         after["stores"].as_object().unwrap().is_empty(),
         "the registry still lists the dropped store: {after}"

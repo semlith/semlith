@@ -1269,7 +1269,18 @@ fn main() -> Result<()> {
             // never held the file: it removed nothing, said so, and exited 0
             // (#77). A caller that believes the exit status believes the file
             // is gone.
-            let choice = home::resolve(&cli.store, &path, None)?;
+            // The directory holding the file, and the working directory for a
+            // bare name with no directory in it at all — which is how somebody
+            // standing in the corpus types it.
+            let anchor = if path.is_dir() {
+                path.clone()
+            } else {
+                match path.parent() {
+                    Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+                    _ => cwd.clone(),
+                }
+            };
+            let choice = home::resolve(&cli.store, &anchor, None)?;
             if let Some(hint) = choice.hint() {
                 eprintln!("{hint}");
             }
@@ -1294,7 +1305,7 @@ fn main() -> Result<()> {
         }
 
         Command::Drop { name: store, yes } => {
-            let dir = semlith::home::Registry::dir_of(&store);
+            let dir = semlith::home::Registry::dir_of(&store)?;
             if !semlith::home::Registry::load()?.stores.contains_key(&store) {
                 anyhow::bail!("no registered store called {store}");
             }
@@ -1361,7 +1372,7 @@ fn main() -> Result<()> {
                 } else {
                     let port = semlith::daemon::port_of(None);
                     println!("{}{key}{}", bold(), reset());
-                    println!("{}", semlith::home::agent_key_path().display());
+                    println!("{}", semlith::home::agent_key_path()?.display());
                     println!();
                     println!("It authenticates the MCP endpoint and nothing else, and it does not");
                     println!("change when the daemon restarts or the portal's token is rotated.");
@@ -1450,7 +1461,7 @@ fn main() -> Result<()> {
                         "no store outside {} is trusted. Every store semlith made is \
                          opened without asking; a `.semlith` that arrived some other \
                          way needs `semlith trust <dir>` once.",
-                        home::home().display()
+                        home::home_or_error()?.display()
                     );
                 } else {
                     for dir in &registry.trusted {
@@ -1470,7 +1481,7 @@ fn main() -> Result<()> {
                  --store; `semlith adopt` moves it into {} if you would rather it \
                  lived with the others.",
                 dir.display(),
-                home::stores_root().display()
+                home::stores_root()?.display()
             );
         }
 
@@ -1589,7 +1600,7 @@ fn read_fleet(flags: &[PathBuf], cwd: &Path, all: bool) -> Result<Fleet> {
              run `semlith index` in a directory to make one, \
              or `semlith adopt ./.semlith` to move an existing one into {}",
             cwd.display(),
-            semlith::home::stores_root().display(),
+            semlith::home::stores_root()?.display(),
         );
     }
     Fleet::open(&dirs)
@@ -1660,7 +1671,7 @@ fn resolve_for_add(
         (Some(only), None) => {
             let only = only.clone();
             Ok(home::Choice::Registered {
-                dir: home::Registry::dir_of(&only),
+                dir: home::Registry::dir_of(&only)?,
                 name: only,
             })
         }
