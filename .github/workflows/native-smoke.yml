@@ -109,7 +109,14 @@ jobs:
           fi
           mkdir -p "$home/.semlith/bin"
           cp "$built" "$home/.semlith/bin/$name"
-          echo "$home/.semlith/bin" >> "$GITHUB_PATH"
+          # PATH in the Windows form, because the next step is PowerShell and a
+          # `/c/users/...` entry means nothing to it -- `semlith is not on PATH`
+          # is how that reads from the portal check.
+          if [ "$RUNNER_OS" = Windows ]; then
+            cygpath -w "$home/.semlith/bin" >> "$GITHUB_PATH"
+          else
+            echo "$home/.semlith/bin" >> "$GITHUB_PATH"
+          fi
           "$home/.semlith/bin/$name" --version
           # The rest of what the installer does -- PATH, the model, the client
           # registration -- run by the binary under test.
