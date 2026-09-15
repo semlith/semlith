@@ -367,6 +367,7 @@ impl Target {
 /// without the whole file riding along with it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Span {
+    #[serde(serialize_with = "serialize_plain")]
     pub path: String,
     pub start_line: u32,
     pub end_line: u32,
@@ -398,6 +399,7 @@ pub enum Read {
 #[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub score: f32,
+    #[serde(serialize_with = "serialize_plain")]
     pub path: String,
     pub start_line: u32,
     pub end_line: u32,
@@ -1970,7 +1972,7 @@ impl Semlith {
                     hits.push((
                         Hit {
                             score,
-                            path: plain(&row.path),
+                            path: row.path,
                             start_line: 0,
                             end_line: 0,
                             text: String::new(),
@@ -2004,7 +2006,7 @@ impl Semlith {
                 hits.push((
                     Hit {
                         score,
-                        path: plain(&row.path),
+                        path: row.path,
                         start_line: row.start_line,
                         end_line: row.end_line,
                         text: row.text,
@@ -2400,6 +2402,14 @@ pub fn human_bytes(bytes: i64) -> String {
     }
 }
 
+/// Serialize a stored path in the form a person reads, leaving the value in
+/// memory as the store's own key. One attribute per field beats a call at every
+/// place a struct reaches JSON, and the CLI's `--json`, the portal and the MCP
+/// results all serialise these same structs.
+pub fn serialize_plain<S: serde::Serializer>(path: &str, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&plain(path))
+}
+
 pub fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -2418,6 +2428,11 @@ pub fn canonical(path: &Path) -> PathBuf {
 ///
 /// A dozen lines rather than a crate: this runs on every hit and every row, and
 /// the rule is two prefixes.
+///
+/// Applied where a path is rendered — [`serialize_plain`] for everything that
+/// goes out as JSON, `display` for the CLI's text — and never where one is
+/// stored or looked up. A stripped path is not the key the store holds, and a
+/// row's own path is what the next query uses to fetch its text.
 pub fn plain(text: &str) -> String {
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");

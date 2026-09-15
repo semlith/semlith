@@ -283,24 +283,25 @@ mod tests {
     /// from any directory; an absolute one is not, so it means exactly itself.
     #[test]
     fn a_relative_pattern_is_anchored_and_an_absolute_one_is_not() {
-        let sep = std::path::MAIN_SEPARATOR;
+        // `/` on every platform: the query side normalises the path column to
+        // `/` on Windows, so one pattern language works everywhere and
+        // `--path 'src/**'` means the same thing on all three (#74).
         let f = Filter::new(&s(&["src/**"]), &[], &[]).unwrap();
-        assert_eq!(f.groups(), [[format!("*{sep}src{sep}**")]]);
+        assert_eq!(f.groups(), [["*/src/**"]]);
 
-        let absolute = format!("{sep}home{sep}me{sep}proj{sep}src{sep}*");
-        let f = Filter::new(&s(&[&absolute]), &[], &[]).unwrap();
-        assert_eq!(f.groups(), [[absolute]]);
+        let f = Filter::new(&s(&["/home/me/proj/src/*"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["/home/me/proj/src/*"]]);
+
+        // A pattern somebody typed with backslashes still means the same thing.
+        let f = Filter::new(&s(&[r"src\**"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["*/src/**"]]);
     }
 
     #[test]
     fn extensions_and_languages_share_one_group_and_union() {
-        let sep = std::path::MAIN_SEPARATOR;
         let f = Filter::new(&[], &s(&["toml"]), &s(&["rust"])).unwrap();
         assert_eq!(f.groups().len(), 1, "one group means they union");
-        assert_eq!(
-            f.groups()[0],
-            [format!("*{sep}*.toml"), format!("*{sep}*.rs")]
-        );
+        assert_eq!(f.groups()[0], ["*/*.toml", "*/*.rs"]);
     }
 
     /// `--path 'src/**' --ext md` must mean "Markdown under src", not
@@ -331,27 +332,15 @@ mod tests {
     /// matches none of the Dockerfiles anyone actually has.
     #[test]
     fn a_language_with_no_extension_matches_by_filename() {
-        let sep = std::path::MAIN_SEPARATOR;
         let f = Filter::new(&[], &[], &s(&["dockerfile"])).unwrap();
         assert_eq!(
             f.groups()[0],
-            [
-                format!("*{sep}*.dockerfile"),
-                format!("*{sep}dockerfile"),
-                format!("*{sep}dockerfile.*"),
-            ],
+            ["*/*.dockerfile", "*/dockerfile", "*/dockerfile.*"],
             "a bare Dockerfile and a Dockerfile.prod are both the language"
         );
 
         let f = Filter::new(&[], &[], &s(&["makefile"])).unwrap();
-        assert_eq!(
-            f.groups()[0],
-            [
-                format!("*{sep}*.mk"),
-                format!("*{sep}gnumakefile"),
-                format!("*{sep}makefile"),
-            ]
-        );
+        assert_eq!(f.groups()[0], ["*/*.mk", "*/gnumakefile", "*/makefile"]);
 
         // Filenames land in the same group extensions do, so the two union
         // rather than intersecting — one code path, so the vector allowlist and

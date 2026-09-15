@@ -655,7 +655,7 @@ fn call_tool(
                             row.name,
                             row.kind,
                             label_of(&row.store),
-                            row.path,
+                            crate::plain(&row.path),
                             row.start_line,
                             row.end_line
                         ));
@@ -671,7 +671,7 @@ fn call_tool(
                     format!(
                         "{}{}:{}-{}{named}{}\n{}",
                         label_of(&span.store),
-                        span.path,
+                        crate::plain(&span.path),
                         span.start_line,
                         span.end_line,
                         if span.fresh { "" } else { " · stale" },
@@ -705,7 +705,7 @@ fn call_tool(
                         out.push_str(&format!(
                             "{}{}:{}-{} @{}  {}\n",
                             label_of(&m.store),
-                            m.path,
+                            crate::plain(&m.path),
                             m.start_line,
                             m.end_line,
                             m.capture,
@@ -1191,7 +1191,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
                 e.kind,
                 e.confidence,
                 label_of(&e.symbol.store),
-                e.symbol.path,
+                crate::plain(&e.symbol.path),
                 e.symbol.start_line,
                 crate::graph::call_site(e, &crate::graph::verbatim)
             )
@@ -1275,8 +1275,8 @@ fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
     let mut files: Vec<(String, Vec<&crate::Hit>)> = Vec::new();
     for hit in hits {
         let label = match &hit.store {
-            Some(store) => format!("{store} {}", hit.path),
-            None => hit.path.clone(),
+            Some(store) => format!("{store} {}", crate::plain(&hit.path)),
+            None => crate::plain(&hit.path),
         };
         match files.iter_mut().find(|(name, _)| *name == label) {
             Some((_, group)) => group.push(hit),
@@ -1435,7 +1435,7 @@ fn render(hits: &[crate::Hit]) -> String {
             out.push_str(&format!(
                 "[{}] {from}{} — image, {}x{} px (score {:.3}{via})\n\n",
                 i + 1,
-                h.path,
+                crate::plain(&h.path),
                 px.width,
                 px.height,
                 h.score,
@@ -1445,7 +1445,7 @@ fn render(hits: &[crate::Hit]) -> String {
         out.push_str(&format!(
             "[{}] {from}{}:{}-{} (score {:.3}{via})\n{}\n\n",
             i + 1,
-            h.path,
+            crate::plain(&h.path),
             h.start_line,
             h.end_line,
             h.score,

@@ -301,7 +301,7 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
             let as_path = Path::new(&row.path);
             json!({
                 "store": label,
-                "path": row.path,
+                "path": crate::plain(&row.path),
                 "ext": as_path.extension().and_then(|e| e.to_str()).unwrap_or(""),
                 "lang": language_of(as_path),
                 "reader": chunk::reader_of(as_path),
@@ -427,7 +427,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         .map(|h| {
             json!({
                 "score": h.score,
-                "path": h.path,
+                "path": crate::plain(&h.path),
                 "start_line": h.start_line,
                 "end_line": h.end_line,
                 "text": if locate { String::new() } else { h.text.clone() },
