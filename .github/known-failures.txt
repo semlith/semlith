@@ -12,7 +12,6 @@
 
 # #70 Windows does not set HOME, so the store home never resolves.
 cli/env/native-shell-index      windows   70   no HOME, so the store home never resolves
-portal/index/stream             windows   70   POST /api/index answers 409
 portal/env/native-shell-index   windows   70   the same failure from the CLI side
 
 # #71 The portal's directory browser falls back to the filesystem root.
@@ -31,8 +30,10 @@ cli/read/line                   windows   74   the same, for path:line
 cli/read/json                   windows   74   the same, for --json
 portal/search/no-verbatim       windows   74   the same prefix through the portal
 
-# #75 Rust ignores SIGPIPE, so a truncated pipe panics.
-cli/pipe/survives-truncation    unix      75   panics instead of exiting quietly
+# #75 Printing to a closed pipe panics rather than exiting. All three
+# platforms: SIGPIPE is the unix mechanism, but the Windows write error
+# reaches the same panic in println!.
+cli/pipe/survives-truncation    all       75   panics instead of exiting quietly
 
 # #76 A path that cannot be read still creates and registers a store.
 cli/index/missing-registers-nothing  all   76   an empty store is left behind

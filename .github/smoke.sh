@@ -267,8 +267,11 @@ c_pipe_survives() {
   [ "${size:-0}" -gt 262144 ] || {
     echo "only $size bytes of output, too little to close a pipe against"; return 1; }
   semlith search "store" -k 300 --json 2> "$work/sigpipe.err" | head -c 200 > /dev/null
-  if grep -q 'panicked at\|Broken pipe' "$work/sigpipe.err"; then
-    grep -m 2 'panicked at\|Broken pipe' "$work/sigpipe.err"
+  if grep -q 'panicked at' "$work/sigpipe.err"; then
+    # The whole of it: the message on the line after the location differs by
+    # platform (EPIPE on unix, a pipe-ended error on Windows) and naming it is
+    # the useful part of the report.
+    head -4 "$work/sigpipe.err"
     return 1
   fi
 }
