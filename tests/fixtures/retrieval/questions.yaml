@@ -1298,3 +1298,111 @@ questions:
       alias-crossing case is proven in `tests/graph.rs` over a fixture corpus
       instead, and that is said here rather than faked with a question this file
       cannot ask.
+
+  # --- 0.17.0: the forty languages the graph gained -------------------------
+  #
+  # Per-language proof is not here, and deliberately so. Every one of the
+  # forty-six has a fixture under `tests/fixtures/graph/` with a declared table
+  # of the symbols and edges it must yield, asserted in `src/graph.rs` without a
+  # model — that is a stronger statement than a retrieval score, and it fails
+  # for a language that extracts nothing. Adding ninety-two questions here whose
+  # subjects are forty-six files that all define `helper` and `acquire` would
+  # measure the ambiguity collapse, not the coverage, and would cost the harness
+  # its running time to do it.
+  #
+  # What is asked here is what only this harness can answer: whether a symbol in
+  # a language that had no graph before is findable, and whether the edge a
+  # markup language contributes is walkable, at the same k and the same byte
+  # budget as everything else.
+
+  - id: identifier-sql-table
+    shape: identifier
+    tool: symbol
+    name: lock_holder
+    spans:
+      - path: tests/fixtures/graph/sql/lock.sql
+        symbol: lock_holder
+        start_line: 1
+        end_line: 3
+    note: >-
+      A SQL table as a symbol. Before 0.17.0 a `.sql` file was text and this
+      question had no answer at all; the table is the unit a schema is searched
+      by, exactly as a function is for code.
+
+  - id: multi-hop-sql-view-reads-table
+    shape: multi-hop
+    tool: neighbors
+    name: acquire
+    kinds: [references]
+    want: callees
+    spans:
+      - path: tests/fixtures/graph/sql/lock.sql
+        symbol: lock_holder
+        start_line: 1
+        end_line: 3
+    note: >-
+      What a view reads is what breaks when the table changes. This is the
+      markup and configuration family's whole claim — that a blast radius exists
+      outside code — reduced to the smallest case that can be scored.
+
+  - id: identifier-powershell-function
+    shape: identifier
+    tool: symbol
+    name: Get-Acquire
+    spans:
+      - path: tests/fixtures/graph/powershell/Lock.ps1
+        symbol: Get-Acquire
+        start_line: 5
+        end_line: 5
+    note: >-
+      A hyphenated name, which is the shape PowerShell gives every function and
+      which no other language in the set produces. It is here because a
+      tokenizer that splits on the hyphen would score it as two terms and this
+      is the question that would catch that.
+
+  - id: identifier-proto-rpc
+    shape: identifier
+    tool: symbol
+    name: Hold
+    spans:
+      - path: tests/fixtures/graph/proto/lock.proto
+        symbol: Hold
+        start_line: 9
+        end_line: 9
+    note: >-
+      An RPC in a protobuf service. A `.proto` file is a contract between two
+      services, so "where is this RPC defined" is asked across repositories more
+      often than most questions about code.
+
+  - id: identifier-graphql-type
+    shape: identifier
+    tool: symbol
+    name: Holder
+    spans:
+      - path: tests/fixtures/graph/graphql/lock.graphql
+        symbol: Holder
+        start_line: 6
+        end_line: 8
+    note: >-
+      A GraphQL type, which is a definition in a file that has no functions in
+      it at all — the case that proves the extractor is not simply looking for
+      code shapes under another name.
+
+  - id: concept-configuration-timeout
+    shape: concept
+    tool: search
+    query: how long before the lock times out
+    prefer: any
+    spans:
+      - path: tests/fixtures/graph/yaml/lock.yaml
+        symbol: timeout
+        start_line: 4
+        end_line: 4
+      - path: tests/fixtures/graph/toml/lock.toml
+        symbol: timeout
+        start_line: 4
+        end_line: 4
+    note: >-
+      Asked in English against configuration rather than code. Both answers are
+      right — the same setting is written twice in two formats — which is the
+      case where returning one file and stopping is the wrong answer.
