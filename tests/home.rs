@@ -667,6 +667,13 @@ fn a_run_with_no_home_at_all_is_an_error_naming_both_variables() {
         .env_remove("HOME")
         .env_remove("SEMLITH_HOME")
         .env_remove("SEMLITH_STORE")
+        // Every variable a home can come from, or this proves nothing on
+        // Windows: from 0.17.1 `USERPROFILE` and `HOMEDRIVE`+`HOMEPATH` answer
+        // there, which is the whole of #70, so removing `HOME` alone leaves a
+        // perfectly resolvable home behind.
+        .env_remove("USERPROFILE")
+        .env_remove("HOMEDRIVE")
+        .env_remove("HOMEPATH")
         .output()
         .expect("semlith runs");
 
