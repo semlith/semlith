@@ -18,11 +18,6 @@ cli/read/line                   windows   74   the same, for path:line
 cli/read/json                   windows   74   the same, for --json
 portal/search/no-verbatim       windows   74   the same prefix through the portal
 
-# #75 Printing to a closed pipe panics rather than exiting. All three
-# platforms: SIGPIPE is the unix mechanism, but the Windows write error
-# reaches the same panic in println!.
-cli/pipe/survives-truncation    all       75   panics instead of exiting quietly
-
 # #76 A path that cannot be read still creates and registers a store.
 cli/index/missing-registers-nothing  all   76   an empty store is left behind
 

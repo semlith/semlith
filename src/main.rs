@@ -427,6 +427,7 @@ enum KeyCommand {
 }
 
 fn main() -> Result<()> {
+    quiet_on_a_closed_pipe();
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -1703,6 +1704,51 @@ const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
     client: "cli",
     session: "cli",
 };
+
+/// Exit quietly when whoever was reading our output goes away.
+///
+/// `semlith files | head` is the most ordinary thing anyone types, and it
+/// printed a panic and a non-zero status (#75). Two halves, because the
+/// mechanism differs:
+///
+/// On unix the Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main`, so the
+/// write returns `EPIPE` and `println!` panics on it. Restoring the default
+/// makes the process end the way `cat` and `grep` do, and a shell reports the
+/// pipeline's status, which is the reader's.
+///
+/// On Windows there is no `SIGPIPE`: the write fails with `BrokenPipe` and
+/// reaches the same panic. The hook turns that one panic — and only that one —
+/// into a silent exit 0, which is what the reader closing the pipe means.
+fn quiet_on_a_closed_pipe() {
+    #[cfg(unix)]
+    {
+        // SAFETY: called once, at the top of `main`, before any thread is
+        // spawned and before anything has been printed. `SIG_DFL` is what the
+        // process would have had if the Rust runtime had not changed it.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+
+    let inherited = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let said = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        // The message `std` builds for a failed `print!`, with the OS error
+        // spelled differently on each platform — matching the kind rather than
+        // the wording is not possible from here, because the error is already
+        // formatted into the panic payload.
+        let printing = said.starts_with("failed printing to std");
+        if printing && (said.contains("Broken pipe") || said.contains("pipe")) {
+            std::process::exit(0);
+        }
+        inherited(info);
+    }));
+}
 
 /// What a forget of a path no store holds says, on stderr, before exiting 1.
 ///
