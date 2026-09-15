@@ -307,6 +307,137 @@ fn grammar(lang: &str) -> Option<(Language, &'static str)> {
             tree_sitter_java::TAGS_QUERY,
         )),
         "c" => Some((tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY)),
+
+        // The forty languages 0.17.0 added. Twenty-three of their crates ship a
+        // tags query written for `tree-sitter tags`, which is the same
+        // arrangement the six above have. The other seventeen ship none, so
+        // the query is written here under `queries/<language>/tags.scm` in the
+        // same capture vocabulary, and the extractor cannot tell the two apart.
+        "clojure" => Some((
+            tree_sitter_clojure_orchard::LANGUAGE.into(),
+            include_str!("../queries/clojure/tags.scm"),
+        )),
+        "cpp" => Some((tree_sitter_cpp::LANGUAGE.into(), tree_sitter_cpp::TAGS_QUERY)),
+        "csharp" => Some((tree_sitter_c_sharp::LANGUAGE.into(), tree_sitter_c_sharp::TAGS_QUERY)),
+        "dart" => Some((tree_sitter_dart::LANGUAGE.into(), tree_sitter_dart::TAGS_QUERY)),
+        "dockerfile" => Some((
+            tree_sitter_containerfile::LANGUAGE.into(),
+            include_str!("../queries/dockerfile/tags.scm"),
+        )),
+        "elixir" => Some((tree_sitter_elixir::LANGUAGE.into(), tree_sitter_elixir::TAGS_QUERY)),
+        "elm" => Some((tree_sitter_elm::LANGUAGE.into(), tree_sitter_elm::TAGS_QUERY)),
+        "erlang" => Some((
+            tree_sitter_erlang::LANGUAGE.into(),
+            include_str!("../queries/erlang/tags.scm"),
+        )),
+        "fortran" => Some((
+            tree_sitter_fortran::LANGUAGE.into(),
+            include_str!("../queries/fortran/tags.scm"),
+        )),
+        "graphql" => Some((
+            tree_sitter_graphql::LANGUAGE.into(),
+            include_str!("../queries/graphql/tags.scm"),
+        )),
+        "groovy" => Some((
+            tree_sitter_groovy::LANGUAGE.into(),
+            include_str!("../queries/groovy/tags.scm"),
+        )),
+        "javascript" => Some((tree_sitter_javascript::LANGUAGE.into(), tree_sitter_javascript::TAGS_QUERY)),
+        "lua" => Some((tree_sitter_lua::LANGUAGE.into(), tree_sitter_lua::TAGS_QUERY)),
+        "nix" => Some((
+            tree_sitter_nix::LANGUAGE.into(),
+            include_str!("../queries/nix/tags.scm"),
+        )),
+        "ocaml" => Some((tree_sitter_ocaml::LANGUAGE_OCAML.into(), tree_sitter_ocaml::TAGS_QUERY)),
+        "php" => Some((tree_sitter_php::LANGUAGE_PHP.into(), tree_sitter_php::TAGS_QUERY)),
+        "powershell" => Some((
+            tree_sitter_powershell::LANGUAGE.into(),
+            include_str!("../queries/powershell/tags.scm"),
+        )),
+        "proto" => Some((
+            tree_sitter_proto::LANGUAGE.into(),
+            include_str!("../queries/proto/tags.scm"),
+        )),
+        "r" => Some((tree_sitter_r::LANGUAGE.into(), tree_sitter_r::TAGS_QUERY)),
+        "ruby" => Some((tree_sitter_ruby::LANGUAGE.into(), tree_sitter_ruby::TAGS_QUERY)),
+        "sql" => Some((
+            tree_sitter_sequel::LANGUAGE.into(),
+            include_str!("../queries/sql/tags.scm"),
+        )),
+        "swift" => Some((tree_sitter_swift::LANGUAGE.into(), tree_sitter_swift::TAGS_QUERY)),
+        "vue" => Some((
+            tree_sitter_vue_next::LANGUAGE.into(),
+            include_str!("../queries/vue/tags.scm"),
+        )),
+        "css" => Some((
+            tree_sitter_css::LANGUAGE.into(),
+            include_str!("../queries/css/tags.scm"),
+        )),
+        "haskell" => Some((
+            tree_sitter_haskell::LANGUAGE.into(),
+            include_str!("../queries/haskell/tags.scm"),
+        )),
+        "html" => Some((
+            tree_sitter_html::LANGUAGE.into(),
+            include_str!("../queries/html/tags.scm"),
+        )),
+        "json" => Some((
+            tree_sitter_json::LANGUAGE.into(),
+            include_str!("../queries/json/tags.scm"),
+        )),
+        "julia" => Some((
+            tree_sitter_julia::LANGUAGE.into(),
+            include_str!("../queries/julia/tags.scm"),
+        )),
+        "kotlin" => Some((
+            tree_sitter_kotlin_ng::LANGUAGE.into(),
+            include_str!("../queries/kotlin/tags.scm"),
+        )),
+        "makefile" => Some((
+            tree_sitter_make::LANGUAGE.into(),
+            include_str!("../queries/makefile/tags.scm"),
+        )),
+        "markdown" => Some((
+            tree_sitter_md::LANGUAGE.into(),
+            include_str!("../queries/markdown/tags.scm"),
+        )),
+        "objective-c" => Some((
+            tree_sitter_objc::LANGUAGE.into(),
+            include_str!("../queries/objective-c/tags.scm"),
+        )),
+        "perl" => Some((
+            ts_parser_perl::LANGUAGE.into(),
+            include_str!("../queries/perl/tags.scm"),
+        )),
+        "scala" => Some((
+            tree_sitter_scala::LANGUAGE.into(),
+            include_str!("../queries/scala/tags.scm"),
+        )),
+        "shell" => Some((
+            tree_sitter_bash::LANGUAGE.into(),
+            include_str!("../queries/shell/tags.scm"),
+        )),
+        "svelte" => Some((
+            tree_sitter_svelte_ng::LANGUAGE.into(),
+            include_str!("../queries/svelte/tags.scm"),
+        )),
+        "terraform" => Some((
+            tree_sitter_hcl::LANGUAGE.into(),
+            include_str!("../queries/terraform/tags.scm"),
+        )),
+        "toml" => Some((
+            tree_sitter_toml_ng::LANGUAGE.into(),
+            include_str!("../queries/toml/tags.scm"),
+        )),
+        "yaml" => Some((
+            tree_sitter_yaml::LANGUAGE.into(),
+            include_str!("../queries/yaml/tags.scm"),
+        )),
+        "zig" => Some((
+            tree_sitter_zig::LANGUAGE.into(),
+            include_str!("../queries/zig/tags.scm"),
+        )),
+
         _ => None,
     }
 }
