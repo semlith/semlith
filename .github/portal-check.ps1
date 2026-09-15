@@ -106,14 +106,25 @@ Write-Host ""
 
 $repo = Join-Path $HOME 'semlith-portal-check'
 $script:repoReady = $false
-Check 'portal/env/clone' 'a repository clones into the home directory' {
+Check 'portal/env/corpus' 'a corpus is prepared in the home directory' {
     if (Test-Path $repo) { Remove-Item -Recurse -Force $repo }
     # A file:// URL so --depth is honoured. .NET recognises only a Windows path
     # as a file URI and returns an empty AbsoluteUri for a unix one, so unix
     # gets the prefix directly: "file://" + "/home/..." is already three slashes.
     $source = if ($IsWindows) { ([uri]$PWD.Path).AbsoluteUri } else { "file://$($PWD.Path)" }
     git clone --depth 1 --quiet $source $repo 2>&1 | Out-Null
-    if (-not (Test-Path (Join-Path $repo 'src'))) { Fail "clone produced no src directory at $repo" }
+    if (-not (Test-Path (Join-Path $repo 'src'))) {
+        # git is not what this harness tests. A copy is as good a corpus, and
+        # losing forty checks because a clone failed is the worse outcome.
+        Write-Host "note: the clone produced nothing; copying the checkout instead"
+        New-Item -ItemType Directory -Force -Path $repo | Out-Null
+        Copy-Item -Recurse -Force (Join-Path $PWD.Path 'src') (Join-Path $repo 'src')
+        foreach ($f in @('README.md', 'CHANGELOG.md')) {
+            $src = Join-Path $PWD.Path $f
+            if (Test-Path $src) { Copy-Item -Force $src $repo }
+        }
+    }
+    if (-not (Test-Path (Join-Path $repo 'src'))) { Fail "no corpus at $repo" }
     $script:repoReady = $true
 }
 
@@ -269,6 +280,21 @@ Check 'portal/route/wrong-method-is-405' 'a write route on GET is 405' -When $sc
     if ($r.StatusCode -ne 405) { Fail "GET /api/index was $($r.StatusCode), not 405" }
 }
 
+# The corpus was indexed before the daemon started, so the store already has
+# content and the read checks below do not depend on /api/index succeeding.
+# Asking the store directly is what keeps a failure in one route from costing
+# every later check its coverage.
+$script:hasData = $false
+if ($script:up) {
+    try { $script:hasData = ((( Get-Json '/api/files').files | Measure-Object).Count -gt 0) }
+    catch { Write-Host "note: the file list could not be read, so the store looks empty" }
+}
+if ($script:up -and -not $script:hasData -and $script:repoReady) {
+    Write-Host "note: the store is empty; filling it from the CLI so the read checks still run"
+    & semlith index --quiet $repo 2>&1 | Out-Null
+    try { $script:hasData = ((( Get-Json '/api/files').files | Measure-Object).Count -gt 0) } catch { }
+}
+
 # ------------------------------------------------------------------- browsing
 
 Check 'portal/dirs/home-is-user-home' 'the browser roots at the user home' -When $script:up {
@@ -316,7 +342,7 @@ Check 'portal/index/stream' 'the web view indexes a repository' -When ($script:u
     $script:indexed = $true
 }
 
-Check 'portal/index/control' 'pause and resume are accepted' -When $script:indexed {
+Check 'portal/index/control' 'pause and resume are accepted' -When $script:hasData {
     foreach ($action in @('pause', 'resume')) {
         $r = Api '/api/index/control' 'POST' @{ action = $action }
         if ($r.StatusCode -ne 200) { Fail "$action was $($r.StatusCode): $($r.Content)" }
@@ -326,27 +352,27 @@ Check 'portal/index/control' 'pause and resume are accepted' -When $script:index
     }
 }
 
-Check 'portal/index/bad-action-400' 'an unknown control action is 400' -When $script:indexed {
+Check 'portal/index/bad-action-400' 'an unknown control action is 400' -When $script:hasData {
     $r = Api '/api/index/control' 'POST' @{ action = 'somersault' }
     if ($r.StatusCode -ne 400) { Fail "an unknown action was $($r.StatusCode), not 400" }
 }
 
 # ----------------------------------------------------------------------- reads
 
-Check 'portal/stores/holds-repo' 'the store list names the repository' -When $script:indexed {
+Check 'portal/stores/holds-repo' 'the store list names the repository' -When $script:hasData {
     $body = Get-Json '/api/stores'
     if (($body | ConvertTo-Json -Depth 8) -notmatch 'semlith-portal-check') {
         Fail "no store names the indexed repository"
     }
 }
 
-Check 'portal/files/lists' 'the file list is not empty' -When $script:indexed {
+Check 'portal/files/lists' 'the file list is not empty' -When $script:hasData {
     $body = Get-Json '/api/files'
     $n = ($body.files | Measure-Object).Count
     if ($n -eq 0) { Fail "the file list is empty" }
 }
 
-Check 'portal/search/hits' 'search returns hits with locators' -When $script:indexed {
+Check 'portal/search/hits' 'search returns hits with locators' -When $script:hasData {
     $body = Get-Json '/api/search?query=store+lock&k=5'
     if (($body.hits | Measure-Object).Count -eq 0) { Fail "search returned no hits" }
     $h = $body.hits[0]
@@ -355,20 +381,20 @@ Check 'portal/search/hits' 'search returns hits with locators' -When $script:ind
     }
 }
 
-Check 'portal/search/no-verbatim' 'no verbatim paths among the hits' -When $script:indexed {
+Check 'portal/search/no-verbatim' 'no verbatim paths among the hits' -When $script:hasData {
     $body = Get-Json '/api/search?query=store+lock&k=5'
     $bad = $body.hits | Where-Object { $_.path -like '\\?\*' }
     if ($bad) { Fail "a hit path is a verbatim path: $($bad[0].path)" }
 }
 
-Check 'portal/search/k' 'k bounds the hit count' -When $script:indexed {
+Check 'portal/search/k' 'k bounds the hit count' -When $script:hasData {
     $body = Get-Json '/api/search?query=store&k=2'
     $n = ($body.hits | Measure-Object).Count
     if ($n -gt 2) { Fail "k=2 returned $n hits" }
     if ($n -eq 0) { Fail "k=2 returned nothing" }
 }
 
-Check 'portal/search/offset' 'offset moves the window' -When $script:indexed {
+Check 'portal/search/offset' 'offset moves the window' -When $script:hasData {
     $a = (Get-Json '/api/search?query=store&k=1').hits[0]
     $b = (Get-Json '/api/search?query=store&k=1&offset=1').hits[0]
     if ($null -eq $a -or $null -eq $b) { Fail "one of the two requests returned no hit" }
@@ -377,28 +403,28 @@ Check 'portal/search/offset' 'offset moves the window' -When $script:indexed {
     }
 }
 
-Check 'portal/search/empty-query' 'an empty query is handled' -When $script:indexed {
+Check 'portal/search/empty-query' 'an empty query is handled' -When $script:hasData {
     $r = Api '/api/search?query='
     if ($r.StatusCode -ge 500) { Fail "an empty query was $($r.StatusCode): $($r.Content)" }
 }
 
-Check 'portal/read/span' 'read returns one span' -When $script:indexed {
+Check 'portal/read/span' 'read returns one span' -When $script:hasData {
     $body = Get-Json "/api/read?target=$([uri]::EscapeDataString('src/main.rs:28-40'))"
     if (($body | ConvertTo-Json -Depth 6).Length -lt 10) { Fail "read returned nothing" }
 }
 
-Check 'portal/symbol' 'symbol answers' -When $script:indexed { Get-Json '/api/symbol?name=main' | Out-Null }
-Check 'portal/neighbors' 'neighbors answers' -When $script:indexed { Get-Json '/api/neighbors?name=main' | Out-Null }
-Check 'portal/path' 'path answers' -When $script:indexed { Get-Json '/api/path?from=main&to=open_store' | Out-Null }
-Check 'portal/graph' 'graph answers' -When $script:indexed { Get-Json '/api/graph?name=main' | Out-Null }
-Check 'portal/ledger' 'ledger answers' -When $script:indexed { Get-Json '/api/ledger' | Out-Null }
+Check 'portal/symbol' 'symbol answers' -When $script:hasData { Get-Json '/api/symbol?name=main' | Out-Null }
+Check 'portal/neighbors' 'neighbors answers' -When $script:hasData { Get-Json '/api/neighbors?name=main' | Out-Null }
+Check 'portal/path' 'path answers' -When $script:hasData { Get-Json '/api/path?from=main&to=open_store' | Out-Null }
+Check 'portal/graph' 'graph answers' -When $script:hasData { Get-Json '/api/graph?name=main' | Out-Null }
+Check 'portal/ledger' 'ledger answers' -When $script:hasData { Get-Json '/api/ledger' | Out-Null }
 
-Check 'portal/pattern' 'a tree-sitter pattern matches' -When $script:indexed {
+Check 'portal/pattern' 'a tree-sitter pattern matches' -When $script:hasData {
     $q = [uri]::EscapeDataString('(function_item name: (identifier) @name)')
     Get-Json "/api/pattern?query=$q&lang=rust" | Out-Null
 }
 
-Check 'portal/pattern/no-lang' 'a pattern without a language is refused' -When $script:indexed {
+Check 'portal/pattern/no-lang' 'a pattern without a language is refused' -When $script:hasData {
     $q = [uri]::EscapeDataString('(function_item)')
     $r = Api "/api/pattern?query=$q"
     if ($r.StatusCode -eq 200) { Fail "a pattern with no --lang answered 200" }
@@ -413,7 +439,7 @@ foreach ($route in @('models', 'languages', 'privacy', 'about', 'agents', 'setup
 # not disagree. A portal that quietly reads a different store is worse than one
 # that errors.
 
-Check 'portal/parity/files' 'the portal and the CLI list the same count' -When $script:indexed {
+Check 'portal/parity/files' 'the portal and the CLI list the same count' -When $script:hasData {
     $portalCount = ((Get-Json '/api/files').files | Measure-Object).Count
     $cliCount = (& semlith files 2>$null | Where-Object { $_.Trim() } | Measure-Object).Count
     if ($portalCount -ne $cliCount) {
@@ -421,7 +447,7 @@ Check 'portal/parity/files' 'the portal and the CLI list the same count' -When $
     }
 }
 
-Check 'portal/parity/search' 'the portal and the CLI agree on the top hit' -When $script:indexed {
+Check 'portal/parity/search' 'the portal and the CLI agree on the top hit' -When $script:hasData {
     $portalTop = (Get-Json '/api/search?query=store+lock&k=1').hits[0].path
     $cliJson = & semlith search "store lock" -k 1 --json 2>$null | Out-String
     $cliTop = ($cliJson | ConvertFrom-Json)[0].path
@@ -433,17 +459,17 @@ Check 'portal/parity/search' 'the portal and the CLI agree on the top hit' -When
 
 # --------------------------------------------------------------------- writes
 
-Check 'portal/add/url' 'add fetches one https URL' -When $script:indexed {
+Check 'portal/add/url' 'add fetches one https URL' -When $script:hasData {
     $r = Api '/api/add' 'POST' @{ url = 'https://raw.githubusercontent.com/semlith/semlith/main/LICENSE' }
     if ($r.StatusCode -ne 200) { Fail "POST /api/add was $($r.StatusCode): $($r.Content)" }
 }
 
-Check 'portal/add/bad-scheme' 'a non-https URL is refused' -When $script:indexed {
+Check 'portal/add/bad-scheme' 'a non-https URL is refused' -When $script:hasData {
     $r = Api '/api/add' 'POST' @{ url = 'ftp://example.com/x' }
     if ($r.StatusCode -eq 200) { Fail "an ftp URL was accepted" }
 }
 
-Check 'portal/forget/removes' 'forget drops a file from the store' -When $script:indexed {
+Check 'portal/forget/removes' 'forget drops a file from the store' -When $script:hasData {
     $target = (Get-Json '/api/files').files |
         Where-Object { "$_" -match '\.rs$' -or $_.path -match '\.rs$' } |
         Select-Object -First 1

@@ -105,9 +105,23 @@ echo
 
 setup_corpus() {
   # A clone rather than the checkout, so .git and .gitignore are present and
-  # the corpus is not the directory the harness is running out of.
-  git clone --depth 1 --quiet "file://$repo_root" "$corpus" 2>&1 || return 1
-  [ -d "$corpus/src" ] || { echo "clone produced no src directory"; return 1; }
+  # the corpus is not the directory the harness is running out of. git is not
+  # what this file tests, though, so a failed clone falls back to a copy rather
+  # than costing all seventy checks their coverage.
+  git clone --depth 1 --quiet "file://$repo_root" "$corpus" 2>&1
+  if [ ! -d "$corpus/src" ]; then
+    echo "the clone produced nothing; copying the checkout instead"
+    mkdir -p "$corpus"
+    cp -R "$repo_root/src" "$corpus/src" || return 1
+    # The fixtures exercise every document reader, so the corpus is poorer
+    # without them even though indexing still works.
+    mkdir -p "$corpus/tests"
+    [ -d "$repo_root/tests/fixtures" ] && cp -R "$repo_root/tests/fixtures" "$corpus/tests/fixtures"
+    for f in README.md CHANGELOG.md; do
+      [ -f "$repo_root/$f" ] && cp "$repo_root/$f" "$corpus/"
+    done
+  fi
+  [ -d "$corpus/src" ] || { echo "no corpus at $corpus"; return 1; }
   # Two awkward names, because a path with a space and a path outside ASCII are
   # both ordinary on a real machine and both break naive quoting.
   mkdir -p "$work/odd names/a repo" "$work/ünïcode" || return 1
