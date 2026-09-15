@@ -9,18 +9,30 @@
 # shortcut. A harness that only ever runs under bash cannot see that class of
 # bug at all.
 #
-# So on Windows the check removes HOME first, to hold the environment a real
-# user has. Everything the script needs for its own bookkeeping comes from
-# PowerShell's $HOME automatic variable, which is derived from USERPROFILE and
-# is set whether or not the environment variable is.
+# The Windows runner does not set HOME either, so what this script sees is a
+# user's environment and not a staged one; the removal below is a belt-and-
+# braces no-op today and a guard if a future runner image adds it. Everything
+# the script needs for its own bookkeeping comes from PowerShell's $HOME
+# automatic variable, which is derived from USERPROFILE and is set whether or
+# not the environment variable is.
 
 $ErrorActionPreference = 'Continue'
 $script:fails = 0
+$script:skips = 0
 
+# `When` exists so that a step whose precondition never held is reported as
+# skipped rather than failed. The first run of this script cloned nothing and
+# then blamed semlith for not finding the directory: a harness that reports its
+# own breakage as a product bug is worse than no harness.
 function Step {
-    param([string]$Name, [scriptblock]$Body)
+    param([string]$Name, [scriptblock]$Body, [bool]$When = $true)
     Write-Host ""
     Write-Host "### $Name"
+    if (-not $When) {
+        Write-Host "--- skipped: a precondition did not hold"
+        $script:skips++
+        return
+    }
     try {
         & $Body
         Write-Host "--- ok: $Name"
@@ -66,21 +78,24 @@ Write-Host "semlith        : $($semlith.Source)"
 # directory, and a checkout in a CI workspace is not in one. Cloning gives the
 # .git and .gitignore an ordinary repository has.
 $repo = Join-Path $HOME 'semlith-portal-check'
+$script:repoReady = $false
 Step "clone a repository into the home directory" {
     if (Test-Path $repo) { Remove-Item -Recurse -Force $repo }
-    # AbsoluteUri gives file:///D:/a/... on Windows and file:///home/... on
-    # unix. Hand-building the URL gets the slash count wrong on one or the
-    # other, and a bare local path makes git ignore --depth.
-    $source = ([uri](Get-Item $PWD.Path).FullName).AbsoluteUri
+    # A file:// URL, so --depth is honoured; git ignores it for a bare local
+    # path. .NET only recognises a Windows path as a file URI, and returns an
+    # empty AbsoluteUri for a unix one, so unix gets the prefix directly —
+    # "file://" + "/home/..." is already the correct three slashes.
+    $source = if ($IsWindows) { ([uri]$PWD.Path).AbsoluteUri } else { "file://$($PWD.Path)" }
     Write-Host "cloning $source"
     git clone --depth 1 --quiet $source $repo 2>&1 | Out-Host
     if (-not (Test-Path (Join-Path $repo 'src'))) { Fail "clone produced no src directory at $repo" }
+    $script:repoReady = $true
     Write-Host "cloned to $repo"
 }
 
 # The one-liner that reproduces what a person hits first. Indexing from the
 # native shell, with nothing pre-seeded, is the whole of the first-run path.
-Step "semlith index from the native shell" {
+Step "semlith index from the native shell" -When $script:repoReady {
     $out = & semlith index --quiet $repo 2>&1 | Out-String
     Write-Host $out.Trim()
     if ($LASTEXITCODE -ne 0) { Fail "semlith index exited $LASTEXITCODE" }
@@ -169,7 +184,7 @@ Step "browse the home directory" {
     if ($body.entries.Count -eq 0) { Fail "the home directory listed no entries" }
 }
 
-Step "browse to the cloned repository" {
+Step "browse to the cloned repository" -When $script:repoReady {
     $r = Api "/api/dirs?path=$([uri]::EscapeDataString($repo))"
     if ($r.StatusCode -ne 200) { Fail "GET /api/dirs for the repo was $($r.StatusCode): $($r.Content)" }
     $body = $r.Content | ConvertFrom-Json
@@ -178,7 +193,7 @@ Step "browse to the cloned repository" {
     }
 }
 
-Step "index the repository from the portal" {
+Step "index the repository from the portal" -When $script:repoReady {
     $r = Api '/api/index' 'POST' @{ path = $repo }
     if ($r.StatusCode -ne 200) { Fail "POST /api/index was $($r.StatusCode): $($r.Content)" }
     $events = $r.Content -split "`n" | Where-Object { $_.Trim() }
@@ -188,7 +203,7 @@ Step "index the repository from the portal" {
     if ($bad) { Fail "the index stream reported an error: $($bad[0])" }
 }
 
-Step "the store is open and holds the repository" {
+Step "the store is open and holds the repository" -When $script:repoReady {
     $r = Api '/api/stores'
     if ($r.StatusCode -ne 200) { Fail "GET /api/stores was $($r.StatusCode)" }
     if ($r.Content -notmatch 'semlith-portal-check') {
@@ -196,7 +211,7 @@ Step "the store is open and holds the repository" {
     }
 }
 
-Step "search from the portal returns usable locators" {
+Step "search from the portal returns usable locators" -When $script:repoReady {
     $r = Api '/api/search?query=store+lock&k=5'
     if ($r.StatusCode -ne 200) { Fail "GET /api/search was $($r.StatusCode): $($r.Content)" }
     $body = $r.Content | ConvertFrom-Json
@@ -220,5 +235,5 @@ Step "stop the daemon" {
 }
 
 Write-Host ""
-Write-Host "### $script:fails failure(s)"
+Write-Host "### $script:fails failure(s), $script:skips skipped"
 exit $script:fails
