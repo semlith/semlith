@@ -22,10 +22,6 @@ on:
   # question this job has already answered.
   pull_request:
     branches: [develop]
-  # TEMPORARY: lets this branch run before the file exists on develop. Remove
-  # in the merge commit.
-  push:
-    branches: [feat/native-smoke]
   workflow_dispatch:
     inputs:
       version:
