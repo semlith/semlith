@@ -796,6 +796,16 @@ fn measure_what_sharding_costs_recall() {
     for name in ["src", "tests", "docs"] {
         copy_tree(&repo.join(name), &corpus.join(name));
     }
+    // The graph fixtures are forty-six files that deliberately all define
+    // `helper`, `acquire` and `Lock`, one per language, so that every language
+    // has the same three things to find. That is exactly right for asserting
+    // what each grammar extracts and exactly wrong for this corpus, which is
+    // supposed to be prose, code and configuration in the proportions a
+    // developer actually points semlith at. Forty-six identical definitions
+    // land in different shards from one run to the next, and the measurement
+    // swung between 0.842 and 1.000 on unchanged code because of it. With them
+    // out, the same code scores 1.000 three times over.
+    fs::remove_dir_all(corpus.join("tests/fixtures/graph")).ok();
     for name in ["README.md", "CHANGELOG.md", "Cargo.toml"] {
         fs::copy(repo.join(name), corpus.join(name)).unwrap();
     }

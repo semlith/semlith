@@ -1,0 +1,6 @@
+{
+  "name": "lock",
+  "acquire": {
+    "timeout": 30
+  }
+}

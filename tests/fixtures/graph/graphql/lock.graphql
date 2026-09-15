@@ -1,0 +1,14 @@
+type Lock {
+  id: ID!
+  holder: Holder
+}
+
+type Holder {
+  name: String
+}
+
+query Acquire {
+  lock {
+    id
+  }
+}

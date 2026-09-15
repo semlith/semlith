@@ -220,6 +220,43 @@ Module responsibilities:
   a span. A span path is resolved by suffix against what was indexed, because a
   locate answer prints a store-relative path and `files.path` is absolute; two
   files matching one suffix is an error naming both, never a guess.
+- **There is one language table, and it is `filter::LANGUAGES`.** From 0.17.0 the
+  extractor has no list of its own: `graph::has_graph` answers "does this
+  language carry symbols and edges" by asking whether a grammar exists, and
+  `graph::language_of` dispatches through the same `filter::language_of_path`
+  the search filter uses. The six-language copy that used to live in `graph.rs`
+  drifted from the forty-six the filter advertised for four releases, so
+  `--language kotlin` narrowed a search perfectly well and `semlith symbol`
+  then answered nothing about the same corpus, with nothing saying why. Do not
+  add a second list; add a row to the one table and a grammar beside it.
+  `every_advertised_language_has_a_working_grammar` fails for a row that has neither a
+  grammar nor an entry in `graph::WITHOUT_GRAMMAR` giving the reason.
+- **A grammar's licence is a gate, not a detail.** Every parser is compiled into
+  an Apache-2.0 binary, so a copyleft grammar would take the whole crate with
+  it. `tests/licences.rs` reads cargo's own metadata and refuses anything
+  outside a permissive allowlist, and it regenerates `THIRD-PARTY-NOTICES` so
+  the notice those licences require cannot go stale. A language whose only
+  grammar is copyleft ships without a graph and is named in
+  `graph::WITHOUT_GRAMMAR` — it is never taken anyway.
+- **A grammar is a crates.io dependency, never a git one.** `cargo publish`
+  rejects git dependencies, so a grammar that is not published is either
+  replaced by another published crate or vendored with its licence. Two
+  languages already needed the first: `tree-sitter` sets `links =
+  "tree-sitter"`, so a grammar crate that depends on `tree-sitter` itself rather
+  than on `tree-sitter-language` cannot coexist with the version this crate
+  links. That is why clojure uses `tree-sitter-clojure-orchard` and perl uses
+  `ts-parser-perl`.
+- **A language proves itself with a fixture, not with a grammar.** Every row in
+  `filter::LANGUAGES` has a file under `tests/fixtures/graph/<language>/` and a
+  row in `graph::tests::FIXTURES` declaring the symbols and edges it must yield.
+  A grammar that compiles and extracts nothing passes every other gate in the
+  crate; this is the one it fails. Write the row first and make the query meet
+  it — loosening a row to match what the query happened to produce is the move
+  the table exists to prevent.
+- **Text predicates go inside the pattern's own parentheses.** `(#eq? @a "id")`
+  written after a pattern rather than inside it is a pattern of its own and
+  filters nothing, silently. That is how `rel="stylesheet"` briefly became an
+  HTML symbol.
 - **`pattern` reads its grammar from `graph::language_grammar`.** The extractor's
   own table, so a language `pattern` accepts is a language the graph accepts and
   there is no second list to drift. Its text comes from the store's chunks too,

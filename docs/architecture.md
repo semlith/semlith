@@ -528,13 +528,52 @@ still reports the stored value.
 
 ### Where the queries come from
 
-Each grammar ships a `TAGS_QUERY` written for `tree-sitter tags`. It is a good
-source of definitions and an uneven one for references: none of the six capture
-imports, and TypeScript and C capture no calls. So each language pairs the
-bundled query with a short supplement in `graph.rs`, and matches are read whole
-rather than capture by capture — a tags query names its tag with `@name` and
-spans it separately, so Java lands `@reference.call` on the argument list with
-the method name beside it.
+Some grammars ship a `TAGS_QUERY` written for `tree-sitter tags`. It is a good
+source of definitions and an uneven one for references: most capture no imports,
+and several — TypeScript, C, C++, C#, JavaScript, PHP, Swift — capture no calls
+either. So a language with a bundled query pairs it with a short supplement in
+`graph.rs`, and matches are read whole rather than capture by capture: a tags
+query names its tag with `@name` and spans it separately, so Java lands
+`@reference.call` on the argument list with the method name beside it.
+
+Most grammars ship no tags query at all. Those languages get one under
+`queries/<language>/tags.scm`, written against that grammar's own node names in
+the same capture vocabulary, and `include_str!`'d in. Nothing downstream can
+tell the two families apart, which is the point: the extractor reads
+`@definition.*`, `@name`, `@hint` and `@reference.*`, and does not know or care
+which file the pattern came from.
+
+A bundled query can also be wrong about a span rather than missing a capture. C
+and C++ tag the *declarator*, so a function's range stopped at its signature and
+every call inside the body was attributed to the file instead of to the function
+making it — "where is `helper` invoked" answered `main.c`. The supplement spans
+the whole `function_definition`, which leaves two definitions of one function at
+two widths, so `extract` drops a definition that another of the same name *and
+kind* contains. Same name and same kind is the condition: a Rust `mod x` holding
+an `fn x`, or a Java class holding its own constructor, keeps both.
+
+### What a symbol is in a language that has no functions
+
+Fourteen of the forty-six are markup, data or configuration. Their structure is
+the only thing a graph can be made of, and it is a good thing: a YAML, TOML or
+JSON key, a Markdown heading, a Terraform block label, a Dockerfile stage, a
+Makefile target, a GraphQL type, a protobuf message or RPC, a SQL table or view,
+a CSS selector, an HTML element with an id. Each carries a kind that says which.
+
+Their references are to files rather than to symbols — an `include`, an
+`import`, a `source`, a `FROM`, a stylesheet or script `src`, a Makefile
+prerequisite, the table a view selects from. That is the whole claim the family
+makes: a change to a base image or a shared module has a blast radius, and
+before 0.17.0 nothing in semlith could show it.
+
+The test for whether a key is worth extracting is whether a developer would ever
+ask about it. Extractable and useful are different, and only the second one
+belongs in the store.
+
+Svelte and Vue are the honest edge of this. Their grammars parse the template
+and hand the `<script>` block back as raw text, so a component's methods are not
+symbols and nothing here pretends otherwise; what they contribute is the
+template's own structure.
 
 Queries are compiled once per process and cached. Compiling is far dearer than
 running, and indexing runs these over every file walked.

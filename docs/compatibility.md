@@ -483,6 +483,41 @@ output line by line has to read the block instead. `/api/symbol` keeps its
 `symbols` key unchanged and adds `callers`, `callees` and `ego` beside it, so the
 HTTP shape is additive rather than replaced.
 
+## 0.17.0
+
+**The code graph covers every language `--lang` accepts.** Through 0.16.0 six of
+the forty-six carried symbols and edges; from 0.17.0 all forty-six do. Nothing
+about the surface changes — no new command, no new tool, no new argument, no
+schema change and no `FORMAT_VERSION` move. What changes is that `semlith
+symbol`, `semlith neighbors`, `semlith path` and a graph-expanded `semlith
+search` now answer for a Ruby, PHP, Kotlin, Swift, Scala, Haskell, Lua, Elixir,
+Zig or Dart corpus, and for a corpus of YAML, TOML, JSON, Markdown, Terraform,
+Dockerfiles, Makefiles, GraphQL, protobuf, SQL, CSS and HTML.
+
+This is additive in the sense the table above describes: the set of languages
+`--lang` accepts has not changed, and the set that carries a graph only grows.
+
+**A store keeps working and gains the new languages on its next index pass.** A
+store written by 0.16.0 opens under 0.17.0 unchanged, and a 0.16.0 binary opens
+a 0.17.0 store — the format version does not move and no column is added.
+Symbols and edges for the newly covered languages appear when those files are
+next indexed, exactly as every other graph fact does. A user who wants them
+immediately runs `semlith index` over the root; there is no build step and there
+must not be one.
+
+**`semlith languages` prints a column it did not print.** The output gains a
+`graph` marker between the language name and its extensions, which the portal's
+About page and `semlith_languages` already showed. A script parsing that output
+by column position sees a new column; parsing by the first field is unaffected.
+
+**`THIRD-PARTY-NOTICES` ships with the binary.** Forty-six parsers are compiled
+in, each under its own permissive licence, and the notice those licences ask for
+travels in the crate and in every release archive rather than only in the
+repository.
+
+**The binary is larger.** Forty grammars are forty C parsers. The measured delta
+is in the CHANGELOG entry for this version.
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

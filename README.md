@@ -519,11 +519,27 @@ holding 137 MB on one store and 137 MB on three — one loaded model, not three.
 ## The code graph
 
 A store knows the structure of the code in it, not only its text. Indexing
-extracts symbols and the edges between them with tree-sitter — for
-Rust, TypeScript, Python, Go, Java and C — on the same changed-file path that
-drives re-embedding. So a file saved under `semlith start` updates its edges in
-the same pass that updates its vectors, and there is no build step and no
-artifact that can quietly go stale.
+extracts symbols and the edges between them with tree-sitter, on the same
+changed-file path that drives re-embedding. So a file saved under `semlith
+start` updates its edges in the same pass that updates its vectors, and there is
+no build step and no artifact that can quietly go stale.
+
+From 0.17.0 that covers **every language `--lang` accepts** — all forty-six of
+them, read from the same table the search filter reads, so the two cannot
+disagree. Through 0.16.0 it was six, which meant `--lang kotlin` narrowed a
+search perfectly well and `semlith symbol` then answered nothing about the same
+corpus.
+
+Fourteen of the forty-six are markup, data or configuration, and their structure
+is their symbol set: a YAML, TOML or JSON key, a Markdown heading, a Terraform
+block label, a Dockerfile stage, a Makefile target, a GraphQL type, a protobuf
+message, a SQL table or view, a CSS selector, an HTML element with an id. What
+they reference is files — an include, an import, a source, a `FROM`, a
+stylesheet or script `src`, the table a view selects from — so a change to a
+base image or a shared module has a blast radius you can ask about.
+
+A store written by an earlier version keeps working and gains the new languages
+the next time those files are indexed.
 
 ```console
 $ semlith symbol acquire

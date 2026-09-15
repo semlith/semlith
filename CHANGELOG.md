@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-15
+
+The code graph covered six of the forty-six languages `--lang` accepts. That gap
+was a promise the product did not keep: `--lang kotlin` narrowed a search
+perfectly well, and then `semlith symbol` answered nothing about the same corpus
+with nothing saying why. It is closed.
+
+### One language table
+
+- **The extractor reads `filter::LANGUAGES`, the table the search filter reads.**
+  `graph::LANGUAGES` — a second copy, six entries against forty-six — is gone,
+  along with the extension table beside it. `graph::has_graph` answers whether a
+  language carries symbols and edges by asking whether a grammar exists, and
+  `graph::language_of` dispatches through the same `filter::language_of_path`
+  the filter uses. A test enumerates the table and fails for a row that has
+  neither a grammar nor an entry in `graph::WITHOUT_GRAMMAR` giving the reason,
+  so the two halves cannot drift apart again.
+- **Every language has a fixture that says what it must extract.** A grammar
+  that compiles and extracts nothing would pass every other gate in the crate.
+  `tests/fixtures/graph/<language>/` holds a real file per language and
+  `graph::tests::FIXTURES` declares the symbols and edges each one must yield,
+  with their kinds.
+
+### Forty grammars
+
+- **Twelve of the new grammars ship a tags query; twenty-eight do not.** Those
+  get one under `queries/<language>/tags.scm`, written against that grammar's
+  own node names in the same capture vocabulary, and nothing downstream can tell
+  the two families apart.
+- **Nothing is vendored and nothing is a git dependency.** Every grammar
+  resolves from crates.io through `tree-sitter-language`, so `cargo publish` is
+  unaffected. Two languages needed a crate other than the obvious one, because
+  `tree-sitter` sets `links = "tree-sitter"` and a grammar depending on
+  `tree-sitter` itself cannot coexist with the version this crate links: clojure
+  uses `tree-sitter-clojure-orchard`, perl uses `ts-parser-perl`.
+- **`THIRD-PARTY-NOTICES` ships with the crate and with every release archive,**
+  and `tests/licences.rs` refuses a grammar outside a permissive allowlist. All
+  forty-six are permissive: forty-three MIT, two Apache-2.0, one CC0-1.0.
+
+### What a symbol is in a language that has no functions
+
+- **Fourteen of the forty-six are markup, data or configuration, and their
+  structure is their symbol set.** A YAML, TOML or JSON key, a Markdown heading,
+  a Terraform block label, a Dockerfile stage, a Makefile target, a GraphQL
+  type, a protobuf message or RPC, a SQL table or view, a CSS selector, an HTML
+  element with an id — each with a kind that says which.
+- **What they reference is files.** An include, an import, a source, a `FROM`, a
+  stylesheet or script `src`, a Makefile prerequisite, the table a view selects
+  from. A change to a base image or a shared module has a blast radius, and
+  nothing in semlith could show it before.
+- **Svelte and Vue contribute their template and say so.** Their grammars hand
+  the `<script>` block back as raw text, so a component's methods are not
+  symbols and nothing pretends otherwise.
+
+### Fixed
+
+- **C and C++ attributed every call to the file rather than to the function
+  making it.** Their bundled queries tag the *declarator*, so a function's range
+  stopped at its signature and "where is `helper` invoked" answered `main.c`.
+  Live since 0.12.0. The supplement now spans the whole definition, and a
+  general rule drops a definition that another of the same name *and kind*
+  contains — same name and same kind, so a Rust `mod x` holding an `fn x` keeps
+  both.
+- **C++ captured no calls at all, C# captured no invocations, JavaScript
+  captured no imports, PHP captured neither a require nor a function call, and
+  Swift captured no calls.** Each now has the supplement its bundled query
+  needed.
+- **Elm recorded nothing about a declaration depending on another.** Its bundled
+  query captures the name in a type annotation as a reference and the body of a
+  declaration not at all, so `acquire = helper` produced no edge between them.
+
+### Surface
+
+- **`semlith languages` prints a `graph` column,** which the portal's About page
+  and `semlith_languages` already showed. The About page's language card states
+  the coverage rather than a count of exceptions.
+- **No new command, tool, argument or schema.** `FORMAT_VERSION` does not move,
+  no column is added, a 0.16.0 store opens under 0.17.0 and the reverse. The new
+  languages' symbols appear on the next index pass of those files, as every
+  graph fact does.
+
+### What it costs
+
+- **The binary more than doubles: 47.0 MiB to 111.3 MiB, +64.3 MiB (+137%).** Measured on
+  macOS arm64 against a 0.16.0 build made with the same toolchain, both already
+  symbol-light — the growth is parser tables, not debug information. OCaml alone
+  is 12.6 MiB of it and the five largest grammars are 36 MiB. There is no
+  ceiling by decision: the number is the deliverable. Per-platform release
+  archive sizes are in the release assets for this tag.
+- **Retrieval moved, and the move was measured rather than assumed.** Against
+  0.16.0 on the same machine, the same corpus and the same question set: hit@1
+  13 to 11, hit@3 18 to 18, hit@8 27 to 25. `wrong yes` stays 0, which is a
+  gate. Four causes were found and measured one at a time; three were defects
+  and are fixed above, and the fourth — a same-language preference for ambiguous
+  edge targets — was tried, scored two hits worse, and reverted. The residual is
+  attributable: this release adds several thousand words of documentation that
+  legitimately answer the harness's concept questions, and those questions
+  accept only code spans. Seven questions rank lower than in 0.16.0 and three
+  rank higher; all ten are named in the release record.
+
+
 ## [0.16.0] - 2026-09-14
 
 0.15.0 made the free product honest and cheap. It did not make it better at

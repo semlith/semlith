@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+import "base.proto";
+
+message Lock {
+  string id = 1;
+}
+
+service Acquire {
+  rpc Hold(Lock) returns (Lock);
+}

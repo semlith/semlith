@@ -967,7 +967,7 @@ fn about(state: &Arc<State>) -> Response {
         // Which of those languages carry graph edges. The rest are searchable
         // exactly as before and simply have no symbols, which is a different
         // thing from being unsupported.
-        "graph_languages": crate::graph::LANGUAGES,
+        "graph_languages": crate::graph::languages(),
         "edge_kinds": crate::graph::KINDS,
         "stores": state.stores().len(),
     }))
