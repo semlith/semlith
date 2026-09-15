@@ -35,6 +35,32 @@ step "index again is a no-op" semlith index --quiet "$corpus/src" "$corpus/tests
 step "stats" semlith stats
 step "files" sh -c 'semlith files | head -20'
 
+# Exit status is not evidence on its own: every command here exited 0 on
+# Windows while printing `\\?\D:\a\...` for every path. A locator is meant to
+# be handed to an editor or back to `semlith read`, and that form is neither.
+tmp=$(mktemp -d)
+no_verbatim_paths() {
+  semlith files > "$tmp/files.out"
+  if grep -qF '\\?\' "$tmp/files.out"; then
+    echo "verbatim paths in the file list:"
+    grep -m 3 -F '\\?\' "$tmp/files.out"
+    return 1
+  fi
+  head -3 "$tmp/files.out"
+}
+step "file list holds no verbatim paths" no_verbatim_paths
+
+# A long listing piped into `head` is what a person types. Rust ignores
+# SIGPIPE, so the writer panics instead of stopping when the reader closes.
+survives_sigpipe() {
+  semlith files 2> "$tmp/sigpipe.err" | head -1 > /dev/null
+  if grep -q 'panicked at\|Broken pipe' "$tmp/sigpipe.err"; then
+    grep -m 2 'panicked at\|Broken pipe' "$tmp/sigpipe.err"
+    return 1
+  fi
+}
+step "a truncated pipe does not panic" survives_sigpipe
+
 step "search" semlith search "how does the store lock work" -k 3
 step "search --json" sh -c 'semlith search "embedding model download" -k 2 --json | head -c 2000; echo'
 step "search --lang" semlith search "parse a document" -k 2 --lang rust

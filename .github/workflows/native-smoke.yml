@@ -81,16 +81,43 @@ jobs:
           .\install.ps1
           Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
 
+      # First, and under PowerShell on every operating system. Git Bash sets
+      # HOME and Windows does not, so a check that only ever runs under bash
+      # cannot see what a person launching the daemon from PowerShell hits.
+      # Run before the CLI smoke so the store home is still empty and the
+      # portal's first-run path is the one exercised.
+      - name: Portal check
+        id: portal
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          pwsh -File .github/portal-check.ps1 2>&1 | Tee-Object -FilePath "portal-${{ matrix.os }}.log"
+          exit $LASTEXITCODE
+
       - name: Smoke
         id: smoke
+        continue-on-error: true
         shell: bash
         run: bash .github/smoke.sh 2>&1 | tee "smoke-${{ matrix.os }}.log"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: smoke-${{ matrix.os }}
-          path: smoke-${{ matrix.os }}.log
+          name: logs-${{ matrix.os }}
+          path: |
+            portal-${{ matrix.os }}.log
+            smoke-${{ matrix.os }}.log
+
+      # Both checks ran and both logs are uploaded; now say whether the job
+      # passed. Without this the `continue-on-error` above would make a run
+      # with real failures look green.
+      - name: Gate
+        shell: bash
+        run: |
+          fail=0
+          [ "${{ steps.portal.outcome }}" = success ] || { echo "portal check failed"; fail=1; }
+          [ "${{ steps.smoke.outcome }}" = success ] || { echo "smoke failed"; fail=1; }
+          exit $fail
 
       - name: Bug hunt
         if: inputs.hunt && always()
