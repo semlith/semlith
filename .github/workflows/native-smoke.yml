@@ -74,52 +74,60 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install the release the way a user does
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          sh install.sh
-          echo "$HOME/.semlith/bin" >> "$GITHUB_PATH"
-
-      - name: Install the release the way a user does
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          .\install.ps1
-          Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
-
-      # On a pull request, the checks are about the code under review, so the
-      # installed release is replaced by this branch's own build. The installer
-      # still ran: PATH, the store home and the model download are its work, and
-      # what changes is only which binary sits in `~/.semlith/bin`.
+      # On a pull request the checks are about the code under review, so this
+      # branch is what gets installed. Without it the harness re-measured the
+      # last published release on every pull request -- a run that cannot fail
+      # for anything in the diff, while `known-failures.txt` says a fix cannot
+      # land without its row coming out in the same breath, which only means
+      # something if the fix is what ran.
       #
-      # Without this the harness re-measured the last published release on every
-      # pull request, which is a run that cannot fail for anything in the diff --
-      # and `known-failures.txt` says a fix cannot land without its row coming
-      # out in the same breath, which only means anything if the fix is what ran.
-      # A dispatch with a version still installs and tests that release.
+      # It happens before the installer rather than after it, because the
+      # installer hands off to `semlith setup`, which downloads the model *with
+      # the binary it just installed*. A released binary running first is a
+      # released binary writing wherever its bugs write.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         if: github.event_name == 'pull_request'
 
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         if: github.event_name == 'pull_request'
 
-      - name: Build this branch and put it where the installer put its binary
+      - name: Install this branch the way the installer installs a release
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
           cargo build --release --locked
           if [ "$RUNNER_OS" = Windows ]; then
             built=target/release/semlith.exe
-            # install.ps1 wrote into PowerShell's $HOME, which is USERPROFILE.
-            # cygpath turns that into the form this shell can copy to.
-            target="$(cygpath -u "$USERPROFILE")/.semlith/bin/semlith.exe"
+            # `semlith setup` writes into PowerShell's $HOME, which is
+            # USERPROFILE; cygpath turns that into the form this shell copies to.
+            home=$(cygpath -u "$USERPROFILE")
+            name=semlith.exe
           else
             built=target/release/semlith
-            target="$HOME/.semlith/bin/semlith"
+            home=$HOME
+            name=semlith
           fi
-          cp "$built" "$target"
-          "$target" --version
+          mkdir -p "$home/.semlith/bin"
+          cp "$built" "$home/.semlith/bin/$name"
+          echo "$home/.semlith/bin" >> "$GITHUB_PATH"
+          "$home/.semlith/bin/$name" --version
+          # The rest of what the installer does -- PATH, the model, the client
+          # registration -- run by the binary under test.
+          "$home/.semlith/bin/$name" setup --yes
+
+      - name: Install the release the way a user does
+        if: github.event_name != 'pull_request' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh install.sh
+          echo "$HOME/.semlith/bin" >> "$GITHUB_PATH"
+
+      - name: Install the release the way a user does
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\install.ps1
+          Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
 
       # First, and under PowerShell on every operating system. Git Bash sets
       # HOME and Windows does not, so a check that only ever runs under bash

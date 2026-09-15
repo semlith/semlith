@@ -454,12 +454,17 @@ check cli/pattern/bad-query    "a malformed pattern is an error"    c_pattern_ba
 # ------------------------------------------------------------- forget and add
 
 c_forget_removes() {
-  target="$corpus/src/lock.rs"
-  semlith files > "$work/before.txt"
-  grep -qF "$target" "$work/before.txt" || {
+  # The listing prints platform paths -- `C:\\...\\src\\lock.rs` on Windows, where
+  # this shell's own `$corpus` is an MSYS path. Compare on the tail with
+  # separators normalised, so the check is about forgetting rather than about
+  # which shell wrote the path.
+  suffix="src/lock.rs"
+  target=$(semlith files | tr '\\' '/' | grep -F "$suffix" | head -1)
+  semlith files | tr '\\' '/' > "$work/before.txt"
+  [ -n "$target" ] || {
     echo "the target is not in the listing, so this proves nothing"; return 1; }
   out=$(semlith forget "$target" 2>&1)
-  semlith files > "$work/after.txt"
+  semlith files | tr '\\' '/' > "$work/after.txt"
   before=$(wc -l < "$work/before.txt")
   after=$(wc -l < "$work/after.txt")
   if grep -qF "$target" "$work/after.txt"; then

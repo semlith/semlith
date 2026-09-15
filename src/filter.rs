@@ -223,30 +223,26 @@ impl Filter {
 /// Lowercased, because the query side compares against `lower(files.path)`:
 /// `README.MD` and `readme.md` are the same file to anyone typing `--ext md`.
 fn anchor(pattern: &str) -> String {
-    let pattern = pattern.to_lowercase();
-    // ponytail: paths on Windows are stored with backslashes, so a pattern
-    // written with forward slashes would match nothing. Translate rather than
-    // asking the user to write a platform-specific glob.
-    #[cfg(windows)]
-    let pattern = pattern.replace('/', "\\");
-
+    // Always `/`, on every platform. The query side compares against a path
+    // whose separators have been normalised to `/` (`store::GLOB_PATH`), so a
+    // pattern written the way everyone writes one matches a Windows store as
+    // well as a unix one. Translating the pattern to backslashes instead —
+    // which is what this did — matched nothing whenever the store held a path
+    // in any other form, and the store holds the verbatim form (#74).
+    let pattern = pattern.to_lowercase().replace('\\', "/");
     if is_absolute(&pattern) {
         pattern
     } else {
-        format!("{}{pattern}", separator_prefix())
+        format!("*/{pattern}")
     }
 }
 
 fn is_absolute(pattern: &str) -> bool {
-    if pattern.starts_with(std::path::MAIN_SEPARATOR) {
+    if pattern.starts_with('/') {
         return true;
     }
     // `c:\...` on Windows. Elsewhere a colon is an ordinary filename character.
     cfg!(windows) && pattern.as_bytes().get(1) == Some(&b':')
-}
-
-fn separator_prefix() -> String {
-    format!("*{}", std::path::MAIN_SEPARATOR)
 }
 
 #[cfg(test)]

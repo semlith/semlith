@@ -440,12 +440,21 @@ Check 'portal/search/k' 'k bounds the hit count' -When $script:hasData {
     if ($n -eq 0) { Fail "k=2 returned nothing" }
 }
 
+# A page is cut out of one search, so the comparison is against that search and
+# not against a shallower one. Rank fusion combines each list's top-k, so the
+# ranking for k=1 is not the first row of the ranking for k=2 -- asking for
+# "offset=1 differs from k=1" would be asking the engine for a property it does
+# not have, and passing it would mean the ranking had stopped depending on k.
 Check 'portal/search/offset' 'offset moves the window' -When $script:hasData {
-    $a = (Get-Json '/api/search?query=store&k=1').hits[0]
-    $b = (Get-Json '/api/search?query=store&k=1&offset=1').hits[0]
-    if ($null -eq $a -or $null -eq $b) { Fail "one of the two requests returned no hit" }
-    if ("$($a.path):$($a.start_line)" -eq "$($b.path):$($b.start_line)") {
-        Fail "offset=1 returned the same hit: $($a.path):$($a.start_line)"
+    $page = Get-Json '/api/search?query=store&k=2'
+    $second = $page.hits[1]
+    if ($null -eq $second) { Fail "k=2 returned fewer than two hits, so this proves nothing" }
+    $body = Get-Json '/api/search?query=store&k=1&offset=1'
+    $b = $body.hits[0]
+    if ($null -eq $b) { Fail "offset=1 returned no hit" }
+    if ($body.offset -ne 1) { Fail "the response does not echo the offset: $($body.offset)" }
+    if ("$($b.path):$($b.start_line)" -ne "$($second.path):$($second.start_line)") {
+        Fail "offset=1 gave $($b.path):$($b.start_line), not the second hit $($second.path):$($second.start_line)"
     }
 }
 
@@ -520,7 +529,9 @@ Check 'portal/add/bad-scheme' 'a non-https URL is refused' -When $script:hasData
 }
 
 Check 'portal/forget/removes' 'forget drops a file from the store' -When $script:hasData {
-    $target = (Get-Json '/api/files').files |
+    # The whole listing, not the default first page: the page is path-sorted and
+    # a corpus whose first fifteen files are prose has no Rust file on it.
+    $target = (Get-Json '/api/files?limit=500').files |
         Where-Object { "$_" -match '\.rs$' -or $_.path -match '\.rs$' } |
         Select-Object -First 1
     $path = if ($target -is [string]) { $target } else { $target.path }

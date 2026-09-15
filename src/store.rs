@@ -391,11 +391,11 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
     let mut binds = Vec::new();
     let mut clauses = Vec::new();
     for group in groups {
-        let ors: Vec<&str> = group
+        let ors: Vec<String> = group
             .iter()
             .map(|p| {
                 binds.push(p.clone());
-                "lower(f.path) GLOB ?"
+                format!("{GLOB_PATH} GLOB ?")
             })
             .collect();
         clauses.push(format!("({})", ors.join(" OR ")));
@@ -575,14 +575,37 @@ pub fn insert_chunk(
 /// reached through a symlink — the suffix is matched against what was actually
 /// indexed. `/` is prepended so `one.rs` cannot match `alone.rs`.
 pub fn files_ending_with(db: &Connection, suffix: &str, limit: usize) -> Result<Vec<String>> {
-    let suffix = suffix.trim_start_matches(['.', '/']);
-    let mut stmt = db.prepare(
-        "SELECT path FROM files WHERE path = ?1 OR path LIKE '%/' || ?1
+    let suffix = suffix
+        .trim_start_matches(['.', '/', '\\'])
+        .replace('\\', "/");
+    let mut stmt = db.prepare(&format!(
+        "SELECT path FROM files WHERE path = ?1 OR {PATH_AS_TYPED} LIKE '%/' || ?1
          ORDER BY LENGTH(path) LIMIT ?2",
-    )?;
+    ))?;
     let rows = stmt.query_map(params![suffix, limit as i64], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
+
+/// `files.path` with separators in the form a person types, for the comparisons
+/// that take a path from one.
+///
+/// A Windows store holds `C:\work\api\src\lock.rs` — or the verbatim form of
+/// it — and every locator, glob and `--lang` pattern is written with `/`, which
+/// is what `semlith read src/main.rs:28-40` hands back. Comparing the two
+/// without this matched nothing on that platform, which is the half of #74 that
+/// is not the prefix. On unix the column is used as it is: a backslash there is
+/// an ordinary character in a filename and rewriting it would make
+/// `a\b.rs` answer to `a/b.rs`.
+#[cfg(windows)]
+const PATH_AS_TYPED: &str = r#"replace(path, '\', '/')"#;
+#[cfg(not(windows))]
+const PATH_AS_TYPED: &str = "path";
+
+/// The same, for the queries that alias the table as `f` and lowercase it.
+#[cfg(windows)]
+const GLOB_PATH: &str = r#"replace(lower(f.path), '\', '/')"#;
+#[cfg(not(windows))]
+const GLOB_PATH: &str = "lower(f.path)";
 
 /// Every chunk of one file whose lines overlap `start..=end`, in file order.
 ///
