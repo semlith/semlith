@@ -366,10 +366,26 @@ Check 'portal/stores/holds-repo' 'the store list names the repository' -When $sc
     }
 }
 
-Check 'portal/files/lists' 'the file list is not empty' -When $script:hasData {
+Check 'portal/files/lists' 'the file list pages and reports a total' -When $script:hasData {
     $body = Get-Json '/api/files'
-    $n = ($body.files | Measure-Object).Count
-    if ($n -eq 0) { Fail "the file list is empty" }
+    if (($body.files | Measure-Object).Count -eq 0) { Fail "the first page is empty" }
+    if ($null -eq $body.total -or $body.total -lt 1) { Fail "no usable total: $($body.total)" }
+}
+
+Check 'portal/files/offset' 'the file list offset moves the page' -When $script:hasData {
+    $first = (Get-Json '/api/files?limit=5').files
+    $next = (Get-Json '/api/files?limit=5&offset=5').files
+    if (($first | Measure-Object).Count -eq 0 -or ($next | Measure-Object).Count -eq 0) {
+        Fail "one of the two pages was empty"
+    }
+    if (($first | ConvertTo-Json -Depth 4) -eq ($next | ConvertTo-Json -Depth 4)) {
+        Fail "offset=5 returned the same page"
+    }
+}
+
+Check 'portal/files/bad-offset' 'an out-of-range offset is refused' -When $script:hasData {
+    $r = Api '/api/files?offset=-1'
+    if ($r.StatusCode -ne 400) { Fail "offset=-1 was $($r.StatusCode), not 400" }
 }
 
 Check 'portal/search/hits' 'search returns hits with locators' -When $script:hasData {
@@ -439,11 +455,15 @@ foreach ($route in @('models', 'languages', 'privacy', 'about', 'agents', 'setup
 # not disagree. A portal that quietly reads a different store is worse than one
 # that errors.
 
-Check 'portal/parity/files' 'the portal and the CLI list the same count' -When $script:hasData {
-    $portalCount = ((Get-Json '/api/files').files | Measure-Object).Count
+Check 'portal/parity/files' 'the portal and the CLI count the same files' -When $script:hasData {
+    # `files` pages in fifteens; `total` is the whole count, which is what the
+    # CLI listing is comparable to.
+    $body = Get-Json '/api/files'
+    $portalTotal = $body.total
     $cliCount = (& semlith files 2>$null | Where-Object { $_.Trim() } | Measure-Object).Count
-    if ($portalCount -ne $cliCount) {
-        Fail "the portal lists $portalCount files and the CLI lists $cliCount"
+    if ($null -eq $portalTotal) { Fail "/api/files reported no total" }
+    if ($portalTotal -ne $cliCount) {
+        Fail "the portal counts $portalTotal files and the CLI lists $cliCount"
     }
 }
 
