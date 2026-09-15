@@ -1,0 +1,46 @@
+# Checks that are known to fail, and the issue that will close each one.
+#
+# A check listed here is reported as `xfail` and does not fail the job. A check
+# listed here that starts passing is reported as `XPASS` and does fail the job,
+# so a fix cannot land without this file being updated in the same breath. That
+# is the whole point: without it, either the run is permanently red and a new
+# regression hides in the noise, or the known bugs get quietly dropped from the
+# harness and stop being tracked at all.
+#
+# Columns: id, platform, issue number, note.
+# Platform is one of: all, unix, windows, linux, macos.
+
+# #70 Windows does not set HOME, so the store home never resolves.
+cli/env/native-shell-index      windows   70   no HOME, so the store home never resolves
+portal/env/native-shell-index   windows   70   the same failure from the CLI side
+
+# #71 The portal's directory browser falls back to the filesystem root.
+portal/dirs/home-is-user-home   windows   71   reports the drive root as the home directory
+portal/dirs/browse-repo         windows   71   refuses the user profile as outside home
+
+# #73 home() writes into the working directory rather than erroring.
+portal/env/no-store-in-cwd      windows   73   a store is written where the installer ran
+portal/env/no-cache-in-cwd      windows   73   52 MB of weights land in the working directory
+
+# #74 Windows locators are printed as \\?\ verbatim paths.
+cli/files/no-verbatim-paths     windows   74   canonicalize returns the verbatim form
+cli/search/no-verbatim-paths    windows   74   same prefix on every hit
+cli/read/span                   windows   74   a corpus-relative target does not resolve
+cli/read/line                   windows   74   the same, for path:line
+cli/read/json                   windows   74   the same, for --json
+portal/search/no-verbatim       windows   74   the same prefix through the portal
+
+# #75 Printing to a closed pipe panics rather than exiting. All three
+# platforms: SIGPIPE is the unix mechanism, but the Windows write error
+# reaches the same panic in println!.
+cli/pipe/survives-truncation    all       75   panics instead of exiting quietly
+
+# #76 A path that cannot be read still creates and registers a store.
+cli/index/missing-registers-nothing  all   76   an empty store is left behind
+
+# #77 forget removes nothing and still exits 0.
+cli/forget/removes                   all   77   the file is still listed afterwards
+portal/forget/removes                all   77   the same route, the same no-op
+
+# #78 The search route validates an offset it never applies.
+portal/search/offset                 all   78   offset=1 returns the same hit
