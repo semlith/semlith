@@ -78,7 +78,12 @@ fn every_grammar_is_permissively_licensed_and_its_notice_ships() {
         std::fs::write(&path, &expected).unwrap();
         return;
     }
-    let actual = std::fs::read_to_string(&path).unwrap_or_default();
+    // Normalised, because git checks this file out with CRLF on Windows and the
+    // generated string is built with LF. The bytes differ, the notice does not,
+    // and a release is not going to be held up over a line ending.
+    let actual = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     assert_eq!(
         actual, expected,
         "THIRD-PARTY-NOTICES no longer describes the grammars in the tree. \
