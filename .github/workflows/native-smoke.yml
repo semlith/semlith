@@ -1,8 +1,12 @@
 name: native-smoke
 
-# Exploratory native runs on the three operating systems semlith ships for.
-# Nothing here uses the repo toolchain: the binary comes from the same
-# installer a user runs, so what breaks here breaks for them.
+# Native runs on the three operating systems semlith ships for, on every pull
+# request into develop and on demand.
+#
+# Nothing here uses the repository toolchain. The binary comes from the same
+# installer a user runs, so what breaks here breaks for them -- which is the
+# gap ci.yml leaves: `cargo test` proves the code compiles and its unit tests
+# pass, never that the shipped artifact works on the machine it lands on.
 #
 # Three modes, picked at dispatch:
 #   smoke  always: install the release, drive every command, upload the log.
@@ -12,7 +16,14 @@ name: native-smoke
 #          brief, and upload its report. Needs the ANTHROPIC_API_KEY secret.
 
 on:
-  # TEMPORARY: lets the branch run before the file exists on main. Remove before merge.
+  # Every pull request into develop, which is where all work lands. A pull
+  # request from develop into main carries the same commits, already checked
+  # here, so running again there would cost three more runners to re-answer a
+  # question this job has already answered.
+  pull_request:
+    branches: [develop]
+  # TEMPORARY: lets this branch run before the file exists on develop. Remove
+  # in the merge commit.
   push:
     branches: [feat/native-smoke]
   workflow_dispatch:

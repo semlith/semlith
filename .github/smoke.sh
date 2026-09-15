@@ -245,7 +245,14 @@ c_files_resolve() {
 }
 
 c_pipe_survives() {
-  semlith files 2> "$work/sigpipe.err" | head -1 > /dev/null
+  # The output has to exceed the pipe buffer, or the writer finishes before the
+  # reader closes and nothing is proved either way. `files` over a small corpus
+  # is a few kilobytes, which is why this check passed on one macOS machine and
+  # failed on another. A --json search carries the chunk text, so it is large.
+  size=$(semlith search "store" -k 50 --json | wc -c)
+  [ "${size:-0}" -gt 131072 ] || {
+    echo "only $size bytes of output, too little to close a pipe against"; return 1; }
+  semlith search "store" -k 50 --json 2> "$work/sigpipe.err" | head -c 200 > /dev/null
   if grep -q 'panicked at\|Broken pipe' "$work/sigpipe.err"; then
     grep -m 2 'panicked at\|Broken pipe' "$work/sigpipe.err"
     return 1

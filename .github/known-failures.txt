@@ -26,11 +26,13 @@ portal/env/no-cache-in-cwd      windows   73   52 MB of weights land in the work
 # #74 Windows locators are printed as \\?\ verbatim paths.
 cli/files/no-verbatim-paths     windows   74   canonicalize returns the verbatim form
 cli/search/no-verbatim-paths    windows   74   same prefix on every hit
-cli/read/locator-round-trip     windows   74   a hit's locator cannot be read back
+cli/read/span                   windows   74   a corpus-relative target does not resolve
+cli/read/line                   windows   74   the same, for path:line
+cli/read/json                   windows   74   the same, for --json
 portal/search/no-verbatim       windows   74   the same prefix through the portal
 
 # #75 Rust ignores SIGPIPE, so a truncated pipe panics.
-cli/pipe/survives-truncation    unix      75   panics instead of exiting quietly
+cli/pipe/survives-truncation    linux     75   panics instead of exiting quietly
 
 # #76 A path that cannot be read still creates and registers a store.
 cli/index/missing-registers-nothing  all   76   an empty store is left behind

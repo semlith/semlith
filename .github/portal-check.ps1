@@ -172,10 +172,22 @@ Check 'portal/daemon/starts' 'the daemon starts and prints a tokenised URL' {
 }
 
 function Api {
-    param([string]$Path, [string]$Method = 'GET', $Body = $null, [string]$Token = $null, [hashtable]$Extra = $null)
+    param(
+        [string]$Path,
+        [string]$Method = 'GET',
+        $Body = $null,
+        # A switch rather than an empty-string sentinel: PowerShell coerces a
+        # [string] parameter defaulting to $null into '', which silently turned
+        # every authenticated request into an anonymous one.
+        [switch]$NoToken,
+        [string]$Token,
+        [hashtable]$Extra = $null
+    )
     $headers = @{}
-    $t = if ($null -ne $Token) { $Token } else { $script:token }
-    if ($t -ne '') { $headers['Semlith-Token'] = $t }
+    if (-not $NoToken) {
+        $t = if ($PSBoundParameters.ContainsKey('Token')) { $Token } else { $script:token }
+        if ($t) { $headers['Semlith-Token'] = $t }
+    }
     if ($null -ne $Extra) { foreach ($k in $Extra.Keys) { $headers[$k] = $Extra[$k] } }
     $req = @{
         Uri                = "http://127.0.0.1:$port$Path"
@@ -204,22 +216,22 @@ function Get-Json {
 # ---------------------------------------------------------------------- access
 
 Check 'portal/auth/page-is-public' 'the page needs no token' -When $script:up {
-    $r = Api '/' 'GET' $null ''
+    $r = Api '/' -NoToken
     if ($r.StatusCode -ne 200) { Fail "GET / without a token was $($r.StatusCode)" }
 }
 
 Check 'portal/auth/asset-is-public' 'a static asset needs no token' -When $script:up {
-    $r = Api '/style.css' 'GET' $null ''
+    $r = Api '/style.css' -NoToken
     if ($r.StatusCode -ne 200) { Fail "GET /style.css without a token was $($r.StatusCode)" }
 }
 
 Check 'portal/auth/api-needs-token' 'an API route without a token is 401' -When $script:up {
-    $r = Api '/api/stores' 'GET' $null ''
+    $r = Api '/api/stores' -NoToken
     if ($r.StatusCode -ne 401) { Fail "GET /api/stores without a token was $($r.StatusCode), not 401" }
 }
 
 Check 'portal/auth/bad-token' 'a wrong token is 401' -When $script:up {
-    $r = Api '/api/stores' 'GET' $null ('0' * 64)
+    $r = Api '/api/stores' -Token ('0' * 64)
     if ($r.StatusCode -ne 401) { Fail "a wrong token was $($r.StatusCode), not 401" }
 }
 
@@ -482,15 +494,15 @@ Check 'portal/mcp/tools-list' 'MCP over the portal route lists tools' -When $scr
 }
 
 Check 'portal/mcp-http/needs-key' '/mcp without the agent key is 401' -When $script:up {
-    $r = Api '/mcp' 'POST' @{ jsonrpc = '2.0'; id = 1; method = 'tools/list' } ''
+    $r = Api '/mcp' 'POST' @{ jsonrpc = '2.0'; id = 1; method = 'tools/list' } -NoToken
     if ($r.StatusCode -ne 401) { Fail "/mcp without a key was $($r.StatusCode), not 401" }
 }
 
 Check 'portal/mcp-http/with-key' '/mcp with the agent key lists tools' -When $script:up {
     $key = (& semlith key show 2>$null | Select-String -Pattern 'sml_[0-9a-f]+').Matches[0].Value
     if (-not $key) { Fail "could not read the agent key" }
-    $r = Api '/mcp' 'POST' @{ jsonrpc = '2.0'; id = 1; method = 'tools/list'; params = @{ } } '' `
-        @{ Authorization = "Bearer $key" }
+    $r = Api '/mcp' 'POST' @{ jsonrpc = '2.0'; id = 1; method = 'tools/list'; params = @{ } } `
+        -NoToken -Extra @{ Authorization = "Bearer $key" }
     if ($r.StatusCode -ne 200) { Fail "/mcp with the key was $($r.StatusCode): $($r.Content)" }
     if ($r.Content -notmatch '"tools"') { Fail "no tools in the answer" }
 }
@@ -518,7 +530,7 @@ Check 'portal/rotate/token' 'rotating the session token invalidates the old one'
     if (-not $fresh) { Fail "rotate returned no token" }
     if ($fresh -eq $old) { Fail "rotate returned the same token" }
     $script:token = $fresh
-    $stale = Api '/api/stores' 'GET' $null $old
+    $stale = Api '/api/stores' -Token $old
     if ($stale.StatusCode -ne 401) { Fail "the old token still worked: $($stale.StatusCode)" }
     $current = Api '/api/stores'
     if ($current.StatusCode -ne 200) { Fail "the new token did not work: $($current.StatusCode)" }
@@ -535,7 +547,7 @@ Check 'portal/daemon/stops' 'the daemon stops cleanly' -When $script:up {
     if ($stderr -match 'panicked at') { Fail "the daemon panicked:`n$stderr" }
 }
 
-Check 'portal/daemon/releases-lock' 'the store lock is free afterwards' -When ($script:up -and $script:repoReady) {
+Check 'portal/daemon/releases-lock' 'the store lock is free afterwards' -When ($script:up -and $script:indexed) {
     $out = & semlith index --quiet $repo 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Fail "indexing after shutdown exited $LASTEXITCODE`n$($out.Trim())" }
 }
