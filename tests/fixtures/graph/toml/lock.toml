@@ -1,0 +1,7 @@
+name = "lock"
+
+[acquire]
+timeout = 30
+
+[acquire.retry]
+attempts = 3

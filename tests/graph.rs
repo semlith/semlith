@@ -25,56 +25,34 @@ use std::time::{Duration, Instant};
 const APPEAR_TIMEOUT: Duration = Duration::from_secs(60);
 const DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// Every language that carries edges, in one corpus, each calling a helper it
-/// defines itself so there is an edge to look for.
+/// The fixture corpus: every language's fixture file, copied into one
+/// directory so a single index pass covers all of them.
+///
+/// The files live in `tests/fixtures/graph/<language>/`, and the per-language
+/// assertions about what each one yields are unit tests in `src/graph.rs`,
+/// where they need no embedding model. What this corpus proves is the wiring:
+/// that indexing a repository actually writes those rows.
 fn polyglot(dir: &Path) {
-    write(
-        dir,
-        "lock.rs",
-        "use std::fs::File;\n\
-         fn helper() {}\n\
-         fn acquire() { helper(); }\n",
-    );
-    write(
-        dir,
-        "app.ts",
-        "import {x} from './m';\n\
-         function helper(){}\n\
-         function acquire(){ helper(); }\n",
-    );
-    write(
-        dir,
-        "run.py",
-        "import os\n\
-         def helper():\n    pass\n\
-         def acquire():\n    helper()\n",
-    );
-    write(
-        dir,
-        "serve.go",
-        "package m\nimport \"fmt\"\n\
-         func helper() {}\n\
-         func acquire() { helper() }\n",
-    );
-    write(
-        dir,
-        "Main.java",
-        "import java.util.List;\n\
-         class Main { void helper(){} void acquire(){ helper(); } }\n",
-    );
-    write(
-        dir,
-        "main.c",
-        "#include <stdio.h>\n\
-         int helper(){ return 1; }\n\
-         int acquire(){ return helper(); }\n",
-    );
-    // Prose, which carries no edges and must not be an error.
-    write(dir, "notes.md", "The lock is acquired before the write.");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph");
+    for language in fs::read_dir(&root).expect("the fixture corpus is missing") {
+        let language = language.unwrap().path();
+        if !language.is_dir() {
+            continue;
+        }
+        for fixture in fs::read_dir(&language).unwrap() {
+            let fixture = fixture.unwrap().path();
+            let name = fixture.file_name().unwrap().to_string_lossy().to_string();
+            write(dir, &name, &fs::read_to_string(&fixture).unwrap());
+        }
+    }
+    // Prose in no language at all, which carries no edges and must not be an
+    // error. Markdown is a language with a graph now, so the file that used to
+    // prove this had stopped proving it.
+    write(dir, "notes.txt", "The lock is acquired before the write.");
 }
 
-/// Indexing a polyglot repository fills the graph for the six languages that
-/// carry edges and says nothing about the file that does not.
+/// Indexing a polyglot repository fills the graph for every language the
+/// filter advertises, and says nothing about the file that is in none of them.
 #[test]
 #[ignore = "downloads an embedding model on first run"]
 fn indexing_fills_the_graph_for_every_advertised_language() {
@@ -84,29 +62,38 @@ fn indexing_fills_the_graph_for_every_advertised_language() {
     index(store.path(), corpus.path());
 
     let s = Semlith::open(store.path(), None).unwrap();
-    for file in [
-        "lock.rs",
-        "app.ts",
-        "run.py",
-        "serve.go",
-        "Main.java",
-        "main.c",
-    ] {
-        assert!(
-            symbols_in(s.db(), file) > 0,
-            "{file} produced no symbols at all"
-        );
-        assert!(
-            calls_from(s.db(), "acquire").contains(&"helper".to_string()),
-            "{file}: acquire -> helper was not extracted; calls found: {:?}",
-            calls_from(s.db(), "acquire")
-        );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph");
+    let mut checked = 0;
+    for language in fs::read_dir(&root).unwrap() {
+        let language = language.unwrap().path();
+        if !language.is_dir() {
+            continue;
+        }
+        for fixture in fs::read_dir(&language).unwrap() {
+            let file = fixture.unwrap().file_name().to_string_lossy().to_string();
+            assert!(
+                symbols_in(s.db(), &file) > 0,
+                "{file} produced no symbols at all"
+            );
+            checked += 1;
+        }
     }
+    assert_eq!(
+        checked,
+        semlith::filter::LANGUAGES.len(),
+        "every advertised language contributes a fixture to the corpus"
+    );
+
+    assert!(
+        calls_from(s.db(), "acquire").contains(&"helper".to_string()),
+        "acquire -> helper was not extracted; calls found: {:?}",
+        calls_from(s.db(), "acquire")
+    );
 
     assert_eq!(
-        symbols_in(s.db(), "notes.md"),
+        symbols_in(s.db(), "notes.txt"),
         0,
-        "a language with no grammar must contribute no symbols, not an error"
+        "a file in no language at all must contribute no symbols, not an error"
     );
 
     // Every edge is one of the two confidences, never null and never a third.

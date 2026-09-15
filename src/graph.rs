@@ -121,34 +121,43 @@ pub struct Extraction {
     pub edges: Vec<Edge>,
 }
 
-/// The languages that carry edges, as the About page lists them.
-pub const LANGUAGES: [&str; 6] = ["rust", "typescript", "python", "go", "java", "c"];
-
-/// Extensions that reach an extractor, and the language label each maps to.
+/// Languages in [`crate::filter::LANGUAGES`] that ship without a graph, and why.
 ///
-/// Dispatch is by extension, like `chunk::extract`, and for the same reason: it
-/// decides before any bytes are read.
-const EXTENSIONS: &[(&str, &str)] = &[
-    ("rs", "rust"),
-    ("ts", "typescript"),
-    ("tsx", "typescript"),
-    ("mts", "typescript"),
-    ("cts", "typescript"),
-    ("py", "python"),
-    ("pyi", "python"),
-    ("go", "go"),
-    ("java", "java"),
-    ("c", "c"),
-    ("h", "c"),
-];
+/// A grammar is refused when its licence is copyleft or cannot be identified:
+/// the parser is compiled into this binary, so a GPL or LGPL grammar would take
+/// the whole Apache-2.0 crate with it, and a licence nobody can name is treated
+/// as the worst case rather than the best. A row here is a deliberate, stated
+/// gap; a row missing from both here and the grammar table is a bug, and
+/// `every_advertised_language_has_a_grammar` fails for it.
+pub const WITHOUT_GRAMMAR: &[(&str, &str)] = &[];
+
+/// Whether the graph covers a language.
+///
+/// There is one list, [`crate::filter::LANGUAGES`], and one answer to "does
+/// this language have a grammar" — this function. Nothing keeps a second copy
+/// of the set, because the six-language copy that used to live here drifted
+/// from the forty-six the product advertised for four releases.
+pub fn has_graph(lang: &str) -> bool {
+    grammar(lang).is_some()
+}
+
+/// Every language the graph covers, in the table's own order.
+pub fn languages() -> Vec<&'static str> {
+    crate::filter::LANGUAGES
+        .iter()
+        .map(|entry| entry.name)
+        .filter(|name| has_graph(name))
+        .collect()
+}
 
 /// The language label for a path, if this release extracts from it.
+///
+/// Dispatch is by extension and whole filename, through the same
+/// [`crate::filter::language_of_path`] the search filter uses, so a file is in
+/// exactly one language no matter which half of the product is asking.
 pub fn language_of(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    EXTENSIONS
-        .iter()
-        .find(|(e, _)| *e == ext)
-        .map(|(_, lang)| *lang)
+    let entry = crate::filter::language_of_path(&path.to_string_lossy())?;
+    has_graph(entry.name).then_some(entry.name)
 }
 
 /// What each grammar's `TAGS_QUERY` does not give us.
@@ -251,10 +260,84 @@ fn supplement(lang: &str) -> &'static str {
             (import_declaration (scoped_identifier) @reference.import)
         "#
         }
+        // C++ has C's problem and C's fix: the bundled query tags the declarator,
+        // so a function's span stopped at its signature, and it captures no
+        // calls at all.
+        "cpp" => {
+            r#"
+            (preproc_include path: (_) @reference.import)
+            (call_expression function: (identifier) @reference.call)
+            (function_definition
+              declarator: (function_declarator
+                declarator: (identifier) @name)) @definition.function
+        "#
+        }
+        "csharp" => {
+            r#"
+            (using_directive (identifier) @reference.import)
+            (invocation_expression function: (identifier) @name) @reference.call
+            ; `store.Search(...)`: the object is the hint.
+            (invocation_expression
+              function: (member_access_expression
+                expression: (_) @hint
+                name: (identifier) @name)) @reference.call
+        "#
+        }
+        // Elm's bundled query captures the name in a type annotation as a
+        // reference and the body of a declaration not at all, so `acquire =
+        // helper` recorded nothing about `acquire` depending on `helper`.
+        "elm" => {
+            r#"
+            (value_declaration
+              functionDeclarationLeft: (function_declaration_left
+                (lower_case_identifier) @name)) @definition.function
+            (value_expr name: (value_qid (lower_case_identifier) @name)) @reference.call
+            (import_clause moduleName: (upper_case_qid) @reference.import)
+        "#
+        }
+        "javascript" => {
+            r#"
+            (import_statement source: (string) @reference.import)
+            (import_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
+            (export_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
+        "#
+        }
+        "php" => {
+            r#"
+            (require_expression (string (string_content) @reference.import))
+            (include_expression (string (string_content) @reference.import))
+            (function_call_expression function: (name) @name) @reference.call
+            (member_call_expression
+              object: (_) @hint
+              name: (name) @name) @reference.call
+        "#
+        }
+        "swift" => {
+            r#"
+            (import_declaration (identifier) @reference.import)
+            (call_expression (simple_identifier) @name) @reference.call
+            (call_expression
+              (navigation_expression
+                target: (_) @hint
+                suffix: (navigation_suffix (simple_identifier) @name))) @reference.call
+        "#
+        }
         "c" => {
             r#"
             (preproc_include path: (_) @reference.import)
             (call_expression function: (identifier) @reference.call)
+            ; C's bundled query tags the declarator, so a function's span stops
+            ; at its signature and every call inside its body was attributed to
+            ; the file instead of to the function that makes it. This spans the
+            ; whole definition; the narrower duplicate is dropped by the
+            ; contained-definition rule below.
+            (function_definition
+              declarator: (function_declarator
+                declarator: (identifier) @name)) @definition.function
         "#
         }
         _ => "",
@@ -290,6 +373,170 @@ fn grammar(lang: &str) -> Option<(Language, &'static str)> {
             tree_sitter_java::TAGS_QUERY,
         )),
         "c" => Some((tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY)),
+
+        // The forty languages 0.17.0 added. Twenty-three of their crates ship a
+        // tags query written for `tree-sitter tags`, which is the same
+        // arrangement the six above have. The other seventeen ship none, so
+        // the query is written here under `queries/<language>/tags.scm` in the
+        // same capture vocabulary, and the extractor cannot tell the two apart.
+        "clojure" => Some((
+            tree_sitter_clojure_orchard::LANGUAGE.into(),
+            include_str!("../queries/clojure/tags.scm"),
+        )),
+        "cpp" => Some((
+            tree_sitter_cpp::LANGUAGE.into(),
+            tree_sitter_cpp::TAGS_QUERY,
+        )),
+        "csharp" => Some((
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            tree_sitter_c_sharp::TAGS_QUERY,
+        )),
+        "dart" => Some((
+            tree_sitter_dart::LANGUAGE.into(),
+            tree_sitter_dart::TAGS_QUERY,
+        )),
+        "dockerfile" => Some((
+            tree_sitter_containerfile::LANGUAGE.into(),
+            include_str!("../queries/dockerfile/tags.scm"),
+        )),
+        "elixir" => Some((
+            tree_sitter_elixir::LANGUAGE.into(),
+            tree_sitter_elixir::TAGS_QUERY,
+        )),
+        "elm" => Some((
+            tree_sitter_elm::LANGUAGE.into(),
+            tree_sitter_elm::TAGS_QUERY,
+        )),
+        "erlang" => Some((
+            tree_sitter_erlang::LANGUAGE.into(),
+            include_str!("../queries/erlang/tags.scm"),
+        )),
+        "fortran" => Some((
+            tree_sitter_fortran::LANGUAGE.into(),
+            include_str!("../queries/fortran/tags.scm"),
+        )),
+        "graphql" => Some((
+            tree_sitter_graphql::LANGUAGE.into(),
+            include_str!("../queries/graphql/tags.scm"),
+        )),
+        "groovy" => Some((
+            tree_sitter_groovy::LANGUAGE.into(),
+            include_str!("../queries/groovy/tags.scm"),
+        )),
+        "javascript" => Some((
+            tree_sitter_javascript::LANGUAGE.into(),
+            tree_sitter_javascript::TAGS_QUERY,
+        )),
+        "lua" => Some((
+            tree_sitter_lua::LANGUAGE.into(),
+            tree_sitter_lua::TAGS_QUERY,
+        )),
+        "nix" => Some((
+            tree_sitter_nix::LANGUAGE.into(),
+            include_str!("../queries/nix/tags.scm"),
+        )),
+        "ocaml" => Some((
+            tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+            tree_sitter_ocaml::TAGS_QUERY,
+        )),
+        "php" => Some((
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            tree_sitter_php::TAGS_QUERY,
+        )),
+        "powershell" => Some((
+            tree_sitter_powershell::LANGUAGE.into(),
+            include_str!("../queries/powershell/tags.scm"),
+        )),
+        "proto" => Some((
+            tree_sitter_proto::LANGUAGE.into(),
+            include_str!("../queries/proto/tags.scm"),
+        )),
+        "r" => Some((tree_sitter_r::LANGUAGE.into(), tree_sitter_r::TAGS_QUERY)),
+        "ruby" => Some((
+            tree_sitter_ruby::LANGUAGE.into(),
+            tree_sitter_ruby::TAGS_QUERY,
+        )),
+        "sql" => Some((
+            tree_sitter_sequel::LANGUAGE.into(),
+            include_str!("../queries/sql/tags.scm"),
+        )),
+        "swift" => Some((
+            tree_sitter_swift::LANGUAGE.into(),
+            tree_sitter_swift::TAGS_QUERY,
+        )),
+        "vue" => Some((
+            tree_sitter_vue_next::LANGUAGE.into(),
+            include_str!("../queries/vue/tags.scm"),
+        )),
+        "css" => Some((
+            tree_sitter_css::LANGUAGE.into(),
+            include_str!("../queries/css/tags.scm"),
+        )),
+        "haskell" => Some((
+            tree_sitter_haskell::LANGUAGE.into(),
+            include_str!("../queries/haskell/tags.scm"),
+        )),
+        "html" => Some((
+            tree_sitter_html::LANGUAGE.into(),
+            include_str!("../queries/html/tags.scm"),
+        )),
+        "json" => Some((
+            tree_sitter_json::LANGUAGE.into(),
+            include_str!("../queries/json/tags.scm"),
+        )),
+        "julia" => Some((
+            tree_sitter_julia::LANGUAGE.into(),
+            include_str!("../queries/julia/tags.scm"),
+        )),
+        "kotlin" => Some((
+            tree_sitter_kotlin_ng::LANGUAGE.into(),
+            include_str!("../queries/kotlin/tags.scm"),
+        )),
+        "makefile" => Some((
+            tree_sitter_make::LANGUAGE.into(),
+            include_str!("../queries/makefile/tags.scm"),
+        )),
+        "markdown" => Some((
+            tree_sitter_md::LANGUAGE.into(),
+            include_str!("../queries/markdown/tags.scm"),
+        )),
+        "objective-c" => Some((
+            tree_sitter_objc::LANGUAGE.into(),
+            include_str!("../queries/objective-c/tags.scm"),
+        )),
+        "perl" => Some((
+            ts_parser_perl::LANGUAGE.into(),
+            include_str!("../queries/perl/tags.scm"),
+        )),
+        "scala" => Some((
+            tree_sitter_scala::LANGUAGE.into(),
+            include_str!("../queries/scala/tags.scm"),
+        )),
+        "shell" => Some((
+            tree_sitter_bash::LANGUAGE.into(),
+            include_str!("../queries/shell/tags.scm"),
+        )),
+        "svelte" => Some((
+            tree_sitter_svelte_ng::LANGUAGE.into(),
+            include_str!("../queries/svelte/tags.scm"),
+        )),
+        "terraform" => Some((
+            tree_sitter_hcl::LANGUAGE.into(),
+            include_str!("../queries/terraform/tags.scm"),
+        )),
+        "toml" => Some((
+            tree_sitter_toml_ng::LANGUAGE.into(),
+            include_str!("../queries/toml/tags.scm"),
+        )),
+        "yaml" => Some((
+            tree_sitter_yaml::LANGUAGE.into(),
+            include_str!("../queries/yaml/tags.scm"),
+        )),
+        "zig" => Some((
+            tree_sitter_zig::LANGUAGE.into(),
+            include_str!("../queries/zig/tags.scm"),
+        )),
+
         _ => None,
     }
 }
@@ -394,6 +641,30 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         ))
     });
     defs.dedup_by(|a, b| a.start == b.start && a.end == b.end && a.name == b.name);
+
+    // Two queries can tag the same definition at two widths: a bundled query
+    // that tags the declarator and a supplement that tags the whole definition
+    // are both right about where the symbol is and disagree about where it
+    // ends. The wider one is the useful one, because a reference inside the
+    // body is only attributed to the symbol whose range covers it — C attributed
+    // every call in a function body to the file until this rule existed.
+    //
+    // Same name *and* same kind is the condition, so a `mod x` containing an
+    // `fn x`, or a Java class containing its own constructor, keeps both.
+    let contained: Vec<bool> = defs
+        .iter()
+        .map(|inner| {
+            defs.iter().any(|outer| {
+                outer.name == inner.name
+                    && outer.kind == inner.kind
+                    && (outer.start, outer.end) != (inner.start, inner.end)
+                    && outer.start <= inner.start
+                    && outer.end >= inner.end
+            })
+        })
+        .collect();
+    let mut keep = contained.iter();
+    defs.retain(|_| !keep.next().copied().unwrap_or(false));
 
     let module = module_name(path);
     let mut symbols = vec![Symbol {
@@ -838,6 +1109,38 @@ pub const DEPENDENCY_KINDS: [&str; 4] = ["calls", "imports", "references", "alia
 
 pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
+}
+
+/// Symbol kinds nothing can point *at*.
+///
+/// A Markdown heading, a YAML or TOML or JSON key, a CSS selector and an HTML
+/// element are navigational: they are what a document is searched by, and they
+/// are worth being symbols for exactly that. Nothing references them. No
+/// `calls` edge has ever meant a heading.
+///
+/// That distinction has to be enforced where an edge's target is resolved,
+/// because `edges.dst` is a *name* and resolution is a join on it. Without it,
+/// 0.17.0's forty new languages put 1 427 navigational symbols into this
+/// repository's own store — 933 configuration keys, 264 CSS selectors, 230
+/// headings — and 44 of them collided with the name of a real function:
+/// `path`, `query`, `symbol`, `graph`, `shape`, `forget`, `error`, `version`.
+/// Every one of those names became *ambiguous*, the walk refuses to cross an
+/// ambiguous name, and the harness measured the result: hit@1 13 to 10, hit@8
+/// 27 to 23 on an unchanged question set.
+///
+/// They stay symbols. `semlith symbol` finds them, a locate answer names the
+/// heading a hit sits under, and `semlith stats` counts them. They simply
+/// cannot be what an edge meant.
+pub const NAVIGATIONAL_KINDS: [&str; 4] = ["heading", "key", "selector", "element"];
+
+/// The same list as a SQL `NOT IN` list, for the two joins that resolve a name.
+pub fn not_navigational(column: &str) -> String {
+    let holes = NAVIGATIONAL_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{column} NOT IN ({holes})")
 }
 
 /// How much of a symbol's score flows on to its neighbours each round.
@@ -1765,8 +2068,11 @@ mod tests {
 
     #[test]
     fn a_file_with_no_grammar_yields_nothing_rather_than_failing() {
+        // Markdown had no grammar until 0.17.0 and was this test's example of
+        // a file the extractor skips. A file in no language at all is the
+        // example that stays true.
         assert!(
-            extract(&PathBuf::from("notes.md"), "# hi")
+            extract(&PathBuf::from("notes.txt"), "the lock is acquired")
                 .unwrap()
                 .is_none()
         );
@@ -1940,24 +2246,556 @@ mod tests {
         assert!(has_edge(&java, "A", "go", "contains"), "{:?}", java.edges);
     }
 
-    /// Every language reachable from `LANGUAGES` really parses, so the About
-    /// page's list cannot claim a language the binary does not carry.
+    /// One language's fixture and what the extractor must find in it.
+    ///
+    /// The fixture is a real file on disk under `tests/fixtures/graph/`, so it
+    /// is written in the language rather than in a Rust string literal, and an
+    /// editor, a formatter and a human all read it as what it is.
+    struct Fixture {
+        language: &'static str,
+        /// Path under `tests/fixtures/graph/`.
+        file: &'static str,
+        /// Symbols that must be extracted, as (name, kind).
+        symbols: &'static [(&'static str, &'static str)],
+        /// Edges that must be extracted, as (from, to, kind).
+        edges: &'static [(&'static str, &'static str, &'static str)],
+    }
+
+    /// What every language must yield, declared rather than discovered.
+    ///
+    /// A language with no row here fails
+    /// `every_advertised_language_has_a_fixture`, so a grammar cannot be wired
+    /// up and left unproven: "it compiled" is not "it extracts anything". The
+    /// expectations are written first and the extractor is made to meet them —
+    /// loosening a row to match what the code happened to produce is the one
+    /// move this table exists to prevent.
+    const FIXTURES: &[Fixture] = &[
+        Fixture {
+            language: "rust",
+            file: "rust/lock.rs",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[
+                ("acquire", "helper", "calls"),
+                ("lock", "std::fs::File", "imports"),
+            ],
+        },
+        Fixture {
+            language: "typescript",
+            file: "typescript/app.ts",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("app", "./m", "imports")],
+        },
+        Fixture {
+            language: "python",
+            file: "python/run.py",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("run", "os", "imports")],
+        },
+        Fixture {
+            language: "go",
+            file: "go/serve.go",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("serve", "fmt", "imports")],
+        },
+        Fixture {
+            language: "java",
+            file: "java/Main.java",
+            symbols: &[
+                ("Main", "class"),
+                ("helper", "method"),
+                ("acquire", "method"),
+            ],
+            edges: &[
+                ("acquire", "helper", "calls"),
+                ("Main", "helper", "contains"),
+            ],
+        },
+        Fixture {
+            language: "c",
+            file: "c/main.c",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "clojure",
+            file: "clojure/lock.clj",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "cpp",
+            file: "cpp/lock.cpp",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "csharp",
+            file: "csharp/Lock.cs",
+            symbols: &[
+                ("Lock", "class"),
+                ("Helper", "method"),
+                ("Acquire", "method"),
+            ],
+            edges: &[("Acquire", "Helper", "calls")],
+        },
+        Fixture {
+            language: "css",
+            file: "css/lock.css",
+            symbols: &[("acquire", "selector"), ("lock", "selector")],
+            edges: &[("lock", "base.css", "imports")],
+        },
+        Fixture {
+            language: "dart",
+            file: "dart/lock.dart",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "dockerfile",
+            file: "dockerfile/Dockerfile",
+            symbols: &[("build", "stage"), ("runtime", "stage")],
+            edges: &[
+                ("build", "debian", "imports"),
+                ("runtime", "build", "imports"),
+            ],
+        },
+        Fixture {
+            language: "elixir",
+            file: "elixir/lock.ex",
+            symbols: &[
+                ("Lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "elm",
+            file: "elm/Lock.elm",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "erlang",
+            file: "erlang/lock.erl",
+            symbols: &[
+                ("lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "fortran",
+            file: "fortran/lock.f90",
+            symbols: &[
+                ("lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "graphql",
+            file: "graphql/lock.graphql",
+            symbols: &[
+                ("Lock", "type"),
+                ("Holder", "type"),
+                ("Acquire", "operation"),
+            ],
+            edges: &[("Lock", "holder", "contains")],
+        },
+        Fixture {
+            language: "groovy",
+            file: "groovy/lock.groovy",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "haskell",
+            file: "haskell/Lock.hs",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "html",
+            file: "html/lock.html",
+            symbols: &[("acquire", "element")],
+            edges: &[
+                ("lock", "base.css", "imports"),
+                ("lock", "app.js", "imports"),
+            ],
+        },
+        Fixture {
+            language: "javascript",
+            file: "javascript/app.js",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("app", "./m", "imports")],
+        },
+        Fixture {
+            language: "json",
+            file: "json/lock.json",
+            symbols: &[("name", "key"), ("acquire", "key"), ("timeout", "key")],
+            edges: &[("acquire", "timeout", "contains")],
+        },
+        Fixture {
+            language: "julia",
+            file: "julia/lock.jl",
+            symbols: &[
+                ("Lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "kotlin",
+            file: "kotlin/Lock.kt",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "lua",
+            file: "lua/lock.lua",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "makefile",
+            file: "makefile/Makefile",
+            symbols: &[("helper", "target"), ("acquire", "target")],
+            edges: &[
+                ("acquire", "helper", "references"),
+                ("Makefile", "config.mk", "imports"),
+            ],
+        },
+        Fixture {
+            language: "markdown",
+            file: "markdown/notes.md",
+            symbols: &[("Lock", "heading"), ("Acquire", "heading")],
+            edges: &[("Lock", "Acquire", "contains")],
+        },
+        Fixture {
+            language: "nix",
+            file: "nix/lock.nix",
+            symbols: &[("helper", "binding"), ("acquire", "binding")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "objective-c",
+            file: "objective-c/Lock.m",
+            symbols: &[
+                ("Lock", "class"),
+                ("helper", "method"),
+                ("acquire", "method"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "ocaml",
+            file: "ocaml/lock.ml",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "perl",
+            file: "perl/lock.pl",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "php",
+            file: "php/lock.php",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "powershell",
+            file: "powershell/Lock.ps1",
+            symbols: &[("Get-Helper", "function"), ("Get-Acquire", "function")],
+            edges: &[("Get-Acquire", "Get-Helper", "calls")],
+        },
+        Fixture {
+            language: "proto",
+            file: "proto/lock.proto",
+            symbols: &[("Lock", "message"), ("Acquire", "service"), ("Hold", "rpc")],
+            edges: &[("lock", "base.proto", "imports")],
+        },
+        Fixture {
+            language: "r",
+            file: "r/lock.r",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "ruby",
+            file: "ruby/lock.rb",
+            symbols: &[("helper", "method"), ("acquire", "method")],
+            edges: &[("lock", "helper", "defines")],
+        },
+        Fixture {
+            language: "scala",
+            file: "scala/Lock.scala",
+            symbols: &[
+                ("Lock", "object"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "shell",
+            file: "shell/lock.sh",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[
+                ("acquire", "helper", "calls"),
+                ("lock", "./config.sh", "imports"),
+            ],
+        },
+        Fixture {
+            language: "sql",
+            file: "sql/lock.sql",
+            symbols: &[("lock_holder", "table"), ("acquire", "view")],
+            edges: &[("acquire", "lock_holder", "references")],
+        },
+        Fixture {
+            language: "svelte",
+            file: "svelte/Lock.svelte",
+            symbols: &[("lock", "element")],
+            edges: &[("Lock", "lock", "defines")],
+        },
+        Fixture {
+            language: "swift",
+            file: "swift/Lock.swift",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "terraform",
+            file: "terraform/lock.tf",
+            symbols: &[("region", "block"), ("base", "block"), ("lock", "block")],
+            edges: &[("lock", "region", "defines")],
+        },
+        Fixture {
+            language: "toml",
+            file: "toml/lock.toml",
+            symbols: &[("name", "key"), ("acquire", "table")],
+            edges: &[("acquire", "timeout", "contains")],
+        },
+        Fixture {
+            language: "vue",
+            file: "vue/Lock.vue",
+            symbols: &[("lock", "element")],
+            edges: &[("Lock", "lock", "defines")],
+        },
+        Fixture {
+            language: "yaml",
+            file: "yaml/lock.yaml",
+            symbols: &[("name", "key"), ("acquire", "key"), ("timeout", "key")],
+            edges: &[("acquire", "timeout", "contains")],
+        },
+        Fixture {
+            language: "zig",
+            file: "zig/lock.zig",
+            symbols: &[
+                ("helper", "function"),
+                ("acquire", "function"),
+                ("std", "variable"),
+            ],
+            // `const std = @import("std")` binds a name equal to the module
+            // it imports, so the import is a self-edge and is dropped: the
+            // binding itself is the fact worth recording, and it is a symbol.
+            edges: &[("acquire", "helper", "calls")],
+        },
+    ];
+
+    fn fixture_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph")
+    }
+
+    /// Prints each fixture's parse tree, for writing a tags query against a
+    /// grammar whose node names nobody has memorised.
+    ///
+    /// ```sh
+    /// cargo test --lib dump_fixture_trees -- --ignored --nocapture
+    /// ```
     #[test]
-    fn every_advertised_language_has_a_working_grammar() {
-        for lang in LANGUAGES {
-            let (language, tags) = grammar(lang).expect("advertised language has a grammar");
-            let mut parser = Parser::new();
-            parser
-                .set_language(&language)
-                .unwrap_or_else(|e| panic!("{lang} grammar is ABI-incompatible: {e}"));
-            Query::new(&language, tags)
-                .unwrap_or_else(|e| panic!("{lang} bundled tags query does not compile: {e:?}"));
-            let supplement = supplement(lang);
-            if !supplement.is_empty() {
-                Query::new(&language, supplement)
-                    .unwrap_or_else(|e| panic!("{lang} supplement does not compile: {e:?}"));
+    #[ignore = "a tool for writing queries, not a gate"]
+    fn dump_fixture_trees() {
+        let root = fixture_root();
+        let mut languages: Vec<_> = crate::filter::LANGUAGES.iter().map(|e| e.name).collect();
+        languages.sort_unstable();
+        for name in languages {
+            let dir = root.join(name);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let text = std::fs::read_to_string(&path).unwrap();
+                let Some((language, _)) = grammar(name) else {
+                    continue;
+                };
+                let mut parser = Parser::new();
+                parser.set_language(&language).unwrap();
+                let tree = parser.parse(&text, None).unwrap();
+                println!(
+                    "===== {name} :: {} =====\n{}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    tree.root_node().to_sexp()
+                );
             }
         }
+    }
+
+    /// Prints what each fixture actually extracts, for comparing against the
+    /// row that declares what it should.
+    ///
+    /// ```sh
+    /// cargo test --lib dump_fixture_extractions -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a tool for writing queries, not a gate"]
+    fn dump_fixture_extractions() {
+        let root = fixture_root();
+        for fixture in FIXTURES {
+            let text = std::fs::read_to_string(root.join(fixture.file)).unwrap();
+            let e = extract(std::path::Path::new(fixture.file), &text)
+                .unwrap()
+                .unwrap();
+            println!("===== {} =====", fixture.language);
+            for s in &e.symbols {
+                println!(
+                    "  symbol {:14} {:24} {}-{}",
+                    s.kind, s.name, s.start_line, s.end_line
+                );
+            }
+            for x in &e.edges {
+                println!(
+                    "  edge   {:14} {} -> {} (line {:?})",
+                    x.kind, x.from, x.to, x.line
+                );
+            }
+        }
+    }
+
+    /// Every language the filter advertises has a fixture, so no grammar is
+    /// wired up without something proving it extracts.
+    #[test]
+    fn every_advertised_language_has_a_fixture() {
+        for entry in crate::filter::LANGUAGES {
+            if WITHOUT_GRAMMAR.iter().any(|(name, _)| *name == entry.name) {
+                continue;
+            }
+            assert!(
+                FIXTURES.iter().any(|f| f.language == entry.name),
+                "{} has a grammar but no fixture asserting what it extracts",
+                entry.name
+            );
+        }
+    }
+
+    /// Each language's fixture yields the symbols and edges its row declares.
+    #[test]
+    fn every_fixture_yields_what_it_declares() {
+        let root = fixture_root();
+        let mut wrong: Vec<String> = Vec::new();
+        for fixture in FIXTURES {
+            let path = root.join(fixture.file);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} is missing: {e}", path.display()));
+            let extraction = extract(std::path::Path::new(fixture.file), &text)
+                .unwrap_or_else(|e| panic!("{}: extraction failed: {e}", fixture.language))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: no extractor reached {} — the extension is not in the table",
+                        fixture.language, fixture.file
+                    )
+                });
+
+            for (name, kind) in fixture.symbols {
+                if !extraction
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == *name && s.kind == *kind)
+                {
+                    wrong.push(format!(
+                        "{}: no {kind} named {name}; found {:?}",
+                        fixture.language,
+                        extraction
+                            .symbols
+                            .iter()
+                            .map(|s| (&s.kind, &s.name))
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
+
+            for (from, to, kind) in fixture.edges {
+                if !extraction
+                    .edges
+                    .iter()
+                    .any(|e| e.from == *from && e.to == *to && e.kind == *kind)
+                {
+                    wrong.push(format!(
+                        "{}: no {kind} edge {from} -> {to}; found {:?}",
+                        fixture.language,
+                        extraction
+                            .edges
+                            .iter()
+                            .map(|e| (&e.from, &e.kind, &e.to))
+                            .collect::<Vec<_>>()
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Every language the product advertises really parses, so the About page's
+    /// list cannot claim a language the binary does not carry.
+    ///
+    /// This is the one-table rule as a test. The set is
+    /// `filter::LANGUAGES` — what `--language` accepts and what the About page
+    /// prints — and the only permitted gap is a row named in
+    /// [`WITHOUT_GRAMMAR`] with its reason. Adding a language to the filter
+    /// without a grammar fails here rather than shipping a language that
+    /// filters but does not graph.
+    #[test]
+    fn every_advertised_language_has_a_working_grammar() {
+        // Collected rather than asserted one at a time: with forty-six
+        // languages, failing on the first one turns a ten-minute fix into
+        // forty-six runs.
+        let mut broken: Vec<String> = Vec::new();
+        for entry in crate::filter::LANGUAGES {
+            let lang = entry.name;
+            if let Some((_, why)) = WITHOUT_GRAMMAR.iter().find(|(name, _)| *name == lang) {
+                assert!(
+                    grammar(lang).is_none(),
+                    "{lang} is listed as having no grammar ({why}) but has one"
+                );
+                continue;
+            }
+            let Some((language, tags)) = grammar(lang) else {
+                broken.push(format!("{lang}: advertised but has no grammar"));
+                continue;
+            };
+            let mut parser = Parser::new();
+            if let Err(e) = parser.set_language(&language) {
+                broken.push(format!("{lang}: grammar is ABI-incompatible: {e}"));
+                continue;
+            }
+            if let Err(e) = Query::new(&language, tags) {
+                broken.push(format!("{lang}: tags query does not compile: {e:?}"));
+            }
+            let supplement = supplement(lang);
+            if !supplement.is_empty()
+                && let Err(e) = Query::new(&language, supplement)
+            {
+                broken.push(format!("{lang}: supplement does not compile: {e:?}"));
+            }
+        }
+        assert!(broken.is_empty(), "{}", broken.join("\n"));
     }
 
     /// A file being saved mid-edit is the normal case under the watcher.

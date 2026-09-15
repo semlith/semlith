@@ -75,7 +75,7 @@ pub fn run(
     let Some(grammar) = crate::graph::language_grammar(&language) else {
         bail!(
             "no grammar for {language:?}; the languages with one are {}",
-            crate::graph::LANGUAGES.join(", ")
+            crate::graph::languages().join(", ")
         );
     };
     let query = Query::new(&grammar, source)
@@ -212,6 +212,28 @@ mod tests {
             err.to_string().contains("not a valid tree-sitter pattern"),
             "{err}"
         );
+    }
+
+    /// Every language the filter advertises compiles a pattern, because
+    /// `pattern` and the extractor read the same grammar table.
+    ///
+    /// A pattern is the one surface where a missing grammar is an error a user
+    /// sees rather than a silent absence of symbols, so it is asserted for all
+    /// forty-six rather than assumed from the extractor's own gate.
+    #[test]
+    fn every_advertised_language_compiles_a_pattern() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(store::SCHEMA).unwrap();
+        let mut broken: Vec<String> = Vec::new();
+        for entry in crate::filter::LANGUAGES {
+            if !crate::graph::has_graph(entry.name) {
+                continue;
+            }
+            if let Err(e) = run(&db, entry.name, "(_) @node", &Filter::default()) {
+                broken.push(format!("{}: {e}", entry.name));
+            }
+        }
+        assert!(broken.is_empty(), "{}", broken.join("\n"));
     }
 
     /// A language with no grammar is named, with the ones that have one, so a

@@ -948,7 +948,7 @@ fn call_tool(
             // spelled out in that argument's description: it is a fact about
             // this build, and a tool can state it once instead of every agent
             // reading it once per session.
-            let with_edges: Vec<&str> = crate::graph::LANGUAGES.to_vec();
+            let with_edges: Vec<&str> = crate::graph::languages();
             let names: Vec<String> = crate::filter::LANGUAGES
                 .iter()
                 .map(|entry| {

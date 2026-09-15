@@ -1518,6 +1518,18 @@ impl Semlith {
                 if end.confidence == graph::AMBIGUOUS {
                     continue;
                 }
+                // Expansion answers "what else does the code say is related to
+                // this". A prose or configuration file reached through the
+                // graph is not that: 0.17.0 gave every language symbols, and
+                // the third list filled with headings, keys and selectors that
+                // the harness scored at zero satisfied spans out of nineteen
+                // reached. They stay symbols, and `neighbors`, `path` and the
+                // blast radius still walk them — a Dockerfile stage or a table
+                // a view reads is exactly the edge those answer. It is the
+                // search's third list they do not belong in.
+                if !crate::filter::is_code(&end.symbol.path) {
+                    continue;
+                }
                 let weight = Self::expansion_weight(&end.confidence);
                 out.push((end.symbol.name, weight, end.confidence));
             }

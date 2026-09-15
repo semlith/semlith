@@ -1124,12 +1124,15 @@ pub fn symbols_by_names(
 /// hidden-by-default unresolved targets are about, not this.
 pub fn edges_out(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<EdgeEnd>> {
     let filter = kind_predicate(kinds, "e.kind");
+    // An edge's target is resolved by name, so without this a configuration key
+    // named `path` is a candidate definition of every `path` any code calls.
+    let target = crate::graph::not_navigational("s.kind");
     let sql = format!(
         "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.hint, srcf.path, src.start_line, e.line
          FROM symbols src
          JOIN files srcf ON srcf.id = src.file_id
          JOIN edges e ON e.src = src.id
-         JOIN symbols s ON s.name = e.dst
+         JOIN symbols s ON s.name = e.dst AND {target}
          JOIN files f ON f.id = s.file_id
          WHERE src.name = ?1 AND {filter}
          ORDER BY f.path, s.start_line"
@@ -1305,6 +1308,15 @@ fn rank(candidate: &str, src_path: &str, hint: Option<&str>, imports: &[String])
     }) {
         return 2;
     }
+    // A same-language tier was tried here and removed
+    // (US-SEMLITH-0.17.0-I01). The reasoning was sound — semlith's own portal
+    // is five thousand lines of JavaScript sharing twenty-five symbol names
+    // with the Rust beside it, and a Rust `calls` edge does not mean a
+    // JavaScript function — but the harness scored it two hits worse: it
+    // settles an ambiguous name in favour of a same-language candidate that is
+    // not always the right one, and a confidently wrong edge costs more than a
+    // refused one. Ambiguity across languages is a ranking problem, and it is
+    // not solved by preferring the nearest guess.
     UNRANKED
 }
 
@@ -1428,7 +1440,14 @@ pub fn symbols_in_chunks(db: &Connection, chunk_ids: &[u64]) -> Result<Vec<Strin
         return Ok(Vec::new());
     }
     let holes = vec!["?"; chunk_ids.len()].join(", ");
-    let sql = format!("SELECT DISTINCT name FROM symbols WHERE chunk_id IN ({holes})");
+    // The one caller is the seed of the ranked walk, and the walk runs over
+    // dependency edges. A heading or a configuration key has none, so seeding
+    // it spends the walk's node budget to reach nothing — and where its name
+    // collides with a real symbol's, it spends the seed's mass on the wrong
+    // one.
+    let navigational = crate::graph::not_navigational("kind");
+    let sql =
+        format!("SELECT DISTINCT name FROM symbols WHERE chunk_id IN ({holes}) AND {navigational}");
     let mut stmt = db.prepare(&sql)?;
     let args = chunk_ids.iter().map(|i| Value::Integer(*i as i64));
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
