@@ -65,6 +65,10 @@ irm https://raw.githubusercontent.com/semlith/semlith/main/install.ps1 | iex
 ```
 <!-- install-oneliners:end -->
 
+The Windows line runs in PowerShell, and Windows PowerShell 5.1 — the one that
+ships with Windows — is enough. Git Bash is not required for the install or for
+anything afterwards.
+
 The script picks the release for your machine, checks the download against the
 release's `SHA256SUMS`, unpacks it into `~/.semlith/bin`, and hands off to
 `semlith setup`, which puts that directory on your `PATH`, pre-downloads the
