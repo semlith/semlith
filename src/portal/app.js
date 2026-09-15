@@ -4834,7 +4834,10 @@ function langCard(languages, withEdges) {
       el("span", { class: "card-title", text: `${languages.length} languages` }),
       el("span", {
         class: "subtitle",
-        text: `Search filters and the code graph read the same table, so the two cannot disagree. ${edges.size} of ${languages.length} carry graph edges.`,
+        text:
+          edges.size === languages.length
+            ? `Search filters and the code graph read the same table, so the two cannot disagree. Every one carries graph edges.`
+            : `Search filters and the code graph read the same table, so the two cannot disagree. ${edges.size} of ${languages.length} carry graph edges.`,
       }),
     ),
     el(
@@ -4849,11 +4852,12 @@ function langCard(languages, withEdges) {
           "div",
           { class: "lang-row" },
           // Every row is ticked, because every row is true of the thing the
-          // tick says: the language is indexed and `--lang` selects it. The
-          // six that also carry graph edges say so beside their name rather
-          // than by being the only ones with a mark — a column where forty of
-          // forty-six are blank reads as forty unsupported languages, which is
-          // the opposite of the fact.
+          // tick says: the language is indexed and `--lang` selects it. A
+          // language that also carries graph edges says so beside its name.
+          // Since 0.17.0 that is all of them, and the mark stays rather than
+          // being dropped as redundant: if a grammar is ever refused — a
+          // copyleft licence is the case that would do it — the gap has to be
+          // visible here rather than inferred from its absence.
           el("span", {
             class: "tick on",
             title: "indexed, and --lang selects it",
@@ -4869,9 +4873,13 @@ function langCard(languages, withEdges) {
     says(
       `All ${languages.length} are indexed and selectable with `,
       mono("--lang"),
-      `. The ${edges.size} marked `,
+      edges.size === languages.length
+        ? ", and every one marked "
+        : `. The ${edges.size} marked `,
       mono("graph"),
-      " carry symbols and edges as well, from a tree-sitter grammar; the rest are searched as text. ",
+      edges.size === languages.length
+        ? " carries symbols and edges as well, from a tree-sitter grammar. "
+        : " carry symbols and edges as well, from a tree-sitter grammar; the rest are searched as text. ",
       mono("semlith languages"),
       " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built.",
     ),

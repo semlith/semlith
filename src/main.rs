@@ -1108,7 +1108,15 @@ fn main() -> Result<()> {
                     .chain(entry.filenames.iter().map(|f| f.to_string()))
                     .collect::<Vec<_>>()
                     .join(" ");
-                println!("{:<12} {what}", entry.name);
+                // The same column the portal's About page and
+                // `semlith_languages` show: whether this language carries
+                // symbols and edges as well as text.
+                let graph = if semlith::graph::has_graph(entry.name) {
+                    "graph"
+                } else {
+                    "     "
+                };
+                println!("{:<12} {graph}  {what}", entry.name);
             }
         }
 

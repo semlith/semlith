@@ -117,10 +117,7 @@ fn grammars() -> Vec<Grammar> {
             Grammar {
                 name,
                 version: package["version"].as_str().unwrap().to_string(),
-                licence: package["license"]
-                    .as_str()
-                    .unwrap_or("UNKNOWN")
-                    .to_string(),
+                licence: package["license"].as_str().unwrap_or("UNKNOWN").to_string(),
                 source: package["repository"].as_str().unwrap_or("").to_string(),
             },
         );
