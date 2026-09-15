@@ -260,6 +260,72 @@ fn supplement(lang: &str) -> &'static str {
             (import_declaration (scoped_identifier) @reference.import)
         "#
         }
+        // C++ has C's problem and C's fix: the bundled query tags the declarator,
+        // so a function's span stopped at its signature, and it captures no
+        // calls at all.
+        "cpp" => {
+            r#"
+            (preproc_include path: (_) @reference.import)
+            (call_expression function: (identifier) @reference.call)
+            (function_definition
+              declarator: (function_declarator
+                declarator: (identifier) @name)) @definition.function
+        "#
+        }
+        "csharp" => {
+            r#"
+            (using_directive (identifier) @reference.import)
+            (invocation_expression function: (identifier) @name) @reference.call
+            ; `store.Search(...)`: the object is the hint.
+            (invocation_expression
+              function: (member_access_expression
+                expression: (_) @hint
+                name: (identifier) @name)) @reference.call
+        "#
+        }
+        // Elm's bundled query captures the name in a type annotation as a
+        // reference and the body of a declaration not at all, so `acquire =
+        // helper` recorded nothing about `acquire` depending on `helper`.
+        "elm" => {
+            r#"
+            (value_declaration
+              functionDeclarationLeft: (function_declaration_left
+                (lower_case_identifier) @name)) @definition.function
+            (value_expr name: (value_qid (lower_case_identifier) @name)) @reference.call
+            (import_clause moduleName: (upper_case_qid) @reference.import)
+        "#
+        }
+        "javascript" => {
+            r#"
+            (import_statement source: (string) @reference.import)
+            (import_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
+            (export_specifier
+              name: (_) @reference.alias
+              alias: (identifier) @name) @definition.alias
+        "#
+        }
+        "php" => {
+            r#"
+            (require_expression (string (string_content) @reference.import))
+            (include_expression (string (string_content) @reference.import))
+            (function_call_expression function: (name) @name) @reference.call
+            (member_call_expression
+              object: (_) @hint
+              name: (name) @name) @reference.call
+        "#
+        }
+        "swift" => {
+            r#"
+            (import_declaration (identifier) @reference.import)
+            (call_expression (simple_identifier) @name) @reference.call
+            (call_expression
+              (navigation_expression
+                target: (_) @hint
+                suffix: (navigation_suffix (simple_identifier) @name))) @reference.call
+        "#
+        }
         "c" => {
             r#"
             (preproc_include path: (_) @reference.import)
@@ -317,15 +383,30 @@ fn grammar(lang: &str) -> Option<(Language, &'static str)> {
             tree_sitter_clojure_orchard::LANGUAGE.into(),
             include_str!("../queries/clojure/tags.scm"),
         )),
-        "cpp" => Some((tree_sitter_cpp::LANGUAGE.into(), tree_sitter_cpp::TAGS_QUERY)),
-        "csharp" => Some((tree_sitter_c_sharp::LANGUAGE.into(), tree_sitter_c_sharp::TAGS_QUERY)),
-        "dart" => Some((tree_sitter_dart::LANGUAGE.into(), tree_sitter_dart::TAGS_QUERY)),
+        "cpp" => Some((
+            tree_sitter_cpp::LANGUAGE.into(),
+            tree_sitter_cpp::TAGS_QUERY,
+        )),
+        "csharp" => Some((
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            tree_sitter_c_sharp::TAGS_QUERY,
+        )),
+        "dart" => Some((
+            tree_sitter_dart::LANGUAGE.into(),
+            tree_sitter_dart::TAGS_QUERY,
+        )),
         "dockerfile" => Some((
             tree_sitter_containerfile::LANGUAGE.into(),
             include_str!("../queries/dockerfile/tags.scm"),
         )),
-        "elixir" => Some((tree_sitter_elixir::LANGUAGE.into(), tree_sitter_elixir::TAGS_QUERY)),
-        "elm" => Some((tree_sitter_elm::LANGUAGE.into(), tree_sitter_elm::TAGS_QUERY)),
+        "elixir" => Some((
+            tree_sitter_elixir::LANGUAGE.into(),
+            tree_sitter_elixir::TAGS_QUERY,
+        )),
+        "elm" => Some((
+            tree_sitter_elm::LANGUAGE.into(),
+            tree_sitter_elm::TAGS_QUERY,
+        )),
         "erlang" => Some((
             tree_sitter_erlang::LANGUAGE.into(),
             include_str!("../queries/erlang/tags.scm"),
@@ -342,14 +423,26 @@ fn grammar(lang: &str) -> Option<(Language, &'static str)> {
             tree_sitter_groovy::LANGUAGE.into(),
             include_str!("../queries/groovy/tags.scm"),
         )),
-        "javascript" => Some((tree_sitter_javascript::LANGUAGE.into(), tree_sitter_javascript::TAGS_QUERY)),
-        "lua" => Some((tree_sitter_lua::LANGUAGE.into(), tree_sitter_lua::TAGS_QUERY)),
+        "javascript" => Some((
+            tree_sitter_javascript::LANGUAGE.into(),
+            tree_sitter_javascript::TAGS_QUERY,
+        )),
+        "lua" => Some((
+            tree_sitter_lua::LANGUAGE.into(),
+            tree_sitter_lua::TAGS_QUERY,
+        )),
         "nix" => Some((
             tree_sitter_nix::LANGUAGE.into(),
             include_str!("../queries/nix/tags.scm"),
         )),
-        "ocaml" => Some((tree_sitter_ocaml::LANGUAGE_OCAML.into(), tree_sitter_ocaml::TAGS_QUERY)),
-        "php" => Some((tree_sitter_php::LANGUAGE_PHP.into(), tree_sitter_php::TAGS_QUERY)),
+        "ocaml" => Some((
+            tree_sitter_ocaml::LANGUAGE_OCAML.into(),
+            tree_sitter_ocaml::TAGS_QUERY,
+        )),
+        "php" => Some((
+            tree_sitter_php::LANGUAGE_PHP.into(),
+            tree_sitter_php::TAGS_QUERY,
+        )),
         "powershell" => Some((
             tree_sitter_powershell::LANGUAGE.into(),
             include_str!("../queries/powershell/tags.scm"),
@@ -359,12 +452,18 @@ fn grammar(lang: &str) -> Option<(Language, &'static str)> {
             include_str!("../queries/proto/tags.scm"),
         )),
         "r" => Some((tree_sitter_r::LANGUAGE.into(), tree_sitter_r::TAGS_QUERY)),
-        "ruby" => Some((tree_sitter_ruby::LANGUAGE.into(), tree_sitter_ruby::TAGS_QUERY)),
+        "ruby" => Some((
+            tree_sitter_ruby::LANGUAGE.into(),
+            tree_sitter_ruby::TAGS_QUERY,
+        )),
         "sql" => Some((
             tree_sitter_sequel::LANGUAGE.into(),
             include_str!("../queries/sql/tags.scm"),
         )),
-        "swift" => Some((tree_sitter_swift::LANGUAGE.into(), tree_sitter_swift::TAGS_QUERY)),
+        "swift" => Some((
+            tree_sitter_swift::LANGUAGE.into(),
+            tree_sitter_swift::TAGS_QUERY,
+        )),
         "vue" => Some((
             tree_sitter_vue_next::LANGUAGE.into(),
             include_str!("../queries/vue/tags.scm"),
@@ -1937,8 +2036,11 @@ mod tests {
 
     #[test]
     fn a_file_with_no_grammar_yields_nothing_rather_than_failing() {
+        // Markdown had no grammar until 0.17.0 and was this test's example of
+        // a file the extractor skips. A file in no language at all is the
+        // example that stays true.
         assert!(
-            extract(&PathBuf::from("notes.md"), "# hi")
+            extract(&PathBuf::from("notes.txt"), "the lock is acquired")
                 .unwrap()
                 .is_none()
         );
@@ -2166,7 +2268,11 @@ mod tests {
         Fixture {
             language: "java",
             file: "java/Main.java",
-            symbols: &[("Main", "class"), ("helper", "method"), ("acquire", "method")],
+            symbols: &[
+                ("Main", "class"),
+                ("helper", "method"),
+                ("acquire", "method"),
+            ],
             edges: &[
                 ("acquire", "helper", "calls"),
                 ("Main", "helper", "contains"),
@@ -2178,10 +2284,367 @@ mod tests {
             symbols: &[("helper", "function"), ("acquire", "function")],
             edges: &[("acquire", "helper", "calls")],
         },
+        Fixture {
+            language: "clojure",
+            file: "clojure/lock.clj",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "cpp",
+            file: "cpp/lock.cpp",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "csharp",
+            file: "csharp/Lock.cs",
+            symbols: &[
+                ("Lock", "class"),
+                ("Helper", "method"),
+                ("Acquire", "method"),
+            ],
+            edges: &[("Acquire", "Helper", "calls")],
+        },
+        Fixture {
+            language: "css",
+            file: "css/lock.css",
+            symbols: &[("acquire", "selector"), ("lock", "selector")],
+            edges: &[("lock", "base.css", "imports")],
+        },
+        Fixture {
+            language: "dart",
+            file: "dart/lock.dart",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "dockerfile",
+            file: "dockerfile/Dockerfile",
+            symbols: &[("build", "stage"), ("runtime", "stage")],
+            edges: &[
+                ("build", "debian", "imports"),
+                ("runtime", "build", "imports"),
+            ],
+        },
+        Fixture {
+            language: "elixir",
+            file: "elixir/lock.ex",
+            symbols: &[
+                ("Lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "elm",
+            file: "elm/Lock.elm",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "erlang",
+            file: "erlang/lock.erl",
+            symbols: &[
+                ("lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "fortran",
+            file: "fortran/lock.f90",
+            symbols: &[
+                ("lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "graphql",
+            file: "graphql/lock.graphql",
+            symbols: &[
+                ("Lock", "type"),
+                ("Holder", "type"),
+                ("Acquire", "operation"),
+            ],
+            edges: &[("Lock", "holder", "contains")],
+        },
+        Fixture {
+            language: "groovy",
+            file: "groovy/lock.groovy",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "haskell",
+            file: "haskell/Lock.hs",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "html",
+            file: "html/lock.html",
+            symbols: &[("acquire", "element")],
+            edges: &[
+                ("lock", "base.css", "imports"),
+                ("lock", "app.js", "imports"),
+            ],
+        },
+        Fixture {
+            language: "javascript",
+            file: "javascript/app.js",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("app", "./m", "imports")],
+        },
+        Fixture {
+            language: "json",
+            file: "json/lock.json",
+            symbols: &[("name", "key"), ("acquire", "key"), ("timeout", "key")],
+            edges: &[("acquire", "timeout", "contains")],
+        },
+        Fixture {
+            language: "julia",
+            file: "julia/lock.jl",
+            symbols: &[
+                ("Lock", "module"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "kotlin",
+            file: "kotlin/Lock.kt",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "lua",
+            file: "lua/lock.lua",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "makefile",
+            file: "makefile/Makefile",
+            symbols: &[("helper", "target"), ("acquire", "target")],
+            edges: &[
+                ("acquire", "helper", "references"),
+                ("Makefile", "config.mk", "imports"),
+            ],
+        },
+        Fixture {
+            language: "markdown",
+            file: "markdown/notes.md",
+            symbols: &[("Lock", "heading"), ("Acquire", "heading")],
+            edges: &[("Lock", "Acquire", "contains")],
+        },
+        Fixture {
+            language: "nix",
+            file: "nix/lock.nix",
+            symbols: &[("helper", "binding"), ("acquire", "binding")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "objective-c",
+            file: "objective-c/Lock.m",
+            symbols: &[
+                ("Lock", "class"),
+                ("helper", "method"),
+                ("acquire", "method"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "ocaml",
+            file: "ocaml/lock.ml",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "perl",
+            file: "perl/lock.pl",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "php",
+            file: "php/lock.php",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "powershell",
+            file: "powershell/Lock.ps1",
+            symbols: &[("Get-Helper", "function"), ("Get-Acquire", "function")],
+            edges: &[("Get-Acquire", "Get-Helper", "calls")],
+        },
+        Fixture {
+            language: "proto",
+            file: "proto/lock.proto",
+            symbols: &[("Lock", "message"), ("Acquire", "service"), ("Hold", "rpc")],
+            edges: &[("lock", "base.proto", "imports")],
+        },
+        Fixture {
+            language: "r",
+            file: "r/lock.r",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "ruby",
+            file: "ruby/lock.rb",
+            symbols: &[("helper", "method"), ("acquire", "method")],
+            edges: &[("lock", "helper", "defines")],
+        },
+        Fixture {
+            language: "scala",
+            file: "scala/Lock.scala",
+            symbols: &[
+                ("Lock", "object"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "shell",
+            file: "shell/lock.sh",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[
+                ("acquire", "helper", "calls"),
+                ("lock", "./config.sh", "imports"),
+            ],
+        },
+        Fixture {
+            language: "sql",
+            file: "sql/lock.sql",
+            symbols: &[("lock_holder", "table"), ("acquire", "view")],
+            edges: &[("acquire", "lock_holder", "references")],
+        },
+        Fixture {
+            language: "svelte",
+            file: "svelte/Lock.svelte",
+            symbols: &[("lock", "element")],
+            edges: &[("Lock", "lock", "defines")],
+        },
+        Fixture {
+            language: "swift",
+            file: "swift/Lock.swift",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+        Fixture {
+            language: "terraform",
+            file: "terraform/lock.tf",
+            symbols: &[("region", "block"), ("base", "block"), ("lock", "block")],
+            edges: &[("lock", "region", "defines")],
+        },
+        Fixture {
+            language: "toml",
+            file: "toml/lock.toml",
+            symbols: &[("name", "key"), ("acquire", "table")],
+            edges: &[("acquire", "timeout", "contains")],
+        },
+        Fixture {
+            language: "vue",
+            file: "vue/Lock.vue",
+            symbols: &[("lock", "element")],
+            edges: &[("Lock", "lock", "defines")],
+        },
+        Fixture {
+            language: "yaml",
+            file: "yaml/lock.yaml",
+            symbols: &[("name", "key"), ("acquire", "key"), ("timeout", "key")],
+            edges: &[("acquire", "timeout", "contains")],
+        },
+        Fixture {
+            language: "zig",
+            file: "zig/lock.zig",
+            symbols: &[
+                ("helper", "function"),
+                ("acquire", "function"),
+                ("std", "variable"),
+            ],
+            // `const std = @import("std")` binds a name equal to the module
+            // it imports, so the import is a self-edge and is dropped: the
+            // binding itself is the fact worth recording, and it is a symbol.
+            edges: &[("acquire", "helper", "calls")],
+        },
     ];
 
     fn fixture_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph")
+    }
+
+    /// Prints each fixture's parse tree, for writing a tags query against a
+    /// grammar whose node names nobody has memorised.
+    ///
+    /// ```sh
+    /// cargo test --lib dump_fixture_trees -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a tool for writing queries, not a gate"]
+    fn dump_fixture_trees() {
+        let root = fixture_root();
+        let mut languages: Vec<_> = crate::filter::LANGUAGES.iter().map(|e| e.name).collect();
+        languages.sort_unstable();
+        for name in languages {
+            let dir = root.join(name);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                let text = std::fs::read_to_string(&path).unwrap();
+                let Some((language, _)) = grammar(name) else {
+                    continue;
+                };
+                let mut parser = Parser::new();
+                parser.set_language(&language).unwrap();
+                let tree = parser.parse(&text, None).unwrap();
+                println!(
+                    "===== {name} :: {} =====\n{}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    tree.root_node().to_sexp()
+                );
+            }
+        }
+    }
+
+    /// Prints what each fixture actually extracts, for comparing against the
+    /// row that declares what it should.
+    ///
+    /// ```sh
+    /// cargo test --lib dump_fixture_extractions -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a tool for writing queries, not a gate"]
+    fn dump_fixture_extractions() {
+        let root = fixture_root();
+        for fixture in FIXTURES {
+            let text = std::fs::read_to_string(root.join(fixture.file)).unwrap();
+            let e = extract(std::path::Path::new(fixture.file), &text)
+                .unwrap()
+                .unwrap();
+            println!("===== {} =====", fixture.language);
+            for s in &e.symbols {
+                println!(
+                    "  symbol {:14} {:24} {}-{}",
+                    s.kind, s.name, s.start_line, s.end_line
+                );
+            }
+            for x in &e.edges {
+                println!(
+                    "  edge   {:14} {} -> {} (line {:?})",
+                    x.kind, x.from, x.to, x.line
+                );
+            }
+        }
     }
 
     /// Every language the filter advertises has a fixture, so no grammar is
@@ -2204,6 +2667,7 @@ mod tests {
     #[test]
     fn every_fixture_yields_what_it_declares() {
         let root = fixture_root();
+        let mut wrong: Vec<String> = Vec::new();
         for fixture in FIXTURES {
             let path = root.join(fixture.file);
             let text = std::fs::read_to_string(&path)
@@ -2218,37 +2682,42 @@ mod tests {
                 });
 
             for (name, kind) in fixture.symbols {
-                assert!(
-                    extraction
-                        .symbols
-                        .iter()
-                        .any(|s| s.name == *name && s.kind == *kind),
-                    "{}: no {kind} named {name}; found {:?}",
-                    fixture.language,
-                    extraction
-                        .symbols
-                        .iter()
-                        .map(|s| (&s.kind, &s.name))
-                        .collect::<Vec<_>>()
-                );
+                if !extraction
+                    .symbols
+                    .iter()
+                    .any(|s| s.name == *name && s.kind == *kind)
+                {
+                    wrong.push(format!(
+                        "{}: no {kind} named {name}; found {:?}",
+                        fixture.language,
+                        extraction
+                            .symbols
+                            .iter()
+                            .map(|s| (&s.kind, &s.name))
+                            .collect::<Vec<_>>()
+                    ));
+                }
             }
 
             for (from, to, kind) in fixture.edges {
-                assert!(
-                    extraction
-                        .edges
-                        .iter()
-                        .any(|e| e.from == *from && e.to == *to && e.kind == *kind),
-                    "{}: no {kind} edge {from} -> {to}; found {:?}",
-                    fixture.language,
-                    extraction
-                        .edges
-                        .iter()
-                        .map(|e| (&e.from, &e.kind, &e.to))
-                        .collect::<Vec<_>>()
-                );
+                if !extraction
+                    .edges
+                    .iter()
+                    .any(|e| e.from == *from && e.to == *to && e.kind == *kind)
+                {
+                    wrong.push(format!(
+                        "{}: no {kind} edge {from} -> {to}; found {:?}",
+                        fixture.language,
+                        extraction
+                            .edges
+                            .iter()
+                            .map(|e| (&e.from, &e.kind, &e.to))
+                            .collect::<Vec<_>>()
+                    ));
+                }
             }
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// Every language the product advertises really parses, so the About page's
@@ -2262,6 +2731,10 @@ mod tests {
     /// filters but does not graph.
     #[test]
     fn every_advertised_language_has_a_working_grammar() {
+        // Collected rather than asserted one at a time: with forty-six
+        // languages, failing on the first one turns a ten-minute fix into
+        // forty-six runs.
+        let mut broken: Vec<String> = Vec::new();
         for entry in crate::filter::LANGUAGES {
             let lang = entry.name;
             if let Some((_, why)) = WITHOUT_GRAMMAR.iter().find(|(name, _)| *name == lang) {
@@ -2271,20 +2744,26 @@ mod tests {
                 );
                 continue;
             }
-            let (language, tags) = grammar(lang)
-                .unwrap_or_else(|| panic!("{lang} is advertised but has no grammar"));
+            let Some((language, tags)) = grammar(lang) else {
+                broken.push(format!("{lang}: advertised but has no grammar"));
+                continue;
+            };
             let mut parser = Parser::new();
-            parser
-                .set_language(&language)
-                .unwrap_or_else(|e| panic!("{lang} grammar is ABI-incompatible: {e}"));
-            Query::new(&language, tags)
-                .unwrap_or_else(|e| panic!("{lang} bundled tags query does not compile: {e:?}"));
+            if let Err(e) = parser.set_language(&language) {
+                broken.push(format!("{lang}: grammar is ABI-incompatible: {e}"));
+                continue;
+            }
+            if let Err(e) = Query::new(&language, tags) {
+                broken.push(format!("{lang}: tags query does not compile: {e:?}"));
+            }
             let supplement = supplement(lang);
-            if !supplement.is_empty() {
-                Query::new(&language, supplement)
-                    .unwrap_or_else(|e| panic!("{lang} supplement does not compile: {e:?}"));
+            if !supplement.is_empty()
+                && let Err(e) = Query::new(&language, supplement)
+            {
+                broken.push(format!("{lang}: supplement does not compile: {e:?}"));
             }
         }
+        assert!(broken.is_empty(), "{}", broken.join("\n"));
     }
 
     /// A file being saved mid-edit is the normal case under the watcher.
