@@ -175,7 +175,7 @@ impl Clip {
             None => {
                 crate::embed::link_runtime()?;
                 crate::embed::refuse_if_airgapped(VISION_REPO)?;
-                let cache = crate::model_cache_dir();
+                let cache = crate::model_cache_dir()?;
                 crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
                 let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
                     .with_show_download_progress(!quiet)
@@ -207,7 +207,7 @@ impl Clip {
             None => {
                 crate::embed::link_runtime()?;
                 crate::embed::refuse_if_airgapped(TEXT_REPO)?;
-                let cache = crate::model_cache_dir();
+                let cache = crate::model_cache_dir()?;
                 crate::embed::verify_cached(&cache, TEXT_REPO, TEXT_REVISION, TEXT_FILES)?;
                 let options = TextInitOptions::new(EmbeddingModel::ClipVitB32)
                     .with_show_download_progress(!quiet)

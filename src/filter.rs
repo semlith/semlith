@@ -223,30 +223,26 @@ impl Filter {
 /// Lowercased, because the query side compares against `lower(files.path)`:
 /// `README.MD` and `readme.md` are the same file to anyone typing `--ext md`.
 fn anchor(pattern: &str) -> String {
-    let pattern = pattern.to_lowercase();
-    // ponytail: paths on Windows are stored with backslashes, so a pattern
-    // written with forward slashes would match nothing. Translate rather than
-    // asking the user to write a platform-specific glob.
-    #[cfg(windows)]
-    let pattern = pattern.replace('/', "\\");
-
+    // Always `/`, on every platform. The query side compares against a path
+    // whose separators have been normalised to `/` (`store::GLOB_PATH`), so a
+    // pattern written the way everyone writes one matches a Windows store as
+    // well as a unix one. Translating the pattern to backslashes instead —
+    // which is what this did — matched nothing whenever the store held a path
+    // in any other form, and the store holds the verbatim form (#74).
+    let pattern = pattern.to_lowercase().replace('\\', "/");
     if is_absolute(&pattern) {
         pattern
     } else {
-        format!("{}{pattern}", separator_prefix())
+        format!("*/{pattern}")
     }
 }
 
 fn is_absolute(pattern: &str) -> bool {
-    if pattern.starts_with(std::path::MAIN_SEPARATOR) {
+    if pattern.starts_with('/') {
         return true;
     }
     // `c:\...` on Windows. Elsewhere a colon is an ordinary filename character.
     cfg!(windows) && pattern.as_bytes().get(1) == Some(&b':')
-}
-
-fn separator_prefix() -> String {
-    format!("*{}", std::path::MAIN_SEPARATOR)
 }
 
 #[cfg(test)]
@@ -287,24 +283,25 @@ mod tests {
     /// from any directory; an absolute one is not, so it means exactly itself.
     #[test]
     fn a_relative_pattern_is_anchored_and_an_absolute_one_is_not() {
-        let sep = std::path::MAIN_SEPARATOR;
+        // `/` on every platform: the query side normalises the path column to
+        // `/` on Windows, so one pattern language works everywhere and
+        // `--path 'src/**'` means the same thing on all three (#74).
         let f = Filter::new(&s(&["src/**"]), &[], &[]).unwrap();
-        assert_eq!(f.groups(), [[format!("*{sep}src{sep}**")]]);
+        assert_eq!(f.groups(), [["*/src/**"]]);
 
-        let absolute = format!("{sep}home{sep}me{sep}proj{sep}src{sep}*");
-        let f = Filter::new(&s(&[&absolute]), &[], &[]).unwrap();
-        assert_eq!(f.groups(), [[absolute]]);
+        let f = Filter::new(&s(&["/home/me/proj/src/*"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["/home/me/proj/src/*"]]);
+
+        // A pattern somebody typed with backslashes still means the same thing.
+        let f = Filter::new(&s(&[r"src\**"]), &[], &[]).unwrap();
+        assert_eq!(f.groups(), [["*/src/**"]]);
     }
 
     #[test]
     fn extensions_and_languages_share_one_group_and_union() {
-        let sep = std::path::MAIN_SEPARATOR;
         let f = Filter::new(&[], &s(&["toml"]), &s(&["rust"])).unwrap();
         assert_eq!(f.groups().len(), 1, "one group means they union");
-        assert_eq!(
-            f.groups()[0],
-            [format!("*{sep}*.toml"), format!("*{sep}*.rs")]
-        );
+        assert_eq!(f.groups()[0], ["*/*.toml", "*/*.rs"]);
     }
 
     /// `--path 'src/**' --ext md` must mean "Markdown under src", not
@@ -335,27 +332,15 @@ mod tests {
     /// matches none of the Dockerfiles anyone actually has.
     #[test]
     fn a_language_with_no_extension_matches_by_filename() {
-        let sep = std::path::MAIN_SEPARATOR;
         let f = Filter::new(&[], &[], &s(&["dockerfile"])).unwrap();
         assert_eq!(
             f.groups()[0],
-            [
-                format!("*{sep}*.dockerfile"),
-                format!("*{sep}dockerfile"),
-                format!("*{sep}dockerfile.*"),
-            ],
+            ["*/*.dockerfile", "*/dockerfile", "*/dockerfile.*"],
             "a bare Dockerfile and a Dockerfile.prod are both the language"
         );
 
         let f = Filter::new(&[], &[], &s(&["makefile"])).unwrap();
-        assert_eq!(
-            f.groups()[0],
-            [
-                format!("*{sep}*.mk"),
-                format!("*{sep}gnumakefile"),
-                format!("*{sep}makefile"),
-            ]
-        );
+        assert_eq!(f.groups()[0], ["*/*.mk", "*/gnumakefile", "*/makefile"]);
 
         // Filenames land in the same group extensions do, so the two union
         // rather than intersecting — one code path, so the vector allowlist and
@@ -457,6 +442,11 @@ pub enum Denied {
     /// A dotfile, which the walker skips and an explicit path used to slip
     /// past.
     Hidden,
+    /// The home directory could not be determined, so whether this path is
+    /// under one of the credential directories is not knowable. The rule fails
+    /// closed: on Windows, where nothing sets `HOME`, it used to be skipped
+    /// entirely and `~/.kube/config` was indexed like any other file (#72).
+    NoHome,
 }
 
 impl Denied {
@@ -473,6 +463,9 @@ impl Denied {
             Denied::Hidden => "is a hidden file, which semlith skips when walking and does not \
                  index when named"
                 .to_string(),
+            Denied::NoHome => "cannot be checked against the credential directories, because \
+                 semlith cannot tell where your home directory is — set SEMLITH_HOME, or HOME"
+                .to_string(),
         }
     }
 }
@@ -484,14 +477,25 @@ impl Denied {
 /// directories under them, and an explicit `semlith_index ~/.ssh/id_rsa` went
 /// straight past all of it.
 pub fn denied(path: &Path) -> Option<Denied> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    if let Some(home) = home {
-        let home = crate::canonical(&home);
-        let real = crate::canonical(path);
-        for dir in DENIED_DIRS {
-            if real.starts_with(home.join(dir)) {
-                return Some(Denied::Directory(dir));
-            }
+    denied_against(path, crate::home::user_home().ok().as_deref())
+}
+
+/// [`denied`] against a home given rather than resolved, so the case that
+/// matters — there is no home — is a test rather than an environment variable
+/// three threads are fighting over.
+///
+/// Fails closed. An unknown home used to mean the directory rules were skipped
+/// and everything under them sailed through, which on Windows — where nothing
+/// sets `HOME` — was every run (#72).
+pub(crate) fn denied_against(path: &Path, home: Option<&Path>) -> Option<Denied> {
+    let Some(home) = home else {
+        return Some(Denied::NoHome);
+    };
+    let home = crate::canonical(home);
+    let real = crate::canonical(path);
+    for dir in DENIED_DIRS {
+        if real.starts_with(home.join(dir)) {
+            return Some(Denied::Directory(dir));
         }
     }
 
@@ -567,10 +571,9 @@ pub fn within_boundary(path: &Path, roots: &[PathBuf]) -> bool {
     {
         return true;
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| real.starts_with(crate::canonical(&home)))
-        .unwrap_or(false)
+    // An unknown home makes this stricter rather than looser: nothing is inside
+    // a boundary semlith cannot locate.
+    crate::home::user_home().is_ok_and(|home| real.starts_with(crate::canonical(&home)))
 }
 
 #[cfg(test)]
@@ -593,6 +596,35 @@ mod deny_tests {
         assert!(glob_match("*secret*", "my-secrets.yaml"));
         assert!(!glob_match("*secret*", "secrat"));
         assert!(glob_match("*.tfstate", "terraform.tfstate"));
+    }
+
+    /// The rule that refuses `~/.ssh` and `~/.kube` has to hold when semlith
+    /// cannot tell where home is, not be skipped. On Windows nothing sets
+    /// `HOME`, so before 0.17.1 this was every run on that platform: the
+    /// deny-list was documented on the Privacy page and did not run (#72).
+    #[test]
+    fn a_path_is_refused_when_the_home_directory_is_unknown() {
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            denied_against(&home.join(".kube").join("config"), Some(home)),
+            Some(Denied::Directory(".kube")),
+            "the rule does not hold with a home"
+        );
+        assert_eq!(
+            denied_against(Path::new("/srv/corpus/notes.md"), None),
+            Some(Denied::NoHome),
+            "an unknown home let an ordinary path through, so it let ~/.kube through too"
+        );
+        assert_eq!(
+            denied_against(&home.join(".kube").join("config"), None),
+            Some(Denied::NoHome),
+            "the credential itself must not slip past either"
+        );
+        let refusal = Denied::NoHome.reason();
+        assert!(
+            refusal.contains("home directory"),
+            "the reason should say what semlith could not determine: {refusal}"
+        );
     }
 
     /// The case the finding is about: a file an agent asked for by name, which

@@ -599,7 +599,7 @@ impl Fleet {
         if let Some(i) = self.embedders.iter().position(|(m, _)| m == model) {
             return Ok(i);
         }
-        let cache = model_cache_dir();
+        let cache = model_cache_dir()?;
         // Read from the same cache in the same breath as the weights, so the
         // count and the model's own segmentation are the same arithmetic.
         if self.tokenizer.is_none() {

@@ -518,6 +518,75 @@ repository.
 **The binary is larger.** Forty grammars are forty C parsers. The measured delta
 is in the CHANGELOG entry for this version.
 
+## 0.17.1
+
+**Five answers change, and every one of them is a case where the old answer said
+an operation had succeeded when it had not.** Nothing is added and nothing is
+removed; what moves is what a script sees.
+
+**`semlith index` on a path that cannot be read exits non-zero.** Opening a store
+is what creates it, so through 0.17.0 a typo left an empty store behind,
+registered under the typo's own name, and exited 0. The roots are checked before
+a store is chosen: a run where every root is unreadable creates nothing and
+registers nothing, and a run mixing readable and unreadable roots indexes the
+readable ones, names each unreadable one on stderr, records only the readable
+roots — and still exits 1. A script that passed a path that had moved and read
+the zero exit as success now sees the failure. `POST /api/index` answers 400 and
+the `semlith_index` MCP tool refuses on the same condition.
+
+**`semlith forget` of a path that is not indexed exits 1.** It exited 0. `forget`
+resolved its store from the working directory rather than from the path it was
+handed, so a forget run from anywhere but the corpus asked a store that had never
+held the file, removed nothing, and reported success. It is now anchored on the
+path, the way `index` already is, and a path no store holds prints `nothing to
+forget: <path> is not indexed` on stderr.
+
+**`POST /api/forget` answers 404 where it answered 200 with a zero count.** For a
+single path, and for a set where nothing was removed.
+
+**`GET /api/search` applies the `offset` it validates.** It checked the parameter
+and then ignored it, so every page repeated the first one. A client that was
+passing `offset` and reading that repetition as the answer now gets different
+rows, and the response echoes `offset` back the way `/api/files` already does.
+The portal's own Search page does not page yet; the route honours the parameter
+for the clients that already believed it did.
+
+**Printing into a closed pipe exits 0 and prints nothing.** `semlith files |
+head` panicked and exited non-zero, on every platform. It now ends the way `cat`
+and `grep` do, so a pipeline that was tolerating a panic on stderr and a non-zero
+status sees neither.
+
+**On Windows the store home is `%USERPROFILE%\.semlith`.** Not a break, but the
+one change a Windows user can see in their own filesystem. Windows sets no
+`HOME`, and semlith read it in nine places, so the store home came out as
+whatever the process happened to have as a working directory — and the store, the
+registry, the agent key and 52 MB of model weights were written there.
+`user_home()` reads `HOME`, then `USERPROFILE`, then `HOMEDRIVE` plus
+`HOMEPATH`, and errors naming `SEMLITH_HOME` when it knows none of them, so the
+store home is the directory `install.ps1` already puts the binary in.
+`SEMLITH_HOME` is still read first, so a user who set it to work around this
+keeps every store exactly where they put it and nothing moves. A user who did not
+has a `.semlith` in whatever directory they first ran semlith from: this release
+stops creating it, and does not find or move the one already there. Copy it,
+delete it, or index the corpus again.
+
+**The directory deny-list fails closed.** A path that cannot be checked against
+`~/.ssh`, `~/.kube` and the rest is refused rather than waved through. On
+Windows, where the home never resolved, those rules had never run at all.
+
+**Paths print in the form the platform opens.** The verbatim `\\?\` prefix — and
+the `\\?\UNC\` form, back to `\\` — is stripped where a path becomes text: search
+hits, file rows, image rows, symbol rows and call-site paths, on the CLI and its
+`--json`, in MCP tool results, and in the portal's `/api/search` and `/api/files`.
+The store still holds the verbatim form, because that is what makes a path longer
+than 260 characters work, and `semlith read` accepts either. A Windows script
+that matched a leading `\\?\` stops matching; one that hands the printed path to
+an editor starts working.
+
+**No store format change.** `FORMAT_VERSION` does not move, no table and no
+column is added, and a store written by 0.17.1 and a store written by 0.17.0 are
+byte-compatible in both directions.
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

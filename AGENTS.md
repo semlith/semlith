@@ -132,6 +132,28 @@ Module responsibilities:
   `http::answer` checks the origin rule first and returns 403 with an empty body.
   The page and its own static assets are the one credential-free surface, because
   a browser attaches no header to a stylesheet.
+- **The home directory is read in one place.** `home::user_home` is the only
+  function in `src/` that reads `HOME`, and on Windows it is the only one that
+  reads `USERPROFILE` or `HOMEDRIVE`+`HOMEPATH`. Nine call sites used to ask the
+  environment themselves and each had a different answer when it was not there,
+  which is the whole of issues #70 to #73: the store home, the model cache, the
+  portal's directory browser, the deny-list, the index boundary and `semlith
+  setup` disagreed about where home was. `tests/home.rs` fails on a tenth
+  lookup, so one cannot be added by accident.
+- **Nothing falls back to the working directory.** `user_home`, `home_or_error`,
+  `stores_root`, `bin_dir`, `registry_path`, `agent_key_path`,
+  `Registry::dir_of` and `model_cache_dir` all return a `Result`, and no variant
+  of any of them returns a default. A machine with no home gets an error naming
+  `SEMLITH_HOME`; it does not get a store, a registry, an agent key and 52 MB of
+  weights written into whatever directory the process started in. The rules that
+  depend on the home fail closed with it: `filter::denied` refuses a path it
+  cannot check against `~/.ssh`, and the portal's `dirs` route answers 500 rather
+  than rooting at a volume.
+- **A path on its way out is plain.** `plain()` strips the Windows verbatim
+  `\\?\` prefix where a path becomes text — hits, file rows, image rows, symbol
+  rows, call sites — and nowhere else. The store keeps the verbatim form, which
+  is what makes a path longer than 260 characters work, and `semlith read`
+  accepts either.
 - **The deny-list is one table.** `filter::DENIED_DIRS` and
   `filter::DENIED_NAMES` in `filter.rs`, applied by `Boundary::refuses` to walked
   entries and explicitly named paths alike. A second copy anywhere is a rule that
@@ -554,6 +576,7 @@ makes this set reviewable is being able to read the whole of it at once.
 | `daemon::alive` | `libc::kill(pid, 0)` | Signal 0 delivers nothing; the documented liveness probe. |
 | `upgrade::writable` | `libc::access` | Two `CString`s that outlive the call; `access` reads them and returns. |
 | `watch::on_signal` | `libc::signal` | Installs and restores a handler that only stores into an `AtomicBool`, which is what an async-signal-safe handler may do. |
+| `main::quiet_on_a_closed_pipe` | `libc::signal` | Restores `SIGPIPE` to `SIG_DFL` — the disposition the process would have had if the Rust runtime had not changed it — once, at the top of `main`, before any thread is spawned and before anything is printed. unix only. |
 | `main`'s `--airgap` | `std::env::set_var` | Before any thread is spawned. |
 | Test helpers in `embed`, `home`, `setup`, `upgrade` | `std::env::set_var` | Each guarded by a mutex that every test reading the variable also takes, and each restores what was there. |
 

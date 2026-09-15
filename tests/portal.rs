@@ -119,26 +119,60 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
+        Self::spawn(true)
+    }
+
+    /// The same daemon with every home variable removed from its environment.
+    ///
+    /// `SEMLITH_HOME` still points at a temporary directory, because a daemon
+    /// with nowhere to keep its stores does not start at all; what is missing
+    /// is the *user's* home, which is what the directory browser is confined
+    /// to. On Windows that is the ordinary state of a fresh shell (#70, #71).
+    fn start_without_a_home() -> Self {
+        Self::spawn(false)
+    }
+
+    /// A daemon serving a store home somebody else has already filled.
+    fn start_in(home: &std::path::Path) -> Self {
+        Self::spawn_in(Some(home), true)
+    }
+
+    fn spawn(with_home: bool) -> Self {
+        Self::spawn_in(None, with_home)
+    }
+
+    fn spawn_in(store_home: Option<&std::path::Path>, with_home: bool) -> Self {
         let dir = tempfile::Builder::new()
             .prefix("semlith-parity-")
             .tempdir()
             .expect("a temporary directory");
-        let home = dir.path().join("home");
+        let home = match store_home {
+            Some(given) => given.to_path_buf(),
+            None => dir.path().join("home"),
+        };
         std::fs::create_dir_all(&home).unwrap();
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+        command
             .arg("start")
             .arg("--port")
             .arg("0")
             .env("SEMLITH_HOME", &home)
-            .env("HOME", &home)
             .env_remove("SEMLITH_STORE")
             .env_remove("SEMLITH_PORT")
             .current_dir(dir.path())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("semlith start runs");
+            .stderr(Stdio::null());
+        if with_home {
+            command.env("HOME", &home);
+        } else {
+            command
+                .env_remove("HOME")
+                .env_remove("USERPROFILE")
+                .env_remove("HOMEDRIVE")
+                .env_remove("HOMEPATH");
+        }
+        let mut child = command.spawn().expect("semlith start runs");
 
         let mut line = String::new();
         BufReader::new(child.stdout.as_mut().unwrap())
@@ -164,7 +198,7 @@ impl Daemon {
     fn status(&self, method: &str, path: &str) -> u16 {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("the daemon listens");
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(90)))
             .unwrap();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
@@ -184,11 +218,42 @@ impl Daemon {
             .unwrap_or(0)
     }
 
+    /// A GET route's status and raw body, for the routes whose failure is the
+    /// point of the test.
+    fn get(&self, path: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("the daemon listens");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(90)))
+            .unwrap();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
+             Connection: close\r\n\r\n",
+            self.port, self.token
+        );
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.flush().unwrap();
+
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).into_owned();
+        let status = text
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or_default();
+        (status, body)
+    }
+
     /// A GET route's body, parsed.
     fn json(&self, path: &str) -> serde_json::Value {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("the daemon listens");
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(90)))
             .unwrap();
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nSemlith-Token: {}\r\n\
@@ -460,4 +525,94 @@ fn the_privacy_route_carries_a_rule_per_control_with_its_own_check() {
             rule["id"], rule["check"]
         );
     }
+}
+
+/// The Index page's folder picker is confined to the user's home. With no home
+/// it used to root at the filesystem — `/` on unix, whichever volume the
+/// process started on under Windows — and then refuse the user's own profile
+/// as outside it. A picker that cannot be confined is refused instead (#71).
+#[test]
+fn the_directory_browser_names_the_home_and_refuses_when_there_is_none() {
+    let daemon = Daemon::start();
+    let listing = daemon.json("/api/dirs");
+    let home = listing["home"].as_str().expect("a home in the answer");
+    assert!(!home.is_empty(), "the browser reported no home: {listing}");
+    assert_ne!(home, "/", "the browser rooted at the filesystem: {listing}");
+    let (status, _) = daemon.get(&format!("/api/dirs?path={home}"));
+    assert_eq!(status, 200, "the home itself was refused as outside itself");
+
+    let homeless = Daemon::start_without_a_home();
+    let (status, body) = homeless.get("/api/dirs");
+    assert_eq!(
+        status, 500,
+        "a browser with no home answered {status}: {body}"
+    );
+    assert!(
+        body.contains("HOME"),
+        "the refusal should name the variables it looked for: {body}"
+    );
+}
+
+/// `offset` was validated and then ignored, so a client paging through results
+/// was handed page one every time (#78).
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_search_route_applies_the_offset_it_validates() {
+    let corpus = tempfile::Builder::new()
+        .prefix("semlith-offset-corpus-")
+        .tempdir()
+        .unwrap();
+    for (name, body) in [
+        (
+            "alpha.md",
+            "The queue drains messages into the worker pool.",
+        ),
+        (
+            "beta.md",
+            "The worker pool reports queue depth every second.",
+        ),
+        ("gamma.md", "Queue depth is what the pool scales on."),
+    ] {
+        std::fs::write(corpus.path().join(name), body).unwrap();
+    }
+
+    // Indexed before the daemon starts, because the daemon opens the stores it
+    // finds at start and a store created after that is not one of them.
+    let home = tempfile::Builder::new()
+        .prefix("semlith-offset-home-")
+        .tempdir()
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", "--quiet", &corpus.path().display().to_string()])
+        .env("SEMLITH_HOME", home.path())
+        .current_dir(corpus.path())
+        .output()
+        .expect("semlith index runs");
+    assert!(
+        out.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let daemon = Daemon::start_in(home.path());
+    let two = daemon.json("/api/search?query=queue%20depth&k=2");
+    let hits = two["hits"].as_array().expect("hits").clone();
+    assert!(hits.len() >= 2, "a three-file corpus returned {two}");
+
+    let paged = daemon.json("/api/search?query=queue%20depth&k=1&offset=1");
+    assert_eq!(
+        paged["offset"].as_i64(),
+        Some(1),
+        "the response does not echo the offset: {paged}"
+    );
+    assert_eq!(
+        paged["hits"].as_array().map(Vec::len),
+        Some(1),
+        "k=1 returned more than one row: {paged}"
+    );
+    assert_eq!(
+        paged["hits"][0]["path"].as_str().unwrap_or_default(),
+        hits[1]["path"].as_str().unwrap_or_default(),
+        "offset=1 did not skip the first hit: {paged}"
+    );
 }

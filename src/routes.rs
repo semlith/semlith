@@ -301,7 +301,7 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
             let as_path = Path::new(&row.path);
             json!({
                 "store": label,
-                "path": row.path,
+                "path": crate::plain(&row.path),
                 "ext": as_path.extension().and_then(|e| e.to_str()).unwrap_or(""),
                 "lang": language_of(as_path),
                 "reader": chunk::reader_of(as_path),
@@ -396,11 +396,20 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
 
     let started = std::time::Instant::now();
     let only = (!only.is_empty()).then_some(only);
-    let hits = match fleet.search_preferring(only.as_deref(), query, k, &filter, prefer) {
+    // The offset is applied rather than validated and dropped. Ranking is over
+    // the whole fused set, so a page is cut out of a deeper search: ask for
+    // `offset + k` and take the page from `offset`, the way `/api/files`
+    // already does. A caller that paged used to be handed page one every time
+    // and had no way to tell (#78).
+    let deep = (offset as usize)
+        .saturating_add(k)
+        .min(FILE_OFFSET_MAX as usize);
+    let found = match fleet.search_preferring(only.as_deref(), query, deep, &filter, prefer) {
         Ok(h) => h,
         Err(e) => return Response::error(500, &e.to_string()),
     };
     let elapsed = started.elapsed();
+    let hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
 
     // The `Hit` shape `--json` already prints, plus the store name — which for
     // a single-store fleet the CLI leaves out and the portal always wants,
@@ -418,7 +427,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         .map(|h| {
             json!({
                 "score": h.score,
-                "path": h.path,
+                "path": crate::plain(&h.path),
                 "start_line": h.start_line,
                 "end_line": h.end_line,
                 "text": if locate { String::new() } else { h.text.clone() },
@@ -454,6 +463,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     let shape = crate::shape_of(query);
     Response::json(&json!({
         "hits": out,
+        "offset": offset,
         "selected": selected,
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
@@ -571,7 +581,7 @@ fn models() -> Response {
 /// How many bytes each model in the cache occupies, by its directory name.
 fn cached_model_sizes() -> std::collections::HashMap<String, u64> {
     let mut out = std::collections::HashMap::new();
-    let Ok(entries) = std::fs::read_dir(crate::model_cache_dir()) else {
+    let Ok(entries) = crate::model_cache_dir().and_then(|dir| Ok(std::fs::read_dir(dir)?)) else {
         return out;
     };
     for entry in entries.flatten() {
@@ -711,10 +721,14 @@ fn languages() -> Response {
 /// browser is asking a local server to list a filesystem, and the answer to
 /// "which directories may it list" has to be a rule rather than a hope.
 fn dirs(request: &Request) -> Response {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let home = crate::canonical(&home);
+    // Never a volume root. Falling back to `/` — or, on Windows, to the drive
+    // the process started on — turned a picker confined to the user's home into
+    // one confined to the whole filesystem, and then refused the user's own
+    // profile as outside it (#71).
+    let home = match crate::home::user_home() {
+        Ok(home) => crate::canonical(&home),
+        Err(e) => return Response::error(500, &e.to_string()),
+    };
 
     let asked = request
         .query("path")
@@ -775,7 +789,7 @@ fn dirs(request: &Request) -> Response {
 /// What the Privacy page checks: where this process listens, whether it may
 /// fetch anything at all, and where the one download it can make is cached.
 fn privacy(state: &Arc<State>) -> Response {
-    let cache = crate::model_cache_dir();
+    let cache = crate::model_cache_dir().unwrap_or_default();
     Response::json(&json!({
         "bind": format!("127.0.0.1:{}", state.server.port()),
         "bind_is_fixed": true,
@@ -796,7 +810,7 @@ fn privacy(state: &Arc<State>) -> Response {
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
         "csp": "default-src 'self'",
         "cors": false,
-        "store_home": home::home().display().to_string(),
+        "store_home": shown(home::home_or_error()),
         // One row per rule this release added, each with what the daemon found
         // when it looked — not a list of claims. A page that states a policy is
         // a page; a page that states a policy and the reading behind it is
@@ -813,9 +827,13 @@ fn privacy(state: &Arc<State>) -> Response {
 /// any handler runs — report what the code does rather than a reading, and say
 /// so in `check`.
 fn rules(state: &Arc<State>) -> Value {
-    let home_dir = home::home();
-    let cache = crate::model_cache_dir();
-    let key_path = home::agent_key_path();
+    // Not defaulted. A daemon that is serving this page resolved a home to open
+    // its stores from, so the error arm is all but unreachable — and if it ever
+    // is reached, a row saying the home did not resolve is the honest answer,
+    // not a row about a path semlith invented (#73).
+    let home_dir = home::home_or_error();
+    let cache = crate::model_cache_dir().unwrap_or_default();
+    let key_path = home::agent_key_path().unwrap_or_default();
     let registry = home::Registry::load().unwrap_or_default();
 
     let store_modes: Vec<String> = state
@@ -912,15 +930,17 @@ fn rules(state: &Arc<State>) -> Value {
         {
             "id": "directory modes",
             "rule": "The store home, every store, the model cache and daemon.json are                      readable by their owner and nobody else.",
-            "check": if store_modes.is_empty() {
-                match home::loose_mode(&home_dir) {
-                    Some(mode) => format!("{} is {mode:o}", home_dir.display()),
-                    None => format!("{} and every open store are 0700", home_dir.display()),
-                }
-            } else {
-                store_modes.join(", ")
+            "check": match (&home_dir, store_modes.is_empty()) {
+                (Err(e), _) => e.to_string(),
+                (Ok(dir), true) => match home::loose_mode(dir) {
+                    Some(mode) => format!("{} is {mode:o}", dir.display()),
+                    None => format!("{} and every open store are 0700", dir.display()),
+                },
+                (Ok(_), false) => store_modes.join(", "),
             },
-            "ok": store_modes.is_empty() && home::loose_mode(&home_dir).is_none(),
+            "ok": home_dir
+                .as_ref()
+                .is_ok_and(|dir| store_modes.is_empty() && home::loose_mode(dir).is_none()),
         },
         {
             "id": "agent key",
@@ -933,6 +953,18 @@ fn rules(state: &Arc<State>) -> Value {
             "ok": key_mode.is_none_or(|mode| mode & 0o077 == 0),
         },
     ])
+}
+
+/// A path for a status field, or the reason there is not one.
+///
+/// Never a placeholder path: a Privacy page that prints `./.semlith` because
+/// the home did not resolve is a page stating something untrue about where the
+/// user's corpus is (#73).
+fn shown(path: anyhow::Result<PathBuf>) -> String {
+    match path {
+        Ok(p) => p.display().to_string(),
+        Err(e) => format!("unresolved — {e}"),
+    }
 }
 
 /// The first sixteen characters of a secret, and an ellipsis.
@@ -960,8 +992,8 @@ fn about(state: &Arc<State>) -> Response {
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),
-        "store_home": home::home().display().to_string(),
-        "model_cache": crate::model_cache_dir().display().to_string(),
+        "store_home": shown(home::home_or_error()),
+        "model_cache": shown(crate::model_cache_dir()),
         "models": TextEmbedding::list_supported_models().len() + 1,
         "languages": LANGUAGES.len(),
         // Which of those languages carry graph edges. The rest are searchable
@@ -1027,7 +1059,7 @@ fn agents(state: &Arc<State>) -> Response {
         // and this route is read on every visit to the page — the point is that
         // nothing about the credential arrives unasked.
         "key_set": home::is_agent_key(&key),
-        "key_path": home::agent_key_path().display().to_string(),
+        "key_path": shown(home::agent_key_path()),
         "install": {
             "sh": crate::setup::INSTALL_SH,
             "ps1": crate::setup::INSTALL_PS1,
@@ -1309,6 +1341,17 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     if paths.is_empty() {
         return Response::error(400, "no path given");
     }
+    // Before a store is chosen or made. The route answered 200 for a path that
+    // does not exist and left a store behind for it (#76).
+    let (paths, unreadable) = crate::check_roots(&paths);
+    if !unreadable.is_empty() {
+        let named = unreadable
+            .iter()
+            .map(|(path, why)| format!("{}: {why}", path.display()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Response::error(400, &format!("cannot index {named}"));
+    }
     let named = body.get("store").and_then(Value::as_str);
     let store = match state.writable(named) {
         Ok(s) => s,
@@ -1512,20 +1555,27 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
             Ok(v) => v,
             Err(_) => return Response::error(500, "the writer stopped before answering"),
         };
+        let chunks = value.get("forgot").and_then(Value::as_i64).unwrap_or(0);
+        let pictures = value.get("images").and_then(Value::as_i64).unwrap_or(0);
         // One path keeps the answer it has always had, so the MCP tool and
-        // every existing caller read the same shape.
+        // every existing caller read the same shape — except that a path the
+        // store never held is a 404 rather than a 200 saying zero. A client
+        // that reads the status and not the body used to be told the file was
+        // gone (#77).
         if single {
+            if chunks == 0 && pictures == 0 {
+                return Response::error(404, &format!("{path} is not indexed"));
+            }
             return Response::json(&value);
         }
-        let chunks = value.get("forgot").and_then(Value::as_i64).unwrap_or(0);
-        if chunks == 0 && value.get("images").and_then(Value::as_i64).unwrap_or(0) == 0 {
+        if chunks == 0 && pictures == 0 {
             missing.push(path.clone());
         }
         forgot += chunks;
-        images += value.get("images").and_then(Value::as_i64).unwrap_or(0);
+        images += pictures;
     }
     let kept = paths.len() - missing.len();
-    Response::json(&json!({
+    let body = json!({
         "files": kept,
         "asked": paths.len(),
         "forgot": forgot,
@@ -1536,7 +1586,13 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
             if kept == 1 { "" } else { "s" },
             if forgot == 1 { "" } else { "s" },
         ),
-    }))
+    });
+    // A set where nothing was removed is not a success either, and the body
+    // already names which paths were not indexed.
+    if kept == 0 {
+        return Response::new(404, "application/json", body.to_string().into_bytes());
+    }
+    Response::json(&body)
 }
 
 /// Delete a store: everything semlith derived from a corpus, and the registry

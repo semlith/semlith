@@ -1,0 +1,13 @@
+# Checks that are known to fail, and the issue that will close each one.
+#
+# A check listed here is reported as `xfail` and does not fail the job. A check
+# listed here that starts passing is reported as `XPASS` and does fail the job,
+# so a fix cannot land without this file being updated in the same breath. That
+# is the whole point: without it, either the run is permanently red and a new
+# regression hides in the noise, or the known bugs get quietly dropped from the
+# harness and stop being tracked at all.
+#
+# Columns: id, platform, issue number, note.
+# Platform is one of: all, unix, windows, linux, macos.
+
+

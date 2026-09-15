@@ -241,7 +241,14 @@ enum Command {
     /// entry naming it. The files it indexed are not touched.
     Drop {
         /// The registered store's name, as `semlith stats` prints it.
-        store: String,
+        ///
+        /// Called `name` rather than `store` because `--store` is a global
+        /// argument: two arguments with the same id in one subcommand is a
+        /// clap panic at parse time, so every `semlith drop` panicked instead
+        /// of deleting anything. The value name keeps the usage line reading
+        /// `semlith drop <STORE>`.
+        #[arg(value_name = "STORE")]
+        name: String,
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
@@ -420,6 +427,7 @@ enum KeyCommand {
 }
 
 fn main() -> Result<()> {
+    quiet_on_a_closed_pipe();
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -490,11 +498,25 @@ fn main() -> Result<()> {
                 paths
             };
 
+            // Before a store is opened, because opening one creates it. A run
+            // whose paths cannot be read used to leave an empty store behind,
+            // registered under the typo's own name, and exit 0 (#76).
+            let (roots, unreadable) = semlith::check_roots(&roots);
+            for (path, why) in &unreadable {
+                eprintln!("cannot index {}: {why}", path.display());
+            }
+            let Some(first) = roots.first().cloned() else {
+                bail!(
+                    "nothing to index: no path given could be read. Nothing was created \
+                     and nothing was registered."
+                );
+            };
+
             // The first path is what the store is about, so it is what names
             // the store and what the registry records as its root. `semlith
             // index ~/work/api` from anywhere means the api store, not a store
             // named after wherever the shell happened to be.
-            let choice = home::resolve(&cli.store, &roots[0], name.as_deref())?;
+            let choice = home::resolve(&cli.store, &first, name.as_deref())?;
             if let Some(hint) = choice.hint() {
                 eprintln!("{hint}");
             }
@@ -567,6 +589,16 @@ fn main() -> Result<()> {
                 semlith::human_bytes(bytes),
                 dir.display()
             );
+            // The readable roots are indexed and recorded; the status is what
+            // changes, so a script that indexed several roots and tolerated a
+            // missing one sees the failure it was told about (#76).
+            if !unreadable.is_empty() {
+                bail!(
+                    "{} of {} paths could not be read, and were not indexed",
+                    unreadable.len(),
+                    unreadable.len() + roots.len()
+                );
+            }
         }
 
         Command::Watch {
@@ -1255,16 +1287,41 @@ fn main() -> Result<()> {
         }
 
         Command::Forget { path } => {
-            let choice = home::resolve(&cli.store, &cwd, None)?;
+            // Anchored on the file, the way `index` is anchored on the path it
+            // is given. Resolving from the working directory asked whichever
+            // store covers wherever the user happened to be standing, which for
+            // a forget run from anywhere but the corpus is a store that has
+            // never held the file: it removed nothing, said so, and exited 0
+            // (#77). A caller that believes the exit status believes the file
+            // is gone.
+            // The directory holding the file, and the working directory for a
+            // bare name with no directory in it at all — which is how somebody
+            // standing in the corpus types it.
+            let anchor = if path.is_dir() {
+                path.clone()
+            } else {
+                match path.parent() {
+                    Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
+                    _ => cwd.clone(),
+                }
+            };
+            let choice = home::resolve(&cli.store, &anchor, None)?;
             if let Some(hint) = choice.hint() {
                 eprintln!("{hint}");
             }
+            // `New` is the store that *would* be created for this path. Opening
+            // it would create an empty store directory to delete nothing from.
+            if matches!(choice, home::Choice::New { .. }) {
+                anyhow::bail!(not_indexed(&path));
+            }
             let mut store = Semlith::open(&choice.one()?, None)?;
             let (chunks, images) = store.forget(&path)?;
+            if chunks == 0 && images == 0 {
+                anyhow::bail!(not_indexed(&path));
+            }
             // An image has no chunks, so a message counting only chunks would
             // report a successful forget as having done nothing.
             let what = match (chunks, images) {
-                (0, 0) => "nothing — it was not indexed".to_string(),
                 (0, images) => format!("{images} image vector(s)"),
                 (chunks, 0) => format!("{chunks} chunks"),
                 (chunks, images) => format!("{chunks} chunks and {images} image vector(s)"),
@@ -1272,8 +1329,8 @@ fn main() -> Result<()> {
             eprintln!("removed {what} for {}", path.display());
         }
 
-        Command::Drop { store, yes } => {
-            let dir = semlith::home::Registry::dir_of(&store);
+        Command::Drop { name: store, yes } => {
+            let dir = semlith::home::Registry::dir_of(&store)?;
             if !semlith::home::Registry::load()?.stores.contains_key(&store) {
                 anyhow::bail!("no registered store called {store}");
             }
@@ -1340,7 +1397,7 @@ fn main() -> Result<()> {
                 } else {
                     let port = semlith::daemon::port_of(None);
                     println!("{}{key}{}", bold(), reset());
-                    println!("{}", semlith::home::agent_key_path().display());
+                    println!("{}", semlith::home::agent_key_path()?.display());
                     println!();
                     println!("It authenticates the MCP endpoint and nothing else, and it does not");
                     println!("change when the daemon restarts or the portal's token is rotated.");
@@ -1429,7 +1486,7 @@ fn main() -> Result<()> {
                         "no store outside {} is trusted. Every store semlith made is \
                          opened without asking; a `.semlith` that arrived some other \
                          way needs `semlith trust <dir>` once.",
-                        home::home().display()
+                        home::home_or_error()?.display()
                     );
                 } else {
                     for dir in &registry.trusted {
@@ -1449,7 +1506,7 @@ fn main() -> Result<()> {
                  --store; `semlith adopt` moves it into {} if you would rather it \
                  lived with the others.",
                 dir.display(),
-                home::stores_root().display()
+                home::stores_root()?.display()
             );
         }
 
@@ -1568,7 +1625,7 @@ fn read_fleet(flags: &[PathBuf], cwd: &Path, all: bool) -> Result<Fleet> {
              run `semlith index` in a directory to make one, \
              or `semlith adopt ./.semlith` to move an existing one into {}",
             cwd.display(),
-            semlith::home::stores_root().display(),
+            semlith::home::stores_root()?.display(),
         );
     }
     Fleet::open(&dirs)
@@ -1639,7 +1696,7 @@ fn resolve_for_add(
         (Some(only), None) => {
             let only = only.clone();
             Ok(home::Choice::Registered {
-                dir: home::Registry::dir_of(&only),
+                dir: home::Registry::dir_of(&only)?,
                 name: only,
             })
         }
@@ -1672,12 +1729,68 @@ const CLI_LEDGER: semlith::ledger::Who<'static> = semlith::ledger::Who {
     session: "cli",
 };
 
+/// Exit quietly when whoever was reading our output goes away.
+///
+/// `semlith files | head` is the most ordinary thing anyone types, and it
+/// printed a panic and a non-zero status (#75). Two halves, because the
+/// mechanism differs:
+///
+/// On unix the Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main`, so the
+/// write returns `EPIPE` and `println!` panics on it. Restoring the default
+/// makes the process end the way `cat` and `grep` do, and a shell reports the
+/// pipeline's status, which is the reader's.
+///
+/// On Windows there is no `SIGPIPE`: the write fails with `BrokenPipe` and
+/// reaches the same panic. The hook turns that one panic — and only that one —
+/// into a silent exit 0, which is what the reader closing the pipe means.
+fn quiet_on_a_closed_pipe() {
+    #[cfg(unix)]
+    {
+        // SAFETY: called once, at the top of `main`, before any thread is
+        // spawned and before anything has been printed. `SIG_DFL` is what the
+        // process would have had if the Rust runtime had not changed it.
+        unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        }
+    }
+
+    let inherited = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let said = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        // The message `std` builds for a failed `print!`, with the OS error
+        // spelled differently on each platform — matching the kind rather than
+        // the wording is not possible from here, because the error is already
+        // formatted into the panic payload.
+        let printing = said.starts_with("failed printing to std");
+        if printing && (said.contains("Broken pipe") || said.contains("pipe")) {
+            std::process::exit(0);
+        }
+        inherited(info);
+    }));
+}
+
+/// What a forget of a path no store holds says, on stderr, before exiting 1.
+///
+/// One sentence rather than a suggestion: the path is either a typo or already
+/// gone, and semlith cannot tell which.
+fn not_indexed(path: &std::path::Path) -> String {
+    format!("nothing to forget: {} is not indexed", path.display())
+}
+
 fn display(path: &std::path::Path) -> String {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    path.strip_prefix(&cwd)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    // Both sides canonicalised, or neither matches on Windows: the file comes
+    // back from `canonicalize` in the verbatim form and the working directory
+    // does not, so `strip_prefix` never fired and every hit printed absolute —
+    // in a form nothing can open (#74).
+    let cwd = semlith::canonical(&std::env::current_dir().unwrap_or_default());
+    let real = semlith::canonical(path);
+    let shown = real.strip_prefix(&cwd).unwrap_or(&real);
+    semlith::plain(&shown.display().to_string())
 }
 
 fn bold() -> &'static str {
