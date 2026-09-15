@@ -75,7 +75,7 @@ pub fn run(
     let Some(grammar) = crate::graph::language_grammar(&language) else {
         bail!(
             "no grammar for {language:?}; the languages with one are {}",
-            crate::graph::LANGUAGES.join(", ")
+            crate::graph::languages().join(", ")
         );
     };
     let query = Query::new(&grammar, source)

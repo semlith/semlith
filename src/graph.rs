@@ -121,34 +121,43 @@ pub struct Extraction {
     pub edges: Vec<Edge>,
 }
 
-/// The languages that carry edges, as the About page lists them.
-pub const LANGUAGES: [&str; 6] = ["rust", "typescript", "python", "go", "java", "c"];
-
-/// Extensions that reach an extractor, and the language label each maps to.
+/// Languages in [`crate::filter::LANGUAGES`] that ship without a graph, and why.
 ///
-/// Dispatch is by extension, like `chunk::extract`, and for the same reason: it
-/// decides before any bytes are read.
-const EXTENSIONS: &[(&str, &str)] = &[
-    ("rs", "rust"),
-    ("ts", "typescript"),
-    ("tsx", "typescript"),
-    ("mts", "typescript"),
-    ("cts", "typescript"),
-    ("py", "python"),
-    ("pyi", "python"),
-    ("go", "go"),
-    ("java", "java"),
-    ("c", "c"),
-    ("h", "c"),
-];
+/// A grammar is refused when its licence is copyleft or cannot be identified:
+/// the parser is compiled into this binary, so a GPL or LGPL grammar would take
+/// the whole Apache-2.0 crate with it, and a licence nobody can name is treated
+/// as the worst case rather than the best. A row here is a deliberate, stated
+/// gap; a row missing from both here and the grammar table is a bug, and
+/// `every_advertised_language_has_a_grammar` fails for it.
+pub const WITHOUT_GRAMMAR: &[(&str, &str)] = &[];
+
+/// Whether the graph covers a language.
+///
+/// There is one list, [`crate::filter::LANGUAGES`], and one answer to "does
+/// this language have a grammar" — this function. Nothing keeps a second copy
+/// of the set, because the six-language copy that used to live here drifted
+/// from the forty-six the product advertised for four releases.
+pub fn has_graph(lang: &str) -> bool {
+    grammar(lang).is_some()
+}
+
+/// Every language the graph covers, in the table's own order.
+pub fn languages() -> Vec<&'static str> {
+    crate::filter::LANGUAGES
+        .iter()
+        .map(|entry| entry.name)
+        .filter(|name| has_graph(name))
+        .collect()
+}
 
 /// The language label for a path, if this release extracts from it.
+///
+/// Dispatch is by extension and whole filename, through the same
+/// [`crate::filter::language_of_path`] the search filter uses, so a file is in
+/// exactly one language no matter which half of the product is asking.
 pub fn language_of(path: &Path) -> Option<&'static str> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    EXTENSIONS
-        .iter()
-        .find(|(e, _)| *e == ext)
-        .map(|(_, lang)| *lang)
+    let entry = crate::filter::language_of_path(&path.to_string_lossy())?;
+    has_graph(entry.name).then_some(entry.name)
 }
 
 /// What each grammar's `TAGS_QUERY` does not give us.
@@ -1940,12 +1949,28 @@ mod tests {
         assert!(has_edge(&java, "A", "go", "contains"), "{:?}", java.edges);
     }
 
-    /// Every language reachable from `LANGUAGES` really parses, so the About
-    /// page's list cannot claim a language the binary does not carry.
+    /// Every language the product advertises really parses, so the About page's
+    /// list cannot claim a language the binary does not carry.
+    ///
+    /// This is the one-table rule as a test. The set is
+    /// `filter::LANGUAGES` — what `--language` accepts and what the About page
+    /// prints — and the only permitted gap is a row named in
+    /// [`WITHOUT_GRAMMAR`] with its reason. Adding a language to the filter
+    /// without a grammar fails here rather than shipping a language that
+    /// filters but does not graph.
     #[test]
     fn every_advertised_language_has_a_working_grammar() {
-        for lang in LANGUAGES {
-            let (language, tags) = grammar(lang).expect("advertised language has a grammar");
+        for entry in crate::filter::LANGUAGES {
+            let lang = entry.name;
+            if let Some((_, why)) = WITHOUT_GRAMMAR.iter().find(|(name, _)| *name == lang) {
+                assert!(
+                    grammar(lang).is_none(),
+                    "{lang} is listed as having no grammar ({why}) but has one"
+                );
+                continue;
+            }
+            let (language, tags) = grammar(lang)
+                .unwrap_or_else(|| panic!("{lang} is advertised but has no grammar"));
             let mut parser = Parser::new();
             parser
                 .set_language(&language)

@@ -110,24 +110,31 @@ const fn lang(
 /// else in the crate asks the question.
 const PROSE: &[&str] = &["css", "html", "json", "markdown", "toml", "yaml"];
 
+/// The entry a path belongs to, by extension or by whole filename.
+///
+/// The one place that answers "what language is this file", so the search
+/// filter, the `prefer` hint and the graph extractor cannot disagree about it.
+/// Matching is case-insensitive because `Makefile`, `makefile` and `MAKEFILE`
+/// are the same file to everyone except a string comparison.
+pub fn language_of_path(path: &str) -> Option<&'static Language> {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    LANGUAGES.iter().find(|entry| {
+        entry.extensions.contains(&ext)
+            || entry.filenames.iter().any(|f| match f.strip_suffix(".*") {
+                Some(stem) => name.starts_with(stem),
+                None => *f == name,
+            })
+    })
+}
+
 /// Whether a path holds implementation, for [`crate::Prefer`].
 ///
 /// A path in no language at all — a `.txt` note, an extracted `.epub` — reads
 /// as prose, which is what it is.
 pub fn is_code(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    let name = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
-    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    LANGUAGES
-        .iter()
-        .find(|entry| {
-            entry.extensions.contains(&ext)
-                || entry.filenames.iter().any(|f| match f.strip_suffix(".*") {
-                    Some(stem) => name.starts_with(stem),
-                    None => *f == name,
-                })
-        })
-        .is_some_and(|entry| !PROSE.contains(&entry.name))
+    language_of_path(path).is_some_and(|entry| !PROSE.contains(&entry.name))
 }
 
 /// The entry for a `--lang` name, matched case-insensitively.
