@@ -44,3 +44,6 @@ portal/forget/removes                all   77   the same route, the same no-op
 
 # #78 The search route validates an offset it never applies.
 portal/search/offset                 all   78   offset=1 returns the same hit
+
+# #72 The directory deny-list is skipped when HOME is unset.
+deny/denied-directory           windows   72   the ~/.kube rule never runs

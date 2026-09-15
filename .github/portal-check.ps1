@@ -170,6 +170,47 @@ Check 'portal/env/no-cache-in-cwd' 'no model cache in the working directory' {
     }
 }
 
+# ------------------------------------------------------------- the deny-list
+
+# A file inside a denied directory under the home directory must not be
+# indexed, even when it is named explicitly. `denied` in src/filter.rs reads
+# HOME to locate those directories, so on Windows, where HOME is unset, the
+# whole directory rule is skipped and this is where that shows.
+#
+# `.kube` rather than `.ssh`: both are on the list and the probe is harmless
+# either way, but a harness that writes into an ssh directory is one nobody
+# will want to run twice. The probe file is uniquely named, the check refuses
+# to touch anything that already exists, and it removes only what it created,
+# so this is safe to run on a real machine and not just a runner.
+#
+# The file name matters. It must match none of DENIED_NAMES and must not begin
+# with a dot, or it would be refused by a different rule and the check would
+# pass without ever exercising the directory rule.
+Check 'deny/denied-directory' 'a file in a denied directory is not indexed' {
+    $denyDir = Join-Path $HOME '.kube'
+    $probe = Join-Path $denyDir 'semlith-harness-probe.txt'
+    $store = Join-Path ([System.IO.Path]::GetTempPath()) 'semlith-deny-probe-store'
+    if (Test-Path $probe) { Fail "$probe already exists; refusing to touch it" }
+    $madeDir = -not (Test-Path $denyDir)
+    if ($madeDir) { New-Item -ItemType Directory -Path $denyDir -Force | Out-Null }
+    try {
+        Set-Content -Path $probe -Encoding utf8 -Value @(
+            'This file exists only so the harness can check that semlith refuses'
+            'to index anything under a credentials directory. It holds nothing.'
+        )
+        if (Test-Path $store) { Remove-Item -Recurse -Force $store }
+        $out = & semlith --store $store index $probe 2>&1 | Out-String
+        $listed = & semlith --store $store files 2>&1 | Out-String
+        if ($listed -match 'semlith-harness-probe') {
+            Fail "a file under $denyDir was indexed, so the directory rule did not apply`n$($out.Trim())"
+        }
+    } finally {
+        Remove-Item -Force $probe -ErrorAction SilentlyContinue
+        if ($madeDir) { Remove-Item -Force $denyDir -ErrorAction SilentlyContinue }
+        Remove-Item -Recurse -Force $store -ErrorAction SilentlyContinue
+    }
+}
+
 # ------------------------------------------------------------------- the daemon
 
 $port = if ($env:PORTAL_PORT) { [int]$env:PORTAL_PORT } else { 7366 }
