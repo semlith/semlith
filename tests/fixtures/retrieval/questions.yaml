@@ -767,28 +767,41 @@ questions:
     shape: concept
     tool: search
     query: which file types actually get symbols and edges extracted from them
-    grep: grep -rn 'EXTENSIONS' src/graph.rs
+    grep: grep -rn 'LANGUAGES' src/filter.rs src/graph.rs
     spans:
-      - path: src/graph.rs
+      - path: src/filter.rs
         symbol: LANGUAGES
-        start_line: 72
-        end_line: 73
+        start_line: 35
+        end_line: 89
       - path: src/graph.rs
-        symbol: EXTENSIONS
-        start_line: 75
-        end_line: 91
+        symbol: has_graph
+        start_line: 140
+        end_line: 142
       - path: src/graph.rs
         symbol: language_of
-        start_line: 93
-        end_line: 100
+        start_line: 158
+        end_line: 161
     note: >-
-      Three consecutive spans covering the language list, the extension map and
-      the lookup. The honest answer today is six languages and eleven
-      extensions, against the 46 languages `filter::LANGUAGES` accepts for
-      search — the parity gap the report's §5.11 is about. A plausible wrong
-      answer is `filter::LANGUAGES` at filter.rs:35, which is the search filter
-      and carries no grammar; it is deliberately not listed as a span, so a tool
-      that returns it scores a miss.
+      Rewritten in 0.17.0, because the release inverted the question's answer
+      rather than moving it.
+
+      As written for 0.15.0 this question had three spans in `src/graph.rs` —
+      `graph::LANGUAGES`, `EXTENSIONS` and `language_of` — and it named
+      `filter::LANGUAGES` as the *plausible wrong answer*, deliberately excluded
+      so that a tool returning it scored a miss. The right answer was "six
+      languages and eleven extensions, against the 46 the filter accepts", and
+      the gap between those two numbers was the point.
+
+      0.17.0 closed that gap. `graph::LANGUAGES` and `EXTENSIONS` no longer
+      exist, and `filter::LANGUAGES` — the answer this question used to punish —
+      is now the correct and only answer, with `graph::has_graph` as the
+      predicate over it and `language_of` as the lookup. Leaving the old spans
+      would have scored a correct answer as a miss, and leaving the old note
+      would have left the file asserting a parity gap the release removed.
+
+      The question itself is unchanged, which is the part that matters: it asks
+      the same thing of the same corpus, and the answer it is checked against is
+      the one the code now gives.
 
   - id: concept-why-defines-excluded-from-path
     shape: concept
@@ -1273,16 +1286,23 @@ questions:
   - id: read-one-span-by-line
     shape: identifier
     tool: read
-    target: src/graph.rs:1182-1190
+    target: src/graph.rs:1491-1499
     spans:
       - path: src/graph.rs
         symbol: call_site
-        start_line: 1182
-        end_line: 1190
+        start_line: 1491
+        end_line: 1499
     note: >-
       The same second stage asked the way a locate answer prints it — a
       store-relative path and a line range. This is the exact string an agent
       copies out of a `semlith_search` reply.
+
+      Re-derived in 0.17.0. Unlike every other question here, this one's target
+      is a literal line range rather than a symbol, so it is the one question
+      the file's "the symbol is the durable anchor" rule cannot protect: 0.17.0
+      added four hundred lines to `src/graph.rs` above `call_site` and the range
+      stopped naming it. The symbol asked about is unchanged, and so is what the
+      question tests.
 
   - id: multi-hop-alias-crossing
     shape: multi-hop

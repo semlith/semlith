@@ -1111,6 +1111,38 @@ pub fn dependency_kinds() -> Vec<String> {
     DEPENDENCY_KINDS.iter().map(|k| k.to_string()).collect()
 }
 
+/// Symbol kinds nothing can point *at*.
+///
+/// A Markdown heading, a YAML or TOML or JSON key, a CSS selector and an HTML
+/// element are navigational: they are what a document is searched by, and they
+/// are worth being symbols for exactly that. Nothing references them. No
+/// `calls` edge has ever meant a heading.
+///
+/// That distinction has to be enforced where an edge's target is resolved,
+/// because `edges.dst` is a *name* and resolution is a join on it. Without it,
+/// 0.17.0's forty new languages put 1 427 navigational symbols into this
+/// repository's own store — 933 configuration keys, 264 CSS selectors, 230
+/// headings — and 44 of them collided with the name of a real function:
+/// `path`, `query`, `symbol`, `graph`, `shape`, `forget`, `error`, `version`.
+/// Every one of those names became *ambiguous*, the walk refuses to cross an
+/// ambiguous name, and the harness measured the result: hit@1 13 to 10, hit@8
+/// 27 to 23 on an unchanged question set.
+///
+/// They stay symbols. `semlith symbol` finds them, a locate answer names the
+/// heading a hit sits under, and `semlith stats` counts them. They simply
+/// cannot be what an edge meant.
+pub const NAVIGATIONAL_KINDS: [&str; 4] = ["heading", "key", "selector", "element"];
+
+/// The same list as a SQL `NOT IN` list, for the two joins that resolve a name.
+pub fn not_navigational(column: &str) -> String {
+    let holes = NAVIGATIONAL_KINDS
+        .iter()
+        .map(|k| format!("'{k}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{column} NOT IN ({holes})")
+}
+
 /// How much of a symbol's score flows on to its neighbours each round.
 ///
 /// PageRank's own default, and there is no reason here to disagree with it.
