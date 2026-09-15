@@ -56,7 +56,7 @@ jobs:
     needs: plan
     runs-on: ${{ matrix.os }}
     # Six hours is the hosted-runner ceiling; the SSH session lives inside it.
-    timeout-minutes: ${{ inputs.ssh && 360 || 45 }}
+    timeout-minutes: ${{ inputs.ssh && 360 || 60 }}
     strategy:
       fail-fast: false
       matrix:
