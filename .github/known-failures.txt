@@ -18,6 +18,4 @@ cli/read/line                   windows   74   the same, for path:line
 cli/read/json                   windows   74   the same, for --json
 portal/search/no-verbatim       windows   74   the same prefix through the portal
 
-# #76 A path that cannot be read still creates and registers a store.
-cli/index/missing-registers-nothing  all   76   an empty store is left behind
 

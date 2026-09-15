@@ -780,6 +780,18 @@ fn call_tool(
             if roots.is_empty() {
                 return Err((-32602, "missing required argument: path".into(), None));
             }
+            // Before a store is opened or made, so a path an agent got wrong
+            // leaves nothing behind and is an error rather than a success with
+            // nothing in it (#76).
+            let (roots, unreadable) = crate::check_roots(&roots);
+            if !unreadable.is_empty() {
+                let named = unreadable
+                    .iter()
+                    .map(|(path, why)| format!("{}: {why}", path.display()))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Ok(tool_error(&format!("cannot index {named}")));
+            }
             if let Some(writer) = writer {
                 let named = strings(&args, "store");
                 return Ok(

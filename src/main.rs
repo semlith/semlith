@@ -498,11 +498,25 @@ fn main() -> Result<()> {
                 paths
             };
 
+            // Before a store is opened, because opening one creates it. A run
+            // whose paths cannot be read used to leave an empty store behind,
+            // registered under the typo's own name, and exit 0 (#76).
+            let (roots, unreadable) = semlith::check_roots(&roots);
+            for (path, why) in &unreadable {
+                eprintln!("cannot index {}: {why}", path.display());
+            }
+            let Some(first) = roots.first().cloned() else {
+                bail!(
+                    "nothing to index: no path given could be read. Nothing was created \
+                     and nothing was registered."
+                );
+            };
+
             // The first path is what the store is about, so it is what names
             // the store and what the registry records as its root. `semlith
             // index ~/work/api` from anywhere means the api store, not a store
             // named after wherever the shell happened to be.
-            let choice = home::resolve(&cli.store, &roots[0], name.as_deref())?;
+            let choice = home::resolve(&cli.store, &first, name.as_deref())?;
             if let Some(hint) = choice.hint() {
                 eprintln!("{hint}");
             }
@@ -575,6 +589,16 @@ fn main() -> Result<()> {
                 semlith::human_bytes(bytes),
                 dir.display()
             );
+            // The readable roots are indexed and recorded; the status is what
+            // changes, so a script that indexed several roots and tolerated a
+            // missing one sees the failure it was told about (#76).
+            if !unreadable.is_empty() {
+                bail!(
+                    "{} of {} paths could not be read, and were not indexed",
+                    unreadable.len(),
+                    unreadable.len() + roots.len()
+                );
+            }
         }
 
         Command::Watch {

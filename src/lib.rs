@@ -2423,6 +2423,31 @@ pub fn model_cache_dir() -> Result<PathBuf> {
         .join("models"))
 }
 
+/// Which of `roots` can be read, and why the others cannot.
+///
+/// Asked before a store is opened, because opening one creates it: a typo in a
+/// path used to leave an empty store registered under the typo's own name and
+/// exit 0, so a script that indexed a moved directory was told it had worked
+/// (#76). A directory is probed with `read_dir` rather than `metadata` alone,
+/// because a directory whose contents cannot be listed is one that would index
+/// as empty.
+pub fn check_roots(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+    let mut readable = Vec::new();
+    let mut refused = Vec::new();
+    for root in roots {
+        let listed = match std::fs::metadata(root) {
+            Ok(meta) if meta.is_dir() => std::fs::read_dir(root).map(|_| ()),
+            Ok(_) => std::fs::File::open(root).map(|_| ()),
+            Err(e) => Err(e),
+        };
+        match listed {
+            Ok(()) => readable.push(root.clone()),
+            Err(e) => refused.push((root.clone(), e.to_string())),
+        }
+    }
+    (readable, refused)
+}
+
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
 /// canonical paths so the same file reached two ways is one entry.
 fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {

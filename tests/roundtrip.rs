@@ -576,3 +576,97 @@ fn drop_removes_the_directory_and_the_registry_entry() {
         "the registry still lists the dropped store: {after}"
     );
 }
+
+/// A path that cannot be read creates nothing, registers nothing, and exits
+/// non-zero.
+///
+/// Opening a store is what creates it, so a check that came after the open left
+/// an empty store registered under the typo's own name and reported success
+/// (#76).
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn indexing_a_path_that_cannot_be_read_leaves_nothing_behind() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let missing = elsewhere.path().join("there-is-no-such-directory");
+
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(args)
+            .current_dir(elsewhere.path())
+            .env("SEMLITH_HOME", home.path())
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["index", "--quiet", &missing.display().to_string()]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a missing path indexed cleanly: {said}"
+    );
+    assert!(
+        said.contains("there-is-no-such-directory"),
+        "the error should name the path: {said}"
+    );
+    assert!(
+        !home.path().join("stores").exists(),
+        "a store directory was created for a path that cannot be read"
+    );
+    assert!(
+        !home.path().join("registry.json").exists(),
+        "the registry records a store for a path that cannot be read"
+    );
+
+    // A readable root beside an unreadable one is still indexed, and the run
+    // still fails, so a script sees it.
+    let good = elsewhere.path().join("good");
+    std::fs::create_dir_all(&good).unwrap();
+    write(
+        &good,
+        "notes.md",
+        "Sourdough starter needs flour and water.",
+    );
+
+    let out = run(&[
+        "index",
+        "--quiet",
+        &good.display().to_string(),
+        &missing.display().to_string(),
+    ]);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "a partial failure reported success: {said}"
+    );
+    assert!(
+        said.contains("there-is-no-such-directory"),
+        "the unreadable root is not named: {said}"
+    );
+
+    let registry: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(home.path().join("registry.json")).unwrap())
+            .unwrap();
+    let recorded = registry["stores"].as_object().unwrap();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "one readable root, one store: {registry}"
+    );
+    let roots = recorded.values().next().unwrap()["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        roots.iter().all(|r| !r.contains("there-is-no-such")),
+        "an unreadable root was registered: {roots:?}"
+    );
+
+    let listed = String::from_utf8_lossy(&run(&["files"]).stdout).into_owned();
+    assert!(
+        listed.lines().any(|l| l.trim().ends_with("notes.md")),
+        "the readable root was not indexed:\n{listed}"
+    );
+}

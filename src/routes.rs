@@ -1341,6 +1341,17 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     if paths.is_empty() {
         return Response::error(400, "no path given");
     }
+    // Before a store is chosen or made. The route answered 200 for a path that
+    // does not exist and left a store behind for it (#76).
+    let (paths, unreadable) = crate::check_roots(&paths);
+    if !unreadable.is_empty() {
+        let named = unreadable
+            .iter()
+            .map(|(path, why)| format!("{}: {why}", path.display()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Response::error(400, &format!("cannot index {named}"));
+    }
     let named = body.get("store").and_then(Value::as_str);
     let store = match state.writable(named) {
         Ok(s) => s,
