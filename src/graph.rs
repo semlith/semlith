@@ -264,6 +264,14 @@ fn supplement(lang: &str) -> &'static str {
             r#"
             (preproc_include path: (_) @reference.import)
             (call_expression function: (identifier) @reference.call)
+            ; C's bundled query tags the declarator, so a function's span stops
+            ; at its signature and every call inside its body was attributed to
+            ; the file instead of to the function that makes it. This spans the
+            ; whole definition; the narrower duplicate is dropped by the
+            ; contained-definition rule below.
+            (function_definition
+              declarator: (function_declarator
+                declarator: (identifier) @name)) @definition.function
         "#
         }
         _ => "",
@@ -403,6 +411,30 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         ))
     });
     defs.dedup_by(|a, b| a.start == b.start && a.end == b.end && a.name == b.name);
+
+    // Two queries can tag the same definition at two widths: a bundled query
+    // that tags the declarator and a supplement that tags the whole definition
+    // are both right about where the symbol is and disagree about where it
+    // ends. The wider one is the useful one, because a reference inside the
+    // body is only attributed to the symbol whose range covers it — C attributed
+    // every call in a function body to the file until this rule existed.
+    //
+    // Same name *and* same kind is the condition, so a `mod x` containing an
+    // `fn x`, or a Java class containing its own constructor, keeps both.
+    let contained: Vec<bool> = defs
+        .iter()
+        .map(|inner| {
+            defs.iter().any(|outer| {
+                outer.name == inner.name
+                    && outer.kind == inner.kind
+                    && (outer.start, outer.end) != (inner.start, inner.end)
+                    && outer.start <= inner.start
+                    && outer.end >= inner.end
+            })
+        })
+        .collect();
+    let mut keep = contained.iter();
+    defs.retain(|_| !keep.next().copied().unwrap_or(false));
 
     let module = module_name(path);
     let mut symbols = vec![Symbol {
@@ -1947,6 +1979,145 @@ mod tests {
         assert!(has_edge(&java, "go", "helper", "calls"), "{:?}", java.edges);
         assert!(java.edges.iter().any(|x| x.kind == "imports"));
         assert!(has_edge(&java, "A", "go", "contains"), "{:?}", java.edges);
+    }
+
+    /// One language's fixture and what the extractor must find in it.
+    ///
+    /// The fixture is a real file on disk under `tests/fixtures/graph/`, so it
+    /// is written in the language rather than in a Rust string literal, and an
+    /// editor, a formatter and a human all read it as what it is.
+    struct Fixture {
+        language: &'static str,
+        /// Path under `tests/fixtures/graph/`.
+        file: &'static str,
+        /// Symbols that must be extracted, as (name, kind).
+        symbols: &'static [(&'static str, &'static str)],
+        /// Edges that must be extracted, as (from, to, kind).
+        edges: &'static [(&'static str, &'static str, &'static str)],
+    }
+
+    /// What every language must yield, declared rather than discovered.
+    ///
+    /// A language with no row here fails
+    /// `every_advertised_language_has_a_fixture`, so a grammar cannot be wired
+    /// up and left unproven: "it compiled" is not "it extracts anything". The
+    /// expectations are written first and the extractor is made to meet them —
+    /// loosening a row to match what the code happened to produce is the one
+    /// move this table exists to prevent.
+    const FIXTURES: &[Fixture] = &[
+        Fixture {
+            language: "rust",
+            file: "rust/lock.rs",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[
+                ("acquire", "helper", "calls"),
+                ("lock", "std::fs::File", "imports"),
+            ],
+        },
+        Fixture {
+            language: "typescript",
+            file: "typescript/app.ts",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("app", "./m", "imports")],
+        },
+        Fixture {
+            language: "python",
+            file: "python/run.py",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("run", "os", "imports")],
+        },
+        Fixture {
+            language: "go",
+            file: "go/serve.go",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls"), ("serve", "fmt", "imports")],
+        },
+        Fixture {
+            language: "java",
+            file: "java/Main.java",
+            symbols: &[("Main", "class"), ("helper", "method"), ("acquire", "method")],
+            edges: &[
+                ("acquire", "helper", "calls"),
+                ("Main", "helper", "contains"),
+            ],
+        },
+        Fixture {
+            language: "c",
+            file: "c/main.c",
+            symbols: &[("helper", "function"), ("acquire", "function")],
+            edges: &[("acquire", "helper", "calls")],
+        },
+    ];
+
+    fn fixture_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/graph")
+    }
+
+    /// Every language the filter advertises has a fixture, so no grammar is
+    /// wired up without something proving it extracts.
+    #[test]
+    fn every_advertised_language_has_a_fixture() {
+        for entry in crate::filter::LANGUAGES {
+            if WITHOUT_GRAMMAR.iter().any(|(name, _)| *name == entry.name) {
+                continue;
+            }
+            assert!(
+                FIXTURES.iter().any(|f| f.language == entry.name),
+                "{} has a grammar but no fixture asserting what it extracts",
+                entry.name
+            );
+        }
+    }
+
+    /// Each language's fixture yields the symbols and edges its row declares.
+    #[test]
+    fn every_fixture_yields_what_it_declares() {
+        let root = fixture_root();
+        for fixture in FIXTURES {
+            let path = root.join(fixture.file);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} is missing: {e}", path.display()));
+            let extraction = extract(std::path::Path::new(fixture.file), &text)
+                .unwrap_or_else(|e| panic!("{}: extraction failed: {e}", fixture.language))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: no extractor reached {} — the extension is not in the table",
+                        fixture.language, fixture.file
+                    )
+                });
+
+            for (name, kind) in fixture.symbols {
+                assert!(
+                    extraction
+                        .symbols
+                        .iter()
+                        .any(|s| s.name == *name && s.kind == *kind),
+                    "{}: no {kind} named {name}; found {:?}",
+                    fixture.language,
+                    extraction
+                        .symbols
+                        .iter()
+                        .map(|s| (&s.kind, &s.name))
+                        .collect::<Vec<_>>()
+                );
+            }
+
+            for (from, to, kind) in fixture.edges {
+                assert!(
+                    extraction
+                        .edges
+                        .iter()
+                        .any(|e| e.from == *from && e.to == *to && e.kind == *kind),
+                    "{}: no {kind} edge {from} -> {to}; found {:?}",
+                    fixture.language,
+                    extraction
+                        .edges
+                        .iter()
+                        .map(|e| (&e.from, &e.kind, &e.to))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 
     /// Every language the product advertises really parses, so the About page's
