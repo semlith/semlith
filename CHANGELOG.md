@@ -88,6 +88,25 @@ with nothing saying why. It is closed.
   languages' symbols appear on the next index pass of those files, as every
   graph fact does.
 
+### What it costs
+
+- **The binary more than doubles: 47.0 MiB to 111.3 MiB, +64.3 MiB (+137%).** Measured on
+  macOS arm64 against a 0.16.0 build made with the same toolchain, both already
+  symbol-light — the growth is parser tables, not debug information. OCaml alone
+  is 12.6 MiB of it and the five largest grammars are 36 MiB. There is no
+  ceiling by decision: the number is the deliverable. Per-platform release
+  archive sizes are in the release assets for this tag.
+- **Retrieval moved, and the move was measured rather than assumed.** Against
+  0.16.0 on the same machine, the same corpus and the same question set: hit@1
+  13 to 11, hit@3 18 to 18, hit@8 27 to 25. `wrong yes` stays 0, which is a
+  gate. Four causes were found and measured one at a time; three were defects
+  and are fixed above, and the fourth — a same-language preference for ambiguous
+  edge targets — was tried, scored two hits worse, and reverted. The residual is
+  attributable: this release adds several thousand words of documentation that
+  legitimately answer the harness's concept questions, and those questions
+  accept only code spans. Seven questions rank lower than in 0.16.0 and three
+  rank higher; all ten are named in the release record.
+
 
 ## [0.16.0] - 2026-09-14
 
