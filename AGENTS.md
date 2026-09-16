@@ -35,7 +35,7 @@ cargo test --release --test retrieval -- --ignored --nocapture # retrieval quali
 ```
 
 `tests/retrieval.rs` is the harness behind every retrieval claim this repository
-makes. It runs a fixed set of 41 questions with ground-truth spans from
+makes. It runs a fixed set of 57 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer and the graph list's
 marginal contribution. It asserts two things: the wrong-yes count for `path` is
@@ -118,7 +118,7 @@ Module responsibilities:
 | `src/routes.rs` | The daemon's routes, as adapters over `Fleet` and the queue |
 | `src/portal/` | The page itself, `include_bytes!`d — HTML, CSS, JS, IBM Plex |
 | `src/proxy.rs` | `semlith mcp` forwarding to a running daemon |
-| `src/clients.rs` | The README's client stanzas, parsed, so the portal shows the tested text |
+| `src/clients.rs` | `docs/clients.md`'s client stanzas, parsed, so the portal shows the tested text |
 | `src/main.rs` | Clap parsing and human output formatting |
 
 ### Invariants worth knowing before editing
@@ -431,8 +431,10 @@ Module responsibilities:
   would make every stanza stale on every restart, and `setup.rs` can only repair
   Claude Code's config — everything else would need a human. Rotating the
   session token therefore does not disconnect agents, and `/mcp` keeps serving
-  the previous key until the daemon that held it exits, so an open session
-  finishes.
+  the previous key for `http::KEY_GRACE` — fifteen minutes, and never past the
+  daemon's exit — so an open session finishes. It used to be "until this process
+  exits", which on a daemon somebody leaves running is a second live credential
+  rather than a grace period.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
 - **`add` is the only command that reaches the network besides `upgrade` and
@@ -468,14 +470,19 @@ contract lives in `docs/compatibility.md`.
 - Behaviour changes to indexing or search need measured numbers, not adjectives.
   The 100k benchmark store is a fixture kept at `~/.cache/semlith/bench/100k-store`
   — build it once (recipe in `CONTRIBUTING.md`), not per release.
-- Public surface changes must land in `docs/compatibility.md`; README client
-  stanzas are executed by `tests/clients.rs`, so a renamed flag breaks there.
-  `clients.rs` also parses the README's structure, not only its fences: the
-  stdio stanzas are read from under `### Setting it up in your client` and
-  grouped by `#### Terminal`, `#### Editors` and `#### Desktop apps`, and the
-  HTTP ones from under `### Connecting over HTTP`. Reword any of those five
-  headings and the portal's Agents page silently empties — change the prose
-  around them, not them.
+- A count stated in the README is asserted against its source by
+  `tests/readme.rs`, which also holds the under-500-line ceiling and the grep
+  for release-specific prose. Change a count in the code and the README fails
+  the build; add a count to the README and add its row there.
+- Public surface changes must land in `docs/compatibility.md`; the client
+  stanzas in `docs/clients.md` are executed by `tests/clients.rs`, so a renamed
+  flag breaks there. `clients.rs` also parses that file's structure, not only
+  its fences: the stdio stanzas are read from under `### Setting it up in your
+  client` and grouped by `#### Terminal`, `#### Editors` and `#### Desktop
+  apps`, and the HTTP ones from under `### Connecting over HTTP`. Reword any of
+  those five headings and the portal's Agents page silently empties — change the
+  prose around them, not them. The stanzas lived in the README until 0.17.2;
+  they are in `docs/clients.md` now, and the README only links to it.
 
 ## Deliberately out of scope
 
@@ -528,7 +535,11 @@ writes into a browser box. Adding a row there is allowed; adding one without the
 reasoning beside it is not. `tests/portal.rs` is the gate: it reads the
 subcommand list out of `--help` and the tool list off a running daemon, and
 fails if any of them — bar `start` and `mcp`, which have their reasons recorded
-there — has no route.
+there — has no route. The Agents page is the one view whose content is not
+computed: it renders the stanzas `src/clients.rs` parses out of
+`docs/clients.md`, so a change to that page is usually a change to that file.
+`docs/portal.md` documents every page, and a new one belongs there in the same
+release.
 
 ## Release
 

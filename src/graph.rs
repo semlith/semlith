@@ -6,8 +6,11 @@
 //! command, and no artifact that can be out of date with the corpus, because
 //! the pass that re-embeds a file is the pass that re-extracts it.
 //!
-//! Six languages carry edges. The rest are searchable exactly as before and
-//! simply have no rows here.
+//! Every language in [`crate::filter::LANGUAGES`] carries edges — all
+//! forty-six, since 0.17.0 replaced the extractor's own six-language list with
+//! a question asked of the grammar table. A row with no grammar is named in
+//! [`WITHOUT_GRAMMAR`] with the reason; it is searchable exactly as before and
+//! simply has no rows here.
 //!
 //! # Where the queries come from
 //!

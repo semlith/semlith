@@ -406,9 +406,9 @@ impl Server {
 
     /// Replace the agent key.
     ///
-    /// `now` drops the previous key immediately; otherwise it stays valid
-    /// until this process exits, so a client mid-session finishes its work and
-    /// only then needs the new stanza.
+    /// `now` drops the previous key immediately; otherwise it stays valid for
+    /// [`KEY_GRACE`], and never past this process's exit, so a client
+    /// mid-session finishes its work and only then needs the new stanza.
     pub fn rotate_agent(&self, key: &str, now: bool) {
         let mut agent = self.agent.lock().unwrap_or_else(|e| e.into_inner());
         let was = std::mem::replace(&mut agent.current, key.to_string());

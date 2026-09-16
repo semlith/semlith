@@ -1,10 +1,10 @@
-//! The README's client setup stanzas, executed.
+//! The client setup stanzas in `docs/clients.md`, executed.
 //!
 //! None of the clients they are written for can be installed in CI, so the
 //! check available is the one that matters most anyway: that what the
 //! documentation prints is a command line this binary answers on. A flag
-//! renamed in the code and not in the README fails here rather than on somebody
-//! else's first attempt.
+//! renamed in the code and not in `docs/clients.md` fails here rather than on
+//! somebody else's first attempt.
 //!
 //! ```sh
 //! cargo test --test clients -- --ignored
@@ -16,7 +16,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const README: &str = include_str!("../README.md");
+const CLIENTS_DOC: &str = include_str!("../docs/clients.md");
 
 /// The heading whose stanzas this file is about, and where they stop.
 const SECTION: &str = "### Setting it up in your client";
@@ -274,12 +274,13 @@ fn answers(home: &Path, argv: &[String]) -> String {
     said
 }
 
-/// The README's client setup section, up to the next top-level heading.
+/// The client setup section of `docs/clients.md`, up to the next top-level
+/// heading.
 fn section() -> String {
-    let start = README
+    let start = CLIENTS_DOC
         .find(SECTION)
-        .unwrap_or_else(|| panic!("the README has no {SECTION:?} heading"));
-    let rest = &README[start..];
+        .unwrap_or_else(|| panic!("the CLIENTS_DOC has no {SECTION:?} heading"));
+    let rest = &CLIENTS_DOC[start..];
     // Ends at the next heading of its own level or above: the
     // `### Connecting over HTTP` section below it is not part of any client.
     let end = ["\n## ", "\n### "]
@@ -323,7 +324,7 @@ fn names_semlith(body: &str) -> bool {
 /// The arguments a stanza hands the binary: everything after the last mention
 /// of it.
 ///
-/// Read out of the stanza rather than compared against a constant: the README
+/// Read out of the stanza rather than compared against a constant: `docs/clients.md`
 /// is the thing under test, so the arguments have to come from it.
 fn args_of(body: &str) -> Vec<String> {
     let tokens = tokens(body);
