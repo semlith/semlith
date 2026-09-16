@@ -273,31 +273,45 @@ fn image_floor() -> f32 {
 /// How much deeper than `k` to look in each ranking before fusing.
 const RANK_DEPTH: usize = 4;
 
-/// How long an index run may go without making its work durable.
+/// How many files an index run may get through without making its work
+/// durable.
 ///
 /// This is what an interruption costs: the vectors embedded since the last
-/// checkpoint, and no more. Thirty seconds is short enough that losing it is an
-/// annoyance rather than an evening, and long enough that a checkpoint's cost —
-/// rewriting the shards touched since the last one — stays a rounding error
-/// against the embedding it protects.
+/// checkpoint, and no more.
+///
+/// It counts files rather than seconds, and that is issue #88's last cause. A
+/// checkpoint flushes the pending batch, and the embedder pads a batch to the
+/// longest sequence in it — so a batch split at a wall-clock boundary is a
+/// batch with different padding, and the vectors it produces differ in their
+/// last bits. int8 quantization turns a last-bit difference into a rank flip,
+/// and the retrieval harness reported a different hit@k on every run because
+/// of it. Three runs over one corpus produced three different indexes; with
+/// the checkpoint interval pushed past the length of the run, two runs produced
+/// byte-identical ones. Counting files makes the split a function of the corpus
+/// rather than of how busy the machine was, so a store is reproducible from its
+/// corpus.
+///
+/// Two hundred files is the same order of durability as the thirty seconds it
+/// replaces on the corpora this is built for, and unlike thirty seconds it is
+/// the same on a slow machine.
 ///
 /// Only a sharded store checkpoints. A store written before 0.7.0 would have to
 /// rewrite its entire index to do it, which is the cost sharding exists to
 /// remove; those stores behave exactly as they did.
-const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const CHECKPOINT_FILES: usize = 200;
 
-/// Override for [`CHECKPOINT_INTERVAL`], in seconds. For the tests, which
-/// cannot spend thirty seconds proving a checkpoint happened. Not part of the
+/// Override for [`CHECKPOINT_FILES`], in files. For the tests, which cannot
+/// index two hundred files to prove a checkpoint happened. Not part of the
 /// documented environment.
-const CHECKPOINT_SECS_ENV: &str = "SEMLITH_CHECKPOINT_SECS";
+const CHECKPOINT_FILES_ENV: &str = "SEMLITH_CHECKPOINT_FILES";
 
-fn checkpoint_interval() -> std::time::Duration {
-    match std::env::var(CHECKPOINT_SECS_ENV)
+fn checkpoint_files() -> usize {
+    match std::env::var(CHECKPOINT_FILES_ENV)
         .ok()
         .and_then(|v| v.parse().ok())
     {
-        Some(secs) => std::time::Duration::from_secs(secs),
-        None => CHECKPOINT_INTERVAL,
+        Some(files) if files > 0 => files,
+        _ => CHECKPOINT_FILES,
     }
 }
 
@@ -1054,8 +1068,8 @@ impl Semlith {
         let mut completed: Vec<(i64, String)> = Vec::new();
 
         let checkpointing = matches!(self.index, index::VectorIndex::Sharded(_));
-        let interval = checkpoint_interval();
-        let mut last_checkpoint = std::time::Instant::now();
+        let every = checkpoint_files();
+        let mut since_checkpoint = 0usize;
 
         // Refused before anything is read. A path that names a credential or
         // sits outside this caller's boundary is reported by name with the rule
@@ -1374,10 +1388,16 @@ impl Semlith {
             // Between files, never inside one: a file half-written into the
             // index is a file whose hash must not be committed, and this is the
             // one point in the loop where that cannot be true.
-            if checkpointing && last_checkpoint.elapsed() >= interval {
+            //
+            // Counted, not timed. See `CHECKPOINT_FILES`: a checkpoint flushes
+            // the pending batch, so a checkpoint that lands somewhere different
+            // on every run splits the batches differently and produces
+            // different vectors from the same corpus.
+            since_checkpoint += 1;
+            if checkpointing && since_checkpoint >= every {
                 self.flush(&mut pending)?;
                 self.checkpoint(&mut completed)?;
-                last_checkpoint = std::time::Instant::now();
+                since_checkpoint = 0;
             }
         }
 

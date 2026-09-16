@@ -672,8 +672,18 @@ The old field was a tri-state about one client, answered by spawning
 file names semlith, read from disk, because asking sixteen client CLIs on a route
 the portal calls on every load is sixteen processes per page load.
 
-**Nothing about the store changes.** `FORMAT_VERSION` does not move, and a store
-written by 0.17.3 and one written by 0.18.0 are byte-compatible in both
+**An index is now a function of its corpus.** Indexing one corpus twice used to
+produce two different sets of vectors, because the checkpoint that makes a run
+durable was timed rather than counted and split an embedding batch at a
+different point each time. It counts files now, and `SEMLITH_CHECKPOINT_SECS` is
+`SEMLITH_CHECKPOINT_FILES`. Neither was ever on the covered list — the variable
+exists so a test need not wait thirty seconds — but a store built by 0.18.0 will
+not be byte-identical to one built by 0.17.3 from the same corpus, and two built
+by 0.18.0 will be. Nothing needs re-indexing: an existing store is read exactly
+as before.
+
+**Nothing else about the store changes.** `FORMAT_VERSION` does not move, and a
+store written by 0.17.3 and one written by 0.18.0 are byte-compatible in both
 directions. `tests/retrieval.rs` changed what it indexes — a snapshot of `src`,
 `tests`, `docs` and `AGENTS.md` rather than the repository root — which moves
 every number that harness reports; it is a test, not a surface, and the reason is

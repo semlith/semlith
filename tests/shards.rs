@@ -40,7 +40,7 @@ fn corpus(dir: &Path, files: usize) {
     }
 }
 
-fn index_child(store: &Path, corpus: &Path, checkpoint_secs: &str) -> Child {
+fn index_child(store: &Path, corpus: &Path, checkpoint_files: &str) -> Child {
     Command::new(env!("CARGO_BIN_EXE_semlith"))
         .arg("--store")
         .arg(store)
@@ -48,7 +48,7 @@ fn index_child(store: &Path, corpus: &Path, checkpoint_secs: &str) -> Child {
         .arg(corpus)
         .arg("--quiet")
         .env("SEMLITH_SHARD_VECTORS", SHARD_VECTORS)
-        .env("SEMLITH_CHECKPOINT_SECS", checkpoint_secs)
+        .env("SEMLITH_CHECKPOINT_FILES", checkpoint_files)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -156,7 +156,7 @@ fn one_file_changing_rewrites_one_shard() {
     let store = dir.path().join(".semlith");
 
     // Built through the binary so the shard size applies to the whole run.
-    let built = index_child(&store, dir.path(), "3600").wait().unwrap();
+    let built = index_child(&store, dir.path(), "100000").wait().unwrap();
     assert!(built.success());
 
     let shards = shard_files(&store);
@@ -228,4 +228,70 @@ fn shard_files(store: &Path) -> Vec<std::path::PathBuf> {
         .collect();
     out.sort();
     out
+}
+
+/// One corpus, indexed twice, produces one index — issue #88.
+///
+/// This is the property every retrieval claim in the repository rests on. The
+/// harness in `tests/retrieval.rs` reported a different hit@k on every run, and
+/// three of the four causes were ordering: a `HashMap` walked in a
+/// randomly-seeded order, a filesystem walk taken in whatever order the
+/// directory came back in, and a sort that left exact ties where it found them.
+///
+/// The fourth was this one, and it is the reason this test lives here rather
+/// than beside the harness. A checkpoint flushes the pending batch, the embedder
+/// pads a batch to the longest sequence in it, and the padding changes the last
+/// bits of every vector in that batch — so a checkpoint that lands somewhere
+/// different on every run produces a different index from the same bytes. With
+/// the interval counted in files rather than seconds it lands in the same place
+/// every time.
+///
+/// The corpus is deliberately several times `CHECKPOINT_FILES` so the run
+/// checkpoints repeatedly rather than finishing before the first one.
+#[test]
+#[ignore = "embeds a corpus twice; downloads the model on first run"]
+fn one_corpus_indexed_twice_produces_one_index() {
+    let dir = tempfile::tempdir().unwrap();
+    corpus(dir.path(), 700);
+
+    let mut hashes = Vec::new();
+    for run in 0..2 {
+        let store = dir.path().join(format!("store-{run}"));
+        let built = Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .arg("--store")
+            .arg(&store)
+            .arg("index")
+            .arg(dir.path())
+            .arg("--quiet")
+            .env("SEMLITH_SHARD_VECTORS", SHARD_VECTORS)
+            // Pinned for the same reason `tests/measure.rs` pins it: ONNX
+            // Runtime reduces across its intra-op threads in whatever order
+            // they finish, which is a second way for one corpus to produce two
+            // indexes and not the one under test here.
+            .env("SEMLITH_EMBED_THREADS", "1")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "indexing failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+
+        let mut shards: Vec<_> = fs::read_dir(store.join("index"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        shards.sort();
+        assert!(shards.len() > 1, "the corpus did not span several shards");
+        let bytes: Vec<u8> = shards.iter().flat_map(|p| fs::read(p).unwrap()).collect();
+        hashes.push(blake3::hash(&bytes).to_hex().to_string());
+    }
+
+    assert_eq!(
+        hashes[0], hashes[1],
+        "the same corpus produced two different indexes; a store is supposed to \
+         be a function of what was indexed, not of when the run happened to \
+         checkpoint"
+    );
 }

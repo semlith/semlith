@@ -50,11 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The retrieval harness reproduces its own numbers (#88). Three runs of one
-  binary over one corpus gave three different hit@k, the graph-only denominator
-  moved, and bytes per answer tracked where the corpus was checked out. The
-  graph walk's maps are ordered, the harness pins one embedding thread, and the
-  corpus is a snapshot rather than the working tree.
+- One corpus indexed twice now produces one index, and the retrieval harness
+  reproduces its own numbers (#88). Three runs of one binary over one corpus
+  gave three different hit@k, the graph-only denominator moved, and bytes per
+  answer tracked where the corpus was checked out. Four causes, all measured:
+  the graph walk read its frontier out of a randomly-seeded `HashMap`; the file
+  walk took whatever order the filesystem gave it, so chunk ids moved; the
+  fusion and rerank sorts left exact ties where they found them; and the index
+  checkpoint was timed rather than counted, so it split an embedding batch at a
+  different point on every run — and the embedder pads a batch to its longest
+  sequence, which changes the last bits of every vector in it. The maps are
+  ordered, the walk is sorted, both sorts are total, and the checkpoint interval
+  counts files.
+- `SEMLITH_CHECKPOINT_SECS` is now `SEMLITH_CHECKPOINT_FILES`. It was never part
+  of the documented environment — it exists so a test need not wait thirty
+  seconds — and it is what made an index run depend on the clock.
 
 ## [0.17.3] - 2026-09-16
 
