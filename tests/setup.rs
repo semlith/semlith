@@ -184,10 +184,16 @@ fn the_users_own_rc_file_survives() {
 }
 
 /// `--yes` is what a script and an installer run, so it has to finish with
-/// nothing attached to stdin, and it must not reach into any agent's config on
-/// the way.
+/// nothing attached to stdin.
+///
+/// It registers agents from 0.18.0, where it used to skip them. An install that
+/// finishes with the agent unable to see the store is not an install anybody
+/// wanted, and the registrations are now the stdio form — no key in any file,
+/// nothing written outside the client's own registry — so there is nothing left
+/// for `--yes` to be protecting the user from. What it must still not do is
+/// write a file semlith does not own: that is `--register-all`, and it asks.
 #[test]
-fn yes_completes_with_stdin_closed_and_registers_no_agent() {
+fn yes_completes_with_stdin_closed_and_writes_no_client_file() {
     let machine = Machine::new();
 
     let run = machine.setup(&["--yes", "--airgap"]);
@@ -199,9 +205,18 @@ fn yes_completes_with_stdin_closed_and_registers_no_agent() {
 
     let said = Machine::said(&run);
     assert!(
-        said.contains("registers no agent"),
-        "`--yes` should say it registered no agent, it said:\n{said}"
+        said.contains("agents"),
+        "`--yes` should report the agents step, it said:\n{said}"
     );
+    // No client configuration file may appear under a home `--yes` was pointed
+    // at. `--register-all` is the only path that writes one, and it confirms
+    // first.
+    for name in [".cursor", ".codeium", ".continue", ".lmstudio", ".warp"] {
+        assert!(
+            !machine.home.join(name).exists(),
+            "`--yes` wrote {name}, which it may not do without --register-all"
+        );
+    }
 }
 
 /// An air-gapped machine's claim is that the process never reached the network.
@@ -453,4 +468,384 @@ fn a_rotation_never_loosens_a_config_file() {
         "the rotation loosened the file from {before:o} to {after:o}"
     );
     assert!(std::fs::read_to_string(&config).unwrap().contains(&fresh));
+}
+
+// ------------------------------------------------- 0.18.0: --register-all
+
+/// The ten clients semlith writes a file for, with the user-level path each
+/// one's `config path=` fence names, relative to `HOME`.
+///
+/// Taken from `docs/clients.md` through the library rather than retyped, so a
+/// path that moves in the documentation moves here too. The count is asserted
+/// because it is the release's own number: fourteen clients register by their
+/// own CLI, ten by a file, and three cannot be registered at all.
+fn writable_clients() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for client in semlith::clients::clients() {
+        if !client.needs_a_file_written() {
+            continue;
+        }
+        for stanza in client.config_files() {
+            let Some(path) = stanza.path.as_deref() else {
+                continue;
+            };
+            // Only the paths that resolve on this platform. Claude Desktop's
+            // Windows path is in the document and is not a file this test can
+            // write on macOS or Linux.
+            let applies = match stanza.os.as_deref() {
+                Some("windows") => cfg!(windows),
+                Some("macos") => cfg!(target_os = "macos"),
+                Some("linux") => cfg!(target_os = "linux"),
+                _ => true,
+            };
+            if applies && let Some(rest) = path.strip_prefix("~/") {
+                out.push((client.name.clone(), rest.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// `--register-all` writes the file of every client that has no registration
+/// command, and a second run changes none of them.
+///
+/// This is the one place semlith writes a file it does not own, so the things
+/// asserted here are the things that make that safe: an unrelated key survives,
+/// a second run is byte-identical, and a backup sits beside anything that was
+/// already there.
+#[test]
+fn register_all_writes_every_file_only_client_and_is_idempotent() {
+    let machine = Machine::new();
+    let expected = writable_clients();
+    // Ten clients have no registration command, and that number is the same
+    // everywhere. How many *paths* resolve is not: Claude Desktop documents a
+    // macOS path and a Windows one and no Linux path at all, so this list is
+    // one shorter there. Asserting the path count directly is what made this
+    // test pass on macOS and fail on Linux.
+    let writable = semlith::clients::clients()
+        .iter()
+        .filter(|client| client.needs_a_file_written())
+        .count();
+    assert_eq!(writable, 10, "ten clients have no registration command");
+    assert!(
+        expected.len() >= 9,
+        "only {} writable client paths resolve on this platform: {expected:?}",
+        expected.len()
+    );
+
+    // One of them already has a configuration with something else in it, so the
+    // merge has something to preserve. Cursor's schema is the common one.
+    let cursor = machine.home.join(".cursor/mcp.json");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cursor,
+        r#"{"mcpServers":{"other":{"command":"other","args":["serve"]}}}"#,
+    )
+    .unwrap();
+
+    let run = machine.setup(&["--yes", "--airgap", "--register-all"]);
+    assert!(
+        run.status.success(),
+        "--register-all exited {:?}:\n{}",
+        run.status.code(),
+        Machine::said(&run)
+    );
+
+    for (client, relative) in &expected {
+        let path = machine.home.join(relative);
+        assert!(
+            path.exists(),
+            "{client}'s file was not written at {}",
+            path.display()
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("semlith"),
+            "{client}'s file has no semlith entry:\n{text}"
+        );
+        // Nothing semlith writes carries the credential. This is the release's
+        // central claim, asserted over every file it wrote.
+        assert!(
+            !text.contains("sml_") && !text.contains("SEMLITH_AGENT_KEY"),
+            "{client}'s file carries a credential:\n{text}"
+        );
+    }
+
+    let merged = std::fs::read_to_string(&cursor).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&merged).expect("the merge is valid JSON");
+    assert_eq!(
+        parsed["mcpServers"]["other"]["command"], "other",
+        "the merge dropped a server that was already there:\n{merged}"
+    );
+    assert_eq!(parsed["mcpServers"]["semlith"]["command"], "semlith");
+    assert!(
+        machine
+            .home
+            .join(".cursor/mcp.json.semlith-backup")
+            .exists(),
+        "a file that already existed was written with no backup beside it"
+    );
+
+    // A second run changes nothing. The same property `a_second_run_changes
+    // _nothing` asserts for the rc file, over the files this release added.
+    let before: BTreeMap<String, String> = expected
+        .iter()
+        .map(|(_, relative)| {
+            let path = machine.home.join(relative);
+            (
+                relative.clone(),
+                std::fs::read_to_string(&path).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let again = machine.setup(&["--yes", "--airgap", "--register-all"]);
+    assert!(again.status.success());
+    for (relative, text) in &before {
+        assert_eq!(
+            &std::fs::read_to_string(machine.home.join(relative)).unwrap_or_default(),
+            text,
+            "{relative} changed on a second --register-all"
+        );
+    }
+}
+
+/// A file that does not parse is left exactly as it was, and the rest are still
+/// written.
+///
+/// The alternative — replacing what could not be read — is how a tool that edits
+/// a file it does not own eventually corrupts one, which is the rule
+/// `--register-all` is bending in the first place.
+#[test]
+fn register_all_refuses_a_malformed_file_and_writes_the_others() {
+    let machine = Machine::new();
+    let cursor = machine.home.join(".cursor/mcp.json");
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    let broken = "{ this was never json";
+    std::fs::write(&cursor, broken).unwrap();
+
+    let run = machine.setup(&["--yes", "--airgap", "--register-all"]);
+    assert!(
+        run.status.success(),
+        "one unreadable file failed the whole install"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&cursor).unwrap(),
+        broken,
+        "a file that could not be parsed was written anyway"
+    );
+
+    let warp = machine.home.join(".warp/.mcp.json");
+    assert!(
+        warp.exists(),
+        "the other clients were not written after one was refused"
+    );
+}
+
+/// Without `--register-all`, no file semlith does not own is created.
+#[test]
+fn a_default_install_writes_no_client_configuration() {
+    let machine = Machine::new();
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(run.status.success());
+    for (client, relative) in writable_clients() {
+        assert!(
+            !machine.home.join(&relative).exists(),
+            "a default install wrote {client}'s {relative}"
+        );
+    }
+}
+
+// ------------------------------------------- 0.18.0: what setup invokes
+
+/// A directory of fake client CLIs, first on `PATH`, each recording the
+/// arguments it was called with.
+///
+/// Thirteen of the sixteen clients with a registration command cannot be
+/// installed here or in CI — `tests/clients.rs` has said so since it was
+/// written — so this is the check that is available, and it is the one that
+/// matters most anyway: that semlith invokes the command line
+/// `docs/clients.md` documents. A flag renamed in the documentation and not in
+/// the code, or the reverse, fails here rather than on somebody's first
+/// attempt. It does not prove the client accepts that command line, and the
+/// release record says so in those words.
+struct FakeClients {
+    dir: PathBuf,
+    log: PathBuf,
+}
+
+impl FakeClients {
+    fn new(root: &Path, programs: &[String], exit: i32) -> Self {
+        let dir = root.join("fake-bin");
+        let log = root.join("invocations.txt");
+        std::fs::create_dir_all(&dir).unwrap();
+        for program in programs {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"{program}\" >> \"$SEMLITH_FAKE_LOG\"\n\
+                     for a in \"$@\"; do printf ' %s' \"$a\" >> \"$SEMLITH_FAKE_LOG\"; done\n\
+                     printf '\\n' >> \"$SEMLITH_FAKE_LOG\"\nexit {exit}\n"
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir, log }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// The clients semlith registers by running their own CLI, and the exact
+/// command line each one's `sh register` fence gives.
+fn global_registrations() -> Vec<(String, String)> {
+    semlith::clients::clients()
+        .iter()
+        .filter(|client| client.registers_globally())
+        .filter_map(|client| {
+            client.register_command().and_then(|command| {
+                // The documented string is a command line; what the client
+                // is actually run with is its argv, and the two differ
+                // wherever a command quotes an argument — Droid's
+                // `"semlith mcp"` is one argument, not two. Split it the
+                // way semlith splits it rather than comparing the raw text,
+                // and a quoting change in the documentation is still caught
+                // because the split is the thing under test.
+                semlith::setup::argv(&command).map(|(program, args)| {
+                    (
+                        client.name.clone(),
+                        std::iter::once(program)
+                            .chain(args)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+/// Every client that registers globally is invoked exactly once, with the argv
+/// `docs/clients.md` documents.
+#[test]
+fn setup_invokes_each_client_with_the_documented_command_line() {
+    let machine = Machine::new();
+    let expected = global_registrations();
+    assert_eq!(
+        expected.len(),
+        14,
+        "fourteen clients register by their own CLI: {:?}",
+        expected.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+
+    let programs: Vec<String> = expected
+        .iter()
+        .flat_map(|(_, command)| command.split_whitespace().next().map(str::to_string))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let fake = FakeClients::new(&machine.home, &programs, 0);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    command
+        .arg("setup")
+        .args(["--yes", "--airgap"])
+        .env("HOME", &machine.home)
+        .env("SEMLITH_HOME", &machine.store_home)
+        .env("SEMLITH_MODEL_CACHE", &machine.cache)
+        .env("SEMLITH_FAKE_LOG", &fake.log)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake.dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+    let run = command.output().expect("setup runs");
+    assert!(
+        run.status.success(),
+        "setup exited {:?}:\n{}{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let invoked = fake.lines();
+    for (client, documented) in &expected {
+        assert!(
+            invoked.iter().any(|line| line == documented),
+            "{client} was not invoked as `{documented}`.\nWhat was invoked:\n{}",
+            invoked.join("\n")
+        );
+        assert_eq!(
+            invoked.iter().filter(|line| *line == documented).count(),
+            1,
+            "{client} was registered more than once"
+        );
+    }
+
+    // And the two whose CLI registers only the directory it is run in are not
+    // invoked at all. Running them is the defect this release exists to end.
+    for name in ["OpenCode", "Kilo Code"] {
+        let client = semlith::clients::clients()
+            .iter()
+            .find(|c| c.name == name)
+            .expect("documented");
+        let program = client
+            .register_command()
+            .and_then(|c| c.split_whitespace().next().map(str::to_string))
+            .expect("has a command");
+        assert!(
+            !invoked.iter().any(|line| line.starts_with(&program)),
+            "{name} registers only the current directory and was invoked anyway"
+        );
+    }
+}
+
+/// A client CLI that refuses does not fail the install, and is told apart from
+/// one that is not installed.
+#[test]
+fn a_client_that_refuses_is_reported_and_the_install_still_succeeds() {
+    let machine = Machine::new();
+    let fake = FakeClients::new(&machine.home, &["claude".to_string()], 1);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    command
+        .arg("setup")
+        .args(["--yes", "--airgap"])
+        .env("HOME", &machine.home)
+        .env("SEMLITH_HOME", &machine.store_home)
+        .env("SEMLITH_MODEL_CACHE", &machine.cache)
+        .env("SEMLITH_FAKE_LOG", &fake.log)
+        .env("PATH", format!("{}:/usr/bin:/bin", fake.dir.display()));
+    let run = command.output().expect("setup runs");
+    assert!(
+        run.status.success(),
+        "a refusing client CLI failed the whole install"
+    );
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        said.contains("would not register") || said.contains("Claude Code"),
+        "the refusal was not reported:\n{said}"
+    );
+    // "absent" and "failed" are different words, and the count of absent
+    // clients is reported rather than folded into the failures.
+    assert!(
+        said.contains("not on this machine"),
+        "the clients that are simply not installed were not named as absent:\n{said}"
+    );
 }

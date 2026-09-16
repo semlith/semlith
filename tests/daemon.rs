@@ -1087,9 +1087,21 @@ fn the_agents_route_serves_the_documented_stanzas_verbatim() {
     assert!(clients.len() >= 12, "only {} clients", clients.len());
     assert_eq!(clients[0]["name"], "Claude Code");
 
-    // Claude Code leads with the endpoint; the subprocess form follows it.
-    let stanza = clients[0]["stanzas"][2]["text"].as_str().expect("a stanza");
-    assert_eq!(stanza.trim(), "claude mcp add semlith -- semlith mcp");
+    // The registration, found by its role rather than by its position: the
+    // list grew an `unregister` fence in 0.18.0, and a positional index is a
+    // second thing to keep right every time the documentation gains a block.
+    let stanza = clients[0]["stanzas"]
+        .as_array()
+        .expect("stanzas")
+        .iter()
+        .find(|stanza| stanza["register"] == true)
+        .and_then(|stanza| stanza["text"].as_str())
+        .expect("Claude Code carries a registration");
+    assert_eq!(
+        stanza.trim(),
+        "claude mcp add --scope user semlith -- semlith mcp",
+        "the registration the portal serves must carry the scope that means every project"
+    );
 
     let doc =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/clients.md"))

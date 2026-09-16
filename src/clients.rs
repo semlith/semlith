@@ -33,6 +33,126 @@ pub struct Stanza {
     /// The fence's language: `json`, `toml`, `sh`, `yaml`.
     pub format: String,
     pub text: String,
+    /// The one `sh register` fence a client with a registration CLI carries:
+    /// the command `semlith setup` runs for it, scope flag and all.
+    ///
+    /// It lives in the fence's info string rather than in a table here because
+    /// a rendered fence hides everything after the language, so the fact stays
+    /// in the document a human reads and in the one a program parses at once.
+    /// A command retyped into Rust would look right for exactly as long as
+    /// nobody edited one of the two.
+    pub register: bool,
+    /// From a bare `unregister` on a fence: a command that removes an existing
+    /// semlith entry from this client, run before the registration.
+    pub unregister: bool,
+    /// From `path=` in the info string: the user-level configuration file
+    /// `semlith setup --register-all` may merge into.
+    ///
+    /// `None` on every fence that is an example rather than a destination —
+    /// which is every project-level file, because registering semlith into one
+    /// repository's committed config is the defect 0.18.0 exists to end.
+    pub path: Option<String>,
+    /// From `os=` in the info string, when a client's file is somewhere else on
+    /// another platform. `None` means the path is the same everywhere.
+    pub os: Option<String>,
+    /// From `scope=` on a `register` fence: what that command actually
+    /// registers.
+    ///
+    /// `global` unless the fence says otherwise, and two clients say otherwise.
+    /// `opencode mcp add` on 1.18.11 and `kilo mcp add` have no global flag, so
+    /// running them registers semlith for the directory the user happened to be
+    /// standing in — which is the defect this release exists to end. semlith
+    /// does not run a `scope=project` command; those clients reach every
+    /// project through their user-level file instead.
+    pub scope: Scope,
+}
+
+/// What a registration command registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Every project on the machine. The only kind semlith runs unasked.
+    #[default]
+    Global,
+    /// The directory it is run in, and nothing else.
+    Project,
+}
+
+/// What a fence's info string says beyond its language.
+///
+/// `sh register`, `json config path=~/.cursor/mcp.json`, and
+/// `json config path=%APPDATA%\Claude\claude_desktop_config.json os=windows`
+/// are the three shapes in use. An attribute this does not know is ignored
+/// rather than refused: `docs/clients.md` is documentation first, and a fence
+/// annotated for some future reader should not stop the portal rendering.
+fn info(line: &str) -> Info {
+    let mut format = String::new();
+    let (mut register, mut unregister) = (false, false);
+    let (mut path, mut os, mut scope) = (None, None, Scope::Global);
+    // Hand-split rather than `split_whitespace`, because one path has a space
+    // in it — Claude Desktop's on macOS — and a quoted value has to survive.
+    for word in split_attributes(line) {
+        match word.split_once('=') {
+            Some(("path", value)) => path = Some(unquote(value).to_string()),
+            Some(("os", value)) => os = Some(unquote(value).to_string()),
+            Some(("scope", "project")) => scope = Scope::Project,
+            Some(("scope", _)) => scope = Scope::Global,
+            _ if word == "register" => register = true,
+            _ if word == "unregister" => unregister = true,
+            _ if format.is_empty() => format = word.to_string(),
+            _ => {}
+        }
+    }
+    Info {
+        format,
+        register,
+        unregister,
+        path,
+        os,
+        scope,
+    }
+}
+
+/// What an info string carried, beyond the fence's language.
+struct Info {
+    format: String,
+    register: bool,
+    unregister: bool,
+    path: Option<String>,
+    os: Option<String>,
+    scope: Scope,
+}
+
+/// An info string's words, keeping a double-quoted value whole.
+fn split_attributes(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                word.push(c);
+            }
+            c if c.is_whitespace() && !quoted => {
+                if !word.is_empty() {
+                    out.push(std::mem::take(&mut word));
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 /// One client, its note, and every stanza `docs/clients.md` gives for it.
@@ -49,6 +169,76 @@ pub struct Client {
     pub stanzas: Vec<Stanza>,
 }
 
+impl Client {
+    /// The command `semlith setup` runs to register this client, or `None` for
+    /// a client whose only route in is a file somebody edits.
+    ///
+    /// Whitespace-collapsed, because a fence may wrap a long command and a
+    /// newline inside an argument list is not part of the command.
+    pub fn register_command(&self) -> Option<String> {
+        self.stanzas
+            .iter()
+            .find(|stanza| stanza.register)
+            .map(|stanza| stanza.text.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    /// The commands that remove an existing semlith entry from this client,
+    /// run before the registration and with their status ignored.
+    ///
+    /// More than one where a client has more than one scope to clear: Claude
+    /// Code's `user`, `project` and `local` are three separate entries, and the
+    /// one that made this release necessary was at `local`. A client that
+    /// documents no remove verb has none here, and semlith reports what the
+    /// failing `add` said rather than guessing a command.
+    pub fn unregister_commands(&self) -> Vec<String> {
+        self.stanzas
+            .iter()
+            .filter(|stanza| stanza.unregister)
+            .map(|stanza| stanza.text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// Whether that command registers semlith for every project.
+    ///
+    /// The only kind `semlith setup` runs unasked. A command that registers the
+    /// current directory would leave the user exactly where 0.18.0 found
+    /// them — semlith working in the repository they happened to be standing in
+    /// and missing from the next one — so those clients go through their
+    /// user-level file instead.
+    pub fn registers_globally(&self) -> bool {
+        self.stanzas
+            .iter()
+            .any(|stanza| stanza.register && stanza.scope == Scope::Global)
+    }
+
+    /// The user-level configuration files for this client.
+    ///
+    /// `semlith doctor` reads them to report where a client actually registered
+    /// and at what scope. `semlith setup --register-all` writes them, but only
+    /// for a client with no global registration CLI: a client semlith can ask
+    /// to register itself is not a file semlith writes.
+    pub fn config_files(&self) -> impl Iterator<Item = &Stanza> {
+        self.stanzas.iter().filter(|stanza| stanza.path.is_some())
+    }
+
+    /// Whether `semlith setup --register-all` would write this client's file.
+    pub fn needs_a_file_written(&self) -> bool {
+        !self.registers_globally() && self.config_files().next().is_some()
+    }
+}
+
+/// The clients `docs/clients.md` documents no way for semlith to register.
+///
+/// Not an omission and not a to-do. Crush and Roo Code document only a
+/// project-level file, and registering semlith into one repository's committed
+/// configuration is the defect this release exists to end rather than a smaller
+/// version of the fix. Zed's own instruction is to open its settings through a
+/// command palette entry, and no vendor documentation gives the path that
+/// opens. `semlith doctor` names these three and prints their stanza rather
+/// than reporting them as failures, because nothing is broken: there is
+/// nowhere to write.
+pub const UNREGISTERABLE: [&str; 3] = ["Crush", "Zed", "Roo Code"];
+
 /// The HTTP stanzas, with `key` substituted for `docs/clients.md`'s placeholder.
 ///
 /// One template for every client rather than one per client: the endpoint and
@@ -60,8 +250,8 @@ pub fn http_stanzas(key: &str) -> Vec<Stanza> {
         .get_or_init(|| parse_http(CLIENTS_DOC))
         .iter()
         .map(|stanza| Stanza {
-            format: stanza.format.clone(),
             text: stanza.text.replace(KEY_PLACEHOLDER, key),
+            ..stanza.clone()
         })
         .collect()
 }
@@ -89,9 +279,15 @@ fn parse_http(readme: &str) -> Vec<Stanza> {
             text.push_str(body);
             text.push('\n');
         }
+        let info = info(format);
         out.push(Stanza {
-            format: format.trim().to_string(),
+            format: info.format,
             text,
+            register: info.register,
+            unregister: info.unregister,
+            path: info.path,
+            os: info.os,
+            scope: info.scope,
         });
     }
     out
@@ -178,9 +374,15 @@ fn parse(readme: &str) -> Vec<Client> {
                 text.push_str(body);
                 text.push('\n');
             }
+            let info = info(format);
             stanzas.push(Stanza {
-                format: format.trim().to_string(),
+                format: info.format,
                 text,
+                register: info.register,
+                unregister: info.unregister,
+                path: info.path,
+                os: info.os,
+                scope: info.scope,
             });
         }
 
@@ -297,22 +499,161 @@ mod tests {
         }
     }
 
+    /// Sixteen of the twenty-seven clients have a registration CLI, and those
+    /// sixteen are exactly the set `semlith setup` registers without being
+    /// asked. The number is asserted rather than counted at runtime because a
+    /// client silently losing its `sh register` fence is a client that goes
+    /// back to being a stanza somebody pastes, which is the defect 0.18.0
+    /// exists to end and which nothing else here would notice.
+    #[test]
+    fn sixteen_clients_carry_a_registration_command() {
+        let with: Vec<&str> = clients()
+            .iter()
+            .filter(|client| client.register_command().is_some())
+            .map(|client| client.name.as_str())
+            .collect();
+        assert_eq!(with.len(), 16, "registration commands found: {with:?}");
+    }
+
+    /// Every documented client is reachable, and the three that are not are
+    /// named rather than left to be discovered.
+    ///
+    /// A client is reachable when semlith can register it for every project:
+    /// by its own CLI, or by writing its user-level configuration file under
+    /// `--register-all`. The three in `UNREGISTERABLE` are neither, for the
+    /// reasons recorded there. A fourth appearing here means a client lost its
+    /// route in without anyone deciding that it should.
+    #[test]
+    fn every_client_is_reachable_or_is_one_of_the_three_that_are_not() {
+        let mut unreachable = Vec::new();
+        let mut by_file = Vec::new();
+        for client in clients() {
+            if client.registers_globally() {
+                continue;
+            }
+            if client.needs_a_file_written() {
+                by_file.push(client.name.as_str());
+                continue;
+            }
+            unreachable.push(client.name.as_str());
+        }
+        assert_eq!(
+            unreachable,
+            UNREGISTERABLE.to_vec(),
+            "the set semlith cannot register has changed; by file: {by_file:?}"
+        );
+    }
+
+    /// Two clients register the directory they are run in, and semlith does not
+    /// run those. Asserted by name: if a third joins them, or one of these two
+    /// gains a global flag, that is a release decision rather than an edit.
+    #[test]
+    fn the_project_scoped_registrations_are_the_two_that_are_known_to_be() {
+        let project: Vec<&str> = clients()
+            .iter()
+            .filter(|client| {
+                client
+                    .stanzas
+                    .iter()
+                    .any(|stanza| stanza.register && stanza.scope == Scope::Project)
+            })
+            .map(|client| client.name.as_str())
+            .collect();
+        assert_eq!(project, vec!["OpenCode", "Kilo Code"]);
+        for name in &project {
+            let client = clients()
+                .iter()
+                .find(|client| &client.name == name)
+                .expect("just found");
+            assert!(
+                !client.registers_globally(),
+                "{name} is counted as global as well as project-scoped"
+            );
+            assert!(
+                client.needs_a_file_written(),
+                "{name} has no global route in at all, which would make it unreachable"
+            );
+        }
+    }
+
+    /// A configuration file semlith writes is user-level. A project-level path
+    /// here would have semlith registering itself into one repository's
+    /// committed config, which is the scope bug wearing different clothes.
+    #[test]
+    fn every_config_path_semlith_writes_is_user_level() {
+        for client in clients() {
+            for stanza in client.config_files() {
+                let path = stanza.path.as_deref().expect("filtered on Some");
+                assert!(
+                    path.starts_with('~') || path.starts_with('%') || path.starts_with('/'),
+                    "{}'s config path {path} is not user-level",
+                    client.name
+                );
+            }
+        }
+    }
+
+    /// A registration semlith performs never carries a credential and never
+    /// names the endpoint: it launches `semlith mcp`, which reads the key out
+    /// of `~/.semlith/agent.key` itself. This is the whole of what 0.18.0
+    /// changed about how a client authenticates, so it is asserted over the
+    /// text rather than left to the shape of the command.
+    #[test]
+    fn no_registration_command_carries_a_key_or_an_endpoint() {
+        for client in clients() {
+            let Some(command) = client.register_command() else {
+                continue;
+            };
+            for forbidden in [KEY_PLACEHOLDER, "Bearer", "127.0.0.1:7365", "sml_"] {
+                assert!(
+                    !command.contains(forbidden),
+                    "{}'s registration command carries {forbidden}:\n{command}",
+                    client.name
+                );
+            }
+            assert!(
+                command.contains("semlith"),
+                "{}'s registration command does not name semlith:\n{command}",
+                client.name
+            );
+        }
+    }
+
     #[test]
     fn claude_code_is_the_first_client_and_has_both_of_its_forms() {
         let first = &clients()[0];
         assert_eq!(first.name, "Claude Code");
-        let formats: Vec<&str> = first.stanzas.iter().map(|s| s.format.as_str()).collect();
-        // The endpoint first, as a committed file and as a command, then the
-        // subprocess form for anyone who wants no key at all.
-        assert_eq!(formats, vec!["json", "sh", "sh"]);
+        // Asserted by role rather than by position. The list grew an
+        // `unregister` fence in 0.18.0 and will grow again; what has to stay
+        // true is that Claude Code documents the endpoint as a file and as a
+        // command, and carries exactly one registration.
+        assert!(
+            first
+                .stanzas
+                .iter()
+                .all(|s| ["json", "sh"].contains(&s.format.as_str()))
+        );
+        assert_eq!(
+            first.stanzas.iter().filter(|s| s.register).count(),
+            1,
+            "a client may document exactly one registration command"
+        );
+        assert!(
+            !first.unregister_commands().is_empty(),
+            "the entry being replaced is often not at the scope the new one goes to"
+        );
         assert!(
             first.stanzas[0].text.contains("http://127.0.0.1:7365/mcp"),
             "the first stanza is not the endpoint:\n{}",
             first.stanzas[0].text
         );
+        // The stdio form, at user scope, is what `semlith setup` runs from
+        // 0.18.0. The scope flag is the release: without it this command
+        // registers the directory it was typed in.
         assert_eq!(
-            first.stanzas[2].text.trim(),
-            "claude mcp add semlith -- semlith mcp"
+            first.register_command().as_deref(),
+            Some("claude mcp add --scope user semlith -- semlith mcp")
         );
+        assert!(first.registers_globally());
     }
 }

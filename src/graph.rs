@@ -1181,23 +1181,37 @@ const ROUNDS: usize = 3;
 /// neighbour of every seed as equally related, so a symbol reached once from a
 /// weak seed ranks with one reached from three strong ones. That is not a
 /// ranking, it is a set.
+///
+/// Every map here is a `BTreeMap` rather than a `HashMap`, and that is the
+/// whole of issue #88. A `HashMap`'s iteration order is seeded randomly per
+/// process, so `for (name, mass) in &score` visited the frontier in a
+/// different order on every run. Three things followed. The mass arriving at a
+/// name is a sum of `f32`s, and floating-point addition is not associative, so
+/// the same walk produced slightly different scores and the ranking moved by a
+/// question between identical runs. `tiers` keeps the first edge of equal
+/// weight, so the confidence a name was labelled with depended on which edge
+/// arrived first. And `edges.len() >= MAX_NODES` cut off whichever names the
+/// order had not reached yet, so the set of names visited — and the graph-only
+/// denominator the harness reports — moved as well. An ordered map costs a
+/// `log n` lookup over a set already bounded by `MAX_NODES` and buys a walk
+/// that answers the same thing twice.
 pub fn expand(
-    personal: &std::collections::HashMap<String, f32>,
+    personal: &std::collections::BTreeMap<String, f32>,
     mut neighbours: impl FnMut(&str) -> Result<Vec<(String, f32, String)>>,
 ) -> Result<Vec<(String, f32, String)>> {
     if personal.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut edges: std::collections::HashMap<String, Vec<(String, f32, String)>> =
-        std::collections::HashMap::new();
+    let mut edges: std::collections::BTreeMap<String, Vec<(String, f32, String)>> =
+        std::collections::BTreeMap::new();
     // The best edge that reached each name, which is what it is labelled with.
-    let mut tiers: std::collections::HashMap<String, (f32, String)> =
-        std::collections::HashMap::new();
+    let mut tiers: std::collections::BTreeMap<String, (f32, String)> =
+        std::collections::BTreeMap::new();
     let mut score = personal.clone();
 
     for _ in 0..ROUNDS {
-        let mut next: std::collections::HashMap<String, f32> = personal
+        let mut next: std::collections::BTreeMap<String, f32> = personal
             .iter()
             .map(|(name, mass)| (name.clone(), (1.0 - DAMPING) * mass))
             .collect();
@@ -2896,7 +2910,7 @@ mod tests {
         .into_iter()
         .collect();
 
-        let personal: std::collections::HashMap<String, f32> = [
+        let personal: std::collections::BTreeMap<String, f32> = [
             ("a".to_string(), 1.0),
             ("b".to_string(), 1.0),
             ("c".to_string(), 1.0),
@@ -2937,7 +2951,7 @@ mod tests {
     /// exclude-the-seeds rule silently empties the third list.
     #[test]
     fn a_seed_the_code_points_at_is_still_reached() {
-        let personal: std::collections::HashMap<String, f32> =
+        let personal: std::collections::BTreeMap<String, f32> =
             [("knead".to_string(), 1.0), ("autolyse".to_string(), 1.0)]
                 .into_iter()
                 .collect();
@@ -2964,7 +2978,7 @@ mod tests {
     #[test]
     fn the_walk_asks_about_each_name_once() {
         let mut asked: Vec<String> = Vec::new();
-        let personal: std::collections::HashMap<String, f32> =
+        let personal: std::collections::BTreeMap<String, f32> =
             [("a".to_string(), 1.0)].into_iter().collect();
         expand(&personal, |name| {
             asked.push(name.to_string());
@@ -2985,7 +2999,7 @@ mod tests {
     /// last one read.
     #[test]
     fn a_reached_name_is_labelled_by_the_best_edge_that_reached_it() {
-        let personal: std::collections::HashMap<String, f32> =
+        let personal: std::collections::BTreeMap<String, f32> =
             [("weak".to_string(), 1.0), ("strong".to_string(), 1.0)]
                 .into_iter()
                 .collect();

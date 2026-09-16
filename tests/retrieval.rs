@@ -56,14 +56,58 @@ struct Span {
 #[test]
 #[ignore = "indexes the repository and downloads an embedding model on first run"]
 fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
-    let root = repository_root();
-    let questions = read_questions(&root.join("tests/fixtures/retrieval/questions.yaml"));
+    // SAFETY: this file holds one test, so nothing else in this process is
+    // reading the environment while this writes it, and it runs before any
+    // thread is spawned and before a model is loaded.
+    //
+    // One embedding thread, deliberately, and this is half of issue #88. ONNX
+    // Runtime reduces across its intra-op threads in whatever order they
+    // finish, so the same text embedded twice on several threads differs in
+    // the last bits — and int8 quantization turns a last-bit difference into a
+    // rank flip between two near-equal chunks. That is why three runs of one
+    // binary over one corpus reported three different hit@k. `tests/measure.rs`
+    // has pinned this since the release that found it; this harness, which is
+    // the measuring stick for every retrieval claim the repository makes, did
+    // not.
+    unsafe { std::env::set_var(semlith::embed::THREADS_ENV, "1") };
+    assert_eq!(
+        semlith::embed::embed_threads(),
+        1,
+        "the thread pin did not take: this harness would measure ONNX Runtime's \
+         reduction jitter as well as the ranking, which is issue #88"
+    );
+
+    let source = corpus_source();
+    let questions = read_questions(&source.join("tests/fixtures/retrieval/questions.yaml"));
     assert!(
         questions.len() >= 30,
         "the question set has shrunk to {} questions; it is the measuring stick and \
          may not be trimmed to suit a result",
         questions.len()
     );
+
+    // The corpus is a snapshot, not the working tree, and that is the other
+    // half of #88. Indexing the repository root indexed `target/`, `.git/` and
+    // every scratch file beside them, so the corpus moved with the build and
+    // with whatever else was open — which is why a byte-identical copy of the
+    // tree at another path reported a different bytes-per-answer. Four entries
+    // are copied because the question set names four: `src`, `tests`, `docs`
+    // and `AGENTS.md`. `tests/measure.rs` already snapshots for the same reason.
+    let snapshot = tempfile::tempdir().expect("a temporary corpus");
+    // Canonical, because the scoring compares `root.join(span.path)` against
+    // the path the store recorded, and the store canonicalizes what it indexes.
+    // On macOS a temporary directory is `/var/folders/...` and its canonical
+    // form is `/private/var/folders/...`, so without this every span comparison
+    // fails and the harness reports 2/47 at every depth — which is what it did.
+    let root = snapshot
+        .path()
+        .canonicalize()
+        .expect("the corpus directory resolves");
+    for name in ["src", "tests", "docs"] {
+        copy_tree(&source.join(name), &root.join(name));
+    }
+    std::fs::copy(source.join("AGENTS.md"), root.join("AGENTS.md"))
+        .expect("AGENTS.md is part of the corpus the question set measures");
 
     let store = tempfile::tempdir().expect("a temporary store");
     let mut semlith = Semlith::open(store.path(), None).expect("the store opens");
@@ -89,19 +133,61 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
         .forget(&questions_file)
         .expect("the question set leaves the corpus it measures");
 
-    let mut report = Report::default();
-    for question in &questions {
-        match question.tool.as_str() {
-            "search" => score_search(&mut semlith, &root, question, &mut report),
-            "path" => score_path(&semlith, question, &mut report),
-            "read" => score_read(&semlith, &root, question, &mut report),
-            // Scored by the same span rule as a search once they are wired up.
-            // Counted as skipped rather than as misses: a metric that punishes
-            // the harness for what the harness has not implemented is a metric
-            // that rewards deleting questions.
-            _ => report.skipped += 1,
+    let score_all = |semlith: &mut Semlith| {
+        let mut report = Report::default();
+        for question in &questions {
+            match question.tool.as_str() {
+                "search" => score_search(semlith, &root, question, &mut report),
+                "path" => score_path(semlith, question, &mut report),
+                "read" => score_read(semlith, &root, question, &mut report),
+                // Scored by the same span rule as a search once they are wired
+                // up. Counted as skipped rather than as misses: a metric that
+                // punishes the harness for what the harness has not implemented
+                // is a metric that rewards deleting questions.
+                _ => report.skipped += 1,
+            }
         }
-    }
+        report
+    };
+
+    let report = score_all(&mut semlith);
+
+    // The harness asserts its own determinism — issue #88, where three runs of
+    // one binary over one corpus gave three different hit@k and the graph-only
+    // denominator moved between them.
+    //
+    // The question set is scored twice against the same store, and the two
+    // reports must be identical question by question. That covers every
+    // query-time source of the drift, which is where it lived: `graph::expand`
+    // walked its frontier through a `HashMap`, whose iteration order is seeded
+    // randomly per process, so the `f32` masses summed differently, the
+    // confidence a name was labelled with depended on arrival order, and
+    // `MAX_NODES` truncated whichever names the order had not reached yet.
+    //
+    // It deliberately does not re-index. The other source was index-time —
+    // ONNX Runtime reducing across its intra-op threads in completion order —
+    // and the fix for that is the single thread pinned at the top of this test.
+    // Checking it here would mean a second full index on every run, for a
+    // property one embedding thread already makes true; it is verified once per
+    // release by running this harness three times and comparing the reports.
+    let again = score_all(&mut semlith);
+    assert_eq!(
+        report.ranks, again.ranks,
+        "the harness does not reproduce its own per-question ranks within one run"
+    );
+    assert_eq!(
+        report.hit_at, again.hit_at,
+        "the harness does not reproduce its own hit@k within one run"
+    );
+    assert_eq!(
+        (report.graph_only, report.graph_only_hits, report.wrong_yes),
+        (again.graph_only, again.graph_only_hits, again.wrong_yes),
+        "the harness does not reproduce its own graph-only denominator within one run"
+    );
+    assert_eq!(
+        report.bytes, again.bytes,
+        "the harness does not reproduce its own bytes per answer within one run"
+    );
 
     let census = resolution_census(&semlith);
     let tool_list = semlith::mcp::tool_list_bytes();
@@ -460,8 +546,33 @@ fn resolution_census(semlith: &Semlith) -> Census {
     census
 }
 
-fn repository_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// The tree the corpus is taken from: this repository, unless
+/// `SEMLITH_MEASURE_CORPUS` names another checkout of it.
+///
+/// The override is what makes an A/B between two releases mean anything. Every
+/// number this harness prints moves with the corpus as well as with the code,
+/// and the corpus is this repository, so comparing two releases without holding
+/// one tree still compares two codebases over two corpora and calls the
+/// difference a ranking change. `tests/measure.rs` reads the same variable for
+/// the same reason. The tree named has to be a checkout of this repository: the
+/// question set's spans are line ranges in these files.
+fn corpus_source() -> PathBuf {
+    std::env::var_os("SEMLITH_MEASURE_CORPUS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Copy `from` into `to`, creating what it needs.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
 }
 
 /// Read the question set.
