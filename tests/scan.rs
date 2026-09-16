@@ -376,6 +376,7 @@ fn audit_a_corpus_for_false_positives() {
     let root = PathBuf::from(root);
     let mut walked = 0usize;
     let mut refused = 0usize;
+    let mut texts: Vec<String> = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -406,10 +407,28 @@ fn audit_a_corpus_for_false_positives() {
                 refused += 1;
                 println!("{}: {}", path.display(), found.reason());
             }
+            texts.push(text);
         }
     }
     println!("audited {walked} readable files under {}", root.display());
     println!("{refused} would be refused");
+
+    // What the scan itself costs, which is the number the throughput claim
+    // rests on. An end-to-end index run is almost entirely the embedder, so a
+    // wall-clock comparison of two runs measures the model rather than this.
+    let mut total = 0usize;
+    let start = std::time::Instant::now();
+    for text in &texts {
+        total += text.len();
+        std::hint::black_box(semlith::filter::scan_text(text));
+    }
+    let spent = start.elapsed();
+    println!(
+        "the scan itself: {:.1} ms over {:.1} MiB of text ({:.0} MiB/s)",
+        spent.as_secs_f64() * 1000.0,
+        total as f64 / (1024.0 * 1024.0),
+        (total as f64 / (1024.0 * 1024.0)) / spent.as_secs_f64()
+    );
 }
 
 /// The two shapes the false-positive audit found in real trees, as a gate.
