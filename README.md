@@ -439,7 +439,7 @@ of these drifts from its source:
 | `tools/list` | **3 995 bytes**, ~999 tokens, twelve tools | `cargo test --release --test retrieval -- --ignored` |
 | retrieval, over a 57-question harness | **hit@1 12, hit@3 18, hit@8 26** of 47, wrong-yes **0** | the same |
 | call-edge resolution | **67 %** settled, against a 50 % gate | the same |
-| the macOS arm64 binary | **116 683 392 bytes** (111.3 MiB) | `ls -l target/release/semlith` |
+| the macOS arm64 binary | **116 679 872 bytes** (111.3 MiB) | `ls -l target/release/semlith` |
 | the Linux glibc floor | **GLIBC_2.34** | `objdump -T semlith runtime/libonnxruntime.so` |
 
 Peak memory does not grow with the corpus — 105k chunks is 85 times the work of

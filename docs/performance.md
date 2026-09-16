@@ -150,12 +150,11 @@ under int8 quantisation that is enough to swap two near-equal chunks.
 
 ## The binary, and what a Linux machine needs
 
-Measured for 0.17.0, when forty grammars landed:
-
-| what | measured |
-|---|---|
-| the macOS arm64 binary | **116 683 392 bytes** — 111.3 MiB, of which 1.8 MB is the image support |
-| the Linux glibc floor | **GLIBC_2.34**, with GLIBCXX_3.4.22 |
+| what | measured | when |
+|---|---|---|
+| the macOS arm64 binary | **116 679 872 bytes** — 111.3 MiB, of which 1.8 MB is the image support | 0.17.2 |
+| the same, when forty grammars landed | 116 683 392 bytes | 0.17.0 |
+| the Linux glibc floor | **GLIBC_2.34**, with GLIBCXX_3.4.22 | 0.17.1's artifact |
 
 ```sh
 ls -l target/release/semlith
