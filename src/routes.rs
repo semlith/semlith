@@ -949,6 +949,7 @@ fn row(id: &str, rule: &str, finding: &crate::doctor::Finding) -> Value {
         "rule": rule,
         "check": finding.check,
         "ok": finding.ok,
+        "applicable": finding.applicable,
         "manual": finding.manual,
         "repair": finding.repair,
     })

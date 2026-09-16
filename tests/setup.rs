@@ -517,8 +517,18 @@ fn writable_clients() -> Vec<(String, String)> {
 fn register_all_writes_every_file_only_client_and_is_idempotent() {
     let machine = Machine::new();
     let expected = writable_clients();
+    // Ten clients have no registration command, and that number is the same
+    // everywhere. How many *paths* resolve is not: Claude Desktop documents a
+    // macOS path and a Windows one and no Linux path at all, so this list is
+    // one shorter there. Asserting the path count directly is what made this
+    // test pass on macOS and fail on Linux.
+    let writable = semlith::clients::clients()
+        .iter()
+        .filter(|client| client.needs_a_file_written())
+        .count();
+    assert_eq!(writable, 10, "ten clients have no registration command");
     assert!(
-        expected.len() >= 10,
+        expected.len() >= 9,
         "only {} writable client paths resolve on this platform: {expected:?}",
         expected.len()
     );

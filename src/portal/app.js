@@ -4302,8 +4302,16 @@ async function doctorView() {
         { class: "stat fact" },
         el("span", { class: "eyebrow", text: rule.id }),
         el("span", {
-          class: rule.ok ? "fact-value" : "fact-value bad",
-          text: rule.ok ? "holds" : "fails",
+          /* Three states. A rule this platform cannot take a reading for —
+           * the two mode rules on Windows — is neither green nor red, because
+           * a tick it has not earned is worse than no tick. */
+          class:
+            rule.applicable === false
+              ? "fact-value"
+              : rule.ok
+                ? "fact-value"
+                : "fact-value bad",
+          text: rule.applicable === false ? "not applicable" : rule.ok ? "holds" : "fails",
         }),
         el("span", { class: "sub", text: rule.check }),
       );
@@ -4927,13 +4935,14 @@ async function privacyView() {
   const paintRules = (rules) => {
     rulesBox.textContent = "";
     for (const rule of rules) {
+      const unmeasured = rule.applicable === false;
       const row = el(
         "div",
-        { class: rule.ok ? "rule-row" : "rule-row bad" },
+        { class: rule.ok || unmeasured ? "rule-row" : "rule-row bad" },
         el(
           "div",
           { class: "rule-head" },
-          el("span", { class: "dot " + (rule.ok ? "good" : "warn") }),
+          el("span", { class: "dot " + (unmeasured ? "" : rule.ok ? "good" : "warn") }),
           el("span", { class: "rule-id", text: rule.id }),
         ),
         el("p", { class: "rule-text", text: rule.rule }),

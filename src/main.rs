@@ -2002,7 +2002,14 @@ fn print_doctor(
     println!();
     println!("{}Rules{}", bold(), reset());
     for rule in rules {
-        let mark = if rule.ok { "ok  " } else { "FAIL" };
+        // Three states, not two. A rule this platform cannot take a reading
+        // for is neither green nor red: Windows has no file mode, and a tick
+        // there would be one the platform has not earned.
+        let mark = match (rule.applicable, rule.ok) {
+            (false, _) => "n/a ",
+            (true, true) => "ok  ",
+            (true, false) => "FAIL",
+        };
         println!("  {mark} {:<20} {}", rule.id, rule.check);
         if let Some(manual) = &rule.manual {
             println!("       run: {manual}");

@@ -63,6 +63,14 @@ pub struct Finding {
     pub ok: bool,
     /// What was measured, in one line.
     pub check: String,
+    /// Whether this rule is a reading this platform can take at all.
+    ///
+    /// `false` for the two mode rules on Windows, which has no file mode. The
+    /// distinction matters because `ok` alone cannot carry it: a rule that was
+    /// never measured is not a rule that passed, and rendering it green is a
+    /// tick the platform has not earned. A row that is not applicable is
+    /// neither green nor red, offers nothing, and says why.
+    pub applicable: bool,
     /// What a user would run to repair it, or `None` when nothing would.
     pub manual: Option<String>,
     /// What the daemon would apply, or `None` when no repair qualifies.
@@ -92,6 +100,12 @@ impl std::fmt::Display for Applied {
 
 /// The mode bits that must be clear on anything semlith wrote.
 const OWNER_ONLY: u32 = 0o077;
+
+/// Whether this platform has a file mode at all.
+///
+/// Windows does not, so the two rules that are readings of one are reported as
+/// not applicable there rather than as passing. See [`Finding::applicable`].
+const MODES: bool = cfg!(unix);
 
 /// The four Privacy rules that are readings of this machine rather than
 /// statements about the code.
@@ -134,6 +148,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
             )
         }),
         repair: None,
+        applicable: true,
     });
 
     let cache = crate::model_cache_dir().unwrap_or_default();
@@ -165,6 +180,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
             }),
             _ => None,
         },
+        applicable: true,
     });
 
     // The home and every open store, because the rule is about all of them and
@@ -186,6 +202,9 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
         ok: home_dir.is_ok() && loose.is_empty(),
         check: match (&home_dir, loose.is_empty()) {
             (Err(e), _) => e.to_string(),
+            (Ok(dir), true) if !MODES => {
+                format!("{} — this platform has no file mode to read", dir.display())
+            }
             (Ok(dir), true) => format!("{} and every open store are 0700", dir.display()),
             (Ok(_), false) => loose
                 .iter()
@@ -213,6 +232,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
             path: dir.clone(),
             to: 0o700,
         }),
+        applicable: MODES,
     });
 
     let key_path = home::agent_key_path().unwrap_or_default();
@@ -232,6 +252,10 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
                 "{} is {mode:o}, readable by more than you",
                 key_path.display()
             ),
+            None if !MODES => format!(
+                "{} — this platform has no file mode to read",
+                key_path.display()
+            ),
             None => format!("{} has no mode to read", key_path.display()),
         },
         manual: (!key_ok).then(|| {
@@ -245,6 +269,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
             path: key_path.clone(),
             to: 0o600,
         }),
+        applicable: MODES,
     });
 
     out
@@ -398,6 +423,10 @@ fn shell_quote(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// Unix only: the repair is a `chmod`, and Windows has no mode to set.
+    /// `privacy_findings` reports those two rules as not applicable there,
+    /// which `the_mode_rules_are_not_applicable_where_there_is_no_mode` covers.
+    #[cfg(unix)]
     #[test]
     fn a_repair_that_would_widen_access_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -417,6 +446,7 @@ mod tests {
         assert_eq!(mode_of(&path), Some(0o600), "the file was changed anyway");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_repair_is_idempotent_and_reports_both_states() {
         let dir = tempfile::tempdir().unwrap();
@@ -470,6 +500,39 @@ mod tests {
             finding.repair.is_none(),
             "a rule a daemon cannot repair was given a button"
         );
+    }
+
+    /// A rule that was never measured is not a rule that passed.
+    ///
+    /// Windows has no file mode, so the two rules that are readings of one are
+    /// reported as not applicable there. Rendering them green would be a tick
+    /// the platform has not earned, and offering a button would be offering a
+    /// `chmod` that cannot mean anything.
+    #[test]
+    fn the_mode_rules_are_not_applicable_where_there_is_no_mode() {
+        for finding in privacy_findings(&[]) {
+            let is_a_mode_rule = matches!(finding.id, "directory modes" | "agent key");
+            assert_eq!(
+                finding.applicable,
+                !is_a_mode_rule || MODES,
+                "{} reports applicable = {} on a platform where MODES is {MODES}",
+                finding.id,
+                finding.applicable
+            );
+            if !finding.applicable {
+                assert!(
+                    finding.repair.is_none() && finding.manual.is_none(),
+                    "{} offers a repair for something it did not measure",
+                    finding.id
+                );
+                assert!(
+                    finding.check.contains("no file mode"),
+                    "{} does not say why it was not measured: {}",
+                    finding.id,
+                    finding.check
+                );
+            }
+        }
     }
 
     /// A shell command shown to be copied has to survive a path with a space.
