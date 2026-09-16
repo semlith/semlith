@@ -288,6 +288,31 @@ enum Command {
         /// Refuse to download model weights. The other steps still run.
         #[arg(long)]
         airgap: bool,
+
+        /// Also write the configuration file of every client that has no
+        /// registration command of its own. Every path is listed before
+        /// anything is written, each file is backed up beside itself, and a
+        /// file that does not parse is left alone.
+        #[arg(long)]
+        register_all: bool,
+    },
+
+    /// Report whether each agent client on this machine can reach semlith, and
+    /// what to run for the ones that cannot.
+    ///
+    /// Reads files and runs nothing, so it is safe on a machine that is
+    /// misbehaving. `--fix` applies the repairs that narrow access to something
+    /// semlith owns, and nothing else.
+    Doctor {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+
+        /// Apply the repairs that qualify as safe: idempotent, narrowing, and
+        /// confined to a path semlith owns. Each names what it changed and what
+        /// it was before.
+        #[arg(long)]
+        fix: bool,
     },
 
     /// Replace this binary with the newest release for this machine. Runs only
@@ -432,9 +457,55 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match cli.command {
-        Command::Setup { yes, airgap } => {
+        Command::Doctor { json, fix } => {
+            let stores: Vec<(String, std::path::PathBuf)> = home::Registry::load()
+                .unwrap_or_default()
+                .stores
+                .into_keys()
+                .filter_map(|name| home::Registry::dir_of(&name).ok().map(|dir| (name, dir)))
+                .collect();
+            let applied = if fix {
+                semlith::doctor::apply_all(&stores)
+            } else {
+                Vec::new()
+            };
+            let report = semlith::doctor::clients_report();
+            let rules = semlith::doctor::privacy_findings(&stores);
+
+            if json {
+                let out = serde_json::json!({
+                    "clients": report,
+                    "rules": rules,
+                    "applied": applied
+                        .iter()
+                        .map(|r| match r {
+                            Ok(a) => serde_json::json!(a),
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        })
+                        .collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                print_doctor(&report, &rules, &applied);
+            }
+
+            // Non-zero when something on this machine is not as it should be,
+            // so a script can gate on it. A client that is simply not installed
+            // is not a fault: most people have two or three of twenty-seven.
+            let faults = report.iter().filter(|c| c.repair.is_some()).count()
+                + rules.iter().filter(|r| !r.ok).count();
+            if faults > 0 {
+                std::process::exit(1);
+            }
+        }
+
+        Command::Setup {
+            yes,
+            airgap,
+            register_all,
+        } => {
             arm_airgap(airgap);
-            semlith::setup::run(yes, airgap)?;
+            semlith::setup::run(yes, airgap, register_all)?;
         }
 
         Command::Upgrade {
@@ -1416,9 +1487,6 @@ fn main() -> Result<()> {
                 let previous = semlith::home::agent_key().unwrap_or_default();
                 let fresh = semlith::home::rotate_agent_key()?;
                 let carried = semlith::setup::recarry_key(&previous, &fresh);
-                let port = semlith::daemon::port_of(None);
-                let url = format!("http://127.0.0.1:{port}/mcp");
-
                 // A running daemon holds the key in memory, so it is told
                 // rather than left serving only the key it started with.
                 let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
@@ -1443,24 +1511,19 @@ fn main() -> Result<()> {
                     );
                 }
 
-                // Claude Code is the one client semlith writes a config for,
-                // because it has a CLI for it. Everything else is named.
-                if semlith::setup::claude_present() {
-                    if semlith::setup::register_claude_http(&url) {
-                        println!(
-                            "Claude Code was re-registered against {url}, naming \
-                             ${{{}}} rather than the key itself, so this is the last \
-                             rotation that needed it touched.",
-                            semlith::setup::KEY_ENV
-                        );
-                    } else {
-                        println!(
-                            "Claude Code is installed but `claude mcp add` failed; paste the stanza below."
-                        );
-                    }
-                }
+                // Nothing is re-registered. From 0.18.0 every registration
+                // semlith writes is the stdio form: the client launches
+                // `semlith mcp`, which reads the key out of
+                // `~/.semlith/agent.key` itself, so a rotation reaches it with
+                // no configuration rewritten anywhere. That is the property the
+                // stdio form was chosen for, and it is worth saying out loud on
+                // the command that used to have to repair one client by hand.
                 if carried.is_empty() {
-                    println!("No configuration file on this machine carried the old key.");
+                    println!(
+                        "No configuration file on this machine carried the old key, and none \
+                         needed to: a registration semlith wrote launches `semlith mcp`, which \
+                         reads the key from the file you just rotated."
+                    );
                 } else {
                     println!();
                     println!("Carried the new key into:");
@@ -1897,4 +1960,70 @@ fn human_time(at: i64) -> String {
         (rest % 3600) / 60,
         rest % 60
     )
+}
+
+/// `semlith doctor`'s human output.
+///
+/// One line per client, then the rules that are readings of this machine. A
+/// client that is not installed says so and is not a fault; a client that is
+/// installed and unregistered carries the command that fixes it, because the
+/// whole point of this command is that the next person reads the answer instead
+/// of bisecting a configuration file.
+fn print_doctor(
+    clients: &[semlith::doctor::ClientReport],
+    rules: &[semlith::doctor::Finding],
+    applied: &[anyhow::Result<semlith::doctor::Applied>],
+) {
+    println!("{}Clients{}", bold(), reset());
+    for client in clients {
+        // "Not installed" is only an answer for a client that has a CLI to be
+        // installed. For the ten that semlith reaches by writing a file, the
+        // CLI is not the question and saying it is absent would be reporting a
+        // fault that is not one.
+        let state = match (client.registered, &client.note, &client.command) {
+            (_, Some(_), _) => "cannot register".to_string(),
+            (true, _, _) => format!("registered ({})", client.scope.unwrap_or("user")),
+            (false, _, None) => "not registered".to_string(),
+            (false, _, Some(_)) if !client.present => "not installed".to_string(),
+            (false, _, Some(_)) => match client.scope {
+                Some("project") => "registered for one project only".to_string(),
+                _ => "installed, not registered".to_string(),
+            },
+        };
+        println!("  {:<28} {state}", client.name);
+        if let Some(note) = &client.note {
+            println!("      {note}");
+        }
+        if let Some(repair) = &client.repair {
+            println!("      run: {repair}");
+        }
+    }
+
+    println!();
+    println!("{}Rules{}", bold(), reset());
+    for rule in rules {
+        let mark = if rule.ok { "ok  " } else { "FAIL" };
+        println!("  {mark} {:<20} {}", rule.id, rule.check);
+        if let Some(manual) = &rule.manual {
+            println!("       run: {manual}");
+        }
+    }
+
+    if !applied.is_empty() {
+        println!();
+        println!("{}Applied{}", bold(), reset());
+        for result in applied {
+            match result {
+                Ok(a) => println!(
+                    "  {a}{}",
+                    if a.rechecked_ok {
+                        ""
+                    } else {
+                        "  (the rule still does not hold)"
+                    }
+                ),
+                Err(e) => println!("  refused: {e}"),
+            }
+        }
+    }
 }

@@ -184,10 +184,16 @@ fn the_users_own_rc_file_survives() {
 }
 
 /// `--yes` is what a script and an installer run, so it has to finish with
-/// nothing attached to stdin, and it must not reach into any agent's config on
-/// the way.
+/// nothing attached to stdin.
+///
+/// It registers agents from 0.18.0, where it used to skip them. An install that
+/// finishes with the agent unable to see the store is not an install anybody
+/// wanted, and the registrations are now the stdio form — no key in any file,
+/// nothing written outside the client's own registry — so there is nothing left
+/// for `--yes` to be protecting the user from. What it must still not do is
+/// write a file semlith does not own: that is `--register-all`, and it asks.
 #[test]
-fn yes_completes_with_stdin_closed_and_registers_no_agent() {
+fn yes_completes_with_stdin_closed_and_writes_no_client_file() {
     let machine = Machine::new();
 
     let run = machine.setup(&["--yes", "--airgap"]);
@@ -199,9 +205,18 @@ fn yes_completes_with_stdin_closed_and_registers_no_agent() {
 
     let said = Machine::said(&run);
     assert!(
-        said.contains("registers no agent"),
-        "`--yes` should say it registered no agent, it said:\n{said}"
+        said.contains("agents"),
+        "`--yes` should report the agents step, it said:\n{said}"
     );
+    // No client configuration file may appear under a home `--yes` was pointed
+    // at. `--register-all` is the only path that writes one, and it confirms
+    // first.
+    for name in [".cursor", ".codeium", ".continue", ".lmstudio", ".warp"] {
+        assert!(
+            !machine.home.join(name).exists(),
+            "`--yes` wrote {name}, which it may not do without --register-all"
+        );
+    }
 }
 
 /// An air-gapped machine's claim is that the process never reached the network.

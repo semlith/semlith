@@ -62,9 +62,9 @@ pub struct Status {
     pub rc_block_present: bool,
     pub model_cache: String,
     pub model_cached: bool,
-    /// `None` when the `claude` CLI is not on `PATH`, so the page can say
-    /// "not checked" rather than "not registered".
-    pub claude_registered: Option<bool>,
+    /// The clients whose own configuration file names semlith, read from disk
+    /// rather than by asking each client's CLI.
+    pub registered_clients: Vec<String>,
     pub version: &'static str,
     /// The install one-liners, so the portal shows the text the README
     /// documents rather than a second copy that can drift.
@@ -99,12 +99,12 @@ pub fn status() -> Status {
     // what the model step already reports.
     let cache = model_cache_dir().unwrap_or_default();
 
-    // Each of these is asked once and then reused. `claude_registered` spawns
-    // `claude mcp list` and waits for it, and this function used to call it
-    // four times — twice for the agents step alone, once for its state and
-    // once for its detail. On a machine where that CLI is slow it turned the
-    // portal's Agents page into a twenty-second wait that looked like a hang.
-    let registered = claude_registered();
+    // Read from each client's own configuration file rather than by asking
+    // each client's CLI. This used to run `claude mcp list` and wait for it,
+    // which on a slow machine turned the portal's Agents page into a
+    // twenty-second hang — and that was for one client. Sixteen processes here
+    // would be sixteen times that, on a route the page calls on every load.
+    let registered = crate::clientfile::registered_clients();
     let installed = bin.is_ok() && bin_path.join(exe_name()).exists();
     let path_has_bin = bin.is_ok() && on_path(bin_path);
     let model_cached = embed::is_cached(&cache);
@@ -152,14 +152,15 @@ pub fn status() -> Status {
         },
         Step {
             name: "agents",
-            state: match registered {
-                Some(true) => State::AlreadyDone,
-                Some(false) | None => State::Skipped,
+            state: if registered.is_empty() {
+                State::Skipped
+            } else {
+                State::AlreadyDone
             },
-            detail: match registered {
-                Some(true) => "Claude Code has the semlith server".into(),
-                Some(false) => "Claude Code is installed but has no semlith server".into(),
-                None => "the claude CLI is not on PATH".into(),
+            detail: if registered.is_empty() {
+                "no client on this machine has the semlith server".into()
+            } else {
+                format!("{} has the semlith server", registered.join(", "))
             },
         },
     ];
@@ -172,7 +173,7 @@ pub fn status() -> Status {
         rc_block_present: block,
         model_cache: cache.display().to_string(),
         model_cached,
-        claude_registered: registered,
+        registered_clients: registered,
         version: env!("CARGO_PKG_VERSION"),
         install_sh: INSTALL_SH,
         install_ps1: INSTALL_PS1,
@@ -181,9 +182,16 @@ pub fn status() -> Status {
 }
 
 /// The guided flow. `yes` takes the default at every prompt — add to `PATH`,
-/// download the model, register no agent — so a script or an agent can install
-/// semlith with nothing attached to stdin.
-pub fn run(yes: bool, airgap: bool) -> Result<()> {
+/// download the model — so a script or an agent can install semlith with
+/// nothing attached to stdin.
+///
+/// Registration is not one of those prompts from 0.18.0. It runs either way,
+/// because an install that leaves the agent unable to see the store is not an
+/// install anybody wanted, and because every registration is now the stdio
+/// form: no key lands in a file, and nothing outside the client's own registry
+/// is touched. `register_all` is the one part that does ask, and it asks with
+/// the list of files in front of the user.
+pub fn run(yes: bool, airgap: bool, register_all: bool) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
     // Reported as they run rather than replayed at the end, so the line about
@@ -192,7 +200,7 @@ pub fn run(yes: bool, airgap: bool) -> Result<()> {
         announce(step_binary(yes)?),
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
-        announce(step_agents(yes)?),
+        announce(step_agents(register_all)?),
         announce(step_verify()?),
     ];
 
@@ -569,19 +577,25 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
     }
 }
 
-/// Step 4. Claude Code is registered by running its own CLI, because that is
-/// the only client whose config file location is stable enough to write to.
-/// Every other client gets the stanza and the path printed, which is what the
-/// README documents and `tests/clients.rs` executes.
-fn step_agents(yes: bool) -> Result<Step> {
-    if yes {
-        return Ok(Step {
-            name: "agents",
-            state: State::Skipped,
-            detail: "--yes registers no agent; run `semlith setup` to pick one".into(),
-        });
-    }
-
+/// Step 4. Every client with a global registration CLI, registered by running
+/// it.
+///
+/// Until 0.18.0 this step registered one client of twenty-seven and printed the
+/// other twenty-six as stanzas to paste. Two things were wrong with that and
+/// neither announced itself. Of the sixteen stanzas that are a command, exactly
+/// one named a scope, so a user pasting any of the other fifteen while sitting
+/// in a project registered semlith for that project alone and found it gone
+/// from the next one. And every HTTP stanza named `${SEMLITH_AGENT_KEY}`, which
+/// only expands if something exported it — so on a machine whose shell startup
+/// file did not, or for a client launched from a desktop icon that reads no
+/// startup file, the client registered, connected, and failed to authenticate
+/// with nothing anywhere saying why.
+///
+/// Both are gone. Every registration is the stdio form, so there is no header
+/// to expand and no key in any file; and every command carries the scope its
+/// client spells "every project". A client semlith cannot register globally is
+/// named as such rather than registered wrongly and counted as a success.
+fn step_agents(register_all: bool) -> Result<Step> {
     let all = clients::clients();
     if all.is_empty() {
         return Ok(Step {
@@ -591,40 +605,179 @@ fn step_agents(yes: bool) -> Result<Step> {
         });
     }
 
-    let mut prompt = cliclack::multiselect::<usize>("Which agents do you use? (space to pick)");
-    for (i, client) in all.iter().enumerate() {
-        prompt = prompt.item(i, &client.name, "");
-    }
-    let picked = prompt.required(false).interact().unwrap_or_default();
-    if picked.is_empty() {
-        return Ok(Step {
-            name: "agents",
-            state: State::Skipped,
-            detail: "none picked".into(),
-        });
-    }
+    let mut wired: Vec<&str> = Vec::new();
+    let mut replaced: Vec<String> = Vec::new();
+    let mut failed: Vec<(&str, String)> = Vec::new();
+    let mut absent = 0usize;
+    let mut by_file: Vec<&clients::Client> = Vec::new();
+    let mut nowhere: Vec<&str> = Vec::new();
 
-    // The HTTP form carries the live agent key, so a stanza this prints is one
-    // that connects. Writing the placeholder would be handing someone a
-    // configuration file to go and edit, which is the thing the persisted key
-    // exists to stop.
-    let key = home::agent_key().unwrap_or_default();
-    let http = crate::clients::http_stanzas(&key);
-
-    let mut wired = Vec::new();
-    for i in picked {
-        let client = &all[i];
-        if client.name.eq_ignore_ascii_case("Claude Code") && register_claude() {
-            wired.push(client.name.clone());
-            continue;
+    for client in all {
+        match register(client) {
+            Registration::Registered { replaced: was } => {
+                wired.push(&client.name);
+                replaced.extend(was);
+            }
+            Registration::Absent => absent += 1,
+            Registration::Failed { reason } => failed.push((&client.name, reason)),
+            Registration::ProjectScoped => by_file.push(client),
+            Registration::Unregisterable => nowhere.push(&client.name),
         }
-        let mut body = client
-            .stanzas
-            .iter()
-            .map(|s| s.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if !key.is_empty() {
+    }
+    // A client with no CLI at all: its file is the only way in, so it joins the
+    // `--register-all` set rather than being reported as missing.
+    let extra: Vec<&clients::Client> = all
+        .iter()
+        .filter(|client| client.needs_a_file_written())
+        .filter(|client| !by_file.iter().any(|seen| seen.name == client.name))
+        .collect();
+    by_file.extend(extra);
+
+    let written = if register_all {
+        write_client_files(&by_file)?
+    } else {
+        for client in &by_file {
+            print_stanza(client);
+        }
+        Vec::new()
+    };
+
+    for (name, reason) in &failed {
+        let client = all.iter().find(|c| &c.name == name);
+        let _ = cliclack::log::warning(format!("{name} would not register: {reason}"));
+        if let Some(client) = client {
+            print_stanza(client);
+        }
+    }
+    for name in &nowhere {
+        let _ = cliclack::log::info(format!(
+            "{name}: semlith cannot register this one — it documents no file outside a project. \
+             Paste the stanza below."
+        ));
+        if let Some(client) = all.iter().find(|c| &c.name == name) {
+            print_stanza(client);
+        }
+    }
+    for was in &replaced {
+        let _ = cliclack::log::info(format!("replaced an existing entry: {was}"));
+    }
+
+    let mut detail = Vec::new();
+    if !wired.is_empty() {
+        detail.push(format!("registered {}", wired.join(", ")));
+    }
+    if !written.is_empty() {
+        detail.push(format!(
+            "wrote {}",
+            written
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if absent > 0 {
+        detail.push(format!("{absent} client CLIs are not on this machine"));
+    }
+    if !by_file.is_empty() && !register_all {
+        detail.push(format!(
+            "{} need `semlith setup --register-all` or the printed stanza",
+            by_file.len()
+        ));
+    }
+
+    Ok(Step {
+        name: "agents",
+        state: if wired.is_empty() && written.is_empty() {
+            State::Skipped
+        } else {
+            State::Done
+        },
+        detail: if detail.is_empty() {
+            "no client CLI on this machine; stanzas printed".into()
+        } else {
+            detail.join("; ")
+        },
+    })
+}
+
+/// Write the user-level configuration file for every client semlith cannot ask
+/// to register itself.
+///
+/// The paths are listed and confirmed before anything is written, because this
+/// is the one place semlith writes a file it does not own. A user who says no
+/// gets the stanzas printed, which is what they would have had anyway.
+fn write_client_files(clients: &[&clients::Client]) -> Result<Vec<PathBuf>> {
+    let plans = crate::clientfile::plan(clients);
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+    let listing = plans
+        .iter()
+        .map(|plan| plan.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = cliclack::note("Files semlith would write", listing);
+
+    let go = cliclack::confirm("Write these files? Each is backed up beside itself first.")
+        .initial_value(false)
+        .interact()
+        .unwrap_or(false);
+    if !go {
+        for client in clients {
+            print_stanza(client);
+        }
+        return Ok(Vec::new());
+    }
+
+    let stanzas: Vec<(&str, &clients::Stanza)> = clients
+        .iter()
+        .flat_map(|client| {
+            client
+                .config_files()
+                .map(move |stanza| (client.name.as_str(), stanza))
+        })
+        .collect();
+    let written = crate::clientfile::apply(&plans, &stanzas)?;
+
+    // A refusal is not a failure of the run: the other files are written and
+    // the one that could not be is named, with its stanza, so the user can
+    // finish it by hand.
+    for plan in &plans {
+        if let crate::clientfile::Action::Refuse { reason } = &plan.action {
+            let _ = cliclack::log::warning(format!(
+                "{}: {} was left alone — {reason}",
+                plan.client,
+                plan.path.display()
+            ));
+            if let Some(client) = clients.iter().find(|c| c.name == plan.client) {
+                print_stanza(client);
+            }
+        }
+    }
+    Ok(written)
+}
+
+/// Print one client's stanzas for a user to paste.
+///
+/// The stdio form first, because it is what semlith would have registered and
+/// it needs no key. The HTTP form follows for a daemon on another machine, with
+/// the live key substituted — writing the placeholder would be handing someone
+/// a configuration file to go and edit, which is the thing the persisted key
+/// exists to stop.
+fn print_stanza(client: &clients::Client) {
+    let mut body = client
+        .stanzas
+        .iter()
+        .filter(|stanza| !stanza.unregister)
+        .map(|stanza| stanza.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if let Ok(key) = home::agent_key()
+        && !key.is_empty()
+    {
+        let http = crate::clients::http_stanzas(&key);
+        if !http.is_empty() {
             body.push_str("\n\nOr over HTTP, against a running `semlith start`:\n\n");
             body.push_str(
                 &http
@@ -634,93 +787,173 @@ fn step_agents(yes: bool) -> Result<Step> {
                     .join("\n"),
             );
         }
-        let _ = cliclack::note(format!("{} — {}", client.name, client.note), body);
+    }
+    let _ = cliclack::note(format!("{} — {}", client.name, client.note), body);
+}
+
+/// What happened when semlith tried to register one client.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
+pub enum Registration {
+    /// Registered, naming whatever was replaced to get there.
+    Registered { replaced: Vec<String> },
+    /// The client's CLI is not on this machine. Not a failure: most people have
+    /// two or three of the twenty-seven.
+    Absent,
+    /// The CLI is here and did not accept the registration. The stanza is
+    /// printed instead and the install continues.
+    Failed { reason: String },
+    /// The CLI registers the directory it is run in, so semlith does not run
+    /// it. `--register-all` writes this client's user-level file instead.
+    ProjectScoped,
+    /// No registration CLI and no documented user-level file: Crush, Zed and
+    /// Roo Code. Nothing is broken; there is nowhere to write.
+    Unregisterable,
+}
+
+/// Register one client by running its own CLI.
+///
+/// The exit status decides and no output is parsed. That contract was written
+/// for `claude mcp add`, whose flags have changed between Claude Code versions,
+/// and it holds harder across sixteen CLIs than it did across one: semlith
+/// controls none of them, and a message it matched on today is a message
+/// somebody rewords next release.
+///
+/// Any `unregister` command the client documents runs first, and its status is
+/// ignored. That is how an existing entry is replaced rather than added beside:
+/// `claude mcp add` refuses a name that is already registered, so an install
+/// repairing a stale HTTP registration would otherwise fail on the machine that
+/// most needs repairing. A client may document more than one — Claude Code has
+/// three, one per scope — because the entry being replaced is often not at the
+/// scope the new one goes to. That is the whole of the bug this release exists
+/// to fix: an entry under `projects."…".mcpServers` that made semlith invisible
+/// from every other directory.
+pub fn register(client: &clients::Client) -> Registration {
+    if !client.registers_globally() {
+        return if client.config_files().next().is_some() {
+            Registration::ProjectScoped
+        } else {
+            Registration::Unregisterable
+        };
+    }
+    let Some(command) = client.register_command() else {
+        return Registration::Unregisterable;
+    };
+    let Some((program, args)) = argv(&command) else {
+        return Registration::Failed {
+            reason: format!("{command:?} is not a command semlith could read"),
+        };
+    };
+
+    // Absence is checked by trying, rather than by walking `PATH`: the answer
+    // wanted is "can this process run it", and a `PATH` walk gets that wrong
+    // for a shell function, an alias and a binary the user cannot execute.
+    let mut replaced = Vec::new();
+    for undo in client.unregister_commands() {
+        let Some((program, args)) = argv(&undo) else {
+            continue;
+        };
+        match Command::new(&program).args(&args).output() {
+            // An exit of zero means there was something there to remove, which
+            // is what the user is told. A non-zero exit is the ordinary case of
+            // nothing being registered, and says nothing.
+            Ok(out) if out.status.success() => replaced.push(undo),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Registration::Absent;
+            }
+            Err(_) => {}
+        }
     }
 
-    Ok(Step {
-        name: "agents",
-        state: if wired.is_empty() {
-            State::Skipped
-        } else {
-            State::Done
+    match Command::new(&program).args(&args).output() {
+        Ok(out) if out.status.success() => Registration::Registered { replaced },
+        Ok(out) => Registration::Failed {
+            reason: first_line(&out.stderr, &out.stdout)
+                .unwrap_or_else(|| format!("{program} exited {}", out.status)),
         },
-        detail: if wired.is_empty() {
-            "stanzas printed; paste them into each client's config".into()
-        } else {
-            wired.join(", ")
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registration::Absent,
+        Err(e) => Registration::Failed {
+            reason: e.to_string(),
         },
-    })
+    }
 }
 
-/// `claude mcp add` has changed flags between Claude Code versions, so its exit
-/// status decides and nothing here parses its output. A non-zero exit falls
-/// back to the printed stanza; it never fails the install.
-pub fn register_claude() -> bool {
-    Command::new("claude")
-        .args([
-            "mcp", "add", "--scope", "user", "semlith", "--", "semlith", "mcp",
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Re-register Claude Code against the HTTP endpoint with the current key.
+/// Split a documented command into a program and its arguments, without a
+/// shell.
 ///
-/// This is the one client semlith writes a configuration for, because it has a
-/// CLI for it. Every other client is named and left to the user — a tool that
-/// edits a file it does not own is a tool that eventually corrupts one.
-pub fn register_claude_http(url: &str) -> bool {
-    // Replaced rather than added beside: `claude mcp add` refuses a name that
-    // is already registered, so an existing entry is removed first. A missing
-    // one makes the remove fail, which is fine and is why its status is
-    // ignored.
-    let _ = Command::new("claude")
-        .args(["mcp", "remove", "--scope", "user", "semlith"])
-        .output();
-    Command::new("claude")
-        .args([
-            "mcp",
-            "add",
-            "--scope",
-            "user",
-            "--transport",
-            "http",
-            "semlith",
-            url,
-            "--header",
-            // The name of the variable, not the key. Every argument of every
-            // process on this machine is readable by every other process the
-            // user owns, and `ps` during a registration used to show the
-            // credential that opens the MCP endpoint. The client expands this
-            // itself, from the variable the rc block exports, so the config
-            // file never carries the key either — and rotating it needs no
-            // config rewritten at all.
-            &format!("Authorization: Bearer ${{{KEY_ENV}}}"),
-        ])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// `sh -c` would be four characters shorter and would hand every one of these
+/// strings to a shell that expands `$`, `` ` `` and `~`. The commands come from
+/// a document compiled into the binary rather than from a user, so that is not
+/// an injection today — but a registration path that evaluates shell
+/// metacharacters is one edit away from being one, and one of these commands is
+/// a JSON object in single quotes, which a shell would be free to mangle.
+///
+/// Quotes group; a backslash escapes the character after it outside quotes.
+/// `None` for an empty command or an unterminated quote, which is a
+/// documentation error rather than something to guess at.
+fn argv(command: &str) -> Option<(String, Vec<String>)> {
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, '\\') => word.push(chars.next()?),
+            (None, c) if c.is_whitespace() => {
+                if started || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, c) => word.push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started || !word.is_empty() {
+        words.push(word);
+    }
+    let mut words = words.into_iter();
+    let program = words.next()?;
+    Some((program, words.collect()))
+}
+
+/// The first non-empty line a failing CLI printed, for the one-line report.
+///
+/// Not parsed for meaning — only shown, so the user reads what the client said
+/// rather than what semlith guessed it meant.
+fn first_line(stderr: &[u8], stdout: &[u8]) -> Option<String> {
+    [stderr, stdout]
+        .into_iter()
+        .flat_map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .next()
+        .map(|line| line.chars().take(200).collect())
 }
 
 /// The variable a client's configuration names instead of the key itself.
+///
+/// Nothing semlith registers names it from 0.18.0 — a registration is the stdio
+/// form and `semlith mcp` reads the key out of `~/.semlith/agent.key` itself.
+/// It stays because the HTTP stanzas stay: a daemon on another machine, or a
+/// client that can only speak HTTP, still needs a header, and a user who pastes
+/// one of those exports this themselves.
 pub const KEY_ENV: &str = "SEMLITH_AGENT_KEY";
-
-/// Whether the Claude Code CLI is on this machine at all.
-pub fn claude_present() -> bool {
-    Command::new("claude")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// `None` when the CLI is absent, so "not checked" and "not registered" stay
-/// different answers.
-fn claude_registered() -> Option<bool> {
-    let out = Command::new("claude").args(["mcp", "list"]).output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).contains("semlith"))
-}
 
 /// Step 5. Runs the binary that was just installed, not this process, because
 /// the question is whether the installed one works.
