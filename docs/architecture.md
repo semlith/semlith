@@ -17,22 +17,35 @@ Querying afterwards is one embedding plus a scan.
 So semlith optimizes for a very specific shape: **indexing can be slow, querying
 must not be.**
 
-## The two-file store
+## The two halves of a store
 
-A store directory holds exactly two things:
+A store directory holds two kinds of state, which must agree:
 
 ```
 .semlith/
-├── index.tv     turbovec index — quantized vectors, keyed by chunk id
-└── store.db     SQLite — chunk text, file paths, line spans, content hashes
+├── index/                        turbovec shards — quantized vectors, keyed by chunk id
+│   ├── 0000000000000001.tvim
+│   └── 0000000000065537.tvim
+└── store.db                      SQLite — chunk text, file paths, line spans, content hashes
 ```
 
-The split is the central design decision. The vector index holds **only**
-vectors and ids. It never holds text. This matters because the index is the
-thing that gets scanned on every query, and its size determines whether the
-working set fits in memory. At 4 bits per coordinate and 384 dimensions, a chunk
-costs 192 bytes in the index — so a million chunks is about 190 MB, while the
+The split is the central design decision. The vector side holds **only** vectors
+and ids. It never holds text. This matters because the vectors are what gets
+scanned on every query, and their size decides how much of the corpus has to be
+resident to answer one. At 4 bits per coordinate and 384 dimensions, a chunk
+costs 192 bytes — so a million chunks is about 190 MB of packed codes, while the
 text those chunks came from could be gigabytes sitting harmlessly in SQLite.
+
+That 190 MB is never resident at once. `index/` is a directory of fixed-size
+shards of 65536 vectors each (`src/index.rs:54`), named for the first chunk id
+they hold and zero-padded so that sorted-by-name is sorted-by-id
+(`src/index.rs:436-437`). A shard is about 12 MB of packed codes, doubled by
+turbovec's repacked search copy, and only as many are held open at once as the
+memory budget allows; the rest are read back when a query reaches them. **The
+directory listing is the manifest** — nothing else records shard boundaries, so
+nothing else can disagree with it. A store written before 0.7.0 keeps a single
+`index.tv` instead and is never migrated; `docs/compatibility.md` has the two
+formats and which binary reads which.
 
 The two halves are joined by one integer. A chunk's SQLite rowid *is* its
 turbovec external id. There is no mapping table, because there is nothing to
@@ -56,7 +69,7 @@ walk paths ──▶ read bytes ──▶ hash ──▶ unchanged? ──▶ sk
                                                           │
                    ┌──────────────────────────────────────┘
                    ▼
-              prune vanished files ──▶ write index.tv ──▶ commit hashes
+              prune vanished files ──▶ write dirty shards ──▶ commit hashes
 ```
 
 A few things in that flow are load-bearing:
@@ -66,7 +79,7 @@ compared against the hash recorded last time. This is what makes re-indexing an
 unchanged corpus take milliseconds instead of hours, and it is why the embedding
 model is never even loaded on a no-op run.
 
-**Hashes are committed last, after `index.tv` is on disk.** A file's row is
+**Hashes are committed last, after the shards are on disk.** A file's row is
 inserted with an empty hash while its vectors are still in flight. If the
 process dies mid-run, those files still have an empty hash, do not match on the
 next run, and get re-indexed. The alternative — recording the hash up front —
@@ -78,8 +91,19 @@ the old chunk ids so they can be removed from the vector index in the same
 breath as the SQL delete. SQLite reuses rowids after deletion, so skipping the
 eviction would eventually collide an old vector with a new chunk's id.
 
-**The index is written via a temp file and a rename**, so an interrupted save
-cannot leave a truncated `index.tv` behind.
+**Each shard is written via a temp file and a rename**, so an interrupted save
+cannot leave a truncated shard behind (`src/index.rs:665-669`). Only the shards
+a run actually touched are rewritten; the rest are not opened.
+
+What that does *not* buy is an all-or-nothing index. A save walks the dirty
+shards one at a time, so a process killed halfway leaves some shards at the new
+vectors and some at the old, and nothing on the vector side records that this
+happened. This is why the hashes are the crash-safety story rather than the
+rename: the files whose vectors were still in flight never got a hash, so the
+next run re-indexes them and rewrites exactly those shards. A leftover `.tmp`
+from the interrupted write is removed on the next open, by a caller that holds
+the store lock and therefore knows there is no live writer it could belong to
+(`src/index.rs:679-687`, `src/index.rs:293-295`).
 
 ## Extraction
 
@@ -316,7 +340,7 @@ this", which is a different and wrong answer.
 ## One writer per store
 
 An index run holds an OS advisory lock on `index.lock` in the store directory
-for its whole duration, including the final `index.tv` write.
+for its whole duration, including the final shard writes.
 
 The lock is the kernel's, not the file's existence. That distinction is the
 whole point: a run killed with SIGKILL, or lost with the machine, releases the
@@ -380,14 +404,15 @@ machine; a second layer of parallelism only contends with it.
 
 `semlith watch` is not a second indexer. Filesystem events only produce a set of
 candidate paths; the content hash, chunk eviction, batched embedding and the
-atomic `index.tv` write are the same code `index` runs. Nothing is re-embedded
+atomic per-shard write are the same code `index` runs. Nothing is re-embedded
 because an event fired — only because the bytes changed.
 
 Two decisions carry the design.
 
-**One writer, held honestly.** `Semlith` keeps its vector index in memory, and
-`save()` writes all of it. Two writers would therefore not interleave, they
-would overwrite: whichever saved last would erase the other's work. So `watch`
+**One writer, held honestly.** `Semlith` holds its resident shards in memory
+and `save()` rewrites each one it has dirtied, whole. Two writers would
+therefore not interleave, they would overwrite: whichever saved a shard last
+would erase the other's work in it. So `watch`
 takes the store lock for its whole life and a concurrent `index` is refused by
 name. A long-held lock is the visible cost of an invariant that was already
 there.
