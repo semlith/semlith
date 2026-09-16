@@ -431,8 +431,10 @@ Module responsibilities:
   would make every stanza stale on every restart, and `setup.rs` can only repair
   Claude Code's config — everything else would need a human. Rotating the
   session token therefore does not disconnect agents, and `/mcp` keeps serving
-  the previous key until the daemon that held it exits, so an open session
-  finishes.
+  the previous key for `http::KEY_GRACE` — fifteen minutes, and never past the
+  daemon's exit — so an open session finishes. It used to be "until this process
+  exits", which on a daemon somebody leaves running is a second live credential
+  rather than a grace period.
 - Extraction dispatches on extension *before* looking at bytes — `.docx` and
   friends are ZIP archives and the binary check would reject them all.
 - **`add` is the only command that reaches the network besides `upgrade` and

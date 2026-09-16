@@ -4304,7 +4304,7 @@ async function agentsView() {
             }: ${carried.join(", ")}.`
           : "No configuration file on this machine carried the old key.";
         keyNote.textContent = done.previous_valid
-          ? `New key. ${rewrote} The previous one keeps working until this daemon exits, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
+          ? `New key. ${rewrote} The previous one keeps working for fifteen minutes, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
           : `New key. ${rewrote} The previous one is refused now; any client configured elsewhere needs the new stanza.`;
       } catch (e) {
         keyNote.className = "note bad";

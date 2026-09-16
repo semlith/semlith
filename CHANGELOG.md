@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation describes the product that exists
+
+An audit of the README against the shipped code found it describing a security
+model removed in 0.14.0, warning readers off four Linux distributions that have
+worked since 0.14.0, contradicting itself about graph coverage in two places,
+omitting two of the twelve agent tools, documenting a portal page deleted in
+0.16.0, and quoting a binary size two and a half times smaller than the one that
+ships. Every one of those is corrected, and the numbers the README states are
+now asserted against the code that defines them by `tests/readme.rs`.
+
+### Added
+
+- `docs/portal.md`, the first documentation of the portal: one section per page,
+  how the daemon starts, and the concepts behind the graph, the search list and
+  the two credentials.
+- `docs/clients.md`, holding the client configuration stanzas moved out of the
+  README. `src/clients.rs` and `tests/clients.rs` read them from there now.
+- `docs/performance.md`, holding the benchmark tables with their reproduction
+  commands and the release each was measured for.
+- `tests/readme.rs`, which parses the counts out of the README and asserts each
+  against its source — languages, edge kinds, tools, commands, formats, image
+  types and clients.
+
+### Fixed
+
+- The portal's Graph page drew four of the six edge kinds the store holds:
+  `contains` and `aliases` were fetched from `/api/graph` and dropped before
+  painting, while the hover card counted them anyway. Both are drawn, both have
+  a filter chip, and the caller and callee counts are taken over what is drawn.
+- `src/graph.rs`'s module comment still said six languages carry edges, which
+  0.17.0 made false.
+- Four places said a rotated agent key stays valid until the daemon exits,
+  including the message the portal prints after a rotation. It has been fifteen
+  minutes since 0.14.0.
+- `docs/compatibility.md`'s covered-surface table named none of `symbol`,
+  `neighbors`, `path`, `ledger` or `drop`, which are stable commands.
+- `CONTRIBUTING.md` said CI runs on Linux and macOS, and did not mention the
+  `msrv` or `scripts` jobs.
+
 ## [0.17.1] - 2026-09-15
 
 Ten bugs. Four of them are one bug: Windows sets no `HOME`, and semlith read it

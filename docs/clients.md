@@ -593,9 +593,9 @@ claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Auth
 }
 ```
 
-`semlith key rotate` mints a new one. The previous key keeps working until the
-running daemon exits, so a session already open finishes rather than dying
-mid-call; `--now` drops it immediately. Claude Code is re-registered through its
+`semlith key rotate` mints a new one. The previous key keeps working for
+fifteen minutes, and never past the running daemon's exit, so a session already
+open finishes rather than dying mid-call; `--now` drops it immediately. Claude Code is re-registered through its
 own CLI, because it is the one client Semlith has a supported way to write a
 config for, and every other client that holds the old key is named so you know
 what to paste the new stanza into.
