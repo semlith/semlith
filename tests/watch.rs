@@ -463,16 +463,41 @@ fn an_interrupted_watcher_leaves_the_store_whole() {
             .arg("watch")
             .arg(corpus.path())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
 
-        // Started means the model is loaded and the catch-up pass is done.
+        // Wait for the child to say it is watching, not for a clock. The
+        // banner comes from the `Progress::Ready` arm, which runs after
+        // `watch::stop_on_signal` has installed the handler, so it is the one
+        // thing that means a SIGINT will now be caught rather than kill the
+        // process outright.
+        //
+        // This was a `sleep(2s)` until 0.17.3, and it had been failing since
+        // 0.17.0 (#85). The first exec of a freshly linked binary spends
+        // seconds inside `execve` while the kernel validates the Mach-O, at
+        // zero CPU; the forty grammars 0.17.0 added took the binary past the
+        // point where that finished inside two seconds. The signal arrived
+        // before `main` did. No number is the right number here — the binary
+        // will grow again — so the test asks the child instead of guessing.
+        let stderr = child.stderr.take().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let drain = thread::spawn(move || {
+            // Drained for the child's whole life, not just until it is ready:
+            // the re-embed case prints a line per file, and a full pipe would
+            // block the process this test is timing.
+            let mut announced = false;
+            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+                if !announced && line.starts_with("watching ") {
+                    announced = true;
+                    let _ = ready_tx.send(());
+                }
+            }
+        });
         assert!(
-            wait_for_vectors(store.path(), 1),
-            "{label}: the watcher never got going"
+            ready_rx.recv_timeout(APPEAR_TIMEOUT).is_ok(),
+            "{label}: the watcher never said it was watching within {APPEAR_TIMEOUT:?}"
         );
-        thread::sleep(Duration::from_secs(2));
 
         if busy {
             // Enough text that the embed is still running when the signal
@@ -490,6 +515,7 @@ fn an_interrupted_watcher_leaves_the_store_whole() {
         assert!(status.success(), "{label}: could not signal the watcher");
 
         let exit = child.wait().unwrap();
+        drain.join().unwrap();
         assert!(exit.success(), "{label}: watcher exited {exit}");
 
         assert!(
