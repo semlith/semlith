@@ -1957,7 +1957,16 @@ impl Semlith {
         // Sorted together with their provenance, so a hit never carries the
         // badges of whichever chunk happened to land in its slot.
         let mut ranked: Vec<Candidate> = fused.into_iter().zip(lists).collect();
-        ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1));
+        // Total, and this is the last of issue #88. Fusion scores are
+        // `1 / (60 + rank)`, so exact ties are common by construction — two
+        // chunks that placed at the same rank in the same list carry the same
+        // f32 to the bit. A sort on score alone leaves those in whatever order
+        // the vector index handed them over, and a store built twice from one
+        // corpus hands near-equal vectors over in a different order, so the
+        // same query returned the same eight chunks in two orders. Breaking on
+        // the id makes the answer a function of the corpus rather than of the
+        // shard scan.
+        ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1).then_with(|| a.0.0.cmp(&b.0.0)));
         // Cut to the deeper list, not to `k`. Everything that reorders the
         // answer below — the preference, and the rerank — needs each
         // candidate's path and enclosing symbol, which only exist once the
@@ -2056,7 +2065,15 @@ impl Semlith {
             }
             hit.score *= prefer.multiplier(filter::is_code(&hit.path));
         }
-        hits.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
+        // Total for the same reason as the fusion sort above: the rerank's
+        // factors are multipliers on a fused score, so two candidates that
+        // entered tied and took the same multipliers leave tied.
+        hits.sort_by(|a, b| {
+            b.0.score
+                .total_cmp(&a.0.score)
+                .then_with(|| a.0.path.cmp(&b.0.path))
+                .then_with(|| a.0.start_line.cmp(&b.0.start_line))
+        });
         hits.truncate(k);
         Ok(hits)
     }

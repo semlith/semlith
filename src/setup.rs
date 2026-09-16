@@ -200,7 +200,7 @@ pub fn run(yes: bool, airgap: bool, register_all: bool) -> Result<()> {
         announce(step_binary(yes)?),
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
-        announce(step_agents(register_all)?),
+        announce(step_agents(register_all, yes)?),
         announce(step_verify()?),
     ];
 
@@ -595,7 +595,7 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
 /// to expand and no key in any file; and every command carries the scope its
 /// client spells "every project". A client semlith cannot register globally is
 /// named as such rather than registered wrongly and counted as a success.
-fn step_agents(register_all: bool) -> Result<Step> {
+fn step_agents(register_all: bool, yes: bool) -> Result<Step> {
     let all = clients::clients();
     if all.is_empty() {
         return Ok(Step {
@@ -634,7 +634,7 @@ fn step_agents(register_all: bool) -> Result<Step> {
     by_file.extend(extra);
 
     let written = if register_all {
-        write_client_files(&by_file)?
+        write_client_files(&by_file, yes)?
     } else {
         for client in &by_file {
             print_stanza(client);
@@ -707,7 +707,7 @@ fn step_agents(register_all: bool) -> Result<Step> {
 /// The paths are listed and confirmed before anything is written, because this
 /// is the one place semlith writes a file it does not own. A user who says no
 /// gets the stanzas printed, which is what they would have had anyway.
-fn write_client_files(clients: &[&clients::Client]) -> Result<Vec<PathBuf>> {
+fn write_client_files(clients: &[&clients::Client], yes: bool) -> Result<Vec<PathBuf>> {
     let plans = crate::clientfile::plan(clients);
     if plans.is_empty() {
         return Ok(Vec::new());
@@ -719,10 +719,15 @@ fn write_client_files(clients: &[&clients::Client]) -> Result<Vec<PathBuf>> {
         .join("\n");
     let _ = cliclack::note("Files semlith would write", listing);
 
-    let go = cliclack::confirm("Write these files? Each is backed up beside itself first.")
-        .initial_value(false)
-        .interact()
-        .unwrap_or(false);
+    // `--yes --register-all` writes without asking. The flag is the asking:
+    // a user who typed `--register-all` has already said the one thing this
+    // prompt exists to get, and a script with nothing on stdin would otherwise
+    // take the default and silently write nothing.
+    let go = yes
+        || cliclack::confirm("Write these files? Each is backed up beside itself first.")
+            .initial_value(false)
+            .interact()
+            .unwrap_or(false);
     if !go {
         for client in clients {
             print_stanza(client);

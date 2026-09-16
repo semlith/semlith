@@ -48,6 +48,11 @@ const BACKUP: &str = ".semlith-backup";
 pub struct Plan {
     pub client: String,
     pub path: PathBuf,
+    /// Flattened, so the JSON is `"action": "merge"` and, for a refusal,
+    /// `"action": "refuse", "reason": "…"`. Without this the tagged enum
+    /// nests as `"action": {"action": "merge"}` and the page's comparison
+    /// against a string is quietly always false.
+    #[serde(flatten)]
     pub action: Action,
 }
 
