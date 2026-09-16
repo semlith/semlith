@@ -14,16 +14,31 @@ Components with a direct bearing on this notice:
 
   turbovec — MIT License
   https://github.com/RyanCodrai/turbovec
-  Implements the TurboQuant quantization scheme described by Google Research.
+  Implements TurboQuant, from "TurboQuant: Online Vector Quantization with
+  Near-optimal Distortion Rate", Amir Zandieh, Majid Daliri, Majid Hadian and
+  Vahab Mirrokni, arXiv:2504.19874 — https://arxiv.org/abs/2504.19874
 
   fastembed-rs — Apache License 2.0
   https://github.com/Anush008/fastembed-rs
 
   ONNX Runtime — MIT License
   https://github.com/microsoft/onnxruntime
-  Downloaded as a prebuilt binary at build time.
+  Downloaded as a prebuilt binary at build time and linked into the binary
+  that ships, so nothing is fetched for it on a user's machine.
+
+  hf-hub — Apache License 2.0
+  https://github.com/huggingface/hf-hub
+  The client that performs the runtime model downloads described below.
 
 At runtime, semlith downloads embedding model weights from the Hugging Face
 Hub. Those weights are covered by their own licenses, granted by their
-respective publishers, and are not distributed as part of this repository. The
-default model is BAAI/bge-small-en-v1.5 (MIT License).
+respective publishers, and are not distributed as part of this repository.
+
+  The default model is granite-embedding-small-english-r2 at int8, fetched
+  from onnx-community/granite-embedding-small-english-r2-ONNX (Apache License
+  2.0), the ONNX export of ibm-granite/granite-embedding-small-english-r2
+  (Apache License 2.0).
+
+  A store that holds an image also fetches the CLIP ViT-B/32 pair,
+  Qdrant/clip-ViT-B-32-vision (MIT License) and Qdrant/clip-ViT-B-32-text
+  (MIT License).

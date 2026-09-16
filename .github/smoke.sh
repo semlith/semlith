@@ -599,6 +599,81 @@ check cli/setup/idempotent     "setup re-runs cleanly"              c_setup_idem
 check cli/upgrade/check        "--check exits 0 or 10"              c_upgrade_check
 check cli/upgrade/airgap       "--airgap refuses the network"       c_upgrade_airgap
 
+# --------------------------------------------------------------------- watch
+
+# Ctrl-C is how `semlith watch` ends, so it has to leave the store whole.
+#
+# There has been a Rust test saying exactly that since 0.6.0, and it is
+# `#[ignore]`d, so CI has never run it. It failed for three releases without
+# anyone hearing (#85). A correctness claim nobody checks is not a claim, so
+# the guarantee is asserted here instead, against the installed binary, on
+# every develop PR.
+#
+# Windows has no row here and that is deliberate rather than an omission:
+# `watch::stop_on_signal` is `#[cfg(unix)]` and Ctrl-C on Windows is a
+# documented no-op, so there is no behaviour to assert.
+c_watch_sigint_whole() {
+  wdir=$work/watchsig
+  mkdir -p "$wdir/corpus"
+  printf 'Sourdough needs flour and water.\n' > "$wdir/corpus/bread.md"
+  semlith --store "$wdir/store" index "$wdir/corpus" > "$wdir/index.out" 2>&1 ||
+    { sed 's/^/  /' "$wdir/index.out"; return 1; }
+
+  semlith --store "$wdir/store" watch "$wdir/corpus" > "$wdir/watch.out" 2>&1 &
+  wpid=$!
+
+  # Wait for the watcher to say it is watching, never for a clock. The banner
+  # is printed after the signal handler is installed, and the first exec of a
+  # large binary can spend seconds in the kernel before `main` runs at all --
+  # which is what made the Rust test's two-second sleep start failing.
+  i=0
+  while [ $i -lt 90 ]; do
+    grep -q '^watching ' "$wdir/watch.out" && break
+    kill -0 "$wpid" 2>/dev/null ||
+      { echo "the watcher exited before it was ready"; sed 's/^/  /' "$wdir/watch.out"; return 1; }
+    sleep 1
+    i=$((i + 1))
+  done
+  grep -q '^watching ' "$wdir/watch.out" ||
+    { echo "the watcher never said it was watching"; sed 's/^/  /' "$wdir/watch.out"; return 1; }
+
+  kill -INT "$wpid" || { echo "could not signal the watcher"; return 1; }
+
+  # Bounded, because the failure this guards against includes a watcher that
+  # never stops. A check that hangs the job reports nothing; one that fails
+  # names the bug.
+  i=0
+  while kill -0 "$wpid" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+  if kill -0 "$wpid" 2>/dev/null; then
+    kill -KILL "$wpid" 2>/dev/null
+    wait "$wpid" 2>/dev/null
+    echo "the watcher was still running 30s after SIGINT"
+    sed 's/^/  /' "$wdir/watch.out"
+    return 1
+  fi
+  wait "$wpid"
+  rc=$?
+  [ $rc -eq 0 ] ||
+    { echo "the watcher exited $rc rather than 0 after SIGINT"; sed 's/^/  /' "$wdir/watch.out"; return 1; }
+
+  # Nothing half-written left behind, in either store format.
+  leftovers=$(find "$wdir/store" -name '*.tmp' 2>/dev/null)
+  [ -z "$leftovers" ] || { echo "a half-written index was left behind: $leftovers"; return 1; }
+
+  # And the two halves still agree: every chunk has a vector.
+  semlith --store "$wdir/store" stats > "$wdir/stats.out" 2>&1 ||
+    { sed 's/^/  /' "$wdir/stats.out"; return 1; }
+  chunks=$(awk '$1 == "chunks" { print $2 }' "$wdir/stats.out")
+  vectors=$(awk '$1 == "vectors" { print $2 }' "$wdir/stats.out")
+  [ -n "$chunks" ] && [ "$chunks" = "$vectors" ] ||
+    { echo "$chunks chunks against $vectors vectors after the interrupt"
+      sed 's/^/  /' "$wdir/stats.out"; return 1; }
+}
+
+if [ "$family" = unix ]; then
+  check cli/watch/sigint-whole   "Ctrl-C leaves the store whole"      c_watch_sigint_whole
+fi
+
 # -------------------------------------------------------------------- daemon
 
 port=${SMOKE_PORT:-7365}

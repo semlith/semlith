@@ -400,11 +400,12 @@ files ──chunk──> text ──embed──> vectors ──quantize──> i
 query ──embed──> vector ──search shards──> chunk ids ──lookup store.db──> excerpts
 ```
 
-A store holds `index/` — the turbovec index, as shards of 65536 quantized
-vectors keyed by chunk id — and `store.db`, the SQLite database holding chunk
-text, paths, line spans, symbols, edges, the ledger and the content hashes that
-make re-indexing incremental. Sharding is what lets a search hold part of the
-corpus, a save rewrite one shard, and a long run checkpoint as it goes.
+A store holds `index/` — the [turbovec](https://github.com/RyanCodrai/turbovec)
+index, shards of 65536 quantized vectors keyed by chunk id — and `store.db`, the
+SQLite database holding chunk text, paths, line spans, symbols, edges, the
+ledger and the content hashes that make re-indexing incremental. Sharding lets a
+search hold part of the corpus, a save rewrite one shard, and a long run
+checkpoint as it goes.
 Embeddings default to `granite-embedding-small-english-r2` at int8, 384
 dimensions, ~52 MB, on CPU via ONNX Runtime; the model is fixed when the store
 is created, because vectors from two models are not comparable.
@@ -488,6 +489,25 @@ CI runs, how the code is laid out, and what is deliberately out of scope;
 participating follows the [Code of Conduct](CODE_OF_CONDUCT.md). Found a
 security problem? Please read [SECURITY.md](SECURITY.md) rather than open an
 issue.
+
+## Prior art
+
+Semlith's vector index is [turbovec](https://github.com/RyanCodrai/turbovec), by
+Ryan Codrai, under the MIT licence. It implements TurboQuant, from ["TurboQuant:
+Online Vector Quantization with Near-optimal Distortion
+Rate"](https://arxiv.org/abs/2504.19874) by Amir Zandieh, Majid Daliri, Majid
+Hadian and Vahab Mirrokni.
+
+Quantizing a vector means keeping it in far fewer bits than it arrived in, which
+is what lets a million chunks be searched from memory. Most quantizers learn how
+from the data, so they need a representative sample of the corpus before they
+can compress any of it. TurboQuant is data-oblivious: it rotates each vector
+randomly and quantizes each coordinate on its own, with no sample and no
+training pass.
+
+That is what an index refreshed on every file save needs. Nothing is gathered
+before the first file is indexed, nothing is rebuilt as the corpus grows, and a
+vector added is a vector searchable.
 
 ## License
 

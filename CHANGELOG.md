@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-09-16
+
+### Credit where the index comes from
+
+Semlith's vector index is [turbovec](https://github.com/RyanCodrai/turbovec), by
+Ryan Codrai, under the MIT licence, and it implements TurboQuant — ["TurboQuant:
+Online Vector Quantization with Near-optimal Distortion
+Rate"](https://arxiv.org/abs/2504.19874), Amir Zandieh, Majid Daliri, Majid
+Hadian and Vahab Mirrokni. That is not an implementation detail: a
+data-oblivious quantizer needs no training pass over the corpus, which is why a
+store can be built from a file save with no rebuild as it grows. The README
+named turbovec twice as a filename component, linked it nowhere, and did not
+name the paper at all.
+
+### Added
+
+- A `## Prior art` section in the README, citing the paper by title, its four
+  authors and its arXiv id, and turbovec by author, licence and repository, with
+  two sentences on what data-oblivious buys a local index. The first prose
+  mention is a link as well.
+- `tests/readme.rs` asserts the README carries both the turbovec repository URL
+  and `2504.19874`, so an edit that drops either fails the build. Its line
+  ceiling moves from 500 to 520 for the new section, once, with the reason in
+  the doc comment beside it.
+- `tests/portal.rs` asserts no semver literal appears in a user-visible string
+  in `src/portal/app.js`. This is the README's release-content gate applied to
+  the surface a user reads inside the product, which had none.
+
+### Fixed
+
+- `NOTICE` named BAAI/bge-small-en-v1.5 as the default model, which the product
+  stopped using. It names granite-embedding-small-english-r2 at int8 and the
+  repository it is fetched from, the CLIP ViT-B/32 vision and text pair a store
+  fetches once it holds an image, and the licence each one states. Its turbovec
+  block cites the paper rather than gesturing at "Google Research", and ONNX
+  Runtime and hf-hub are named with what each one actually downloads.
+- `docs/architecture.md`, which the README calls the full account, described the
+  single-file index that store format 2 replaced in 0.7.0 — including a
+  crash-safety argument and an atomic-write argument stated over the wrong
+  object. Every such passage is re-derived from the code that writes a shard:
+  the rename gives per-shard atomicity and nothing more, and what covers an
+  interrupted run is the hashes being committed last. The store diagram is now
+  the directory as it is on disk.
+- The portal's About page said forty grammars arrived in a named release and
+  that the binary had grown by a measured number of MiB against another one —
+  three versions and four figures, hardcoded, where no reader could tell which
+  build they described. The passage is gone and what a reader can act on is a
+  clause in the paragraph above it.
+
+### A Ctrl-C guarantee that CI can see fail
+
+`an_interrupted_watcher_leaves_the_store_whole` had been failing since 0.17.0
+and nobody heard, because it is `#[ignore]`d and CI does not run the ignored
+set (#85). The cause was the test, not the product: it gave the spawned watcher
+a hard-coded two seconds to install its signal handler, and the first exec of a
+freshly linked binary spends seconds inside `execve` at zero CPU while the
+kernel validates the Mach-O. The forty grammars 0.17.0 added took the binary
+past the point where that finished in under two seconds, so the SIGINT arrived
+before `main` did. `src/watch.rs` was never wrong.
+
+- The test now waits for the watcher's own `watching …` banner, which is
+  printed after the handler is installed, instead of for a clock. No number can
+  be the right number there — the binary will grow again.
+- `.github/smoke.sh` gains `cli/watch/sigint-whole`, which interrupts a real
+  watcher and then checks the exit status, that no half-written index was left
+  behind, and that every chunk still has a vector. It runs against the
+  installed binary on `ubuntu-latest` and `macos-latest` on every develop PR,
+  so the guarantee now has a gate that runs. Windows has no row by design:
+  `watch::stop_on_signal` is `#[cfg(unix)]` and Ctrl-C there is a documented
+  no-op.
+
+### Removed
+
+- The About page's `MCP revisions` row. Four protocol dates are a wire contract
+  between the server and an agent client, not something a person reading About
+  can act on. `GET /api/about` still returns them and dropping one is still a
+  declared break.
+
 ## [0.17.2] - 2026-09-16
 
 ### Documentation describes the product that exists
@@ -1689,7 +1767,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.17.3...HEAD
+[0.17.3]: https://github.com/semlith/semlith/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/semlith/semlith/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/semlith/semlith/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/semlith/semlith/compare/v0.16.0...v0.17.0

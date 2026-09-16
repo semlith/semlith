@@ -4892,12 +4892,7 @@ function langCard(languages, withEdges) {
         ? " carries symbols and edges as well, from a tree-sitter grammar. "
         : " carry symbols and edges as well, from a tree-sitter grammar; the rest are searched as text. ",
       mono("semlith languages"),
-      " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built.",
-    ),
-    says(
-      "Forty of these grammars arrived in 0.17.0 and they are not free: the binary went from 47.0 MiB to 111.3 MiB, ",
-      mono("+64.3 MiB"),
-      ", measured on the build machine against a 0.16.0 build made with the same toolchain. That is parser tables rather than debug information — both binaries are already symbol-light — and OCaml alone is 12.6 MiB of it. The number is stated rather than budgeted for: no language was dropped to hit a size.",
+      " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built. Those grammars are most of what the binary weighs, and no language was dropped to hit a size.",
     ),
   );
 }
@@ -4976,7 +4971,6 @@ async function aboutView() {
           row("Bound to", about.bind),
           row("Store home", about.store_home),
           row("Model cache", about.model_cache),
-          row("MCP revisions", (about.revisions || []).join(" · ")),
           row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
         ),
         langCard(languages.languages || [], about.graph_languages || []),

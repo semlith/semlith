@@ -645,3 +645,126 @@ fn the_graph_page_draws_every_edge_kind_the_store_stores() {
          filters nothing"
     );
 }
+
+/// Text the portal can render, with comments and interpolations removed.
+///
+/// Not a JavaScript parser. It tracks the three quote characters, backslash
+/// escapes, `//` and `/* */`, and drops the `${...}` spans inside a template
+/// literal, which is all that is needed to decide whether a run of digits is a
+/// sentence a user reads or a note to whoever edits the file next.
+fn user_visible_strings(source: &str) -> Vec<String> {
+    let src: Vec<char> = source.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        match src[i] {
+            '/' if src.get(i + 1) == Some(&'/') => {
+                while i < src.len() && src[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if src.get(i + 1) == Some(&'*') => {
+                i += 2;
+                while i < src.len() && !(src[i] == '*' && src.get(i + 1) == Some(&'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            quote @ ('"' | '\'' | '`') => {
+                let mut literal = String::new();
+                i += 1;
+                while i < src.len() {
+                    if src[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if quote == '`' && src[i] == '$' && src.get(i + 1) == Some(&'{') {
+                        // A live value, not a sentence: skip to the matching brace.
+                        let mut depth = 1;
+                        i += 2;
+                        while i < src.len() && depth > 0 {
+                            match src[i] {
+                                '{' => depth += 1,
+                                '}' => depth -= 1,
+                                _ => {}
+                            }
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if src[i] == quote {
+                        i += 1;
+                        break;
+                    }
+                    literal.push(src[i]);
+                    i += 1;
+                }
+                out.push(literal);
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// The first `<digits>.<digits>.<digits>` in `text` that is not the start of a
+/// dotted quad, so an address the portal prints is not read as a release.
+fn semver_like(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let digits = |at: usize| chars.get(at).is_some_and(char::is_ascii_digit);
+    let mut i = 0;
+    while i < chars.len() {
+        if !digits(i) || (i > 0 && (digits(i - 1) || chars[i - 1] == '.')) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i;
+        let mut groups = 1;
+        while digits(end) {
+            end += 1;
+        }
+        while groups < 3 && chars.get(end) == Some(&'.') && digits(end + 1) {
+            end += 1;
+            while digits(end) {
+                end += 1;
+            }
+            groups += 1;
+        }
+        let quad = chars.get(end) == Some(&'.') && digits(end + 1);
+        if groups == 3 && !quad {
+            return Some(chars[start..end].iter().collect());
+        }
+        i = end.max(start + 1);
+    }
+    None
+}
+
+/// No release named anywhere inside the running product.
+///
+/// The About page used to say that forty grammars arrived in a named release
+/// and that the binary had grown by a measured number of MiB since another one
+/// — three versions and four figures, hardcoded, on a page where no reader can
+/// tell which build they describe. They were true of one build on one machine
+/// and went stale without failing anything, which is the defect
+/// `the_readme_carries_no_release_specific_content` exists to catch in the
+/// README. The portal is the same surface with a larger audience and had no
+/// such gate.
+///
+/// The live values are unaffected: About's version and binary rows and the
+/// setup screen's installed version are `${...}` interpolations of what the
+/// server just returned, and this reads none of them.
+#[test]
+fn the_portal_names_no_release_in_anything_a_user_reads() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+
+    for literal in user_visible_strings(APP_JS) {
+        if let Some(found) = semver_like(&literal) {
+            panic!(
+                "src/portal/app.js renders {found:?} in {literal:?}; a version written into a \
+                 sentence describes one build and goes stale inside the product, where the \
+                 reader cannot tell. State it from what the server returns, or do not state it"
+            );
+        }
+    }
+}

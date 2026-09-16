@@ -213,13 +213,40 @@ fn the_readme_carries_no_release_specific_content() {
     );
 }
 
-/// Under 500 lines, because the document that has to convert a first-time
+/// The work the index is built on, named and linked where a reader evaluating
+/// semlith will meet it.
+///
+/// turbovec implements TurboQuant, and that choice is the product: a
+/// data-oblivious quantizer is why a store can be built from a file save with
+/// no training corpus and no rebuild. Before 0.17.3 the README named turbovec
+/// twice as a filename component, linked it nowhere, and named the paper not at
+/// all. Credit that lives only in prose is credit anyone can delete without
+/// failing anything, which is how it went missing in the first place.
+#[test]
+fn the_readme_credits_the_work_the_index_is_built_on() {
+    assert!(
+        README.contains("https://github.com/RyanCodrai/turbovec"),
+        "the README no longer links turbovec, the index semlith is built on"
+    );
+    assert!(
+        README.contains("2504.19874"),
+        "the README no longer cites arXiv:2504.19874, the TurboQuant paper turbovec implements"
+    );
+}
+
+/// Under 520 lines, because the document that has to convert a first-time
 /// reader was 1 816 of them and mostly a reference table.
+///
+/// The ceiling was 500 until 0.17.3, which raised it by twenty for the `Prior
+/// art` section. The gate exists to keep a reference catalogue out of the
+/// front page, and an attribution is not a reference catalogue — but the number
+/// moves in a release that decided to move it, with the reason recorded, and
+/// not in whatever edit next runs out of room.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 500,
-        "the README is {lines} lines; the ceiling is 500"
+        lines < 520,
+        "the README is {lines} lines; the ceiling is 520"
     );
 }
