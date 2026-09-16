@@ -36,6 +36,11 @@ getrandom = "0.3.4"
 # what is built is what fastembed was already building.
 tokenizers = { version = "0.23", default-features = false }
 ignore = "0.4.31"
+# Already in the tree through `ignore`'s own dependency edge; named here so the
+# credential content scan is one `RegexSet` pass over a file's text rather than
+# fourteen hand-written scanners. Naming it compiles nothing that was not
+# already being compiled.
+regex = "1.13"
 pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -133,3 +138,8 @@ dynamic-ort = ["fastembed/ort-load-dynamic", "dep:ort"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# The same version the crate itself already depends on, named again here so a
+# test can build a `.docx` — a zip of XML — to prove the credential scan reads
+# what a document reader produced rather than only what a text file holds.
+# Compiles nothing that was not already being compiled.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }

@@ -2476,6 +2476,7 @@ dependencies = [
  "notify",
  "ort",
  "pdf-extract",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

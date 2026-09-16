@@ -417,8 +417,13 @@ pub const DENIED_DIRS: &[&str] = &[
 /// agent that indexed one has put the contents of every environment variable a
 /// service needs into a store it can then be asked to search.
 pub const DENIED_NAMES: &[&str] = &[
-    ".env",
-    ".env.*",
+    // Every shape of environment file, not only the two that are conventional.
+    // `.env*` subsumes `.env` and `.env.*` and covers `.envrc`, `.env-local`
+    // and `.env.vault`; `*.env` and `*.env.*` cover `dev.env`,
+    // `production.env.local` and the files a Docker `env_file` points at.
+    ".env*",
+    "*.env",
+    "*.env.*",
     "*.pem",
     "*.key",
     "*.p12",
@@ -430,6 +435,18 @@ pub const DENIED_NAMES: &[&str] = &[
     "*secret*",
     "*.tfstate",
     "*.kdbx",
+    // Per-user credential dotfiles. Until 0.19.0 the hidden-file rule caught
+    // these on its own; now that a dotfile the user's own `.gitignore`
+    // whitelisted is walked and indexed, each one has to be named or the
+    // change would put an npm token into a store.
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    ".pgpass",
+    ".htpasswd",
+    ".boto",
+    ".s3cfg",
+    "*.ppk",
 ];
 
 /// Why a path was not indexed.
@@ -477,7 +494,8 @@ impl Denied {
 /// directories under them, and an explicit `semlith_index ~/.ssh/id_rsa` went
 /// straight past all of it.
 pub fn denied(path: &Path) -> Option<Denied> {
-    denied_against(path, crate::home::user_home().ok().as_deref())
+    let home = crate::home::user_home().ok().map(|h| crate::canonical(&h));
+    denied_against(&crate::canonical(path), home.as_deref())
 }
 
 /// [`denied`] against a home given rather than resolved, so the case that
@@ -487,12 +505,17 @@ pub fn denied(path: &Path) -> Option<Denied> {
 /// Fails closed. An unknown home used to mean the directory rules were skipped
 /// and everything under them sailed through, which on Windows — where nothing
 /// sets `HOME` — was every run (#72).
+/// Both paths are taken as already canonical, which is the 0.19.0 change. The
+/// walk hands out canonical paths (`crate::walk`) and the home is resolved once
+/// per run, so doing it again here was two `canonicalize` calls per file — two
+/// opened handles per file on Windows, on a corpus where the answer for the
+/// home could not have changed. [`denied`] canonicalises for the callers that
+/// have a single path and no run around it.
 pub(crate) fn denied_against(path: &Path, home: Option<&Path>) -> Option<Denied> {
     let Some(home) = home else {
         return Some(Denied::NoHome);
     };
-    let home = crate::canonical(home);
-    let real = crate::canonical(path);
+    let real = path;
     for dir in DENIED_DIRS {
         if real.starts_with(home.join(dir)) {
             return Some(Denied::Directory(dir));
@@ -627,13 +650,63 @@ mod deny_tests {
         );
     }
 
+    /// Every name the widened list is supposed to cover, one row each.
+    ///
+    /// A table rather than prose because 0.19.0 walks and indexes a dotfile
+    /// the user's own `.gitignore` whitelisted, and the hidden-file rule used
+    /// to be what kept `.npmrc` and `.envrc` out of a store. A typo in one of
+    /// these patterns is now the difference between a refused file and a
+    /// credential in a searchable index, so it fails the build.
+    #[test]
+    fn every_credential_name_is_refused() {
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.vault",
+            ".envrc",
+            ".env-local",
+            // On purpose. The name says what the file holds, and a placeholder
+            // today is a filled-in credential on somebody's branch tomorrow.
+            ".env.example",
+            "dev.env",
+            "production.env.local",
+            ".npmrc",
+            ".netrc",
+            ".pypirc",
+            ".pgpass",
+            ".htpasswd",
+            ".boto",
+            ".s3cfg",
+            "server.ppk",
+        ] {
+            let path = PathBuf::from("/work/api").join(name);
+            assert!(
+                matches!(
+                    denied_against(&path, Some(Path::new("/home/x"))),
+                    Some(Denied::Name(_))
+                ),
+                "{name} must be refused by name, not by any other rule"
+            );
+        }
+        // Not credentials, and a widened pattern that swallowed them would be
+        // a release that stopped indexing ordinary code.
+        for name in ["environment.ts", "env.rs", "envelope.md", "preventable.go"] {
+            let path = PathBuf::from("/work/api").join(name);
+            assert_eq!(
+                denied_against(&path, Some(Path::new("/home/x"))),
+                None,
+                "{name} is not a credential"
+            );
+        }
+    }
+
     /// The case the finding is about: a file an agent asked for by name, which
     /// the walker's rules never saw.
     #[test]
     fn a_credential_is_denied_wherever_it_is_named() {
         assert!(matches!(
             denied(Path::new("/work/api/.env")),
-            Some(Denied::Name(".env"))
+            Some(Denied::Name(".env*"))
         ));
         assert!(matches!(
             denied(Path::new("/work/api/service-account-credentials.json")),
@@ -670,4 +743,282 @@ mod deny_tests {
         assert!(!within_boundary(Path::new("/etc/hosts"), &roots));
         assert!(!within_boundary(Path::new("/work/other"), &roots));
     }
+}
+
+/// One credential shape the content scan looks for.
+///
+/// A row is a name, a pattern, a string that must match it and a string that
+/// must not. The last two are not documentation: `tests/scan.rs` walks this
+/// table and fails if a row has an example it does not match or a near miss it
+/// does, so a pattern typo is a failing build rather than a credential in a
+/// store.
+pub struct Shape {
+    /// What the match is called, in the line a user reads.
+    pub kind: &'static str,
+    /// The regular expression. Anchored by the credential's own prefix
+    /// wherever there is one, because a prefix is the issuer declaring what
+    /// the string is — which is what makes these safe to refuse on sight.
+    pub pattern: &'static str,
+    /// A string of this shape. Fake, and refused all the same.
+    pub example: &'static str,
+    /// A string that looks like it but is not: the right prefix and the wrong
+    /// length, usually. What stops a pattern being widened by accident.
+    pub near_miss: &'static str,
+}
+
+/// Every credential shape semlith refuses a file for.
+///
+/// Some examples are written as `concat!` of two halves. A table of credential
+/// shapes is the one file that will hold fourteen credential-shaped literals,
+/// and GitHub's own push protection refuses a branch that contains them — it
+/// stopped 0.19.0's first push over the Slack and Twilio rows. Splitting the
+/// literal keeps the source free of a contiguous match while the constant it
+/// compiles to is exactly the string the tests assert against. Any row a
+/// scanner flags gets the same treatment; the rest stay whole, because an
+/// unnecessary split is a row that reads worse for nothing.
+///
+/// Prefix-declared, not entropy-guessed, with one exception at the bottom. A
+/// documentation page that quotes AWS's own `AKIAIOSFODNN7EXAMPLE` is refused
+/// like any other match and `--include-secrets` indexes it: an allow-list of
+/// known-fake values is a second table to keep right, and a credential that
+/// gets indexed because it resembled an example is the failure that matters.
+pub const SHAPES: &[Shape] = &[
+    // Anthropic before OpenAI: `sk-ant-` is an `sk-` too, and the first match
+    // is the one named.
+    Shape {
+        kind: "an Anthropic API key",
+        pattern: r"\bsk-ant-[A-Za-z0-9_-]{24,}",
+        example: "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH",
+        near_miss: "sk-ant-short",
+    },
+    Shape {
+        kind: "an OpenAI API key",
+        pattern: r"\bsk-[A-Za-z0-9_-]{32,}",
+        example: "sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII",
+        near_miss: "sk-tooshort",
+    },
+    Shape {
+        kind: "an AWS access key id",
+        pattern: r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+        example: "AKIAIOSFODNN7EXAMPLE",
+        near_miss: "AKIAIOSFODNN7EXAMPL",
+    },
+    Shape {
+        kind: "a GitHub token",
+        pattern: r"\bgh[pousr]_[A-Za-z0-9]{36}\b",
+        example: "ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678",
+        near_miss: "ghp_tooshortforatoken",
+    },
+    Shape {
+        kind: "a GitHub fine-grained token",
+        pattern: r"\bgithub_pat_[A-Za-z0-9_]{40,}",
+        example: "github_pat_11AAAAAAA0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        near_miss: "github_pat_11AAAAAAA0",
+    },
+    Shape {
+        kind: "a Slack token",
+        pattern: r"\bxox[abprs]-[0-9A-Za-z-]{12,}",
+        example: concat!("xox", "b-123456789012-1234567890123-aaaaaaaaaaaaaaaaaaaaaaaa"),
+        near_miss: "xoxb-123",
+    },
+    // Test keys as well as live ones. A `sk_test_` is not a credential in the
+    // sense a live key is, and refusing it costs a documentation page — but
+    // the alternative is a table with an exception in it, and an exception is
+    // the thing that is wrong the day somebody pastes a live key into a file
+    // called `test.md`. `--include-secrets` is the way past, as it is for a
+    // `.env`.
+    Shape {
+        kind: "a Stripe key",
+        pattern: r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}",
+        example: "sk_live_aaaaBBBBccccDDDD1234",
+        near_miss: "sk_live_tooshort",
+    },
+    Shape {
+        kind: "a Google API key",
+        pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
+        example: "AIzaSyA0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        near_miss: "AIzaSyA0aaaaaaaaaaaa",
+    },
+    Shape {
+        kind: "a Twilio API key",
+        pattern: r"\bSK[0-9a-fA-F]{32}\b",
+        example: concat!("SK", "0123456789abcdef0123456789abcdef"),
+        near_miss: "SK0123456789abcdef",
+    },
+    Shape {
+        kind: "a SendGrid API key",
+        pattern: r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
+        example: "SG.aaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        near_miss: "SG.aaaa.bbbb",
+    },
+    Shape {
+        kind: "an npm token",
+        pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
+        example: "npm_aaaaBBBBccccDDDDeeeeFFFFgggg12345678",
+        near_miss: "npm_install",
+    },
+    Shape {
+        kind: "a semlith agent key",
+        pattern: r"\bsml_[0-9a-f]{64}\b",
+        example: "sml_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        near_miss: "sml_0123456789abcdef",
+    },
+    Shape {
+        kind: "a private key block",
+        pattern: r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----",
+        example: "-----BEGIN RSA PRIVATE KEY-----",
+        near_miss: "-----BEGIN CERTIFICATE-----",
+    },
+    Shape {
+        kind: "a JSON web token",
+        pattern: r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        example: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        near_miss: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0",
+    },
+];
+
+/// The generic rule: a key-like name assigned a long, high-entropy literal.
+///
+/// The value may not cross a line, and the name and the value may not be
+/// separated by one. Without that, `split_once("/?token=")` and a quote two
+/// lines later are one match whose "value" is the code in between — which is
+/// what the 0.19.0 false-positive audit found in this repository's own
+/// `tests/daemon.rs`. A credential is written on one line.
+///
+/// The one shape with no issuer prefix, so it needs two things at once. The
+/// name alone catches `password = "hunter2"`, which is not a credential worth
+/// refusing a file for; the entropy alone catches every base64 fixture and
+/// every lockfile hash in the corpus. Both together is the rule.
+const ASSIGNMENT: &str = r#"(?i)[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|auth)[a-z0-9_-]*[ \t]*[:=][ \t]*["']([^"'\r\n]{20,})["']"#;
+
+/// How much entropy a generic literal needs before it reads as a credential.
+///
+/// Shannon bits per character. A random 24-character token sits near 4.5; a
+/// placeholder like `changeme_changeme_changeme` sits near 2.5. Measured
+/// against both corpora in the 0.19.0 false-positive audit.
+const MIN_ENTROPY: f64 = 3.2;
+
+/// What the scan found, and where.
+///
+/// The line, never the text. No character of a matched credential is written
+/// anywhere semlith writes: not here, not in an event, not in the CLI's
+/// output, not in the store, not in a log. A scan that quotes the secret it
+/// found has moved the secret rather than refused it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub kind: String,
+    pub line: u32,
+}
+
+impl Found {
+    /// The line a user reads, naming the kind and the place.
+    pub fn reason(&self) -> String {
+        format!(
+            "holds what looks like {} at line {} — semlith does not index it",
+            self.kind, self.line
+        )
+    }
+}
+
+/// The compiled table, built once.
+fn shapes() -> &'static (regex::RegexSet, Vec<regex::Regex>, regex::Regex) {
+    static COMPILED: std::sync::OnceLock<(regex::RegexSet, Vec<regex::Regex>, regex::Regex)> =
+        std::sync::OnceLock::new();
+    COMPILED.get_or_init(|| {
+        let set = regex::RegexSet::new(SHAPES.iter().map(|s| s.pattern))
+            .expect("the credential shapes compile");
+        let each = SHAPES
+            .iter()
+            .map(|s| regex::Regex::new(s.pattern).expect("the credential shapes compile"))
+            .collect();
+        let assignment = regex::Regex::new(ASSIGNMENT).expect("the assignment rule compiles");
+        (set, each, assignment)
+    })
+}
+
+/// The first credential this text looks like it holds, if any.
+///
+/// One `RegexSet` pass decides whether anything matched at all, which is the
+/// answer for every file in a corpus but a handful; only then is the matching
+/// shape run again to find where. Called on the text a reader produced, before
+/// it is chunked, stored or embedded — a file semlith refuses is a file whose
+/// contents never reach the store in the first place.
+pub fn scan_text(text: &str) -> Option<Found> {
+    let (set, each, assignment) = shapes();
+    let mut best: Option<(usize, &'static str)> = None;
+    for index in set.matches(text).iter() {
+        if let Some(m) = each[index].find(text) {
+            let at = m.start();
+            if best.is_none_or(|(prev, _)| at < prev) {
+                best = Some((at, SHAPES[index].kind));
+            }
+        }
+    }
+    if let Some(caps) = assignment.captures(text)
+        && let Some(value) = caps.get(1)
+        && !is_placeholder(value.as_str())
+        && entropy(value.as_str()) >= MIN_ENTROPY
+    {
+        let at = caps.get(0).expect("the whole match").start();
+        if best.is_none_or(|(prev, _)| at < prev) {
+            best = Some((at, "a secret assigned to a key-like name"));
+        }
+    }
+    let (at, kind) = best?;
+    Some(Found {
+        kind: kind.to_string(),
+        line: line_of(text, at),
+    })
+}
+
+/// Whether a value is a placeholder standing in for a credential rather than
+/// one.
+///
+/// The 0.19.0 false-positive audit found this on the first corpus it ran over:
+/// semlith's own `docs/clients.md` carries `Authorization = "Bearer
+/// ${SEMLITH_AGENT_KEY}"`, which is a key-like name assigned twenty characters
+/// of respectable entropy and is the exact opposite of a leaked credential —
+/// it is the documentation for how not to write one down.
+///
+/// A rule about shape, not a list of known-fake values. A template reference,
+/// an angle-bracket placeholder and a bare `SCREAMING_SNAKE` variable name are
+/// all things a credential is never spelled as: a real key mixes case or digits
+/// in a way a variable name does not. The prefixed shapes in [`SHAPES`] get no
+/// such exemption — an `AKIA…` is an AWS key wherever it is written.
+fn is_placeholder(value: &str) -> bool {
+    if value.contains("${") || value.contains("{{") || value.contains("<") || value.contains("%(") {
+        return true;
+    }
+    // A variable name rather than a value: upper case, digits, underscores and
+    // nothing else, optionally with a word in front of it.
+    value.split_whitespace().last().is_some_and(|last| {
+        !last.is_empty()
+            && last
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    })
+}
+
+/// Shannon entropy in bits per character.
+fn entropy(value: &str) -> f64 {
+    let mut counts = std::collections::HashMap::new();
+    for c in value.chars() {
+        *counts.entry(c).or_insert(0usize) += 1;
+    }
+    let total = value.chars().count() as f64;
+    if total == 0.0 {
+        return 0.0;
+    }
+    -counts
+        .values()
+        .map(|n| {
+            let p = *n as f64 / total;
+            p * p.log2()
+        })
+        .sum::<f64>()
+}
+
+/// Which line a byte offset falls on, counting from one.
+fn line_of(text: &str, at: usize) -> u32 {
+    text[..at].bytes().filter(|b| *b == b'\n').count() as u32 + 1
 }
