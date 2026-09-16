@@ -487,7 +487,10 @@ fn an_interrupted_watcher_leaves_the_store_whole() {
             // the re-embed case prints a line per file, and a full pipe would
             // block the process this test is timing.
             let mut announced = false;
-            for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+            {
                 if !announced && line.starts_with("watching ") {
                     announced = true;
                     let _ = ready_tx.send(());
