@@ -638,6 +638,19 @@ c_watch_sigint_whole() {
     { echo "the watcher never said it was watching"; sed 's/^/  /' "$wdir/watch.out"; return 1; }
 
   kill -INT "$wpid" || { echo "could not signal the watcher"; return 1; }
+
+  # Bounded, because the failure this guards against includes a watcher that
+  # never stops. A check that hangs the job reports nothing; one that fails
+  # names the bug.
+  i=0
+  while kill -0 "$wpid" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+  if kill -0 "$wpid" 2>/dev/null; then
+    kill -KILL "$wpid" 2>/dev/null
+    wait "$wpid" 2>/dev/null
+    echo "the watcher was still running 30s after SIGINT"
+    sed 's/^/  /' "$wdir/watch.out"
+    return 1
+  fi
   wait "$wpid"
   rc=$?
   [ $rc -eq 0 ] ||
