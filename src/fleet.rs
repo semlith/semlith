@@ -320,6 +320,7 @@ impl Fleet {
         language: &str,
         source: &str,
         filter: &crate::filter::Filter,
+        offset: usize,
     ) -> Result<crate::pattern::Matches> {
         let chosen = self.chosen(only)?;
         let label_rows = self.members.len() > 1;
@@ -328,9 +329,17 @@ impl Fleet {
             matches: Vec::new(),
             files: 0,
             truncated: false,
+            skipped: 0,
         };
+        // One offset across the fleet, not one per store. The stores are asked
+        // in a fixed order, so what the first one skipped comes off what the
+        // second is asked to skip.
+        let mut left = offset;
         for i in chosen {
-            let part = crate::pattern::run(self.members[i].store.db(), language, source, filter)?;
+            let part =
+                crate::pattern::run(self.members[i].store.db(), language, source, filter, left)?;
+            left = left.saturating_sub(part.skipped);
+            out.skipped += part.skipped;
             out.files += part.files;
             out.truncated |= part.truncated;
             for mut found in part.matches {

@@ -57,6 +57,12 @@ pub struct Matches {
     pub files: usize,
     /// True when [`MAX_MATCHES`] or [`MAX_FILES`] cut the answer short.
     pub truncated: bool,
+    /// Matches this run passed over to honour the caller's `offset`.
+    ///
+    /// Reported so a fleet can carry one offset across several stores: the
+    /// second store's offset is the caller's minus what the first one already
+    /// skipped, and without this number there is nothing to subtract.
+    pub skipped: usize,
 }
 
 /// Run `source` as a tree-sitter query over every indexed file of `language`.
@@ -65,11 +71,16 @@ pub struct Matches {
 /// it costs nothing and is reported as the parser's own message rather than as
 /// an empty result — an agent that mistyped a pattern and was handed "no
 /// matches" would conclude the code does not contain the shape.
+/// `offset` continues a listing the cap cut short. The order is total — files
+/// are sorted and the matches within a file are tree-sitter's — so the same
+/// call with the same offset returns the same matches, which is what makes
+/// paging through a cap meaningful rather than a second sample.
 pub fn run(
     db: &rusqlite::Connection,
     language: &str,
     source: &str,
     filter: &Filter,
+    offset: usize,
 ) -> Result<Matches> {
     let language = language.trim().to_ascii_lowercase();
     let Some(grammar) = crate::graph::language_grammar(&language) else {
@@ -93,6 +104,7 @@ pub fn run(
     let mut out = Vec::new();
     let mut parsed = 0usize;
     let mut truncated = false;
+    let mut skipped = 0usize;
     for file in files.iter().take(MAX_FILES) {
         if out.len() >= MAX_MATCHES {
             truncated = true;
@@ -116,6 +128,14 @@ pub fn run(
                 if out.len() >= MAX_MATCHES {
                     truncated = true;
                     break;
+                }
+                // Skipped after the match is found, not before the file is
+                // read: the offset is into the match sequence, and a file
+                // holding forty matches contributes forty to it whether or not
+                // this call renders them.
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
                 }
                 let node = capture.node;
                 out.push(Match {
@@ -141,6 +161,7 @@ pub fn run(
         matches: out,
         files: parsed,
         truncated,
+        skipped,
     })
 }
 
@@ -206,7 +227,7 @@ mod tests {
     fn an_invalid_pattern_is_an_error_rather_than_an_empty_answer() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(store::SCHEMA).unwrap();
-        let err = run(&db, "rust", "(this is not a pattern", &Filter::default())
+        let err = run(&db, "rust", "(this is not a pattern", &Filter::default(), 0)
             .expect_err("an unbalanced pattern does not compile");
         assert!(
             err.to_string().contains("not a valid tree-sitter pattern"),
@@ -229,7 +250,7 @@ mod tests {
             if !crate::graph::has_graph(entry.name) {
                 continue;
             }
-            if let Err(e) = run(&db, entry.name, "(_) @node", &Filter::default()) {
+            if let Err(e) = run(&db, entry.name, "(_) @node", &Filter::default(), 0) {
                 broken.push(format!("{}: {e}", entry.name));
             }
         }
@@ -242,8 +263,81 @@ mod tests {
     fn a_language_with_no_grammar_says_which_have_one() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(store::SCHEMA).unwrap();
-        let err = run(&db, "cobol", "(identifier) @x", &Filter::default())
+        let err = run(&db, "cobol", "(identifier) @x", &Filter::default(), 0)
             .expect_err("cobol carries no grammar in this release");
         assert!(err.to_string().contains("rust"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+
+    /// A store holding one Rust file with `calls` distinct call expressions,
+    /// written straight into the schema — no embedder, because a pattern run
+    /// reads chunk text and never a vector.
+    fn store_of(calls: usize) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(store::SCHEMA).unwrap();
+        let mut body = String::from("fn main() {\n");
+        for i in 0..calls {
+            body.push_str(&format!("    call_{i}();\n"));
+        }
+        body.push_str("}\n");
+        let lines = body.lines().count() as u32;
+        let file = store::insert_file(&db, "/work/api/src/main.rs", "hash", 1, 0).unwrap();
+        store::insert_chunk(&db, file, 0, 1, lines, &body).unwrap();
+        db
+    }
+
+    /// The cap is only useful if there is a way past it, and the way past it
+    /// is only useful if the order is total.
+    #[test]
+    fn offset_continues_the_listing_and_repeats_exactly() {
+        let db = store_of(MAX_MATCHES + 40);
+        let pattern = "(call_expression function: (identifier) @f)";
+
+        let first = run(&db, "rust", pattern, &Filter::default(), 0).unwrap();
+        assert_eq!(first.matches.len(), MAX_MATCHES);
+        assert!(first.truncated);
+
+        let next = run(&db, "rust", pattern, &Filter::default(), MAX_MATCHES).unwrap();
+        assert_eq!(next.skipped, MAX_MATCHES);
+        assert_eq!(next.matches.len(), 40);
+        assert_eq!(
+            next.matches[0].text, "call_200",
+            "the continuation starts at the match after the cap"
+        );
+        assert!(
+            !first.matches.iter().any(|m| m.text == "call_200"),
+            "the two pages must not overlap"
+        );
+
+        // Two identical calls, two identical answers. Without this the offset
+        // is a second sample rather than a continuation.
+        let again = run(&db, "rust", pattern, &Filter::default(), MAX_MATCHES).unwrap();
+        let texts: Vec<&str> = next.matches.iter().map(|m| m.text.as_str()).collect();
+        let repeat: Vec<&str> = again.matches.iter().map(|m| m.text.as_str()).collect();
+        assert_eq!(texts, repeat);
+    }
+
+    /// The same glob filter every other surface takes, which is the other way
+    /// past the cap.
+    #[test]
+    fn a_path_filter_narrows_which_files_are_parsed() {
+        let db = store_of(3);
+        let pattern = "(call_expression function: (identifier) @f)";
+
+        let all = run(&db, "rust", pattern, &Filter::default(), 0).unwrap();
+        assert_eq!(all.files, 1);
+
+        let elsewhere = Filter::new(&["src/other/**".to_string()], &[], &[]).unwrap();
+        let none = run(&db, "rust", pattern, &elsewhere, 0).unwrap();
+        assert_eq!(none.files, 0);
+        assert!(none.matches.is_empty());
+
+        let here = Filter::new(&["**/src/**".to_string()], &[], &[]).unwrap();
+        let some = run(&db, "rust", pattern, &here, 0).unwrap();
+        assert_eq!(some.matches.len(), 3);
     }
 }
