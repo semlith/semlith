@@ -917,6 +917,7 @@ const VIEWS = [
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
   { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
+  { group: "Operate", id: "doctor", label: "Doctor", title: "Doctor" },
   { group: "About", id: "about", label: "About", title: "About" },
 ];
 
@@ -4233,6 +4234,142 @@ function installPanel() {
 
 // ---------------------------------------------------------------- agents
 
+/* ---------------------------------------------------------------- doctor */
+
+/* `semlith doctor`, as a page.
+ *
+ * The parity rule is why it exists: the command was added in 0.18.0, so its
+ * view is in the same release. It reads the same two functions the command
+ * prints — the per-client report and the four Privacy rules that are readings
+ * of this machine — so the page and the terminal cannot disagree about whether
+ * a client is registered or a rule holds.
+ *
+ * The repair buttons post to `/api/privacy/fix`, which calls what
+ * `semlith doctor --fix` calls. A second implementation in the browser would
+ * be a second answer to what "safe" means. */
+async function doctorView() {
+  let data;
+  try {
+    data = await api("/api/doctor");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Doctor"), error(e.message));
+  }
+
+  const state = (c) => {
+    if (c.note) return { text: "cannot register", kind: null };
+    if (c.registered) return { text: `registered (${c.scope || "user"})`, kind: "good" };
+    if (!c.command) return { text: "not registered", kind: "bad" };
+    if (!c.present) return { text: "not installed", kind: null };
+    if (c.scope === "project")
+      return { text: "one project only", kind: "bad" };
+    return { text: "installed, not registered", kind: "bad" };
+  };
+
+  const clients = dataTable({
+    rows: data.clients || [],
+    perPage: 25,
+    columns: [
+      { key: "name", label: "Client", sortable: true, value: (r) => r.name },
+      {
+        key: "state",
+        label: "semlith",
+        sortable: true,
+        value: (r) => state(r).text,
+        render: (r) => {
+          const s = state(r);
+          return pill(s.text, s.kind);
+        },
+      },
+      {
+        key: "repair",
+        label: "To fix",
+        render: (r) =>
+          r.repair
+            ? copyField(r.repair)
+            : el("span", { class: "sub", text: r.note ? "nothing to run" : "—" }),
+      },
+    ],
+  });
+
+  const rulesBox = el("div", { class: "strip" });
+  const note = el("div", { class: "note" });
+
+  const paintRules = (rules) => {
+    rulesBox.textContent = "";
+    for (const rule of rules) {
+      const row = el(
+        "div",
+        { class: "stat fact" },
+        el("span", { class: "eyebrow", text: rule.id }),
+        el("span", {
+          class: rule.ok ? "fact-value" : "fact-value bad",
+          text: rule.ok ? "holds" : "fails",
+        }),
+        el("span", { class: "sub", text: rule.check }),
+      );
+      if (!rule.ok && rule.manual) row.appendChild(copyField(rule.manual));
+      /* A button only where a repair qualifies. A rule the daemon cannot
+       * repair — `private addresses` is set in the environment the daemon
+       * inherited, and no process can unset a variable in its parent's — gets
+       * the manual step and nothing else, rather than a button that apologises
+       * after the click. */
+      if (!rule.ok && rule.repair) {
+        const fix = el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "Fix",
+          onclick: async () => {
+            fix.disabled = true;
+            note.className = "note";
+            note.textContent = "Applying…";
+            try {
+              const out = await post("/api/privacy/fix", { rule: rule.id });
+              const applied = (out.applied || [])[0];
+              /* What it changed and what it was before, so the user can undo
+               * it by hand. The rules come back re-read, so the row redraws
+               * from a measurement rather than from the click having worked. */
+              note.textContent = applied
+                ? `${applied.path}: ${applied.now}, was ${applied.was}` +
+                  (applied.rechecked_ok ? "" : " — the rule still does not hold")
+                : "Nothing to apply.";
+              paintRules(out.rules || []);
+            } catch (e) {
+              note.className = "note bad";
+              note.textContent = e.message;
+              fix.disabled = false;
+            }
+          },
+        });
+        row.appendChild(fix);
+      }
+      rulesBox.appendChild(row);
+    }
+  };
+  paintRules(data.rules || []);
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Doctor",
+      "Whether each agent client on this machine can reach semlith, and what to run for the ones that cannot.",
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("span", { class: "card-title", text: "Clients" }),
+      clients.node,
+    ),
+    el(
+      "div",
+      { class: "card" },
+      el("span", { class: "card-title", text: "Rules" }),
+      rulesBox,
+      note,
+    ),
+  );
+}
+
 async function agentsView() {
   let data;
   try {
@@ -4515,6 +4652,116 @@ async function agentsView() {
   }
   showClient(chosen);
 
+  /* `semlith setup --register-all`, as a control.
+   *
+   * Ten clients have no registration command of their own, so the only way
+   * semlith reaches them is by writing their configuration file — and
+   * `src/setup.rs` states the rule that bends: a tool that edits a file it does
+   * not own eventually corrupts one. It holds for every default install. This
+   * is the user overriding it for their own machine, which is why the plan is
+   * fetched and shown first and nothing is written until a second click.
+   *
+   * Each file is backed up beside itself before its first write, each merge
+   * keeps every key it did not come to change, and a file that does not parse
+   * is refused rather than replaced. */
+  const planBox = el("div", { class: "rules" });
+  const planNote = el("div", { class: "note" });
+  let planned = null;
+
+  const write = el("button", {
+    class: "button small",
+    type: "button",
+    text: "Write these files",
+    hidden: true,
+    onclick: async () => {
+      write.disabled = true;
+      planNote.className = "note";
+      planNote.textContent = "Writing…";
+      try {
+        const out = await post("/api/agents/register", { confirm: true });
+        const written = out.written || [];
+        planNote.textContent = written.length
+          ? `Wrote ${written.length} file${written.length === 1 ? "" : "s"}. Each has a .semlith-backup beside it.`
+          : "Nothing needed writing.";
+        planned = out.plan || [];
+        paintPlan();
+      } catch (e) {
+        planNote.className = "note bad";
+        planNote.textContent = e.message;
+        write.disabled = false;
+      }
+    },
+  });
+
+  const paintPlan = () => {
+    planBox.textContent = "";
+    for (const item of planned || []) {
+      const what =
+        item.action === "create"
+          ? "will be created"
+          : item.action === "merge"
+            ? "will be merged into"
+            : item.action === "already-done"
+              ? "already has semlith"
+              : `will be left alone — ${item.reason}`;
+      planBox.appendChild(
+        el(
+          "div",
+          { class: "rule-row" },
+          el(
+            "div",
+            { class: "rule-head" },
+            el("span", { class: "rule-id", text: item.client }),
+          ),
+          el("code", { class: "rule-check", text: item.path }),
+          el("span", { class: "sub", text: what }),
+        ),
+      );
+    }
+    const pending = (planned || []).some(
+      (p) => p.action === "create" || p.action === "merge",
+    );
+    write.hidden = !pending;
+    write.disabled = !pending;
+  };
+
+  const preview = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Show what would be written",
+    onclick: async () => {
+      preview.disabled = true;
+      planNote.className = "note";
+      planNote.textContent = "Reading…";
+      try {
+        const out = await post("/api/agents/register", {});
+        planned = out.plan || [];
+        planNote.textContent = planned.length
+          ? "Nothing has been written yet."
+          : "There is no client on this machine whose file semlith would write.";
+        paintPlan();
+      } catch (e) {
+        planNote.className = "note bad";
+        planNote.textContent = e.message;
+      } finally {
+        preview.disabled = false;
+      }
+    },
+  });
+
+  const registerAll = el(
+    "div",
+    { class: "card pad" },
+    el("span", { class: "card-title", text: "Register the clients that have no command" }),
+    el("p", {
+      class: "subtitle",
+      text: "Ten of the twenty-seven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's `semlith setup --register-all`.",
+    }),
+    el("div", { class: "head" }, preview, write),
+    planBox,
+    planNote,
+  );
+
   return el(
     "div",
     { class: "view" },
@@ -4533,16 +4780,17 @@ async function agentsView() {
       el("span", { class: "card-title", text: "Agent key" }),
       el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
       says(
-        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. Every stanza below names ",
-        mono("${" + KEY_ENV + "}"),
-        " instead of the key, so the client reads it from the environment at start and a rotation needs no file rewritten. It is exported by the block ",
-        mono("semlith setup"),
-        " wrote in your shell startup file, from ",
+        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
+        mono("semlith mcp"),
+        ", which reads the key from ",
         mono(data.key_path || "~/.semlith/agent.key"),
-        ".",
+        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
+        mono("${" + KEY_ENV + "}"),
+        " yourself.",
       ),
     ),
     keyNote,
+    registerAll,
     el(
       "div",
       { class: "grid scroller" },
@@ -4657,6 +4905,89 @@ async function privacyView() {
       el("span", { class: "sub", text: why }),
     );
 
+  /* The rules, with a way to act on them. Until 0.18.0 this page reported a
+   * failing rule and left the user to work out the command; a page that tells
+   * someone their store home is world-readable and stops there has done half a
+   * job.
+   *
+   * Every failing row gets the manual step, always, because that half works
+   * everywhere — including on Windows, where the mode rules have no reading at
+   * all. A row gets a button only where the daemon can repair it safely:
+   * narrowing, idempotent, on a path semlith owns, and re-checked by the rule's
+   * own check afterwards. `private addresses` has no button, and cannot: it is
+   * set in the environment the daemon inherited, and no process can unset a
+   * variable in its parent's.
+   *
+   * The button posts to the engine `semlith doctor --fix` calls. A repair
+   * implemented in the browser would be a second answer to what "safe" means,
+   * on the page whose whole subject is that question. */
+  const rulesBox = el("div", { class: "rules" });
+  const fixNote = el("div", { class: "note" });
+
+  const paintRules = (rules) => {
+    rulesBox.textContent = "";
+    for (const rule of rules) {
+      const row = el(
+        "div",
+        { class: rule.ok ? "rule-row" : "rule-row bad" },
+        el(
+          "div",
+          { class: "rule-head" },
+          el("span", { class: "dot " + (rule.ok ? "good" : "warn") }),
+          el("span", { class: "rule-id", text: rule.id }),
+        ),
+        el("p", { class: "rule-text", text: rule.rule }),
+        // The reading, under the rule rather than beside it: it is a path or a
+        // count often enough that a column would spend the whole card's width
+        // on one of them and wrap the rest.
+        el(
+          "div",
+          { class: "rule-found" },
+          el("span", { class: "eyebrow", text: "found" }),
+          el("code", { class: "rule-check", text: rule.check }),
+        ),
+      );
+      if (!rule.ok && rule.manual) {
+        row.appendChild(
+          el(
+            "div",
+            { class: "rule-found" },
+            el("span", { class: "eyebrow", text: "to fix" }),
+            copyField(rule.manual),
+          ),
+        );
+      }
+      if (!rule.ok && rule.repair) {
+        const fix = el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "Fix",
+          onclick: async () => {
+            fix.disabled = true;
+            fixNote.className = "note";
+            fixNote.textContent = "Applying…";
+            try {
+              const out = await post("/api/privacy/fix", { rule: rule.id });
+              const applied = (out.applied || [])[0];
+              fixNote.textContent = applied
+                ? `${applied.path}: ${applied.now}, was ${applied.was}` +
+                  (applied.rechecked_ok ? "" : " — the rule still does not hold")
+                : "Nothing to apply.";
+              paintRules(out.rules || []);
+            } catch (e) {
+              fixNote.className = "note bad";
+              fixNote.textContent = e.message;
+              fix.disabled = false;
+            }
+          },
+        });
+        row.appendChild(fix);
+      }
+      rulesBox.appendChild(row);
+    }
+  };
+  paintRules(data.rules || []);
+
   /* The four steps, numbered, each with its own copy button. A packet capture
    * is the only one of them that proves anything on its own; the others are
    * what make the first one quick to believe. */
@@ -4751,32 +5082,8 @@ async function privacyView() {
             class: "subtitle",
             text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
           }),
-          el(
-            "div",
-            { class: "rules" },
-            (data.rules || []).map((rule) =>
-              el(
-                "div",
-                { class: rule.ok ? "rule-row" : "rule-row bad" },
-                el(
-                  "div",
-                  { class: "rule-head" },
-                  el("span", { class: "dot " + (rule.ok ? "good" : "warn") }),
-                  el("span", { class: "rule-id", text: rule.id }),
-                ),
-                el("p", { class: "rule-text", text: rule.rule }),
-                // The reading, under the rule rather than beside it: it is a
-                // path or a count often enough that a column would spend the
-                // whole card's width on one of them and wrap the rest.
-                el(
-                  "div",
-                  { class: "rule-found" },
-                  el("span", { class: "eyebrow", text: "found" }),
-                  el("code", { class: "rule-check", text: rule.check }),
-                ),
-              ),
-            ),
-          ),
+          rulesBox,
+          fixNote,
         ),
         el(
           "div",
@@ -5087,6 +5394,7 @@ const RENDER = {
   search: searchView,
   agents: agentsView,
   privacy: privacyView,
+  doctor: doctorView,
   about: aboutView,
   graph: graphView,
   ledger: ledgerView,
