@@ -897,7 +897,7 @@ pub fn register(client: &clients::Client) -> Registration {
 /// Quotes group; a backslash escapes the character after it outside quotes.
 /// `None` for an empty command or an unterminated quote, which is a
 /// documentation error rather than something to guess at.
-fn argv(command: &str) -> Option<(String, Vec<String>)> {
+pub fn argv(command: &str) -> Option<(String, Vec<String>)> {
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut started = false;

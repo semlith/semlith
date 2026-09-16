@@ -644,3 +644,198 @@ fn a_default_install_writes_no_client_configuration() {
         );
     }
 }
+
+// ------------------------------------------- 0.18.0: what setup invokes
+
+/// A directory of fake client CLIs, first on `PATH`, each recording the
+/// arguments it was called with.
+///
+/// Thirteen of the sixteen clients with a registration command cannot be
+/// installed here or in CI — `tests/clients.rs` has said so since it was
+/// written — so this is the check that is available, and it is the one that
+/// matters most anyway: that semlith invokes the command line
+/// `docs/clients.md` documents. A flag renamed in the documentation and not in
+/// the code, or the reverse, fails here rather than on somebody's first
+/// attempt. It does not prove the client accepts that command line, and the
+/// release record says so in those words.
+struct FakeClients {
+    dir: PathBuf,
+    log: PathBuf,
+}
+
+impl FakeClients {
+    fn new(root: &Path, programs: &[String], exit: i32) -> Self {
+        let dir = root.join("fake-bin");
+        let log = root.join("invocations.txt");
+        std::fs::create_dir_all(&dir).unwrap();
+        for program in programs {
+            let path = dir.join(program);
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\nprintf '%s' \"{program}\" >> \"$SEMLITH_FAKE_LOG\"\n\
+                     for a in \"$@\"; do printf ' %s' \"$a\" >> \"$SEMLITH_FAKE_LOG\"; done\n\
+                     printf '\\n' >> \"$SEMLITH_FAKE_LOG\"\nexit {exit}\n"
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Self { dir, log }
+    }
+
+    fn lines(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// The clients semlith registers by running their own CLI, and the exact
+/// command line each one's `sh register` fence gives.
+fn global_registrations() -> Vec<(String, String)> {
+    semlith::clients::clients()
+        .iter()
+        .filter(|client| client.registers_globally())
+        .filter_map(|client| {
+            client.register_command().and_then(|command| {
+                // The documented string is a command line; what the client
+                // is actually run with is its argv, and the two differ
+                // wherever a command quotes an argument — Droid's
+                // `"semlith mcp"` is one argument, not two. Split it the
+                // way semlith splits it rather than comparing the raw text,
+                // and a quoting change in the documentation is still caught
+                // because the split is the thing under test.
+                semlith::setup::argv(&command).map(|(program, args)| {
+                    (
+                        client.name.clone(),
+                        std::iter::once(program)
+                            .chain(args)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+/// Every client that registers globally is invoked exactly once, with the argv
+/// `docs/clients.md` documents.
+#[test]
+fn setup_invokes_each_client_with_the_documented_command_line() {
+    let machine = Machine::new();
+    let expected = global_registrations();
+    assert_eq!(
+        expected.len(),
+        14,
+        "fourteen clients register by their own CLI: {:?}",
+        expected.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+
+    let programs: Vec<String> = expected
+        .iter()
+        .flat_map(|(_, command)| command.split_whitespace().next().map(str::to_string))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let fake = FakeClients::new(&machine.home, &programs, 0);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    command
+        .arg("setup")
+        .args(["--yes", "--airgap"])
+        .env("HOME", &machine.home)
+        .env("SEMLITH_HOME", &machine.store_home)
+        .env("SEMLITH_MODEL_CACHE", &machine.cache)
+        .env("SEMLITH_FAKE_LOG", &fake.log)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                fake.dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+    let run = command.output().expect("setup runs");
+    assert!(
+        run.status.success(),
+        "setup exited {:?}:\n{}{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let invoked = fake.lines();
+    for (client, documented) in &expected {
+        assert!(
+            invoked.iter().any(|line| line == documented),
+            "{client} was not invoked as `{documented}`.\nWhat was invoked:\n{}",
+            invoked.join("\n")
+        );
+        assert_eq!(
+            invoked.iter().filter(|line| *line == documented).count(),
+            1,
+            "{client} was registered more than once"
+        );
+    }
+
+    // And the two whose CLI registers only the directory it is run in are not
+    // invoked at all. Running them is the defect this release exists to end.
+    for name in ["OpenCode", "Kilo Code"] {
+        let client = semlith::clients::clients()
+            .iter()
+            .find(|c| c.name == name)
+            .expect("documented");
+        let program = client
+            .register_command()
+            .and_then(|c| c.split_whitespace().next().map(str::to_string))
+            .expect("has a command");
+        assert!(
+            !invoked.iter().any(|line| line.starts_with(&program)),
+            "{name} registers only the current directory and was invoked anyway"
+        );
+    }
+}
+
+/// A client CLI that refuses does not fail the install, and is told apart from
+/// one that is not installed.
+#[test]
+fn a_client_that_refuses_is_reported_and_the_install_still_succeeds() {
+    let machine = Machine::new();
+    let fake = FakeClients::new(&machine.home, &["claude".to_string()], 1);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    command
+        .arg("setup")
+        .args(["--yes", "--airgap"])
+        .env("HOME", &machine.home)
+        .env("SEMLITH_HOME", &machine.store_home)
+        .env("SEMLITH_MODEL_CACHE", &machine.cache)
+        .env("SEMLITH_FAKE_LOG", &fake.log)
+        .env("PATH", format!("{}:/usr/bin:/bin", fake.dir.display()));
+    let run = command.output().expect("setup runs");
+    assert!(
+        run.status.success(),
+        "a refusing client CLI failed the whole install"
+    );
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        said.contains("would not register") || said.contains("Claude Code"),
+        "the refusal was not reported:\n{said}"
+    );
+    // "absent" and "failed" are different words, and the count of absent
+    // clients is reported rather than folded into the failures.
+    assert!(
+        said.contains("not on this machine"),
+        "the clients that are simply not installed were not named as absent:\n{said}"
+    );
+}
