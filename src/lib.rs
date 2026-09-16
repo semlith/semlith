@@ -17,8 +17,10 @@
 
 pub mod add;
 pub mod chunk;
+pub mod clientfile;
 pub mod clients;
 pub mod daemon;
+pub mod doctor;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
@@ -1471,7 +1473,10 @@ impl Semlith {
         // answered best. A chunk both lists found seeds twice as hard as one
         // only a single list found, which is the same judgement the fusion
         // makes a few lines later.
-        let mut mass: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
+        // Ordered, not hashed. The walk this seeds sums `f32` masses, and a
+        // random iteration order made those sums differ between runs of one
+        // binary over one store — issue #88. `graph::expand` says the rest.
+        let mut mass: std::collections::BTreeMap<u64, f32> = std::collections::BTreeMap::new();
         for list in [dense, keyword] {
             for (rank, id) in list.iter().take(SEEDS).enumerate() {
                 *mass.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
@@ -1485,7 +1490,8 @@ impl Semlith {
         // which chunk's mass is the whole point of a personalised walk. A
         // chunk holding three symbols splits its mass between them rather than
         // seeding each of them as though it were a hit of its own.
-        let mut personal: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        let mut personal: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
         for (id, mass) in &mass {
             let names = store::symbols_in_chunks(&self.db, &[*id])?;
             if names.is_empty() {
