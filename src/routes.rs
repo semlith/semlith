@@ -110,8 +110,15 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (
             _,
             _,
-            "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/rotate" | "/api/mcp"
-            | "/api/upgrade" | "/api/privacy/fix" | "/api/agents/register",
+            "/api/index"
+            | "/api/add"
+            | "/api/forget"
+            | "/api/adopt"
+            | "/api/rotate"
+            | "/api/mcp"
+            | "/api/upgrade"
+            | "/api/privacy/fix"
+            | "/api/agents/register",
         ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
     }

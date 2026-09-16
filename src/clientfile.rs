@@ -158,7 +158,9 @@ pub fn registered_clients() -> Vec<String> {
 /// The name is distinctive enough that a false positive means somebody wrote
 /// "semlith" in their own config, which is the answer anyway.
 fn names_semlith(text: &str) -> bool {
-    text.contains("\"semlith\"") || text.contains("semlith:") || text.contains("[mcp_servers.semlith")
+    text.contains("\"semlith\"")
+        || text.contains("semlith:")
+        || text.contains("[mcp_servers.semlith")
 }
 
 /// The absolute path a `path=` attribute names on this machine, or `None` when
@@ -434,7 +436,11 @@ mod tests {
         let before = "extensions:\n  other:\n    enabled: true\n";
         std::fs::write(&path, before).unwrap();
 
-        let s = stanza("yaml", "extensions:\n  semlith:\n    cmd: semlith\n", "unused");
+        let s = stanza(
+            "yaml",
+            "extensions:\n  semlith:\n    cmd: semlith\n",
+            "unused",
+        );
         assert!(matches!(decide(&s, &path), Action::Refuse { .. }));
         assert!(write_one(&s, &path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);

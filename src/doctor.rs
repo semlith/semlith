@@ -149,11 +149,13 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
         // `chmod` on it would fail after the click. The row says which case it
         // is; only the user's own cache gets either half.
         manual: match (&cache_ok, owned_by_us(&cache)) {
-            (Err(_), true) => Some(Repair::Chmod {
-                path: cache.clone(),
-                to: 0o700,
-            }
-            .manual()),
+            (Err(_), true) => Some(
+                Repair::Chmod {
+                    path: cache.clone(),
+                    to: 0o700,
+                }
+                .manual(),
+            ),
             _ => None,
         },
         repair: match (&cache_ok, owned_by_us(&cache)) {
@@ -301,14 +303,11 @@ pub fn apply_all(stores: &[(String, PathBuf)]) -> Vec<Result<Applied>> {
     // Re-read between repairs rather than collecting the list once: repairing
     // the store home can clear the `directory modes` row on its own, and a list
     // taken up front would then apply a repair to a path already narrowed.
-    loop {
-        let Some(repair) = privacy_findings(stores)
-            .into_iter()
-            .filter(|finding| !finding.ok)
-            .find_map(|finding| finding.repair)
-        else {
-            break;
-        };
+    while let Some(repair) = privacy_findings(stores)
+        .into_iter()
+        .filter(|finding| !finding.ok)
+        .find_map(|finding| finding.repair)
+    {
         let applied = apply(&repair, stores);
         let failed = applied.is_err();
         out.push(applied);
