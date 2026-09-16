@@ -11,7 +11,7 @@ break, and is treated as one.
 
 | Surface | What is promised |
 |---|---|
-| CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `add`, `forget`, `start`, `adopt`, `mcp`, `models`, `languages`, `setup`, `upgrade`, and what each one does. |
+| CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `add`, `forget`, `drop`, `start`, `adopt`, `mcp`, `models`, `languages`, `ledger`, `symbol`, `neighbors`, `path`, `setup`, `upgrade`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
 | Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. From 0.15.0, `SEMLITH_LEDGER` — `0`, `off` or `false` stops the ledger recording anything on this machine. |
 | CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
@@ -586,6 +586,33 @@ an editor starts working.
 **No store format change.** `FORMAT_VERSION` does not move, no table and no
 column is added, and a store written by 0.17.1 and a store written by 0.17.0 are
 byte-compatible in both directions.
+
+## 0.17.2
+
+**Nothing a user drives changes.** No command, no flag, no MCP tool, no schema,
+no store format. `FORMAT_VERSION` does not move, and a store written by 0.17.1
+and one written by 0.17.2 are byte-compatible in both directions.
+
+**The client configuration stanzas move from `README.md` to `docs/clients.md`.**
+This is a contract for exactly one kind of reader: a packager or a fork that
+patched the README's client section moves that patch to the new file. The
+stanzas themselves are unchanged — the same bytes, at the same heading levels,
+because `src/clients.rs` parses those headings — and `GET /api/agents` returns
+the same twenty-seven clients in the same three groups. `src/clients.rs`'s
+`include_str!` names the new path, so the file is part of the published crate;
+a build that excluded it would not compile.
+
+**The portal's Graph page draws `contains` and `aliases` edges.** It fetched
+both from `/api/graph` and dropped them before painting, so the canvas showed
+four of the six kinds the store holds while the hover card counted all six. Both
+kinds now have a filter chip, and the caller and callee counts are taken over
+what is drawn. Nothing about the stored graph changes; this is the renderer
+catching up with it.
+
+**A rotated agent key is documented as lasting fifteen minutes.** That is what
+`http::KEY_GRACE` has been since 0.14.0. Four places in the repository still said
+"until this daemon exits", including the message the portal prints after a
+rotation. The behaviour is unchanged and the sentences now match it.
 
 ## What a break would look like
 

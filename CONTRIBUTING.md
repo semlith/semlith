@@ -26,14 +26,21 @@ a few minutes. Later builds are fast.
 
 ## The checks that must pass
 
-CI runs exactly these on Linux and macOS. Run them before opening a pull
-request and there will be no surprises:
+CI runs exactly these on Linux, macOS and Windows. Run them before opening a
+pull request and there will be no surprises:
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+Two more jobs run beside them and need nothing from you until they fail. `msrv`
+builds the crate on the Rust version `Cargo.toml` declares, so a newer
+language feature that compiles on your toolchain and not on the declared floor
+fails there rather than on a user's machine. `scripts` shellchecks `install.sh`
+and lints `install.ps1`, because the install scripts are the front door and
+nothing else compiles them.
 
 There is one more test that CI does not run, because it downloads a ~52 MB
 embedding model:

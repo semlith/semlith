@@ -1356,13 +1356,6 @@ function graphCanvas(options) {
         };
       });
       edges = data.edges || [];
-      load = nodes.map(() => 1);
-      for (const edge of edges) {
-        if (nodes[edge.from]) nodes[edge.from].callees += 1;
-        if (nodes[edge.to]) nodes[edge.to].callers += 1;
-        if (load[edge.from] !== undefined) load[edge.from] += 1;
-        if (load[edge.to] !== undefined) load[edge.to] += 1;
-      }
       selected = null;
       near = new Set();
       hovered = null;
@@ -1380,6 +1373,20 @@ function graphCanvas(options) {
     /** Draw only the edge kinds asked for. Returns how many are drawn. */
     filter(kinds) {
       drawn = !kinds || !kinds.size ? edges : edges.filter((e) => kinds.has(e.kind));
+      // Counted over what is drawn rather than over what was fetched: a hover
+      // card that says "3 in" beside one line on the canvas is describing a
+      // graph the reader cannot see, and the reader believes the card.
+      load = nodes.map(() => 1);
+      for (const node of nodes) {
+        node.callers = 0;
+        node.callees = 0;
+      }
+      for (const edge of drawn) {
+        if (nodes[edge.from]) nodes[edge.from].callees += 1;
+        if (nodes[edge.to]) nodes[edge.to].callers += 1;
+        if (load[edge.from] !== undefined) load[edge.from] += 1;
+        if (load[edge.to] !== undefined) load[edge.to] += 1;
+      }
       if (selected !== null) selectAt(selected);
       // Fewer edges is a different layout, so the springs get another go at it.
       reheat(0.25);
@@ -1422,7 +1429,11 @@ function graphCanvas(options) {
   };
 }
 
-const EDGE_KINDS = ["calls", "imports", "defines", "references"];
+// Every kind `graph::KINDS` stores. A kind missing here is fetched from
+// /api/graph and thrown away before painting, which is what `contains` and
+// `aliases` were until 0.17.2 - the rail counted them and the canvas did not
+// draw them. `tests/portal.rs` asserts this list against the Rust one.
+const EDGE_KINDS = ["defines", "calls", "imports", "references", "contains", "aliases"];
 
 async function graphView() {
   await refreshStores();
@@ -4293,7 +4304,7 @@ async function agentsView() {
             }: ${carried.join(", ")}.`
           : "No configuration file on this machine carried the old key.";
         keyNote.textContent = done.previous_valid
-          ? `New key. ${rewrote} The previous one keeps working until this daemon exits, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
+          ? `New key. ${rewrote} The previous one keeps working for fifteen minutes, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
           : `New key. ${rewrote} The previous one is refused now; any client configured elsewhere needs the new stanza.`;
       } catch (e) {
         keyNote.className = "note bad";

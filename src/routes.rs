@@ -803,8 +803,8 @@ fn privacy(state: &Arc<State>) -> Response {
         // printed URL, and once more in the body of the rotate response — it is
         // in no other response, and it is in no cookie at all.
         "token_preview": preview(&state.server.token()),
-        // How long a rotated agent key still works, if one still does. Shown
-        // as a countdown rather than as "until this daemon exits", which on a
+        // How long a rotated agent key still works, if one still does. A
+        // number of seconds rather than "until this daemon exits", which on a
         // machine somebody leaves running is not a grace period at all.
         "key_grace_seconds": state.server.key_grace().map(|left| left.as_secs()),
         "host_allowed": ["localhost", "127.0.0.1", "::1"],
@@ -1793,10 +1793,10 @@ fn new_session() -> String {
 
 /// Rotate the agent key, or take up one another process has just written.
 ///
-/// The previous key stays valid until this daemon exits unless `now` is set,
-/// so a client mid-session finishes its work rather than failing on the call
-/// it happened to be making. It is not persisted: a restart is where the old
-/// key stops, which is the same moment every client had to be told anyway.
+/// Unless `now` is set, the previous key stays valid for the grace window in
+/// `http::KEY_GRACE` and no longer, so a client mid-session finishes its work
+/// rather than failing on the call it happened to be making. It is not
+/// persisted either, so a restart inside the window also ends it.
 fn key(state: &Arc<State>, request: &Request) -> Response {
     let body = match request.json() {
         Ok(b) => b,

@@ -616,3 +616,32 @@ fn the_search_route_applies_the_offset_it_validates() {
         "offset=1 did not skip the first hit: {paged}"
     );
 }
+
+/// The canvas draws every kind the store holds.
+///
+/// `EDGE_KINDS` in `app.js` is the filter the Graph page applies on every load,
+/// so a kind missing from it is fetched from `/api/graph` and dropped before
+/// painting — which `contains` and `aliases` were for two releases, while the
+/// rail went on counting them. The two lists are in different languages and
+/// cannot share a constant, so this is what keeps them from drifting again.
+#[test]
+fn the_graph_page_draws_every_edge_kind_the_store_stores() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+
+    let line = APP_JS
+        .lines()
+        .find(|line| line.starts_with("const EDGE_KINDS = "))
+        .expect("app.js declares EDGE_KINDS on one line");
+    let mut drawn: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+    drawn.sort_unstable();
+
+    let mut stored: Vec<&str> = semlith::graph::KINDS.to_vec();
+    stored.sort_unstable();
+
+    assert_eq!(
+        drawn, stored,
+        "the Graph page's edge kinds and graph::KINDS disagree; a kind in one \
+         and not the other is either an edge nothing draws or a chip that \
+         filters nothing"
+    );
+}
