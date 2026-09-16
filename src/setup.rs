@@ -351,11 +351,46 @@ fn step_path(yes: bool) -> Result<Step> {
     };
 
     let existing = std::fs::read_to_string(&rc).unwrap_or_default();
+
+    // A block that is already there is replaced when it is not the block this
+    // version writes, rather than left because something with the right fences
+    // exists. Until 0.18.0 this returned here on sight of `BEGIN`, so a user
+    // upgrading kept whatever an older version had written for ever — and what
+    // 0.17.3 wrote was an export of `SEMLITH_AGENT_KEY`, a credential placed in
+    // the environment of every process they start, which nothing reads any more.
+    //
+    // Found by the clean-container check between the tag and the publish, on a
+    // release whose whole subject is that no file semlith writes carries the key.
     if existing.contains(BEGIN) {
+        let wanted = path_line(&bin)?;
+        let current = block_body(&existing);
+        if current.as_deref() == Some(wanted.as_str()) {
+            return Ok(Step {
+                name: "path",
+                state: State::AlreadyDone,
+                detail: format!("{} already has the semlith block", rc.display()),
+            });
+        }
+        let dropped_key = current
+            .as_deref()
+            .is_some_and(|body| body.contains(KEY_ENV));
+        replace_block(&rc, &existing, &wanted)?;
         return Ok(Step {
             name: "path",
-            state: State::AlreadyDone,
-            detail: format!("{} already has the semlith block", rc.display()),
+            state: State::Done,
+            detail: if dropped_key {
+                format!(
+                    "{} — replaced the block an older version wrote, which exported {KEY_ENV}. \
+                     Nothing reads it now: a registered client launches `semlith mcp`, which reads \
+                     the key from the file itself. Open a new shell to be rid of it.",
+                    rc.display()
+                )
+            } else {
+                format!(
+                    "{} — replaced the block an older version wrote",
+                    rc.display()
+                )
+            },
         });
     }
 
@@ -404,6 +439,40 @@ fn step_path(yes: bool) -> Result<Step> {
 }
 
 /// fish is not POSIX and `export` is a syntax error in it.
+/// What sits between the fences, or `None` when the file has no closing one.
+///
+/// Trimmed of the newlines the fences are written with, so it compares equal to
+/// what [`path_line`] returns.
+fn block_body(text: &str) -> Option<String> {
+    let start = text.find(BEGIN)? + BEGIN.len();
+    let end = text[start..].find(END)? + start;
+    Some(text[start..end].trim_matches('\n').to_string())
+}
+
+/// Replace what is between the fences, leaving every byte outside them alone.
+///
+/// Through a neighbouring temporary file and a rename: a half-written rc file
+/// is a shell that will not start, and this is somebody's login shell.
+fn replace_block(rc: &Path, existing: &str, line: &str) -> Result<()> {
+    let start = existing
+        .find(BEGIN)
+        .context("the block's opening fence went missing between reading and writing")?;
+    let end = existing[start..]
+        .find(END)
+        .map(|at| start + at + END.len())
+        .context("the semlith block has an opening fence and no closing one; fix it by hand")?;
+    let next = format!(
+        "{}{BEGIN}\n{line}\n{END}{}",
+        &existing[..start],
+        &existing[end..]
+    );
+
+    let temp = rc.with_extension("semlith-tmp");
+    std::fs::write(&temp, &next).with_context(|| format!("writing {}", temp.display()))?;
+    std::fs::rename(&temp, rc).with_context(|| format!("replacing {}", rc.display()))?;
+    Ok(())
+}
+
 fn path_line(bin: &Path) -> Result<String> {
     let path = bin.display().to_string();
     // A newline would end the line and start another one, which is a second
@@ -423,32 +492,24 @@ fn path_line(bin: &Path) -> Result<String> {
     let is_fish = std::env::var("SHELL")
         .map(|s| s.ends_with("fish"))
         .unwrap_or(false);
-    let key = home::agent_key_path()?.display().to_string();
-    if key.contains('\n') || key.contains('\r') || key.contains('\0') {
-        bail!(
-            "the agent key path contains a newline, so it cannot be written into a shell startup file"
-        );
-    }
 
-    // Two lines: the bin directory on PATH, and the agent key in the
-    // environment. The key is exported by *reading the file* at shell start
-    // rather than by being written into this file, so the credential lives in
-    // one place with one set of permissions, and rotating it needs nothing
-    // rewritten — every client stanza names the variable.
+    // One line: the bin directory on `PATH`.
+    //
+    // There used to be a second, exporting `SEMLITH_AGENT_KEY` by reading the
+    // key file at every shell start, because every client stanza named the
+    // variable. From 0.18.0 none of them does — a registration semlith writes
+    // launches `semlith mcp`, which reads the key out of the file itself — so
+    // the export is a credential placed in the environment of every process the
+    // user starts, in exchange for nothing. A user who pastes one of the HTTP
+    // stanzas by hand can export it themselves, and `docs/clients.md` says so.
+    //
+    // A block written by an earlier version still holds the export. `step_path`
+    // replaces the whole block between its fences on every run, so running
+    // `semlith setup` once removes it.
     Ok(if is_fish {
-        format!(
-            "set -gx PATH {} $PATH\n\
-             test -r {key_q}; and set -gx {KEY_ENV} (cat {key_q})",
-            fish_quote(&path),
-            key_q = fish_quote(&key),
-        )
+        format!("set -gx PATH {} $PATH", fish_quote(&path))
     } else {
-        format!(
-            "export PATH={}:$PATH\n\
-             [ -r {key_q} ] && export {KEY_ENV}=\"$(cat {key_q})\"",
-            posix_quote(&path),
-            key_q = posix_quote(&key),
-        )
+        format!("export PATH={}:$PATH", posix_quote(&path))
     })
 }
 

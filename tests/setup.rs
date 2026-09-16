@@ -405,12 +405,16 @@ fn the_key_never_reaches_a_command_line_or_a_config_file() {
     let out = m.setup(&["--yes", "--airgap"]);
     assert!(out.status.success(), "{}", Machine::said(&out));
 
-    // The rc block exports the key by reading the file, rather than carrying a
-    // copy of it. One credential, one file, one set of permissions.
+    // The rc block carries no credential at all from 0.18.0. It used to export
+    // the key by reading the file at every shell start, which was better than
+    // carrying a copy — but every client stanza named that variable then, and
+    // none does now: a registration semlith writes launches `semlith mcp`,
+    // which reads the key itself. `the_path_block_exports_no_credential`
+    // asserts the block's contents; this one asserts no key value anywhere.
     let rc = std::fs::read_to_string(m.home.join(".zshrc")).expect("the rc file");
     assert!(
-        rc.contains("SEMLITH_AGENT_KEY") && rc.contains("agent.key"),
-        "the rc block does not export the key from its file:\n{rc}"
+        !rc.contains("SEMLITH_AGENT_KEY"),
+        "the rc block still exports the key:\n{rc}"
     );
     assert!(
         !rc.contains("sml_"),
@@ -848,4 +852,80 @@ fn a_client_that_refuses_is_reported_and_the_install_still_succeeds() {
         said.contains("not on this machine"),
         "the clients that are simply not installed were not named as absent:\n{said}"
     );
+}
+
+/// The shell startup block carries `PATH` and nothing else.
+///
+/// It used to carry a second line exporting `SEMLITH_AGENT_KEY`, read out of
+/// the key file at every shell start, because every client stanza named that
+/// variable. From 0.18.0 none of them does: a registration semlith writes
+/// launches `semlith mcp`, which reads the key itself. The export then puts a
+/// credential into the environment of every process the user starts in exchange
+/// for nothing.
+///
+/// This was found by the clean-container check between the tag and the publish,
+/// which is what that check is for.
+#[test]
+fn the_path_block_exports_no_credential() {
+    let machine = Machine::new();
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(run.status.success());
+
+    let rc = std::fs::read_to_string(machine.home.join(".zshrc")).unwrap();
+    assert!(rc.contains(BEGIN), "setup wrote no block at all:\n{rc}");
+    assert!(
+        rc.contains(".semlith/bin"),
+        "the block no longer puts the bin directory on PATH:\n{rc}"
+    );
+    assert!(
+        !rc.contains("SEMLITH_AGENT_KEY"),
+        "the block still exports the agent key:\n{rc}"
+    );
+    assert!(
+        !rc.contains("agent.key"),
+        "the block still reads the key file:\n{rc}"
+    );
+}
+
+/// A block written by an earlier version has its export removed.
+///
+/// `step_path` replaces everything between its own fences on every run, so one
+/// `semlith setup` is the repair. Asserted rather than assumed, because a user
+/// upgrading from 0.17.3 is the case that matters: they already have the export,
+/// and nothing else is going to take it out.
+#[test]
+fn an_older_blocks_key_export_is_removed_by_a_later_setup() {
+    let machine = Machine::new();
+    let rc = machine.home.join(".zshrc");
+    let key = machine.store_home.join("agent.key");
+    std::fs::write(
+        &rc,
+        format!(
+            "# a shell rc somebody already owns\n\
+             {BEGIN}\n\
+             export PATH='{}':$PATH\n\
+             [ -r '{}' ] && export SEMLITH_AGENT_KEY=\"$(cat '{}')\"\n\
+             # <<< semlith <<<\n\
+             # something the user put after it\n",
+            machine.home.join(".semlith/bin").display(),
+            key.display(),
+            key.display(),
+        ),
+    )
+    .unwrap();
+
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(run.status.success());
+
+    let after = std::fs::read_to_string(&rc).unwrap();
+    assert!(
+        !after.contains("SEMLITH_AGENT_KEY"),
+        "the stale export survived a setup run:\n{after}"
+    );
+    assert!(
+        after.contains("# a shell rc somebody already owns")
+            && after.contains("# something the user put after it"),
+        "replacing the block ate what was around it:\n{after}"
+    );
+    assert!(after.contains(".semlith/bin"), "PATH was lost:\n{after}");
 }
