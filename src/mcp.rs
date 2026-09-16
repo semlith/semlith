@@ -422,7 +422,7 @@ fn tool_defs(open: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol name." },
+                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol." },
                     "store": { "type": "array" }
                 },
                 "required": ["target"]
@@ -1704,9 +1704,14 @@ mod tests {
                 )
             })
             .collect();
+        // 3 996, not 4 000. `tests/retrieval.rs` is the gate that decides and
+        // it fails at `bytes.div_ceil(4) >= 1_000`, which 3 997 bytes reaches —
+        // so a proxy set at 4 000 passes a list the criterion rejects, and did,
+        // eight minutes into a run that has to index a corpus before it says
+        // so. The two numbers now mean the same thing.
         assert!(
-            size < 4_000,
-            "tools/list is {size} bytes: {}",
+            size <= 3_996,
+            "tools/list is {size} bytes, over the 3 996 the 1 000-token gate allows: {}",
             each.join(" ")
         );
     }
