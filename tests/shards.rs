@@ -252,7 +252,13 @@ fn shard_files(store: &Path) -> Vec<std::path::PathBuf> {
 #[ignore = "embeds a corpus twice; downloads the model on first run"]
 fn one_corpus_indexed_twice_produces_one_index() {
     let dir = tempfile::tempdir().unwrap();
-    corpus(dir.path(), 700);
+    // The corpus and the stores are siblings, not nested. A store written
+    // inside the corpus is a store the next run indexes, and the two runs then
+    // have different corpora — which is a difference this test would report as
+    // the defect it is looking for.
+    let corpus_dir = dir.path().join("corpus");
+    fs::create_dir_all(&corpus_dir).unwrap();
+    corpus(&corpus_dir, 700);
 
     let mut hashes = Vec::new();
     for run in 0..2 {
@@ -261,7 +267,7 @@ fn one_corpus_indexed_twice_produces_one_index() {
             .arg("--store")
             .arg(&store)
             .arg("index")
-            .arg(dir.path())
+            .arg(&corpus_dir)
             .arg("--quiet")
             .env("SEMLITH_SHARD_VECTORS", SHARD_VECTORS)
             // Pinned for the same reason `tests/measure.rs` pins it: ONNX
