@@ -1075,11 +1075,11 @@ fn the_privacy_route_reports_what_this_process_actually_does() {
 
 // ---------------------------------------------------------------- T11
 
-/// The Agents view's stanzas come from the README, which is the same text
-/// `tests/clients.rs` executes. A stanza retyped anywhere else would be right
-/// until somebody edited one of the two copies.
+/// The Agents view's stanzas come from `docs/clients.md`, which is the same
+/// text `tests/clients.rs` executes. A stanza retyped anywhere else would be
+/// right until somebody edited one of the two copies.
 #[test]
-fn the_agents_route_serves_the_readme_stanzas_verbatim() {
+fn the_agents_route_serves_the_documented_stanzas_verbatim() {
     let daemon = Daemon::start("agents", &[]);
     let agents = daemon.get("/api/agents").json();
 
@@ -1091,11 +1091,12 @@ fn the_agents_route_serves_the_readme_stanzas_verbatim() {
     let stanza = clients[0]["stanzas"][2]["text"].as_str().expect("a stanza");
     assert_eq!(stanza.trim(), "claude mcp add semlith -- semlith mcp");
 
-    let readme = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md"))
-        .expect("the README is beside the crate");
+    let doc =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/clients.md"))
+            .expect("docs/clients.md is beside the crate");
     assert!(
-        readme.contains(stanza.trim()),
-        "the route serves a stanza the README does not contain: {stanza}"
+        doc.contains(stanza.trim()),
+        "the route serves a stanza docs/clients.md does not contain: {stanza}"
     );
 
     for client in clients {
