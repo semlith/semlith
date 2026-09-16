@@ -16,6 +16,7 @@ break, and is treated as one.
 | Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. From 0.15.0, `SEMLITH_LEDGER` — `0`, `off` or `false` stops the ledger recording anything on this machine. |
 | CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
 | CLI commands added in 0.14.0 | `trust <dir>` and `trust --list`, and `index --include-secrets`. |
+| CLI commands added in 0.18.0 | `doctor`, with `--json` and `--fix`, and `setup --register-all`. |
 | CLI commands added in 0.16.0 | `read <target>` — `path:start-end`, `path:line` or a symbol name — and `pattern <query> --lang <name>`. `search` gains `--prefer code\|docs\|any`, defaulting to `any`. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
@@ -613,6 +614,80 @@ catching up with it.
 `http::KEY_GRACE` has been since 0.14.0. Four places in the repository still said
 "until this daemon exits", including the message the portal prints after a
 rotation. The behaviour is unchanged and the sentences now match it.
+
+## 0.18.0
+
+**`semlith setup` registers agent clients, and `--yes` registers them too.**
+Until 0.18.0 it registered exactly one client, Claude Code, and `--yes` skipped
+the agents step entirely. It now runs the registration command of every client
+that documents one, at the scope that client spells "every project", and `--yes`
+does the same. `semlith setup --yes` remains what a script runs unattended, and
+it still writes no file semlith does not own — that is `--register-all`, which
+lists every path and asks before writing any of them.
+
+**Every registration semlith writes is the stdio form.** A registered client
+launches `semlith mcp` rather than holding `http://127.0.0.1:7365/mcp` and an
+`Authorization` header. Three things follow, and they are the release. No
+configuration file semlith writes carries the agent key or names
+`${SEMLITH_AGENT_KEY}`. A key rotation reconfigures nothing, because the key is
+read from `~/.semlith/agent.key` by the `semlith mcp` process rather than
+expanded from the environment by the client — `semlith key rotate` no longer
+re-registers anything, and says so. And the shell startup block that exported
+`SEMLITH_AGENT_KEY` is no longer what makes a client work.
+
+`SEMLITH_AGENT_KEY` stays on the covered list and the HTTP endpoint is not
+withdrawn: a daemon on another machine still needs a header, `docs/clients.md`
+still documents the HTTP stanzas, and a user who pastes one exports the variable
+themselves. What changed is that nothing semlith writes depends on it.
+
+**An existing semlith registration is replaced, not added beside.** For the ten
+clients that document a remove verb, `semlith setup` runs it before the add, at
+every scope that client has. Claude Code's `local` scope is included
+deliberately: an entry under `projects."…".mcpServers` in `~/.claude.json` is
+what made semlith invisible from every directory but one, and it is removed.
+
+**Two clients are no longer registered by their own CLI.** `opencode mcp add`
+on 1.18.11 and `kilo mcp add` have no flag that means every project, so running
+them would register the directory the user was standing in. They are registered
+by writing their user-level configuration file under `--register-all` instead.
+Three others — Crush, Zed and Roo Code — document no user-level path at all and
+semlith registers them nowhere; `semlith doctor` names all three with the reason.
+
+**`semlith doctor` is added**, with `--json` and `--fix`. It reports, per client,
+whether it is installed, whether semlith is registered, at what scope, and what
+to run otherwise, plus the four Privacy rules that are readings of this machine.
+It exits non-zero when something is not as it should be, which is a contract a
+script can gate on; a client that is simply not installed is not a fault.
+
+**The Privacy page gains a manual step on every failing rule and a button where
+a repair qualifies.** `POST /api/privacy/fix` and `POST /api/agents/register` are
+new routes, and `GET /api/doctor` is the Doctor page's. A repair narrows access,
+is idempotent, touches only a path semlith owns, and is confirmed by re-running
+the rule's own check. `private addresses` has no button and cannot: the variable
+is in the environment the daemon inherited.
+
+**`GET /api/setup`'s `claude_registered` is replaced by `registered_clients`.**
+The old field was a tri-state about one client, answered by spawning
+`claude mcp list`. The new one is a list of the clients whose own configuration
+file names semlith, read from disk, because asking sixteen client CLIs on a route
+the portal calls on every load is sixteen processes per page load.
+
+**An index is now a function of its corpus.** Indexing one corpus twice used to
+produce two different sets of vectors, because the checkpoint that makes a run
+durable was timed rather than counted and split an embedding batch at a
+different point each time. It counts files now, and `SEMLITH_CHECKPOINT_SECS` is
+`SEMLITH_CHECKPOINT_FILES`. Neither was ever on the covered list — the variable
+exists so a test need not wait thirty seconds — but a store built by 0.18.0 will
+not be byte-identical to one built by 0.17.3 from the same corpus, and two built
+by 0.18.0 will be. Nothing needs re-indexing: an existing store is read exactly
+as before.
+
+**Nothing else about the store changes.** `FORMAT_VERSION` does not move, and a
+store written by 0.17.3 and one written by 0.18.0 are byte-compatible in both
+directions. `tests/retrieval.rs` changed what it indexes — a snapshot of `src`,
+`tests`, `docs` and `AGENTS.md` rather than the repository root — which moves
+every number that harness reports; it is a test, not a surface, and the reason is
+issue #88.
 
 ## What a break would look like
 

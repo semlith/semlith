@@ -76,6 +76,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/ledger") => ledger(state),
         (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
+        (true, _, "/api/doctor") => doctor(state),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/add") => add(state, request),
@@ -92,6 +93,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/endpoint") => endpoint(state, request),
         (_, true, "/api/key") => key(state, request),
         (_, true, "/api/setup") => fix_setup(request),
+        (_, true, "/api/privacy/fix") => privacy_fix(state, request),
+        (_, true, "/api/agents/register") => register_clients(state, request),
         (_, true, "/api/root") => root(state, request),
         (_, true, "/api/store/delete") => delete_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
@@ -107,8 +110,15 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (
             _,
             _,
-            "/api/index" | "/api/add" | "/api/forget" | "/api/adopt" | "/api/rotate" | "/api/mcp"
-            | "/api/upgrade",
+            "/api/index"
+            | "/api/add"
+            | "/api/forget"
+            | "/api/adopt"
+            | "/api/rotate"
+            | "/api/mcp"
+            | "/api/upgrade"
+            | "/api/privacy/fix"
+            | "/api/agents/register",
         ) => Response::error(405, "wrong method for this route"),
         _ => Response::error(404, "no such route"),
     }
@@ -827,37 +837,20 @@ fn privacy(state: &Arc<State>) -> Response {
 /// any handler runs — report what the code does rather than a reading, and say
 /// so in `check`.
 fn rules(state: &Arc<State>) -> Value {
-    // Not defaulted. A daemon that is serving this page resolved a home to open
-    // its stores from, so the error arm is all but unreachable — and if it ever
-    // is reached, a row saying the home did not resolve is the honest answer,
-    // not a row about a path semlith invented (#73).
-    let home_dir = home::home_or_error();
-    let cache = crate::model_cache_dir().unwrap_or_default();
-    let key_path = home::agent_key_path().unwrap_or_default();
     let registry = home::Registry::load().unwrap_or_default();
 
-    let store_modes: Vec<String> = state
-        .stores()
-        .iter()
-        .filter_map(|s| home::loose_mode(&s.dir).map(|m| format!("{} is {m:o}", s.name)))
-        .collect();
-
-    // Annotated: on Windows both arms of this are `None`, and `None` on its own
-    // tells the compiler nothing — the comparisons below then have two `PartialEq`
-    // impls to choose between, one of them serde_json's. A Windows-only type
-    // error, which is exactly the kind the matrix exists to find.
-    let key_mode: Option<u32> = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::metadata(&key_path)
-                .map(|m| m.permissions().mode() & 0o777)
-                .ok()
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
+    // The four rules that are readings of this machine live in `doctor`, with
+    // the repairs that apply to them, so the page and `semlith doctor --fix`
+    // cannot disagree about what is wrong or about what would fix it. The six
+    // below are statements about the code — enforced in `http::answer` before
+    // any handler runs — so they carry no measurement, no manual step and no
+    // button.
+    let measured = crate::doctor::privacy_findings(&open_stores(state));
+    let measured = |id: &str| {
+        measured
+            .iter()
+            .find(|finding| finding.id == id)
+            .expect("every measured rule is reported")
     };
 
     json!([
@@ -902,57 +895,161 @@ fn rules(state: &Arc<State>) -> Value {
             ),
             "ok": true,
         },
-        {
-            "id": "private addresses",
-            "rule": "semlith add resolves every hop and refuses an address that is not                      on the public internet: loopback, RFC 1918, link-local,                      carrier-grade NAT, unique local.",
-            "check": if std::env::var_os(crate::add::ALLOW_PRIVATE_ENV).is_some() {
-                format!("{} is set, so private addresses are allowed", crate::add::ALLOW_PRIVATE_ENV)
-            } else {
-                "on".to_string()
-            },
-            "ok": std::env::var_os(crate::add::ALLOW_PRIVATE_ENV).is_none(),
-        },
+        row(
+            "private addresses",
+            "semlith add resolves every hop and refuses an address that is not                  on the public internet: loopback, RFC 1918, link-local,                  carrier-grade NAT, unique local.",
+            measured("private addresses"),
+        ),
         {
             "id": "pinned models",
             "rule": "Every model file is fetched at a pinned commit and verified against a                      digest recorded in the source and in docs/models.md. The weights are                      what computes every vector in every store.",
             "check": format!("granite at {}", &crate::embed::GRANITE_REVISION[..12]),
             "ok": true,
         },
-        {
-            "id": "model cache",
-            "rule": "Weights are not loaded from a cache another account owns or can write                      to.",
-            "check": match crate::embed::check_cache_dir(&cache) {
-                Ok(()) => format!("{} is yours alone", cache.display()),
-                Err(e) => e.to_string(),
-            },
-            "ok": crate::embed::check_cache_dir(&cache).is_ok(),
-        },
-        {
-            "id": "directory modes",
-            "rule": "The store home, every store, the model cache and daemon.json are                      readable by their owner and nobody else.",
-            "check": match (&home_dir, store_modes.is_empty()) {
-                (Err(e), _) => e.to_string(),
-                (Ok(dir), true) => match home::loose_mode(dir) {
-                    Some(mode) => format!("{} is {mode:o}", dir.display()),
-                    None => format!("{} and every open store are 0700", dir.display()),
-                },
-                (Ok(_), false) => store_modes.join(", "),
-            },
-            "ok": home_dir
-                .as_ref()
-                .is_ok_and(|dir| store_modes.is_empty() && home::loose_mode(dir).is_none()),
-        },
-        {
-            "id": "agent key",
-            "rule": "The key is in one file, readable by you alone. No client                      configuration carries it and no command line shows it: every stanza                      names ${SEMLITH_AGENT_KEY}.",
-            "check": match key_mode {
-                Some(mode) if mode & 0o077 == 0 => format!("{} is {mode:o}", key_path.display()),
-                Some(mode) => format!("{} is {mode:o}", key_path.display()),
-                None => format!("{} has no mode to read", key_path.display()),
-            },
-            "ok": key_mode.is_none_or(|mode| mode & 0o077 == 0),
-        },
+        row(
+            "model cache",
+            "Weights are not loaded from a cache another account owns or can write                  to.",
+            measured("model cache"),
+        ),
+        row(
+            "directory modes",
+            "The store home, every store, the model cache and daemon.json are                  readable by their owner and nobody else.",
+            measured("directory modes"),
+        ),
+        row(
+            "agent key",
+            "The key is in one file, readable by you alone. No registration semlith                  writes carries it and no command line shows it: a client launches                  `semlith mcp`, which reads the key from that file itself.",
+            measured("agent key"),
+        ),
     ])
+}
+
+/// Every store the daemon has open, as `doctor` takes them.
+///
+/// The repairs apply to the stores this page is reporting on, so the list is
+/// passed in rather than re-derived: a second assembly of it here is a second
+/// answer to which stores are open.
+fn open_stores(state: &Arc<State>) -> Vec<(String, std::path::PathBuf)> {
+    state
+        .stores()
+        .iter()
+        .map(|s| (s.name.clone(), s.dir.clone()))
+        .collect()
+}
+
+/// One measured rule as the page renders it.
+///
+/// `manual` and `repair` are what 0.18.0 added: the command a user would type,
+/// on every failing row, and the repair the daemon would apply where one
+/// qualifies. A row with `manual` and no `repair` is a rule a person can fix
+/// and a process cannot, which is a state the page has to be able to show.
+fn row(id: &str, rule: &str, finding: &crate::doctor::Finding) -> Value {
+    json!({
+        "id": id,
+        "rule": rule,
+        "check": finding.check,
+        "ok": finding.ok,
+        "applicable": finding.applicable,
+        "manual": finding.manual,
+        "repair": finding.repair,
+    })
+}
+
+/// `semlith doctor`, as a route.
+///
+/// The same two functions the CLI calls, so the page and the terminal cannot
+/// disagree about whether a client is registered or a rule holds. The portal
+/// parity rule is why this exists at all: `semlith doctor` is a command, so it
+/// has a view in the release that adds it.
+fn doctor(state: &Arc<State>) -> Response {
+    Response::json(&json!({
+        "clients": crate::doctor::clients_report(),
+        "rules": crate::doctor::privacy_findings(&open_stores(state)),
+        "unregisterable": crate::clients::UNREGISTERABLE,
+    }))
+}
+
+/// Apply one Privacy repair, or every one that qualifies.
+///
+/// Calls `doctor::apply`, which is what `semlith doctor --fix` calls. The
+/// button does not have a repair of its own and cannot have one: a second
+/// implementation here is a second answer to what "safe" means, on the page
+/// whose whole subject is that question.
+///
+/// The response carries the rules re-read afterwards, so the page redraws from
+/// a measurement rather than assuming the click worked.
+fn privacy_fix(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let stores = open_stores(state);
+    let applied: Vec<Value> = match body.get("rule").and_then(Value::as_str) {
+        Some(id) => {
+            let Some(repair) = crate::doctor::privacy_findings(&stores)
+                .into_iter()
+                .find(|finding| finding.id == id)
+                .and_then(|finding| finding.repair)
+            else {
+                return Response::error(400, &format!("{id} has no repair semlith can apply"));
+            };
+            match crate::doctor::apply(&repair, &stores) {
+                Ok(a) => vec![json!(a)],
+                Err(e) => return Response::error(400, &e.to_string()),
+            }
+        }
+        None => crate::doctor::apply_all(&stores)
+            .into_iter()
+            .map(|r| match r {
+                Ok(a) => json!(a),
+                Err(e) => json!({ "error": e.to_string() }),
+            })
+            .collect(),
+    };
+    Response::json(&json!({
+        "applied": applied,
+        "rules": rules(state),
+    }))
+}
+
+/// Write the configuration file of every client semlith cannot ask to register
+/// itself — the portal's half of `semlith setup --register-all`.
+///
+/// Two calls, deliberately. Without a body it returns the plan: every path and
+/// what would happen to it, which is what the page shows before it asks. With
+/// `{"confirm": true}` it applies that plan. This is the one place the daemon
+/// writes a file it does not own, and a user who has not seen the list has not
+/// agreed to it.
+fn register_clients(state: &Arc<State>, request: &Request) -> Response {
+    let _ = state;
+    let body = request.json().unwrap_or(json!({}));
+    let writable: Vec<&crate::clients::Client> = crate::clients::clients()
+        .iter()
+        .filter(|client| client.needs_a_file_written())
+        .collect();
+    let plans = crate::clientfile::plan(&writable);
+
+    if body.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Response::json(&json!({ "plan": plans, "confirmed": false }));
+    }
+
+    let stanzas: Vec<(&str, &crate::clients::Stanza)> = writable
+        .iter()
+        .flat_map(|client| {
+            client
+                .config_files()
+                .map(move |stanza| (client.name.as_str(), stanza))
+        })
+        .collect();
+    match crate::clientfile::apply(&plans, &stanzas) {
+        Ok(written) => Response::json(&json!({
+            "plan": plans,
+            "confirmed": true,
+            "written": written,
+            "clients": crate::doctor::clients_report(),
+        })),
+        Err(e) => Response::error(500, &e.to_string()),
+    }
 }
 
 /// A path for a status field, or the reason there is not one.

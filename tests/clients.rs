@@ -78,7 +78,7 @@ fn every_promised_client_has_a_stanza() {
 #[test]
 fn every_json_stanza_parses() {
     for (language, body) in blocks(&section()) {
-        if language == "json" {
+        if language.split_whitespace().next() == Some("json") {
             serde_json::from_str::<serde_json::Value>(&body)
                 .unwrap_or_else(|e| panic!("a json stanza does not parse: {e}\n{body}"));
         }
@@ -97,6 +97,13 @@ fn no_stanza_carries_a_store_path() {
         // An HTTP stanza launches nothing: it holds a URL and a header, and
         // has no argument list to check. It is checked below instead.
         if is_http(&body) {
+            continue;
+        }
+        // An `unregister` fence runs the client's own CLI to remove an entry.
+        // It names semlith because that is the entry's name, and it has no
+        // `semlith mcp` argument list to check — the subject is the client's
+        // command, not semlith's.
+        if language.split_whitespace().any(|word| word == "unregister") {
             continue;
         }
         if !names_semlith(&body) {
@@ -308,6 +315,10 @@ fn blocks(text: &str) -> Vec<(String, String)> {
             body.push_str(line);
             body.push('\n');
         }
+        // The info string carries more than a language from 0.18.0 — `register`,
+        // `unregister`, `config path=…`, `scope=…` — and it is kept whole here
+        // so a caller can ask which kind of block it is looking at. Only the
+        // first word is the language.
         out.push((language.trim().to_string(), body));
     }
     out

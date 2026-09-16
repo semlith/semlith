@@ -17,8 +17,10 @@
 
 pub mod add;
 pub mod chunk;
+pub mod clientfile;
 pub mod clients;
 pub mod daemon;
+pub mod doctor;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
@@ -271,31 +273,45 @@ fn image_floor() -> f32 {
 /// How much deeper than `k` to look in each ranking before fusing.
 const RANK_DEPTH: usize = 4;
 
-/// How long an index run may go without making its work durable.
+/// How many files an index run may get through without making its work
+/// durable.
 ///
 /// This is what an interruption costs: the vectors embedded since the last
-/// checkpoint, and no more. Thirty seconds is short enough that losing it is an
-/// annoyance rather than an evening, and long enough that a checkpoint's cost —
-/// rewriting the shards touched since the last one — stays a rounding error
-/// against the embedding it protects.
+/// checkpoint, and no more.
+///
+/// It counts files rather than seconds, and that is issue #88's last cause. A
+/// checkpoint flushes the pending batch, and the embedder pads a batch to the
+/// longest sequence in it — so a batch split at a wall-clock boundary is a
+/// batch with different padding, and the vectors it produces differ in their
+/// last bits. int8 quantization turns a last-bit difference into a rank flip,
+/// and the retrieval harness reported a different hit@k on every run because
+/// of it. Three runs over one corpus produced three different indexes; with
+/// the checkpoint interval pushed past the length of the run, two runs produced
+/// byte-identical ones. Counting files makes the split a function of the corpus
+/// rather than of how busy the machine was, so a store is reproducible from its
+/// corpus.
+///
+/// Two hundred files is the same order of durability as the thirty seconds it
+/// replaces on the corpora this is built for, and unlike thirty seconds it is
+/// the same on a slow machine.
 ///
 /// Only a sharded store checkpoints. A store written before 0.7.0 would have to
 /// rewrite its entire index to do it, which is the cost sharding exists to
 /// remove; those stores behave exactly as they did.
-const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const CHECKPOINT_FILES: usize = 200;
 
-/// Override for [`CHECKPOINT_INTERVAL`], in seconds. For the tests, which
-/// cannot spend thirty seconds proving a checkpoint happened. Not part of the
+/// Override for [`CHECKPOINT_FILES`], in files. For the tests, which cannot
+/// index two hundred files to prove a checkpoint happened. Not part of the
 /// documented environment.
-const CHECKPOINT_SECS_ENV: &str = "SEMLITH_CHECKPOINT_SECS";
+const CHECKPOINT_FILES_ENV: &str = "SEMLITH_CHECKPOINT_FILES";
 
-fn checkpoint_interval() -> std::time::Duration {
-    match std::env::var(CHECKPOINT_SECS_ENV)
+fn checkpoint_files() -> usize {
+    match std::env::var(CHECKPOINT_FILES_ENV)
         .ok()
         .and_then(|v| v.parse().ok())
     {
-        Some(secs) => std::time::Duration::from_secs(secs),
-        None => CHECKPOINT_INTERVAL,
+        Some(files) if files > 0 => files,
+        _ => CHECKPOINT_FILES,
     }
 }
 
@@ -1052,8 +1068,8 @@ impl Semlith {
         let mut completed: Vec<(i64, String)> = Vec::new();
 
         let checkpointing = matches!(self.index, index::VectorIndex::Sharded(_));
-        let interval = checkpoint_interval();
-        let mut last_checkpoint = std::time::Instant::now();
+        let every = checkpoint_files();
+        let mut since_checkpoint = 0usize;
 
         // Refused before anything is read. A path that names a credential or
         // sits outside this caller's boundary is reported by name with the rule
@@ -1372,10 +1388,16 @@ impl Semlith {
             // Between files, never inside one: a file half-written into the
             // index is a file whose hash must not be committed, and this is the
             // one point in the loop where that cannot be true.
-            if checkpointing && last_checkpoint.elapsed() >= interval {
+            //
+            // Counted, not timed. See `CHECKPOINT_FILES`: a checkpoint flushes
+            // the pending batch, so a checkpoint that lands somewhere different
+            // on every run splits the batches differently and produces
+            // different vectors from the same corpus.
+            since_checkpoint += 1;
+            if checkpointing && since_checkpoint >= every {
                 self.flush(&mut pending)?;
                 self.checkpoint(&mut completed)?;
-                last_checkpoint = std::time::Instant::now();
+                since_checkpoint = 0;
             }
         }
 
@@ -1471,7 +1493,10 @@ impl Semlith {
         // answered best. A chunk both lists found seeds twice as hard as one
         // only a single list found, which is the same judgement the fusion
         // makes a few lines later.
-        let mut mass: std::collections::HashMap<u64, f32> = std::collections::HashMap::new();
+        // Ordered, not hashed. The walk this seeds sums `f32` masses, and a
+        // random iteration order made those sums differ between runs of one
+        // binary over one store — issue #88. `graph::expand` says the rest.
+        let mut mass: std::collections::BTreeMap<u64, f32> = std::collections::BTreeMap::new();
         for list in [dense, keyword] {
             for (rank, id) in list.iter().take(SEEDS).enumerate() {
                 *mass.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
@@ -1485,7 +1510,8 @@ impl Semlith {
         // which chunk's mass is the whole point of a personalised walk. A
         // chunk holding three symbols splits its mass between them rather than
         // seeding each of them as though it were a hit of its own.
-        let mut personal: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        let mut personal: std::collections::BTreeMap<String, f32> =
+            std::collections::BTreeMap::new();
         for (id, mass) in &mass {
             let names = store::symbols_in_chunks(&self.db, &[*id])?;
             if names.is_empty() {
@@ -1951,7 +1977,16 @@ impl Semlith {
         // Sorted together with their provenance, so a hit never carries the
         // badges of whichever chunk happened to land in its slot.
         let mut ranked: Vec<Candidate> = fused.into_iter().zip(lists).collect();
-        ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1));
+        // Total, and this is the last of issue #88. Fusion scores are
+        // `1 / (60 + rank)`, so exact ties are common by construction — two
+        // chunks that placed at the same rank in the same list carry the same
+        // f32 to the bit. A sort on score alone leaves those in whatever order
+        // the vector index handed them over, and a store built twice from one
+        // corpus hands near-equal vectors over in a different order, so the
+        // same query returned the same eight chunks in two orders. Breaking on
+        // the id makes the answer a function of the corpus rather than of the
+        // shard scan.
+        ranked.sort_by(|a, b| b.0.1.total_cmp(&a.0.1).then_with(|| a.0.0.cmp(&b.0.0)));
         // Cut to the deeper list, not to `k`. Everything that reorders the
         // answer below — the preference, and the rerank — needs each
         // candidate's path and enclosing symbol, which only exist once the
@@ -2050,7 +2085,15 @@ impl Semlith {
             }
             hit.score *= prefer.multiplier(filter::is_code(&hit.path));
         }
-        hits.sort_by(|a, b| b.0.score.total_cmp(&a.0.score));
+        // Total for the same reason as the fusion sort above: the rerank's
+        // factors are multipliers on a fused score, so two candidates that
+        // entered tied and took the same multipliers leave tied.
+        hits.sort_by(|a, b| {
+            b.0.score
+                .total_cmp(&a.0.score)
+                .then_with(|| a.0.path.cmp(&b.0.path))
+                .then_with(|| a.0.start_line.cmp(&b.0.start_line))
+        });
         hits.truncate(k);
         Ok(hits)
     }
@@ -2534,6 +2577,18 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
             }
         }
     }
+    // Sorted, and this is issue #88's index-time half. `ignore::Walk` yields
+    // entries in whatever order the filesystem hands the directory over, which
+    // is not stable between two walks of two byte-identical trees. Indexing in
+    // that order assigns `chunks.id` in that order, and the ids are what every
+    // exact tie in the fusion, the FTS predicate and the graph walk falls back
+    // to — so the same corpus indexed twice produced two rankings, and the
+    // retrieval harness reported a different hit@k each time it ran.
+    //
+    // Sorting makes a store a function of its corpus rather than of the order
+    // the filesystem happened to be in, which is worth having on its own: two
+    // people indexing the same checkout get the same store.
+    out.sort();
     out
 }
 

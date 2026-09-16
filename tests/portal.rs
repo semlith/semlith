@@ -73,6 +73,9 @@ const VIEWS: &[(&str, &str)] = &[
     ("key", "/api/key"),
     // `semlith drop` is the Stores page's Delete, behind its second click.
     ("drop", "/api/store/delete"),
+    // `semlith doctor` is the Doctor page, which reads the same two functions
+    // the command prints and posts its repairs to the same engine.
+    ("doctor", "/api/doctor"),
 ];
 
 /// And the same for the MCP tool surface.
