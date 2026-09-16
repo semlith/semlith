@@ -755,8 +755,10 @@ under it names the three `Host` values that are answered. Everything else gets
 
 One card of facts: the version and the store format version, the binary's path,
 size and target triple, what it is bound to, where the store home is, where the
-model cache is, which MCP protocol revisions it speaks, and how long it has been
-up with its process id.
+model cache is, and how long it has been up with its process id. The MCP protocol
+revisions the server speaks are a wire contract with an agent client rather than
+something a reader can act on, so they are not shown here; `GET /api/about`
+still returns them, and `docs/compatibility.md` says what dropping one means.
 
 **Languages** is every name `--lang` accepts, with a mark on the ones the code
 graph is extracted from. It lives here rather than on a page of its own because it
