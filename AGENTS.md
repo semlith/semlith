@@ -35,7 +35,7 @@ cargo test --release --test retrieval -- --ignored --nocapture # retrieval quali
 ```
 
 `tests/retrieval.rs` is the harness behind every retrieval claim this repository
-makes. It runs a fixed set of 41 questions with ground-truth spans from
+makes. It runs a fixed set of 57 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer and the graph list's
 marginal contribution. It asserts two things: the wrong-yes count for `path` is
@@ -470,6 +470,10 @@ contract lives in `docs/compatibility.md`.
 - Behaviour changes to indexing or search need measured numbers, not adjectives.
   The 100k benchmark store is a fixture kept at `~/.cache/semlith/bench/100k-store`
   — build it once (recipe in `CONTRIBUTING.md`), not per release.
+- A count stated in the README is asserted against its source by
+  `tests/readme.rs`, which also holds the under-500-line ceiling and the grep
+  for release-specific prose. Change a count in the code and the README fails
+  the build; add a count to the README and add its row there.
 - Public surface changes must land in `docs/compatibility.md`; the client
   stanzas in `docs/clients.md` are executed by `tests/clients.rs`, so a renamed
   flag breaks there. `clients.rs` also parses that file's structure, not only
