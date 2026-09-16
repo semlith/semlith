@@ -633,7 +633,10 @@ configuration file semlith writes carries the agent key or names
 read from `~/.semlith/agent.key` by the `semlith mcp` process rather than
 expanded from the environment by the client — `semlith key rotate` no longer
 re-registers anything, and says so. And the shell startup block that exported
-`SEMLITH_AGENT_KEY` is no longer what makes a client work.
+`SEMLITH_AGENT_KEY` is gone: `semlith setup` writes `PATH` and nothing else, and
+replaces a block an earlier version wrote rather than leaving any block it finds
+in place — which is what it used to do, so an upgrade kept the export for ever.
+Open a new shell after running it.
 
 `SEMLITH_AGENT_KEY` stays on the covered list and the HTTP endpoint is not
 withdrawn: a daemon on another machine still needs a header, `docs/clients.md`
