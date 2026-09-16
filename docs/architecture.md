@@ -19,22 +19,37 @@ must not be.**
 
 ## The two halves of a store
 
-A store directory holds two kinds of state, which must agree:
+A store holds two kinds of state, which must agree, and beside them the two
+files that say who is allowed to write and where to reach them. Under the store
+home that is:
 
 ```
-.semlith/
-├── index/                        turbovec shards — quantized vectors, keyed by chunk id
-│   ├── 0000000000000001.tvim
-│   └── 0000000000065537.tvim
-└── store.db                      SQLite — chunk text, file paths, line spans, content hashes
+~/.semlith/
+├── registry.json                 which store covers which roots, and the model each was built with
+├── agent.key                     the credential a client presents to the daemon
+└── stores/
+    └── semlith/                  one store, named for what it covers
+        ├── index/                turbovec shards — quantized vectors, keyed by chunk id
+        │   └── 0000000000000001.tvim
+        ├── images/               the same again at CLIP's 512 dimensions, only once a store has met an image
+        │   └── index/
+        │       └── 0000000000000001.tvim
+        ├── store.db              SQLite — chunk text, file paths, line spans, symbols, edges, content hashes
+        ├── index.lock            the OS advisory lock one writer holds for a whole run
+        └── daemon.json           written while a daemon holds the lock, so `semlith mcp` can forward to it
 ```
 
-The split is the central design decision. The vector side holds **only** vectors
-and ids. It never holds text. This matters because the vectors are what gets
-scanned on every query, and their size decides how much of the corpus has to be
-resident to answer one. At 4 bits per coordinate and 384 dimensions, a chunk
-costs 192 bytes — so a million chunks is about 190 MB of packed codes, while the
-text those chunks came from could be gigabytes sitting harmlessly in SQLite.
+A store kept beside its corpus is the same directory under a different name: a
+`.semlith/` next to the files, holding `index/`, `store.db` and the rest. Only
+the location differs.
+
+The split between the two halves is the central design decision. The vector
+side holds **only** vectors and ids. It never holds text. This matters because
+the vectors are what gets scanned on every query, and their size decides how
+much of the corpus has to be resident to answer one. At 4 bits per coordinate
+and 384 dimensions, a chunk costs 192 bytes — so a million chunks is about
+190 MB of packed codes, while the text those chunks came from could be
+gigabytes sitting harmlessly in SQLite.
 
 That 190 MB is never resident at once. `index/` is a directory of fixed-size
 shards of 65536 vectors each (`src/index.rs:54`), named for the first chunk id
