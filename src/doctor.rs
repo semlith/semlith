@@ -505,6 +505,17 @@ pub struct ClientReport {
     pub repair: Option<String>,
     /// Why semlith cannot register this client, for the three that it cannot.
     pub note: Option<String>,
+    /// Whether this row is something wrong with the machine, as opposed to
+    /// something semlith could do if asked.
+    ///
+    /// The distinction is what makes the exit code usable in a script. A client
+    /// that is not installed is not a fault — most people have two or three of
+    /// the twenty-seven. Nor is a file-only client the user has never opted into
+    /// writing: `--register-all` is an offer, and a report that went red because
+    /// the user had not taken it would be red on almost every machine, which is
+    /// the same as not reporting at all. A fault is a client that is on this
+    /// machine and cannot see semlith.
+    pub fault: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -585,11 +596,23 @@ pub fn clients_report() -> Vec<ClientReport> {
                 None
             };
 
+            // "On this machine" for a client with a CLI means the CLI is on
+            // `PATH`. For a file-only client it means its configuration
+            // directory already exists — the user has that client and has
+            // configured something in it — because there is nothing else to
+            // ask.
+            let in_use = present
+                || files
+                    .iter()
+                    .any(|f| f.exists || f.path.parent().is_some_and(Path::exists));
+            let fault = note.is_none() && in_use && !registered;
+
             ClientReport {
                 name: client.name.clone(),
                 command,
                 present,
                 registered,
+                fault,
                 scope: match (registered, only_project) {
                     (true, _) => Some("user"),
                     (false, true) => Some("project"),
