@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file that does not parse is refused rather than replaced.
 - `docs/clients.md` carries the registration facts in its fence info strings, so
   the document a human reads and the one `src/clients.rs` parses are one file.
+- The shell startup block `semlith setup` writes carries `PATH` and nothing else.
+  It used to export `SEMLITH_AGENT_KEY` by reading the key file at every shell
+  start, which made sense while every client stanza named that variable; none
+  does now, so the export put a credential into the environment of every process
+  you start in exchange for nothing. A block written by an earlier version is
+  replaced — `semlith setup` used to leave any block it found alone, so an
+  upgrade kept the export for ever.
 
 ### `semlith doctor`
 
