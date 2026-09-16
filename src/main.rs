@@ -223,6 +223,10 @@ enum Command {
         #[arg(long, short)]
         path: Vec<String>,
 
+        /// Skip this many matches, to continue a listing the cap cut short.
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -236,6 +240,27 @@ enum Command {
 
     /// Remove a file from the store.
     Forget { path: PathBuf },
+
+    /// List every file the store holds that semlith would refuse today.
+    ///
+    /// The path for a store indexed before a rule widened, or before the
+    /// credential content scan existed. Exits non-zero while anything is
+    /// found, so it can be a check in a script.
+    Scan {
+        /// The registered store's name, as `semlith stats` prints it. Named
+        /// `name` for the same reason `drop` is: `--store` is a global
+        /// argument and two arguments with one id is a parse-time panic.
+        #[arg(value_name = "STORE")]
+        name: Option<String>,
+
+        /// Remove what was found, the way `semlith forget` removes a file.
+        #[arg(long)]
+        forget: bool,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Delete a store: its vectors, chunks, graph and ledger, and the registry
     /// entry naming it. The files it indexed are not touched.
@@ -617,6 +642,17 @@ fn main() -> Result<()> {
                 if p.outcome == semlith::FileOutcome::Refused {
                     eprintln!("  - {}", display(path));
                 }
+                // A failure is louder than a refusal because it is not a
+                // decision: something went wrong with this one file and the
+                // run carried on, which is exactly the case a silent line
+                // would hide.
+                if p.outcome == semlith::FileOutcome::Failed {
+                    eprintln!(
+                        "  ! {} — {}",
+                        display(path),
+                        p.why.as_deref().unwrap_or("failed")
+                    );
+                }
                 if spoke.elapsed() >= PROGRESS_INTERVAL {
                     spoke = Instant::now();
                     eprintln!("    {}", predict(p, started.elapsed()));
@@ -641,13 +677,55 @@ fn main() -> Result<()> {
             // Named one per line. A refusal reported as a count is one the
             // person retries with the same arguments.
             for (path, why) in &report.refused {
-                eprintln!("refused: {path} — {why}");
+                eprintln!("refused: {} — {why}", semlith::plain(path));
             }
             if !report.refused.is_empty() && !include_secrets {
                 eprintln!("  `--include-secrets` indexes these anyway, if you meant to.");
             }
+            // Named one per line, like the refused. A run that finishes having
+            // failed on eleven files and says only "11 failed" is a run whose
+            // eleven files nobody goes and looks at.
+            for (path, why) in &report.failed {
+                eprintln!("failed: {} — {why}", semlith::plain(path));
+            }
+            // What the flag actually did. A store built with
+            // `--include-secrets` that never says how many credentials it took
+            // in is a store whose owner has no idea what is in it.
+            if report.secrets_indexed > 0 {
+                eprintln!(
+                    "indexed {} file(s) the credential scan would have refused, because \
+                     `--include-secrets` was given",
+                    report.secrets_indexed
+                );
+            }
+            // Skipped, broken out. "1 847 skipped" is the line that sent this
+            // release's Windows logs in; "1 840 empty, 7 binary" is the same
+            // fact and needs no investigation.
+            let by_reason = if report.skipped_reasons.is_empty() {
+                String::new()
+            } else {
+                let mut parts: Vec<(usize, &str)> = report
+                    .skipped_reasons
+                    .iter()
+                    .map(|(kind, n)| (*n, kind.as_str()))
+                    .collect();
+                parts.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                format!(
+                    " ({})",
+                    parts
+                        .iter()
+                        .map(|(n, kind)| format!("{n} {kind}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let failed = if report.failed.is_empty() {
+                String::new()
+            } else {
+                format!(", {} failed", report.failed.len())
+            };
             eprintln!(
-                "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped, {} removed",
+                "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped{by_reason}, {} removed{failed}",
                 report.indexed,
                 report.chunks,
                 started.elapsed().as_secs_f32(),
@@ -1046,12 +1124,13 @@ fn main() -> Result<()> {
             query,
             lang,
             path,
+            offset,
             json,
         } => {
             let filter = Filter::new(&path, &[], &[])?;
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let started = Instant::now();
-            let found = fleet.pattern_in(None, &lang, &query, &filter)?;
+            let found = fleet.pattern_in(None, &lang, &query, &filter, offset)?;
             semlith::ledger::graph(
                 &fleet,
                 &CLI_LEDGER,
@@ -1092,7 +1171,16 @@ fn main() -> Result<()> {
                     found.matches.len(),
                     found.files,
                     found.language,
-                    if found.truncated { " (truncated)" } else { "" },
+                    if found.truncated {
+                        // The offset that continues it, not just the fact that
+                        // something was cut off.
+                        format!(
+                            " (truncated — --offset {} for the rest)",
+                            offset + found.matches.len()
+                        )
+                    } else {
+                        String::new()
+                    },
                 );
             }
         }
@@ -1355,6 +1443,52 @@ fn main() -> Result<()> {
 
             eprintln!("{} -> {}", fetched.url, display(&fetched.path));
             eprintln!("indexed {} chunks into {}", report.chunks, dir.display());
+        }
+
+        Command::Scan { name, forget, json } => {
+            let choice = home::resolve(&cli.store, &cwd, name.as_deref())?;
+            if let Some(hint) = choice.hint() {
+                eprintln!("{hint}");
+            }
+            if matches!(choice, home::Choice::New { .. }) {
+                anyhow::bail!("there is no store here to scan");
+            }
+            let mut store = Semlith::open(&choice.one()?, None)?;
+            let findings = store.scan()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&findings)?);
+            } else {
+                for finding in &findings {
+                    println!(
+                        "{} — {}",
+                        display(std::path::Path::new(&finding.path)),
+                        finding.why
+                    );
+                }
+            }
+            if findings.is_empty() {
+                if !json {
+                    println!("nothing this store holds would be refused today.");
+                }
+                return Ok(());
+            }
+            if forget {
+                let gone = store.forget_findings(&findings)?;
+                if !json {
+                    println!("removed {gone} file(s) from the store.");
+                }
+                return Ok(());
+            }
+            if !json {
+                println!(
+                    "{} file(s) would be refused today. `semlith scan --forget` removes them.",
+                    findings.len()
+                );
+            }
+            // Non-zero while anything is still in the store, so this is usable
+            // as a check. A scan that found credentials and exited 0 is a
+            // check that passes on the case it exists to catch.
+            std::process::exit(1);
         }
 
         Command::Forget { path } => {
