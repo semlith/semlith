@@ -1,9 +1,9 @@
-//! The client setup stanzas, read out of the README at compile time.
+//! The client setup stanzas, read out of `docs/clients.md` at compile time.
 //!
 //! The portal's Agents view shows a copy-ready stanza per client, and there is
 //! exactly one way for that to stay true as flags change: it has to be the
-//! same text `tests/clients.rs` executes. So the README is the source, embedded
-//! with `include_str!` and parsed with the same rules the test uses — a heading
+//! same text `tests/clients.rs` executes. So `docs/clients.md` is the source,
+//! embedded with `include_str!` and parsed with the same rules the test uses — a heading
 //! per client, then its fenced blocks.
 //!
 //! A stanza retyped into Rust would be a second copy that looks right for
@@ -11,7 +11,7 @@
 
 use std::sync::OnceLock;
 
-const README: &str = include_str!("../README.md");
+const CLIENTS_DOC: &str = include_str!("../docs/clients.md");
 
 /// The heading the stanzas live under.
 const SECTION: &str = "### Setting it up in your client";
@@ -35,21 +35,21 @@ pub struct Stanza {
     pub text: String,
 }
 
-/// One client, its note, and every stanza the README gives for it.
+/// One client, its note, and every stanza `docs/clients.md` gives for it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Client {
     pub name: String,
     /// Where the file lives and anything the client needs told about it, as
     /// one line of plain text.
     pub note: String,
-    /// `terminal`, `editor` or `desktop`, read from the README's own grouping
+    /// `terminal`, `editor` or `desktop`, read from `docs/clients.md`'s own grouping
     /// so the portal's tabs and the documentation cannot disagree about which
     /// kind of thing a client is.
     pub group: String,
     pub stanzas: Vec<Stanza>,
 }
 
-/// The HTTP stanzas, with `key` substituted for the README's placeholder.
+/// The HTTP stanzas, with `key` substituted for `docs/clients.md`'s placeholder.
 ///
 /// One template for every client rather than one per client: the endpoint and
 /// the header are the same wherever they are pasted, and a per-client copy
@@ -57,7 +57,7 @@ pub struct Client {
 pub fn http_stanzas(key: &str) -> Vec<Stanza> {
     static PARSED: OnceLock<Vec<Stanza>> = OnceLock::new();
     PARSED
-        .get_or_init(|| parse_http(README))
+        .get_or_init(|| parse_http(CLIENTS_DOC))
         .iter()
         .map(|stanza| Stanza {
             format: stanza.format.clone(),
@@ -100,7 +100,7 @@ fn parse_http(readme: &str) -> Vec<Stanza> {
 /// Every documented client, parsed once.
 pub fn clients() -> &'static [Client] {
     static PARSED: OnceLock<Vec<Client>> = OnceLock::new();
-    PARSED.get_or_init(|| parse(README))
+    PARSED.get_or_init(|| parse(CLIENTS_DOC))
 }
 
 fn parse(readme: &str) -> Vec<Client> {
@@ -124,7 +124,7 @@ fn parse(readme: &str) -> Vec<Client> {
     let mut group = String::from("terminal");
     let mut lines = section.lines().peekable();
     while let Some(line) = lines.next() {
-        // The README groups its clients under `#### Terminal`, `#### Editors`
+        // `docs/clients.md` groups its clients under `#### Terminal`, `#### Editors`
         // and `#### Desktop apps`. Read from there rather than from a table in
         // this file, so the grouping has one source.
         if let Some(heading) = line.strip_prefix("#### ") {
@@ -211,13 +211,13 @@ mod tests {
     use super::*;
 
     /// If this ever comes back empty, the Agents view silently shows nothing
-    /// and the README has been restructured under it.
+    /// and `docs/clients.md` has been restructured under it.
     #[test]
     fn every_documented_client_is_parsed_with_at_least_one_stanza() {
         let parsed = clients();
         assert!(
             parsed.len() >= 27,
-            "only {} clients parsed out of the README",
+            "only {} clients parsed out of the CLIENTS_DOC",
             parsed.len()
         );
         for client in parsed {
@@ -250,7 +250,7 @@ mod tests {
     }
 
     /// Every client is in one of the three groups the portal renders as tabs,
-    /// and the counts sum to the number of clients the README documents.
+    /// and the counts sum to the number of clients `docs/clients.md` documents.
     #[test]
     fn every_client_carries_a_group_read_from_the_readme() {
         let parsed = clients();
