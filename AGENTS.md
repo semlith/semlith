@@ -184,7 +184,11 @@ Module responsibilities:
   `Semlith::index_within_held` and `forget_held` exist for exactly that caller.
 - **`semlith mcp` forwards when a daemon is running**, found through the
   discovery file beside the lock, and the daemon answers with the same
-  `mcp::answer` the stdio server runs. Every failure to reach one — no file, an
+  `mcp::answer` the stdio server runs. From 0.18.0 this is what every
+  registration semlith writes launches, which is why no client configuration
+  carries the agent key and why a rotation reconfigures nothing: the key is read
+  from `~/.semlith/agent.key` by this process, not expanded from the
+  environment by the client. Every failure to reach one — no file, an
   unreadable file, a dead port — falls back to opening the store directly.
 - **`mcp.rs`: stdout is protocol, stderr is diagnostics.** Never print to
   stdout outside the JSON-RPC framing, and keep `quiet` set on the Fleet there.
@@ -214,7 +218,9 @@ Module responsibilities:
   named definition, was specified, built, measured and removed in the same
   release: in a code repository it is a second and blunter `prefer: code` applied
   to every query, and it fights the real one. Do not reintroduce it, and do not
-  add a learned weight here — the per-repository learned profile is 0.18.0's.
+  add a learned weight here. The per-repository learned profile is still a
+  roadmap item; the version it used to be numbered as was reassigned when the
+  roadmap was renumbered on 2026-09-16, so this sentence names no release.
 - **The query's shape is read in one place.** `shape_of` in `lib.rs`, from the
   query text and nothing else, so every surface that prints it calls that
   function and there is no second classifier. The portal draws the hint from
@@ -476,7 +482,14 @@ contract lives in `docs/compatibility.md`.
   the build; add a count to the README and add its row there.
 - Public surface changes must land in `docs/compatibility.md`; the client
   stanzas in `docs/clients.md` are executed by `tests/clients.rs`, so a renamed
-  flag breaks there. `clients.rs` also parses that file's structure, not only
+  flag breaks there. From 0.18.0 that file also carries the registration facts,
+  in fence info strings a renderer hides: `sh register` is the command
+  `semlith setup` runs and must carry the scope that client spells "every
+  project", `sh unregister` is what clears an existing entry first,
+  `<lang> config path=…` (with `os=` and double quotes where a path has a space)
+  is a client's user-level configuration file, and `scope=project` marks a
+  registration command that would register only the current directory — semlith
+  does not run those. `clients.rs` also parses that file's structure, not only
   its fences: the stdio stanzas are read from under `### Setting it up in your
   client` and grouped by `#### Terminal`, `#### Editors` and `#### Desktop
   apps`, and the HTTP ones from under `### Connecting over HTTP`. Reword any of

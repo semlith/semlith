@@ -70,6 +70,12 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
     // the measuring stick for every retrieval claim the repository makes, did
     // not.
     unsafe { std::env::set_var(semlith::embed::THREADS_ENV, "1") };
+    assert_eq!(
+        semlith::embed::embed_threads(),
+        1,
+        "the thread pin did not take: this harness would measure ONNX Runtime's \
+         reduction jitter as well as the ranking, which is issue #88"
+    );
 
     let source = corpus_source();
     let questions = read_questions(&source.join("tests/fixtures/retrieval/questions.yaml"));
@@ -127,19 +133,61 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
         .forget(&questions_file)
         .expect("the question set leaves the corpus it measures");
 
-    let mut report = Report::default();
-    for question in &questions {
-        match question.tool.as_str() {
-            "search" => score_search(&mut semlith, &root, question, &mut report),
-            "path" => score_path(&semlith, question, &mut report),
-            "read" => score_read(&semlith, &root, question, &mut report),
-            // Scored by the same span rule as a search once they are wired up.
-            // Counted as skipped rather than as misses: a metric that punishes
-            // the harness for what the harness has not implemented is a metric
-            // that rewards deleting questions.
-            _ => report.skipped += 1,
+    let score_all = |semlith: &mut Semlith| {
+        let mut report = Report::default();
+        for question in &questions {
+            match question.tool.as_str() {
+                "search" => score_search(semlith, &root, question, &mut report),
+                "path" => score_path(semlith, question, &mut report),
+                "read" => score_read(semlith, &root, question, &mut report),
+                // Scored by the same span rule as a search once they are wired
+                // up. Counted as skipped rather than as misses: a metric that
+                // punishes the harness for what the harness has not implemented
+                // is a metric that rewards deleting questions.
+                _ => report.skipped += 1,
+            }
         }
-    }
+        report
+    };
+
+    let report = score_all(&mut semlith);
+
+    // The harness asserts its own determinism — issue #88, where three runs of
+    // one binary over one corpus gave three different hit@k and the graph-only
+    // denominator moved between them.
+    //
+    // The question set is scored twice against the same store, and the two
+    // reports must be identical question by question. That covers every
+    // query-time source of the drift, which is where it lived: `graph::expand`
+    // walked its frontier through a `HashMap`, whose iteration order is seeded
+    // randomly per process, so the `f32` masses summed differently, the
+    // confidence a name was labelled with depended on arrival order, and
+    // `MAX_NODES` truncated whichever names the order had not reached yet.
+    //
+    // It deliberately does not re-index. The other source was index-time —
+    // ONNX Runtime reducing across its intra-op threads in completion order —
+    // and the fix for that is the single thread pinned at the top of this test.
+    // Checking it here would mean a second full index on every run, for a
+    // property one embedding thread already makes true; it is verified once per
+    // release by running this harness three times and comparing the reports.
+    let again = score_all(&mut semlith);
+    assert_eq!(
+        report.ranks, again.ranks,
+        "the harness does not reproduce its own per-question ranks within one run"
+    );
+    assert_eq!(
+        report.hit_at, again.hit_at,
+        "the harness does not reproduce its own hit@k within one run"
+    );
+    assert_eq!(
+        (report.graph_only, report.graph_only_hits, report.wrong_yes),
+        (again.graph_only, again.graph_only_hits, again.wrong_yes),
+        "the harness does not reproduce its own graph-only denominator within one run"
+    );
+    assert_eq!(
+        report.bytes, again.bytes,
+        "the harness does not reproduce its own bytes per answer within one run"
+    );
 
     let census = resolution_census(&semlith);
     let tool_list = semlith::mcp::tool_list_bytes();

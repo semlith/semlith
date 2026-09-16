@@ -157,7 +157,8 @@ read just those lines instead of the whole file.
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
 | `semlith models` | List available embedding models. See [docs/models.md](docs/models.md). |
 | `semlith languages` | List the language names `--lang` accepts. |
-| `semlith setup [--yes]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register agent clients. Idempotent, so it is also the repair command. `--airgap` skips the model. |
+| `semlith setup [--yes] [--register-all]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, and register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, listing every path first. `--airgap` skips the model. |
+| `semlith doctor [--fix]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns. |
 | `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
 `semlith add` fetches over https only, refuses redirects that leave https, caps
@@ -369,11 +370,10 @@ indexing a second repository needs no edit to any client's configuration.
 semlith implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and
 `2024-11-05`, each with a session in `tests/mcp.rs` proving it.
 
-**Configuration stanzas for 27 clients — terminal, editor and desktop — are in
-[docs/clients.md](docs/clients.md)**, along with the HTTP transport for clients
-that would rather hold a URL than spawn a process. Every stanza there is
-launched and answered by `tests/clients.rs`, and the portal's Agents page shows
-the same text.
+**`semlith setup` registers semlith in every client that has a registration
+command, at the scope that means every project**; `semlith doctor` says which it
+could not and what to run for them. [docs/clients.md](docs/clients.md) holds the
+stanzas for all 27 and the HTTP transport, and `tests/clients.rs` launches each.
 
 ## What gets indexed
 
@@ -424,7 +424,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **12** |
-| CLI commands | **23** |
+| CLI commands | **24** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

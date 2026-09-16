@@ -2540,6 +2540,18 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
             }
         }
     }
+    // Sorted, and this is issue #88's index-time half. `ignore::Walk` yields
+    // entries in whatever order the filesystem hands the directory over, which
+    // is not stable between two walks of two byte-identical trees. Indexing in
+    // that order assigns `chunks.id` in that order, and the ids are what every
+    // exact tie in the fusion, the FTS predicate and the graph walk falls back
+    // to — so the same corpus indexed twice produced two rankings, and the
+    // retrieval harness reported a different hit@k each time it ran.
+    //
+    // Sorting makes a store a function of its corpus rather than of the order
+    // the filesystem happened to be in, which is worth having on its own: two
+    // people indexing the same checkout get the same store.
+    out.sort();
     out
 }
 

@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Every agent client on the machine, from every project
+
+- `semlith setup` registers semlith in every client that documents a
+  registration command, at the scope that client spells "every project", rather
+  than registering Claude Code alone and printing the other twenty-six as
+  stanzas to paste. `--yes` registers too, where it used to skip the step.
+- Every registration is the stdio form: the client launches `semlith mcp`, which
+  reads the agent key from `~/.semlith/agent.key` itself. No configuration file
+  semlith writes carries the key or names `${SEMLITH_AGENT_KEY}`, and a rotation
+  reconfigures nothing.
+- An existing semlith entry is removed before the new one is added, at every
+  scope the client has — including the project-scope entry in `~/.claude.json`
+  that made semlith invisible from every directory but one.
+- `semlith setup --register-all`, and a control on the portal's Agents page,
+  write the configuration file of the ten clients that have no registration
+  command. Every path is listed before anything is written, each file is backed
+  up beside itself, each merge keeps every key it did not come to change, and a
+  file that does not parse is refused rather than replaced.
+- `docs/clients.md` carries the registration facts in its fence info strings, so
+  the document a human reads and the one `src/clients.rs` parses are one file.
+
+### `semlith doctor`
+
+- New command, with `--json` and `--fix`. Per client: installed, registered, at
+  what scope, and what to run otherwise. Plus the four Privacy rules that are
+  readings of this machine. Exits non-zero when something is wrong.
+- A portal view of the same report, from the same route.
+
+### The Privacy page can fix what it reports
+
+- Every failing rule carries the command that repairs it, copyable.
+- `directory modes`, `agent key`, and `model cache` when the cache is your own
+  carry a button as well. A repair narrows access, is idempotent, touches only a
+  path semlith owns, and is confirmed by re-running the rule's own check; it
+  reports `0700, was 0755` so it can be undone by hand.
+- `private addresses` gets the manual step and no button. It fails on a variable
+  in the environment the daemon inherited, and no process can unset a variable in
+  its parent's.
+- Fixed: the `agent key` check rendered the same sentence whether the mode was
+  compliant or not, so a key at 0644 read exactly like one at 0600.
+
+### Fixed
+
+- The retrieval harness reproduces its own numbers (#88). Three runs of one
+  binary over one corpus gave three different hit@k, the graph-only denominator
+  moved, and bytes per answer tracked where the corpus was checked out. The
+  graph walk's maps are ordered, the harness pins one embedding thread, and the
+  corpus is a snapshot rather than the working tree.
+
 ## [0.17.3] - 2026-09-16
 
 ### Credit where the index comes from

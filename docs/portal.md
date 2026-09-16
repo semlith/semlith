@@ -80,13 +80,13 @@ shown again.
 
 ### The navigation
 
-Nine pages in three groups, plus About:
+Ten pages in three groups, plus About:
 
 | Group | Pages |
 |---|---|
 | Workspace | Stores, Files, Index |
 | Explore | Search, Graph |
-| Operate | Agents, Ledger, Privacy |
+| Operate | Agents, Ledger, Privacy, Doctor |
 | About | About |
 
 The address bar carries the page as a fragment — `#search`, `#graph` — so a
@@ -735,6 +735,27 @@ and under it is what *this daemon found when it checked* — a path, a file mode
 count. A page that states a policy is a page; a page that states a policy and the
 reading behind it is something you can disagree with.
 
+From 0.18.0 a failing row also carries the command that repairs it, copyable, and
+— where the daemon can do it safely — a **Fix** button. Safely is a property of
+the repair rather than a judgement made per button: it narrows access rather than
+widening it, it is idempotent, it touches only a path semlith owns, and it is
+confirmed by re-running that rule's own check, so a row turns green because the
+daemon looked again and not because a click succeeded. What it changed and what it
+was before are both reported — `0700, was 0755` — so it can be undone by hand.
+
+Six of the ten rules hold by construction and have nothing to fix: they are
+enforced in `http::answer` before any handler runs. Of the four that are readings
+of this machine, `directory modes` and `agent key` are a `chmod` that removes
+group and other bits; `model cache` is the same where the cache is yours and no
+button at all where another account owns it, and the row says which case it is;
+and `private addresses` gets the manual step and no button, because it fails on a
+variable in the environment the daemon inherited and no process can unset a
+variable in its parent's. On Windows the two mode rules have no reading and no
+repair, and the row says so rather than showing a tick it has not earned.
+
+The button posts to the engine `semlith doctor --fix` calls. Neither surface has a
+repair the other lacks.
+
 **The one outbound connection that exists** is the embedding model, downloaded
 once on first index and cached. `semlith upgrade` and `semlith add` reach the
 network only in the second you ask them to. `--airgap` refuses all three and exits
@@ -748,6 +769,32 @@ needs reconfiguring.
 **Content-Security-Policy** prints the policy every response carries, and the line
 under it names the three `Host` values that are answered. Everything else gets
 400.
+
+## Doctor
+
+**What it is for.** Whether each agent client on this machine can reach semlith,
+and what to run for the ones that cannot — so the next person who hits an
+unregistered client reads the answer instead of bisecting a configuration file.
+
+**Clients** is one row per documented client: its name, whether semlith is
+registered in it and at what scope, and the command that fixes the row when it
+needs fixing. Four states are kept apart on purpose. *Not installed* is a client
+whose CLI is not on this machine, which is not a fault — most people have two or
+three of the twenty-seven. *Installed, not registered* is one that would register
+if asked. *One project only* is the defect this release exists to end: semlith
+registered for the directory somebody was standing in. And *cannot register* is
+one of the three — Crush, Zed and Roo Code — that document no user-level
+configuration path at all, where the page prints the reason rather than a repair
+it cannot offer.
+
+**Rules** is the same four measurable Privacy rules, with the same manual step
+and the same Fix button, read from the same function. The page and
+`semlith doctor` in a terminal cannot disagree about whether a client is
+registered or a rule holds, because they call the same two functions.
+
+Nothing on this page runs a client's CLI. The registration state is read out of
+each client's own configuration file, because asking sixteen command-line tools on
+a route the portal loads every time is sixteen processes per page load.
 
 ## About
 
