@@ -818,7 +818,10 @@ pub const SHAPES: &[Shape] = &[
     Shape {
         kind: "a Slack token",
         pattern: r"\bxox[abprs]-[0-9A-Za-z-]{12,}",
-        example: concat!("xox", "b-123456789012-1234567890123-aaaaaaaaaaaaaaaaaaaaaaaa"),
+        example: concat!(
+            "xox",
+            "b-123456789012-1234567890123-aaaaaaaaaaaaaaaaaaaaaaaa"
+        ),
         near_miss: "xoxb-123",
     },
     // Test keys as well as live ones. A `sk_test_` is not a credential in the
