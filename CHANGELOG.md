@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-09-17
+
 ### A sliced run carries on instead of starting over
 
 - A run yields the writer back to the watcher every 45 seconds and returns as a
@@ -2066,7 +2068,10 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.17.3...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/semlith/semlith/compare/v0.19.0...v0.20.0
+[0.19.0]: https://github.com/semlith/semlith/compare/v0.18.0...v0.19.0
+[0.18.0]: https://github.com/semlith/semlith/compare/v0.17.3...v0.18.0
 [0.17.3]: https://github.com/semlith/semlith/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/semlith/semlith/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/semlith/semlith/compare/v0.17.0...v0.17.1
