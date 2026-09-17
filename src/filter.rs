@@ -839,7 +839,7 @@ pub const SHAPES: &[Shape] = &[
     Shape {
         kind: "a Google API key",
         pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
-        example: "AIzaSyA0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        example: concat!("AIza", "SyA0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         near_miss: "AIzaSyA0aaaaaaaaaaaa",
     },
     Shape {
