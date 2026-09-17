@@ -181,7 +181,16 @@ jobs:
           # Store, so the name is resolved rather than assumed.
           PY=python3
           command -v python3 >/dev/null 2>&1 || PY=python
-          "$PY" -m pip install --quiet --disable-pip-version-check websocket-client
+
+          # Into a virtual environment, not into the runner's Python. A macOS
+          # image's system Python is externally managed (PEP 668) and refuses
+          # `pip install` outright, which killed this step before the daemon
+          # was ever started — and the failure read as "no portal URL".
+          "$PY" -m venv drive-venv
+          VPY=drive-venv/bin/python
+          [ -x "$VPY" ] || VPY=drive-venv/Scripts/python
+          "$VPY" -m pip install --quiet --disable-pip-version-check websocket-client
+          PY="$VPY"
 
           # Its own store home and its own port, so this cannot collide with
           # whatever the two steps above left behind — a daemon still holding a
