@@ -810,9 +810,17 @@ h2 {
  * grid cell is unreadable for the same reason a 180-character page subtitle
  * is. The page subtitle above is the exception, because it has a row of its
  * own and wrapping it mid-sentence at 1440px is what the cap caused. */
+/* Prose fills the box it is in.
+ *
+ * These used to stop at a 68ch measure, which is the typographic default and
+ * was wrong here in a way that read as a bug rather than as a choice: the page
+ * subtitle above was already exempt, so one paragraph on a page ran the full
+ * width and the one under it stopped halfway, with the card's right half
+ * empty. Consistency is worth more than the measure on a page whose cards are
+ * already sized to their content. */
 .card .subtitle,
 .hero .subtitle {
-  max-width: var(--measure);
+  max-width: 100%;
 }
 
 .eyebrow {
@@ -1948,6 +1956,13 @@ pre.code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The picker's line of prose is inset like the row above it and the rows
+   below it. It is a direct child of a card with no padding of its own — the
+   crumbs bar and the entries each bring theirs — so without this it alone sat
+   against the border. */
+.picker > .subtitle {
+  padding: var(--sp-3) var(--sp-3h) 0;
 }
 .picker .entries {
   max-height: 320px;
@@ -3999,7 +4014,8 @@ td.row-end {
 .rule-text {
   color: var(--muted);
   margin: 0;
-  max-width: 68ch;
+  /* Full width, like every other paragraph. See `.card .subtitle`. */
+  max-width: 100%;
 }
 /* What the daemon found, under the rule it is about. A column beside the rule
  * spends the card's whole width on the one row whose reading is a path, and

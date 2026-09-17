@@ -2509,9 +2509,14 @@ mod tests {
 
     /// The change counters are process-global — deliberately, because two of
     /// the six are bumped by code that has no `State` in hand. That makes them
-    /// shared between tests running in parallel threads, so any test that
-    /// reasons about *which* counter moved has to hold this first. A test that
-    /// merely causes a bump does not.
+    /// shared between every test in this binary running in parallel threads.
+    ///
+    /// **Every test here that causes a bump takes this, not only the one that
+    /// reads the counters.** Guarding the reader alone passed on macOS and
+    /// failed on Windows, where the scheduling differs: a clock test's
+    /// `record` landed inside the isolation test's window and moved `runs`
+    /// while it was asserting that writing `stores` had not.
+    #[must_use]
     fn counters() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -2541,6 +2546,9 @@ mod tests {
     /// faithfully redrew that as a run that had just begun.
     #[test]
     fn a_runs_clock_spans_its_slices_and_never_goes_backwards() {
+        // Recording bumps the runs counter, which another test in this
+        // module asserts the isolation of. Same guard, or they race.
+        let _held = counters();
         let store = bare_store("api");
         store.begin_run(1, vec![PathBuf::from("/work/api")]);
         store.record(&serde_json::json!({ "event": "started", "paths": ["/work/api"] }));
@@ -2559,6 +2567,9 @@ mod tests {
     /// keeps its total rather than counting on.
     #[test]
     fn a_held_run_stops_counting_and_a_finished_one_freezes() {
+        // Recording bumps the runs counter, which another test in this
+        // module asserts the isolation of. Same guard, or they race.
+        let _held = counters();
         let store = bare_store("api");
         store.begin_run(1, Vec::new());
         store.record(&serde_json::json!({ "event": "started", "paths": [] }));
@@ -2587,6 +2598,9 @@ mod tests {
     /// affected by what the other has read.
     #[test]
     fn two_cursors_over_one_log_each_see_every_line_once() {
+        // Recording bumps the runs counter, which another test in this
+        // module asserts the isolation of. Same guard, or they race.
+        let _held = counters();
         let store = bare_store("api");
         store.begin_run(1, Vec::new());
         for scanned in 0..5 {
@@ -2615,6 +2629,9 @@ mod tests {
     /// The queue is first in, first out by submission, and nothing reorders it.
     #[test]
     fn the_queue_admits_in_submission_order_and_only_up_to_the_limit() {
+        // Recording bumps the runs counter, which another test in this
+        // module asserts the isolation of. Same guard, or they race.
+        let _held = counters();
         let admission = Admission::new(2);
         let stores: Vec<Arc<Store>> = ["a", "b", "c", "d"].into_iter().map(bare_store).collect();
         for store in &stores {
@@ -2649,6 +2666,9 @@ mod tests {
     /// was embedded — which is the whole difference from stopping a run.
     #[test]
     fn a_dequeued_run_is_answered_at_once_and_undoes_nothing() {
+        // Recording bumps the runs counter, which another test in this
+        // module asserts the isolation of. Same guard, or they race.
+        let _held = counters();
         let admission = Admission::new(1);
         let (a, b) = (bare_store("a"), bare_store("b"));
         admission.submit(&a, Vec::new());
