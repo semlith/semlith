@@ -582,6 +582,15 @@ pub struct ClientReport {
     /// the same as not reporting at all. A fault is a client that is on this
     /// machine and cannot see semlith.
     pub fault: bool,
+    /// Whether this client is on this machine at all.
+    ///
+    /// Wider than `present`, which is only about a CLI on `PATH`: a client
+    /// semlith registers by writing a file is here if its configuration
+    /// directory is. The portal read the two as one, so a client with a
+    /// configuration directory and no CLI was labelled "not installed" and
+    /// handed a fix command in the next column — one row saying two different
+    /// things, which is finding 3.8 from the other end.
+    pub in_use: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -697,6 +706,7 @@ pub fn clients_report() -> Vec<ClientReport> {
                 files,
                 repair,
                 note,
+                in_use,
             }
         })
         .collect()

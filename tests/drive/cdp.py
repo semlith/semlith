@@ -399,7 +399,15 @@ class Drive:
             try:
                 last = self.eval(js_predicate)
             except ProtocolError as error:
-                last = str(error)
+                # A predicate that throws has not come true — it has usually
+                # dereferenced a node that is not on the page yet, which is the
+                # exact state this is waiting out. Recorded for the timeout
+                # message and then polled again: returning the exception's text
+                # here made every throwing predicate succeed on its first poll,
+                # because a non-empty string is truthy.
+                last = "threw: %s" % error
+                time.sleep(0.1)
+                continue
             if last:
                 return last
             time.sleep(0.1)
@@ -462,14 +470,58 @@ class Drive:
 
     # ------------------------------------------------------- portal helpers
 
-    def open_view(self, view_id, fresh=False):
-        """Open one of the portal's views and wait for it to paint.
+    # Every view in `src/portal/app.js` is an `async` function that awaits one
+    # or more `/api/…` calls before it returns a single node, and `render()`
+    # fills the page with a bare "Loading…" while it does. So a check that
+    # navigates and then reads immediately reads the *previous* view — or an
+    # empty one — and reports the control it wanted as missing.
+    #
+    # The heading is the signal that the awaits are over: `render()` picks the
+    # view out of `VIEWS`, and each view's own `pageHead(title, …)` writes that
+    # same title into the one `h1` on the page. The Search page's is
+    # `el("h1", {class: "sr-only", text: "Search"})`, which is the same
+    # contract. Until the awaited node is inserted there is no `h1` at all.
+    #
+    #: view id -> the `h1` that view paints, from `VIEWS` in `src/portal/app.js`.
+    VIEW_TITLES = {
+        "stores": "Stores",
+        "files": "Files",
+        "index": "Index",
+        "search": "Search",
+        "graph": "Graph",
+        "agents": "Agents",
+        "ledger": "Retrieval ledger",
+        "privacy": "Privacy",
+        "doctor": "Doctor",
+        "about": "About",
+    }
+
+    #: The views whose heading paints before their content does, and the
+    #: expression that is true once the content is there too. The Graph page is
+    #: the only one: it returns its frame and then fetches `/api/graph` from a
+    #: `setTimeout`, because the canvas has no size until it is in the document,
+    #: so its heading is on screen while `.graph-count` still reads "loading…".
+    VIEW_READY = {
+        "graph": (
+            "/\\d[\\d,]*\\s*symbols/i.test("
+            "((document.querySelector('.graph-count') || {}).innerText) || '')"
+        ),
+    }
+
+    def open_view(self, view_id, fresh=False, timeout=30):
+        """Open one of the portal's views and wait until it is actually on screen.
 
         The token travels in the query on the first load only; the page moves
         it into sessionStorage and takes it out of the address bar, exactly as
         `src/portal/app.js` describes. `fresh=True` forces the query form
         again, which is what a check wants when it has just cleared storage.
         """
+        if view_id not in self.VIEW_TITLES:
+            raise ProtocolError(
+                "the portal has no view called %r. The ten are %s."
+                % (view_id, ", ".join(sorted(self.VIEW_TITLES)))
+            )
+
         already_loaded = False
         if not fresh:
             try:
@@ -482,10 +534,26 @@ class Drive:
         else:
             self.navigate("%s/?token=%s#%s" % (self.portal_url, self.token, view_id))
 
+        title = self.VIEW_TITLES[view_id]
         self.wait_for(
-            "document.querySelector('#root') && document.querySelector('#root').innerText.trim().length > 0",
-            what="the %s view to paint" % view_id,
+            "(() => { const h = document.querySelector('#root h1');"
+            " return !!h && (h.textContent || '').trim() === %s; })()" % json.dumps(title),
+            timeout=timeout,
+            what=(
+                "the #%s view's own heading to read %r. Every view awaits an "
+                "/api/… call before anything of it is inserted, so a view that "
+                "has merely been navigated to is still the one before it — and "
+                "with no store open the whole page is the welcome screen, whose "
+                "heading is 'No stores yet'." % (view_id, title)
+            ),
         )
+        extra = self.VIEW_READY.get(view_id)
+        if extra:
+            self.wait_for(
+                extra,
+                timeout=timeout,
+                what="the #%s view's content to arrive behind its heading" % view_id,
+            )
         # One frame of settle, so a check reading geometry does not read it
         # mid-render. Cheap, and it removes a whole class of flake.
         self.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
@@ -518,14 +586,22 @@ class Drive:
         ),
     }
 
-    def _index_panel_button(self, label):
-        """The `aria-pressed` of the Index page button reading `label`."""
+    def _index_panel_button(self, label, timeout=20):
+        """The `aria-pressed` of the Index page button reading `label`.
+
+        Waited for rather than read once. `indexView()` awaits `refreshStores()`
+        and `refreshRuns()` before any of its four buttons exists, so a single
+        miss means "not yet", not "gone" — and reporting it as gone is what made
+        five checks blame the product for a button that arrived a moment later.
+        Both answers, `"true"` and `"false"`, are non-empty strings and so are
+        truthy to `wait_for`; only the absent button polls again.
+        """
         if label not in self.INDEX_PANELS:
             raise ProtocolError(
                 "the drive does not know an Index page panel called %r. The four "
                 "are %s." % (label, ", ".join(sorted(self.INDEX_PANELS)))
             )
-        state = self.eval(
+        return self.wait_for(
             """
             (() => {
               const wanted = %s.trim().toLowerCase();
@@ -537,15 +613,14 @@ class Drive:
               return null;
             })()
             """
-            % json.dumps(label)
+            % json.dumps(label),
+            timeout=timeout,
+            what=(
+                "the Index page's %r button. The page's four reveal buttons are "
+                "how every one of its panels is reached; if their wording moved, "
+                "update `INDEX_PANELS` rather than the check." % label
+            ),
         )
-        if state is None:
-            raise ProtocolError(
-                "no button on the Index page reads %r. The page's four reveal "
-                "buttons are how every one of its panels is reached; if their "
-                "wording moved, update this table rather than the check." % label
-            )
-        return state
 
     def open_index_panel(self, label, timeout=20):
         """Press one of the Index page's four reveal buttons and wait for its panel.

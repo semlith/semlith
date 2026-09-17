@@ -35,6 +35,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 
 import cdp
 import fixtures
@@ -230,6 +231,29 @@ def store_named(d, name):
             return row
     fail("no store named %r is open. Stores present: %s"
          % (name, ", ".join(sorted(r["name"] for r in stores(d)))))
+
+
+def doctor_state(row):
+    """The state the Doctor page's `semlith` column shows for one client row.
+
+    `/api/doctor` returns the facts — `note`, `registered`, `scope`, `command`,
+    `present` — and `doctorView()`'s own `state(c)` in `src/portal/app.js`
+    derives the words from them. There is no `state` field on the row, so a
+    check that read one grouped every client under `''` and then compared their
+    `command` values, which are the client binaries (`claude`, `codex`, …) and
+    not remedies at all. This is that function, in the same order.
+    """
+    if row.get("note"):
+        return "cannot register"
+    if row.get("registered"):
+        return "registered (%s)" % (row.get("scope") or "user")
+    if not row.get("command"):
+        return "not registered"
+    if not row.get("present"):
+        return "not installed"
+    if row.get("scope") == "project":
+        return "one project only"
+    return "installed, not registered"
 
 
 def start_index(d, path):
@@ -535,20 +559,38 @@ def _(d):
     # fix that keeps the watcher off a store with a queued run satisfy the
     # finding's complaint, which is that the card and the store disagree. The
     # assertion is therefore on the agreement, not on the mechanism.
-    store_name = indexed_fixture(d, d.fixtures.small())
-    run = run_for(d, store_name)
-    held = store_named(d, store_name)
+    #
+    # And the agreement is with what the store *gained*, not with what it holds.
+    # A run over a corpus that is already indexed correctly reports "0 indexed,
+    # N unchanged, 0 chunks", and asserting its `indexed` against the store's
+    # total made a correct run look like the under-reporting one. So the store
+    # is measured on both sides of the run and the deltas are what the card has
+    # to match. On a full drive this is the first run over `small`, so the store
+    # does not exist yet and the deltas are the whole corpus; on `--only 1.6`
+    # after an earlier drive they are zero, and zero indexed against zero gained
+    # is the same assertion.
+    path = d.fixtures.small()
+    before = {row["name"]: row for row in stores(d)}
 
-    if run.get("indexed") != held["files"]:
+    run_id, store_name = start_index(d, path)
+    run = wait_for_run(d, store_name, run_id=run_id)
+
+    was = before.get(store_name) or {"files": 0, "chunks": 0}
+    now = store_named(d, store_name)
+    gained_files = now["files"] - was["files"]
+    gained_chunks = now["chunks"] - was["chunks"]
+
+    if run.get("indexed") != gained_files:
         fail(
-            "the run card says it handled %s files and %s holds %d. A card that "
-            "under-reports makes the user's own index run look like it did "
-            "almost nothing." % (run.get("indexed"), store_name, held["files"])
+            "the run card says it indexed %s files and %s went from %d to %d — a "
+            "gain of %d. A card that under-reports makes the user's own index run "
+            "look like it did almost nothing."
+            % (run.get("indexed"), store_name, was["files"], now["files"], gained_files)
         )
-    if run.get("chunks") != held["chunks"]:
+    if run.get("chunks") != gained_chunks:
         fail(
-            "the run card says %s chunks and %s holds %d"
-            % (run.get("chunks"), store_name, held["chunks"])
+            "the run card says %s chunks and %s went from %d to %d — a gain of %d"
+            % (run.get("chunks"), store_name, was["chunks"], now["chunks"], gained_chunks)
         )
 
 
@@ -938,16 +980,31 @@ def _(d):
     # And when something is actually running, it is the card at the top.
     _, busy = start_index(d, d.fixtures.bulk())
     d.open_view("index")
-    d.wait_for(
-        "[...document.querySelectorAll(%s)].some(c => c.innerText.includes(%s))"
-        % (json.dumps(RUN_CARD), json.dumps(busy)),
-        what="the run card for %s" % busy,
-    )
-    first = d.eval("(document.querySelector(%s) || {}).innerText || ''" % json.dumps(RUN_CARD))
-    if busy not in first:
+    # Both conditions in one wait, not two reads. The page repaints its cards
+    # from the shared one-second poll, so between "the new card exists" and "the
+    # list has been re-sorted around it" there is a frame in which the finished
+    # card is still first — and reading once in that frame reported a sort bug
+    # that was a repaint the check did not wait for. A bounded wait, because a
+    # live run that never reaches the top is exactly what this finding is about.
+    try:
+        d.wait_for(
+            "(() => { const cards = [...document.querySelectorAll(%s)];"
+            " const first = cards[0];"
+            " return cards.some(c => c.innerText.includes(%s))"
+            " && !!first && first.innerText.includes(%s); })()"
+            % (json.dumps(RUN_CARD), json.dumps(busy), json.dumps(busy)),
+            timeout=30,
+            what="the live run on %s to be the first card on the Index page" % busy,
+        )
+    except cdp.ProtocolError:
+        first = d.eval(
+            "(document.querySelector(%s) || {}).innerText || ''" % json.dumps(RUN_CARD)
+        )
+        d.api("/api/index/control", method="POST", body={"store": busy, "action": "stop"})
         fail(
-            "a run that is still going (%s) is not the first card on the page; "
-            "the top card reads %r" % (busy, first[:120])
+            "a run that is still going (%s) never became the first card on the "
+            "page; after 30s of repaints the top card still reads %r"
+            % (busy, first[:120])
         )
     d.api("/api/index/control", method="POST", body={"store": busy, "action": "stop"})
 
@@ -1276,33 +1333,61 @@ def _(d):
 @finding("3.5", "the graph's CALLERS list holds only call edges")
 def _(d):
     d.open_view("graph")
-    d.wait_for("/callers/i.test(document.querySelector('#root').innerText)",
-               what="the graph's CALLERS rail", timeout=30)
-    kinds = d.eval(
+    # The rail fills from `/api/neighbors` after the graph itself has drawn, so
+    # it is waited for by its own markup — `ends(title, …)` builds one
+    # `.rail-group` per list, headed by an `h3`.
+    # Scoped to `.graph-rail`, because the shell's own navigation is built from
+    # `.rail-group` divs too and a bare `.rail-group` matches four of them
+    # before it reaches the graph's.
+    d.wait_for(
+        "!!document.querySelector('.graph-rail .rail-group h3')",
+        timeout=30,
+        what="the graph rail's edge lists for the symbol it opened on",
+    )
+    # The finding allowed either of two answers: filter the list to `calls`, or
+    # rename it to what it holds. The product took the rename — the heading is
+    # now "Incoming" — so the property asserted is the one both answers share:
+    # a list whose heading promises calls holds only calls. Each row carries its
+    # own kind in `el("span", {class: "via", text: end.kind})`, so the kinds are
+    # read rather than pattern-matched out of the row's prose.
+    rail = d.eval(
         """
         (() => {
-          const heads = [...document.querySelectorAll('h1,h2,h3,h4,th,.rail-title')];
-          const head = heads.find(h => /^callers$/i.test((h.innerText||'').trim()));
-          if (!head) return null;
-          const list = head.parentElement;
-          return [...list.querySelectorAll('li, tr, .row')]
-            .map(r => (r.innerText || '').trim()).filter(Boolean);
+          const groups = [...document.querySelectorAll('.graph-rail .rail-group')];
+          if (!groups.length) return null;
+          return groups.map(group => ({
+            head: ((group.querySelector('h3') || {}).innerText || '').trim(),
+            kinds: [...group.querySelectorAll('li')]
+              .map(row => ((row.querySelector('.via') || {}).innerText || '').trim())
+              .filter(Boolean),
+          }));
         })()
         """
     )
-    if not kinds:
-        skip("nothing is listed under CALLERS for the default selection")
-    # The ambiguity: renaming the heading to "incoming edges" answers the
-    # finding too. This takes the other half of the finding's own sentence —
-    # "or should filter to `calls`" — because a list called CALLERS that holds
-    # non-calls is the part that misleads.
-    wrong = [row for row in kinds if re.search(r"\b(defines|references|imports|contains|aliases)\b", row)]
-    if wrong:
+    if not rail:
         fail(
-            "the CALLERS list holds %d edges that are not calls, for example %r. "
-            "The section is really 'incoming edges'; either it says so or it "
-            "filters to calls." % (len(wrong), wrong[0][:120])
+            "the graph rail lists no edge groups at all for the symbol the page "
+            "opened on. `ends(…)` builds one `.rail-group` with an `h3` per list, "
+            "even when the list is empty."
         )
+    incoming = [g for g in rail if re.match(r"^(incoming|callers)\b", g["head"], re.IGNORECASE)]
+    if not incoming:
+        fail(
+            "the graph rail has no list of the edges that point at the selected "
+            "symbol. Its groups are headed %s."
+            % ", ".join(repr(g["head"]) for g in rail)
+        )
+    for group in incoming:
+        if not group["kinds"]:
+            continue
+        promises_calls = re.match(r"^callers\b", group["head"], re.IGNORECASE)
+        wrong = sorted({k for k in group["kinds"] if k.lower() != "calls"})
+        if promises_calls and wrong:
+            fail(
+                "the rail's %r list holds %s, which are not calls. The section is "
+                "really 'incoming edges'; either it says so — as it now does — or "
+                "it filters to calls." % (group["head"], ", ".join(wrong))
+            )
 
 
 @finding("3.6", "the graph opens on something legible and offers fit and zoom")
@@ -1337,34 +1422,43 @@ def _(d):
 
 @finding("3.7", "scoping the graph cannot raise the edge count")
 def _(d):
-    d.open_view("graph")
-    d.wait_for("/\\d+\\s+symbols/i.test(document.querySelector('#root').innerText)",
-               what="the graph summary")
+    # Read from `/api/graph`, not from the page's `.graph-count`.
+    #
+    # The number the page prints is `canvas.counts()` — whatever survived the
+    # edge-kind chips and the store chips that whichever check ran before this
+    # one left switched on — and the page does not open on the whole graph
+    # anyway: `graphView()` lands on `focus(busiest.name)`, a neighbourhood. So
+    # the unscoped reading came back as two symbols and every comparison after
+    # it was against the wrong denominator. Both numbers now come from one
+    # route, with the same `limit` and the same (absent) store filter, so the
+    # only difference between the two answers is the scope. Nothing on the page
+    # is touched, so its chips are left exactly as they were found.
+    LIMIT = 200
 
-    def counts():
-        body = view_text(d)
-        symbols = re.search(r"([\d,]+)\s+symbols", body, re.IGNORECASE)
-        edges = re.search(r"([\d,]+)\s+edges", body, re.IGNORECASE)
-        if not symbols or not edges:
-            fail("the graph summary no longer prints symbol and edge counts")
-        return (int(symbols.group(1).replace(",", "")), int(edges.group(1).replace(",", "")))
+    def counts(data):
+        return (len(data.get("nodes") or []), len(data.get("edges") or []))
 
-    base_symbols, base_edges = counts()
-    scope = d.eval(
-        """
-        (() => {
-          const el = [...document.querySelectorAll('input')]
-            .find(i => /scope|symbol/i.test(i.placeholder || i.name || i.id || ''));
-          return el ? (el.id ? '#' + el.id : ('input[placeholder="' + el.placeholder + '"]')) : null;
-        })()
-        """
+    whole = d.api("/api/graph?limit=%d" % LIMIT)
+    base_symbols, base_edges = counts(whole)
+    if not base_symbols:
+        skip("this machine's stores hold no extracted symbols to scope")
+
+    # The same value the scope box would send: `applyScope()` reads anything
+    # without a dot or a slash as a symbol to centre on, and posts it as `name`.
+    target = next(
+        (
+            node["name"]
+            for node in whole["nodes"]
+            if node.get("name") and "." not in node["name"] and "/" not in node["name"]
+        ),
+        None,
     )
-    if not scope:
-        fail("no graph scope field was found")
-    d.type(scope, "acquire")
-    d.press("Enter")
-    d.eval("new Promise(done => setTimeout(() => done(true), 1500))")
-    scoped_symbols, scoped_edges = counts()
+    if not target:
+        skip("no symbol in this graph can be scoped to by name")
+
+    scoped_symbols, scoped_edges = counts(
+        d.api("/api/graph?limit=%d&name=%s" % (LIMIT, urllib.parse.quote(target)))
+    )
 
     if scoped_symbols > base_symbols:
         fail("a scoped graph has %d symbols, more than the whole graph's %d"
@@ -1402,25 +1496,35 @@ def _(d):
 
 @finding("3.9", "one Doctor state has one fix command")
 def _(d):
-    rows = d.api("/api/doctor").get("clients") or d.api("/api/doctor").get("rows") or []
+    rows = d.api("/api/doctor").get("clients") or []
     if not rows:
         skip("the doctor route lists no clients on this machine")
+
     by_state = {}
     for row in rows:
-        state = str(row.get("state") or row.get("status") or "").lower().strip()
-        fix = (row.get("fix") or row.get("command") or "").strip()
+        fix = str(row.get("repair") or "").strip()
         if not fix or fix == "—":
             continue
-        by_state.setdefault(state, {}).setdefault(fix, []).append(row.get("name"))
+        by_state.setdefault(doctor_state(row), {}).setdefault(fix, []).append(row.get("name"))
+
     for state, fixes in by_state.items():
-        if len(fixes) > 1:
-            listed = "; ".join(
-                "%s → %r" % (", ".join(names), fix) for fix, names in fixes.items()
-            )
-            fail(
-                "the state %r is given %d different remedies with nothing to "
-                "explain the difference: %s" % (state, len(fixes), listed)
-            )
+        if len(fixes) < 2:
+            continue
+        # Two commands under one state are allowed when the cell says why. The
+        # product's own answer is a trailing `# <client> is registered by writing
+        # its config file, which \`semlith setup\` alone does not do`, which the
+        # `copyField` renders with the command — so a remedy that carries an
+        # explanation of its own is not an unexplained second remedy.
+        unexplained = {fix: names for fix, names in fixes.items() if "#" not in fix}
+        if len(unexplained) < 2:
+            continue
+        listed = "; ".join(
+            "%s → %r" % (", ".join(names), fix) for fix, names in unexplained.items()
+        )
+        fail(
+            "the state %r is given %d different remedies with nothing to "
+            "explain the difference: %s" % (state, len(unexplained), listed)
+        )
 
 
 @finding("3.10", "the recommended Claude Code HTTP command carries --scope user")
@@ -1810,7 +1914,16 @@ def _(d):
         fail("with no stored preference the page should follow the OS, and it set "
              "data-theme=%r" % start)
 
-    toggle = "button[aria-label*='theme' i], [data-theme-toggle], button[title*='theme' i]"
+    # `paintThemeButton()` labels the control with where it goes, not where you
+    # are: "Switch to light", "Switch to dark", "Follow the system theme". Only
+    # the third contains the word "theme", and it is never the label in the
+    # state this check starts from — so a selector matching on "theme" found
+    # nothing and reported the toggle as missing. All three labels, by name.
+    toggle = (
+        "button[aria-label='Follow the system theme'],"
+        " button[aria-label='Switch to light'],"
+        " button[aria-label='Switch to dark']"
+    )
     if not exists(d, toggle):
         fail("no theme toggle was found on the page")
 
@@ -1898,28 +2011,66 @@ def _(d):
 @finding("3.26", "naming a target store and 'each folder becomes its own store' are exclusive")
 def _(d):
     d.open_view("index")
-    state = d.eval(
-        """
-        (() => {
-          const select = [...document.querySelectorAll('select')]
-            .find(s => /add to|each folder becomes its own store/i.test(s.innerText || ''));
-          const projects = [...document.querySelectorAll('button, a')]
-            .find(b => /projects under a folder/i.test(b.innerText || ''));
-          if (!select || !projects) return null;
-          const value = (select.selectedOptions[0] || {}).text || '';
-          return {value: value.trim(), projectsDisabled: projects.disabled === true,
-                  selectDisabled: select.disabled === true};
-        })()
-        """
-    )
+    # The dropdown by its own `aria-label`, not by its text: a `<select>`'s
+    # `innerText` is the browser's business — Chrome gives an empty string for a
+    # closed one — so matching on "add to" found nothing and the check reported
+    # a control that was on the page the whole time.
+    TARGET = 'select[aria-label="Where to index into"]'
+
+    def target():
+        return d.eval(
+            "(() => { const s = document.querySelector(%s);"
+            " if (!s) return null;"
+            " return {value: ((s.selectedOptions[0] || {}).text || '').trim(),"
+            "         disabled: s.disabled === true,"
+            "         stores: [...s.options].filter(o => o.value !== 'each' && !o.disabled)"
+            "                               .map(o => o.value)}; })()" % json.dumps(TARGET)
+        )
+
+    state = target()
     if state is None:
-        fail("the Index page no longer carries both a store dropdown and a projects picker")
-    names_a_store = state["value"].lower().startswith("add to")
-    if names_a_store and not state["projectsDisabled"]:
+        fail("the Index page no longer carries a store dropdown beside its pickers")
+
+    # The exclusivity the finding asks for, exercised rather than waited for.
+    # The product's answer is in `reveal()`: opening the projects picker forces
+    # the dropdown back to "each folder becomes its own store" and disables it,
+    # because that mode makes each project its own store and an "add to <store>"
+    # beside it is an instruction that contradicts the picker that is open.
+    if not state["stores"]:
+        skip("no open store is offered as an index target, so there is nothing to make exclusive")
+    d.eval(
+        "(() => { const s = document.querySelector(%s);"
+        " s.value = %s;"
+        " s.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        % (json.dumps(TARGET), json.dumps(state["stores"][0]))
+    )
+    named = target()
+    if not named["value"].lower().startswith("add to"):
         fail(
-            "the store dropdown reads %r while 'Projects under a folder…' is still "
-            "offered. That mode is documented to make each project its own store, "
-            "and nothing reconciles the two." % state["value"]
+            "the store dropdown would not take %r as its target; it reads %r"
+            % (state["stores"][0], named["value"])
+        )
+
+    d.open_index_panel("Projects under a folder…")
+    with_picker = target()
+    if not with_picker["disabled"]:
+        fail(
+            "the store dropdown reads %r and is still live while 'Projects under "
+            "a folder…' is open. That mode is documented to make each project its "
+            "own store, and nothing reconciles the two." % with_picker["value"]
+        )
+    if with_picker["value"].lower().startswith("add to"):
+        fail(
+            "'Projects under a folder…' is open and the store dropdown still "
+            "reads %r. It is disabled, so the contradiction is now unfixable "
+            "from the page rather than resolved." % with_picker["value"]
+        )
+
+    d.close_index_panel("Projects under a folder…")
+    if target()["disabled"]:
+        fail(
+            "closing 'Projects under a folder…' left the store dropdown disabled, "
+            "so naming a target store is no longer possible at all"
         )
 
 
@@ -2123,15 +2274,44 @@ def _(d):
             fail(
                 "the responsive table drops ROOTS and CHUNKS and nothing else "
                 "exposes the root, so on a phone you cannot see what a store "
-                "indexes"
+                "indexes. The product's answer is the `<span class=\"meta "
+                "only-narrow\">` on the store's own row, which the stylesheet "
+                "shows below 820px."
             )
+        # Clipped *and* unrecoverable. Two kinds of overflow on this page are
+        # not defects and were both being reported as one:
+        #
+        #   * `.sr-only` — the table's `<caption>` among others — is a 1×1 box
+        #     with `overflow: hidden` by design, so its scrollWidth always
+        #     exceeds its clientWidth. It is for a screen reader and cannot be
+        #     clipped visually at all.
+        #   * `lineCell(value, …)` deliberately truncates to one line and hangs
+        #     the whole value on a `title`, which is finding 4.1's contract. A
+        #     row that ends in an ellipsis and hands over its full text on hover
+        #     is the design, not a clip.
+        #
+        # What is left is text cut off with nothing carrying the rest — which is
+        # what would make a store's root unreadable on a phone.
         clipped = d.eval(
-            "[...document.querySelectorAll('#root *')]"
-            ".filter(el => el.children.length === 0 && el.scrollWidth > el.clientWidth + 2)"
-            ".map(el => (el.innerText || '').trim()).slice(0, 3)"
+            """
+            [...document.querySelectorAll('#root *')]
+              .filter(el => el.children.length === 0)
+              .filter(el => !el.closest('.sr-only'))
+              .filter(el => el.scrollWidth > el.clientWidth + 2)
+              .filter(el => {
+                const full = (el.innerText || '').trim();
+                const held = (el.closest('[title]') || {}).title || '';
+                return !full || held.trim() !== full;
+              })
+              .map(el => (el.innerText || '').trim())
+              .slice(0, 3)
+            """
         )
         if clipped:
-            fail("text is clipped mid-word on the phone build: %s" % ", ".join(clipped))
+            fail(
+                "text is clipped on the phone build with nothing carrying the rest "
+                "of it — no `title`, no expansion: %s" % ", ".join(clipped)
+            )
     finally:
         d.reset_viewport()
 
