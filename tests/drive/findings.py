@@ -181,6 +181,27 @@ def descend_picker(d, path):
     return here
 
 
+#: The "runs at once" field. `settingField` gives each of the three an
+#: `aria-label` and no name or id, so the label is the handle.
+RUNS_AT_ONCE = 'input[aria-label="runs at once"]'
+
+
+def limits_panel(d):
+    """Everything the machine limits panel says, with its panel already open."""
+    text = d.eval(
+        "(() => { const field = document.querySelector(%s);"
+        " return field ? field.closest('.card').innerText : null; })()"
+        % json.dumps(RUNS_AT_ONCE)
+    )
+    if text is None:
+        fail(
+            "the machine limits panel is open and holds no %s field. The three "
+            "numbers are 'runs at once', 'threads each' and 'MiB per store'."
+            % RUNS_AT_ONCE
+        )
+    return text
+
+
 def rects(d, selector):
     """The bounding boxes of matching elements, for layout assertions."""
     return d.eval(
@@ -1157,17 +1178,10 @@ def _(d):
 @finding("3.2", "the machine limits panel does not contradict itself")
 def _(d):
     d.open_view("index")
-    panel = d.eval(
-        """
-        (() => {
-          const all = [...document.querySelectorAll('section, fieldset, .panel, .card')];
-          const p = all.find(el => /logical core/i.test(el.innerText || ''));
-          return p ? p.innerText : null;
-        })()
-        """
-    )
-    if panel is None:
-        fail("no machine limits panel was found on the Index page")
+    # The three numbers live behind the "Machine limits" button, folded away
+    # because they are read once and changed rarely.
+    d.open_index_panel("Machine limits")
+    panel = limits_panel(d)
 
     if re.search(r"\b0\s*GiB is free", panel, re.IGNORECASE):
         fail(
@@ -1193,31 +1207,37 @@ def _(d):
             "the field is labelled MiB per store and its help text says MB. One "
             "card, two units for one number:\n%s" % panel[:400]
         )
+    d.close_index_panel("Machine limits")
 
 
 @finding("3.3", "'threads each' recomputes when 'runs at once' changes")
 def _(d):
     d.open_view("index")
-    runs_field = d.eval(
-        """
-        (() => {
-          const el = [...document.querySelectorAll('input, select')]
-            .find(i => /runs.?at.?once/i.test((i.name || '') + (i.id || '')));
-          return el ? (el.id ? '#' + el.id : ('[name="' + el.name + '"]')) : null;
-        })()
-        """
-    )
-    if not runs_field:
-        fail("no 'runs at once' field was found on the Index page")
+    d.open_index_panel("Machine limits")
+    if not exists(d, RUNS_AT_ONCE):
+        fail("no 'runs at once' field was found in the machine limits panel")
+    if d.eval("document.querySelector(%s).disabled" % json.dumps(RUNS_AT_ONCE)):
+        skip("this machine's runs-at-once is set by the environment, so the page cannot change it")
 
-    d.type(runs_field, "3")
-    d.press("Enter")
-    d.eval("new Promise(done => setTimeout(() => done(true), 1200))")
+    # `settingField` saves on `change`, which `d.type` dispatches; the panel is
+    # then repainted from the daemon's answer.
+    d.type(RUNS_AT_ONCE, "3")
+    try:
+        d.wait_for(
+            "/\\b3 runs\\b/.test(document.querySelector(%s).closest('.card').innerText)"
+            % json.dumps(RUNS_AT_ONCE),
+            timeout=15,
+            what="the limits panel to be repainted for 3 runs at once",
+        )
+    except cdp.ProtocolError:
+        # Let the assertions below say which derivation went stale.
+        pass
 
+    # Each field's derivation is the `.note` under it, not a paragraph.
     help_text = d.eval(
         """
         (() => {
-          const all = [...document.querySelectorAll('p, small, .help, .hint')];
+          const all = [...document.querySelectorAll('.setting .note, .note')];
           const el = all.find(e => /embedding threads/i.test(e.innerText || ''));
           return el ? el.innerText : null;
         })()
@@ -1232,22 +1252,15 @@ def _(d):
         )
     if not re.search(r"\b3 runs?\b", help_text):
         fail("'threads each' help does not mention the 3 runs now configured: %r" % help_text)
+    # Left open for 3.4, which reads the same panel for the saved value this
+    # check has just written.
 
 
 @finding("3.4", "a value the daemon calls saved, the portal calls saved too")
 def _(d):
     d.open_view("index")
-    panel = d.eval(
-        """
-        (() => {
-          const all = [...document.querySelectorAll('section, fieldset, .panel, .card')];
-          const p = all.find(el => /runs at once/i.test(el.innerText || ''));
-          return p ? p.innerText : null;
-        })()
-        """
-    )
-    if panel is None:
-        fail("no indexing settings panel was found on the Index page")
+    d.open_index_panel("Machine limits")
+    panel = limits_panel(d)
     # 3.3 has just written a value, so this run of the drive has a saved one.
     if re.search(r"\bderived\b", panel) and not re.search(r"\bsaved\b", panel):
         fail(
@@ -1257,6 +1270,7 @@ def _(d):
             "user is trying to work out whether their setting took effect:\n%s"
             % panel[:300]
         )
+    d.close_index_panel("Machine limits")
 
 
 @finding("3.5", "the graph's CALLERS list holds only call edges")
@@ -1858,18 +1872,19 @@ def _(d):
 @finding("3.25", "the URL field's placeholder does not change after a failed attempt")
 def _(d):
     d.open_view("index")
-    selector = (
-        "(() => { const el = [...document.querySelectorAll('input')]"
-        ".find(i => /url|link to a page/i.test(i.placeholder || '')); "
-        "return el ? el.placeholder.trim() : null; })()"
-    )
+    d.open_index_panel("Add from a URL")
+    selector = "(document.querySelector('#index-url') || {}).placeholder"
     first = d.eval(selector)
-    if first is None:
-        fail("no 'Add from a URL' field was found on the Index page")
+    if not first:
+        fail("the 'Add from a URL' field carries no placeholder at all")
 
-    d.type("input[placeholder=%s]" % json.dumps(first), "not-a-url")
+    d.type("#index-url", "not-a-url")
     d.click_text("button", "Fetch and index")
-    d.eval("new Promise(done => setTimeout(() => done(true), 1500))")
+    d.wait_for(
+        "!!document.querySelector('#index-url').closest('.card')"
+        ".querySelector('.note.bad')",
+        what="the failed attempt to be reported on the panel",
+    )
 
     second = d.eval(selector)
     if second != first:
@@ -1877,6 +1892,7 @@ def _(d):
             "the URL field's placeholder changed from %r to %r after a failed "
             "attempt" % (first, second)
         )
+    d.close_index_panel("Add from a URL")
 
 
 @finding("3.26", "naming a target store and 'each folder becomes its own store' are exclusive")
@@ -1962,7 +1978,7 @@ def _(d):
 @finding("4.3", "the code preview shows that it scrolls")
 def _(d):
     d.open_view("search")
-    d.type("input[type=search], #query, input[name=query]", "release record sealed immutable")
+    d.type(SEARCH_BOX, "release record sealed immutable")
     d.press("Enter")
     d.wait_for("document.querySelectorAll('pre, code, .preview').length > 0",
                what="a code preview")
@@ -1992,41 +2008,51 @@ def _(d):
 @finding("4.4", "folder pickers sort case-insensitively")
 def _(d):
     d.open_view("index")
-    d.click_text("button, a", "Choose folders…")
-    d.wait_for("!!document.querySelector('dialog, [role=dialog], .picker')",
-               what="the folder picker")
-    names = d.eval(
+    d.open_index_panel("Choose folders…")
+    # Folders first and files after, each half by name — so the assertion is on
+    # each half rather than on the whole list, which the route deliberately
+    # groups. One name per row from the row's own `.name` span: a row can also
+    # carry a store badge, and the whole row's text would sort that too.
+    rows = d.eval(
         """
-        (() => {
-          const picker = document.querySelector('dialog, [role=dialog], .picker');
-          return [...picker.querySelectorAll('.name, .entry, li')]
-            .map(e => (e.innerText || '').trim().split('\\n')[0]).filter(Boolean);
-        })()
+        [...document.querySelectorAll(%s)].map(entry => ({
+          name: ((entry.querySelector('.name') || {}).textContent || '').trim(),
+          // A file in a multiple-select picker is rendered inert; a folder is
+          // the row with a tick beside it.
+          folder: !entry.classList.contains('inert'),
+        })).filter(row => row.name)
         """
+        % json.dumps(OPEN_PICKER + " .entry")
     )
-    if len(names) < 2:
-        skip("the picker lists fewer than two entries here")
-    if names != sorted(names, key=lambda n: n.lower()):
-        fail(
-            "the folder picker sorts case-sensitively, so every lowercase entry "
-            "sinks below every uppercase one. Saw: %s" % ", ".join(names[:8])
-        )
-    d.press("Escape")
+    folders = [row["name"] for row in rows if row["folder"]]
+    files = [row["name"] for row in rows if not row["folder"]]
+    if len(folders) < 2 and len(files) < 2:
+        skip("the picker lists fewer than two entries of either kind here")
+    for kind, names in (("folders", folders), ("files", files)):
+        if names != sorted(names, key=lambda n: n.lower()):
+            fail(
+                "the folder picker sorts its %s case-sensitively, so every "
+                "lowercase entry sinks below every uppercase one. Saw: %s"
+                % (kind, ", ".join(names[:8]))
+            )
+    d.close_index_panel("Choose folders…")
 
 
 @finding("4.5", "files in a folder picker read as not selectable")
 def _(d):
     d.open_view("index")
-    d.click_text("button, a", "Choose folders…")
-    d.wait_for("!!document.querySelector('dialog, [role=dialog], .picker')",
-               what="the folder picker")
+    d.open_index_panel("Choose folders…")
     undimmed = d.eval(
         """
         (() => {
-          const picker = document.querySelector('dialog, [role=dialog], .picker');
-          const entries = [...picker.querySelectorAll('.entry, li')];
-          const files = entries.filter(e => !e.querySelector('input[type=checkbox]'));
-          const folders = entries.filter(e => e.querySelector('input[type=checkbox]'));
+          const picker = document.querySelector(%s);
+          if (!picker) return null;
+          const entries = [...picker.querySelectorAll('.entry')];
+          // The tick is a sibling of the row rather than a child of it, so
+          // "has a checkbox" is a question about the wrapper: a folder row is
+          // an `.entry-row`, and a file is a bare `.entry` beside it.
+          const folders = entries.filter(e => e.closest('.entry-row'));
+          const files = entries.filter(e => !e.closest('.entry-row'));
           if (!files.length || !folders.length) return null;
           const opacity = el => parseFloat(getComputedStyle(el).opacity || '1');
           const folderOpacity = Math.max(...folders.map(opacity));
@@ -2034,8 +2060,9 @@ def _(d):
                       .map(f => (f.innerText || '').trim()).slice(0, 3);
         })()
         """
+        % json.dumps(OPEN_PICKER)
     )
-    d.press("Escape")
+    d.close_index_panel("Choose folders…")
     if undimmed is None:
         skip("this directory shows no mix of files and folders")
     if undimmed:
@@ -2138,9 +2165,9 @@ def _(d):
     d.set_viewport(390, 844, mobile=True)
     try:
         d.open_view("search", fresh=True)
-        d.type("input[type=search], #query, input[name=query]", "release record sealed immutable")
+        d.type(SEARCH_BOX, "release record sealed immutable")
         d.press("Enter")
-        d.wait_for("document.querySelectorAll('[data-hit], .hit, article').length > 0",
+        d.wait_for("document.querySelectorAll(%s).length > 0" % json.dumps(RESULT_CARD),
                    what="search results")
         summary = d.eval(
             """
@@ -2154,7 +2181,7 @@ def _(d):
             })()
             """
         )
-        cards = rects(d, "[data-hit], .hit, article")
+        cards = rects(d, RESULT_CARD)
         if summary is None or not cards:
             skip("no summary bar or no result cards to compare")
         first = cards[0]
@@ -2193,7 +2220,9 @@ def _(d):
 def _(d):
     first = indexed_fixture(d, d.fixtures.small())
     second_run, same_store = start_index(d, d.fixtures.small())
-    wait_for_run(d, same_store)
+    # Waited on by id: "the store's run" is now an ambiguous thing to wait for,
+    # which is the whole of this finding.
+    wait_for_run(d, same_store, run_id=second_run)
     if same_store != first:
         skip("the second submission made a new store, so there is no shared card")
 
@@ -2205,6 +2234,26 @@ def _(d):
             "are keyed by store name rather than by run, which is why a card's "
             "header showed the new run's path and status while its body still "
             "held the previous run's log lines." % (same_store, len(ids))
+        )
+
+    # And the page draws one card per run rather than one per store, which is
+    # what a card describing two different runs at once looked like.
+    d.open_view("index")
+    d.wait_for(
+        "[...document.querySelectorAll(%s)].some(c => c.innerText.includes(%s))"
+        % (json.dumps(RUN_CARD), json.dumps(same_store)),
+        what="a run card for %s" % same_store,
+    )
+    drawn = d.eval(
+        "[...document.querySelectorAll(%s)]"
+        ".filter(c => c.innerText.includes(%s)).length"
+        % (json.dumps(RUN_CARD), json.dumps(same_store))
+    )
+    if drawn < 2:
+        fail(
+            "the daemon holds %d runs for %s and the Index page draws %d card(s) "
+            "for it. One card per store means the second run's header sits over "
+            "the first run's log." % (len(ids), same_store, drawn)
         )
 
 
@@ -2220,12 +2269,12 @@ def _(d):
     card = d.eval(
         """
         (() => {
-          const cards = [...document.querySelectorAll('[data-run], .run, article')];
+          const cards = [...document.querySelectorAll(%s)];
           const card = cards.find(c => c.innerText.includes(%s));
           return card ? card.innerText : null;
         })()
         """
-        % json.dumps(store_name)
+        % (json.dumps(RUN_CARD), json.dumps(store_name))
     )
     if card is None:
         fail("no run card for %s was found" % store_name)
@@ -2322,32 +2371,40 @@ def _(d):
 def _(d):
     folder = d.fixtures.monorepo()  # a folder that is deliberately not a store
     d.open_view("stores")
-    d.click_text("button, a", "Adopt existing .semlith")
-    d.wait_for("!!document.querySelector('dialog, [role=dialog], .picker')",
+    d.click_text("button", "Adopt existing .semlith")
+    d.wait_for("!!document.querySelector(%s)" % json.dumps(OPEN_PICKER + " .crumbs"),
                what="the adopt picker")
-    before = d.eval(
-        "(document.querySelector('dialog, [role=dialog], .picker')"
-        " .querySelector('.path, header, h2') || {}).innerText || ''"
-    )
-    d.api_result("/api/adopt", method="POST", body={"path": folder})
-    # The portal's own path, through the picker, so the error handling under
-    # test is the page's and not this drive's.
-    d.click_text("dialog button, [role=dialog] button", "Use")
-    d.eval("new Promise(done => setTimeout(() => done(true), 1200))")
 
-    still_open = d.eval("!!document.querySelector('dialog, [role=dialog], .picker')")
-    if not still_open:
+    # Walked somewhere first, because "keeps the picker open where it was" can
+    # only be told from "reopens at $HOME" when it is not standing at $HOME.
+    descend_picker(d, folder)
+    before = picker_where(d)
+    want("the adopt picker's folder before the attempt", before, folder)
+
+    # The portal's own path, through the picker, so the error handling under
+    # test is the page's and not this drive's. The button says what it does
+    # here, rather than the multi-select picker's "Use this folder".
+    d.click_text(OPEN_PICKER + " button", "Adopt this directory")
+    d.wait_for(
+        "!!document.querySelector('.note.bad')",
+        what="the failed adopt to be reported",
+    )
+    # The page hides the card, reports the failure and reopens where it was, in
+    # that order, so the reopen is given its own moment before it is judged.
+    try:
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(OPEN_PICKER), timeout=10)
+    except cdp.ProtocolError:
+        pass  # the assertion below says what that means
+
+    if not exists(d, OPEN_PICKER):
         fail(
             "a failed adopt closed the picker and dropped back to the Stores "
             "page. Reopening starts again at $HOME with all navigation lost."
         )
-    after = d.eval(
-        "(document.querySelector('dialog, [role=dialog], .picker')"
-        " .querySelector('.path, header, h2') || {}).innerText || ''"
-    )
+    after = picker_where(d)
     if after != before:
         fail("the picker stayed open but moved from %r to %r" % (before, after))
-    d.press("Escape")
+    d.click_text(OPEN_PICKER + " button", "Close")
 
 
 @finding("4.18", "the adopt picker says which folder is adoptable")

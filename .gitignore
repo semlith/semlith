@@ -7,3 +7,7 @@
 
 # UltraShip: local-only workspace, never pushed
 .ultraship/
+
+# Python bytecode from the browser drive.
+__pycache__/
+*.pyc

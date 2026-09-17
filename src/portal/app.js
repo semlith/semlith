@@ -2059,7 +2059,7 @@ async function graphView() {
         el("button", {
           class: "button secondary small",
           type: "button",
-          text: "Ask the index about it",
+          text: "Ask the index a question",
           onclick: () => {
             state.pendingQuery = node.name;
             go("search");
@@ -2463,7 +2463,7 @@ function ledgerRows(data) {
     data.legacy_rows
       ? el("p", {
           class: "subtitle",
-          text: "Rows recorded before 0.20.2 were written once per open store, so figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
+          text: "Some rows here are older than the query id, and were written once per open store — figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
         })
       : null,
   );
