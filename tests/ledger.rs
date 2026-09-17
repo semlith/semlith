@@ -425,6 +425,14 @@ fn rows_sharing_a_query_id_count_as_one_retrieval() {
     // The token sums stay sums of rows: each row holds its own store's hits.
     assert_eq!((excerpt, whole), (35, 350));
 
-    // And the chain still walks, across both hash formulas.
+    // And the chain still walks. The id is not part of the hash — see
+    // `chain_hash` — so a 0.20.1 binary, which is this release's rollback
+    // path, verifies these rows too rather than reporting every one of them
+    // as broken.
     assert_eq!(semlith::store::ledger_break(s.db()).unwrap(), None);
+    let with_id = semlith::store::retrievals(s.db(), 10).unwrap();
+    assert!(
+        with_id.iter().any(|row| row.query_id == shared),
+        "the id is still stored and read back, it is only left out of the hash"
+    );
 }

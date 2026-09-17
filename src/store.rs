@@ -1663,13 +1663,18 @@ fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
         "\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
         row.session, row.tool, row.stale_hits, row.tokenizer
     ));
-    // Third formula, chosen the same way the second one is: `query_id` is
-    // empty on every row written before 0.20.2 and set on every row written
-    // since, so a store holding rows of all three kinds still walks end to end
-    // and no existing ledger is reported as broken.
-    if !row.query_id.is_empty() {
-        payload.push_str(&format!("\u{1f}{}", row.query_id));
-    }
+    // `query_id` is deliberately NOT in the payload.
+    //
+    // Adding it would be a third formula, and a 0.20.1 binary — which is this
+    // release's own rollback path — recomputes the second one. Every row
+    // written since would then fail to verify under the version somebody
+    // rolled back to, which is the one thing a verify must never do: a verify
+    // that cries wolf is worse than no verify at all.
+    //
+    // What that costs is stated rather than hidden: the id can be altered
+    // without breaking the chain, so the grouping of rows into retrievals is
+    // not tamper-evident. What a retrieval *was* — who asked, what they asked,
+    // how many hits, what it cost — is covered exactly as before.
     blake3::hash(payload.as_bytes()).to_hex().to_string()
 }
 
@@ -1935,7 +1940,7 @@ pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
 pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
     let mut stmt = db.prepare(
         "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-                session, tool, stale_hits, tokenizer, query_id
+                session, tool, stale_hits, tokenizer
          FROM retrievals ORDER BY id",
     )?;
     let mut rows = stmt.query([])?;
@@ -1959,7 +1964,6 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
                 let session: String = r.get(10)?;
                 let stale: i64 = r.get(12)?;
                 let tokenizer: String = r.get(13)?;
-                let query_id: String = r.get(14).ok().flatten().unwrap_or_default();
                 chain_hash(
                     &prev,
                     at,
@@ -1974,7 +1978,8 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
                         whole_file_tokens: whole,
                         stale_hits: stale,
                         tokenizer: &tokenizer,
-                        query_id: &query_id,
+                        // Not covered by the hash; see `chain_hash`.
+                        query_id: "",
                     },
                 )
             }

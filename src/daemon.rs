@@ -1917,6 +1917,15 @@ impl State {
             return Ok(());
         }
         let open = self.stores();
+        // A store whose directory has gone since the daemon opened it — it was
+        // deleted by another process, or the volume it sat on was unmounted —
+        // is left out rather than taken as a reason to answer nothing. It used
+        // to fail the whole call, so one missing directory made `/api/stores`
+        // answer 500 for every store on the machine and the portal went blank.
+        let open: Vec<Arc<Store>> = open
+            .into_iter()
+            .filter(|s| s.dir.join("store.db").exists())
+            .collect();
         let dirs: Vec<PathBuf> = open.iter().map(|s| s.dir.clone()).collect();
         if dirs.is_empty() {
             return Ok(());
