@@ -2820,6 +2820,23 @@ async function storesView() {
                   }),
                 )
               : null,
+            // A store whose corpus has gone. It opens, it answers, and what it
+            // answers about is not on disk any more — which is a different
+            // fault from a registry entry with no store, and was said nowhere
+            // but inside the ROOTS column that a phone drops.
+            !s.missing && (s.roots || []).length && !(s.roots || []).some((r) => r.present)
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill("root missing", "bad", {
+                    title: (s.roots || []).map((r) => r.path).join(", "),
+                  }),
+                  el("span", {
+                    class: "meta",
+                    text: `nothing at ${(s.roots || []).map((r) => r.path).join(", ")} — re-point it, or delete the store`,
+                  }),
+                )
+              : null,
             // What the daemon reconciled away when it opened this store: rows
             // it held for files outside every root it is registered against.
             s.pruned
@@ -3042,10 +3059,16 @@ async function storesView() {
 
 // ----------------------------------------------------------------- files
 
-/** The most rows `/api/files` returns in one request, which is what bounds
- * "select all N matches". The route refuses a larger `limit` rather than
- * clamping it. */
+/** The most rows `/api/files` returns in one request. The route refuses a
+ * larger `limit` rather than clamping it. */
 const FILES_PER_REQUEST = 500;
+
+/** The most files "select all N matches" will gather.
+ *
+ * The same ceiling the route puts on `offset`: past it there are no more pages
+ * to ask for, so the answer is to narrow the filter — said, rather than a
+ * button that quietly acts on a prefix of what it named. */
+const FILES_SELECTABLE = 10_000;
 
 async function filesView() {
   const chosenExt = new Set();
@@ -3110,7 +3133,9 @@ async function filesView() {
    * every sort, page and filter and a selection that vanished when you sorted
    * would be a selection nobody could trust. */
   const picked = new Map();
-  const bulkNote = el("div", { class: "note" });
+  // Announced as well as drawn: this is where a bulk Forget says what it did,
+  // and a row vanishing is not something a screen reader hears.
+  const bulkNote = el("div", { class: "note", role: "status", "aria-live": "polite" });
   const bulkBar = el("div", { class: "bulk", hidden: true });
 
   function paintBulk() {
@@ -3129,7 +3154,7 @@ async function filesView() {
       // answer is to narrow the filter, said rather than a button that quietly
       // acts on a prefix.
       matches > many
-        ? matches <= FILES_PER_REQUEST
+        ? matches <= FILES_SELECTABLE
           ? el("button", {
               class: "button ghost small",
               type: "button",
@@ -3139,7 +3164,7 @@ async function filesView() {
           : el("span", {
               class: "meta",
               text: `${n(matches)} files match — narrow the filter to ${n(
-                FILES_PER_REQUEST,
+                FILES_SELECTABLE,
               )} or fewer to select them all`,
             })
         : null,
@@ -3199,6 +3224,7 @@ async function filesView() {
         absent += (done.not_indexed || []).length;
       }
       picked.clear();
+      justForgot = true;
       paintBulk();
       bulkNote.textContent = absent
         ? `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
@@ -3386,22 +3412,34 @@ async function filesView() {
   /** How many files the current filter matches, for "select all N". */
   let matches = 0;
 
-  /** Tick every file the current filter matches, not just the page. */
+  /** Tick every file the current filter matches, not just the page.
+   *
+   * Paged, because one request returns at most `FILES_PER_REQUEST` rows. The
+   * header checkbox selects the page, honestly and deliberately; this is how
+   * the whole result set is reached, which before this there was no way to do
+   * at all. */
   async function selectEveryMatch() {
-    const params = new URLSearchParams();
-    if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
-    for (const ext of chosenExt) params.append("ext", ext);
-    for (const store of storeFilter.stores()) params.append("store", store);
-    params.set("limit", String(FILES_PER_REQUEST));
-    let data;
-    try {
-      data = await api(`/api/files?${params}`);
-    } catch (e) {
-      bulkNote.className = "note bad";
-      bulkNote.textContent = e.message;
-      return;
+    bulkNote.className = "note";
+    bulkNote.textContent = `Selecting ${n(matches)} files…`;
+    for (let offset = 0; offset < matches && offset < FILES_SELECTABLE; offset += FILES_PER_REQUEST) {
+      const params = new URLSearchParams();
+      if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
+      for (const ext of chosenExt) params.append("ext", ext);
+      for (const store of storeFilter.stores()) params.append("store", store);
+      params.set("limit", String(FILES_PER_REQUEST));
+      params.set("offset", String(offset));
+      let data;
+      try {
+        data = await api(`/api/files?${params}`);
+      } catch (e) {
+        bulkNote.className = "note bad";
+        bulkNote.textContent = e.message;
+        return;
+      }
+      for (const file of data.files || []) picked.set(file.path, file.store);
+      if (!(data.files || []).length) break;
     }
-    for (const file of data.files || []) picked.set(file.path, file.store);
+    bulkNote.textContent = "";
     for (const box of table.node.querySelectorAll("tbody input.pick")) box.checked = true;
     paintBulk();
   }
@@ -4619,7 +4657,13 @@ function settingField(key, label, limit, onSave) {
     // is made with the derivation in front of them rather than instead of it.
     if (!fixed && asked > limit.derived) {
       why.className = "note bad";
-      why.textContent = `Above the ${limit.derived} this machine derived — ${limit.reason}. It will be used as you set it.`;
+      // Where it came from, on this branch too. A saved value above the
+      // derived one takes this branch every time, so saying only "derived"
+      // here is saying it in exactly the case where a user is trying to work
+      // out whether their setting took effect — and the daemon's own line
+      // calls the same value saved.
+      const held = limit.source === "saved" ? `${limit.value} saved. ` : "";
+      why.textContent = `${held}Above the ${limit.derived} this machine derived — ${limit.reason}. It will be used as you set it.`;
       return;
     }
     why.className = "note";
@@ -5537,6 +5581,7 @@ async function doctorView() {
   };
 
   const clients = dataTable({
+    caption: "Every documented client, whether it is on this machine, whether it is registered, and what would fix it.",
     rows: data.clients || [],
     perPage: 25,
     columns: [
@@ -6333,6 +6378,7 @@ async function privacyView() {
   const scanBox = el("div", { class: "rows tight" });
 
   const scanTable = dataTable({
+    caption: "Every file a store is still holding that semlith would refuse to index today.",
     sort: "path",
     columns: [
       { key: "store", label: "Store", className: "meta", sortable: true, value: (f) => f.store },

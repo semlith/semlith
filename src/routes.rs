@@ -744,7 +744,7 @@ const MODEL_NOTES: &[(&str, &str)] = &[
     ),
     (
         "BGESmallENV15",
-        "Fast and small English model. semlith's default is granite, listed above",
+        "Fast and small English model from BAAI. Not the one semlith builds a store with unless it is asked for",
     ),
 ];
 
