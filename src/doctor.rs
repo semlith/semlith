@@ -582,6 +582,15 @@ pub struct ClientReport {
     /// the same as not reporting at all. A fault is a client that is on this
     /// machine and cannot see semlith.
     pub fault: bool,
+    /// Whether this client is on this machine at all.
+    ///
+    /// Wider than `present`, which is only about a CLI on `PATH`: a client
+    /// semlith registers by writing a file is here if its configuration
+    /// directory is. The portal read the two as one, so a client with a
+    /// configuration directory and no CLI was labelled "not installed" and
+    /// handed a fix command in the next column — one row saying two different
+    /// things, which is finding 3.8 from the other end.
+    pub in_use: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -643,25 +652,6 @@ pub fn clients_report() -> Vec<ClientReport> {
             } else {
                 None
             };
-            let repair = if note.is_some() {
-                None
-            } else if only_project && !registered {
-                Some(format!(
-                    "semlith setup  # removes {} project-scope registration(s) and registers at user scope",
-                    project_scoped.len()
-                ))
-            } else if !registered && client.needs_a_file_written() {
-                Some("semlith setup --register-all".to_string())
-            } else if !registered && present {
-                Some("semlith setup".to_string())
-            } else {
-                // A client whose CLI is not on this machine is not a fault.
-                // Most people have two or three of the twenty-seven, and a
-                // report that flagged the other twenty-four would be a report
-                // nobody reads twice.
-                None
-            };
-
             // "On this machine" for a client with a CLI means the CLI is on
             // `PATH`. For a file-only client it means its configuration
             // directory already exists — the user has that client and has
@@ -672,6 +662,35 @@ pub fn clients_report() -> Vec<ClientReport> {
                     .iter()
                     .any(|f| f.exists || f.path.parent().is_some_and(Path::exists));
             let fault = note.is_none() && in_use && !registered;
+
+            // A client that is not on this machine gets no command. It used to
+            // get one — Kilo Code read "not installed" and carried `semlith
+            // setup --register-all` beside it, and the Agents page's dry run
+            // then proposed writing a configuration file for a client semlith
+            // had just said was not there. Most people have two or three of
+            // the twenty-seven; a report that offered a remedy for the other
+            // twenty-four is a report nobody reads twice.
+            let repair = if note.is_some() || !in_use {
+                None
+            } else if only_project && !registered {
+                Some(format!(
+                    "semlith setup  # removes {} project-scope registration(s) and registers at user scope",
+                    project_scoped.len()
+                ))
+            } else if !registered && client.needs_a_file_written() {
+                // Two commands for what reads as one state, so the cell says
+                // why they differ: this client is registered by writing its
+                // configuration file, which the plain `semlith setup` of the
+                // row above it does not do.
+                Some(format!(
+                    "semlith setup --register-all  # {} is registered by writing its config file, which `semlith setup` alone does not do",
+                    client.name
+                ))
+            } else if !registered && present {
+                Some("semlith setup".to_string())
+            } else {
+                None
+            };
 
             ClientReport {
                 name: client.name.clone(),
@@ -687,6 +706,7 @@ pub fn clients_report() -> Vec<ClientReport> {
                 files,
                 repair,
                 note,
+                in_use,
             }
         })
         .collect()

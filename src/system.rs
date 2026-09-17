@@ -248,14 +248,23 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
             .max(1)
     };
     let runs = memory_runs.min(core_budget);
-    // `core_budget / runs` is at least 1 because runs never exceeds the budget,
-    // and multiplying it back out can never exceed the budget either.
-    let threads = (crate::embed::embed_threads() / runs).clamp(1, core_budget / runs);
 
     let runs_reason = if unknown_memory {
         format!(
             "the memory reading failed, so one run at a time until there is a reading, on {} logical cores",
             machine.logical_cores
+        )
+    } else if headroom < peak {
+        // The floor, said out loud. This used to read "1.4 GiB minus a 2 GiB
+        // reserve, at 1.5 GiB a run, allows 1" — a subtraction that is
+        // negative concluding that it allows one, which is the floor applying
+        // and the sentence not admitting it.
+        format!(
+            "{} free is under the {} reserve plus {} for a run, so the floor of 1 applies; {} logical cores with one kept free would allow {core_budget}",
+            gib(machine.available_memory_mb),
+            gib(RESERVE_MB),
+            gib(peak),
+            machine.logical_cores,
         )
     } else {
         format!(
@@ -273,26 +282,77 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
             value: runs,
             reason: runs_reason,
         },
-        threads_per_writer: Derivation {
-            value: threads,
-            reason: format!(
-                "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each",
-                crate::embed::embed_threads(),
-                runs_phrase(runs),
-            ),
-        },
+        threads_per_writer: threads_for(machine, runs),
         index_memory_mb: Derivation {
             value: index_memory,
             reason: format!(
-                "{index_memory} MB a store: the {} MB floor, doubled once past 16 GiB free beyond the reserve and again past 64 GiB, and {} is free",
+                "{index_memory} MiB a store: the {} MiB floor, doubled once past 16 GiB beyond the reserve and again past 64 GiB, and {} beyond the reserve out of the {} free now",
                 crate::index::INDEX_MEMORY_MB,
-                gib(headroom),
+                beyond(headroom),
+                size(machine.available_memory_mb),
             ),
         },
     }
 }
 
-/// The index budget rises in two steps rather than continuously, because a
+/// The threads-per-writer derivation for a given number of runs at once.
+///
+/// Split out because the panel must recompute it when the number of runs
+/// changes. Set runs to 3 and the help text under "threads each" went on
+/// saying "split between 1 run", because it was the derivation for the runs
+/// this machine would have chosen rather than for the runs in force.
+pub fn threads_for(machine: &Machine, runs: usize) -> Derivation {
+    let core_budget = machine.logical_cores.saturating_sub(1).max(1);
+    // The runs actually in force, not a number clamped to the cores. A user
+    // who sets three runs on a three-core machine gets three runs — the
+    // admission queue takes the value as given — so a sentence that described
+    // the split across two was describing a machine that is not this one. The
+    // clamp belongs on the threads each run gets, which cannot fall below one.
+    let runs = runs.max(1);
+    let per_run = (core_budget / runs).max(1);
+    let threads = (crate::embed::embed_threads() / runs).clamp(1, per_run);
+    Derivation {
+        value: threads,
+        reason: format!(
+            "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each",
+            crate::embed::embed_threads(),
+            runs_phrase(runs),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod threads_tests {
+    use super::*;
+
+    /// The sentence names the runs that will actually happen.
+    ///
+    /// Found by the browser drive on a three-core runner: asked for three runs
+    /// it said "split between 2 runs", because the run count was being clamped
+    /// to the core budget before it was printed. The admission queue takes the
+    /// value as given, so two was a description of a different machine.
+    #[test]
+    fn the_split_names_the_runs_in_force_however_few_cores_there_are() {
+        let small = Machine {
+            logical_cores: 3,
+            physical_cores: None,
+            total_memory_mb: 8192,
+            available_memory_mb: 4096,
+        };
+        let three = threads_for(&small, 3);
+        assert!(
+            three.reason.contains("3 runs"),
+            "the sentence describes a machine that is not this one: {}",
+            three.reason
+        );
+        assert!(three.value >= 1, "a run always gets at least one thread");
+
+        // And one run still reads as one run rather than as "1 runs".
+        assert!(threads_for(&small, 1).reason.contains("1 run "));
+    }
+}
+
+/// The index budget rises in two steps rather than continuously, because a/// The index budget rises in two steps rather than continuously, because a
 /// figure a user can recognise is worth more here than a fitted curve.
 fn index_memory_mb(headroom_mb: u64) -> usize {
     let base = crate::index::INDEX_MEMORY_MB;
@@ -315,6 +375,29 @@ fn runs_phrase(runs: usize) -> String {
 fn gib(mb: u64) -> String {
     let text = format!("{:.1}", mb as f64 / 1024.0);
     format!("{} GiB", text.trim_end_matches(".0"))
+}
+
+/// A size in the unit it is actually big enough for.
+///
+/// `gib` truncates: 512 MiB reads as "0.5 GiB" and 40 MiB reads as "0 GiB",
+/// which is how the panel came to say "0 GiB is free" three lines under
+/// "1,383 MiB free now". Under a gibibyte the honest unit is the one the
+/// header is already using.
+fn size(mb: u64) -> String {
+    if mb < 1024 {
+        format!("{mb} MiB")
+    } else {
+        gib(mb)
+    }
+}
+
+/// How much is free beyond the reserve, said so that none is not a number.
+fn beyond(headroom_mb: u64) -> String {
+    if headroom_mb == 0 {
+        "none is free".to_string()
+    } else {
+        format!("{} is free", size(headroom_mb))
+    }
 }
 
 #[cfg(test)]

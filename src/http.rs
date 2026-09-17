@@ -837,12 +837,27 @@ fn answer(
 
 /// Whether this request may be answered without a credential.
 ///
-/// The page itself and the files it loads, and nothing else. The token in the
-/// printed URL's query is never read here: it is handed to the page, which
-/// sends it back in a header, so a reload with no token in the address bar
-/// still gets the page and a request for data still does not.
+/// The page itself and the files it loads, and the 404 for a path that is
+/// neither. Nothing that says anything about this machine: `/api` and `/mcp`
+/// are below and need the token.
+///
+/// The token in the printed URL's query is never read here: it is handed to
+/// the page, which sends it back in a header, so a reload with no token in the
+/// address bar still gets the page and a request for data still does not.
+///
+/// The last clause is why a missing asset is a 404 rather than a 401. A
+/// browser attaches no header to an icon named by a manifest, so a wrong path
+/// in that manifest read as an authentication failure and sent whoever
+/// debugged it to look at the token. "This file is not here" discloses
+/// nothing: the asset list is the same in every copy of this binary.
 fn public(request: &Request, reading: bool) -> bool {
-    reading && (request.path == "/" || crate::portal::asset(&request.path).is_some())
+    if !reading {
+        return false;
+    }
+    if request.path == "/" || crate::portal::asset(&request.path).is_some() {
+        return true;
+    }
+    !request.path.starts_with("/api") && request.path != MCP_PATH
 }
 
 /// Whether a write came from this server's own origin.
@@ -1294,7 +1309,13 @@ mod tests {
         assert!(public(&get("/app.js"), true));
         assert!(public(&get("/style.css"), true));
 
+        // A path that is not an asset is public so that it can be answered
+        // with a 404 rather than a 401 — see `public`.
+        assert!(public(&get("/nope.png"), true));
+        assert!(public(&get("/icons/nope.png"), true));
+
         assert!(!public(&get("/api/stores"), true));
+        assert!(!public(&get("/api/nope"), true));
         assert!(!public(&get("/api/image"), true));
         assert!(!public(&get(MCP_PATH), true));
         // A write is never public, whatever it names.

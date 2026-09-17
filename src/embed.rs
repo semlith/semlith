@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// The Hugging Face repository holding granite's ONNX export.
-const GRANITE_REPO: &str = "onnx-community/granite-embedding-small-english-r2-ONNX";
+pub const GRANITE_REPO: &str = "onnx-community/granite-embedding-small-english-r2-ONNX";
 
 /// int8 rather than fp32: a quarter of the download, and measurably faster on
 /// ARM despite the folklore that quantized ONNX never is.

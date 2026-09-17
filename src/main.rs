@@ -1,11 +1,27 @@
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use fastembed::TextEmbedding;
 use semlith::home;
 use semlith::{Semlith, embed, embed::Model, filter::Filter, fleet::Fleet};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+/// What an index run does about files the store holds from outside its roots.
+///
+/// A store is about its roots, and a row for anything else is a row whose
+/// search results carry the wrong store label. Reconciling on write is the half
+/// that stops it recurring; the daemon reconciles on open, which is the half
+/// that fixes what is already there.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, ValueEnum)]
+enum Reconcile {
+    /// Drop them, and say how many. The default.
+    Drop,
+    /// Count them and say so, changing nothing. The dry run to look at first.
+    Report,
+    /// Leave them alone.
+    Off,
+}
 
 /// A local semantic cache for AI agents.
 #[derive(Parser)]
@@ -73,6 +89,12 @@ enum Command {
         /// One level only. Implies `--each`.
         #[arg(long, value_name = "FOLDER")]
         projects: Option<PathBuf>,
+
+        /// What to do about files the store already holds from outside its
+        /// registered roots. `report` counts them and changes nothing, which
+        /// is the dry run worth doing first on a store you did not build today.
+        #[arg(long, value_name = "MODE", default_value = "drop")]
+        reconcile: Reconcile,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -599,6 +621,7 @@ fn main() -> Result<()> {
             include_secrets,
             each,
             projects,
+            reconcile,
         } => {
             arm_airgap(airgap);
 
@@ -727,6 +750,32 @@ fn main() -> Result<()> {
                 // portal lists with nothing in it.
                 let model_name = store.model().to_string();
                 home::record(&choice, roots, &model_name)?;
+
+                // After the registry entry, because the roots this measures
+                // against are the ones that entry has just recorded. A store
+                // that holds files from outside them is a store whose hits
+                // carry another store's label, so the default is to put it
+                // right; `--reconcile report` says how many without touching
+                // them, and `off` leaves them.
+                if reconcile != Reconcile::Off {
+                    let boundary = home::index_roots(&dir);
+                    let strays = store.out_of_root(&boundary)?;
+                    if !strays.is_empty() {
+                        if reconcile == Reconcile::Report {
+                            eprintln!(
+                                "{} file(s) in this store sit outside its roots. \
+                                 `--reconcile drop` removes them.",
+                                strays.len()
+                            );
+                        } else {
+                            let dropped = store.prune_out_of_root(&boundary)?;
+                            eprintln!(
+                                "reconciled: {dropped} file(s) dropped, held from outside \
+                                 this store's roots. The files on disk are untouched."
+                            );
+                        }
+                    }
+                }
 
                 let (files, chunks, bytes) = store.stats()?;
                 // Images are counted apart from chunks because they are not
@@ -2158,15 +2207,11 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
 
 /// A unix second as a local clock time, for the ledger's rows.
 fn human_time(at: i64) -> String {
-    let secs = at.max(0) as u64;
-    let day = secs / 86_400;
-    let rest = secs % 86_400;
-    format!(
-        "{:02}:{:02}:{:02} d{day}",
-        rest / 3600,
-        (rest % 3600) / 60,
-        rest % 60
-    )
+    // Local, with the offset. It used to be UTC arithmetic with a day number,
+    // while the portal printed the browser's local clock, and neither said
+    // which zone it meant — so the same retrieval read 13:40:32 in one place
+    // and 19:00:18 in the other and nothing on either screen admitted it.
+    semlith::clock::local_clock(at)
 }
 
 /// `semlith doctor`'s human output.

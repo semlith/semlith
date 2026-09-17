@@ -333,7 +333,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 6] = [
+    const ADDITIONS: [(&str, &str, &str); 7] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -346,6 +346,14 @@ fn add_columns(db: &Connection) -> Result<()> {
         ("retrievals", "tool", "TEXT"),
         ("retrievals", "stale_hits", "INTEGER"),
         ("retrievals", "tokenizer", "TEXT"),
+        // 0.20.2: the id one retrieval shares across every store that
+        // contributed to it. A search over six stores used to write six rows
+        // and the Ledger page counted six retrievals, so every figure on it
+        // scaled with how many stores happened to be open. The rows stay per
+        // store — that is what keeps each store's chain verifiable and its
+        // token counts its own — and this is what makes them one retrieval
+        // again when they are counted.
+        ("retrievals", "query_id", "TEXT"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -683,6 +691,13 @@ pub enum FileSort {
     Chunks,
     Lines,
     Indexed,
+    /// Which store holds the row. Not a column of this table at all — it is
+    /// which database the row came out of — so it is ordered by the merge.
+    Store,
+    /// The reader that parsed the file, derived from its extension.
+    Reader,
+    /// The language the file was recognised as, derived from its extension.
+    Lang,
 }
 
 impl FileSort {
@@ -693,8 +708,21 @@ impl FileSort {
             "chunks" => Some(Self::Chunks),
             "lines" => Some(Self::Lines),
             "indexed" => Some(Self::Indexed),
+            "store" => Some(Self::Store),
+            "reader" => Some(Self::Reader),
+            "lang" => Some(Self::Lang),
             _ => None,
         }
+    }
+
+    /// Whether this ordering is over a value the database does not hold.
+    ///
+    /// Three of the seven columns are derived by the route from the path, or
+    /// from which store answered. They cannot be an `ORDER BY`, so the rows
+    /// are ordered by the merge instead — which needs every matching row
+    /// rather than one page of each store's.
+    pub fn derived(self) -> bool {
+        matches!(self, Self::Store | Self::Reader | Self::Lang)
     }
 
     fn sql(self) -> &'static str {
@@ -704,6 +732,9 @@ impl FileSort {
             Self::Chunks => "COUNT(c.id)",
             Self::Lines => "COALESCE(MAX(c.end_line), 0)",
             Self::Indexed => "f.indexed_at",
+            // The base order under a derived sort: deterministic, and the
+            // tie-break the merge uses anyway.
+            Self::Store | Self::Reader | Self::Lang => "f.path",
         }
     }
 }
@@ -1510,6 +1541,10 @@ pub struct Retrieval {
     pub excerpt_tokens: i64,
     pub whole_file_tokens: i64,
     pub hash: String,
+    /// Which stores answered this one retrieval, so several rows can be shown
+    /// as the one search they came from. Empty for a row written before
+    /// 0.20.2, which was its own retrieval.
+    pub query_id: String,
 }
 
 /// Append one retrieval, chained to the row before it.
@@ -1540,8 +1575,8 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
     db.execute(
         "INSERT INTO retrievals
          (at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, prev, hash,
-          session, tool, stale_hits, tokenizer)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+          session, tool, stale_hits, tokenizer, query_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             at,
             client,
@@ -1555,7 +1590,8 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
             row.session,
             row.tool,
             row.stale_hits,
-            row.tokenizer
+            row.tokenizer,
+            row.query_id
         ],
     )?;
     // The one place a retrieval is written, so the one place the portal's
@@ -1587,6 +1623,13 @@ pub struct NewRetrieval<'a> {
     /// never summed together, so the label travels with the row rather than
     /// being assumed from its age.
     pub tokenizer: &'a str,
+    /// The id shared by every row one retrieval wrote.
+    ///
+    /// A cross-store search writes a row in each store that answered it, so
+    /// each store's chain stays its own and its token figures describe its own
+    /// hits. This is what says those rows are one retrieval rather than
+    /// several, and it is what "queries recorded" counts.
+    pub query_id: &'a str,
 }
 
 /// The hash covering one row and the one before it.
@@ -1620,6 +1663,18 @@ fn chain_hash(prev: &str, at: i64, row: &NewRetrieval<'_>) -> String {
         "\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
         row.session, row.tool, row.stale_hits, row.tokenizer
     ));
+    // `query_id` is deliberately NOT in the payload.
+    //
+    // Adding it would be a third formula, and a 0.20.1 binary — which is this
+    // release's own rollback path — recomputes the second one. Every row
+    // written since would then fail to verify under the version somebody
+    // rolled back to, which is the one thing a verify must never do: a verify
+    // that cries wolf is worse than no verify at all.
+    //
+    // What that costs is stated rather than hidden: the id can be altered
+    // without breaking the chain, so the grouping of rows into retrievals is
+    // not tamper-evident. What a retrieval *was* — who asked, what they asked,
+    // how many hits, what it cost — is covered exactly as before.
     blake3::hash(payload.as_bytes()).to_hex().to_string()
 }
 
@@ -1704,7 +1759,8 @@ fn legacy_chain_hash(
 /// The most recent `limit` retrievals, newest first.
 pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     let mut stmt = db.prepare(
-        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash
+        "SELECT id, at, client, query, hits, micros, excerpt_tokens, whole_file_tokens, hash,
+                query_id
          FROM retrievals ORDER BY id DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit as i64], |r| {
@@ -1718,16 +1774,66 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
             excerpt_tokens: r.get(6)?,
             whole_file_tokens: r.get(7)?,
             hash: r.get(8)?,
+            query_id: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole
+/// Which rows of the ledger a count is about.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LedgerScope {
+    /// Every retrieval.
+    All,
+    /// Those that found something, which are the only ones credited with a
+    /// saving.
+    Credited,
+    /// Those credited whose tokens were estimated rather than counted by the
+    /// store's own tokenizer.
+    Estimated,
+}
+
+/// The distinct retrievals this store holds, as keys that can be unioned
+/// across stores.
+///
+/// One search over six stores writes a row in each that answered it, sharing a
+/// query id. Summing six stores' own counts turns that back into six
+/// retrievals, which is the multiplier the Ledger page was reporting — so the
+/// portal unions these keys instead of adding counts. A row written before
+/// 0.20.2 has no id and is keyed by its own row id in its own store, which is
+/// what it was.
+pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
+    let sql = match scope {
+        LedgerScope::All => "SELECT DISTINCT query_id, id FROM retrievals",
+        LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
+        LedgerScope::Estimated => {
+            "SELECT DISTINCT query_id, id FROM retrievals
+             WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')"
+        }
+    };
+    let mut stmt = db.prepare(sql)?;
+    let rows = stmt.query_map([], |r| {
+        let id: Option<String> = r.get(0)?;
+        let row: i64 = r.get(1)?;
+        Ok(id.unwrap_or_else(|| format!("{store}:row:{row}")))
+    })?;
+    let mut out: Vec<String> = rows.collect::<Result<Vec<_>, _>>()?;
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole
 /// ledger — what the Ledger page shows.
 pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
+    // Retrievals, not rows. One search across six stores writes a row in each
+    // store that answered it and they share one `query_id`, so counting rows
+    // here is what made every figure on the Ledger page scale with how many
+    // stores happened to be open. A row written before 0.20.2 has no id and is
+    // its own retrieval, which is what it was.
     Ok(db.query_row(
-        "SELECT COUNT(*), COUNT(DISTINCT client), COALESCE(SUM(excerpt_tokens), 0),
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)), COUNT(DISTINCT client),
+                COALESCE(SUM(excerpt_tokens), 0),
                 COALESCE(SUM(whole_file_tokens), 0) FROM retrievals",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -1756,15 +1862,24 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
 /// this release does not add. The number is therefore an upper bound on what
 /// was saved, and `semlith stats` says so rather than presenting it as exact.
 pub fn ledger_savings(db: &Connection) -> Result<Savings> {
+    // Retrievals rather than rows on both sides of the ratio, for the reason
+    // `ledger_totals` gives: the rows of one cross-store search are one search.
+    // The token sums stay sums of rows, because each row holds its own store's
+    // hits and nothing is double-counted by adding them.
     let (credited, net): (i64, i64) = db.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
+                COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
          FROM retrievals WHERE hits > 0",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let total: i64 = db.query_row("SELECT COUNT(*) FROM retrievals", [], |r| r.get(0))?;
+    let total: i64 = db.query_row(
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals",
+        [],
+        |r| r.get(0),
+    )?;
     let estimated: i64 = db.query_row(
-        "SELECT COUNT(*) FROM retrievals
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
          WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')",
         [],
         |r| r.get(0),
@@ -1863,6 +1978,8 @@ pub fn ledger_break(db: &Connection) -> Result<Option<i64>> {
                         whole_file_tokens: whole,
                         stale_hits: stale,
                         tokenizer: &tokenizer,
+                        // Not covered by the hash; see `chain_hash`.
+                        query_id: "",
                     },
                 )
             }
@@ -1952,6 +2069,18 @@ pub fn file_stamps(
         Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
     })?;
     Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+}
+
+/// The newest `indexed_at` this store holds, or `None` when it holds nothing.
+///
+/// The store's own answer to "last write", which is what the Stores page's
+/// column says it shows. The daemon used to answer it from a counter that
+/// started at zero every time it launched, so a store with 438 files in it read
+/// `never` until something wrote to it again — finding 1.7 of the 2026-09-17
+/// drive.
+pub fn last_write(db: &Connection) -> Result<Option<i64>> {
+    let at: Option<i64> = db.query_row("SELECT MAX(indexed_at) FROM files", [], |r| r.get(0))?;
+    Ok(at)
 }
 
 /// `(symbols, edges)` — the graph's size, for `stats` and the portal.

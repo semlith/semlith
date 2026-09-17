@@ -19,6 +19,7 @@ pub mod add;
 pub mod chunk;
 pub mod clientfile;
 pub mod clients;
+pub mod clock;
 pub mod daemon;
 pub mod doctor;
 pub mod embed;
@@ -506,6 +507,14 @@ pub enum FileOutcome {
     /// and a refused one is a file semlith will not read. An agent that asked
     /// for it needs to know which.
     Refused,
+    /// Not a file at all: the run is writing what it has embedded to disk.
+    ///
+    /// Every [`CHECKPOINT_FILES`] files a run flushes its batch and rewrites
+    /// the shards, which on a large corpus is twenty seconds in which nothing
+    /// is read and nothing was said. A progress bar that sits at 400/600 for
+    /// twenty seconds and then jumps to 462 is indistinguishable from a hang;
+    /// this is the run saying which of the two it is.
+    Writing,
     /// semlith tried to index it and the attempt failed on this file's own
     /// content — a decoder that rejected the bytes, a parser that could not
     /// read them, a path the operating system would not open.
@@ -522,6 +531,7 @@ impl FileOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Indexing => "indexing",
+            Self::Writing => "writing",
             Self::Unchanged => "unchanged",
             Self::Skipped => "skipped",
             Self::Removed => "removed",
@@ -632,11 +642,31 @@ impl Boundary {
         if let Some(roots) = &self.roots
             && !filter::within_boundary(path, roots)
         {
+            // The roots by name. A refusal that says "outside this store's
+            // roots" without saying what they are leaves the caller to guess
+            // which store it is holding and what that store is about — and the
+            // Privacy page promises this rule by name, so the refusal that
+            // enforces it should be legible on its own.
+            let named = if roots.is_empty() {
+                "this store has no registered roots, so only the home directory is inside \
+                 its boundary"
+                    .to_string()
+            } else {
+                format!(
+                    "this store's roots are {}",
+                    roots
+                        .iter()
+                        .map(|r| r.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             return Some(Refusal {
-                why: "is outside this store's roots and outside the home directory, so \
-                      semlith will not index it. Add it as a root first, or index it \
-                      from the command line."
-                    .to_string(),
+                why: format!(
+                    "is outside this store's roots, so semlith will not index it into this \
+                     store — {named}. Index it into the store that covers it, add it as a \
+                     root first, or index it from the command line."
+                ),
                 // Emphatically not. This says nothing about the file's
                 // contents — only that this caller may not reach it — and a
                 // caller who may not read a path must not be able to delete
@@ -1812,9 +1842,28 @@ impl Semlith {
             // different vectors from the same corpus.
             since_checkpoint += 1;
             if checkpointing && since_checkpoint >= every {
+                // Said before and after, because the work between these two
+                // lines is the longest thing a run does without reading a
+                // file: the batch is flushed and every shard is rewritten.
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Writing,
+                    Some("writing the index to disk".to_string()),
+                );
                 self.flush(&mut pending)?;
                 self.checkpoint(&mut completed)?;
                 since_checkpoint = 0;
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Indexing,
+                    None,
+                );
             }
         }
 
@@ -2166,6 +2215,56 @@ impl Semlith {
             self.images.remove(*id as u64)?;
         }
         Ok((ids.len(), images.len()))
+    }
+
+    /// Every file this store holds that sits under none of `roots`.
+    ///
+    /// A store is about its roots. Rows for anything else got in through a
+    /// mis-scoped run under the old boundary rule, which treated the whole home
+    /// directory as fair game for every store, and they are wrong twice over:
+    /// the search results carry the wrong store label, and a file that two
+    /// stores hold competes with itself for the same `k` slots.
+    ///
+    /// Returns the paths in the store's own spelling, which is what `evict`
+    /// takes.
+    pub fn out_of_root(&self, roots: &[PathBuf]) -> Result<Vec<String>> {
+        // With nothing to be outside of, nothing is. A store whose roots the
+        // registry does not record — a bare `--store` directory — is not one
+        // this can reason about, and dropping its whole contents on the
+        // strength of an empty list is the one outcome worth ruling out.
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Through the boundary rule rather than a second copy of it. A path
+        // and a root have to be compared in one shape — see
+        // `filter::within_boundary` — and a store that dropped rows by a rule
+        // slightly different from the one that refuses writes would hold
+        // exactly the files the daemon then declined to re-index.
+        Ok(store::all_paths(&self.db)?
+            .into_iter()
+            .filter(|key| !filter::within_boundary(Path::new(key), roots))
+            .collect())
+    }
+
+    /// Drop every row this store holds for a file outside its roots.
+    ///
+    /// The count is what the daemon logs and what the Stores page shows, so a
+    /// store that was contaminated says so rather than quietly correcting
+    /// itself. The files on disk are untouched; the store that owns them still
+    /// holds them.
+    pub fn prune_out_of_root(&mut self, roots: &[PathBuf]) -> Result<usize> {
+        let strays = self.out_of_root(roots)?;
+        if strays.is_empty() {
+            return Ok(0);
+        }
+        self.writing(|me| {
+            for key in &strays {
+                me.evict(key)?;
+            }
+            me.index.save()?;
+            Ok(())
+        })?;
+        Ok(strays.len())
     }
 
     /// Every file this store holds that today's rules would refuse.
