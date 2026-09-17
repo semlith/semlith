@@ -153,8 +153,12 @@ def descend_picker(d, path):
             "the picker is showing %s, which is not above %s, so there is no way "
             "to walk down to it" % (here, path)
         )
-    relative = path_key[len(here_key.rstrip("/")) + 1:]
-    for part in relative.split("/"):
+    # The segments come from the path as it is spelled, not from the key. The
+    # key is lowercased so that `C:` and `c:` compare equal; clicking a row
+    # called `AppData` with the text `appdata` matches nothing.
+    depth = len([p for p in here_key.rstrip("/").split("/") if p])
+    spelled = [p for p in path.replace("\\", "/").rstrip("/").split("/") if p]
+    for part in spelled[depth:]:
         if part in ("", "."):
             continue
         clicked = d.eval(
@@ -1336,11 +1340,28 @@ def _(d):
         skip("the daemon has not noticed the removed root yet")
 
     d.open_view("stores")
-    row_text = d.eval(
+    # Waited for, not read once. The page is live: it polls every second and
+    # redraws what moved, so a row read in the same breath as the navigation is
+    # a row drawn from the answer before the root was removed.
+    read_row = (
         "(() => { const r = [...document.querySelectorAll('tbody tr')]"
         ".find(r => r.innerText.includes(%s)); return r ? r.innerText : null; })()"
         % json.dumps(store_name)
     )
+    try:
+        d.wait_for(
+            "(() => { const r = [...document.querySelectorAll('tbody tr')]"
+            ".find(r => r.innerText.includes(%s));"
+            " return !!r && /missing|gone|not there|unavailable/i.test(r.innerText); })()"
+            % json.dumps(store_name),
+            timeout=15,
+            what="the Stores row for %s to say its root is gone" % store_name,
+        )
+    except cdp.ProtocolError:
+        # Fall through to the assertion below, which says it in the finding's
+        # own words and quotes what the row actually read.
+        pass
+    row_text = d.eval(read_row)
     if row_text is None:
         fail("the Stores page no longer lists %s at all" % store_name)
     if not re.search(r"missing|gone|not there|unavailable", row_text, re.IGNORECASE):
