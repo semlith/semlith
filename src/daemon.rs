@@ -186,13 +186,36 @@ fn alive(_pid: u32) -> bool {
 }
 
 /// Something the watcher thread should do next, on behalf of a request.
+/// What an index job has left to do.
+///
+/// A slice yields the writer back to the watcher when its budget runs out and
+/// the rest is re-queued behind whatever the watcher had waiting, so one
+/// logical run is several `Index` jobs on one report channel. What a
+/// continuation carries is the *remainder of the walk*, not the roots: walking
+/// the roots again meant re-opening and re-hashing every file the run had
+/// already done, once per slice, to be told each time that it was unchanged.
+enum Work {
+    /// The first slice of a run: the roots to walk.
+    Roots(Vec<PathBuf>),
+    /// Every later slice: exactly the files the previous one did not reach.
+    Rest(Vec<PathBuf>),
+}
+
+struct Indexing {
+    work: Work,
+    /// Every file this run has embedded, across every slice, so a stop undoes
+    /// the run rather than the slice that happened to be going.
+    already: Vec<String>,
+    /// What the run had scanned before this slice, and how many files the walk
+    /// found in total. Carried so the progress a page draws belongs to the run:
+    /// a slice's own counters restart at one, which a page faithfully redrew as
+    /// a run that had begun again.
+    scanned: u64,
+    total: u64,
+}
+
 enum Job {
-    /// The paths to walk, and every file the earlier slices of this same run
-    /// already embedded. A slice yields the writer back to the watcher when
-    /// its budget runs out and the rest is re-queued behind whatever the
-    /// watcher had waiting, so one logical run is several `Index` jobs on one
-    /// report channel.
-    Index(Vec<PathBuf>, Vec<String>),
+    Index(Indexing),
     Forget(PathBuf),
 }
 
@@ -312,8 +335,19 @@ impl RunState {
         if let Some(ended) = self.ended {
             return ended;
         }
-        let held = self.paused_total + self.paused_at.map(|at| at.elapsed()).unwrap_or_default();
-        self.origin.elapsed().saturating_sub(held)
+        // One instant, both spans measured from it. Sampling `Instant::now()`
+        // twice — once inside the held total and once for the run's own — puts
+        // the gap between the two calls into the answer, so a *held* clock
+        // crept upward by a few hundred nanoseconds per read and crossed a
+        // millisecond boundary often enough to be visible.
+        let now = std::time::Instant::now();
+        let held = self.paused_total
+            + self
+                .paused_at
+                .map(|at| now.saturating_duration_since(at))
+                .unwrap_or_default();
+        now.saturating_duration_since(self.origin)
+            .saturating_sub(held)
     }
 
     /// Stop counting for as long as the run is held.
@@ -632,7 +666,12 @@ impl Store {
         self.record(&notice);
         let _ = report.send(notice);
         queue.push_back(Queued {
-            job: Job::Index(paths, Vec::new()),
+            job: Job::Index(Indexing {
+                work: Work::Roots(paths),
+                already: Vec::new(),
+                scanned: 0,
+                total: 0,
+            }),
             report,
         });
     }
@@ -2003,11 +2042,16 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
     };
 
     match job {
-        Job::Index(paths, already) => {
+        Job::Index(Indexing {
+            work,
+            already,
+            scanned: scanned_before,
+            total: total_before,
+        }) => {
             // Only the first slice announces itself; the rest are the same run
             // continuing, and a second "started" would read as a second run.
-            if already.is_empty() {
-                let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+            if let Work::Roots(roots) = &work {
+                let names: Vec<String> = roots.iter().map(|p| p.display().to_string()).collect();
                 say(serde_json::json!({ "event": "started", "paths": names }));
             }
             // Every queued job arrived through the portal or through a
@@ -2041,30 +2085,41 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                     crate::Flow::Run
                 }
             };
-            let outcome =
-                writer.index_within_held_under(&paths, SLICE, &control, |path, progress| {
-                    say(serde_json::json!({
-                        "event": "file",
-                        // Plain, like every other path semlith hands out. The
-                        // store keeps the verbatim form; a `\\?\C:\` prefix in
-                        // an event is a path no editor opens and no shell
-                        // completes.
-                        "path": crate::plain(&path.display().to_string()),
-                        // What is happening to this file, so a page can say
-                        // "unchanged" rather than showing nothing at all.
-                        "outcome": progress.outcome.as_str(),
-                        // Why, for the outcomes that owe an explanation. A
-                        // page showing "skipped" against two thousand files
-                        // and nothing else is a page nobody can act on.
-                        "why": progress.why,
-                        "scanned": progress.scanned,
-                        "total": progress.total,
-                        "indexed": progress.indexed,
-                        "chunks": progress.chunks,
-                        "symbols": progress.symbols,
-                        "elapsed_ms": store.run_elapsed_ms(),
-                    }));
-                });
+            // The run's own progress, not the slice's. A continuation's
+            // counters start at one because it is indexing a shorter list; the
+            // page is drawing one run, so it is told where the run is.
+            let on_file = |path: &Path, progress: crate::IndexProgress| {
+                let scanned = scanned_before + progress.scanned as u64;
+                say(serde_json::json!({
+                    "event": "file",
+                    // Plain, like every other path semlith hands out. The
+                    // store keeps the verbatim form; a `\\?\C:\` prefix in
+                    // an event is a path no editor opens and no shell
+                    // completes.
+                    "path": crate::plain(&path.display().to_string()),
+                    // What is happening to this file, so a page can say
+                    // "unchanged" rather than showing nothing at all.
+                    "outcome": progress.outcome.as_str(),
+                    // Why, for the outcomes that owe an explanation. A
+                    // page showing "skipped" against two thousand files
+                    // and nothing else is a page nobody can act on.
+                    "why": progress.why,
+                    "scanned": scanned,
+                    // The walk's total, settled on the first slice. A later
+                    // slice only knows how many it was handed.
+                    "total": if total_before > 0 { total_before } else { progress.total as u64 },
+                    "indexed": progress.indexed,
+                    "chunks": progress.chunks,
+                    "symbols": progress.symbols,
+                    "elapsed_ms": store.run_elapsed_ms(),
+                }));
+            };
+            let outcome = match work {
+                Work::Roots(ref roots) => {
+                    writer.index_within_held_under(roots, SLICE, &control, on_file)
+                }
+                Work::Rest(rest) => writer.index_rest_held_under(rest, SLICE, &control, on_file),
+            };
             match outcome {
                 Ok(mut done) => {
                     store.last_write.store(now() as usize, Ordering::Relaxed);
@@ -2111,8 +2166,26 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                     // the reader keeps one stream rather than being asked to
                     // press the button again.
                     if done.remaining > 0 {
+                        // The remainder of the walk, not the roots. Handing the
+                        // roots back meant the next slice walked the tree from
+                        // the top and re-opened and re-hashed every file the
+                        // run had already done, to be told each time that it
+                        // was unchanged — so the progress bar restarted at one
+                        // every forty-five seconds, and a run of N files over S
+                        // slices read N×S files instead of N.
+                        let total = if total_before > 0 {
+                            total_before
+                        } else {
+                            // Settled once, on the slice that did the walk.
+                            (scanned_before + done.scanned as u64) + done.remaining as u64
+                        };
                         store.requeue(Queued {
-                            job: Job::Index(paths, written),
+                            job: Job::Index(Indexing {
+                                work: Work::Rest(std::mem::take(&mut done.pending)),
+                                already: written,
+                                scanned: scanned_before + done.scanned as u64,
+                                total,
+                            }),
                             report: back,
                         });
                         say(serde_json::json!({
@@ -2433,6 +2506,268 @@ pub fn port_of(flag: Option<u16>) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The change counters are process-global — deliberately, because two of
+    /// the six are bumped by code that has no `State` in hand. That makes them
+    /// shared between tests running in parallel threads, so any test that
+    /// reasons about *which* counter moved has to hold this first. A test that
+    /// merely causes a bump does not.
+    fn counters() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A store with nothing behind it, for the parts of a run that are
+    /// bookkeeping rather than embedding.
+    fn bare_store(name: &str) -> Arc<Store> {
+        Arc::new(Store {
+            name: name.to_string(),
+            dir: PathBuf::from("/nowhere").join(name),
+            roots: Vec::new(),
+            watched: Vec::new(),
+            queue: Mutex::new(VecDeque::new()),
+            events: Mutex::new(VecDeque::new()),
+            run: Mutex::new(None),
+            watching: AtomicBool::new(true),
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            last_write: AtomicUsize::new(0),
+        })
+    }
+
+    /// The clock restarted from zero every forty-five seconds, because it was
+    /// measured inside `perform` and a slice is a fresh `Job::Index`. A page
+    /// faithfully redrew that as a run that had just begun.
+    #[test]
+    fn a_runs_clock_spans_its_slices_and_never_goes_backwards() {
+        let store = bare_store("api");
+        store.begin_run(1, vec![PathBuf::from("/work/api")]);
+        store.record(&serde_json::json!({ "event": "started", "paths": ["/work/api"] }));
+        std::thread::sleep(Duration::from_millis(30));
+        let first = store.run_elapsed_ms();
+        // A slice hands the writer back and the run returns as a new job. The
+        // clock is the run's, so it carries on.
+        store.record(&serde_json::json!({ "event": "slice", "remaining": 12 }));
+        std::thread::sleep(Duration::from_millis(30));
+        let second = store.run_elapsed_ms();
+        assert!(second >= first, "{second} went backwards from {first}");
+        assert!(second >= 50, "the clock did not span the slice: {second}ms");
+    }
+
+    /// Held time is not time anything is happening, and a run that is over
+    /// keeps its total rather than counting on.
+    #[test]
+    fn a_held_run_stops_counting_and_a_finished_one_freezes() {
+        let store = bare_store("api");
+        store.begin_run(1, Vec::new());
+        store.record(&serde_json::json!({ "event": "started", "paths": [] }));
+        store.record(&serde_json::json!({ "event": "paused" }));
+        let held = store.run_elapsed_ms();
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(
+            store.run_elapsed_ms(),
+            held,
+            "the clock counted while the run was held"
+        );
+
+        store.record(&serde_json::json!({ "event": "resumed" }));
+        std::thread::sleep(Duration::from_millis(20));
+        store.record(&serde_json::json!({ "event": "done", "indexed": 3, "stopped": false }));
+        let total = store.run_elapsed_ms();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(
+            store.run_elapsed_ms(),
+            total,
+            "a finished run's clock kept going"
+        );
+    }
+
+    /// Two clients read one run through their own cursors, and neither is
+    /// affected by what the other has read.
+    #[test]
+    fn two_cursors_over_one_log_each_see_every_line_once() {
+        let store = bare_store("api");
+        store.begin_run(1, Vec::new());
+        for scanned in 0..5 {
+            store.record(&serde_json::json!({ "event": "file", "scanned": scanned }));
+        }
+
+        let seqs = |lines: &[serde_json::Value]| {
+            lines
+                .iter()
+                .map(|l| l["seq"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        let first = store.log_after(None);
+        assert_eq!(seqs(&first), vec![0, 1, 2, 3, 4]);
+
+        // One client reads on from where it was; the other has read nothing
+        // and still sees the whole run.
+        store.record(&serde_json::json!({ "event": "file", "scanned": 5 }));
+        assert_eq!(seqs(&store.log_after(Some(4))), vec![5]);
+        assert_eq!(seqs(&store.log_after(None)), vec![0, 1, 2, 3, 4, 5]);
+        // A cursor past the end is caught up, not an error.
+        assert!(store.log_after(Some(5)).is_empty());
+    }
+
+    /// The queue is first in, first out by submission, and nothing reorders it.
+    #[test]
+    fn the_queue_admits_in_submission_order_and_only_up_to_the_limit() {
+        let admission = Admission::new(2);
+        let stores: Vec<Arc<Store>> = ["a", "b", "c", "d"].into_iter().map(bare_store).collect();
+        for store in &stores {
+            admission.submit(store, vec![PathBuf::from("/work").join(&store.name)]);
+        }
+
+        assert_eq!(admission.running(), 2, "the limit admitted more than two");
+        let waiting: Vec<String> = admission.waiting().into_iter().map(|(_, s, _)| s).collect();
+        assert_eq!(waiting, vec!["c", "d"]);
+        assert_eq!(admission.position_of("c"), Some(1));
+        assert_eq!(admission.position_of("d"), Some(2));
+        assert_eq!(
+            admission.position_of("a"),
+            None,
+            "a running run is not waiting"
+        );
+
+        // A run finishing admits exactly the head, and the one behind it moves
+        // up by having been behind it.
+        let first = stores[0].current_run().expect("a is running");
+        admission.finish(first);
+        assert_eq!(admission.position_of("d"), Some(1));
+        assert_eq!(admission.running(), 2);
+
+        // Raising the limit admits immediately; nothing waits for a timer.
+        admission.set_limit(4);
+        assert!(admission.waiting().is_empty());
+        assert_eq!(admission.running(), 3);
+    }
+
+    /// Taking a folder out of the queue costs nothing, because nothing of it
+    /// was embedded — which is the whole difference from stopping a run.
+    #[test]
+    fn a_dequeued_run_is_answered_at_once_and_undoes_nothing() {
+        let admission = Admission::new(1);
+        let (a, b) = (bare_store("a"), bare_store("b"));
+        admission.submit(&a, Vec::new());
+        let (_, waiting) = admission.submit(&b, Vec::new());
+
+        assert_eq!(admission.position_of("b"), Some(1));
+        assert_eq!(admission.dequeue("b"), 1);
+        assert_eq!(admission.position_of("b"), None);
+        assert_eq!(admission.running(), 1, "dequeuing b disturbed a");
+
+        let answer = waiting.recv().expect("the dequeued run was answered");
+        assert_eq!(answer["event"], "done");
+        assert_eq!(answer["stopped"], true);
+        assert_eq!(answer["dequeued"], true);
+        assert_eq!(answer["removed"], 0, "a dequeued run undid something");
+        // And nothing is left to dequeue.
+        assert_eq!(admission.dequeue("b"), 0);
+    }
+
+    /// Each counter moves when, and only when, its own domain is written.
+    ///
+    /// The bump sites themselves are held to "once, and nowhere else" by
+    /// `one_bump_site_per_domain` below; this is the other half — that the six
+    /// are genuinely separate and one write does not move two.
+    #[test]
+    fn a_counter_moves_for_its_own_domain_and_no_other() {
+        let _held = counters();
+        for domain in changes::DOMAINS {
+            let before: Vec<u64> = changes::DOMAINS.iter().map(|d| changes::read(*d)).collect();
+            changes::bump(domain);
+            for (other, was) in changes::DOMAINS.iter().zip(&before) {
+                let now = changes::read(*other);
+                if *other == domain {
+                    assert_eq!(now, was + 1, "{} did not move", domain.as_str());
+                } else {
+                    assert_eq!(
+                        now,
+                        *was,
+                        "writing {} moved {}",
+                        domain.as_str(),
+                        other.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    /// How many places may write each domain.
+    ///
+    /// One, except `stores`: a store joining and a store being deleted are two
+    /// writes of one domain and there is no single function both go through —
+    /// `open_store` takes a lock and spawns a watcher, `delete_store` stops one
+    /// and removes the directory. Every other domain has exactly one writer and
+    /// a second site would be a second source of truth.
+    const BUMP_SITES: &[(&str, usize)] = &[
+        ("stores", 2),
+        ("runs", 1),
+        ("clients", 1),
+        ("ledger", 1),
+        ("events", 1),
+        ("privacy", 1),
+    ];
+
+    /// A bump site that is not in the one function that writes its domain is
+    /// how one page goes stale while the others are live — the worst outcome
+    /// available, because a portal that is wrong in one place is trusted in all
+    /// of them.
+    #[test]
+    fn one_bump_site_per_domain() {
+        // Every source file, read as text. `include_str!` rather than walking
+        // the directory, so a file added without a line here is a compile
+        // error rather than a silently unchecked file.
+        const SOURCES: &[(&str, &str)] = &[
+            ("daemon.rs", include_str!("daemon.rs")),
+            ("routes.rs", include_str!("routes.rs")),
+            ("store.rs", include_str!("store.rs")),
+            ("doctor.rs", include_str!("doctor.rs")),
+            ("ledger.rs", include_str!("ledger.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("watch.rs", include_str!("watch.rs")),
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("http.rs", include_str!("http.rs")),
+            ("home.rs", include_str!("home.rs")),
+        ];
+        for domain in changes::DOMAINS {
+            let needle = format!("Domain::{}", title_case(domain.as_str()));
+            let sites: usize = SOURCES
+                .iter()
+                .map(|(_, text)| {
+                    text.lines()
+                        .filter(|line| {
+                            line.contains("changes::bump") && line.contains(needle.as_str())
+                        })
+                        .count()
+                })
+                .sum();
+            let allowed = BUMP_SITES
+                .iter()
+                .find(|(name, _)| *name == domain.as_str())
+                .map(|(_, n)| *n)
+                .expect("every domain declares how many places may write it");
+            assert_eq!(
+                sites,
+                allowed,
+                "{} is bumped at {sites} site(s) and {allowed} is what it may have; a counter \
+                 is bumped where its domain is written, and a site beyond that list is a \
+                 second source of truth",
+                domain.as_str()
+            );
+        }
+    }
+
+    fn title_case(word: &str) -> String {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => String::new(),
+        }
+    }
 
     /// A `.semlith` beside its corpus is not in the registry, and the daemon
     /// still has to know what to call it and what to watch. The rule is the

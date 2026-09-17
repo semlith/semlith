@@ -93,6 +93,24 @@ The address bar carries the page as a fragment — `#search`, `#graph` — so a
 particular page can be bookmarked or reloaded. On a narrow screen the navigation
 is a drawer that closes when it takes you somewhere.
 
+Under the pages is a count — `2 indexing`, or `2 indexing · 3 queued` — on every
+page rather than on the Index page alone, because a run that is only visible from
+the page that started it is a run that happens out of sight. It is hidden when
+nothing is running.
+
+**Most of the portal reads live.** The daemon keeps one counter per data domain —
+stores, runs, clients, ledger, events, privacy — and bumps it in the one function
+that writes that domain. Every page polls those six integers once a second from
+`GET /api/changes` and refetches only the domains that moved, so a quiet daemon
+with a tab open costs one small request a second and nothing else. It is a poll
+rather than a stream because a stream would hold one of the daemon's eight HTTP
+workers for as long as the tab is open, and eight tabs would then be a portal
+that cannot answer. A tab in the background stops asking, and catches up in one
+pass when it comes back. Which pages read live is said on each of them below;
+Search, Read and Graph deliberately do not, because each is the answer to a
+question somebody asked and redrawing it under them would be answering a
+different one.
+
 ## Stores
 
 **What it is for.** Every store this machine has, what each holds, and whether
@@ -161,6 +179,13 @@ The **Watcher** card is a live feed of what has changed on disk since the daemon
 started, most recent first. The card beside it summarises connected agents; the
 Agents page has the whole of it.
 
+**This page reads live.** The rows and the feed redraw when the stores or events
+domains move, so a file saved in a watched root, a store another process created,
+and a run finishing all appear without a reload. It redraws by asking for the
+rows it would have had on a reload rather than by patching what is on screen — a
+second renderer is how a table ends up disagreeing with a reload of itself — and
+the scroll position is kept.
+
 ## Files
 
 **What it is for.** Exactly what is in the index, so that "semlith has not read
@@ -203,40 +228,110 @@ writes, because a write names the store it is for.
 
 ## Index
 
-**What it is for.** Reading a folder, or one fetched URL, into a store, and
-watching it happen.
+**What it is for.** Reading folders, or one fetched URL, into stores, and
+watching every run the daemon is carrying.
 
 The daemon is the writer for every store it opened. This page does not index
-anything itself: it puts a job on that store's write queue and streams back what
-the writer reports, which is the same path `semlith_index` takes over MCP. That
-is why a run can sit at `queued` — the watcher is mid-file, and one writer per
-store is the rule that stops two passes corrupting each other.
+anything itself, and it no longer holds a run either: it asks the daemon to queue
+one and then reads it back, the same way it reads anything else. That is the
+difference worth knowing about. The page used to *be* the run — it held a
+streaming response open and the run existed only as the events travelling down
+it — so the tab that pressed the button was the only thing that knew the run was
+happening, and leaving the page threw that away. The work carried on, because the
+work is the store's, but nothing on screen could find it again.
+
+A run lives in the daemon now: its id, its paths, its status, its counters, its
+clock, the last 500 lines of its log and, when it ends, its summary. The same
+`say` closure that emits every event writes that record, so the card and the log
+cannot disagree about what happened. Navigating to Search and back, refreshing,
+or closing the tab for the length of a run changes nothing — every run is on its
+card where it actually is, with its log carrying on from the last line this page
+saw. A run is only ever cut short in two ways: its own **Stop**, or
+`semlith start` ending.
 
 **Controls.**
 
-- **path** — the folder or file to index. The first-run screen carries a path
-  into this field.
-- **Choose folder…** — a directory picker rooted at your home. It and the URL
-  card are mutually exclusive: offering both at once offers two answers to one
-  question.
+- **paths** — one path per line, so several folders can be started without
+  opening a picker at all. The first-run screen carries a path into this field.
+- **Choose folders…** — a directory picker rooted at your home, which can tick
+  more than one folder in a visit.
+- **Projects under a folder…** — the repository checklist below.
 - **Add from a URL** — one https request for exactly that URL, a page, a PDF or a
   file. Nothing is crawled, no credential is sent, and what lands is written
   inside the store's own `downloads/` directory rather than into your working
-  tree. It then goes through the same queue and reports through the same event
-  stream, so there is no second progress mechanism to learn.
-- **The store selector** — shown only when more than one store is open.
-- **Start indexing** — becomes **Pause** while a run is on.
-- **Stop** — appears only while a run is on.
-- **queue depth** — how many jobs are waiting across every store.
+  tree. It then goes through the same queue and becomes a card like any other, so
+  there is no second progress mechanism to learn. The fetch itself is the one
+  synchronous part, because its refusals — the URL was `http`, the body was too
+  large, nothing here reads that content type — are what the card has to show.
+- **the target** — where the paths go. Three answers, below.
+- **Start indexing** — queues the runs and answers at once with how many were
+  queued. The cards are what happens next; the button does not become a control
+  for them, because there is more than one run.
 
-**Progress** shows a percentage, a bar and a status line carrying files scanned
-over files found, chunks written, and a chunks-per-second rate. The log beneath
-it prints one line per file with the outcome that file got — `indexed`,
-`unchanged`, `skipped`, `removed`, `refused`, `failed` — coloured so that a
-re-index of an unchanged corpus reads as a wall of background with the handful of
-real writes standing out of it. The run ends with a counted line: indexed,
-unchanged, skipped, removed, failed where there were any, chunks, and the total
-elapsed.
+The three pickers are mutually exclusive: two of them open at once is two answers
+to one question.
+
+**Where the paths go.** The selector offers `each folder becomes its own store`
+and an `add to <name>` per open store, and the route behind it takes a third
+answer a script can use:
+
+| Target | What happens |
+|---|---|
+| `each` | One store per path, each resolved exactly as `semlith index <path>` resolves it — same name, same directory under the store home, same registry entry, including the numeric suffix when a second folder is also called `api`. It is the same function, not a second copy of its rules, which is what stops indexing a folder here and again from a terminal producing two stores. |
+| a named store | Every path goes into that one store, and each becomes one of its roots so the watcher keeps it current. |
+| nothing named | `each` for more than one path, and the single-store behaviour for one. Three folders are three corpora, and putting them in one store is a choice nobody made. |
+
+A path that could not be queued is named with its reason and the ones beside it
+still start: a typo in the third folder should not take the two that were with
+it.
+
+**Projects under a folder** is the case the directory picker handles badly —
+ticking twelve repositories one directory at a time is twelve walks into and back
+out of the same parent. It asks the daemon which children of a folder are git
+repositories and offers them all at once, already ticked. A `.git` file counts as
+much as a `.git` directory, so a worktree and a submodule are on the list. One
+level only: a monorepo is one store, and its nested repositories are its own
+business. Where none of the children is a repository the plain subfolders are
+offered instead and the card says so, because a folder of folders is still what
+you were pointing at. A child an existing store already covers is listed with
+`in <store>` and starts unticked — shown rather than omitted, because "nothing
+here" and "all of it is already done" are different answers. **All**, **None** and
+**Use N** fill the paths field and set the target to `each`.
+
+**One card per store**, and the card is the run — the one that is going, or the
+last one that finished, kept afterwards so a page opened later says what it did
+rather than showing nothing. Each card carries its store's name, a status pill, a
+percentage and bar, files scanned over files found, chunks written, a
+chunks-per-second rate, the elapsed clock, the paths, and the log.
+
+**This page reads live**, on the runs and stores domains, and it is the one page
+that paints in place rather than redrawing itself: a card holds a log and a
+scroll position of its own, and redrawing would throw both away. A store whose
+run the daemon has forgotten — it was deleted, or the daemon restarted — loses
+its card rather than keeping a stale one.
+
+| Status | What it means |
+|---|---|
+| `queued` | Submitted and not yet under way. The pill carries its place in line when it is waiting on the daemon-wide queue below; without a place it is waiting on its own store's writer, which is the watcher being mid-file — one writer per store is the rule that stops two passes corrupting each other. |
+| `running` | A writer has it. |
+| `paused` | Held between files by this card's **Pause**. |
+| `stopping` | A stop was asked for and what the run embedded is being undone. Told apart from `stopped` because on a large corpus the undoing takes as long as the embedding did, and a card that jumped straight to `stopped` would be claiming the store was already back to what it was. |
+| `done` | Finished. |
+| `stopped` | Stopped, and undone. The bar returns to 0% rather than filling, because a full bar would say the opposite of what happened. |
+| `failed` | Ended on an error that was not a file's — the model, or the store. |
+
+**The log** under each card prints one line per file with the outcome that file
+got — `indexed`, `unchanged`, `skipped`, `removed`, `refused`, `failed` —
+coloured so that a re-index of an unchanged corpus reads as a wall of background
+with the handful of real writes standing out of it. The run ends with a counted
+line: indexed, unchanged, skipped, removed, failed where there were any, chunks,
+and the total elapsed.
+
+The card reads its log by a cursor rather than by how much it has drawn, so two
+tabs open on the same run each see every line exactly once and neither is
+affected by what the other has read. The daemon keeps the last 500 lines; a tab
+away for longer than that restarts from the oldest line still held rather than
+showing a gap as though it were continuity.
 
 **Three of those outcomes owe an explanation, and the line gives it.** A
 `skipped`, `refused` or `failed` line carries the reason beside the path, because
@@ -260,20 +355,23 @@ coloured and counted apart for that reason. Every failed path is named again on
 the closing line rather than only counted, because a run that ends with "eleven
 failed" and no names is a run whose eleven files nobody goes and looks at.
 
-**The elapsed clock** sits beside the counts. It reads `00:00` from the moment you
-press the button, and begins moving when the run actually starts — a run that
-queues behind the watcher can be seconds from starting, and a clock that appeared
-only then would look like a page that did nothing, while one that counted the
-wait would be reporting time this run did not spend indexing. It ticks once a
-second, and every `file` event
-corrects it to the daemon's own measurement, so it is the run's elapsed time and
-not the tab's: a browser throttles a background tab's timers to about once a
-minute, and a clock that only counted here would be minutes short by the time
-anybody looked at it. It keeps counting through a pause, because a paused run is
-still a run that has been going this long, and it is not reset by a slice. It
-freezes on `done`, `stopped` or `failed`, holding the daemon's total.
+**The elapsed clock** sits beside the counts, because files, chunks, rate and
+elapsed are one reading of one run. It starts when the run is submitted rather
+than when a writer picks it up: the wait for a writer is time you are waiting.
+The daemon measures it, the card ticks between polls so the seconds move, and
+every poll corrects to the daemon's figure — which only ever goes forward, so a
+correction never makes the reading jump backwards. It is the run's time and not
+the tab's, which matters because a browser throttles a background tab's timers to
+about once a minute. It stops while a run is held, because held time is not time
+anything is happening, and it freezes on `done`, `stopped` or `failed`, holding
+the total.
 
-**What Stop does that Pause does not.**
+It also spans the whole run rather than the slice. A run hands the writer back to
+the watcher every 45 seconds and returns as a fresh job, so a clock measured
+around that work restarted from zero every 45 seconds and the page faithfully
+redrew a run that had just begun. The clock belongs to the run now.
+
+**What Stop does that Pause does not, and what Remove does that neither does.**
 
 **Pause** holds the run between files. The writer is still this run's — the lock
 is not handed back, the store is left mid-corpus, and **Resume** carries on from
@@ -285,9 +383,62 @@ filling, and indexing the same folder again begins from the beginning. The
 confirmation says so before it happens. Pause is "wait"; Stop is "as though it
 never ran".
 
+**Remove** is what the button says on a run that is still `queued`, and it takes
+that run out of the line. It answers at once and confirms nothing, because there
+is nothing to undo: a queued run has embedded no file and holds no writer. That
+is the whole difference between removing a folder from the queue and stopping one
+that is going.
+
 One more event can appear in the log: `slice`, saying the writer has handed
 itself back to the watcher and put the rest of this run back on the queue. It is
-one run and one stream, and there is nothing for you to do about it.
+one run and one log, and there is nothing for you to do about it.
+
+**Waiting** appears under the cards when more than the machine can carry has been
+asked for, listing the queued runs in the order they will start, each with its
+store, its paths and a **Remove**. A store's writer used to take the next job on
+its own queue with nothing above it, so eleven open stores meant eleven runs at
+once whatever the machine had; there is one daemon-wide queue now, ordered by
+submission, and a run is admitted only while fewer than *runs at once* are
+running. Anything submitted while the queue exists joins its end. The head is
+admitted the moment a run finishes, stops or fails — with this page open or not,
+which is the point of the run living in the daemon. The watcher's own re-embeds
+do not pass through the queue: they are small, they already interleave with runs,
+and holding a file save behind eleven queued repositories would make the watcher
+useless exactly when the machine is busy.
+
+**How hard this machine may work** is the last card: three numbers, each with the
+machine reading behind it and the sentence that derived it. The daemon reads
+logical cores, total memory and memory free *now* on every request, so the figure
+in front of you is about this machine at this moment rather than at startup.
+
+| Setting | Derived from |
+|---|---|
+| runs at once | Memory free less a 2 GiB reserve, divided by what one run peaks at, and no more than the cores allow with one kept free so the portal still answers while every writer is busy. Floor 1, and 1 outright when the memory reading failed — a failed reading is not a machine with no memory. |
+| threads each | The embedder's own thread count divided between the runs, clamped so runs × threads never exceeds the cores. Floor 1. |
+| MiB per store | 512 MiB of vectors, doubled once past 16 GiB free beyond the reserve and again past 64 GiB. Two steps rather than a curve, because a figure you recognise is worth more here than a fitted one. |
+
+Each is yours to change, and a value above what the machine derived is used as
+you set it — with the derivation in front of you rather than instead of it, which
+is why the field says what it was going to do. Changing *runs at once* takes
+effect on the next admission: raising it admits the head immediately, lowering it
+stops nothing already going, because a run holds a writer and undoing it would
+cost the work it has done. The other two apply to the next run queued.
+
+A value the environment sets — `SEMLITH_INDEX_PARALLEL`, `SEMLITH_EMBED_THREADS`
+or `SEMLITH_INDEX_MEMORY` — is shown, disabled, and says so. An explicit variable
+is an instruction from whoever started the process, and a page in a browser may
+not overrule it. What is not from the environment is saved in
+`~/.semlith/settings.json`, written the first time a field is moved and not
+before, so a home without that file is a home deriving all three.
+
+**What survives what.** Navigating away, coming back, refreshing and closing the
+tab change nothing about any run: the daemon holds them, and this page redraws
+what it finds. A daemon restart is the one thing that does not survive. A run that
+was going when the process ended is not resumed — the files it had committed are
+in the store and indexing again reports them as `unchanged` — and a run that was
+still queued never started at all, which would otherwise leave no trace anywhere.
+The next `semlith start` says both on the store's own event feed, once, on the
+Stores page.
 
 ## Search
 
@@ -699,6 +850,10 @@ These are the same stanzas the README documents — they are parsed out of it an
 executed by a test, so the portal shows text that is known to work rather than
 text somebody typed twice.
 
+**This page reads live.** The clients domain moves when one connects,
+disconnects or runs a query, so **Connected** and its query counts follow an
+agent working in another window without a reload.
+
 ## Ledger
 
 **What it is for.** What your agents actually retrieved, recorded locally, so the
@@ -754,6 +909,10 @@ would cost more than the saving being measured.
 
 **by client** breaks the count down under each client's own name, taken from the
 MCP handshake rather than guessed at here.
+
+**This page reads live.** Every surface that records a retrieval writes through
+one function, and that is where the ledger domain is bumped, so a row lands here
+as an agent retrieves it — whichever window the agent is working in.
 
 ## Privacy
 
@@ -849,6 +1008,12 @@ needs reconfiguring.
 **Content-Security-Policy** prints the policy every response carries, and the line
 under it names the three `Host` values that are answered. Everything else gets
 400.
+
+**The rules read live.** A repair moves the privacy domain in the one function
+that applies one, so a `chmod` run in a terminal or a `semlith doctor --fix` in
+another window turns the row here without a reload. The rest of the page is a
+reading of the binary rather than of a changing thing, and a **Scan** is a list
+you asked for; neither is refetched on a timer.
 
 ## Doctor
 

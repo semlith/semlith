@@ -484,6 +484,90 @@ fn no_view_in_the_map_is_a_route_that_does_not_exist() {
     }
 }
 
+/// Every route 0.20.0 added, with the verb it answers on.
+///
+/// The parity map above pairs a *command* with its view, which is the rule
+/// AGENTS.md states. These four are not a command's view — they are what the
+/// page polls to read live — so they need their own row here or nothing would
+/// notice one of them being dropped.
+const LIVE_ROUTES: &[(&str, &str)] = &[
+    // What is indexing and how far it has got, for a page or a script.
+    ("GET", "/api/index/runs"),
+    // One run's log after a cursor. Asked with no store on purpose: naming one
+    // that does not exist is a 404 about the *store*, which is the right answer
+    // and indistinguishable here from the route being missing.
+    ("GET", "/api/index/log"),
+    // The repositories under a folder, for the Index page's checklist and for
+    // `semlith index --projects`.
+    ("GET", "/api/projects"),
+    // The six change counters the whole live portal is driven by.
+    ("GET", "/api/changes"),
+    // The three machine settings.
+    ("POST", "/api/index/settings"),
+];
+
+#[test]
+fn every_route_the_live_portal_polls_is_served() {
+    let daemon = Daemon::start();
+    for (method, route) in LIVE_ROUTES {
+        let status = daemon.status(method, route);
+        assert_ne!(status, 404, "{route} is not served");
+        assert_ne!(status, 405, "{route} does not answer on {method}");
+    }
+}
+
+/// `/api/changes` is the one clock, so it has to carry all six domains: a page
+/// watching a domain this route does not report would never refetch it, and
+/// would be the one stale panel on an otherwise live portal.
+#[test]
+fn the_changes_route_reports_every_domain() {
+    let daemon = Daemon::start();
+    let changes = daemon.json("/api/changes");
+    for domain in ["stores", "runs", "clients", "ledger", "events", "privacy"] {
+        assert!(
+            changes
+                .get(domain)
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "/api/changes does not report {domain}: {changes}"
+        );
+    }
+}
+
+/// The two flags 0.20.0 adds to `index` have a surface on the page, which is
+/// what portal parity asks of a capability.
+///
+/// `--each` is the Index page's target control, and `--projects` is its
+/// repository checklist. Asserted against the page's own source, because a
+/// flag documented in `--help` and absent from the portal is exactly the debt
+/// this repository says it does not carry.
+#[test]
+fn the_index_flags_have_a_portal_surface() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", "--help"])
+        .output()
+        .expect("semlith index --help");
+    let help = String::from_utf8_lossy(&help.stdout);
+
+    assert!(
+        help.contains("--each"),
+        "index --help does not offer --each"
+    );
+    assert!(
+        help.contains("--projects"),
+        "index --help does not offer --projects"
+    );
+    assert!(
+        APP_JS.contains("each folder becomes its own store"),
+        "the Index page offers no `each` target, so --each has no portal view"
+    );
+    assert!(
+        APP_JS.contains("/api/projects"),
+        "the Index page never asks for projects, so --projects has no portal view"
+    );
+}
+
 /// The Privacy page's Rules section is the release's claims with the daemon's
 /// own reading beside each. A row that only stated the rule would be a sentence
 /// somebody wrote.

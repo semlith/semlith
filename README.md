@@ -135,7 +135,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 
 | Command | What it does |
 |---|---|
-| `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--include-secrets` indexes what the deny-list otherwise refuses. |
+| `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--each` gives every path its own store instead of one shared store; `--projects <FOLDER>` takes the paths from the git repositories directly under a folder, and implies `--each`. `--include-secrets` indexes what the deny-list otherwise refuses. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it, `--prefer code\|docs\|any` to lift one side of the corpus. |
 | `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
@@ -211,8 +211,8 @@ semlith: opened api at /Users/you/.semlith/stores/api — watching 1 root(s)
 
 That URL is printed once, on stdout. Everything else goes to stderr, and the
 token never appears there.
-Nine pages — Stores, Files, Index, Search, Graph, Agents, Ledger, Privacy and
-About — each the same answer the terminal gives. The Graph page draws the
+Ten pages — Stores, Files, Index, Search, Graph, Agents, Ledger, Privacy, Doctor
+and About — each the same answer the terminal gives. The Graph page draws the
 symbols and edges the store holds, with a filter chip per edge kind and a
 confidence colour per edge. **[docs/portal.md](docs/portal.md) documents every
 page**, what each control does, and what each column, badge and number means.

@@ -716,6 +716,17 @@ pub struct IndexReport {
     /// Paths a time-bounded run never reached. Zero unless a budget cut the
     /// run short — an unbounded `index_paths` always finishes what it walked.
     pub remaining: usize,
+    /// Exactly the paths this slice did not reach, in the order it would have
+    /// taken them.
+    ///
+    /// The next slice indexes these rather than walking the roots again. A
+    /// re-walk is not merely wasted directory traversal: every file the run had
+    /// already done is re-opened and re-hashed to discover it is unchanged, so
+    /// a run of N files over S slices read N×S files instead of N, and the
+    /// progress a page drew restarted from one on every slice. The content
+    /// hashes made it *correct* to re-walk, which is why it went unnoticed.
+    #[serde(skip)]
+    pub pending: Vec<PathBuf>,
     /// Paths refused, each with the rule that refused it.
     ///
     /// Listed rather than counted: "three paths were refused" is not something
@@ -1193,6 +1204,40 @@ impl Semlith {
         self.index_set(walk(roots), true, Some(deadline), Some(control), on_file)
     }
 
+    /// Carry on a run from exactly where its last slice stopped.
+    ///
+    /// `files` is the previous slice's [`IndexReport::pending`] — the paths it
+    /// did not reach, in the order it would have taken them. No walk: the tree
+    /// was walked when the run started, and walking it again on every slice is
+    /// what made a long run re-open and re-hash everything it had already done,
+    /// forty-five seconds at a time.
+    ///
+    /// The orphan sweep still belongs to this call, because `index_set` only
+    /// performs it on the slice that reaches the end of the list.
+    pub(crate) fn index_rest_held_under(
+        &mut self,
+        files: Vec<PathBuf>,
+        budget: std::time::Duration,
+        control: &dyn Fn() -> Flow,
+        on_file: impl FnMut(&Path, IndexProgress),
+    ) -> Result<IndexReport> {
+        let deadline = std::time::Instant::now() + budget;
+        self.index_set(
+            // Every one of these came out of the walk this run started with,
+            // so they are walked paths and are held to the same boundary rule
+            // they were held to then.
+            Walked {
+                files,
+                named: Vec::new(),
+                unreadable: Vec::new(),
+            },
+            true,
+            Some(deadline),
+            Some(control),
+            on_file,
+        )
+    }
+
     /// `index_paths` without taking the lock, for a caller that already holds
     /// it — `semlith watch` holds it for its whole life.
     pub(crate) fn index_walk(
@@ -1370,7 +1415,11 @@ impl Semlith {
             );
         }
 
-        for (seen, path) in paths.into_iter().enumerate() {
+        for (seen, path) in paths.iter().enumerate() {
+            // Cloned per file so `paths` outlives the loop and the remainder
+            // can be handed to the next slice. One `PathBuf` clone against
+            // opening and hashing the file it names.
+            let path = path.clone();
             // Only ever after something was embedded: a budget too small for
             // any work at all must still make progress, or calling again is
             // the same call forever.
@@ -1379,6 +1428,7 @@ impl Semlith {
                 && std::time::Instant::now() >= deadline
             {
                 report.remaining = total - seen;
+                report.pending = paths[seen..].to_vec();
                 break;
             }
             if let Some(ask) = control {
@@ -1403,6 +1453,7 @@ impl Semlith {
                 }
                 if yielded {
                     report.remaining = total - seen;
+                    report.pending = paths[seen..].to_vec();
                     break;
                 }
                 if stop {
@@ -1774,8 +1825,12 @@ impl Semlith {
         // to undo all of them — see `Job::Index` in the daemon.
         report.written = written;
 
-        // Anything recorded but no longer on disk is dead weight.
-        if sweep {
+        // Anything recorded but no longer on disk is dead weight — but only
+        // once the run has actually reached the end of what it walked. A slice
+        // that yielded has not seen the rest of the corpus yet, and sweeping on
+        // every slice re-read every recorded path once per slice for an answer
+        // that could not change until the walk was done.
+        if sweep && report.pending.is_empty() && !report.stopped {
             for key in store::all_paths(&self.db)? {
                 if !Path::new(&key).exists() {
                     for id in store::delete_file(&self.db, &key)? {

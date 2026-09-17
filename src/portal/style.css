@@ -1308,14 +1308,45 @@ h2 {
   flex-shrink: 0;
   color: var(--muted);
 }
-.field input {
+.field input,
+/* The Index page's path box is a textarea — several paths, one per line — and
+   a textarea carries an intrinsic `cols` width that no `flex-grow` overrides.
+   It sat at its default twenty columns in a row built for the whole page. */
+.field textarea {
   border: 0;
   outline: none;
   background: transparent;
   flex-grow: 1;
   min-width: 0;
+  width: 100%;
   font-family: var(--mono);
   font-size: var(--t-field);
+}
+
+/* A field that holds a textarea grows with it.
+   Every other `.field` is one row of one line, so `.field` pins a height and
+   centres its children — which a two-line textarea overflows in both
+   directions at once, putting the first line of the placeholder above the
+   border and the resize grip below it. Marked with a class rather than
+   `:has(textarea)` so the rule is as explicit as the markup it styles. */
+.field.area {
+  height: auto;
+  min-height: 40px;
+  align-items: flex-start;
+  padding-top: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+.field.area textarea {
+  resize: vertical;
+  line-height: 1.5;
+  /* The grip lives inside the border now that the field grows, and a box that
+     never shrinks below its two rows does not jump as lines are added. */
+  min-height: calc(1.5em * 2);
+}
+/* On the first line, level with the text, rather than in the middle of a box
+   whose height depends on how many paths were typed into it. */
+.field.area .prefix {
+  line-height: 1.5;
 }
 
 /* A select, shaped like the field beside it rather than like a pill. A

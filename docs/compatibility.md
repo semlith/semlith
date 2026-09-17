@@ -13,12 +13,13 @@ break, and is treated as one.
 |---|---|
 | CLI commands | The names `index`, `watch`, `search`, `stats`, `files`, `add`, `forget`, `drop`, `start`, `adopt`, `mcp`, `models`, `languages`, `ledger`, `symbol`, `neighbors`, `path`, `setup`, `upgrade`, and what each one does. |
 | CLI flags | Flag names, their short forms, and their meanings — including the repeatable `--store`/`-s` on the read commands and the single `--store` the write commands take. |
-| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. From 0.15.0, `SEMLITH_LEDGER` — `0`, `off` or `false` stops the ledger recording anything on this machine. |
+| Environment | `SEMLITH_STORE` (a path-separator-delimited list, split the way `PATH` is), `SEMLITH_HOME`, `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_INDEX_MEMORY`. From 0.14.0, `SEMLITH_ADD_ALLOW_PRIVATE` and the `SEMLITH_AGENT_KEY` a client stanza names. From 0.15.0, `SEMLITH_LEDGER` — `0`, `off` or `false` stops the ledger recording anything on this machine. From 0.20.0, `SEMLITH_INDEX_PARALLEL` — how many index runs the daemon may have going at once. |
 | CLI commands added in 0.13.0 | `key show` and `key rotate`, and `start --no-mcp-http`. |
 | CLI commands added in 0.14.0 | `trust <dir>` and `trust --list`, and `index --include-secrets`. |
 | CLI commands added in 0.18.0 | `doctor`, with `--json` and `--fix`, and `setup --register-all`. |
 | CLI commands added in 0.16.0 | `read <target>` — `path:start-end`, `path:line` or a symbol name — and `pattern <query> --lang <name>`. `search` gains `--prefer code\|docs\|any`, defaulting to `any`. |
 | CLI commands added in 0.19.0 | `scan [STORE]`, with `--forget` and `--json`. It exits non-zero while the store still holds anything today's rules would refuse, which is a contract a script can gate on. `pattern` gains `--path` (a repeatable glob) and `--offset`. |
+| CLI flags added in 0.20.0 | `index --each`, one store per path; `index --projects <FOLDER>`, which takes the paths from the folder's children and implies `--each`. Neither changes what `semlith index` does without them. |
 | MCP tool arguments added in 0.19.0 | `semlith_pattern` takes `path`, an array of globs, and `offset`, an integer. Both are optional and both default to what 0.18.0 did, so a client that passes neither sees no change. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
@@ -76,7 +77,12 @@ tool-written state, like `store.db` and the lock file. semlith writes them,
 there is no supported way to hand-edit them, a field semlith does not recognise
 is dropped on the next write, and their shapes are free to change. An older
 binary never reads either of them, which is why reinstalling 0.8.0 loses the
-registry and nothing else.
+registry and nothing else. From 0.20.0 `~/.semlith/settings.json` and
+`~/.semlith/queued.json` join them on the same terms — the first is what the
+portal saved of the three indexing settings, the second is what a stopping daemon
+left for the next one to report — and neither is a configuration file semlith
+promises to keep reading. A file that cannot be read or parsed is the same answer
+as no file.
 
 **The portal itself.** Its routes, its markup, its assets and its appearance are
 not a contract. It is a page, served to a browser on the same machine.
@@ -858,6 +864,139 @@ matches so a listing the 200-match cap cut short can be continued. The
 truncation line now names the offset that continues it rather than leaving a
 caller to guess at a narrower pattern. Neither cap has moved, the order is
 total, and two calls with the same offset return the same matches.
+
+## 0.20.0
+
+**One change breaks something a script could have been reading, and it is an
+`/api/` route.** No CLI command is removed, no flag changes meaning, no MCP tool
+or schema moves, and nothing about ranking or scoring changes — a question
+answered by 0.19.0 is answered the same way here. `FORMAT_VERSION` does not move:
+a store written by 0.19.0 opens under 0.20.0, a 0.19.0 binary opens a store
+0.20.0 wrote, and no table or column is added in either direction.
+
+### `POST /api/index` answers immediately instead of streaming
+
+Through 0.19.0 this route held an HTTP worker open for the whole of a run and
+streamed newline-delimited JSON down it. It now queues the work and returns:
+
+```json
+{"runs": [{"run": 4, "store": "api", "path": "/Users/you/work/api"}], "target": "each"}
+```
+
+`target` is `"each"` or `"store"`. A run that could not be queued appears in the
+same array with `error` in place of `run`, so one refused path does not take the
+ones beside it. On the `store` target a row carries `run` and `store` and no
+`path`, because one run took every path.
+
+**What breaks.** A script that read the NDJSON stream to follow a run gets a
+single JSON object and no stream. **What replaces it.** `GET /api/index/runs`,
+polled: the run is the daemon's now, so a caller reads it rather than holding it.
+The reason for the change is the worker: eight of them serve the whole portal,
+and a route that pins one for the length of an index run is a portal that stops
+answering while it indexes.
+
+**The NDJSON stream stays where it is still the right shape** — a forwarded
+`semlith_index`, whose caller is blocking on the answer and never held a worker
+here. Nothing about the MCP tool changes.
+
+`POST /api/add` answers the same way and for the same reason, adding `fetched`
+and `url` to the object. The fetch itself is still synchronous, because its
+refusals are what the caller has to be told.
+
+### New routes, a new target and a new action
+
+| Route | What it answers |
+|---|---|
+| `GET /api/index/runs` | Every store's run with its queue position, the daemon-wide queue in submission order, how many runs are on, and the three settings with their source, the derived value, the sentence that derived it and the machine reading behind it. The machine is re-read per call, so the memory figure is memory free *now*. |
+| `GET /api/index/log?store=<name>&after=<seq>` | That run's log lines after a cursor. A cursor rather than an offset, so two clients reading the same run through their own cursors each see every line exactly once. The daemon keeps the last 500. |
+| `GET /api/projects?path=<dir>` | The git repositories directly under a directory — a `.git` directory *or* file, so a worktree and a submodule count — each with its name, canonical path and the store already covering it if any. Where none of the children is a repository, its plain subdirectories instead, with `repositories: false`. One level only. Confined to the user's home exactly as `/api/dirs` is. |
+| `GET /api/changes` | Six monotonic integers, one per data domain: `stores`, `runs`, `clients`, `ledger`, `events`, `privacy`. The portal polls this once a second and refetches only what moved. It is not a server-sent stream because a stream would hold one of the eight workers per open tab. |
+| `POST /api/index/settings` | Saves any of `runs_at_once`, `embed_threads` and `index_memory_mb`. A setting the environment fixes is refused with 409, naming the variable. |
+
+`POST /api/index` takes `"store": "each"` — one store per path, each resolved
+through the same function `semlith index <path>` resolves through, including the
+numeric suffix for a second `api`. No store at all means `each` for more than one
+path and the single-store behaviour of 0.19.0 for one.
+
+`POST /api/index/control` gains `dequeue`, which takes a waiting run out of the
+queue. It answers at once and undoes nothing, because nothing of it was embedded
+— which is the whole difference from stopping a run that is going. `pause`,
+`resume` and `stop` are unchanged.
+
+**None of this is a covered surface.** The daemon's HTTP routes are
+[not a contract](#what-is-not-covered) and never have been; this section exists
+because a script may have been reading that stream anyway, and a break nobody was
+told about is the same to whoever hits it.
+
+### `semlith index --each` and `--projects`
+
+`--each` puts each path in its own store, named and placed exactly as
+`semlith index <path>` would name and place it. It is sequential — one process,
+one embedder, one store at a time; a user who wants them in parallel runs the
+daemon, which is what it is for. `--each` with `--name` is refused rather than
+guessed at, because a name is a name for one store.
+
+`--projects <FOLDER>` takes the paths from the repositories directly under that
+folder, or from its plain subfolders where none of them is a repository, and
+implies `--each`. It is the same discovery `/api/projects` does, from the same
+function, so the portal's checklist and the terminal cannot disagree about what is
+under a folder.
+
+`semlith index` with neither flag does exactly what it did: several paths go into
+one store.
+
+### The three indexing settings, and where they are kept
+
+The daemon reads this machine — logical cores, total memory, memory free now —
+and derives how many runs may be on at once, how many embedder threads each gets,
+and how much memory a store's index may use. Each is a setting rather than a
+constant, and the order of precedence is: the environment, then what the portal
+saved, then the derivation.
+
+| Setting | Variable | Field in `settings.json` |
+|---|---|---|
+| Runs at once | `SEMLITH_INDEX_PARALLEL` (new) | `runs_at_once` |
+| Embedder threads per writer | `SEMLITH_EMBED_THREADS` | `embed_threads` |
+| Index memory per store | `SEMLITH_INDEX_MEMORY` | `index_memory_mb` |
+
+An explicit variable wins, because it is an instruction from whoever started the
+process, and the portal cannot overrule one. `~/.semlith/settings.json` is created
+the first time a field is changed and never before; a home without it derives all
+three. It is tool-written state like `registry.json`, not a configuration file —
+see [what is not covered](#what-is-not-covered).
+
+`SEMLITH_EMBED_THREADS` and `SEMLITH_INDEX_MEMORY` keep the meanings they had.
+What changes is the value in force when neither is set: it is derived from the
+machine rather than fixed, so a daemon on a large machine will use more threads
+and more memory than 0.19.0 did, and one on a small machine will use fewer.
+`semlith start` prints all three with their source at startup.
+
+### Runs wait for each other now
+
+Each store's writer used to take the next job on its own queue with nothing above
+it, so eleven open stores meant eleven index runs at once whatever the machine
+had. A run is now admitted only while fewer than runs-at-once are running, and
+otherwise waits in one daemon-wide FIFO ordered by submission. The head is
+admitted the moment a run finishes, stops or fails. The watcher's own re-embeds
+bypass admission: they are small, they already interleave through slices, and
+holding a file save behind eleven queued repositories would make the watcher
+useless exactly when the machine is busy.
+
+A daemon that ends with runs still queued drops them — a run's state was that
+daemon's — and its next start names each of them on that store's event feed as
+never started, along with any run that was going and what it had committed.
+Without that a queued folder would leave no trace anywhere, and the way anybody
+found out would be noticing the search results were thin.
+
+### The run clock measures the run
+
+The elapsed time an index run reports was measured around one *slice* of it. A
+run hands the writer back to the watcher every 45 seconds and returns as a fresh
+job, so the reading restarted from zero every 45 seconds and every surface
+faithfully reported a run that had just begun. It now starts when the run is
+submitted, spans every slice, stops while the run is held, and freezes at its
+total when the run ends. Nothing about the field's name or type changes; the
+number was wrong and is not any more.
 
 ## What a break would look like
 

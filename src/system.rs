@@ -16,12 +16,18 @@ pub const RESERVE_MB: u64 = 2048;
 
 /// Peak resident memory one indexing run costs, in megabytes.
 ///
-/// A shipped default, measured on the release machine. It is a starting point,
-/// not a law: the daemon replaces it with a per-machine measurement after the
-/// first run when the two differ by more than a quarter, because a different
-/// corpus, model or page size is a different peak.
-// ponytail: 1500 is the shipped figure pending the release measurement; the
-// upgrade path is the first run's own measured peak replacing it per machine.
+/// A shipped default, measured on the release machine. It is what the first
+/// run on any machine is derived from, because the first run is the one that
+/// needs a default and there is nothing yet to measure.
+///
+/// It is not replaced by a per-machine measurement. That was the plan, and
+/// nothing implements it: the value reaches [`derive`] from here and from
+/// nowhere else. Said plainly rather than left as a doc comment describing
+/// behaviour the code does not have.
+// ponytail: one shipped figure for every machine. The upgrade path is the
+// daemon recording its own peak across a run and deriving from that instead
+// when the two differ by more than a quarter — a different corpus, model or
+// page size is a different peak, and a laptop is not the release machine.
 pub const PER_RUN_PEAK_MB: u64 = 1500;
 
 /// What the platform says about this machine.

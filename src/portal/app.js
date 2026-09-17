@@ -224,10 +224,13 @@ const ICONS = {
   more:
     "M12 4.1a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|"
     + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
+  // Three tracks with a handle on each: the machine's three numbers.
+  sliders: "M4 7h10|M18 7h2|M4 12h4|M12 12h8|M4 17h11|M19 17h1|M15 5v4|M9 10v4|M16 15v4",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
  * more than a single stroke. */
+
 const NAV_ICONS = {
   stores: "M12 4l8 4-8 4-8-4 8-4|M4 12l8 4 8-4|M4 16.5l8 4 8-4",
   files: "M6 3h7l5 5v13H6z|M13 3v5h5",
@@ -4308,7 +4311,6 @@ async function indexView() {
     ]);
     if (signature === limitsDrawn) return;
     limitsDrawn = signature;
-    settingsCard.hidden = false;
     const machine = limits.machine || {};
     fill(
       settingsCard,
@@ -4402,22 +4404,40 @@ async function indexView() {
     icon(ICONS.file),
     "Add from a URL",
   );
+  /* The machine's three numbers are a panel like the others rather than a card
+   * standing open under the page. They are read once, changed rarely, and
+   * having them permanently on screen gave the most static thing here the most
+   * room. */
+  const settingsButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("settings"),
+    },
+    icon(ICONS.sliders),
+    "Machine limits",
+  );
 
-  /* The three ways to choose what to index are mutually exclusive: two of them
-   * open at once is two answers to one question. */
+  /* The four ways to open something here are mutually exclusive: two open at
+   * once is two answers to one question. */
   function reveal(which) {
     const wantPicker = which === "picker" && !picker.isOpen();
     const wantProjects = which === "projects" && !projects.isOpen();
     const wantUrl = which === "url" && urlCard.hidden;
+    const wantSettings = which === "settings" && settingsCard.hidden;
     if (!wantPicker) picker.close();
     if (!wantProjects) projects.close();
     urlCard.hidden = !wantUrl;
+    settingsCard.hidden = !wantSettings;
     if (wantPicker) picker.open("");
     if (wantProjects) projects.open("");
     if (wantUrl) urlField.focus();
     folderButton.setAttribute("aria-pressed", String(wantPicker));
     projectsButton.setAttribute("aria-pressed", String(wantProjects));
     urlButton.setAttribute("aria-pressed", String(wantUrl));
+    settingsButton.setAttribute("aria-pressed", String(wantSettings));
   }
 
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
@@ -4508,7 +4528,7 @@ async function indexView() {
     ),
     el(
       "div",
-      { class: "field tall full" },
+      { class: "field tall full area" },
       el("span", { class: "prefix", text: "paths" }),
       labelled("index-path", "Paths to index, one per line", field),
     ),
@@ -4518,6 +4538,7 @@ async function indexView() {
       folderButton,
       projectsButton,
       urlButton,
+      settingsButton,
       target,
       start,
     ),
