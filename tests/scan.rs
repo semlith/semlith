@@ -492,24 +492,31 @@ fn a_boundary_refusal_evicts_nothing() {
     assert_eq!(before.len(), 1, "{before:?}");
     drop(s);
 
+    // Whether this test has anything to say depends on where the operating
+    // system puts temporary directories. `within_boundary` admits anything
+    // under the user's home, and on Windows the temp directory is under it —
+    // so the path this test calls "outside" is inside the boundary there, is
+    // indexed rather than refused, and there is no refusal to assert about.
+    // Checked before the run rather than after, so that platform does not pay
+    // for an embedding it cannot learn anything from. The invariant itself is
+    // pinned by `only_a_refusal_about_the_file_itself_is_marked_for_eviction`,
+    // which touches no filesystem and runs everywhere.
+    if semlith::filter::within_boundary(&elsewhere, &[corpus.path().to_path_buf()]) {
+        return;
+    }
+
     // Now as an agent confined to the corpus, asking for the path outside it.
     let mut s = store_at(store.path());
     s.boundary = semlith::Boundary::within(vec![corpus.path().to_path_buf()]);
     let report = s.index_paths(&[elsewhere], |_, _| {}).unwrap();
 
-    // Whether this is a boundary refusal at all depends on where the operating
-    // system puts temporary directories: `within_boundary` admits anything
-    // under the user's home, and on Windows the temp directory is under it. So
-    // the refusal is asserted where it happens, and the half that matters —
-    // the store is untouched — is asserted everywhere. The refusal itself is
-    // pinned deterministically by the test below, which needs no files.
-    if let Some((_, why)) = report.refused.first() {
-        assert!(why.contains("outside"), "{why:?}");
-        assert!(
-            !why.contains("removed from this store"),
-            "a boundary refusal claimed to have evicted something"
-        );
-    }
+    assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
+    let why = &report.refused[0].1;
+    assert!(why.contains("outside"), "{why:?}");
+    assert!(
+        !why.contains("removed from this store"),
+        "a boundary refusal claimed to have evicted something"
+    );
     let after = semlith::store::all_paths(s.db()).unwrap();
     assert_eq!(
         after, before,
