@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-09-17
+
+A full manual drive of every portal page on 2026-09-17 — every button, filter,
+picker, toggle, sort, index run, search, graph interaction, agent action,
+privacy scan and about row, at desktop, tablet and phone widths — found 62
+defects. This release fixes all of them, and adds the scripted browser drive
+that replays every one of their reproductions as a standing gate.
+
+### The product no longer contradicts itself
+
+- A store holds only what its roots cover. The index boundary treated the whole
+  home directory as inside every store's boundary, so any store on the machine
+  could swallow any other's corpus and be allowed — the `semlith` store held 262
+  files belonging to `ultraship`, every search across all stores returned them
+  twice, and the store label on the duplicate was wrong. The home directory is
+  now the fallback only for a store with no registered roots. A store reconciles
+  what it should not hold when the daemon opens it, logging the count and showing
+  it on the Stores page, and `semlith index` does the same — with
+  `--reconcile report` to see the count before anything is dropped. The files on
+  disk are untouched.
+- One search is one retrieval. A search wrote a ledger row into every open
+  store, so every figure on the Retrieval ledger page scaled with how many
+  stores happened to be open: sixty-three queries recorded for about a dozen
+  searches. The rows stay per store — that is what keeps each store's hash chain
+  its own and each row's token counts about its own hits — and they now share a
+  query id, which is what "queries recorded" counts. Rows written before this
+  version have no id and are each their own retrieval, as they were; the chain
+  is not rewritten, and the page says so.
+- `LAST WRITE` is the store's last write, read from the store rather than from
+  this daemon's memory of its own session. A store with 438 files in it no
+  longer reads `never`.
+- `semlith ledger` and the portal both print local time with the zone offset,
+  from the operating system rather than from UTC arithmetic. One dataset, one
+  clock.
+
+### Index runs tell the truth about what they did
+
+- Runs are keyed by run id rather than by store. A second run against the same
+  store used to write its header over the first one's card while the body kept
+  the previous run's log.
+- A finished run offers **Remove** and not **Stop**. Stop on a finished run
+  opened a confirm promising to undo everything it had embedded, did nothing
+  visible, and left the store carrying a cancellation that killed its next run
+  at 0% — with the file fetched, written to disk and never indexed, and no error
+  anywhere. A late stop is refused, and the cancellation is cleared when a run
+  is admitted.
+- Live runs sort above finished ones, a finished card folds to one line, all the
+  finished cards can be cleared at once, and the "N runs queued." line clears
+  when nothing is queued.
+- The live chunk counter is the run's, not the slice's. It climbed to a flush
+  boundary and fell back to single figures, which reads as a run losing work.
+- A store the portal creates holds its watcher off until the run that is about
+  to index it arrives, so a run no longer finds its own files unchanged and
+  reports `1 indexed … 1 chunks` for a store that has just gained three files.
+- A run that is rewriting its shards says so. Every two hundred files it flushes
+  and rewrites, which on a large corpus is twenty seconds with the bar not
+  moving and nothing said.
+
+### Features that did not work
+
+- **Adopt existing .semlith** adopts. It takes the folder that holds the store
+  as readily as the store itself, the picker lists `.semlith` directories and
+  marks a folder that holds one, and a failed adopt leaves the picker where it
+  failed rather than closing it and losing every step of navigation.
+- **Add from a URL** has its own target-store selector. The control it actually
+  read was a dropdown in a different panel, so every URL — valid, private or
+  nonsense — was refused with the same store-selection error, and the private
+  address refusal was unreachable from the portal.
+- **Open in Files** opens Files filtered to that store. The Files page has a
+  store control of its own, and all seven of its columns sort, so there is a way
+  in the portal to look at one store's files.
+- **Projects under a folder…** has Up and drill-down, the same navigation the
+  folder picker beside it has always had, so it can be pointed at a monorepo
+  anywhere on the machine.
+- The graph's edge-kind filters filter. With all six off it drew every edge and
+  the summary asserted a number that did not describe the canvas. The edge count
+  is the count of edges drawn, and an edge two stores both know is drawn once —
+  a twenty-node subgraph reported more edges than the whole graph.
+- Changing `lang:`, `path:` or the token budget re-runs the search, like every
+  other control on the page.
+- The Retrieval ledger page shows the ledger: the rows `semlith ledger` prints,
+  paged and sortable.
+
+### The HTTP surface
+
+- An unknown path answers `404`, with `401` kept for a request that failed the
+  token. A wrong path in the PWA manifest read as an authentication failure and
+  sent whoever debugged it to look at the token.
+- `site.webmanifest`'s icon paths resolve, so a page load logs no console error.
+- `/api/files?limit=` above the maximum answers `400` naming it, the same
+  contract `offset` already had, rather than clamping silently.
+
+### Copy, states and polish
+
+- A registry entry whose directory is missing is shown as missing, naming the
+  path that is absent, and is offered nowhere a real store is offered.
+- The Machine limits panel's derivations are computed from the numbers it
+  prints: a negative headroom says the floor applies, MB and MiB are one unit,
+  "threads each" recomputes when "runs at once" changes, and a saved value is
+  called saved rather than derived.
+- Doctor gives a fix command only for a client that is on this machine, and
+  where two commands are genuinely right for one state the cell says why.
+- The Claude Code HTTP stanza carries the `--scope user` the paragraph above it
+  insists on; inline code on the Agents page renders as code; closing the MCP
+  endpoint asks first; and the dry run is the primary button while the one that
+  writes ten configuration files is the secondary.
+- Four model notes described a different model than the row they sat on, the
+  model semlith actually runs showed no size, and sorting by size buried the
+  only rows that had one.
+- The Privacy page's Rules badge says it is about new writes, and the scan below
+  it says it is about what is already stored.
+- The theme control offers system, light and dark, so following the operating
+  system is reachable again.
+- Truncated paths carry a `title`, four tables carry captions, unselectable rows
+  in a picker are dimmed, pickers sort case-insensitively, the code preview fades
+  where a line continues, the tablet stat tiles break three and two, a phone's
+  store chips are one scrolling row, and a sub-second run reads in tenths.
+- The first search after the daemon starts says it is loading the embedding
+  model rather than showing five seconds of "searching".
+
+### The gate
+
+- `tests/drive/` drives Chrome over the DevTools Protocol and replays the
+  reproduction for every one of the 62 findings, asserting the corrected
+  behaviour and writing a transcript and a screenshot per check. It runs in the
+  native smoke harness on Linux, macOS and Windows.
+
+### Unchanged
+
+- The MCP tool list, the tool schemas and the store format. Agents see the same
+  twelve tools with the same contracts, and a 0.20.1 store opens without
+  migration.
+
 ## [0.20.1] - 2026-09-17
 
 ### Fixed

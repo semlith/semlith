@@ -164,6 +164,30 @@ jobs:
         shell: bash
         run: bash .github/smoke.sh 2>&1 | tee "smoke-${{ matrix.os }}.log"
 
+      # The browser drive: every reproduction the 2026-09-17 manual drive
+      # recorded, replayed against a real portal in a real Chrome. The two
+      # checks above reach the routes; this is the only thing that reaches the
+      # page, which is where forty-seven of those sixty-two defects lived.
+      #
+      # Here rather than in `ci.yml` because this is the job that already has
+      # a released binary, a Chrome and three operating systems. A runner image
+      # ships Chrome on all three.
+      - name: Browser drive
+        id: drive
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 -m pip install --quiet --disable-pip-version-check websocket-client
+          semlith start > drive-daemon.log 2>&1 &
+          for _ in $(seq 1 60); do
+            grep -q 'token=' drive-daemon.log && break
+            sleep 1
+          done
+          SEMLITH_TOKEN="$(grep -o 'token=[0-9a-f]*' drive-daemon.log | head -1 | cut -d= -f2)" \
+          SEMLITH_BIN="$(command -v semlith)" \
+            python3 tests/drive/drive.py --out "drive-${{ matrix.os }}" \
+              2>&1 | tee "drive-${{ matrix.os }}.log"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
@@ -171,6 +195,8 @@ jobs:
           path: |
             portal-${{ matrix.os }}.log
             smoke-${{ matrix.os }}.log
+            drive-${{ matrix.os }}.log
+            drive-${{ matrix.os }}/
 
       # Both checks ran and both logs are uploaded; now say whether the job
       # passed. Without this the `continue-on-error` above would make a run
@@ -181,6 +207,7 @@ jobs:
           fail=0
           [ "${{ steps.portal.outcome }}" = success ] || { echo "portal check failed"; fail=1; }
           [ "${{ steps.smoke.outcome }}" = success ] || { echo "smoke failed"; fail=1; }
+          [ "${{ steps.drive.outcome }}" = success ] || { echo "browser drive failed"; fail=1; }
           exit $fail
 
       - name: Bug hunt

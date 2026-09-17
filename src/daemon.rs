@@ -1990,6 +1990,22 @@ pub fn run(
 ) -> Result<Arc<State>> {
     let registry = Registry::load()?;
 
+    // Named, not silently passed over. A registry entry whose directory is not
+    // on disk was skipped without a word, so a machine with three of them
+    // started clean and offered all three everywhere a real store is offered.
+    for name in registry.stores.keys() {
+        let Ok(dir) = Registry::dir_of(name) else {
+            continue;
+        };
+        if dir.join("store.db").exists() {
+            continue;
+        }
+        report(&format!(
+            "skipped {name}: registered, but there is no store at {}",
+            dir.display()
+        ));
+    }
+
     // Locks first, and all of them, before anything is watched or served: a
     // daemon that took three of four locks and then failed would leave three
     // stores unusable to the `semlith index` that is about to be tried.
