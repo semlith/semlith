@@ -2207,15 +2207,11 @@ fn print_ends(out: &mut impl Write, heading: &str, ends: &[semlith::store::EdgeE
 
 /// A unix second as a local clock time, for the ledger's rows.
 fn human_time(at: i64) -> String {
-    let secs = at.max(0) as u64;
-    let day = secs / 86_400;
-    let rest = secs % 86_400;
-    format!(
-        "{:02}:{:02}:{:02} d{day}",
-        rest / 3600,
-        (rest % 3600) / 60,
-        rest % 60
-    )
+    // Local, with the offset. It used to be UTC arithmetic with a day number,
+    // while the portal printed the browser's local clock, and neither said
+    // which zone it meant — so the same retrieval read 13:40:32 in one place
+    // and 19:00:18 in the other and nothing on either screen admitted it.
+    semlith::clock::local_clock(at)
 }
 
 /// `semlith doctor`'s human output.

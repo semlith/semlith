@@ -257,6 +257,18 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
             "the memory reading failed, so one run at a time until there is a reading, on {} logical cores",
             machine.logical_cores
         )
+    } else if headroom < peak {
+        // The floor, said out loud. This used to read "1.4 GiB minus a 2 GiB
+        // reserve, at 1.5 GiB a run, allows 1" — a subtraction that is
+        // negative concluding that it allows one, which is the floor applying
+        // and the sentence not admitting it.
+        format!(
+            "{} free is under the {} reserve plus {} for a run, so the floor of 1 applies; {} logical cores with one kept free would allow {core_budget}",
+            gib(machine.available_memory_mb),
+            gib(RESERVE_MB),
+            gib(peak),
+            machine.logical_cores,
+        )
     } else {
         format!(
             "{} free minus a {} reserve, at {} a run, allows {memory_runs}, and {} logical cores with one kept free allows {core_budget}, so {runs}",
@@ -273,22 +285,36 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
             value: runs,
             reason: runs_reason,
         },
-        threads_per_writer: Derivation {
-            value: threads,
-            reason: format!(
-                "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each",
-                crate::embed::embed_threads(),
-                runs_phrase(runs),
-            ),
-        },
+        threads_per_writer: threads_for(machine, runs),
         index_memory_mb: Derivation {
             value: index_memory,
             reason: format!(
-                "{index_memory} MB a store: the {} MB floor, doubled once past 16 GiB free beyond the reserve and again past 64 GiB, and {} is free",
+                "{index_memory} MiB a store: the {} MiB floor, doubled once past 16 GiB beyond the reserve and again past 64 GiB, and {} is free beyond the reserve out of the {} free now",
                 crate::index::INDEX_MEMORY_MB,
                 gib(headroom),
+                gib(machine.available_memory_mb),
             ),
         },
+    }
+}
+
+/// The threads-per-writer derivation for a given number of runs at once.
+///
+/// Split out because the panel must recompute it when the number of runs
+/// changes. Set runs to 3 and the help text under "threads each" went on
+/// saying "split between 1 run", because it was the derivation for the runs
+/// this machine would have chosen rather than for the runs in force.
+pub fn threads_for(machine: &Machine, runs: usize) -> Derivation {
+    let core_budget = machine.logical_cores.saturating_sub(1).max(1);
+    let runs = runs.clamp(1, core_budget);
+    let threads = (crate::embed::embed_threads() / runs).clamp(1, core_budget / runs);
+    Derivation {
+        value: threads,
+        reason: format!(
+            "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each",
+            crate::embed::embed_threads(),
+            runs_phrase(runs),
+        ),
     }
 }
 

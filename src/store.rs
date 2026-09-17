@@ -1752,7 +1752,50 @@ pub fn retrievals(db: &Connection, limit: usize) -> Result<Vec<Retrieval>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole
+/// Which rows of the ledger a count is about.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum LedgerScope {
+    /// Every retrieval.
+    All,
+    /// Those that found something, which are the only ones credited with a
+    /// saving.
+    Credited,
+    /// Those credited whose tokens were estimated rather than counted by the
+    /// store's own tokenizer.
+    Estimated,
+}
+
+/// The distinct retrievals this store holds, as keys that can be unioned
+/// across stores.
+///
+/// One search over six stores writes a row in each that answered it, sharing a
+/// query id. Summing six stores' own counts turns that back into six
+/// retrievals, which is the multiplier the Ledger page was reporting — so the
+/// portal unions these keys instead of adding counts. A row written before
+/// 0.20.2 has no id and is keyed by its own row id in its own store, which is
+/// what it was.
+pub fn ledger_keys(db: &Connection, store: &str, scope: LedgerScope) -> Result<Vec<String>> {
+    let sql = match scope {
+        LedgerScope::All => "SELECT DISTINCT query_id, id FROM retrievals",
+        LedgerScope::Credited => "SELECT DISTINCT query_id, id FROM retrievals WHERE hits > 0",
+        LedgerScope::Estimated => {
+            "SELECT DISTINCT query_id, id FROM retrievals
+             WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')"
+        }
+    };
+    let mut stmt = db.prepare(sql)?;
+    let rows = stmt.query_map([], |r| {
+        let id: Option<String> = r.get(0)?;
+        let row: i64 = r.get(1)?;
+        Ok(id.unwrap_or_else(|| format!("{store}:row:{row}")))
+    })?;
+    let mut out: Vec<String> = rows.collect::<Result<Vec<_>, _>>()?;
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole/// `(queries, clients, excerpt tokens, whole-file tokens)` over the whole
 /// ledger — what the Ledger page shows.
 pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
     // Retrievals, not rows. One search across six stores writes a row in each

@@ -1298,10 +1298,16 @@ impl Limits {
         let machine = crate::system::read();
         let derived = crate::system::derive(&machine, crate::system::PER_RUN_PEAK_MB);
         let saved = home::Settings::load();
+        let runs_at_once = Limit::new(derived.runs_at_once, saved.runs_at_once, PARALLEL_ENV);
+        // Derived from the runs actually in force, not from the runs this
+        // machine would have chosen. The two differ exactly when someone has
+        // changed the setting, which is the moment the sentence under the
+        // field is being read.
+        let threads_derived = crate::system::threads_for(&machine, runs_at_once.value);
         Self {
-            runs_at_once: Limit::new(derived.runs_at_once, saved.runs_at_once, PARALLEL_ENV),
+            runs_at_once,
             embed_threads: Limit::new(
-                derived.threads_per_writer,
+                threads_derived,
                 saved.embed_threads,
                 crate::embed::THREADS_ENV,
             ),
@@ -1446,6 +1452,15 @@ pub struct Unopened {
     pub name: String,
     pub dir: PathBuf,
     pub why: String,
+    /// Whether nothing is at that path at all, as against a store that is
+    /// there and could not be opened.
+    ///
+    /// The portal draws the two differently and must: a store another process
+    /// is writing comes back by itself on the next read, and a registry entry
+    /// for a directory that does not exist never will. Offering "add to
+    /// alpha" for the second is the same mechanism that put 262 of one store's
+    /// files into another.
+    pub missing: bool,
 }
 
 impl State {
@@ -1505,6 +1520,7 @@ impl State {
                     name: name.clone(),
                     dir,
                     why: "registered, but there is nothing at that path".to_string(),
+                    missing: true,
                 });
                 continue;
             }
@@ -1513,6 +1529,7 @@ impl State {
                     name: name.clone(),
                     dir,
                     why: format!("{e:#}"),
+                    missing: false,
                 });
             }
         }

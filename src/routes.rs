@@ -26,6 +26,12 @@ use std::sync::atomic::Ordering;
 /// cap is what stops a hand-written query asking for all of them.
 const FILE_PAGE: i64 = 500;
 
+/// How many ledger rows the Retrieval ledger page is handed.
+///
+/// The same depth `semlith ledger --last 200` offers, which is what the
+/// portal-parity rule asks for: the page shows the rows the CLI prints.
+const LEDGER_ROWS: usize = 200;
+
 /// How deep the Files route will page.
 ///
 /// The cost of an offset is paid before the page is cut: every open store is
@@ -245,6 +251,7 @@ fn stores(state: &Arc<State>) -> Response {
             // the daemon opened it. Shown for the session so the correction is
             // visible rather than silent.
             "pruned": handle.pruned.load(Ordering::Relaxed),
+            "missing": false,
             "events": handle.events(),
         }));
     }
@@ -258,6 +265,11 @@ fn stores(state: &Arc<State>) -> Response {
             "name": store.name,
             "dir": store.dir.display().to_string(),
             "unopened": store.why,
+            // A registry entry for a directory that is not there. The portal
+            // shows it as missing, naming the path that is absent, and offers
+            // it nowhere a real store is offered — not in the Index dropdown,
+            // not as a search chip, not as a graph chip.
+            "missing": store.missing,
             "roots": [],
             "files": 0,
             "chunks": 0,
@@ -320,8 +332,13 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     let limit = request
         .query("limit")
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(15)
-        .clamp(1, FILE_PAGE);
+        .unwrap_or(15);
+    // Refused rather than clamped, the same contract `offset` above has. A
+    // caller that asked for two thousand rows and silently got five hundred
+    // has no way to tell that from a corpus with five hundred files in it.
+    if !(1..=FILE_PAGE).contains(&limit) {
+        return Response::error(400, &format!("limit must be between 1 and {FILE_PAGE}"));
+    }
 
     // Each store is asked for the first `offset + limit` rows in the requested
     // order and the merge picks the page out of the union. Asking each store
@@ -558,37 +575,80 @@ fn ledger(state: &Arc<State>) -> Response {
     });
     let recording = state.ledger;
     with_fleet(state, empty, move |fleet| {
-        let (mut queries, mut clients, mut excerpt, mut whole) = (0, 0, 0, 0);
+        let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
         let mut intact = true;
-        for (_, store) in fleet.each() {
-            let (q, c, e, w) = store::ledger_totals(store.db())?;
-            queries += q;
+        // Unioned rather than summed: one search over six stores writes a row
+        // in each that answered it, under one query id, and adding six stores'
+        // own counts is what made this page report sixty-three queries for
+        // about a dozen searches.
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for (label, store) in fleet.each() {
+            let (_, c, e, w) = store::ledger_totals(store.db())?;
+            seen.extend(store::ledger_keys(
+                store.db(),
+                label,
+                store::LedgerScope::All,
+            )?);
             clients = clients.max(c);
             excerpt += e;
             whole += w;
             intact = intact && store::ledger_break(store.db())?.is_none();
         }
+        let queries = seen.len() as i64;
         // Summed across stores the same way the totals are, and reported with
         // the denominators that make them readable: a ratio on its own is a
         // marketing number, and the Ledger page is told not to draw one.
         let mut net = 0;
-        let (mut credited, mut total) = (0, 0);
         let mut measured = true;
+        let mut credited_keys: std::collections::BTreeSet<String> = Default::default();
+        let mut estimated_keys: std::collections::BTreeSet<String> = Default::default();
         let mut by_client: std::collections::BTreeMap<String, i64> = Default::default();
-        for (_, store) in fleet.each() {
+        // The newest rows across every store, merged, for the table this page
+        // owes the CLI's `semlith ledger --last 20`. Read here rather than
+        // from a second route so the tiles and the rows cannot disagree.
+        let mut rows: Vec<Value> = Vec::new();
+        for (label, store) in fleet.each() {
             let savings = store::ledger_savings(store.db())?;
             net += savings.net;
-            credited += savings.credited;
-            total += savings.total;
             measured = measured && savings.measured;
+            credited_keys.extend(store::ledger_keys(
+                store.db(),
+                label,
+                store::LedgerScope::Credited,
+            )?);
+            estimated_keys.extend(store::ledger_keys(
+                store.db(),
+                label,
+                store::LedgerScope::Estimated,
+            )?);
             for (client, count) in store::ledger_clients(store.db())? {
                 *by_client.entry(client).or_default() += count;
             }
+            for row in store::retrievals(store.db(), LEDGER_ROWS)? {
+                rows.push(json!({
+                    "at": row.at,
+                    // Local time with the offset, the same string `semlith
+                    // ledger` prints. One dataset, one clock.
+                    "when": crate::clock::local_stamp(row.at),
+                    "store": label,
+                    "client": row.client,
+                    "query": row.query,
+                    "hits": row.hits,
+                    "ms": row.micros / 1000,
+                    "excerpt_tokens": row.excerpt_tokens,
+                    "whole_file_tokens": row.whole_file_tokens,
+                    "query_id": row.query_id,
+                }));
+            }
         }
-        let coverage = if total == 0 {
+        rows.sort_by_key(|row| std::cmp::Reverse(row["at"].as_i64().unwrap_or(0)));
+        rows.truncate(LEDGER_ROWS);
+        let credited = credited_keys.len() as i64;
+        let measured = measured && estimated_keys.is_empty();
+        let coverage = if queries == 0 {
             0
         } else {
-            credited * 100 / total
+            credited * 100 / queries
         };
         let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
         Ok(json!({
@@ -604,6 +664,13 @@ fn ledger(state: &Arc<State>) -> Response {
             "coverage": coverage,
             "tier": if measured && credited > 0 { "measured" } else { "modelled" },
             "by_client": by_client,
+            "rows": rows,
+            // Rows written before this version were one per open store, so the
+            // figures they contribute to may be over-counted. Said on the page
+            // rather than corrected in place: the chain is not rewritten.
+            "legacy_rows": rows.iter().any(|row| {
+                row["query_id"].as_str().unwrap_or_default().is_empty()
+            }),
         }))
     })
 }
