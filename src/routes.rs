@@ -2112,7 +2112,15 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
             // embedded anything, so both are answered from here immediately
             // rather than when the writer eventually reaches them.
             dequeued += state.admission.dequeue(&store.name);
-            dequeued += store.cancel_queued();
+            // Every run taken off the store's queue was already admitted, so
+            // its place among the runs that may go at once is given back here.
+            // Without this a stop before the writer reached the run leaked a
+            // slot, and three of them left the daemon admitting nothing at all.
+            let cancelled = store.cancel_queued();
+            dequeued += cancelled.len();
+            for run in cancelled {
+                state.admission.finish(run);
+            }
             store
                 .cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);

@@ -31,6 +31,26 @@ def semlith_bin():
     return os.environ.get("SEMLITH_BIN", "semlith")
 
 
+def corpus_root():
+    """Where the corpora are built, somewhere the portal's pickers can reach.
+
+    `/api/dirs` and `/api/projects` refuse any path outside the user's home
+    directory, deliberately: they are a browser asking a local server to list a
+    filesystem. A corpus in the system temp directory is therefore invisible to
+    every check that drives a picker, and on macOS the system temp directory is
+    under `/var/folders`, which is never under `$HOME`.
+
+    So the system temp directory is used when it is inside the home — which is
+    what the README's advice to point `TMPDIR` there achieves — and the home
+    itself otherwise. Either way the corpus is removed on the way out.
+    """
+    home = os.path.realpath(os.path.expanduser("~"))
+    system = os.path.realpath(tempfile.gettempdir())
+    if system == home or system.startswith(home + os.sep):
+        return system
+    return home
+
+
 def run(args, cwd=None, timeout=600):
     """Run a command, returning its combined output, raising on failure."""
     try:
@@ -95,9 +115,10 @@ class Fixtures:
     """Every corpus the checks can ask for, under one temp directory."""
 
     def __init__(self, keep=False):
-        self.root = tempfile.mkdtemp(prefix="semlith-drive-corpus-")
+        self.root = tempfile.mkdtemp(prefix="semlith-drive-corpus-", dir=corpus_root())
         self.keep = keep
         self._adoptme = None
+        self._adopted = 0
         self._monorepo = None
         self._bulk = None
         self._small = None
@@ -171,9 +192,15 @@ class Fixtures:
         answer and a hand-built directory would only prove this file can copy
         a schema.
         """
-        if self._adoptme:
+        # Rebuilt rather than cached once the store has gone: adopting *moves*
+        # the `.semlith` into the home, so the folder finding 2.1 hands back is
+        # not a folder finding 4.18 can still find a store in.
+        if self._adoptme and os.path.exists(
+            os.path.join(self._adoptme, ".semlith", "store.db")
+        ):
             return self._adoptme
-        directory = os.path.join(self.root, "adoptme")
+        self._adopted += 1
+        directory = os.path.join(self.root, "adoptme-%d" % self._adopted)
         os.makedirs(directory, exist_ok=True)
         with open(os.path.join(directory, "README.md"), "w", encoding="utf-8") as handle:
             handle.write(DOC % {"name": "adoptme"})
@@ -191,11 +218,11 @@ class Fixtures:
     def monorepo(self):
         """Two git repositories and one plain folder, for finding 2.5.
 
-        Deliberately not under `$HOME`'s top level: the whole point of 2.5 is
-        that the picker could not be pointed anywhere else. If the portal's
-        `/api/dirs` still confines the picker to the home directory — which
-        it does, and correctly so — the drive's temp root has to be inside it,
-        which is what `SEMLITH_DRIVE_ROOT` is for. See the README.
+        Deliberately not at `$HOME`'s top level: the whole point of 2.5 is that
+        the picker could not be pointed anywhere else, so the check has to walk
+        it somewhere. The portal's `/api/dirs` and `/api/projects` still
+        confine the pickers to the home directory — correctly — which is what
+        `corpus_root` above keeps the whole corpus inside.
         """
         if self._monorepo:
             return self._monorepo

@@ -490,6 +490,80 @@ class Drive:
         # mid-render. Cheap, and it removes a whole class of flake.
         self.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
 
+    # The Index page keeps its folder picker, its projects checklist, its URL
+    # panel and its machine limits behind one button each, and the four are
+    # mutually exclusive: opening one closes the rest. Every panel starts
+    # `hidden`, and a hidden subtree contributes nothing to `innerText`, so a
+    # check that reads a panel without pressing its button reads an empty
+    # string and blames the product for a control that is simply folded away.
+    #
+    # The value is a JavaScript expression that is true once the panel that
+    # button reveals is actually on screen. Two of the buttons open a picker,
+    # and only one picker can be open at a time, which is why they share one.
+    INDEX_PANELS = {
+        "Choose folders…": (
+            "!!document.querySelector('.card.picker:not([hidden]) .crumbs')"
+        ),
+        "Projects under a folder…": (
+            "!!document.querySelector('.card.picker:not([hidden]) .crumbs')"
+        ),
+        "Add from a URL": (
+            "(() => { const field = document.querySelector('#index-url');"
+            " return !!field && !field.closest('.card').hidden; })()"
+        ),
+        "Machine limits": (
+            "(() => { const field = document.querySelector("
+            "'input[aria-label=\"runs at once\"]');"
+            " return !!field && !field.closest('.card').hidden; })()"
+        ),
+    }
+
+    def _index_panel_button(self, label):
+        """The `aria-pressed` of the Index page button reading `label`."""
+        if label not in self.INDEX_PANELS:
+            raise ProtocolError(
+                "the drive does not know an Index page panel called %r. The four "
+                "are %s." % (label, ", ".join(sorted(self.INDEX_PANELS)))
+            )
+        state = self.eval(
+            """
+            (() => {
+              const wanted = %s.trim().toLowerCase();
+              for (const button of document.querySelectorAll('button.secondary')) {
+                if ((button.innerText || '').trim().toLowerCase() === wanted) {
+                  return button.getAttribute('aria-pressed') || 'false';
+                }
+              }
+              return null;
+            })()
+            """
+            % json.dumps(label)
+        )
+        if state is None:
+            raise ProtocolError(
+                "no button on the Index page reads %r. The page's four reveal "
+                "buttons are how every one of its panels is reached; if their "
+                "wording moved, update this table rather than the check." % label
+            )
+        return state
+
+    def open_index_panel(self, label, timeout=20):
+        """Press one of the Index page's four reveal buttons and wait for its panel.
+
+        A panel that is already open is left alone, because pressing its button
+        again is what closes it.
+        """
+        if self._index_panel_button(label) != "true":
+            self.click_text("button.secondary", label)
+        self.wait_for(
+            self.INDEX_PANELS[label], timeout=timeout, what="the %r panel" % label
+        )
+
+    def close_index_panel(self, label):
+        """Fold a panel back up, so the next check finds the page as it was."""
+        if self._index_panel_button(label) == "true":
+            self.click_text("button.secondary", label)
+
     # ---------------------------------------------------------- portal HTTP
 
     def _request(self, path, method="GET", body=None):

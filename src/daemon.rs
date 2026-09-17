@@ -893,14 +893,23 @@ impl Store {
     /// until the writer reached it and then be cleared, so the page said
     /// "stopping…" for as long as the queue took. Nothing was embedded, so
     /// there is nothing to undo and the answer is immediate.
-    pub fn cancel_queued(&self) -> usize {
+    /// Take this store's waiting index jobs off its queue, and say which runs
+    /// they were.
+    ///
+    /// The ids are the point. A run cancelled here has already been admitted —
+    /// it is on the store's queue precisely because the admission queue let it
+    /// through — so its place among the runs that may be going at once has to
+    /// be given back, or the daemon loses a slot every time someone stops a
+    /// run before its writer reaches it. Three stops left `runs at once` at
+    /// three with nothing running and everything queued behind them forever.
+    pub fn cancel_queued(&self) -> Vec<u64> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-        let mut dropped = 0;
+        let mut dropped = Vec::new();
         queue.retain(|queued| {
             if !matches!(queued.job, Job::Index(..)) {
                 return true;
             }
-            let _ = queued.report.send(serde_json::json!({
+            let answer = serde_json::json!({
                 "event": "done",
                 "indexed": 0,
                 "unchanged": 0,
@@ -910,10 +919,30 @@ impl Store {
                 "images": 0,
                 "remaining": 0,
                 "stopped": true,
-            }));
-            dropped += 1;
+            });
+            let _ = queued.report.send(answer);
+            dropped.push(queued.run);
             false
         });
+        drop(queue);
+        // Folded into each run's own record, so a page that polls the snapshot
+        // rather than reading the stream sees the run end too.
+        for run in &dropped {
+            self.record(
+                *run,
+                &serde_json::json!({
+                    "event": "done",
+                    "indexed": 0,
+                    "unchanged": 0,
+                    "skipped": 0,
+                    "removed": 0,
+                    "chunks": 0,
+                    "images": 0,
+                    "remaining": 0,
+                    "stopped": true,
+                }),
+            );
+        }
         dropped
     }
 }
@@ -2503,7 +2532,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                         }));
                         store.paused.store(false, Ordering::Relaxed);
                         store.cancelled.store(false, Ordering::Relaxed);
-                        release(store, admission);
+                        release(run, admission);
                         return;
                     }
 
@@ -2591,7 +2620,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
             // The flags belong to a run, and this one is over.
             store.paused.store(false, Ordering::Relaxed);
             store.cancelled.store(false, Ordering::Relaxed);
-            release(store, admission);
+            release(run, admission);
         }
         Job::Forget(path) => match writer.forget_held(&path) {
             // Counted apart, because an image has no chunks: a single number
@@ -2718,10 +2747,13 @@ fn report_dropped_queue(stores: &[Arc<Store>], report: &(dyn Fn(&str) + Send + S
 /// the writer back to the watcher is not one of them: the run is still the
 /// store's, and releasing it there would admit a second run onto a machine
 /// that is already carrying this one.
-fn release(store: &Arc<Store>, admission: &Arc<Admission>) {
-    if let Some(id) = store.current_run() {
-        admission.finish(id);
-    }
+///
+/// The run is named rather than looked up. It used to ask the store for "the
+/// run", which worked while a store had exactly one; asking for its unfinished
+/// run at the moment a run finishes returns nothing, and the place is never
+/// given back — after `runs at once` runs the daemon admits nothing at all.
+fn release(run: u64, admission: &Arc<Admission>) {
+    admission.finish(run);
 }
 
 /// The daemon standing in as the writer for a forwarded `semlith_index` or
@@ -3024,7 +3056,50 @@ mod tests {
         assert_eq!(admission.running(), 3);
     }
 
+    /// A run that ends gives its place back, however it ended.
+    ///
+    /// The place is released by run id. It used to be released by asking the
+    /// store for "the run", which held while a store had exactly one — and
+    /// once a store held several, asking for its *unfinished* run at the
+    /// moment a run finished returned nothing, so the place was never given
+    /// back. After `runs at once` runs the daemon admitted nothing ever again,
+    /// and every later run sat at `queued` forever with nothing running.
+    #[test]
+    fn every_run_that_ends_gives_its_place_back() {
+        let _held = counters();
+        let admission = Arc::new(Admission::new(2));
+        let stores: Vec<Arc<Store>> = ["a", "b", "c"].into_iter().map(bare_store).collect();
+        let mut ids = Vec::new();
+        for store in &stores {
+            let (id, _) = admission.submit(store, Vec::new());
+            ids.push(id);
+        }
+        assert_eq!(admission.running(), 2);
+
+        // Each run ends the way `perform` ends one: its record is marked done
+        // and then its place is released by id.
+        for (store, id) in stores.iter().zip(&ids) {
+            store.record(
+                *id,
+                &serde_json::json!({ "event": "done", "indexed": 0, "stopped": false }),
+            );
+            // The reason `release` takes the id: by now the store has no
+            // unfinished run to be asked for, so a lookup would find nothing
+            // and release nothing.
+            assert_eq!(store.current_run(), None);
+            release(*id, &admission);
+        }
+
+        assert_eq!(
+            admission.running(),
+            0,
+            "a finished run kept its place, so the daemon can admit nothing more"
+        );
+        assert!(admission.waiting().is_empty(), "the queue never drained");
+    }
+
     /// Taking a folder out of the queue costs nothing, because nothing of it
+    /// was embedded — which is the whole difference from stopping a run.    /// Taking a folder out of the queue costs nothing, because nothing of it
     /// was embedded — which is the whole difference from stopping a run.
     #[test]
     fn a_dequeued_run_is_answered_at_once_and_undoes_nothing() {
