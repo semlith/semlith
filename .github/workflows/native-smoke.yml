@@ -177,15 +177,22 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check websocket-client
+          # `python3` on a Windows runner is a stub that opens the Microsoft
+          # Store, so the name is resolved rather than assumed.
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+          "$PY" -m pip install --quiet --disable-pip-version-check websocket-client
           semlith start > drive-daemon.log 2>&1 &
           for _ in $(seq 1 60); do
             grep -q 'token=' drive-daemon.log && break
             sleep 1
           done
+          grep -q 'token=' drive-daemon.log || {
+            echo "the daemon never printed a portal URL:"; cat drive-daemon.log; exit 1;
+          }
           SEMLITH_TOKEN="$(grep -o 'token=[0-9a-f]*' drive-daemon.log | head -1 | cut -d= -f2)" \
           SEMLITH_BIN="$(command -v semlith)" \
-            python3 tests/drive/drive.py --out "drive-${{ matrix.os }}" \
+            "$PY" tests/drive/drive.py --out "drive-${{ matrix.os }}" \
               2>&1 | tee "drive-${{ matrix.os }}.log"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
