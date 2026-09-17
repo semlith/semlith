@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### A sliced run carries on instead of starting over
+
+- A run yields the writer back to the watcher every 45 seconds and returns as a
+  fresh job. That job carried the run's *roots*, so each slice walked the tree
+  from the top and re-opened and re-hashed every file the run had already done,
+  to be told each time that it was unchanged. It was correct — indexing is keyed
+  on content hashes — and it read as a run restarting every 45 seconds, and it
+  made a run of N files over S slices read N x S files instead of N. A slice now
+  carries the remainder of its own walk, and the orphan sweep happens on the
+  slice that reaches the end rather than on every one of them.
+- The progress a page shows belongs to the run rather than to the slice, so the
+  counter no longer returns to 1 partway through.
+
+### The run clock
+
+- Starts when the run is submitted, not when the writer reaches it: the wait for
+  a writer is time you are waiting.
+- Spans every slice. It used to be measured inside the one function a slice
+  runs, so it restarted from zero each time.
+- Stops while a run is held, and freezes at its total when the run ends.
+
+### The Doctor page
+
+- Has a navigation icon. It was the one item in the rail that rendered nothing.
+- Its Clients and Rules sections use the same layout as every other section in
+  the portal. They were bare cards with no padding, so the title sat against the
+  border and the table squared off the corner beneath it.
+
 ### A run lives in the daemon, not in the page that started it
 
 - An index run is the daemon's: its id, paths, status, counters, clock, the last
