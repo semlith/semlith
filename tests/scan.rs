@@ -497,19 +497,59 @@ fn a_boundary_refusal_evicts_nothing() {
     s.boundary = semlith::Boundary::within(vec![corpus.path().to_path_buf()]);
     let report = s.index_paths(&[elsewhere], |_, _| {}).unwrap();
 
-    assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
-    assert!(
-        report.refused[0].1.contains("outside"),
-        "{:?}",
-        report.refused[0].1
-    );
-    assert!(
-        !report.refused[0].1.contains("removed from this store"),
-        "a boundary refusal claimed to have evicted something"
-    );
+    // Whether this is a boundary refusal at all depends on where the operating
+    // system puts temporary directories: `within_boundary` admits anything
+    // under the user's home, and on Windows the temp directory is under it. So
+    // the refusal is asserted where it happens, and the half that matters —
+    // the store is untouched — is asserted everywhere. The refusal itself is
+    // pinned deterministically by the test below, which needs no files.
+    if let Some((_, why)) = report.refused.first() {
+        assert!(why.contains("outside"), "{why:?}");
+        assert!(
+            !why.contains("removed from this store"),
+            "a boundary refusal claimed to have evicted something"
+        );
+    }
     let after = semlith::store::all_paths(s.db()).unwrap();
     assert_eq!(
         after, before,
         "a refusal about the caller deleted what another caller indexed"
     );
+}
+
+/// The flag that decides whether a refusal evicts, pinned without touching a
+/// filesystem.
+///
+/// `Boundary::refuses` resolves nothing on disk — `canonical` falls back to the
+/// path it was given — so a synthetic path outside any home exercises the
+/// boundary branch identically on all three platforms.
+#[test]
+fn only_a_refusal_about_the_file_itself_is_marked_for_eviction() {
+    let home = PathBuf::from(if cfg!(windows) {
+        r"C:\Users\nobody"
+    } else {
+        "/home/nobody"
+    });
+    let root = home.join("work").join("api");
+    let outside = PathBuf::from(if cfg!(windows) {
+        r"C:\elsewhere\somebody-elses\notes.md"
+    } else {
+        "/elsewhere/somebody-elses/notes.md"
+    });
+
+    let agent = semlith::Boundary::within(vec![root.clone()]);
+    let refusal = agent
+        .refuses(&outside, false, Some(&home))
+        .expect("a path outside the roots and outside the home is refused");
+    assert!(refusal.why.contains("outside"), "{:?}", refusal.why);
+    assert!(
+        !refusal.credential,
+        "a refusal about the caller must not evict what another caller indexed"
+    );
+
+    // The other kind, for contrast: this one is about the file, and does evict.
+    let named = semlith::Boundary::default()
+        .refuses(&root.join(".env"), true, Some(&home))
+        .expect("a credential is refused by name");
+    assert!(named.credential, "{:?}", named.why);
 }
