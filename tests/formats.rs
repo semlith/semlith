@@ -35,7 +35,8 @@ fn fixtures() -> PathBuf {
 fn text_of(name: &str) -> String {
     let path = fixtures().join(name);
     let bytes = fs::read(&path).unwrap_or_else(|e| panic!("reading {name}: {e}"));
-    chunk::extract(&path, &bytes).unwrap_or_else(|| panic!("{name} was skipped, not read"))
+    chunk::extract(&path, &bytes)
+        .unwrap_or_else(|why| panic!("{name} was skipped ({}), not read", why.as_str()))
 }
 
 /// The release's central claim, one format at a time: the phrase a person can
@@ -206,7 +207,7 @@ fn an_unreadable_document_is_skipped_rather_than_fatal() {
     for (name, bytes) in cases {
         let path = PathBuf::from(name);
         assert!(
-            chunk::extract(&path, &bytes).is_none(),
+            chunk::extract(&path, &bytes).is_err(),
             "{name} was read as text rather than skipped"
         );
     }
@@ -217,7 +218,7 @@ fn an_unreadable_document_is_skipped_rather_than_fatal() {
         let path = fixtures().join(name);
         let bytes = fs::read(&path).unwrap();
         assert!(
-            chunk::extract(&path, &bytes).is_none(),
+            chunk::extract(&path, &bytes).is_err(),
             "{name} was read; the cap or the encryption check did not hold"
         );
     }
@@ -456,7 +457,7 @@ fn an_unreadable_new_format_is_skipped_rather_than_fatal() {
     for (name, bytes) in cases {
         let path = PathBuf::from(name);
         assert!(
-            chunk::extract(&path, &bytes).is_none(),
+            chunk::extract(&path, &bytes).is_err(),
             "{name} was read as text rather than skipped"
         );
     }
@@ -465,7 +466,7 @@ fn an_unreadable_new_format_is_skipped_rather_than_fatal() {
     // budget every archive format shares.
     let bomb = fs::read(fixtures().join("bomb.docx")).unwrap();
     assert!(
-        chunk::extract(&PathBuf::from("bomb.epub"), &bomb).is_none(),
+        chunk::extract(&PathBuf::from("bomb.epub"), &bomb).is_err(),
         "the archive cap does not hold for EPUB"
     );
 

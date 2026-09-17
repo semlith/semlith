@@ -7,6 +7,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-17
+
+### One unreadable file no longer ends the run
+
+- A file that fails on its own content — a truncated PNG, a source file
+  tree-sitter cannot parse — is reported `failed` with the decoder's or the
+  parser's own message, and the run indexes the next file. Until now the first
+  such file ended a run over ten thousand of them, which is what an index of a
+  real Windows project tree kept doing. A failure of the embedding batch itself
+  is the model failing rather than a file, and is still fatal.
+- Every skipped file says why, from a closed set: `empty`, `over 8 MiB`, `not a
+  regular file`, `unreadable` with the operating system's own words, `binary`,
+  `no text in this document`, `not a decodable image`. An Angular tree's
+  generated `.component.scss` files and a Python package's `__init__.py` files
+  read as `empty` rather than as two thousand files that quietly went missing.
+- The `done` event, the CLI's last lines and `semlith_index`'s return count the
+  skipped by reason and name every failed path. `semlith_index` returns a
+  summary rather than a tool error: a run that skipped one corrupt image and
+  indexed nine thousand files succeeded.
+- A file whose reader produced nothing used to be counted and never reported, so
+  the portal's progress bar stopped short of its own total on any tree with
+  binaries in it. Every file the walk yields now produces exactly one event.
+- Entries the walk itself cannot read are `failed` files on the same channel
+  rather than a line on stderr the daemon never sees.
+- The watcher survives a per-file failure. A save that failed to embed used to
+  stop the watcher thread for that store, so every later save in that tree was
+  silently never indexed; it is now a line on the store's feed and `watching`
+  stays true.
+
+### Credentials
+
+- A content scan runs on every file's text before it is chunked, stored or
+  embedded, including the text a reader produced from a `.docx` or a notebook.
+  It knows fourteen credential shapes whose prefix is the issuer's own
+  declaration of what the string is, plus one generic rule: a key-like name
+  assigned at least twenty characters of high-entropy text. A match refuses the
+  whole file and names the kind and the line — never any character of what it
+  matched. `--include-secrets` indexes it anyway, and says how many it took in.
+- The deny-list widened to every environment-variable file rather than `.env`
+  and `.env.*` alone, and to the per-user credential files the hidden-file rule
+  used to catch on its own: `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`,
+  `.htpasswd`, `.boto`, `.s3cfg` and `*.ppk`. `.env.example` is refused on
+  purpose: the name says what the file holds, whatever today's contents are.
+- A refused file that an earlier run indexed is evicted in the same pass, and
+  the refusal says so. A store does not keep holding what semlith has decided it
+  will not hold, so a `dev.env` that 0.18.0 indexed leaves on the first run
+  under this release.
+- `semlith scan [STORE]` runs both rules over everything a store already holds,
+  prints each file semlith would refuse today, and exits non-zero while any
+  remain. `--forget` evicts them. The portal's Privacy page has the same list,
+  from the same function, with a Forget beside each row. There is no MCP tool
+  for it: an agent is not the party that decides what a store may hold.
+
+### A whitelisted dotfile is indexed rather than refused
+
+- The hidden-file rule now applies only to a path the caller named. A `.gitkeep`
+  the walk yielded because the user's own `.gitignore` asked for it — `dist/*`
+  then `!dist/.gitkeep` — was being walked and then refused for being hidden,
+  which is the walk contradicting itself. `semlith index ~/.npmrc` is still
+  refused, and the credential rules still apply to both.
+- **This changes what a store holds on a re-index.** A tree whose `.gitignore`
+  whitelists dotfiles will gain them. The widened deny-list above is what keeps
+  that from meaning a credential.
+
+### Fixed
+
+- `semlith index` from a second process while `semlith start` is running
+  produced a store the portal and every agent could not see until the daemon was
+  restarted. The daemon now re-reads the registry on every Stores read and on
+  every by-name miss, and opens what it finds. A directory another process holds
+  the lock on is listed as being written and tried again on the next read; one
+  that is no longer there is listed as missing.
+- `semlith_symbol` and `semlith_path` returned Windows verbatim paths —
+  `\\?\C:\work\api\src\lock.rs` — which no editor opens and no shell
+  completes. They, and the daemon's own file events, render like every other
+  surface now. The store still keeps the verbatim form as its key.
+- The home directory was canonicalised twice per file to answer a question that
+  cannot change during a run, which on Windows is two opened handles per file.
+  Once per run now.
+
+### Also
+
+- `semlith_pattern`, `semlith pattern` and `/api/pattern` take `path` — the same
+  glob filter every other surface takes, which this one ignored — and `offset`,
+  so a listing the 200-match cap cut short can be continued. The truncation line
+  names the offset that continues it.
+- The portal's Index page shows the elapsed time, corrected to the daemon's own
+  clock on every file so a backgrounded tab cannot drift, counting through a
+  pause and frozen on the total when the run ends.
+
 ## [0.18.0] - 2026-09-16
 
 ### Every agent client on the machine, from every project

@@ -1755,3 +1755,97 @@ fn the_index_boundary_holds_through_the_portal() {
         "a refused file is in the store:\n{listed}"
     );
 }
+
+/// The daemon is the sole writer of every registered store, but it is not the
+/// only process that writes one: `semlith index` beside a running daemon is
+/// how a new project joins. Until 0.19.0 the store it created was invisible —
+/// not on the Stores page, not answerable by name over MCP — until the daemon
+/// was restarted.
+///
+/// A corpus of empty files, so the run registers a store without embedding
+/// anything and this test needs no model.
+#[test]
+fn a_store_the_cli_wrote_appears_without_a_restart() {
+    let (dir, home, work) = sandbox("reconcile");
+    let served = work.join("api");
+    std::fs::create_dir_all(&served).unwrap();
+    std::fs::write(served.join("notes.md"), "").unwrap();
+
+    let daemon = Daemon::start_in(dir, home, served, &[]);
+
+    let joining = daemon.home.join("..").join("work").join("new-project");
+    std::fs::create_dir_all(&joining).unwrap();
+    std::fs::write(joining.join("readme.md"), "").unwrap();
+
+    let before = daemon.get("/api/stores").json();
+    assert!(
+        !serde_json::to_string(&before)
+            .unwrap()
+            .contains("new-project"),
+        "the store exists before it has been created"
+    );
+
+    let out = semlith(&daemon.home)
+        .arg("index")
+        .arg(&joining)
+        .output()
+        .expect("semlith index runs");
+    assert!(
+        out.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = daemon.get("/api/stores").json();
+    let listed = serde_json::to_string(&after).unwrap();
+    assert!(
+        listed.contains("new-project"),
+        "the daemon did not reconcile with the registry:\n{listed}"
+    );
+}
+
+/// A registered directory another process holds the lock on is reported as
+/// being written, never forced open: the daemon taking a second writer's lock
+/// is the one thing the store's whole design is arranged to prevent.
+#[test]
+fn a_store_another_process_is_writing_is_listed_rather_than_opened() {
+    let (dir, home, work) = sandbox("reconcile-locked");
+    let served = work.join("api");
+    std::fs::create_dir_all(&served).unwrap();
+    std::fs::write(served.join("notes.md"), "").unwrap();
+
+    let daemon = Daemon::start_in(dir, home, served, &[]);
+
+    let joining = daemon.home.join("..").join("work").join("busy-project");
+    std::fs::create_dir_all(&joining).unwrap();
+    std::fs::write(joining.join("readme.md"), "").unwrap();
+    let out = semlith(&daemon.home)
+        .arg("index")
+        .arg(&joining)
+        .output()
+        .expect("semlith index runs");
+    assert!(out.status.success());
+
+    // Held by this process, which is not the daemon — exactly the case a
+    // second `semlith index` still running would present.
+    let store_dir = daemon.home.join("stores").join("busy-project");
+    let lock = semlith::lock::StoreLock::acquire(&store_dir).expect("the lock is free");
+
+    let listed = serde_json::to_string(&daemon.get("/api/stores").json()).unwrap();
+    assert!(
+        listed.contains("busy-project"),
+        "a locked store should still be listed:\n{listed}"
+    );
+    assert!(
+        listed.contains("unopened"),
+        "a locked store should say why it is not open:\n{listed}"
+    );
+
+    // Released, and the next read opens it by itself.
+    drop(lock);
+    let reopened = serde_json::to_string(&daemon.get("/api/stores").json()).unwrap();
+    assert!(
+        !reopened.contains("unopened"),
+        "the store should have opened once the lock was released:\n{reopened}"
+    );
+}

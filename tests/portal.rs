@@ -73,6 +73,10 @@ const VIEWS: &[(&str, &str)] = &[
     ("key", "/api/key"),
     // `semlith drop` is the Stores page's Delete, behind its second click.
     ("drop", "/api/store/delete"),
+    // `semlith scan` is the Privacy page's Scan section: the same
+    // `Semlith::scan` behind both, with a Forget button per row that posts to
+    // `/api/forget`, the daemon's one eviction path.
+    ("scan", "/api/privacy/scan"),
     // `semlith doctor` is the Doctor page, which reads the same two functions
     // the command prints and posts its repairs to the same engine.
     ("doctor", "/api/doctor"),

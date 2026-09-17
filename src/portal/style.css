@@ -3923,3 +3923,13 @@ td.row-end {
 .log .line.refused {
   opacity: 1;
 }
+
+/* A failure is not a decision: a skipped file is one semlith chose not to
+   read, a failed one is a file it tried to read and could not. They are
+   different colours because they are different news. */
+.log .line.failed .outcome {
+  color: var(--red);
+}
+.log .line.failed {
+  opacity: 1;
+}

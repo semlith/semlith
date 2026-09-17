@@ -99,11 +99,32 @@ about: refused, by name, with the rule that refused it.
 **And never a credential.** Whatever the boundary, no path under `~/.ssh`,
 `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.config/gcloud`, `~/.azure`, `~/.docker`,
 `~/Library/Keychains`, `~/.password-store` or `~/.local/share/keyrings` is
-indexed, and neither is a file named `.env`, `.env.*`, `*.pem`, `*.key`,
-`*.p12`, `*.pfx`, `*.jks`, `id_rsa*`, `id_ed25519*`, `*credentials*`,
-`*secret*`, `*.tfstate` or `*.kdbx`. The hidden-file rule the walker applies now
-applies to a path named explicitly too — which is how `~/.ssh/id_rsa` used to
-walk past every rule the walk applied.
+indexed, and neither is a file named `.env*`, `*.env`, `*.env.*`, `*.pem`,
+`*.key`, `*.p12`, `*.pfx`, `*.jks`, `id_rsa*`, `id_ed25519*`, `*credentials*`,
+`*secret*`, `*.tfstate`, `*.kdbx`, `.npmrc`, `.netrc`, `.pypirc`, `.pgpass`,
+`.htpasswd`, `.boto`, `.s3cfg` or `*.ppk`. That is `filter::DENIED_NAMES` in
+full. Each pattern is matched against the file name alone, case-insensitively,
+with `*` standing for any run of characters — these are not rules about where a
+file lives, because a `.env` in a repository is the same kind of thing as a
+`.env` in a home directory.
+
+**Three of those cover every shape of environment file rather than the two that
+are conventional.** `.env*` subsumes `.env` and `.env.*` and also catches
+`.envrc`, `.env-local` and `.env.vault`; `*.env` and `*.env.*` catch `dev.env`,
+`production.env.local` and the files a Docker `env_file` points at. `.env.example`
+is refused along with the rest, and that is deliberate rather than an oversight:
+the name says what the file holds, and a placeholder today is a real value after
+somebody fills it in and forgets which copy they edited.
+
+**The eight per-user dotfiles at the end of that list are new in 0.19.0**, and
+they are there because something else changed. Until then the hidden-file rule
+caught `.npmrc` and its relatives on its own, by refusing every dotfile. From
+0.19.0 a dotfile the walk yielded is indexed, because the walk only yielded it
+after your own `.gitignore` whitelisted it — `dist/*` followed by
+`!dist/.gitkeep` — and refusing it as hidden is the walk contradicting itself. A
+dotfile you *named* is still refused as hidden, so `semlith index ~/.npmrc` is
+answered the way it always was. Naming those eight is what keeps the first half
+of that change from putting an npm token into a store.
 
 `semlith index` on the command line keeps the deny-list and loses the boundary:
 the person typing it owns the machine. `--include-secrets` is how you say you
@@ -120,6 +141,91 @@ configuration carries it: every stanza names `${SEMLITH_AGENT_KEY}`, which
 never appears on a command line, so `ps` cannot show it, and `/api/agents` does
 not return it — the portal fetches it once, when you press Reveal. A rotated key
 stops working fifteen minutes later.
+
+## What is inside a file, not only what it is called
+
+A deny-list decides from a name, and an AWS key pasted into `README.md` has a
+name that says nothing. From 0.19.0 every file's text is scanned before it is
+chunked, stored or embedded — including the text a reader produced for a
+`.docx`, a PDF or a notebook, which is how a key in the body of a document is
+caught rather than only one in a file called `.env`. Images and binaries are
+never scanned; they were never text. A file semlith refuses this way is a file
+whose contents never reach the store at all.
+
+**What it looks for** is one table, `filter::SHAPES`, and it is short on
+purpose. Every row but one is anchored on the credential's own prefix, because a
+prefix is the issuer declaring what the string is, and that is what makes a
+string safe to refuse on sight: Anthropic API keys (`sk-ant-`), OpenAI API keys
+(`sk-`), AWS access key ids (`AKIA` or `ASIA`), GitHub tokens (`ghp_`, `gho_`,
+`ghu_`, `ghs_`, `ghr_`), GitHub fine-grained tokens (`github_pat_`), Slack
+tokens (`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-`), Stripe keys (`sk_live_`,
+`rk_live_`, `sk_test_` and `rk_test_` — a test key is not a credential in the
+sense a live one is, and it is refused anyway, because a table with an
+exception in it is wrong the day somebody pastes a live key into a file called
+`test.md`), Google API keys (`AIza`), Twilio API keys (`SK`
+followed by 32 hex characters), SendGrid API keys (`SG.`), npm tokens (`npm_`),
+semlith's own agent key (`sml_`), a `-----BEGIN … PRIVATE KEY-----` block, and a
+JSON web token. Each row carries an example it must match and a near miss it
+must not, and `tests/scan.rs` walks the table and fails the build on either — so
+a typo in a pattern is a red build rather than a credential in a store.
+
+**The one rule with no prefix needs two things at once.** An assignment whose
+left side is a key-like name — `api_key`, `secret`, `token`, `password`,
+`passwd`, `auth`, in any surrounding identifier — and whose quoted right side is
+at least twenty characters of high entropy. Both halves are necessary. The name
+alone refuses `password = "hunter2"`, which is not a credential worth refusing a
+file for. The entropy alone refuses every base64 fixture and every lockfile hash
+in a normal corpus. Together they are narrow enough to be on by default.
+
+Two shapes are excluded from that rule, both of them things a credential is
+never written as. A value that is a template reference — `${SEMLITH_AGENT_KEY}`,
+`{{token}}`, `<your-key-here>` — or a bare `SCREAMING_SNAKE` variable name is a
+placeholder, and refusing a file for carrying the documentation of how not to
+write a key down is the rule working against itself. And the value may not cross
+a line: without that, a `token=` on one line and a quote two lines later match as
+one string whose contents are the code in between. Both came out of the
+false-positive audit this rule was measured by, which found each of them in a
+real tree.
+
+**The reason never quotes the credential.** A refusal says what kind of thing
+matched and the line it sat on, and no character of the matched text is written
+anywhere semlith writes: not in the event, not in the CLI's output, not in the
+store, not in a log, not on the portal. A scan that prints the secret it found
+has moved the secret rather than refused it.
+
+**There is no allow-list of known-fake values.** A documentation page quoting
+AWS's own `AKIAIOSFODNN7EXAMPLE` is refused like any other match. A second table
+of values that only look like credentials is a second table to keep right, and
+of the two ways to be wrong, indexing a real key because it resembled an example
+is the one that costs something. `--include-secrets` indexes such a file anyway,
+and the run then says how many files the scan would have refused — a store built
+with that flag should be able to tell you what it took in.
+
+**A file that today's rules refuse leaves the store on the next pass.** Both
+halves of the decision evict: a path refused by the deny-list and a file refused
+by the content scan have their rows and vectors removed in the same run, and the
+refusal line says so. That is how a `dev.env` an older release indexed leaves,
+and how a file that was clean when it was indexed and has since gained a token
+leaves. The file on disk is untouched.
+
+**For a store indexed before all of this, there is `semlith scan`.** It runs
+both halves over every file a store already holds — the deny-list against the
+name, the content table against the text the store is holding — and prints each
+file semlith would refuse today with the rule, or the kind and the line. It
+exits non-zero while anything is found, so it can be a check in a script;
+`--forget` evicts what it found. The portal's Privacy page has the same thing
+with a button per row, reading the same function, because two implementations of
+"what should not be here" would eventually disagree and the one that mattered
+would be whichever you did not run. There is no MCP tool for it: an agent is not
+the party that decides what a store may hold.
+
+**The scan is a net, not a guarantee.** It refuses the shapes in that table and
+nothing else. A credential with no issuer prefix, one your own service mints in
+a format nobody else uses, one split across two lines, one that is base64 of
+something else — none of those match, and none of them will. It lowers the odds
+that an ordinary accident puts a key into a store; it is not a reason to index a
+directory you would not otherwise index, and it is not a reason to skip a
+`semlith scan` afterwards.
 
 ## What is yours alone on disk
 
@@ -154,7 +260,12 @@ restrictions are the change.
 
 ## Where each of these came from
 
-Every rule on this page closes a finding from the security audit of 0.13.0, and
-each one shipped with the test that would have caught it. `CHANGELOG.md` lists
+Every rule on this page but one closes a finding from the security audit of
+0.13.0, and each one shipped with the test that would have caught it. The
+exception is the content scan, which is 0.19.0 and closes nothing: it exists
+because widening what the walker indexes made "the name decides" too thin a rule
+to be the only one. It shipped with its own test all the same —
+`tests/scan.rs`, which walks the shape table and fails on a pattern that has
+stopped matching its own example. `CHANGELOG.md` lists
 them by finding id; [`docs/compatibility.md`](compatibility.md) records the four
 that break something 0.13.0 did, with the way back for each.

@@ -91,6 +91,17 @@ pub enum Progress<'a> {
         chunks: i64,
     },
     File(&'a Path),
+    /// One file the re-index could not read, with what failed.
+    ///
+    /// Separate from [`Progress::Error`] because it is not the watcher's
+    /// error: the loop keeps running and the store keeps being watched. Before
+    /// 0.19.0 a save that failed to embed came back as `Err` from
+    /// `index_changed` and ended the watch thread, so every later save in that
+    /// tree was silently never indexed.
+    Failed {
+        path: &'a Path,
+        why: String,
+    },
     Batch(IndexReport, Duration),
     /// A non-fatal backend error. Reported rather than swallowed: an exhausted
     /// inotify watch limit leaves a process that is running and no longer
@@ -192,8 +203,8 @@ pub fn run_held(
         // Without this a store that was interrupted would only finish catching
         // up when a file happened to change.
         if behind && !waiting() {
-            let more = store.index_walk_under(&roots, &step_aside, |path, _| {
-                progress(Progress::File(path))
+            let more = store.index_walk_under(&roots, &step_aside, |path, p| {
+                progress(file_progress(path, &p))
             })?;
             behind = more.remaining > 0;
             if more.indexed > 0 || more.removed > 0 {
@@ -222,13 +233,27 @@ pub fn run_held(
         }
 
         let started = Instant::now();
-        let report = store.index_changed(paths, |path, _| progress(Progress::File(path)))?;
+        let report = store.index_changed(paths, |path, p| progress(file_progress(path, &p)))?;
         if report.indexed > 0 || report.removed > 0 {
             progress(Progress::Batch(report, started.elapsed()));
         }
     }
 
     Ok(())
+}
+
+/// One file's line on the watcher's feed.
+///
+/// A failure is named; everything else is the file alone. The whole point is
+/// that a failure is a line rather than the end of the thread.
+fn file_progress<'a>(path: &'a Path, p: &crate::IndexProgress) -> Progress<'a> {
+    match p.outcome {
+        crate::FileOutcome::Failed => Progress::Failed {
+            path,
+            why: p.why.clone().unwrap_or_else(|| "failed".to_string()),
+        },
+        _ => Progress::File(path),
+    }
 }
 
 /// Keep taking events until the stream goes quiet for `debounce`, so one save
@@ -275,7 +300,7 @@ fn admissible(roots: &[PathBuf], batch: BTreeSet<PathBuf>) -> Vec<PathBuf> {
         return gone;
     }
 
-    let visible: BTreeSet<PathBuf> = walk(roots).into_iter().collect();
+    let visible: BTreeSet<PathBuf> = walk(roots).files.into_iter().collect();
     batch
         .into_iter()
         .filter(|p| visible.contains(p) || gone.contains(p))

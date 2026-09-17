@@ -398,7 +398,7 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Semantic + keyword search. format excerpt adds the text.",
+            "description": "Semantic + keyword search. format excerpt adds text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -418,11 +418,11 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_read",
-            "description": "One span or one symbol, and nothing around it.",
+            "description": "One span or one symbol, nothing around it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol name." },
+                    "target": { "type": "string", "description": "path:start-end, path:line, or a symbol." },
                     "store": { "type": "array" }
                 },
                 "required": ["target"]
@@ -435,8 +435,10 @@ fn tool_defs(open: &str) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "e.g. (call_expression function: (identifier) @f)" },
+                    "query": { "type": "string", "description": "(call_expression function: (identifier) @f)" },
                     "lang": { "type": "string" },
+                    "path": { "type": "array" },
+                    "offset": { "type": "integer" },
                     "store": { "type": "array" }
                 },
                 "required": ["query", "lang"]
@@ -472,7 +474,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_index",
-            "description": "Index paths. Only what changed is re-embedded.",
+            "description": "Index paths. Only changes are re-embedded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -524,7 +526,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_neighbors",
-            "description": "What calls a symbol and what it calls. Only extracted and resolved edges are certain.",
+            "description": "What calls a symbol and what it calls. Only resolved edges are certain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -539,14 +541,14 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_path",
-            "description": "The shortest chain between two symbols, or that there is none.",
+            "description": "The shortest chain between two symbols, or none.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "from": { "type": "string" },
                     "to": { "type": "string" },
                     "depth": { "type": "integer", "description": "Default 6." },
-                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; then a hypothesis." },
+                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; a hypothesis." },
                     "strict": { "type": "boolean" },
                     "store": { "type": "string" }
                 },
@@ -689,7 +691,20 @@ fn call_tool(
                 return Err((-32602, "missing required argument: lang".into(), None));
             };
             let only = strings(&args, "store");
-            match stores.pattern_in(Some(&only), lang, query, &crate::filter::Filter::default()) {
+            // The same glob filter every other tool takes. Passing
+            // `Filter::default()` here meant a pattern could not be narrowed
+            // to a directory, so the only way past the cap was a narrower
+            // pattern.
+            let filter = match filter_of(&args) {
+                Ok(f) => f,
+                Err(e) => return Ok(tool_error(&e)),
+            };
+            let offset = args
+                .get("offset")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(0);
+            match stores.pattern_in(Some(&only), lang, query, &filter, offset) {
                 // "no file of that language is indexed" and "none of them
                 // match" are different facts, and only the second means the
                 // pattern was wrong.
@@ -713,7 +728,14 @@ fn call_tool(
                         ));
                     }
                     if found.truncated {
-                        out.push_str(&format!("truncated at {} matches\n", found.matches.len()));
+                        // Naming the offset that continues it. A cap with no
+                        // continuation is a cap an agent works around by
+                        // guessing at a narrower pattern.
+                        out.push_str(&format!(
+                            "truncated at {} matches — call again with offset: {} for the rest\n",
+                            found.matches.len(),
+                            offset + found.matches.len()
+                        ));
                     }
                     out.trim_end().to_string()
                 }
@@ -762,7 +784,13 @@ fn call_tool(
                     "No file in the semlith store matches that.".to_string()
                 }
                 Ok((paths, left_out)) => {
-                    let mut out = paths.join("\n");
+                    // Plain, like every other path an agent is handed. This
+                    // one was still verbatim after 0.17.1 fixed the rest.
+                    let mut out = paths
+                        .iter()
+                        .map(|p| crate::plain(p))
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     // A truncated list that does not say so is how an agent
                     // decides a file it cannot see was never indexed.
                     if left_out > 0 {
@@ -821,8 +849,29 @@ fn call_tool(
                 // write somewhere else.
                 Err(e) => return Ok(tool_error(&e.to_string())),
                 Ok(report) => {
+                    // Skipped broken out by reason, because an agent told
+                    // "1 847 skipped" and nothing else re-indexes the same
+                    // tree hoping for a different answer.
+                    let by_reason = if report.skipped_reasons.is_empty() {
+                        String::new()
+                    } else {
+                        let mut parts: Vec<(usize, &str)> = report
+                            .skipped_reasons
+                            .iter()
+                            .map(|(kind, n)| (*n, kind.as_str()))
+                            .collect();
+                        parts.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                        format!(
+                            " ({})",
+                            parts
+                                .iter()
+                                .map(|(n, kind)| format!("{n} {kind}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    };
                     let mut out = format!(
-                        "{} indexed, {} unchanged, {} skipped, {} removed ({} chunks)",
+                        "{} indexed, {} unchanged, {} skipped{by_reason}, {} removed ({} chunks)",
                         report.indexed,
                         report.unchanged,
                         report.skipped,
@@ -840,7 +889,15 @@ fn call_tool(
                     // Named, one per line, with the rule that refused each. A
                     // refusal reported as a count is one an agent retries.
                     for (path, why) in &report.refused {
-                        out.push_str(&format!("\nrefused: {path} — {why}"));
+                        out.push_str(&format!("\nrefused: {} — {why}", crate::plain(path)));
+                    }
+                    // A failed file is part of the summary, not a tool error.
+                    // `error` is for a run that could not continue; a run that
+                    // skipped one corrupt PNG and indexed the other nine
+                    // thousand files succeeded, and saying otherwise sends the
+                    // agent back to re-run it.
+                    for (path, why) in &report.failed {
+                        out.push_str(&format!("\nfailed: {} — {why}", crate::plain(path)));
                     }
                     out
                 }
@@ -951,7 +1008,13 @@ fn call_tool(
                 Ok(found) if found.definitions.is_empty() => empty_graph(stores, name),
                 // The same renderer the CLI prints, so an agent and a person
                 // are told the same thing about one symbol.
-                Ok(found) => found.render("", "", &crate::graph::verbatim),
+                // `plain`, not `verbatim`. An agent given
+                // `\\?\C:\work\api\src\lock.rs` cannot open it, cannot pass it
+                // back to `semlith_read`, and cannot paste it anywhere a human
+                // will accept — which was every locator this tool returned on
+                // Windows. The store keeps the verbatim key; only the text on
+                // its way out is plain.
+                Ok(found) => found.render("", "", &crate::plain),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -1057,7 +1120,7 @@ fn call_tool(
             let depth = depth.clamp(1, 20);
             match stores.path_in(Some(&only), from, to, depth, all_edges) {
                 Ok(Some(chain)) if chain.steps.is_empty() => format!("{from} is {to}."),
-                Ok(Some(chain)) => chain.render("", "", &crate::graph::verbatim),
+                Ok(Some(chain)) => chain.render("", "", &crate::plain),
                 Ok(None) => crate::graph::not_connected(from, to, depth, all_edges),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
@@ -1182,7 +1245,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
                     e.kind,
                     e.confidence,
                     e.definitions,
-                    crate::graph::call_site(e, &crate::graph::verbatim)
+                    crate::graph::call_site(e, &crate::plain)
                 );
             }
             format!(
@@ -1193,7 +1256,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
                 label_of(&e.symbol.store),
                 crate::plain(&e.symbol.path),
                 e.symbol.start_line,
-                crate::graph::call_site(e, &crate::graph::verbatim)
+                crate::graph::call_site(e, &crate::plain)
             )
         })
         .collect::<Vec<_>>()
@@ -1641,9 +1704,14 @@ mod tests {
                 )
             })
             .collect();
+        // 3 996, not 4 000. `tests/retrieval.rs` is the gate that decides and
+        // it fails at `bytes.div_ceil(4) >= 1_000`, which 3 997 bytes reaches —
+        // so a proxy set at 4 000 passes a list the criterion rejects, and did,
+        // eight minutes into a run that has to index a corpus before it says
+        // so. The two numbers now mean the same thing.
         assert!(
-            size < 4_000,
-            "tools/list is {size} bytes: {}",
+            size <= 3_996,
+            "tools/list is {size} bytes, over the 3 996 the 1 000-token gate allows: {}",
             each.join(" ")
         );
     }

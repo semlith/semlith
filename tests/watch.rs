@@ -585,6 +585,58 @@ fn a_saved_document_is_searchable_like_a_saved_source_file() {
 
 /// A watcher running in its own thread, stoppable from the test, counting
 /// what it re-embedded so a test can prove a burst cost one pass and not ten.
+/// One corrupt file must not take the watcher with it.
+///
+/// Until 0.19.0 a save the indexer could not embed came back as `Err` from
+/// `index_changed`, which ended the watch thread — so every later save in that
+/// tree was silently never indexed, and nothing said so. The failing form was
+/// demonstrated against 0.18.0's code first: the second write below never
+/// became searchable.
+#[test]
+#[ignore = "downloads an embedding model and CLIP on first run"]
+fn a_file_that_cannot_be_embedded_does_not_stop_the_watcher() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+
+    write(
+        corpus.path(),
+        "bread.md",
+        "Sourdough needs flour and water.",
+    );
+    index(store.path(), corpus.path());
+
+    let watcher = spawn(store.path(), corpus.path());
+
+    // A PNG header a dimension reader accepts and a decoder does not: the
+    // signature, an IHDR declaring 32 by 32, and then nothing.
+    let mut truncated = Vec::new();
+    truncated.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+    truncated.extend_from_slice(&[0, 0, 0, 13]);
+    truncated.extend_from_slice(b"IHDR");
+    truncated.extend_from_slice(&32u32.to_be_bytes());
+    truncated.extend_from_slice(&32u32.to_be_bytes());
+    truncated.extend_from_slice(&[8, 6, 0, 0, 0]);
+    truncated.extend_from_slice(&[0, 0, 0, 0]);
+    fs::write(corpus.path().join("broken.png"), &truncated).unwrap();
+
+    // Long enough for the failing save to have been handled, so the write
+    // below is genuinely after it rather than racing it.
+    thread::sleep(Duration::from_secs(2));
+
+    write(
+        corpus.path(),
+        "rust.md",
+        "The borrow checker proves aliasing rules at compile time.",
+    );
+
+    assert!(
+        wait_for(store.path(), "compile time aliasing proof", "rust.md"),
+        "the save after the failure never became searchable within {APPEAR_TIMEOUT:?} —          the watcher stopped on the corrupt file"
+    );
+
+    watcher.stop();
+}
+
 struct Watcher {
     stop: Arc<AtomicBool>,
     embedded: Arc<AtomicUsize>,

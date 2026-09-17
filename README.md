@@ -129,8 +129,7 @@ semlith start                                      # see it, and keep it current
    /// capped at MAX_BACKOFF. ...
 ```
 
-The `path:start-end` locator is usable as it stands — hand it to an editor, or
-read just those lines instead of the whole file.
+The `path:start-end` locator is usable as it stands: hand it to an editor.
 
 ## Commands
 
@@ -140,11 +139,12 @@ read just those lines instead of the whole file.
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it, `--prefer code\|docs\|any` to lift one side of the corpus. |
 | `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
-| `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required. |
+| `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required; `--path` narrows it and `--offset` continues a listing the cap cut short. |
 | `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
 | `semlith files` | List indexed files. |
 | `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
 | `semlith forget <PATH>` | Drop one file from the store. The file on disk is untouched. |
+| `semlith scan [STORE]` | List every file the store holds that semlith would refuse today — a credential the name does not admit to, a rule that has widened. Exits non-zero while any remain; `--forget` evicts them. |
 | `semlith drop <STORE>` | Delete a store outright — its vectors, chunks, graph and ledger, and the registry entry naming it. The indexed files are untouched. |
 | `semlith symbol <NAME>` | The definition, its callers and callees, and the ring two hops out, in one answer. From the parsed syntax tree rather than a grep for `fn name`. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows. |
@@ -163,9 +163,9 @@ read just those lines instead of the whole file.
 
 `semlith add` fetches over https only, refuses redirects that leave https, caps
 the body at 32 MiB, writes only inside the store's own `downloads/`, and refuses
-everything under `--airgap`. It also refuses a private or loopback address, so a
-URL cannot be used to read something inside your network;
-`SEMLITH_ADD_ALLOW_PRIVATE=1` lifts that one rule, for a wiki on a LAN you own.
+everything under `--airgap` or to a private or loopback address, so a URL cannot
+read something inside your network. `SEMLITH_ADD_ALLOW_PRIVATE=1` lifts that
+last rule, for a wiki on a LAN you own.
 
 ## Where stores live
 
@@ -349,7 +349,7 @@ tools over HTTP at `/mcp`:
 | --- | --- |
 | `semlith_search` | Where the answer is: path, line span, enclosing symbol, how it was found and whether the file has changed since it was indexed, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. `format: "excerpt"` returns the text instead. |
 | `semlith_read` | One span or one symbol and nothing around it — the second stage after a search, so an agent locates first and reads only what it needs. |
-| `semlith_pattern` | A tree-sitter structural pattern over the indexed files of one language. |
+| `semlith_pattern` | A tree-sitter structural pattern over the indexed files of one language, with the same `path` narrowing as the rest and an `offset` that continues a truncated listing. |
 | `semlith_stats` | What each open store holds, and the names the other tools accept. |
 | `semlith_files` | Which files are indexed — so "not indexed" and "not discussed" stop looking the same. |
 | `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
@@ -424,7 +424,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **12** |
-| CLI commands | **24** |
+| CLI commands | **25** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 
