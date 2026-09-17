@@ -472,6 +472,10 @@ function dataTable(spec) {
   const table = el(
     "table",
     { class: spec.className || null },
+    // A caption, always. Four of these tables had neither a caption nor an
+    // `aria-label`, so a screen reader announced "table" and left the reader
+    // to work out which one from its columns.
+    spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null,
     el("thead", {}, headRow),
     body,
   );
@@ -497,6 +501,14 @@ function dataTable(spec) {
     // A copy: sorting the caller's array in place would reorder the data
     // behind whatever else is reading it.
     return [...rows].sort((a, b) => {
+      // Rows with no value in this column sink, whichever way the sort runs.
+      // A column where most rows are blank otherwise hides its own data:
+      // sorting the About page's SIZE column ascending put all forty-three
+      // dashes first and the five real sizes on the last page.
+      if (column.empty) {
+        const blank = Number(column.empty(a)) - Number(column.empty(b));
+        if (blank) return blank;
+      }
       const x = column.value(a);
       const y = column.value(b);
       if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
@@ -2305,6 +2317,11 @@ async function ledgerView() {
       stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
     ),
     clientBreakdown(data.by_client),
+    // The rows themselves. The page called itself a debugging trail and an
+    // audit record and had no table on it at all — three snippets telling the
+    // reader to go and run `semlith ledger` in a terminal instead, which is
+    // also the portal-parity rule broken: the CLI prints rows, so this does.
+    ledgerRows(data),
     el(
       "div",
       { class: "scroller" },
@@ -2376,7 +2393,62 @@ async function ledgerView() {
   );
 }
 
-/* Who the ledger recorded, and how often.
+/** The ledger's rows: the same ones `semlith ledger --last 200` prints. */
+function ledgerRows(data) {
+  const rows = data.rows || [];
+  const table = dataTable({
+    className: "w-ledger",
+    sort: "at",
+    dir: "desc",
+    perPage: 15,
+    rows,
+    caption: "Every retrieval recorded on this machine, newest first.",
+    columns: [
+      {
+        key: "at",
+        label: "When",
+        className: "meta",
+        value: (r) => r.at,
+        // Local time with the offset, as the server rendered it — the same
+        // string the CLI prints. One dataset, one clock: the two surfaces used
+        // to disagree by the UTC offset with neither of them saying so.
+        render: (r) => el("span", { class: "one-line", title: r.when, text: r.when }),
+      },
+      { key: "client", label: "Client", className: "meta", render: (r) => r.client },
+      { key: "store", label: "Store", className: "meta narrow-drop", render: (r) => r.store },
+      {
+        key: "query",
+        label: "Query",
+        className: "path",
+        render: (r) => el("span", { class: "one-line", title: r.query, text: r.query }),
+      },
+      { key: "hits", label: "Hits", className: "num", render: (r) => n(r.hits) },
+      {
+        key: "ms",
+        label: "ms",
+        className: "num narrow-drop",
+        render: (r) => n(r.ms),
+      },
+    ],
+  });
+  table.update(rows, rows.length);
+  return el(
+    "div",
+    { class: "card pad" },
+    el("span", { class: "card-title", text: "The rows" }),
+    rows.length
+      ? table.node
+      : empty("Nothing recorded yet. A search from any client writes a row here."),
+    data.legacy_rows
+      ? el("p", {
+          class: "subtitle",
+          text: "Rows recorded before 0.20.2 were written once per open store, so figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
+        })
+      : null,
+  );
+}
+
+/* Who the ledger recorded, and how often./* Who the ledger recorded, and how often.
  *
  * The row that says the ledger works. Before 0.15.0 it could only ever read
  * `portal 31`, because the portal's own search box was the only thing that
@@ -2698,6 +2770,7 @@ async function storesView() {
 
   const table = dataTable({
     className: "w-stores",
+    caption: "Every store on this machine: where it is, what it holds, and when it was last written to.",
     sort: "name",
     perPage: 10,
     rows: stores,
@@ -3126,6 +3199,7 @@ async function filesView() {
 
   const table = dataTable({
     className: "w-files",
+    caption: "Every indexed file, the reader that parsed it, and what it contributed to the store.",
     server: true,
     sort: "path",
     columns: [
@@ -5536,27 +5610,43 @@ async function agentsView() {
     class: "button secondary small",
     type: "button",
     text: endpoint.open ? "Stop" : "Start",
-    onclick: async () => {
-      toggle.disabled = true;
-      endpointNote.className = "note";
-      endpointNote.textContent = endpoint.open ? "Closing…" : "Opening…";
-      try {
-        const done = await post("/api/endpoint", { open: !endpoint.open });
-        endpoint.open = done.open;
-        toggle.textContent = done.open ? "Stop" : "Start";
-        endpointNote.textContent = done.open
-          ? "The endpoint is answering. A configured client reconnects on its next call."
-          : "The endpoint is closed. The daemon, the watcher and the portal are unaffected.";
-        fill(statePill, el("i", {}), done.open ? "answering" : "closed");
-        statePill.className = done.open ? "pill good" : "pill warn";
-      } catch (e) {
-        endpointNote.className = "note bad";
-        endpointNote.textContent = e.message;
-      } finally {
-        toggle.disabled = false;
-      }
+    onclick: () => {
+      // Every other consequential action on this page confirms — delete a
+      // store, forget a file, stop a run — and this is the one that takes
+      // semlith away from every connected agent at once. Starting it back up
+      // costs nothing, so only the stop asks.
+      if (!endpoint.open) return apply();
+      ask({
+        title: "Close the MCP endpoint?",
+        body: "Every connected agent loses semlith until it is started again. The daemon, the watcher and the portal are unaffected, and Start puts it back.",
+        confirm: "Close the endpoint",
+        tone: "bad",
+        run: apply,
+      });
     },
   });
+
+  /** Open or close the endpoint, once whoever asked has confirmed. */
+  async function apply() {
+    toggle.disabled = true;
+    endpointNote.className = "note";
+    endpointNote.textContent = endpoint.open ? "Closing…" : "Opening…";
+    try {
+      const done = await post("/api/endpoint", { open: !endpoint.open });
+      endpoint.open = done.open;
+      toggle.textContent = done.open ? "Stop" : "Start";
+      endpointNote.textContent = done.open
+        ? "The endpoint is answering. A configured client reconnects on its next call."
+        : "The endpoint is closed. The daemon, the watcher and the portal are unaffected.";
+      fill(statePill, el("i", {}), done.open ? "answering" : "closed");
+      statePill.className = done.open ? "pill good" : "pill warn";
+    } catch (e) {
+      endpointNote.className = "note bad";
+      endpointNote.textContent = e.message;
+    } finally {
+      toggle.disabled = false;
+    }
+  }
   const statePill = pill(endpoint.open ? "answering" : "closed", endpoint.open ? "good" : "warn");
 
   // ---- rotation
@@ -5638,6 +5728,7 @@ async function agentsView() {
   // ---- connected clients
   const connected = dataTable({
     className: "w-agents",
+    caption: "Every documented client, whether it is on this machine, and whether it is registered.",
     sort: "name",
     grow: false,
     perPage: 10,
@@ -5813,8 +5904,13 @@ async function agentsView() {
   const planNote = el("div", { class: "note" });
   let planned = null;
 
+  /* The safe one is the primary. The amber button that writes into ten real
+   * configuration files across the machine used to be the primary and the dry
+   * run beside it the secondary, so the visual hierarchy was upside down
+   * against the risk and the writing button was reachable without ever having
+   * looked at the preview. */
   const write = el("button", {
-    class: "button small",
+    class: "button secondary small",
     type: "button",
     text: "Write these files",
     hidden: true,
@@ -5871,7 +5967,7 @@ async function agentsView() {
   };
 
   const preview = el("button", {
-    class: "button secondary small",
+    class: "button small",
     type: "button",
     text: "Show what would be written",
     onclick: async () => {
@@ -5898,10 +5994,13 @@ async function agentsView() {
     "div",
     { class: "card pad" },
     el("span", { class: "card-title", text: "Register the clients that have no command" }),
-    el("p", {
-      class: "subtitle",
-      text: "Ten of the twenty-seven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's `semlith setup --register-all`.",
-    }),
+    // Inline code as code, not as a pair of backtick characters. Every other
+    // code reference on this page is styled; this one was printed verbatim.
+    says(
+      "Ten of the twenty-seven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
+      mono("semlith setup --register-all"),
+      ".",
+    ),
     el("div", { class: "head" }, preview, write),
     planBox,
     planNote,
@@ -6541,6 +6640,7 @@ async function aboutView() {
   const list = (models && models.models) || [];
   const table = dataTable({
     className: "w-models",
+    caption: "Every embedding model a store can be built with, and which of them this machine has fetched.",
     sort: "name",
     perPage: 10,
     rows: list,
@@ -6550,16 +6650,30 @@ async function aboutView() {
         label: "Model",
         className: "path",
         value: (m) => m.name,
-        // One line with the name on the tooltip: wrapped across two lines a
-        // model name reads as two models.
-        render: (m) => el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
+        // The name to type beside where it comes from. The column mixed three
+        // naming schemes — fastembed's CamelCase, a HuggingFace path and
+        // semlith's own kebab-case — with nothing saying which was which; the
+        // name is what `--model` takes, and the repository is the second line.
+        render: (m) =>
+          el(
+            "div",
+            { class: "rows tight" },
+            el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
+            m.code
+              ? el("span", { class: "meta one-line", "data-tip": m.code, text: m.code })
+              : null,
+          ),
       },
       { key: "dim", label: "Dims", className: "num", value: (m) => m.dim, render: (m) => String(m.dim) },
       {
         key: "bytes",
         label: "Size",
         className: "num",
+        // Empty last, whichever way the column is sorted. Forty-three of the
+        // forty-eight rows have no size, so sorting ascending put every blank
+        // first and buried the only five rows with data.
         value: (m) => m.bytes || 0,
+        empty: (m) => !m.bytes,
         // Blank rather than guessed: a model this machine has never fetched has
         // no size here to measure, and fastembed's catalogue does not carry one.
         render: (m) => (m.bytes ? bytes(m.bytes) : "—"),
