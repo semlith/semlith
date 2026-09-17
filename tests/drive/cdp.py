@@ -321,6 +321,13 @@ class Drive:
             (() => {
               const wanted = %s.trim().toLowerCase();
               for (const el of document.querySelectorAll(%s)) {
+                // Only what a person could click. `innerText` on an element
+                // that is not rendered falls back to its text content in
+                // Chrome, so a `hidden` button still reads as its own label —
+                // which had this clicking the Remove on a *live* run card,
+                // where it is present and folded away, and reporting the 409
+                // the daemon rightly answered with.
+                if (el.offsetParent === null && getComputedStyle(el).position !== "fixed") continue;
                 if ((el.innerText || el.value || "").trim().toLowerCase() === wanted) {
                   el.scrollIntoView({block: "center"});
                   el.click();
@@ -334,7 +341,8 @@ class Drive:
         )
         if not found:
             raise ProtocolError(
-                "no %r element reads %r, so there was nothing to click." % (selector, text)
+                "no %r element a person could click reads %r, so there was "
+                "nothing to click." % (selector, text)
             )
 
     def type(self, selector, text):
