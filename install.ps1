@@ -97,7 +97,7 @@ try {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
     $installed = Join-Path $binDir 'semlith.exe'
 
-    # Rename first, replace second — the same sequence `semlith upgrade` uses
+    # Rename first, replace second: the same sequence `semlith upgrade` uses
     # (`src/upgrade.rs`) and for the same reason. Windows will not let a file
     # be written over an executable that is already there, and will refuse
     # outright while a `semlith start` is holding it open; what it will always
