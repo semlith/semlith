@@ -1994,6 +1994,15 @@ pre.code {
 .picker .entry:hover {
   background: var(--soft);
 }
+/* A row that cannot be chosen says so before it is clicked. A file listed at
+ * full contrast beside the folders in a folder picker reads as an option. */
+.picker .entry.inert,
+.picker .entry.inert:hover {
+  background: none;
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.6;
+}
 .picker .entry svg {
   width: 16px;
   height: 16px;

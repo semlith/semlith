@@ -1936,11 +1936,45 @@ fn projects(request: &Request) -> Response {
     Response::json(&json!({
         "path": resolved.display().to_string(),
         "home": home.display().to_string(),
+        // Where "Up" goes, under the same containment rule `/api/dirs` has.
+        // Without it this picker opened at the home directory and could not
+        // leave it, so it could not be pointed at a monorepo anywhere else on
+        // the machine — while the picker beside it navigated freely.
+        "parent": resolved
+            .parent()
+            .filter(|p| p.starts_with(&home))
+            .map(|p| p.display().to_string()),
         // Repositories where there are any, plain subfolders where there are
         // none. One list either way, so the page has one thing to render.
         "projects": rows,
+        // Everything under here that can be navigated into, which is not the
+        // same list: a folder of folders offers its subfolders as projects,
+        // and a folder of repositories offers none at all.
+        "folders": folders(&resolved),
         "repositories": repositories,
     }))
+}
+
+/// The directories directly under `dir`, for a picker to drill into.
+fn folders(dir: &Path) -> Vec<Value> {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Value> = listing
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && !entry.file_name().to_string_lossy().starts_with('.')
+        })
+        .map(|entry| {
+            json!({
+                "name": entry.file_name().to_string_lossy().into_owned(),
+                "path": entry.path().display().to_string(),
+            })
+        })
+        .collect();
+    out.sort_by_key(|row| row["name"].as_str().unwrap_or("").to_lowercase());
+    out
 }
 
 /// Six integers saying which domains have been written.

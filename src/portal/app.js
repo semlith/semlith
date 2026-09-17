@@ -733,11 +733,18 @@ function folderPicker(options) {
         { class: "entries" },
         data.entries.length
           ? data.entries.map((entry) => {
+              // A file in a folder picker is not selectable, and rendering
+              // it at full contrast beside the folders that are says
+              // otherwise. Dimmed when it cannot be chosen, which in the
+              // multiple case is always.
+              const inert = multiple && !entry.dir;
               const row = el(
                 "button",
                 {
-                  class: "entry",
+                  class: inert ? "entry inert" : "entry",
                   type: "button",
+                  disabled: inert,
+                  title: entry.path,
                   onclick: () => {
                     if (entry.dir) open(entry.path);
                     else {
@@ -748,6 +755,10 @@ function folderPicker(options) {
                 },
                 icon(entry.dir ? ICONS.folder : ICONS.file),
                 el("span", { class: "name", text: entry.name }),
+                // What "Adopt existing .semlith" is looking for. Nothing in
+                // the listing used to tell an adoptable folder from any other,
+                // which is the surface of the adopt feature not working.
+                entry.adoptable ? pill("a store", "good") : null,
               );
               if (!multiple || !entry.dir) return row;
               /* The tick is its own control beside the row, not the row
@@ -2634,6 +2645,11 @@ async function storesView() {
       } catch (e) {
         adoptNote.className = "note bad";
         adoptNote.textContent = e.message;
+        // Back where it failed, rather than closed. A failed adopt used to
+        // drop the reader onto the Stores page, and reopening the picker
+        // started again at the home directory with every step of navigation
+        // lost.
+        picker.open(path);
       }
     },
   });
@@ -5060,6 +5076,16 @@ function projectsChecklist(options) {
       el(
         "div",
         { class: "crumbs" },
+        // The same navigation the folder picker beside it has had all along.
+        // Without it this opened at the home directory and stayed there, so a
+        // monorepo anywhere else on the machine was unreachable.
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Up",
+          disabled: !data.parent,
+          onclick: () => open(data.parent),
+        }),
         el("span", { class: "where", text: data.path }),
         el("span", { class: "spacer" }),
         el("button", {
@@ -5127,8 +5153,13 @@ function projectsChecklist(options) {
                 { class: "entry-row" },
                 box,
                 el(
-                  "span",
-                  { class: "entry" },
+                  "button",
+                  {
+                    class: "entry",
+                    type: "button",
+                    title: `Open ${row.path}`,
+                    onclick: () => open(row.path),
+                  },
                   icon(ICONS.folder),
                   el("span", { class: "name", text: row.name }),
                   row.indexed ? pill(`in ${row.indexed}`, "warn") : null,
@@ -5137,6 +5168,34 @@ function projectsChecklist(options) {
             })
           : empty("Nothing here that Semlith can index."),
       ),
+      // Everything else under this folder, so the picker can be walked to
+      // wherever the projects actually are.
+      (data.folders || []).filter((f) => !rows.some((row) => row.path === f.path)).length
+        ? el(
+            "div",
+            { class: "entries" },
+            el("p", { class: "subtitle", text: "Or open one of these:" }),
+            (data.folders || [])
+              .filter((f) => !rows.some((row) => row.path === f.path))
+              .map((folder) =>
+                el(
+                  "div",
+                  { class: "entry-row" },
+                  el(
+                    "button",
+                    {
+                      class: "entry",
+                      type: "button",
+                      title: `Open ${folder.path}`,
+                      onclick: () => open(folder.path),
+                    },
+                    icon(ICONS.folder),
+                    el("span", { class: "name", text: folder.name }),
+                  ),
+                ),
+              ),
+          )
+        : null,
     );
     return true;
   }
