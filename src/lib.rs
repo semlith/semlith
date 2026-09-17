@@ -41,6 +41,7 @@ pub mod proxy;
 pub mod routes;
 pub mod setup;
 pub mod store;
+pub mod system;
 pub mod upgrade;
 pub mod watch;
 

@@ -1960,6 +1960,84 @@ pre.code {
   white-space: nowrap;
 }
 
+/* A tick beside a row rather than on it. Walking into a folder and choosing it
+   are different intentions, and one control cannot mean both. */
+.picker .entry-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding-left: var(--sp-3);
+  border-bottom: 1px solid var(--line-soft);
+}
+.picker .entry-row .entry {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+.picker .tick {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- runs */
+
+/* One card per store with a run. They stack rather than sit in a grid: a card
+   carries a log, and a log in a column half the page wide is unreadable. */
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.run-card .bar {
+  margin: var(--sp-2h) 0;
+}
+.run-card .log {
+  max-height: 260px;
+  margin-top: var(--sp-2h);
+}
+.run-card .filters {
+  align-items: center;
+}
+
+.queue .queue-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2h);
+  min-width: 0;
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.queue .queue-row:last-child {
+  border-bottom: 0;
+}
+.queue .queue-row .key {
+  font-family: var(--mono);
+  font-size: var(--t-body-sm);
+  color: var(--muted);
+  min-width: 1.5rem;
+}
+.queue .queue-row .name {
+  font-family: var(--mono);
+  font-size: var(--t-body-sm);
+  font-weight: 600;
+}
+
+/* The three derived values, side by side where there is room. Each carries its
+   reason under it, which is what makes the number arguable rather than magic. */
+.settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-2h);
+}
+.settings .setting .note {
+  margin-top: var(--sp-1);
+}
+
 /* --------------------------------------------------------------- search */
 
 /* Sticky, because on a narrow window the two stages stack and the whole page

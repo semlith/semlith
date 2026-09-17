@@ -111,6 +111,71 @@ pub fn registry_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("registry.json"))
 }
 
+/// Where the three values the Index page can change are kept.
+///
+/// Beside `registry.json` and not inside it: the registry is what stores exist
+/// and where, and these are how hard this machine may work. `daemon.json` is
+/// not the place either — that is per-store discovery, written beside a lock
+/// and deleted when the daemon exits, and these outlive a run.
+///
+/// It is not a user-editable config file, which AGENTS.md says this project
+/// does not have. It is tool-written state, like the registry: semlith writes
+/// it when somebody moves a field on the page, and nothing documents a way to
+/// hand-edit it.
+pub fn settings_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("settings.json"))
+}
+
+/// The three values, as the file holds them.
+///
+/// Every field is optional and absent means "derive it". A home with no file
+/// at all — which is every home until somebody moves a field — derives all
+/// three, so the file's absence is a state rather than a missing default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub runs_at_once: Option<usize>,
+    pub embed_threads: Option<usize>,
+    pub index_memory_mb: Option<usize>,
+}
+
+impl Settings {
+    /// What the file says, or nothing at all.
+    ///
+    /// A file that cannot be read or parsed is the same answer as no file:
+    /// these are three numbers with derivable defaults, and failing a daemon
+    /// start over them would be refusing to work because of a preference.
+    pub fn load() -> Self {
+        let Ok(path) = settings_path() else {
+            return Self::default();
+        };
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write the file, creating the home if it is not there.
+    ///
+    /// The same temporary-file-and-rename the registry uses, for the same
+    /// reason: a process killed mid-write leaves the previous settings rather
+    /// than half of a new set.
+    pub fn save(&self) -> Result<()> {
+        let path = settings_path()?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
+        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
+        let body = serde_json::to_string_pretty(self)? + "\n";
+        write_private(&temp, body.as_bytes())
+            .with_context(|| format!("writing {}", temp.display()))?;
+        if let Err(e) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e).with_context(|| format!("writing {}", path.display()));
+        }
+        Ok(())
+    }
+}
+
 /// Where the agent key lives.
 ///
 /// Under the home rather than inside a store: it authorises the daemon's MCP
