@@ -2516,7 +2516,6 @@ mod tests {
     /// failed on Windows, where the scheduling differs: a clock test's
     /// `record` landed inside the isolation test's window and moved `runs`
     /// while it was asserting that writing `stores` had not.
-    #[must_use]
     fn counters() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
