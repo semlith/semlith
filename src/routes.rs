@@ -26,6 +26,18 @@ use std::sync::atomic::Ordering;
 /// cap is what stops a hand-written query asking for all of them.
 const FILE_PAGE: i64 = 500;
 
+/// The most files a derived-column sort will order.
+///
+/// `FILE_OFFSET_MAX` bounds how deep the table can be paged; this bounds how
+/// much has to be held to order it by a column the database does not hold.
+const DERIVED_SORT_MAX: i64 = 20_000;
+
+/// How many ledger rows the Retrieval ledger page is handed.
+///
+/// The same depth `semlith ledger --last 200` offers, which is what the
+/// portal-parity rule asks for: the page shows the rows the CLI prints.
+const LEDGER_ROWS: usize = 200;
+
 /// How deep the Files route will page.
 ///
 /// The cost of an offset is paid before the page is cut: every open store is
@@ -169,15 +181,34 @@ fn stores(state: &Arc<State>) -> Response {
                     // and readers they run to, and a page that counts its own
                     // rows to get there is describing the page.
                     store::file_facets(s.db(), &[]).unwrap_or_default(),
+                    // The store's own last write, not this daemon's memory of
+                    // one. A store written yesterday has a last write today.
+                    store::last_write(s.db()).ok().flatten(),
                 )
             });
 
-        let (files, chunks, bytes, model, dim, vectors, shards, facets) = match stats {
-            Some((Ok((f, c, b)), model, dim, len, shards, facets)) => {
-                (f, c, b, model, dim, len, shards, facets)
+        let (files, chunks, bytes, model, dim, vectors, shards, facets, written) = match stats {
+            Some((Ok((f, c, b)), model, dim, len, shards, facets, written)) => {
+                (f, c, b, model, dim, len, shards, facets, written)
             }
-            _ => (0, 0, 0, String::new(), 0, 0, None, store::Facets::default()),
+            _ => (
+                0,
+                0,
+                0,
+                String::new(),
+                0,
+                0,
+                None,
+                store::Facets::default(),
+                None,
+            ),
         };
+
+        // The daemon's own counter still wins when it is newer, so a re-embed
+        // that has landed in this session shows immediately rather than waiting
+        // for the next read of the file table.
+        let session = handle.last_write.load(Ordering::Relaxed) as i64;
+        let last_write = written.unwrap_or(0).max(session);
 
         // The reader is a property of the code rather than a column, so it is
         // derived from the extensions the store actually holds rather than
@@ -192,7 +223,7 @@ fn stores(state: &Arc<State>) -> Response {
 
         out.push(json!({
             "name": handle.name,
-            "dir": handle.dir.display().to_string(),
+            "dir": crate::plain(&handle.dir.display().to_string()),
             // A store made before 0.14.0 is readable by everyone on the machine
             // until it is opened by this binary, and one somebody chmod'ed is
             // readable until the next open too. Reported rather than silently
@@ -206,7 +237,7 @@ fn stores(state: &Arc<State>) -> Response {
             // Told apart so the portal can show a root that is not there as a
             // problem rather than silently listing one fewer.
             "roots": handle.roots.iter().map(|r| json!({
-                "path": r.display().to_string(),
+                "path": crate::plain(&r.display().to_string()),
                 "present": r.exists(),
             })).collect::<Vec<_>>(),
             "files": files,
@@ -221,7 +252,12 @@ fn stores(state: &Arc<State>) -> Response {
             "readers": readers.len(),
             "watching": handle.watching.load(Ordering::Relaxed),
             "queue": handle.queue_depth(),
-            "last_write": handle.last_write.load(Ordering::Relaxed),
+            "last_write": last_write,
+            // Rows this store held for files outside its roots, dropped when
+            // the daemon opened it. Shown for the session so the correction is
+            // visible rather than silent.
+            "pruned": handle.pruned.load(Ordering::Relaxed),
+            "missing": false,
             "events": handle.events(),
         }));
     }
@@ -233,8 +269,13 @@ fn stores(state: &Arc<State>) -> Response {
     for store in unopened {
         out.push(json!({
             "name": store.name,
-            "dir": store.dir.display().to_string(),
+            "dir": crate::plain(&store.dir.display().to_string()),
             "unopened": store.why,
+            // A registry entry for a directory that is not there. The portal
+            // shows it as missing, naming the path that is absent, and offers
+            // it nowhere a real store is offered — not in the Index dropdown,
+            // not as a search chip, not as a graph chip.
+            "missing": store.missing,
             "roots": [],
             "files": 0,
             "chunks": 0,
@@ -248,6 +289,7 @@ fn stores(state: &Arc<State>) -> Response {
             "watching": false,
             "queue": 0,
             "last_write": 0,
+            "pruned": 0,
             "events": [],
         }));
     }
@@ -296,30 +338,65 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     let limit = request
         .query("limit")
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(15)
-        .clamp(1, FILE_PAGE);
+        .unwrap_or(15);
+    // Refused rather than clamped, the same contract `offset` above has. A
+    // caller that asked for two thousand rows and silently got five hundred
+    // has no way to tell that from a corpus with five hundred files in it.
+    if !(1..=FILE_PAGE).contains(&limit) {
+        return Response::error(400, &format!("limit must be between 1 and {FILE_PAGE}"));
+    }
 
     // Each store is asked for the first `offset + limit` rows in the requested
     // order and the merge picks the page out of the union. Asking each store
     // for the page directly would be wrong the moment two stores are open: the
     // tenth row overall is not the tenth row of either of them.
-    let take = offset.saturating_add(limit);
+    // Three of the seven columns are derived rather than stored, so ordering
+    // by one of them needs every matching row and not one page of each
+    // store's. Bounded, and refused past the bound rather than silently
+    // ordering a prefix — a sort that quietly describes the first ten thousand
+    // rows of a larger corpus is a sort nobody can trust.
     let mut merged: Vec<(String, store::FileRow)> = Vec::new();
     let mut total = 0i64;
     let mut extensions: Vec<String> = Vec::new();
     let mut stores = 0usize;
+    // Counted first, because how many rows each store has to be asked for
+    // depends on it: a derived sort needs all of them.
     for (label, opened) in fleet.each() {
         if !only.is_empty() && !only.iter().any(|n| n == label) {
             continue;
         }
-        stores += 1;
+        // Stores with a matching file, not stores that happen to be open. The
+        // header read "0 files · 0 formats · 2 stores", where two of the three
+        // numbers answered the filter and the third did not.
         match store::file_count(opened.db(), filter.groups()) {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                stores += usize::from(count > 0);
+            }
             Err(e) => return Response::error(500, &e.to_string()),
         }
         match store::file_facets(opened.db(), filter.groups()) {
             Ok(facets) => extensions.extend(facets.extensions),
             Err(e) => return Response::error(500, &e.to_string()),
+        }
+    }
+    if sort.derived() && total > DERIVED_SORT_MAX {
+        return Response::error(
+            400,
+            &format!(
+                "this column is derived rather than stored, so ordering by it needs every \
+                 matching row; narrow the filter to {DERIVED_SORT_MAX} files or fewer"
+            ),
+        );
+    }
+    let take = if sort.derived() {
+        total
+    } else {
+        offset.saturating_add(limit)
+    };
+    for (label, opened) in fleet.each() {
+        if !only.is_empty() && !only.iter().any(|n| n == label) {
+            continue;
         }
         let listed = match store::file_rows(opened.db(), filter.groups(), sort, desc, take) {
             Ok(r) => r,
@@ -328,13 +405,20 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         merged.extend(listed.into_iter().map(|row| (label.to_string(), row)));
     }
 
-    merged.sort_by(|(_, a), (_, b)| {
+    merged.sort_by(|(a_store, a), (b_store, b)| {
         let order = match sort {
             store::FileSort::Path => a.path.cmp(&b.path),
             store::FileSort::Bytes => a.bytes.cmp(&b.bytes),
             store::FileSort::Chunks => a.chunks.cmp(&b.chunks),
             store::FileSort::Lines => a.lines.cmp(&b.lines),
             store::FileSort::Indexed => a.indexed_at.cmp(&b.indexed_at),
+            store::FileSort::Store => a_store.cmp(b_store),
+            store::FileSort::Reader => {
+                chunk::reader_of(Path::new(&a.path)).cmp(chunk::reader_of(Path::new(&b.path)))
+            }
+            store::FileSort::Lang => {
+                language_of(Path::new(&a.path)).cmp(language_of(Path::new(&b.path)))
+            }
         };
         let order = if desc { order.reverse() } else { order };
         order.then_with(|| a.path.cmp(&b.path))
@@ -534,37 +618,80 @@ fn ledger(state: &Arc<State>) -> Response {
     });
     let recording = state.ledger;
     with_fleet(state, empty, move |fleet| {
-        let (mut queries, mut clients, mut excerpt, mut whole) = (0, 0, 0, 0);
+        let (mut clients, mut excerpt, mut whole) = (0, 0, 0);
         let mut intact = true;
-        for (_, store) in fleet.each() {
-            let (q, c, e, w) = store::ledger_totals(store.db())?;
-            queries += q;
+        // Unioned rather than summed: one search over six stores writes a row
+        // in each that answered it, under one query id, and adding six stores'
+        // own counts is what made this page report sixty-three queries for
+        // about a dozen searches.
+        let mut seen: std::collections::BTreeSet<String> = Default::default();
+        for (label, store) in fleet.each() {
+            let (_, c, e, w) = store::ledger_totals(store.db())?;
+            seen.extend(store::ledger_keys(
+                store.db(),
+                label,
+                store::LedgerScope::All,
+            )?);
             clients = clients.max(c);
             excerpt += e;
             whole += w;
             intact = intact && store::ledger_break(store.db())?.is_none();
         }
+        let queries = seen.len() as i64;
         // Summed across stores the same way the totals are, and reported with
         // the denominators that make them readable: a ratio on its own is a
         // marketing number, and the Ledger page is told not to draw one.
         let mut net = 0;
-        let (mut credited, mut total) = (0, 0);
         let mut measured = true;
+        let mut credited_keys: std::collections::BTreeSet<String> = Default::default();
+        let mut estimated_keys: std::collections::BTreeSet<String> = Default::default();
         let mut by_client: std::collections::BTreeMap<String, i64> = Default::default();
-        for (_, store) in fleet.each() {
+        // The newest rows across every store, merged, for the table this page
+        // owes the CLI's `semlith ledger --last 20`. Read here rather than
+        // from a second route so the tiles and the rows cannot disagree.
+        let mut rows: Vec<Value> = Vec::new();
+        for (label, store) in fleet.each() {
             let savings = store::ledger_savings(store.db())?;
             net += savings.net;
-            credited += savings.credited;
-            total += savings.total;
             measured = measured && savings.measured;
+            credited_keys.extend(store::ledger_keys(
+                store.db(),
+                label,
+                store::LedgerScope::Credited,
+            )?);
+            estimated_keys.extend(store::ledger_keys(
+                store.db(),
+                label,
+                store::LedgerScope::Estimated,
+            )?);
             for (client, count) in store::ledger_clients(store.db())? {
                 *by_client.entry(client).or_default() += count;
             }
+            for row in store::retrievals(store.db(), LEDGER_ROWS)? {
+                rows.push(json!({
+                    "at": row.at,
+                    // Local time with the offset, the same string `semlith
+                    // ledger` prints. One dataset, one clock.
+                    "when": crate::clock::local_stamp(row.at),
+                    "store": label,
+                    "client": row.client,
+                    "query": row.query,
+                    "hits": row.hits,
+                    "ms": row.micros / 1000,
+                    "excerpt_tokens": row.excerpt_tokens,
+                    "whole_file_tokens": row.whole_file_tokens,
+                    "query_id": row.query_id,
+                }));
+            }
         }
-        let coverage = if total == 0 {
+        rows.sort_by_key(|row| std::cmp::Reverse(row["at"].as_i64().unwrap_or(0)));
+        rows.truncate(LEDGER_ROWS);
+        let credited = credited_keys.len() as i64;
+        let measured = measured && estimated_keys.is_empty();
+        let coverage = if queries == 0 {
             0
         } else {
-            credited * 100 / total
+            credited * 100 / queries
         };
         let ratio = (excerpt > 0).then(|| whole as f64 / excerpt as f64);
         Ok(json!({
@@ -580,9 +707,46 @@ fn ledger(state: &Arc<State>) -> Response {
             "coverage": coverage,
             "tier": if measured && credited > 0 { "measured" } else { "modelled" },
             "by_client": by_client,
+            "rows": rows,
+            // Rows written before this version were one per open store, so the
+            // figures they contribute to may be over-counted. Said on the page
+            // rather than corrected in place: the chain is not rewritten.
+            "legacy_rows": rows.iter().any(|row| {
+                row["query_id"].as_str().unwrap_or_default().is_empty()
+            }),
         }))
     })
 }
+
+/// Notes fastembed's catalogue gets wrong about its own models.
+///
+/// These strings are shown in semlith's UI, beside a model the user is invited
+/// to choose between, so they are semlith's statements whatever their origin.
+/// Four of them described a different model than the row they sat on: two
+/// called a base model large, two called an English-only model multilingual,
+/// and one called itself the default when semlith's default is granite.
+///
+/// Keyed on the name the row shows. A model whose upstream note is right is
+/// not listed, so this table stays the list of known errors rather than a
+/// second catalogue that has to be kept in step.
+const MODEL_NOTES: &[(&str, &str)] = &[
+    (
+        "BGEBaseENV15Q",
+        "Quantized v1.5 release of the base English model",
+    ),
+    (
+        "GTEBaseENV15",
+        "Base English embedding model from Alibaba DAMO Academy",
+    ),
+    (
+        "GTEBaseENV15Q",
+        "Quantized base English embedding model from Alibaba DAMO Academy",
+    ),
+    (
+        "BGESmallENV15",
+        "Fast and small English model from BAAI. Not the one semlith builds a store with unless it is asked for",
+    ),
+];
 
 fn models() -> Response {
     let mut out = vec![
@@ -590,6 +754,10 @@ fn models() -> Response {
             "name": embed::GRANITE_NAME,
             "dim": 384,
             "description": "default. IBM Granite R2 small, int8, English",
+            // The repository it is fetched from, which is also how its cache
+            // directory is named — so the model semlith actually runs shows
+            // its size like every other cached model rather than a dash.
+            "code": embed::GRANITE_REPO,
         }),
         // Not a choice, so it is listed apart from the models a store can be
         // built with: both halves of it are loaded together, on the first
@@ -602,10 +770,16 @@ fn models() -> Response {
         }),
     ];
     for info in TextEmbedding::list_supported_models() {
+        let name = info.model.to_string();
+        let description = MODEL_NOTES
+            .iter()
+            .find(|(model, _)| *model == name)
+            .map(|(_, note)| (*note).to_string())
+            .unwrap_or_else(|| info.description.clone());
         out.push(json!({
-            "name": info.model.to_string(),
+            "name": name,
             "dim": info.dim,
-            "description": info.description,
+            "description": description,
             "code": info.model_code,
         }));
     }
@@ -802,35 +976,55 @@ fn dirs(request: &Request) -> Response {
     };
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
+        // Dot-entries are noise in a corpus picker, with one exception: a
+        // `.semlith` directory is the thing "Adopt existing .semlith" adopts,
+        // and hiding it meant nothing in the listing told an adoptable folder
+        // from any other — while the feature named after it could not reach
+        // it at all.
+        if name.starts_with('.') && name != crate::home::LOCAL_DIR {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let path = entry.path();
         entries.push(json!({
             "name": name,
-            "path": entry.path().display().to_string(),
+            "path": crate::plain(&path.display().to_string()),
             "dir": is_dir,
+            // Whether pointing adopt at this folder would work: it either is a
+            // store, or holds one at `.semlith`.
+            "adoptable": is_dir && (is_store(&path) || is_store(&path.join(crate::home::LOCAL_DIR))),
         }));
     }
     entries.sort_by(|a, b| {
         let (ad, bd) = (a["dir"].as_bool(), b["dir"].as_bool());
+        // Case-insensitively, because a picker that sinks every lowercase name
+        // below every uppercase one is a picker where `semlith-drive-corpus`
+        // is three screens under `Screen Studio Projects`.
         bd.cmp(&ad).then_with(|| {
-            a["name"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["name"].as_str().unwrap_or(""))
+            let (an, bn) = (
+                a["name"].as_str().unwrap_or(""),
+                b["name"].as_str().unwrap_or(""),
+            );
+            an.to_lowercase()
+                .cmp(&bn.to_lowercase())
+                .then_with(|| an.cmp(bn))
         })
     });
 
     Response::json(&json!({
-        "path": resolved.display().to_string(),
-        "home": home.display().to_string(),
+        "path": crate::plain(&resolved.display().to_string()),
+        "home": crate::plain(&home.display().to_string()),
         "parent": resolved
             .parent()
             .filter(|p| p.starts_with(&home))
-            .map(|p| p.display().to_string()),
+            .map(|p| crate::plain(&p.display().to_string())),
         "entries": entries,
     }))
+}
+
+/// Whether a directory is a semlith store, by the one file that says so.
+fn is_store(dir: &Path) -> bool {
+    dir.join("store.db").exists()
 }
 
 /// What the Privacy page checks: where this process listens, whether it may
@@ -841,7 +1035,7 @@ fn privacy(state: &Arc<State>) -> Response {
         "bind": format!("127.0.0.1:{}", state.server.port()),
         "bind_is_fixed": true,
         "airgap": state.airgap,
-        "model_cache": cache.display().to_string(),
+        "model_cache": crate::plain(&cache.display().to_string()),
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
         "token_header": crate::http::TOKEN_HEADER,
@@ -1139,7 +1333,7 @@ fn register_clients(state: &Arc<State>, request: &Request) -> Response {
 /// user's corpus is (#73).
 fn shown(path: anyhow::Result<PathBuf>) -> String {
     match path {
-        Ok(p) => p.display().to_string(),
+        Ok(p) => crate::plain(&p.display().to_string()),
         Err(e) => format!("unresolved — {e}"),
     }
 }
@@ -1159,7 +1353,7 @@ fn about(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "version": env!("CARGO_PKG_VERSION"),
         "format_version": store::FORMAT_VERSION,
-        "binary": binary.display().to_string(),
+        "binary": crate::plain(&binary.display().to_string()),
         // Measured rather than stated: the size of the file this process was
         // started from.
         "binary_bytes": std::fs::metadata(&binary).map(|m| m.len()).unwrap_or(0),
@@ -1633,7 +1827,7 @@ fn index_runs(state: &Arc<State>) -> Response {
     let runs: Vec<Value> = state
         .stores()
         .iter()
-        .filter_map(|store| store.run_snapshot(admission.position_of(&store.name)))
+        .flat_map(|store| store.run_snapshots(admission.position_of(&store.name)))
         .collect();
     let queue: Vec<Value> = admission
         .waiting()
@@ -1673,13 +1867,17 @@ fn index_log(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(404, &format!("no store called {name} is open"));
     };
     let after = request.query("after").and_then(|v| v.parse::<u64>().ok());
-    let lines = store.log_after(after);
+    // A store can have two runs, so a caller that knows which one it is
+    // reading names it. Without a run, the live one answers — which is what a
+    // caller that knows only a store name means.
+    let run = request.query("run").and_then(|v| v.parse::<u64>().ok());
+    let lines = store.log_after(run, after);
     let last = lines
         .last()
         .and_then(|line| line.get("seq"))
         .and_then(Value::as_u64)
         .or(after);
-    Response::json(&json!({ "store": name, "lines": lines, "cursor": last }))
+    Response::json(&json!({ "store": name, "run": run, "lines": lines, "cursor": last }))
 }
 
 /// The projects directly under a directory, for the Index page's checklist.
@@ -1725,7 +1923,7 @@ fn projects(request: &Request) -> Response {
                 "name": path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                "path": path.display().to_string(),
+                "path": crate::plain(&path.display().to_string()),
                 "repository": repositories,
                 // Shown and unticked rather than hidden, so a user can see
                 // what is already indexed from the same list they choose out
@@ -1737,13 +1935,47 @@ fn projects(request: &Request) -> Response {
         .collect();
 
     Response::json(&json!({
-        "path": resolved.display().to_string(),
-        "home": home.display().to_string(),
+        "path": crate::plain(&resolved.display().to_string()),
+        "home": crate::plain(&home.display().to_string()),
+        // Where "Up" goes, under the same containment rule `/api/dirs` has.
+        // Without it this picker opened at the home directory and could not
+        // leave it, so it could not be pointed at a monorepo anywhere else on
+        // the machine — while the picker beside it navigated freely.
+        "parent": resolved
+            .parent()
+            .filter(|p| p.starts_with(&home))
+            .map(|p| crate::plain(&p.display().to_string())),
         // Repositories where there are any, plain subfolders where there are
         // none. One list either way, so the page has one thing to render.
         "projects": rows,
+        // Everything under here that can be navigated into, which is not the
+        // same list: a folder of folders offers its subfolders as projects,
+        // and a folder of repositories offers none at all.
+        "folders": folders(&resolved),
         "repositories": repositories,
     }))
+}
+
+/// The directories directly under `dir`, for a picker to drill into.
+fn folders(dir: &Path) -> Vec<Value> {
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Value> = listing
+        .flatten()
+        .filter(|entry| {
+            entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                && !entry.file_name().to_string_lossy().starts_with('.')
+        })
+        .map(|entry| {
+            json!({
+                "name": entry.file_name().to_string_lossy().into_owned(),
+                "path": crate::plain(&entry.path().display().to_string()),
+            })
+        })
+        .collect();
+    out.sort_by_key(|row| row["name"].as_str().unwrap_or("").to_lowercase());
+    out
 }
 
 /// Six integers saying which domains have been written.
@@ -1850,6 +2082,8 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(409, &e.to_string()),
     };
     let mut dequeued = 0;
+    let mut removed = 0;
+    let run = body.get("run").and_then(Value::as_u64);
     match body.get("action").and_then(Value::as_str) {
         Some("pause") => store
             .paused
@@ -1858,11 +2092,35 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
             .paused
             .store(false, std::sync::atomic::Ordering::Relaxed),
         Some("stop") => {
+            // A run that has already finished is not one a stop can act on.
+            // It used to be accepted: the confirm dialog promised to undo
+            // everything the run had embedded, nothing visibly happened, and
+            // the store was left carrying a cancellation that killed whatever
+            // ran next. Refusing it here is the half of that fix the caller
+            // can see.
+            if !store.run_live() && state.admission.position_of(&store.name).is_none() {
+                return Response::error(
+                    409,
+                    &format!(
+                        "{} has no run to stop — the last one has already finished. \
+                         Remove its card instead.",
+                        store.name
+                    ),
+                );
+            }
             // The two queues first, in front of the running job: neither has
             // embedded anything, so both are answered from here immediately
             // rather than when the writer eventually reaches them.
             dequeued += state.admission.dequeue(&store.name);
-            dequeued += store.cancel_queued();
+            // Every run taken off the store's queue was already admitted, so
+            // its place among the runs that may go at once is given back here.
+            // Without this a stop before the writer reached the run leaked a
+            // slot, and three of them left the daemon admitting nothing at all.
+            let cancelled = store.cancel_queued();
+            dequeued += cancelled.len();
+            for run in cancelled {
+                state.admission.finish(run);
+            }
             store
                 .cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1884,10 +2142,27 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
                 );
             }
         }
+        // Dismissing a card that has nothing left to say. Not a stop: there is
+        // no run to unwind and nothing in the store changes, which is exactly
+        // why the two must not share a button.
+        Some("remove") => {
+            let Some(id) = run else {
+                return Response::error(400, "remove needs the run to remove");
+            };
+            if !store.remove_run(id) {
+                return Response::error(
+                    409,
+                    &format!("run {id} is not a finished run of {}", store.name),
+                );
+            }
+            removed += 1;
+        }
+        Some("clear") => removed += store.clear_finished_runs(),
         _ => {
             return Response::error(
                 400,
-                "action must be \"pause\", \"resume\", \"stop\" or \"dequeue\"",
+                "action must be \"pause\", \"resume\", \"stop\", \"dequeue\", \"remove\" \
+                 or \"clear\"",
             );
         }
     }
@@ -1896,6 +2171,7 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
         "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
         "dequeued": dequeued,
+        "removed": removed,
     }))
 }
 
@@ -1946,7 +2222,10 @@ fn store_for(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Erro
         home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)?;
     }
 
-    state.open_store(&dir)
+    // The run that indexes it is submitted by the caller a moment from now, so
+    // the watcher holds its catch-up rather than racing that run for the
+    // writer and leaving it reporting a corpus it did not index.
+    state.open_store(&dir, true)
 }
 
 /// Fetch one URL into the store and index what landed, streaming the same
@@ -1988,7 +2267,7 @@ fn add(state: &Arc<State>, request: &Request) -> Response {
         Ok((run, _progress)) => Response::json(&json!({
             "runs": [{ "run": run, "store": store.name }],
             "target": "store",
-            "fetched": fetched.path.display().to_string(),
+            "fetched": crate::plain(&fetched.path.display().to_string()),
             "url": fetched.url,
         })),
         Err(e) => Response::error(409, &e.to_string()),
@@ -2128,7 +2407,7 @@ fn delete_store(state: &Arc<State>, request: &Request) -> Response {
     match state.delete_store(name) {
         Ok(dir) => Response::json(&json!({
             "store": name,
-            "deleted": dir.display().to_string(),
+            "deleted": crate::plain(&dir.display().to_string()),
             "message": format!(
                 "{name} is gone: its vectors, chunks, graph and ledger were deleted and the \
                  registry no longer lists it. The files it indexed are untouched."
@@ -2160,8 +2439,8 @@ fn trust(state: &Arc<State>, request: &Request) -> Response {
     };
     match registry.trust(Path::new(dir)) {
         Ok(dir) => Response::json(&json!({
-            "dir": dir.display().to_string(),
-            "trusted": registry.trusted.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
+            "dir": crate::plain(&dir.display().to_string()),
+            "trusted": registry.trusted.iter().map(|d| crate::plain(&d.display().to_string())).collect::<Vec<_>>(),
             // The daemon opened its stores at startup, so one trusted now joins
             // on the next start — the same answer `/api/adopt` gives, for the
             // same reason.
@@ -2180,6 +2459,16 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, "no path given");
     };
     let dir = PathBuf::from(dir);
+    // The folder that holds the store is as good an answer as the store
+    // itself. The CLI takes the store directory — "usually ./.semlith" — and
+    // the picker hid dot-directories, so the feature called "Adopt existing
+    // .semlith" had no path through the portal that reached one: pointing it
+    // at the folder containing the store failed with "no store.db in it".
+    let dir = if !is_store(&dir) && is_store(&dir.join(crate::home::LOCAL_DIR)) {
+        dir.join(crate::home::LOCAL_DIR)
+    } else {
+        dir
+    };
     // A store this daemon holds the lock on cannot be moved out from under
     // itself, and the error for that should say so rather than be an IO error
     // halfway through a rename.
@@ -2193,7 +2482,7 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
     match home::adopt(&dir, None, None) {
         Ok((name, target)) => Response::json(&json!({
             "name": name,
-            "dir": target.display().to_string(),
+            "dir": crate::plain(&target.display().to_string()),
             // The daemon opened its stores at startup and holds their locks,
             // so a store adopted now joins on the next start. Said plainly
             // rather than left for the user to notice it is not in the list.
@@ -2338,7 +2627,7 @@ fn key(state: &Arc<State>, request: &Request) -> Response {
     // it was run on.
     let updated: Vec<String> = crate::setup::recarry_key(&previous, &fresh)
         .iter()
-        .map(|p| p.display().to_string())
+        .map(|p| crate::plain(&p.display().to_string()))
         .collect();
     Response::json(&json!({
         "key": fresh,
@@ -2480,5 +2769,51 @@ mod tests {
             vec!["a", "b"]
         );
         assert!(strings(&json!({}), "path").is_empty());
+    }
+
+    /// Every path this file hands out is one a person can use.
+    ///
+    /// `std::fs::canonicalize` on Windows returns the verbatim `\\?\C:\...`
+    /// form, which is what the store holds and what the long-path APIs need —
+    /// and what no editor opens, no shell completes and nobody pastes back
+    /// (#74). The rule is that a path is made plain where it is rendered, and
+    /// every route in this file renders into JSON. The store roots were the
+    /// one column that had been missed, which is the column that tells a user
+    /// what a store indexes.
+    #[test]
+    fn every_path_this_file_hands_out_is_plain() {
+        let source = include_str!("routes.rs");
+        let raw: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            // Assembled rather than written, so this test's own predicate is
+            // not a match for itself.
+            .filter(|(_, line)| line.contains(&format!("display(){}", ".to_string()")))
+            .filter(|(_, line)| !line.contains("crate::plain("))
+            // This test's own prose.
+            .filter(|(_, line)| !line.trim_start().starts_with("///"))
+            .map(|(n, line)| (n + 1, line.trim()))
+            .collect();
+        assert!(
+            raw.is_empty(),
+            "these paths go out as JSON without being made plain, so on Windows they carry \
+             the verbatim prefix: {raw:#?}"
+        );
+    }
+
+    /// A correction for a model that no longer exists is a correction that has
+    /// silently stopped applying, and the wrong note comes back.
+    #[test]
+    fn every_corrected_model_note_names_a_model_that_is_listed() {
+        let listed: Vec<String> = TextEmbedding::list_supported_models()
+            .into_iter()
+            .map(|info| info.model.to_string())
+            .collect();
+        for (name, _) in MODEL_NOTES {
+            assert!(
+                listed.iter().any(|model| model == name),
+                "{name} is corrected here and is not in fastembed's catalogue any more"
+            );
+        }
     }
 }

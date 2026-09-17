@@ -1922,6 +1922,26 @@ impl Node {
 /// a whole store — in that order of preference. There is no "everything"
 /// scope, because a force layout over a monorepo is neither drawable nor
 /// readable, and pretending otherwise just produces a hairball.
+/// The most connected symbol across these stores, for a view nobody has scoped.
+///
+/// One candidate per store — `symbols_scoped` already orders by degree — and
+/// then the one with the most edges of the few that came back. Cheap: a
+/// handful of candidates, one edge lookup each.
+fn busiest(stores: &[(&str, &crate::Semlith)]) -> Result<Option<String>> {
+    let mut best: Option<(usize, String)> = None;
+    for (_, store) in stores {
+        let db = store.db();
+        for row in crate::store::symbols_scoped(db, None, 1)? {
+            let degree = crate::store::edges_in(db, &row.name, &[])?.len()
+                + crate::store::edges_out(db, &row.name, &[])?.len();
+            if best.as_ref().is_none_or(|(most, _)| degree > *most) {
+                best = Some((degree, row.name.clone()));
+            }
+        }
+    }
+    Ok(best.filter(|(degree, _)| *degree > 0).map(|(_, name)| name))
+}
+
 pub fn scoped(
     stores: &[(&str, &crate::Semlith)],
     focus: Option<&str>,
@@ -1933,6 +1953,20 @@ pub fn scoped(
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut edges: Vec<serde_json::Value> = Vec::new();
     let mut total = 0usize;
+
+    // With nothing asked for, the busiest symbol's neighbourhood rather than
+    // the busiest `limit` symbols.
+    //
+    // Only edges with both ends drawn are drawn, and the most connected
+    // symbols in a corpus are hubs that each point at many different leaves
+    // and almost never at one another — so "the top two hundred by degree"
+    // came back as two hundred boxes and nought edges. A field of dots is
+    // technically the graph and of no use to anyone looking at it.
+    let chosen_focus = match (focus, prefix) {
+        (None, None) => busiest(stores)?,
+        (focus, _) => focus.map(str::to_string),
+    };
+    let focus = chosen_focus.as_deref();
 
     for (label, store) in stores {
         let db = store.db();
@@ -1976,6 +2010,13 @@ pub fn scoped(
 
     // Only edges whose both ends are drawn. An edge to something off-canvas is
     // not a line anyone can follow.
+    //
+    // Deduplicated across stores. Every store open is asked about every drawn
+    // name, so a symbol two stores both know produced the same edge twice —
+    // and a 20-node subgraph reported 836 edges where the whole 43-node graph
+    // reported 623, which cannot both be true and is not a number anyone can
+    // read.
+    let mut seen: std::collections::HashSet<(usize, usize, String)> = Default::default();
     for (from_name, from_index) in &index {
         for (_, store) in stores {
             for end in crate::store::edges_out(store.db(), from_name, &[])? {
@@ -1983,6 +2024,9 @@ pub fn scoped(
                     continue;
                 };
                 if from_index == to_index {
+                    continue;
+                }
+                if !seen.insert((*from_index, *to_index, end.kind.clone())) {
                     continue;
                 }
                 edges.push(serde_json::json!({

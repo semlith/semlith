@@ -587,16 +587,50 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 /// machine and is not held to this — which is the one asymmetry in the rule,
 /// and it is deliberate.
 pub fn within_boundary(path: &Path, roots: &[PathBuf]) -> bool {
-    let real = crate::canonical(path);
-    if roots
-        .iter()
-        .any(|root| real.starts_with(crate::canonical(root)))
-    {
+    let real = comparable(path);
+    if roots.iter().any(|root| under(&real, &comparable(root))) {
         return true;
     }
+    // The home directory is the fallback for a store that has no roots at all
+    // — a `--store <dir>` the registry has never heard of — and for nothing
+    // else. It used to apply to every store, which made the boundary no
+    // boundary: every store on the machine shares a home, so an agent pointed
+    // at one repository could index another one into it and be allowed. That
+    // is how the `semlith` store came to hold 262 files belonging to
+    // `ultraship`, under a Privacy page that says the roots are enforced.
+    //
     // An unknown home makes this stricter rather than looser: nothing is inside
     // a boundary semlith cannot locate.
-    crate::home::user_home().is_ok_and(|home| real.starts_with(crate::canonical(&home)))
+    roots.is_empty() && crate::home::user_home().is_ok_and(|home| under(&real, &comparable(&home)))
+}
+
+/// A path in the one shape two of them can be compared in.
+///
+/// `crate::canonical` hands back what it was given when the path does not
+/// resolve, and on Windows a path that resolves comes back verbatim —
+/// `\\?\C:\work\api`. So a root that exists and a file that does not were
+/// being compared in two different spellings of the same place, and the file
+/// read as outside a boundary it was inside. That matters more since a store
+/// is confined to its roots: a file missing for a moment would be judged to
+/// belong to another store and its rows dropped.
+fn comparable(path: &Path) -> String {
+    crate::plain(&crate::canonical(path).to_string_lossy())
+}
+
+/// Whether one comparable path is the other or sits under it.
+///
+/// Segment-wise rather than a string prefix: `/work/api-old` starts with
+/// `/work/api` and is not under it.
+fn under(path: &str, root: &str) -> bool {
+    let root = root.trim_end_matches(['/', '\\']);
+    if root.is_empty() {
+        return true;
+    }
+    match path.strip_prefix(root) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('/') || rest.starts_with('\\'),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -735,8 +769,72 @@ mod deny_tests {
         assert!(Denied::Hidden.reason().contains("hidden"));
     }
 
+    /// Two spellings of one place compare equal.
+    ///
+    /// `canonical` returns a path unchanged when it does not resolve, and on
+    /// Windows returns the verbatim `\\?\C:\…` form when it does — so a root
+    /// that exists and a file that does not were compared in two different
+    /// spellings and never matched.
     #[test]
-    fn the_boundary_is_the_roots_and_the_home() {
+    fn a_verbatim_root_and_a_plain_path_are_the_same_place() {
+        // Through `within_boundary`, because the stripping and the comparison
+        // together are the thing under test. None of these paths exists, so
+        // `canonical` hands each back unchanged and what reaches `under` is
+        // exactly the two spellings a Windows machine produces.
+        let plain_root = vec![PathBuf::from(r"C:\work\api")];
+        let verbatim_root = vec![PathBuf::from(r"\\?\C:\work\api")];
+        assert!(within_boundary(
+            Path::new(r"\\?\C:\work\api\src\lib.rs"),
+            &plain_root
+        ));
+        assert!(within_boundary(
+            Path::new(r"C:\work\api\src\lib.rs"),
+            &verbatim_root
+        ));
+        // A sibling whose name begins with the root's is not under it.
+        assert!(!within_boundary(
+            Path::new(r"\\?\C:\work\api-old\lib.rs"),
+            &plain_root
+        ));
+
+        // The segment rule itself, on the form the comparison sees.
+        assert!(under("/work/api/src/lib.rs", "/work/api"));
+        assert!(under("/work/api", "/work/api"));
+        assert!(under("/work/api/", "/work/api"));
+        assert!(!under("/work/api-old/src/lib.rs", "/work/api"));
+    }
+
+    #[test]
+    fn a_store_with_roots_is_confined_to_them() {
+        let roots = vec![PathBuf::from("/work/api")];
+        assert!(within_boundary(Path::new("/work/api/src/lib.rs"), &roots));
+
+        // A machine with no home semlith can locate — a Windows runner, which
+        // sets no HOME — is one where the fallback has nothing to fall back
+        // to, and the rule under test is the roots one either way.
+        let Ok(home) = crate::home::user_home() else {
+            assert!(!within_boundary(
+                Path::new("/somewhere/else/lib.mjs"),
+                &roots
+            ));
+            return;
+        };
+        let elsewhere = home.join("elsewhere").join("lib.mjs");
+
+        // The home directory is not a licence to index into a store that has
+        // roots of its own. This is finding 1.1 of the 2026-09-17 drive: every
+        // store on a machine shares a home, so treating it as inside every
+        // boundary made the boundary no boundary at all.
+        assert!(!within_boundary(&elsewhere, &roots));
+
+        // With no roots recorded at all, the home directory is the boundary,
+        // because otherwise a `--store` the registry never saw could index
+        // nothing whatever.
+        assert!(within_boundary(&elsewhere, &[]));
+    }
+
+    #[test]
+    fn a_path_under_no_root_is_outside_the_boundary() {
         let roots = vec![PathBuf::from("/work/api")];
         assert!(within_boundary(Path::new("/work/api/src/lib.rs"), &roots));
         assert!(within_boundary(Path::new("/work/api"), &roots));

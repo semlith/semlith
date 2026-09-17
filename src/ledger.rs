@@ -97,7 +97,28 @@ impl Counter<'_> {
 /// tokenizer.
 pub const MODEL: &str = "model";
 
-/// Record one search-shaped retrieval into every store that answered it.
+/// An id for one retrieval, shared by every row it writes.
+///
+/// A cross-store search writes a row in each store that answered it, because
+/// that is what keeps each store's hash chain its own and its token figures
+/// about its own hits. Without something tying those rows together they are
+/// counted as several retrievals, which is how the Ledger page came to report
+/// sixty-three queries for about a dozen searches — every figure on it
+/// multiplied by the number of stores that happened to be open.
+///
+/// The clock and a counter, because two retrievals in the same nanosecond are
+/// possible and two in the same nanosecond in the same process are not.
+fn query_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{at:x}-{:x}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Record one search-shaped retrieval into every store that answered it./// Record one search-shaped retrieval into every store that answered it.
 ///
 /// `whole_file_tokens` is what reading those files whole would have cost,
 /// which is the honest denominator: the ratio is measured against a real
@@ -116,20 +137,38 @@ pub fn search(
     if !enabled() {
         return;
     }
-    let excerpt: i64 = hits.iter().map(|h| counter.count(&h.text)).sum();
+    let id = query_id();
 
+    // Whether the hits know which store they came from. The fleet labels them
+    // when it merges, and a single-store search does not — so `None` means
+    // "the one store this came from", not "every store". Read once for the
+    // answer rather than once per hit per store: treating an unlabelled hit as
+    // belonging to whichever store was being considered is what wrote the same
+    // row into all six of them.
+    let labelled = hits.iter().any(|h| h.store.is_some());
+
+    let mut first = true;
     for (label, store) in fleet.each() {
         // Only the stores this answer actually came from, so a search across
         // three stores does not write three identical rows. A search that
         // found nothing came from none of them and is recorded once, against
         // the first, so the zero-hit row exists to be counted.
-        let mine: Vec<&crate::Hit> = hits
-            .iter()
-            .filter(|h| h.store.as_deref().is_none_or(|s| s == label))
-            .collect();
+        let mine: Vec<&crate::Hit> = if labelled {
+            hits.iter()
+                .filter(|h| h.store.as_deref() == Some(label))
+                .collect()
+        } else if first {
+            hits.iter().collect()
+        } else {
+            Vec::new()
+        };
+        first = false;
         if mine.is_empty() && !hits.is_empty() {
             continue;
         }
+        // This store's excerpt cost, not the whole answer's. Both sides of the
+        // ratio describe the same hits or the row describes nothing.
+        let excerpt: i64 = mine.iter().map(|h| counter.count(&h.text)).sum();
         let paths: std::collections::BTreeSet<&str> =
             mine.iter().map(|h| h.path.as_str()).collect();
         let whole: i64 = paths
@@ -151,6 +190,7 @@ pub fn search(
                 whole_file_tokens: whole,
                 stale_hits: stale,
                 tokenizer: counter.label(),
+                query_id: &id,
             },
         );
         if hits.is_empty() {
@@ -201,6 +241,7 @@ pub fn reply(
                 whole_file_tokens: whole,
                 stale_hits: body.matches("· stale").count() as i64,
                 tokenizer: counter.label(),
+                query_id: &query_id(),
             },
         );
     }
@@ -255,6 +296,7 @@ pub fn graph(
         return;
     }
     let counter = fleet.counter();
+    let id = query_id();
     for (_, store) in fleet.each() {
         let whole = match store::grep_cost(store.db(), name) {
             Ok(bytes) => counter.count_bytes(bytes as u64),
@@ -279,6 +321,7 @@ pub fn graph(
                 // A graph answer quotes no file, so none of it can be stale.
                 stale_hits: 0,
                 tokenizer: counter.label(),
+                query_id: &id,
             },
         );
     }
