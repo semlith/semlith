@@ -1992,8 +1992,19 @@ fn tend(
         &roots,
         debounce,
         stop,
-        // A queued job is what the catch-up steps aside for.
-        &|| store.queue_depth() > 0,
+        // A queued job is what the catch-up steps aside for — and a run
+        // waiting for admission counts, though it is on no queue of this
+        // store's yet.
+        //
+        // Without the second half, the admission queue bounds nothing. A run
+        // that has not been admitted is invisible here, so this store's
+        // watcher sees an idle store and indexes the whole root itself: three
+        // folders submitted with runs-at-once at 1 became one admitted run and
+        // two watcher catch-ups, all three indexing at once. The work was done
+        // and the store was correct, which is why it took a measurement to
+        // notice — the run that was finally admitted then reported nothing
+        // indexed, because its watcher had already done it.
+        &|| store.queue_depth() > 0 || admission.position_of(&store.name).is_some(),
         |progress| {
             use watch::Progress;
             match progress {
