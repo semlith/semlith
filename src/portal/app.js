@@ -218,6 +218,7 @@ const ICONS = {
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z|M14 3v5h5",
   up: "M5 12h14|M11 6l-6 6 6 6",
   alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
+  monitor: "M4 5h16v10H4z|M9 19h6|M12 15v4",
   moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
   copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
   // Three filled dots, as circles rather than as dotted strokes.
@@ -1312,6 +1313,53 @@ function graphCanvas(options) {
     alpha = Math.max(alpha, to === undefined ? 0.35 : to);
   }
 
+  /* Push overlapping labels apart, after the springs have had their say.
+   *
+   * The force layout solves for edge length and node repulsion and knows
+   * nothing about how wide a label is, so in the default view
+   * `the_queue_admits_in_subm…` sat on top of `a_dequeued_run_is_answere…` and
+   * one label was worn down to `…as`. This works on the boxes the last paint
+   * measured, which is the only place their real width exists.
+   *
+   * ponytail: O(n²) over every pair, four passes. The node budget is 180, so
+   * that is 130k comparisons once per layout change; a grid would be the
+   * upgrade if the budget ever rises. */
+  function separate() {
+    const box = wrap.getBoundingClientRect();
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 240);
+    for (let pass = 0; pass < 4; pass++) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i];
+          const b = nodes[j];
+          // Before the first paint there are no measurements, and a guess
+          // here would push the layout around for no reason.
+          if (!a.w || !b.w) return;
+          const dx = (b.x - a.x) * w;
+          const dy = (b.y - a.y) * h;
+          const wantX = (a.w + b.w) / 2 + 8;
+          const wantY = (a.h + b.h) / 2 + 6;
+          const overX = wantX - Math.abs(dx);
+          const overY = wantY - Math.abs(dy);
+          // Boxes only collide when they overlap on both axes.
+          if (overX <= 0 || overY <= 0) continue;
+          // Along whichever axis needs the smaller move, so a label is nudged
+          // aside rather than thrown across the canvas.
+          if (overX / w < overY / h) {
+            const push = ((dx >= 0 ? 1 : -1) * overX) / w / 2;
+            a.x = Math.min(0.94, Math.max(0.06, a.x - push));
+            b.x = Math.min(0.94, Math.max(0.06, b.x + push));
+          } else {
+            const push = ((dy >= 0 ? 1 : -1) * overY) / h / 2;
+            a.y = Math.min(0.92, Math.max(0.08, a.y - push));
+            b.y = Math.min(0.92, Math.max(0.08, b.y + push));
+          }
+        }
+      }
+    }
+  }
+
   /** A rounded rectangle, the shape every symbol is drawn as. */
   function box(ctx, x, y, w, h, r) {
     ctx.beginPath();
@@ -1558,11 +1606,20 @@ function graphCanvas(options) {
         step(Math.max(box.width, 240), Math.max(box.height, 240));
       }
       settled = true;
+      // Once for the measurements, then the labels are pushed off each other
+      // using them, then again to draw the result.
+      paint();
+      separate();
       paint();
     },
-    /** Draw only the edge kinds asked for. Returns how many are drawn. */
+    /** Draw only the edge kinds asked for. Returns how many are drawn.
+     *
+     * An empty set means no kind is selected, which means no edges — not
+     * every edge. The old "no filter selected means no filter" fallback was
+     * indistinguishable from all six chips on, and the summary line asserted
+     * a number that did not describe what was drawn. */
     filter(kinds) {
-      drawn = !kinds || !kinds.size ? edges : edges.filter((e) => kinds.has(e.kind));
+      drawn = kinds ? edges.filter((e) => kinds.has(e.kind)) : edges;
       // Counted over what is drawn rather than over what was fetched: a hover
       // card that says "3 in" beside one line on the canvas is describing a
       // graph the reader cannot see, and the reader believes the card.
@@ -1593,6 +1650,58 @@ function graphCanvas(options) {
       return true;
     },
     counts: () => ({ nodes: nodes.length, edges: drawn.length }),
+
+    /** The symbol worth landing on: the one with the most edges that were
+     * actually found rather than guessed.
+     *
+     * The unscoped view used to open on whatever had the most edges of any
+     * kind, which in a Rust codebase is `new` — every type has one, and its
+     * neighbourhood is hundreds of inferred edges to unrelated code. A hub of
+     * extracted and resolved edges is a hub of the corpus rather than a hub of
+     * one very common word. */
+    best() {
+      const score = new Map();
+      for (const edge of drawn) {
+        if (edge.confidence !== "extracted" && edge.confidence !== "resolved") continue;
+        for (const end of [edge.from, edge.to]) {
+          score.set(end, (score.get(end) || 0) + 1);
+        }
+      }
+      let pick = null;
+      let most = 0;
+      for (const [index, count] of score) {
+        if (count <= most || !nodes[index]) continue;
+        most = count;
+        pick = nodes[index].name;
+      }
+      return pick;
+    },
+
+    /** Spread the layout back out to fill the frame. */
+    fit() {
+      if (!nodes.length) return;
+      const xs = nodes.map((node) => node.x);
+      const ys = nodes.map((node) => node.y);
+      const spread = (values, low, high) => {
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const span = max - min;
+        // Everything in one spot: nothing to spread, and dividing by the span
+        // would be dividing by zero.
+        if (span < 0.001) return () => (low + high) / 2;
+        return (value) => low + ((value - min) / span) * (high - low);
+      };
+      const toX = spread(xs, 0.08, 0.92);
+      const toY = spread(ys, 0.1, 0.9);
+      for (const node of nodes) {
+        node.x = toX(node.x);
+        node.y = toY(node.y);
+        node.vx = 0;
+        node.vy = 0;
+      }
+      separate();
+      paint();
+    },
     running: () => running,
     toggle() {
       running = !running;
@@ -1674,6 +1783,21 @@ async function graphView() {
       const on = canvas.toggle();
       e.currentTarget.textContent = on ? "Pause" : "Resume";
     },
+  });
+
+  /* Beside Pause, which used to be the only control the canvas had: a reader
+   * who dragged a node off the edge had no way back short of reloading. */
+  const fit = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Fit",
+    onclick: () => canvas.fit(),
+  });
+  const reset = el("button", {
+    class: "button ghost small",
+    type: "button",
+    text: "Reset",
+    onclick: () => load({}),
   });
 
   /* The label has to come from what the canvas is actually doing, not from a
@@ -1838,9 +1962,13 @@ async function graphView() {
           }),
         ),
       ),
-      ends("Callers", data.callers.map(edge), "Nothing in the graph calls this."),
+      // "Incoming", because that is what the list holds. Under a heading
+      // reading CALLERS it carried a `defines` edge and a `references` edge,
+      // neither of which is a call — the section is every edge that points at
+      // this symbol and now says so.
+      ends("Incoming", data.callers.map(edge), "Nothing in the graph points at this."),
       ends(
-        "Callees",
+        "Outgoing",
         data.callees.map(edge),
         "A leaf, as far as the extracted edges go.",
         // Targets the store holds no definition for. Left out by default,
@@ -1884,12 +2012,11 @@ async function graphView() {
       el(
         "div",
         { class: "rail-actions" },
-        el("a", {
+        el("button", {
           class: "button secondary small",
-          href: "#search",
-          text: "Chunks it lives in",
-          onclick: (e) => {
-            e.preventDefault();
+          type: "button",
+          text: "Ask the index about it",
+          onclick: () => {
             state.pendingQuery = node.name;
             go("search");
           },
@@ -1922,7 +2049,7 @@ async function graphView() {
     counts();
     // A focused view arrives with its centre chosen, so the rail says something
     // before the first click rather than asking for one.
-    const centre = params && params.name;
+    const centre = (params && params.name) || canvas.best();
     if (centre && canvas.pick(centre)) return;
     blank("Pick a node to see what calls it and what it calls.");
   }
@@ -1931,16 +2058,31 @@ async function graphView() {
     load({ name, limit: "45" });
   }
 
+  /** Apply whatever is in the scope box. */
+  function applyScope() {
+    const value = scopeInput.value.trim();
+    if (!value) return load({});
+    // A path fragment scopes; anything else is read as a symbol to centre on.
+    load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
+  }
+
   const scopeInput = el("input", {
     type: "search",
     placeholder: "Scope to a path, or find a symbol",
+    // Every other control on this page applies on a click, so a text field
+    // that silently waits for Enter reads as broken. It still takes Enter, and
+    // now it also says so and has a button.
+    "aria-describedby": "graph-scope-hint",
     onkeydown: (e) => {
       if (e.key !== "Enter") return;
-      const value = e.currentTarget.value.trim();
-      if (!value) return load({});
-      // A path fragment scopes; anything else is read as a symbol to centre on.
-      load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
+      applyScope();
     },
+  });
+  const scopeButton = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Scope",
+    onclick: () => applyScope(),
   });
 
   const kindChips = EDGE_KINDS.map((kind) =>
@@ -1955,6 +2097,7 @@ async function graphView() {
         if (on) kinds.add(kind);
         else kinds.delete(kind);
         canvas.filter(kinds);
+        canvas.fit();
         counts();
       },
     }),
@@ -1985,7 +2128,7 @@ async function graphView() {
       pageHead(
         "Graph",
         "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
-        { actions: [el("div", { class: "filters" }, kindChips), pause] },
+        { actions: [el("div", { class: "filters" }, kindChips), fit, reset, pause] },
       ),
       el(
         "div",
@@ -1995,6 +2138,12 @@ async function graphView() {
           { class: "graph-scope" },
           icon(ICONS.search, 16),
           labelled("graph-scope", "Scope the graph", scopeInput),
+          scopeButton,
+          el("span", {
+            class: "meta",
+            id: "graph-scope-hint",
+            text: "Enter applies it",
+          }),
         ),
         storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
       ),
@@ -3489,8 +3638,30 @@ async function searchView() {
     el("span", { class: "segs" }, preferPills),
   );
 
-  const langField = el("input", { class: "bare", size: "8", placeholder: "any", onchange: () => run() });
-  const pathField = el("input", { class: "bare", size: "8", placeholder: "any", onchange: () => run() });
+  /* Re-run as the filter is typed, like every other control on this page.
+   *
+   * `change` alone fires on blur, so a reader who typed a glob and looked at
+   * the rows was looking at results from before the glob — with the filter
+   * field showing the new value and nothing saying the two disagreed. */
+  let filterTimer = 0;
+  const rerun = () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => run(), 250);
+  };
+  const langField = el("input", {
+    class: "bare",
+    size: "8",
+    placeholder: "any",
+    oninput: rerun,
+    onchange: () => run(),
+  });
+  const pathField = el("input", {
+    class: "bare",
+    size: "8",
+    placeholder: "any",
+    oninput: rerun,
+    onchange: () => run(),
+  });
   const langDial = el(
     "div",
     { class: "dial" },
@@ -3504,7 +3675,14 @@ async function searchView() {
     labelled("search-path", "Only paths matching this glob", pathField),
   );
 
-  const budgetField = el("input", { class: "bare", size: "5", value: "1500", inputmode: "numeric", onchange: () => run() });
+  const budgetField = el("input", {
+    class: "bare",
+    size: "5",
+    value: "1500",
+    inputmode: "numeric",
+    oninput: rerun,
+    onchange: () => run(),
+  });
   const budgetDial = el(
     "div",
     { class: "dial" },
@@ -3522,7 +3700,9 @@ async function searchView() {
 
   const input = el("input", {
     type: "search",
-    placeholder: "Ask it something",
+    // The same words as the launcher in the top bar. Two phrasings for one
+    // destination reads as two destinations.
+    placeholder: "Ask the index a question",
     oninput: () => {
       // The hint is about the query in the box. An empty box has no shape.
       if (!input.value.trim()) shapeHint.hidden = true;
@@ -6122,7 +6302,13 @@ async function privacyView() {
             el("span", { class: "card-title", text: "Rules" }),
             el("span", { class: "spacer" }),
             pill(
-              (data.rules || []).every((r) => r.ok) ? "all holding" : "check the rows",
+              // What the badge is actually about. "All holding" read as a
+              // statement about everything semlith is storing, three lines
+              // above a scan that had found a private key in a store — the
+              // rules are forward-looking, and this now says so.
+              (data.rules || []).every((r) => r.ok)
+                ? "holding for new writes"
+                : "check the rows",
               (data.rules || []).every((r) => r.ok) ? "good" : "warn",
             ),
           ),
@@ -6139,13 +6325,15 @@ async function privacyView() {
           el(
             "div",
             { class: "head" },
-            el("span", { class: "card-title", text: "Scan" }),
+            // The heading said "Scan" and the button beside it said "Scan",
+            // which rendered as the word twice.
+            el("span", { class: "card-title", text: "What is already stored" }),
             el("span", { class: "spacer" }),
             scanButton,
           ),
           el("p", {
             class: "subtitle",
-            text: "Every file a store is still holding that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
+            text: "The rules above decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
           }),
           scanBox,
           scanNote,
@@ -6498,28 +6686,46 @@ function logoImage(size) {
   });
 }
 
+/** The three states the control offers, in the order it cycles them. */
+const THEMES = ["system", "light", "dark"];
+
 function theme(next) {
-  document.documentElement.setAttribute("data-theme", next);
+  // "system" is the absence of a choice, which is what the stylesheet's
+  // prefers-color-scheme block reads. Before this the first click wrote a
+  // choice and there was no way back to following the OS without clearing the
+  // site's storage.
+  if (next === "system") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", next);
+  }
   state.theme = next;
   try {
-    localStorage.setItem("semlith-theme", next);
+    if (next === "system") localStorage.removeItem("semlith-theme");
+    else localStorage.setItem("semlith-theme", next);
   } catch (_) {
     /* a private window refuses storage; the toggle still works for this run */
   }
   for (const img of document.querySelectorAll("img.logo")) {
-    img.src = next === "dark" ? "logo-dark.svg" : "logo.svg";
+    img.src = isDark() ? "logo-dark.svg" : "logo.svg";
   }
   paintThemeButton();
 }
 
-/** The toggle shows where it goes, not where you are. */
+/** The control shows where it goes, not where you are. */
 function paintThemeButton() {
   const button = shell.themeButton;
   if (!button) return;
-  const toDark = !isDark();
-  fill(button, icon(toDark ? ICONS.moon : ICONS.sun));
-  button.setAttribute("aria-label", toDark ? "Switch to dark" : "Switch to light");
-  button.setAttribute("title", toDark ? "Switch to dark" : "Switch to light");
+  const next = THEMES[(THEMES.indexOf(state.theme || "system") + 1) % THEMES.length];
+  const label = {
+    system: "Follow the system theme",
+    light: "Switch to light",
+    dark: "Switch to dark",
+  }[next];
+  const glyph = { system: ICONS.monitor, light: ICONS.sun, dark: ICONS.moon }[next];
+  fill(button, icon(glyph));
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
 }
 
 // ----------------------------------------------------------------- shell
@@ -6544,7 +6750,11 @@ function buildShell() {
   const themeButton = el("button", {
     class: "icon-button",
     type: "button",
-    onclick: () => theme(isDark() ? "light" : "dark"),
+    // system → light → dark → system. Three states rather than two, because
+    // "follow the system" is one of them and the two-state toggle could not
+    // return to it.
+    onclick: () =>
+      theme(THEMES[(THEMES.indexOf(state.theme || "system") + 1) % THEMES.length]),
   });
   shell.themeButton = themeButton;
   paintThemeButton();
@@ -6764,7 +6974,7 @@ async function boot() {
   if (saved === "dark" || saved === "light") {
     theme(saved);
   } else {
-    state.theme = isDark() ? "dark" : "light";
+    state.theme = "system";
   }
 
   wireTips();
