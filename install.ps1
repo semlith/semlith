@@ -96,7 +96,36 @@ try {
     }
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
     $installed = Join-Path $binDir 'semlith.exe'
-    Move-Item -Path $exe -Destination $installed -Force
+
+    # Rename first, replace second: the same sequence `semlith upgrade` uses
+    # (`src/upgrade.rs`) and for the same reason. Windows will not let a file
+    # be written over an executable that is already there, and will refuse
+    # outright while a `semlith start` is holding it open; what it will always
+    # allow is renaming that executable out of the way. A single
+    # `Move-Item -Force` therefore worked on every clean machine and failed on
+    # every re-install with "Cannot create a file when that file already
+    # exists", which is the one case CI never sees because a runner is new.
+    $old = "$installed.old"
+    if (Test-Path -LiteralPath $installed) {
+        Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $installed -Destination $old -Force
+    }
+    try {
+        Move-Item -LiteralPath $exe -Destination $installed -Force
+    }
+    catch {
+        # Put back what was working before giving up: a failed install must not
+        # be the reason a machine has no semlith at all.
+        if (Test-Path -LiteralPath $old) {
+            Move-Item -LiteralPath $old -Destination $installed -Force
+        }
+        throw
+    }
+    # The old binary goes once it is no longer the running one. A daemon still
+    # holding it keeps it until the next install, exactly as `semlith upgrade`
+    # leaves `semlith.old` behind.
+    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue
+
     Write-Information "Installed $installed" -InformationAction Continue
 }
 finally {

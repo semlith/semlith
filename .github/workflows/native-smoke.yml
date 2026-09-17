@@ -127,12 +127,21 @@ jobs:
         shell: bash
         run: |
           sh install.sh
+          # Twice. A runner is a new machine, so installing once only ever
+          # tests a first install -- and the installer's hard case is the
+          # second one, where the binary it is replacing is already there.
+          sh install.sh
           echo "$HOME/.semlith/bin" >> "$GITHUB_PATH"
 
       - name: Install the release the way a user does
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
         shell: pwsh
         run: |
+          .\install.ps1
+          # Twice, and on Windows this is the one that matters: a single
+          # Move-Item cannot replace an executable that is already there, so
+          # every re-install failed with "Cannot create a file when that file
+          # already exists" while every clean install passed.
           .\install.ps1
           Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
 
