@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.20.2] - 2026-09-17
+## [0.20.2] - 2026-09-18
 
 A full manual drive of every portal page on 2026-09-17 — every button, filter,
 picker, toggle, sort, index run, search, graph interaction, agent action,
