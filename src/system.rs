@@ -286,10 +286,10 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
         index_memory_mb: Derivation {
             value: index_memory,
             reason: format!(
-                "{index_memory} MiB a store: the {} MiB floor, doubled once past 16 GiB beyond the reserve and again past 64 GiB, and {} is free beyond the reserve out of the {} free now",
+                "{index_memory} MiB a store: the {} MiB floor, doubled once past 16 GiB beyond the reserve and again past 64 GiB, and {} beyond the reserve out of the {} free now",
                 crate::index::INDEX_MEMORY_MB,
-                gib(headroom),
-                gib(machine.available_memory_mb),
+                beyond(headroom),
+                size(machine.available_memory_mb),
             ),
         },
     }
@@ -338,6 +338,29 @@ fn runs_phrase(runs: usize) -> String {
 fn gib(mb: u64) -> String {
     let text = format!("{:.1}", mb as f64 / 1024.0);
     format!("{} GiB", text.trim_end_matches(".0"))
+}
+
+/// A size in the unit it is actually big enough for.
+///
+/// `gib` truncates: 512 MiB reads as "0.5 GiB" and 40 MiB reads as "0 GiB",
+/// which is how the panel came to say "0 GiB is free" three lines under
+/// "1,383 MiB free now". Under a gibibyte the honest unit is the one the
+/// header is already using.
+fn size(mb: u64) -> String {
+    if mb < 1024 {
+        format!("{mb} MiB")
+    } else {
+        gib(mb)
+    }
+}
+
+/// How much is free beyond the reserve, said so that none is not a number.
+fn beyond(headroom_mb: u64) -> String {
+    if headroom_mb == 0 {
+        "none is free".to_string()
+    } else {
+        format!("{} is free", size(headroom_mb))
+    }
 }
 
 #[cfg(test)]

@@ -1233,6 +1233,12 @@ function graphCanvas(options) {
   const wrap = el("div", { class: "graph-stage" }, canvas);
   let nodes = [];
   let edges = [];
+  /* Every symbol the scope holds, which is not the same as the number drawn:
+   * a force layout is readable at dozens of nodes and a hairball at hundreds,
+   * so the view is capped. Saying only what is drawn let the summary read as a
+   * statement about the whole graph, and then scoping to a symbol could report
+   * more edges than "the whole graph" had. */
+  let total = 0;
   let drawn = [];
   let selected = null;
   let near = new Set();
@@ -1638,6 +1644,7 @@ function graphCanvas(options) {
         };
       });
       edges = data.edges || [];
+      total = data.total || 0;
       selected = null;
       near = new Set();
       hovered = null;
@@ -1693,7 +1700,7 @@ function graphCanvas(options) {
       if (onPick) onPick(nodes[index]);
       return true;
     },
-    counts: () => ({ nodes: nodes.length, edges: drawn.length }),
+    counts: () => ({ nodes: nodes.length, edges: drawn.length, total }),
 
     /** The symbol worth landing on: the one with the most edges that were
      * actually found rather than guessed.
@@ -1853,8 +1860,12 @@ async function graphView() {
   }
 
   function counts() {
-    const { nodes, edges } = canvas.counts();
-    meta.textContent = `${n(nodes)} symbols · ${n(edges)} edges`;
+    const { nodes, edges, total } = canvas.counts();
+    // What is drawn, out of what the scope holds. The cap is the reason the
+    // two differ, and a summary that mentioned only the first read as a count
+    // of the whole graph.
+    const shown = total && total > nodes ? `${n(nodes)} of ${n(total)} symbols` : `${n(nodes)} symbols`;
+    meta.textContent = `${shown} · ${n(edges)} edges`;
   }
 
   function blank(message) {
@@ -2510,7 +2521,15 @@ function clientBreakdown(byClient) {
  * as "add to alpha" in the Index dropdown and as a chip on Search and Graph,
  * which is the same mechanism that put one store's files into another. */
 function liveStores() {
-  return state.stores.filter((store) => !store.missing && !store.unopened);
+  return state.stores.filter((store) => {
+    if (store.missing || store.unopened) return false;
+    // A store whose every registered root has gone is a store nothing can
+    // sensibly be indexed into: the corpus it is about is not on the machine.
+    // A store with no roots recorded at all is a different thing — a `--store`
+    // directory the registry never saw — and is offered as it always was.
+    const roots = store.roots || [];
+    return !roots.length || roots.some((root) => root.present);
+  });
 }
 
 /** Read the store list into `state`, so every view agrees on how many exist. *//** Read the store list into `state`, so every view agrees on how many exist. */
@@ -2951,10 +2970,15 @@ async function storesView() {
           // process is writing it. One vocabulary in this column: every value
           // here is a last write or the reason there is none to read, and a
           // store's own state lives in its own badge beside its name.
-          if (s.missing || s.unopened) return el("span", { class: "meta", text: "—" });
+          // One vocabulary: either a time, or the em dash that means there is
+          // no time to show. Why there is none — the store is missing, or it
+          // was never written to — lives in its own badge beside the name,
+          // where it is a fact about the store rather than about this column.
           // Read from the store rather than from this daemon's memory of its
           // own session, so a store written yesterday no longer says "never".
-          return s.last_write ? pill(when(s.last_write), "good") : pill("no writes yet");
+          return s.last_write
+            ? pill(when(s.last_write), "good")
+            : el("span", { class: "meta", text: "—" });
         },
       },
       {
@@ -3044,7 +3068,14 @@ async function storesView() {
                   el(
                     "div",
                     { class: "row" },
-                    el("span", { class: "at", text: clock(e.at) }),
+                    // The whole stamp on the element as well as in it: the
+                    // zone offset is what makes this line to the second, and a
+                    // phone has no room for both the time and the offset.
+                    el("span", {
+                      class: "at",
+                      text: clock(e.at),
+                      title: clock(e.at),
+                    }),
                     lineCell(e.text, "what"),
                   ),
                 ),
@@ -4497,7 +4528,10 @@ function runCard(run, controls) {
     pause.hidden = !live || next.status === "queued";
     // A queued run has embedded nothing, so taking it out of the line costs
     // nothing and is not the same act as stopping one that is going.
-    stop.textContent = next.status === "queued" ? "Remove" : "Stop";
+    // "Take out of the queue" rather than "Remove": a finished card's Remove
+    // dismisses the card and touches nothing, and one word for both put two
+    // different acts on one page under one label.
+    stop.textContent = next.status === "queued" ? "Take out of the queue" : "Stop";
     stop.hidden = !live;
     stop.disabled = next.status === "stopping";
     // A run that has finished has nothing to pause and nothing to stop. It
@@ -4527,7 +4561,7 @@ function runCard(run, controls) {
   let touched = false;
 
   pause.addEventListener("click", () => controls.hold(pause.textContent === "Pause"));
-  stop.addEventListener("click", () => controls.stop(stop.textContent === "Remove"));
+  stop.addEventListener("click", () => controls.stop(stop.textContent !== "Stop"));
   remove.addEventListener("click", () => controls.remove());
   expand.addEventListener("click", () => {
     open = !open;
@@ -4866,10 +4900,10 @@ async function indexView() {
               el("button", {
                 class: "button ghost small",
                 type: "button",
-                text: "Remove",
+                text: "Take out of the queue",
                 // Nothing of it was embedded, so there is nothing to undo and
                 // nothing to confirm.
-                onclick: () => control(row.store, "dequeue"),
+                onclick: () => control(row.store, "dequeue", row.run),
               }),
             ),
           ),

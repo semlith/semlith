@@ -1456,9 +1456,33 @@ def _(d):
     if not target:
         skip("no symbol in this graph can be scoped to by name")
 
-    scoped_symbols, scoped_edges = counts(
-        d.api("/api/graph?limit=%d&name=%s" % (LIMIT, urllib.parse.quote(target)))
-    )
+    scoped_data = d.api("/api/graph?limit=%d&name=%s" % (LIMIT, urllib.parse.quote(target)))
+    scoped_symbols, scoped_edges = counts(scoped_data)
+
+    # The drawn set is capped — a force layout is a hairball past a few dozen
+    # nodes — so neither answer is "the whole graph", and the summary line now
+    # says so ("32 of 4,092 symbols"). What must hold is that no edge is drawn
+    # twice: the original defect was every open store being asked about every
+    # drawn name, so an edge two stores both knew was counted once per store
+    # and a twenty-node scope reported 836 edges where the page's own unscoped
+    # view reported 623.
+    def duplicates(data):
+        seen, twice = set(), []
+        for edge in data.get("edges") or []:
+            key = (edge.get("from"), edge.get("to"), edge.get("kind"))
+            if key in seen:
+                twice.append(key)
+            seen.add(key)
+        return twice
+
+    for label, data in (("the unscoped graph", whole), ("the scoped graph", scoped_data)):
+        twice = duplicates(data)
+        if twice:
+            fail(
+                "%s draws %d edge(s) twice, so its edge count is not a count of "
+                "what is on the canvas: %s"
+                % (label, len(twice), twice[:3])
+            )
 
     if scoped_symbols > base_symbols:
         fail("a scoped graph has %d symbols, more than the whole graph's %d"
@@ -1948,8 +1972,13 @@ def _(d):
     top_bar = d.eval(
         """
         (() => {
-          const el = [...document.querySelectorAll('header *, nav *')]
-            .find(e => /ask (the index a question|it something)/i.test(e.innerText || e.placeholder || ''));
+          // The innermost match, not the outermost. `querySelectorAll` is in
+          // document order, so an ancestor comes before its descendants and
+          // taking the first one reads the launcher's whole container —
+          // including the `/` shortcut badge beside the phrase.
+          const all = [...document.querySelectorAll('header *, nav *')]
+            .filter(e => /ask (the index a question|it something)/i.test(e.innerText || e.placeholder || ''));
+          const el = all[all.length - 1];
           return el ? (el.innerText || el.placeholder || '').trim() : null;
         })()
         """
