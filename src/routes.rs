@@ -26,6 +26,12 @@ use std::sync::atomic::Ordering;
 /// cap is what stops a hand-written query asking for all of them.
 const FILE_PAGE: i64 = 500;
 
+/// The most files a derived-column sort will order.
+///
+/// `FILE_OFFSET_MAX` bounds how deep the table can be paged; this bounds how
+/// much has to be held to order it by a column the database does not hold.
+const DERIVED_SORT_MAX: i64 = 20_000;
+
 /// How many ledger rows the Retrieval ledger page is handed.
 ///
 /// The same depth `semlith ledger --last 200` offers, which is what the
@@ -344,23 +350,53 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     // order and the merge picks the page out of the union. Asking each store
     // for the page directly would be wrong the moment two stores are open: the
     // tenth row overall is not the tenth row of either of them.
-    let take = offset.saturating_add(limit);
+    // Three of the seven columns are derived rather than stored, so ordering
+    // by one of them needs every matching row and not one page of each
+    // store's. Bounded, and refused past the bound rather than silently
+    // ordering a prefix — a sort that quietly describes the first ten thousand
+    // rows of a larger corpus is a sort nobody can trust.
     let mut merged: Vec<(String, store::FileRow)> = Vec::new();
     let mut total = 0i64;
     let mut extensions: Vec<String> = Vec::new();
     let mut stores = 0usize;
+    // Counted first, because how many rows each store has to be asked for
+    // depends on it: a derived sort needs all of them.
     for (label, opened) in fleet.each() {
         if !only.is_empty() && !only.iter().any(|n| n == label) {
             continue;
         }
-        stores += 1;
+        // Stores with a matching file, not stores that happen to be open. The
+        // header read "0 files · 0 formats · 2 stores", where two of the three
+        // numbers answered the filter and the third did not.
         match store::file_count(opened.db(), filter.groups()) {
-            Ok(count) => total += count,
+            Ok(count) => {
+                total += count;
+                stores += usize::from(count > 0);
+            }
             Err(e) => return Response::error(500, &e.to_string()),
         }
         match store::file_facets(opened.db(), filter.groups()) {
             Ok(facets) => extensions.extend(facets.extensions),
             Err(e) => return Response::error(500, &e.to_string()),
+        }
+    }
+    if sort.derived() && total > DERIVED_SORT_MAX {
+        return Response::error(
+            400,
+            &format!(
+                "this column is derived rather than stored, so ordering by it needs every \
+                 matching row; narrow the filter to {DERIVED_SORT_MAX} files or fewer"
+            ),
+        );
+    }
+    let take = if sort.derived() {
+        total
+    } else {
+        offset.saturating_add(limit)
+    };
+    for (label, opened) in fleet.each() {
+        if !only.is_empty() && !only.iter().any(|n| n == label) {
+            continue;
         }
         let listed = match store::file_rows(opened.db(), filter.groups(), sort, desc, take) {
             Ok(r) => r,
@@ -369,13 +405,19 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         merged.extend(listed.into_iter().map(|row| (label.to_string(), row)));
     }
 
-    merged.sort_by(|(_, a), (_, b)| {
+    merged.sort_by(|(a_store, a), (b_store, b)| {
         let order = match sort {
             store::FileSort::Path => a.path.cmp(&b.path),
             store::FileSort::Bytes => a.bytes.cmp(&b.bytes),
             store::FileSort::Chunks => a.chunks.cmp(&b.chunks),
             store::FileSort::Lines => a.lines.cmp(&b.lines),
             store::FileSort::Indexed => a.indexed_at.cmp(&b.indexed_at),
+            store::FileSort::Store => a_store.cmp(b_store),
+            store::FileSort::Reader => chunk::reader_of(Path::new(&a.path))
+                .cmp(chunk::reader_of(Path::new(&b.path))),
+            store::FileSort::Lang => {
+                language_of(Path::new(&a.path)).cmp(language_of(Path::new(&b.path)))
+            }
         };
         let order = if desc { order.reverse() } else { order };
         order.then_with(|| a.path.cmp(&b.path))
@@ -933,23 +975,38 @@ fn dirs(request: &Request) -> Response {
     };
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
+        // Dot-entries are noise in a corpus picker, with one exception: a
+        // `.semlith` directory is the thing "Adopt existing .semlith" adopts,
+        // and hiding it meant nothing in the listing told an adoptable folder
+        // from any other — while the feature named after it could not reach
+        // it at all.
+        if name.starts_with('.') && name != crate::home::LOCAL_DIR {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let path = entry.path();
         entries.push(json!({
             "name": name,
-            "path": entry.path().display().to_string(),
+            "path": path.display().to_string(),
             "dir": is_dir,
+            // Whether pointing adopt at this folder would work: it either is a
+            // store, or holds one at `.semlith`.
+            "adoptable": is_dir && (is_store(&path) || is_store(&path.join(crate::home::LOCAL_DIR))),
         }));
     }
     entries.sort_by(|a, b| {
         let (ad, bd) = (a["dir"].as_bool(), b["dir"].as_bool());
+        // Case-insensitively, because a picker that sinks every lowercase name
+        // below every uppercase one is a picker where `semlith-drive-corpus`
+        // is three screens under `Screen Studio Projects`.
         bd.cmp(&ad).then_with(|| {
-            a["name"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["name"].as_str().unwrap_or(""))
+            let (an, bn) = (
+                a["name"].as_str().unwrap_or(""),
+                b["name"].as_str().unwrap_or(""),
+            );
+            an.to_lowercase()
+                .cmp(&bn.to_lowercase())
+                .then_with(|| an.cmp(bn))
         })
     });
 
@@ -962,6 +1019,11 @@ fn dirs(request: &Request) -> Response {
             .map(|p| p.display().to_string()),
         "entries": entries,
     }))
+}
+
+/// Whether a directory is a semlith store, by the one file that says so.
+fn is_store(dir: &Path) -> bool {
+    dir.join("store.db").exists()
 }
 
 /// What the Privacy page checks: where this process listens, whether it may
@@ -2354,6 +2416,16 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, "no path given");
     };
     let dir = PathBuf::from(dir);
+    // The folder that holds the store is as good an answer as the store
+    // itself. The CLI takes the store directory — "usually ./.semlith" — and
+    // the picker hid dot-directories, so the feature called "Adopt existing
+    // .semlith" had no path through the portal that reached one: pointing it
+    // at the folder containing the store failed with "no store.db in it".
+    let dir = if !is_store(&dir) && is_store(&dir.join(crate::home::LOCAL_DIR)) {
+        dir.join(crate::home::LOCAL_DIR)
+    } else {
+        dir
+    };
     // A store this daemon holds the lock on cannot be moved out from under
     // itself, and the error for that should say so rather than be an IO error
     // halfway through a rename.

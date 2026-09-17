@@ -691,6 +691,13 @@ pub enum FileSort {
     Chunks,
     Lines,
     Indexed,
+    /// Which store holds the row. Not a column of this table at all — it is
+    /// which database the row came out of — so it is ordered by the merge.
+    Store,
+    /// The reader that parsed the file, derived from its extension.
+    Reader,
+    /// The language the file was recognised as, derived from its extension.
+    Lang,
 }
 
 impl FileSort {
@@ -701,8 +708,21 @@ impl FileSort {
             "chunks" => Some(Self::Chunks),
             "lines" => Some(Self::Lines),
             "indexed" => Some(Self::Indexed),
+            "store" => Some(Self::Store),
+            "reader" => Some(Self::Reader),
+            "lang" => Some(Self::Lang),
             _ => None,
         }
+    }
+
+    /// Whether this ordering is over a value the database does not hold.
+    ///
+    /// Three of the seven columns are derived by the route from the path, or
+    /// from which store answered. They cannot be an `ORDER BY`, so the rows
+    /// are ordered by the merge instead — which needs every matching row
+    /// rather than one page of each store's.
+    pub fn derived(self) -> bool {
+        matches!(self, Self::Store | Self::Reader | Self::Lang)
     }
 
     fn sql(self) -> &'static str {
@@ -712,6 +732,9 @@ impl FileSort {
             Self::Chunks => "COUNT(c.id)",
             Self::Lines => "COALESCE(MAX(c.end_line), 0)",
             Self::Indexed => "f.indexed_at",
+            // The base order under a derived sort: deterministic, and the
+            // tie-break the merge uses anyway.
+            Self::Store | Self::Reader | Self::Lang => "f.path",
         }
     }
 }
