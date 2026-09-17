@@ -596,6 +596,9 @@ makes this set reviewable is being able to read the whole of it at once.
 |---|---|---|
 | `embed::performance_cores` | `libc::sysctlbyname` | A NUL-terminated C string, and an `i32` whose size the call is told and will not exceed. macOS only. |
 | `embed::check_cache_dir` | `libc::getuid` | Reads this process's own uid and cannot fail. |
+| `system::sysctl` | `libc::sysctlbyname` | A NUL-terminated C string, and a `u64` whose size the call is told and will not exceed. macOS only. |
+| `system::macos_available_mb` | `libc::host_statistics64`, `libc::mach_host_self`, `libc::sysconf`, `mem::zeroed` | The struct is zeroed and its size passed as a count the call will not exceed; the host port is this process's own and is not retained. `mach_host_self` is deprecated in libc 0.2 in favour of the `mach2` crate, which is a dependency this release does not take for three lines — the deprecation is allowed at the call with its reason. macOS only. |
+| `system::platform` (windows) | `GlobalMemoryStatusEx` | A zeroed `MEMORYSTATUSEX` whose `dwLength` is set to its own size before the call, which is the documented contract. Windows only. |
 | `daemon::owner_only` | `libc::getuid` | As above. |
 | `daemon::alive` | `libc::kill(pid, 0)` | Signal 0 delivers nothing; the documented liveness probe. |
 | `upgrade::writable` | `libc::access` | Two `CString`s that outlive the call; `access` reads them and returns. |
