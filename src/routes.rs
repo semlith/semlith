@@ -1710,58 +1710,39 @@ fn projects(request: &Request) -> Response {
         return Response::error(400, "outside the home directory");
     }
 
-    let listing = match std::fs::read_dir(&resolved) {
-        Ok(l) => l,
-        Err(e) => return Response::error(400, &e.to_string()),
+    // The same discovery `semlith index --projects` runs, from the same
+    // function, so the checklist and the terminal cannot disagree about what
+    // is under a folder.
+    let (found, repositories) = match home::projects_under(&resolved) {
+        Ok(found) => found,
+        Err(e) => return Response::error(400, &format!("{e:#}")),
     };
     let registry = home::Registry::load().unwrap_or_default();
+    let rows: Vec<Value> = found
+        .iter()
+        .map(|path| {
+            json!({
+                "name": path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                "path": path.display().to_string(),
+                "repository": repositories,
+                // Shown and unticked rather than hidden, so a user can see
+                // what is already indexed from the same list they choose out
+                // of — "nothing here" and "all of it is done" are different
+                // answers.
+                "indexed": registry.covering(path).map(|(name, _)| name.to_string()),
+            })
+        })
+        .collect();
 
-    let mut repositories = Vec::new();
-    let mut plain = Vec::new();
-    for entry in listing.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let path = crate::canonical(&entry.path());
-        // A `.git` file, not only a directory: that is what a worktree and a
-        // submodule have, and both are repositories a developer would tick.
-        let repository = path.join(".git").exists();
-        // Shown and unticked rather than hidden, so a user can see what is
-        // already indexed from the same list they are choosing out of.
-        let covered = registry.covering(&path).map(|(name, _)| name.to_string());
-        let row = json!({
-            "name": name,
-            "path": path.display().to_string(),
-            "repository": repository,
-            "indexed": covered,
-        });
-        if repository {
-            repositories.push(row);
-        } else {
-            plain.push(row);
-        }
-    }
-    let by_name = |a: &Value, b: &Value| {
-        a["name"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["name"].as_str().unwrap_or(""))
-    };
-    repositories.sort_by(by_name);
-    plain.sort_by(by_name);
-
-    let repositories_found = !repositories.is_empty();
     Response::json(&json!({
         "path": resolved.display().to_string(),
         "home": home.display().to_string(),
         // Repositories where there are any, plain subfolders where there are
-        // none. Both in one list, so the page has one thing to render.
-        "projects": if repositories_found { repositories } else { plain },
-        "repositories": repositories_found,
+        // none. One list either way, so the page has one thing to render.
+        "projects": rows,
+        "repositories": repositories,
     }))
 }
 

@@ -126,6 +126,43 @@ pub fn settings_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("settings.json"))
 }
 
+/// The projects directly under a directory: the children that are git
+/// repositories, or its plain subdirectories where none of them is.
+///
+/// One level only. A monorepo is one store, and its nested repositories are
+/// its own business — discovery that walked down would turn one corpus into
+/// forty stores that each know a fortieth of it.
+///
+/// A `.git` file counts as much as a `.git` directory: that is what a worktree
+/// and a submodule have, and both are things a developer would tick.
+///
+/// One implementation, called by the portal's `/api/projects` and by `semlith
+/// index --projects`, so the checklist and the terminal cannot disagree about
+/// what is under a folder.
+pub fn projects_under(dir: &Path) -> Result<(Vec<PathBuf>, bool)> {
+    let listing = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    let mut repositories = Vec::new();
+    let mut plain = Vec::new();
+    for entry in listing.flatten() {
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let path = crate::canonical(&entry.path());
+        if path.join(".git").exists() {
+            repositories.push(path);
+        } else {
+            plain.push(path);
+        }
+    }
+    repositories.sort();
+    plain.sort();
+    let found = !repositories.is_empty();
+    Ok((if found { repositories } else { plain }, found))
+}
+
 /// The three values, as the file holds them.
 ///
 /// Every field is optional and absent means "derive it". A home with no file

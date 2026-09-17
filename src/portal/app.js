@@ -237,6 +237,10 @@ const NAV_ICONS = {
   ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
   privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
+  // A trace with a beat in it: this page is a reading of the machine, and the
+  // rail is icons only — a nav item that rendered nothing was the one item
+  // with no way to tell what it was.
+  doctor: "M3 12h3l2-5 3 10 2.5-7 1.5 2h6",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
 };
 
@@ -4928,6 +4932,13 @@ async function doctorView() {
   };
   paintRules(data.rules || []);
 
+  // What the table is a list of, said once above it rather than counted off
+  // the rows by the reader — the page is twenty-seven rows and two of them
+  // matter.
+  const rows = data.clients || [];
+  const registered = rows.filter((c) => c.registered).length;
+  const fixable = rows.filter((c) => !c.registered && c.repair).length;
+
   return el(
     "div",
     { class: "view" },
@@ -4937,17 +4948,36 @@ async function doctorView() {
     ),
     el(
       "div",
-      { class: "card" },
-      el("span", { class: "card-title", text: "Clients" }),
+      // `card pad`, like every other section on every other page. A bare card
+      // has no padding, so the title sat against the border and the table
+      // squared off the corner under it.
+      { class: "card pad" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Clients" }),
+        el("span", { class: "spacer" }),
+        el("span", {
+          class: "meta",
+          text: `${n(registered)} registered · ${n(fixable)} to fix · ${n(rows.length)} known`,
+        }),
+      ),
       clients.node,
     ),
+    // The rules are already cards — one `.stat` each — so they sit in the view
+    // beside their heading rather than inside a second card. A card of cards
+    // is a border drawn around some borders.
     el(
       "div",
-      { class: "card" },
+      { class: "head" },
       el("span", { class: "card-title", text: "Rules" }),
-      rulesBox,
-      note,
+      el("span", {
+        class: "meta",
+        text: "what the daemon found when it looked, not what the documentation says",
+      }),
     ),
+    rulesBox,
+    note,
   );
 }
 

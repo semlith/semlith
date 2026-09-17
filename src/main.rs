@@ -58,6 +58,21 @@ enum Command {
         /// tools or the portal, which are held to the boundary either way.
         #[arg(long)]
         include_secrets: bool,
+
+        /// One store per path, each named and placed exactly as `semlith index
+        /// <path>` would name and place it. Without this, several paths go
+        /// into one store, which is what they have always done.
+        ///
+        /// Sequential: one process, one embedder, one store at a time. A user
+        /// who wants them in parallel runs the daemon, which is what it is for.
+        #[arg(long)]
+        each: bool,
+
+        /// Take the paths from the git repositories directly under this folder,
+        /// or from its plain subfolders where none of them is a repository.
+        /// One level only. Implies `--each`.
+        #[arg(long, value_name = "FOLDER")]
+        projects: Option<PathBuf>,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -582,16 +597,37 @@ fn main() -> Result<()> {
             quiet,
             airgap,
             include_secrets,
+            each,
+            projects,
         } => {
             arm_airgap(airgap);
-            let model = model
-                .map(|m| m.parse::<Model>().map_err(anyhow::Error::msg))
-                .transpose()?;
 
-            let roots = if paths.is_empty() {
-                vec![PathBuf::from(".")]
-            } else {
-                paths
+            // `--projects` turns a folder into the paths under it, and means
+            // `--each`: asking which repositories are under a folder and then
+            // merging them into one store answers a different question.
+            let (roots, each) = match &projects {
+                Some(folder) => {
+                    let (found, repositories) = home::projects_under(folder)?;
+                    if found.is_empty() {
+                        bail!(
+                            "nothing under {} to index: no repository and no subfolder",
+                            folder.display()
+                        );
+                    }
+                    eprintln!(
+                        "{} {} under {}",
+                        found.len(),
+                        if repositories {
+                            "repositories"
+                        } else {
+                            "folders"
+                        },
+                        folder.display()
+                    );
+                    (found, true)
+                }
+                None if paths.is_empty() => (vec![PathBuf::from(".")], each),
+                None => (paths, each),
             };
 
             // Before a store is opened, because opening one creates it. A run
@@ -601,143 +637,172 @@ fn main() -> Result<()> {
             for (path, why) in &unreadable {
                 eprintln!("cannot index {}: {why}", path.display());
             }
-            let Some(first) = roots.first().cloned() else {
+            if roots.is_empty() {
                 bail!(
                     "nothing to index: no path given could be read. Nothing was created \
                      and nothing was registered."
                 );
-            };
-
-            // The first path is what the store is about, so it is what names
-            // the store and what the registry records as its root. `semlith
-            // index ~/work/api` from anywhere means the api store, not a store
-            // named after wherever the shell happened to be.
-            let choice = home::resolve(&cli.store, &first, name.as_deref())?;
-            if let Some(hint) = choice.hint() {
-                eprintln!("{hint}");
             }
-            let dir = choice.one()?;
-            let mut store = Semlith::open(&dir, model)?;
-            store.quiet = quiet;
-            // No confinement on the command line: the person typing it owns the
-            // machine. The deny-list still applies, because indexing a private
-            // key by accident is a mistake rather than a decision.
-            store.boundary = semlith::Boundary {
-                roots: None,
-                allow_secrets: include_secrets,
-            };
-
-            let started = Instant::now();
-            // Throttled, not per file: a corpus large enough to need an
-            // estimate is one where a line per file is the noise the estimate
-            // is trying to cut through.
-            let mut spoke = Instant::now();
-            let report = store.index_paths(&roots, |path, p| {
-                if quiet {
-                    return;
-                }
-                if p.outcome == semlith::FileOutcome::Indexing {
-                    eprintln!("  + {}", display(path));
-                }
-                if p.outcome == semlith::FileOutcome::Refused {
-                    eprintln!("  - {}", display(path));
-                }
-                // A failure is louder than a refusal because it is not a
-                // decision: something went wrong with this one file and the
-                // run carried on, which is exactly the case a silent line
-                // would hide.
-                if p.outcome == semlith::FileOutcome::Failed {
-                    eprintln!(
-                        "  ! {} — {}",
-                        display(path),
-                        p.why.as_deref().unwrap_or("failed")
-                    );
-                }
-                if spoke.elapsed() >= PROGRESS_INTERVAL {
-                    spoke = Instant::now();
-                    eprintln!("    {}", predict(p, started.elapsed()));
-                }
-            })?;
-
-            // Recorded after the run, not before it: a registry entry for a
-            // store that failed to index is a store the daemon opens and the
-            // portal lists with nothing in it.
-            let model_name = store.model().to_string();
-            home::record(&choice, &roots, &model_name)?;
-
-            let (files, chunks, bytes) = store.stats()?;
-            // Images are counted apart from chunks because they are not
-            // chunks: one image is one vector, and folding it into a chunk
-            // count would make the number mean two things.
-            let images = if report.images > 0 {
-                format!(", {} images", report.images)
-            } else {
-                String::new()
-            };
-            // Named one per line. A refusal reported as a count is one the
-            // person retries with the same arguments.
-            for (path, why) in &report.refused {
-                eprintln!("refused: {} — {why}", semlith::plain(path));
-            }
-            if !report.refused.is_empty() && !include_secrets {
-                eprintln!("  `--include-secrets` indexes these anyway, if you meant to.");
-            }
-            // Named one per line, like the refused. A run that finishes having
-            // failed on eleven files and says only "11 failed" is a run whose
-            // eleven files nobody goes and looks at.
-            for (path, why) in &report.failed {
-                eprintln!("failed: {} — {why}", semlith::plain(path));
-            }
-            // What the flag actually did. A store built with
-            // `--include-secrets` that never says how many credentials it took
-            // in is a store whose owner has no idea what is in it.
-            if report.secrets_indexed > 0 {
-                eprintln!(
-                    "indexed {} file(s) the credential scan would have refused, because \
-                     `--include-secrets` was given",
-                    report.secrets_indexed
+            // A name is a name for one store. With `--each` every store is
+            // named after its own path, so one `--name` for all of them is an
+            // instruction that cannot be carried out.
+            if each && name.is_some() {
+                bail!(
+                    "--each names each store after its own path, so --name cannot apply to \
+                     all of them. Run semlith index --name <name> <path> per folder instead."
                 );
             }
-            // Skipped, broken out. "1 847 skipped" is the line that sent this
-            // release's Windows logs in; "1 840 empty, 7 binary" is the same
-            // fact and needs no investigation.
-            let by_reason = if report.skipped_reasons.is_empty() {
-                String::new()
+
+            // One run over every path, as always — or one run per path, which
+            // is what `--each` means. Sequential either way: one process, one
+            // embedder, one store at a time.
+            let runs: Vec<Vec<PathBuf>> = if each {
+                roots.iter().cloned().map(|path| vec![path]).collect()
             } else {
-                let mut parts: Vec<(usize, &str)> = report
-                    .skipped_reasons
-                    .iter()
-                    .map(|(kind, n)| (*n, kind.as_str()))
-                    .collect();
-                parts.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-                format!(
-                    " ({})",
-                    parts
+                vec![roots.clone()]
+            };
+
+            for roots in &runs {
+                let first = roots[0].clone();
+
+                // The first path is what the store is about, so it is what names
+                // the store and what the registry records as its root. `semlith
+                // index ~/work/api` from anywhere means the api store, not a store
+                // named after wherever the shell happened to be.
+                let choice = home::resolve(&cli.store, &first, name.as_deref())?;
+                if let Some(hint) = choice.hint() {
+                    eprintln!("{hint}");
+                }
+                let dir = choice.one()?;
+                // Parsed per run rather than once: it names the model a *new*
+                // store is built with, and `--each` may create several.
+                let model = model
+                    .clone()
+                    .map(|m| m.parse::<Model>().map_err(anyhow::Error::msg))
+                    .transpose()?;
+                let mut store = Semlith::open(&dir, model)?;
+                store.quiet = quiet;
+                // No confinement on the command line: the person typing it owns the
+                // machine. The deny-list still applies, because indexing a private
+                // key by accident is a mistake rather than a decision.
+                store.boundary = semlith::Boundary {
+                    roots: None,
+                    allow_secrets: include_secrets,
+                };
+
+                let started = Instant::now();
+                // Throttled, not per file: a corpus large enough to need an
+                // estimate is one where a line per file is the noise the estimate
+                // is trying to cut through.
+                let mut spoke = Instant::now();
+                let report = store.index_paths(roots, |path, p| {
+                    if quiet {
+                        return;
+                    }
+                    if p.outcome == semlith::FileOutcome::Indexing {
+                        eprintln!("  + {}", display(path));
+                    }
+                    if p.outcome == semlith::FileOutcome::Refused {
+                        eprintln!("  - {}", display(path));
+                    }
+                    // A failure is louder than a refusal because it is not a
+                    // decision: something went wrong with this one file and the
+                    // run carried on, which is exactly the case a silent line
+                    // would hide.
+                    if p.outcome == semlith::FileOutcome::Failed {
+                        eprintln!(
+                            "  ! {} — {}",
+                            display(path),
+                            p.why.as_deref().unwrap_or("failed")
+                        );
+                    }
+                    if spoke.elapsed() >= PROGRESS_INTERVAL {
+                        spoke = Instant::now();
+                        eprintln!("    {}", predict(p, started.elapsed()));
+                    }
+                })?;
+
+                // Recorded after the run, not before it: a registry entry for a
+                // store that failed to index is a store the daemon opens and the
+                // portal lists with nothing in it.
+                let model_name = store.model().to_string();
+                home::record(&choice, roots, &model_name)?;
+
+                let (files, chunks, bytes) = store.stats()?;
+                // Images are counted apart from chunks because they are not
+                // chunks: one image is one vector, and folding it into a chunk
+                // count would make the number mean two things.
+                let images = if report.images > 0 {
+                    format!(", {} images", report.images)
+                } else {
+                    String::new()
+                };
+                // Named one per line. A refusal reported as a count is one the
+                // person retries with the same arguments.
+                for (path, why) in &report.refused {
+                    eprintln!("refused: {} — {why}", semlith::plain(path));
+                }
+                if !report.refused.is_empty() && !include_secrets {
+                    eprintln!("  `--include-secrets` indexes these anyway, if you meant to.");
+                }
+                // Named one per line, like the refused. A run that finishes having
+                // failed on eleven files and says only "11 failed" is a run whose
+                // eleven files nobody goes and looks at.
+                for (path, why) in &report.failed {
+                    eprintln!("failed: {} — {why}", semlith::plain(path));
+                }
+                // What the flag actually did. A store built with
+                // `--include-secrets` that never says how many credentials it took
+                // in is a store whose owner has no idea what is in it.
+                if report.secrets_indexed > 0 {
+                    eprintln!(
+                        "indexed {} file(s) the credential scan would have refused, because \
+                     `--include-secrets` was given",
+                        report.secrets_indexed
+                    );
+                }
+                // Skipped, broken out. "1 847 skipped" is the line that sent this
+                // release's Windows logs in; "1 840 empty, 7 binary" is the same
+                // fact and needs no investigation.
+                let by_reason = if report.skipped_reasons.is_empty() {
+                    String::new()
+                } else {
+                    let mut parts: Vec<(usize, &str)> = report
+                        .skipped_reasons
                         .iter()
-                        .map(|(n, kind)| format!("{n} {kind}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            };
-            let failed = if report.failed.is_empty() {
-                String::new()
-            } else {
-                format!(", {} failed", report.failed.len())
-            };
-            eprintln!(
-                "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped{by_reason}, {} removed{failed}",
-                report.indexed,
-                report.chunks,
-                started.elapsed().as_secs_f32(),
-                report.unchanged,
-                report.skipped,
-                report.removed,
-            );
-            eprintln!(
-                "store: {files} files, {chunks} chunks, {} at {}",
-                semlith::human_bytes(bytes),
-                dir.display()
-            );
+                        .map(|(kind, n)| (*n, kind.as_str()))
+                        .collect();
+                    parts.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+                    format!(
+                        " ({})",
+                        parts
+                            .iter()
+                            .map(|(n, kind)| format!("{n} {kind}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                };
+                let failed = if report.failed.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} failed", report.failed.len())
+                };
+                eprintln!(
+                    "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped{by_reason}, {} removed{failed}",
+                    report.indexed,
+                    report.chunks,
+                    started.elapsed().as_secs_f32(),
+                    report.unchanged,
+                    report.skipped,
+                    report.removed,
+                );
+                eprintln!(
+                    "store: {files} files, {chunks} chunks, {} at {}",
+                    semlith::human_bytes(bytes),
+                    dir.display()
+                );
+            }
+
             // The readable roots are indexed and recorded; the status is what
             // changes, so a script that indexed several roots and tolerated a
             // missing one sees the failure it was told about (#76).
@@ -1017,7 +1082,8 @@ fn main() -> Result<()> {
                 if let Some(broken) = semlith::store::ledger_break(store.db())? {
                     writeln!(
                         out,
-                        "\n  the chain does not verify from row {broken} onwards: \
+                        "
+  the chain does not verify from row {broken} onwards: \
                          these rows have been edited or removed"
                     )?;
                 }
@@ -1227,13 +1293,20 @@ fn main() -> Result<()> {
                 if neighbours.hidden > 0 {
                     writeln!(
                         out,
-                        "\n{} target{} outside this store, not listed (--all)",
+                        "
+{} target{} outside this store, not listed (--all)",
                         neighbours.hidden,
                         if neighbours.hidden == 1 { "" } else { "s" },
                     )?;
                 }
                 if !neighbours.unresolved.is_empty() {
-                    writeln!(out, "\n{}outside this store{}", bold(), reset())?;
+                    writeln!(
+                        out,
+                        "
+{}outside this store{}",
+                        bold(),
+                        reset()
+                    )?;
                     for end in &neighbours.unresolved {
                         writeln!(out, "  {} via {}", end.name, end.kind)?;
                     }
