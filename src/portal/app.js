@@ -4567,6 +4567,10 @@ function runCard(run, controls) {
     open = !open;
     touched = null;
     paintFold();
+    // Its lines are wanted now. A folded card's log is not on screen, so it is
+    // not fetched until it is — which is what keeps a page of finished cards
+    // from costing one request each on the first paint.
+    if (open && controls.reveal) controls.reveal();
   });
 
   const node = el(
@@ -4605,7 +4609,7 @@ function runCard(run, controls) {
     if (ticking) paintClock();
   }, 1000);
 
-  return { node, absorb, log };
+  return { node, absorb, log, isOpen: () => open };
 }
 
 /** Append one log line, keeping the reader's place if they have scrolled up. */
@@ -4835,13 +4839,21 @@ async function indexView() {
           // Dismissing a card, which touches nothing in the store. No confirm,
           // for the same reason taking a folder out of the queue has none.
           remove: () => control(run.store, "remove", run.id),
+          // The card has just been unfolded and wants the lines it skipped.
+          reveal: () => {
+            const card = drawn.get(run.id);
+            if (card) catchUpLog(run, card);
+          },
         });
         drawn.set(run.id, card);
         cards.append(card.node);
       } else {
         card.absorb(run);
       }
-      catchUpLog(run, card);
+      // Only what the reader can see. A finished card starts folded, and
+      // fetching the log of every one of them on the first paint is a request
+      // per card for lines nobody is looking at.
+      if (card.isOpen()) catchUpLog(run, card);
     }
     // A run the daemon has forgotten — its card was removed, its store was
     // deleted, or the daemon restarted — loses its card rather than keeping a
