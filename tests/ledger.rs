@@ -27,6 +27,10 @@ fn row<'a>(
         whole_file_tokens: whole,
         stale_hits: 0,
         tokenizer: semlith::ledger::CHARS4,
+        // Empty is what every row written before 0.20.2 holds, and it is what
+        // keeps this helper's rows one retrieval each. The rows of one
+        // cross-store search sharing an id have their own test below.
+        query_id: "",
     }
 }
 
@@ -394,4 +398,33 @@ fn cli(store: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+/// One search across several stores is one retrieval.
+///
+/// Each store that answered keeps its own row — that is what makes its chain
+/// its own and its token figures about its own hits — and the rows share one
+/// id, so what the Ledger page counts is searches rather than open stores.
+/// Before 0.20.2 a search with six stores open was counted six times.
+#[test]
+fn rows_sharing_a_query_id_count_as_one_retrieval() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Semlith::open(dir.path(), None).unwrap();
+
+    let shared = "one-search";
+    for (excerpt, whole) in [(10, 100), (20, 200)] {
+        let mut r = row("portal", "sourdough", excerpt, whole);
+        r.query_id = shared;
+        semlith::store::record_retrieval(s.db(), &r).unwrap();
+    }
+    // A row from before this release, with no id: its own retrieval, as it was.
+    semlith::store::record_retrieval(s.db(), &row("cli", "rye", 5, 50)).unwrap();
+
+    let (queries, _, excerpt, whole) = semlith::store::ledger_totals(s.db()).unwrap();
+    assert_eq!(queries, 2, "two searches, three rows");
+    // The token sums stay sums of rows: each row holds its own store's hits.
+    assert_eq!((excerpt, whole), (35, 350));
+
+    // And the chain still walks, across both hash formulas.
+    assert_eq!(semlith::store::ledger_break(s.db()).unwrap(), None);
 }

@@ -169,15 +169,34 @@ fn stores(state: &Arc<State>) -> Response {
                     // and readers they run to, and a page that counts its own
                     // rows to get there is describing the page.
                     store::file_facets(s.db(), &[]).unwrap_or_default(),
+                    // The store's own last write, not this daemon's memory of
+                    // one. A store written yesterday has a last write today.
+                    store::last_write(s.db()).ok().flatten(),
                 )
             });
 
-        let (files, chunks, bytes, model, dim, vectors, shards, facets) = match stats {
-            Some((Ok((f, c, b)), model, dim, len, shards, facets)) => {
-                (f, c, b, model, dim, len, shards, facets)
+        let (files, chunks, bytes, model, dim, vectors, shards, facets, written) = match stats {
+            Some((Ok((f, c, b)), model, dim, len, shards, facets, written)) => {
+                (f, c, b, model, dim, len, shards, facets, written)
             }
-            _ => (0, 0, 0, String::new(), 0, 0, None, store::Facets::default()),
+            _ => (
+                0,
+                0,
+                0,
+                String::new(),
+                0,
+                0,
+                None,
+                store::Facets::default(),
+                None,
+            ),
         };
+
+        // The daemon's own counter still wins when it is newer, so a re-embed
+        // that has landed in this session shows immediately rather than waiting
+        // for the next read of the file table.
+        let session = handle.last_write.load(Ordering::Relaxed) as i64;
+        let last_write = written.unwrap_or(0).max(session);
 
         // The reader is a property of the code rather than a column, so it is
         // derived from the extensions the store actually holds rather than
@@ -221,7 +240,11 @@ fn stores(state: &Arc<State>) -> Response {
             "readers": readers.len(),
             "watching": handle.watching.load(Ordering::Relaxed),
             "queue": handle.queue_depth(),
-            "last_write": handle.last_write.load(Ordering::Relaxed),
+            "last_write": last_write,
+            // Rows this store held for files outside its roots, dropped when
+            // the daemon opened it. Shown for the session so the correction is
+            // visible rather than silent.
+            "pruned": handle.pruned.load(Ordering::Relaxed),
             "events": handle.events(),
         }));
     }
@@ -248,6 +271,7 @@ fn stores(state: &Arc<State>) -> Response {
             "watching": false,
             "queue": 0,
             "last_write": 0,
+            "pruned": 0,
             "events": [],
         }));
     }
@@ -1633,7 +1657,7 @@ fn index_runs(state: &Arc<State>) -> Response {
     let runs: Vec<Value> = state
         .stores()
         .iter()
-        .filter_map(|store| store.run_snapshot(admission.position_of(&store.name)))
+        .flat_map(|store| store.run_snapshots(admission.position_of(&store.name)))
         .collect();
     let queue: Vec<Value> = admission
         .waiting()
@@ -1673,13 +1697,17 @@ fn index_log(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(404, &format!("no store called {name} is open"));
     };
     let after = request.query("after").and_then(|v| v.parse::<u64>().ok());
-    let lines = store.log_after(after);
+    // A store can have two runs, so a caller that knows which one it is
+    // reading names it. Without a run, the live one answers — which is what a
+    // caller that knows only a store name means.
+    let run = request.query("run").and_then(|v| v.parse::<u64>().ok());
+    let lines = store.log_after(run, after);
     let last = lines
         .last()
         .and_then(|line| line.get("seq"))
         .and_then(Value::as_u64)
         .or(after);
-    Response::json(&json!({ "store": name, "lines": lines, "cursor": last }))
+    Response::json(&json!({ "store": name, "run": run, "lines": lines, "cursor": last }))
 }
 
 /// The projects directly under a directory, for the Index page's checklist.
@@ -1850,6 +1878,8 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(409, &e.to_string()),
     };
     let mut dequeued = 0;
+    let mut removed = 0;
+    let run = body.get("run").and_then(Value::as_u64);
     match body.get("action").and_then(Value::as_str) {
         Some("pause") => store
             .paused
@@ -1858,6 +1888,22 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
             .paused
             .store(false, std::sync::atomic::Ordering::Relaxed),
         Some("stop") => {
+            // A run that has already finished is not one a stop can act on.
+            // It used to be accepted: the confirm dialog promised to undo
+            // everything the run had embedded, nothing visibly happened, and
+            // the store was left carrying a cancellation that killed whatever
+            // ran next. Refusing it here is the half of that fix the caller
+            // can see.
+            if !store.run_live() && state.admission.position_of(&store.name).is_none() {
+                return Response::error(
+                    409,
+                    &format!(
+                        "{} has no run to stop — the last one has already finished. \
+                         Remove its card instead.",
+                        store.name
+                    ),
+                );
+            }
             // The two queues first, in front of the running job: neither has
             // embedded anything, so both are answered from here immediately
             // rather than when the writer eventually reaches them.
@@ -1884,10 +1930,27 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
                 );
             }
         }
+        // Dismissing a card that has nothing left to say. Not a stop: there is
+        // no run to unwind and nothing in the store changes, which is exactly
+        // why the two must not share a button.
+        Some("remove") => {
+            let Some(id) = run else {
+                return Response::error(400, "remove needs the run to remove");
+            };
+            if !store.remove_run(id) {
+                return Response::error(
+                    409,
+                    &format!("run {id} is not a finished run of {}", store.name),
+                );
+            }
+            removed += 1;
+        }
+        Some("clear") => removed += store.clear_finished_runs(),
         _ => {
             return Response::error(
                 400,
-                "action must be \"pause\", \"resume\", \"stop\" or \"dequeue\"",
+                "action must be \"pause\", \"resume\", \"stop\", \"dequeue\", \"remove\" \
+                 or \"clear\"",
             );
         }
     }
@@ -1896,6 +1959,7 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
         "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
         "dequeued": dequeued,
+        "removed": removed,
     }))
 }
 
@@ -1946,7 +2010,10 @@ fn store_for(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Erro
         home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)?;
     }
 
-    state.open_store(&dir)
+    // The run that indexes it is submitted by the caller a moment from now, so
+    // the watcher holds its catch-up rather than racing that run for the
+    // writer and leaving it reporting a corpus it did not index.
+    state.open_store(&dir, true)
 }
 
 /// Fetch one URL into the store and index what landed, streaming the same

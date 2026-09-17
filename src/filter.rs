@@ -594,9 +594,18 @@ pub fn within_boundary(path: &Path, roots: &[PathBuf]) -> bool {
     {
         return true;
     }
+    // The home directory is the fallback for a store that has no roots at all
+    // — a `--store <dir>` the registry has never heard of — and for nothing
+    // else. It used to apply to every store, which made the boundary no
+    // boundary: every store on the machine shares a home, so an agent pointed
+    // at one repository could index another one into it and be allowed. That
+    // is how the `semlith` store came to hold 262 files belonging to
+    // `ultraship`, under a Privacy page that says the roots are enforced.
+    //
     // An unknown home makes this stricter rather than looser: nothing is inside
     // a boundary semlith cannot locate.
-    crate::home::user_home().is_ok_and(|home| real.starts_with(crate::canonical(&home)))
+    roots.is_empty()
+        && crate::home::user_home().is_ok_and(|home| real.starts_with(crate::canonical(&home)))
 }
 
 #[cfg(test)]
@@ -736,7 +745,21 @@ mod deny_tests {
     }
 
     #[test]
-    fn the_boundary_is_the_roots_and_the_home() {
+    fn a_store_with_roots_is_confined_to_them() {
+        let roots = vec![PathBuf::from("/work/api")];
+        let home = crate::home::user_home().unwrap_or_else(|_| PathBuf::from("/nonexistent"));
+        // The home directory is not a licence to index into a store that has
+        // roots of its own. This is finding 1.1 of the 2026-09-17 drive.
+        assert!(!within_boundary(&home.join("elsewhere/lib.mjs"), &roots));
+        assert!(within_boundary(Path::new("/work/api/src/lib.rs"), &roots));
+        // With no roots recorded at all, the home directory is the boundary,
+        // because otherwise a `--store` the registry never saw could index
+        // nothing whatever.
+        assert!(within_boundary(&home.join("elsewhere/lib.mjs"), &[]));
+    }
+
+    #[test]
+    fn a_path_under_no_root_is_outside_the_boundary() {
         let roots = vec![PathBuf::from("/work/api")];
         assert!(within_boundary(Path::new("/work/api/src/lib.rs"), &roots));
         assert!(within_boundary(Path::new("/work/api"), &roots));
