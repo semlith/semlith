@@ -223,7 +223,7 @@ fn stores(state: &Arc<State>) -> Response {
 
         out.push(json!({
             "name": handle.name,
-            "dir": handle.dir.display().to_string(),
+            "dir": crate::plain(&handle.dir.display().to_string()),
             // A store made before 0.14.0 is readable by everyone on the machine
             // until it is opened by this binary, and one somebody chmod'ed is
             // readable until the next open too. Reported rather than silently
@@ -237,7 +237,7 @@ fn stores(state: &Arc<State>) -> Response {
             // Told apart so the portal can show a root that is not there as a
             // problem rather than silently listing one fewer.
             "roots": handle.roots.iter().map(|r| json!({
-                "path": r.display().to_string(),
+                "path": crate::plain(&r.display().to_string()),
                 "present": r.exists(),
             })).collect::<Vec<_>>(),
             "files": files,
@@ -269,7 +269,7 @@ fn stores(state: &Arc<State>) -> Response {
     for store in unopened {
         out.push(json!({
             "name": store.name,
-            "dir": store.dir.display().to_string(),
+            "dir": crate::plain(&store.dir.display().to_string()),
             "unopened": store.why,
             // A registry entry for a directory that is not there. The portal
             // shows it as missing, naming the path that is absent, and offers
@@ -988,7 +988,7 @@ fn dirs(request: &Request) -> Response {
         let path = entry.path();
         entries.push(json!({
             "name": name,
-            "path": path.display().to_string(),
+            "path": crate::plain(&path.display().to_string()),
             "dir": is_dir,
             // Whether pointing adopt at this folder would work: it either is a
             // store, or holds one at `.semlith`.
@@ -1012,12 +1012,12 @@ fn dirs(request: &Request) -> Response {
     });
 
     Response::json(&json!({
-        "path": resolved.display().to_string(),
-        "home": home.display().to_string(),
+        "path": crate::plain(&resolved.display().to_string()),
+        "home": crate::plain(&home.display().to_string()),
         "parent": resolved
             .parent()
             .filter(|p| p.starts_with(&home))
-            .map(|p| p.display().to_string()),
+            .map(|p| crate::plain(&p.display().to_string())),
         "entries": entries,
     }))
 }
@@ -1035,7 +1035,7 @@ fn privacy(state: &Arc<State>) -> Response {
         "bind": format!("127.0.0.1:{}", state.server.port()),
         "bind_is_fixed": true,
         "airgap": state.airgap,
-        "model_cache": cache.display().to_string(),
+        "model_cache": crate::plain(&cache.display().to_string()),
         "model_cached": cache.exists()
             && std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false),
         "token_header": crate::http::TOKEN_HEADER,
@@ -1333,7 +1333,7 @@ fn register_clients(state: &Arc<State>, request: &Request) -> Response {
 /// user's corpus is (#73).
 fn shown(path: anyhow::Result<PathBuf>) -> String {
     match path {
-        Ok(p) => p.display().to_string(),
+        Ok(p) => crate::plain(&p.display().to_string()),
         Err(e) => format!("unresolved — {e}"),
     }
 }
@@ -1353,7 +1353,7 @@ fn about(state: &Arc<State>) -> Response {
     Response::json(&json!({
         "version": env!("CARGO_PKG_VERSION"),
         "format_version": store::FORMAT_VERSION,
-        "binary": binary.display().to_string(),
+        "binary": crate::plain(&binary.display().to_string()),
         // Measured rather than stated: the size of the file this process was
         // started from.
         "binary_bytes": std::fs::metadata(&binary).map(|m| m.len()).unwrap_or(0),
@@ -1923,7 +1923,7 @@ fn projects(request: &Request) -> Response {
                 "name": path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                "path": path.display().to_string(),
+                "path": crate::plain(&path.display().to_string()),
                 "repository": repositories,
                 // Shown and unticked rather than hidden, so a user can see
                 // what is already indexed from the same list they choose out
@@ -1935,8 +1935,8 @@ fn projects(request: &Request) -> Response {
         .collect();
 
     Response::json(&json!({
-        "path": resolved.display().to_string(),
-        "home": home.display().to_string(),
+        "path": crate::plain(&resolved.display().to_string()),
+        "home": crate::plain(&home.display().to_string()),
         // Where "Up" goes, under the same containment rule `/api/dirs` has.
         // Without it this picker opened at the home directory and could not
         // leave it, so it could not be pointed at a monorepo anywhere else on
@@ -1944,7 +1944,7 @@ fn projects(request: &Request) -> Response {
         "parent": resolved
             .parent()
             .filter(|p| p.starts_with(&home))
-            .map(|p| p.display().to_string()),
+            .map(|p| crate::plain(&p.display().to_string())),
         // Repositories where there are any, plain subfolders where there are
         // none. One list either way, so the page has one thing to render.
         "projects": rows,
@@ -1970,7 +1970,7 @@ fn folders(dir: &Path) -> Vec<Value> {
         .map(|entry| {
             json!({
                 "name": entry.file_name().to_string_lossy().into_owned(),
-                "path": entry.path().display().to_string(),
+                "path": crate::plain(&entry.path().display().to_string()),
             })
         })
         .collect();
@@ -2267,7 +2267,7 @@ fn add(state: &Arc<State>, request: &Request) -> Response {
         Ok((run, _progress)) => Response::json(&json!({
             "runs": [{ "run": run, "store": store.name }],
             "target": "store",
-            "fetched": fetched.path.display().to_string(),
+            "fetched": crate::plain(&fetched.path.display().to_string()),
             "url": fetched.url,
         })),
         Err(e) => Response::error(409, &e.to_string()),
@@ -2407,7 +2407,7 @@ fn delete_store(state: &Arc<State>, request: &Request) -> Response {
     match state.delete_store(name) {
         Ok(dir) => Response::json(&json!({
             "store": name,
-            "deleted": dir.display().to_string(),
+            "deleted": crate::plain(&dir.display().to_string()),
             "message": format!(
                 "{name} is gone: its vectors, chunks, graph and ledger were deleted and the \
                  registry no longer lists it. The files it indexed are untouched."
@@ -2439,8 +2439,8 @@ fn trust(state: &Arc<State>, request: &Request) -> Response {
     };
     match registry.trust(Path::new(dir)) {
         Ok(dir) => Response::json(&json!({
-            "dir": dir.display().to_string(),
-            "trusted": registry.trusted.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
+            "dir": crate::plain(&dir.display().to_string()),
+            "trusted": registry.trusted.iter().map(|d| crate::plain(&d.display().to_string())).collect::<Vec<_>>(),
             // The daemon opened its stores at startup, so one trusted now joins
             // on the next start — the same answer `/api/adopt` gives, for the
             // same reason.
@@ -2482,7 +2482,7 @@ fn adopt(state: &Arc<State>, request: &Request) -> Response {
     match home::adopt(&dir, None, None) {
         Ok((name, target)) => Response::json(&json!({
             "name": name,
-            "dir": target.display().to_string(),
+            "dir": crate::plain(&target.display().to_string()),
             // The daemon opened its stores at startup and holds their locks,
             // so a store adopted now joins on the next start. Said plainly
             // rather than left for the user to notice it is not in the list.
@@ -2627,7 +2627,7 @@ fn key(state: &Arc<State>, request: &Request) -> Response {
     // it was run on.
     let updated: Vec<String> = crate::setup::recarry_key(&previous, &fresh)
         .iter()
-        .map(|p| p.display().to_string())
+        .map(|p| crate::plain(&p.display().to_string()))
         .collect();
     Response::json(&json!({
         "key": fresh,
@@ -2769,6 +2769,36 @@ mod tests {
             vec!["a", "b"]
         );
         assert!(strings(&json!({}), "path").is_empty());
+    }
+
+    /// Every path this file hands out is one a person can use.
+    ///
+    /// `std::fs::canonicalize` on Windows returns the verbatim `\\?\C:\...`
+    /// form, which is what the store holds and what the long-path APIs need —
+    /// and what no editor opens, no shell completes and nobody pastes back
+    /// (#74). The rule is that a path is made plain where it is rendered, and
+    /// every route in this file renders into JSON. The store roots were the
+    /// one column that had been missed, which is the column that tells a user
+    /// what a store indexes.
+    #[test]
+    fn every_path_this_file_hands_out_is_plain() {
+        let source = include_str!("routes.rs");
+        let raw: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            // Assembled rather than written, so this test's own predicate is
+            // not a match for itself.
+            .filter(|(_, line)| line.contains(&format!("display(){}", ".to_string()")))
+            .filter(|(_, line)| !line.contains("crate::plain("))
+            // This test's own prose.
+            .filter(|(_, line)| !line.trim_start().starts_with("///"))
+            .map(|(n, line)| (n + 1, line.trim()))
+            .collect();
+        assert!(
+            raw.is_empty(),
+            "these paths go out as JSON without being made plain, so on Windows they carry \
+             the verbatim prefix: {raw:#?}"
+        );
     }
 
     /// A correction for a model that no longer exists is a correction that has

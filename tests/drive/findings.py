@@ -142,13 +142,19 @@ def descend_picker(d, path):
     person would.
     """
     here = picker_where(d)
-    relative = os.path.relpath(path, here)
-    if relative.startswith(".."):
+    # Compared as text rather than with `os.path.relpath`, which refuses two
+    # paths it reads as being on different mounts — and `\\?\C:\...` and
+    # `C:\...` are exactly that to Python, though they are one drive.
+    here_key, path_key = normalise(here), normalise(path)
+    if path_key == here_key:
+        return
+    if not path_key.startswith(here_key.rstrip("/") + "/"):
         fail(
             "the picker is showing %s, which is not above %s, so there is no way "
             "to walk down to it" % (here, path)
         )
-    for part in relative.split(os.sep):
+    relative = path_key[len(here_key.rstrip("/")) + 1:]
+    for part in relative.split("/"):
         if part in ("", "."):
             continue
         clicked = d.eval(
@@ -368,8 +374,21 @@ def all_files(d, params=""):
 
 
 def normalise(path):
-    """One spelling of a path, so a Windows comparison is about the path."""
-    return path.replace("\\", "/").rstrip("/").lower()
+    """One spelling of a path, so a Windows comparison is about the path.
+
+    The verbatim prefix comes off first. `registry.json` holds what
+    `std::fs::canonicalize` produced, which on Windows is `\\?\C:\...`, and
+    that is deliberate — it is what the long-path APIs need. A comparison
+    against a path a person typed has to meet it in the middle.
+    """
+    text = path.replace("\\", "/").rstrip("/").lower()
+    for prefix in ("//?/unc/", "//?/"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            if prefix == "//?/unc/":
+                text = "//" + text
+            break
+    return text
 
 
 # ==========================================================================
