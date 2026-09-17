@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -116,6 +116,12 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 # release archive in this process rather than through whatever `tar` is on
 # PATH. `rust_backend` keeps it from linking a system zlib.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+
+# Already in the tree transitively; named here so `system::read` can ask
+# `GlobalMemoryStatusEx` how much memory this machine has, which Windows
+# exposes nowhere else.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
 
 [features]
 # How ONNX Runtime is linked, and the one thing that differs between the binary

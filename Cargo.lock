@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2532,6 +2532,7 @@ dependencies = [
  "ts-parser-perl",
  "turbovec",
  "ureq",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

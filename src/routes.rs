@@ -78,6 +78,10 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
         (true, _, "/api/doctor") => doctor(state),
+        (true, _, "/api/index/runs") => index_runs(state),
+        (true, _, "/api/index/log") => index_log(state, request),
+        (true, _, "/api/projects") => projects(request),
+        (true, _, "/api/changes") => changes(state),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/add") => add(state, request),
@@ -99,6 +103,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/root") => root(state, request),
         (_, true, "/api/store/delete") => delete_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
+        (_, true, "/api/index/settings") => index_settings(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
         // A route that exists on another verb is worth telling apart from one
@@ -1505,7 +1510,23 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
 
 // ---------------------------------------------------------------- writes
 
-/// Index one or more paths, streaming progress as newline-delimited JSON.
+/// Index one or more paths, and answer with the runs that were started.
+///
+/// This route used to hold an HTTP worker for the whole of a run and stream it
+/// as newline-delimited JSON, which made the tab that pressed the button the
+/// only thing in the world that knew the run was happening. It now queues the
+/// work and returns: the run lives in the daemon, and the page reads it from
+/// `/api/index/runs` and `/api/index/log` like anything else. The stream is
+/// kept where it is still the right shape — a forwarded `semlith_index`, whose
+/// caller is blocking on the answer and never held a worker here.
+///
+/// Three targets, and no fourth:
+///
+/// - a named store, as before;
+/// - `"each"`, one store per path, resolved exactly as `semlith index <path>`
+///   resolves it;
+/// - nothing, which means `each` for several paths and the single-store
+///   behaviour of today for one.
 fn index(state: &Arc<State>, request: &Request) -> Response {
     let body = match request.json() {
         Ok(b) => b,
@@ -1529,8 +1550,48 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
             .join("; ");
         return Response::error(400, &format!("cannot index {named}"));
     }
-    let named = body.get("store").and_then(Value::as_str);
-    let store = match state.writable(named) {
+
+    let asked = body.get("store").and_then(Value::as_str);
+    let each = match asked {
+        Some("each") => true,
+        Some(_) => false,
+        // Several paths and no store named is the case this release exists
+        // for: three folders are three corpora, and putting them in one store
+        // is a choice nobody made.
+        None => paths.len() > 1,
+    };
+
+    if each {
+        let mut started = Vec::new();
+        for path in &paths {
+            // One store per path, through `home::resolve` rather than a second
+            // copy of its rules — including `free_name`'s suffix for a second
+            // `api` — so a store this page makes is byte-for-byte where the
+            // command line would have put it.
+            let store = match store_for(state, path) {
+                Ok(store) => store,
+                Err(e) => return Response::error(409, &format!("{}: {e:#}", path.display())),
+            };
+            match state.index(&store, vec![path.clone()]) {
+                Ok((run, _progress)) => started.push(json!({
+                    "run": run,
+                    "store": store.name,
+                    "path": crate::plain(&path.display().to_string()),
+                })),
+                // Named, and the ones already started are in the answer: a
+                // folder that could not be queued should not take the two that
+                // were with it.
+                Err(e) => started.push(json!({
+                    "store": store.name,
+                    "path": crate::plain(&path.display().to_string()),
+                    "error": e.to_string(),
+                })),
+            }
+        }
+        return Response::json(&json!({ "runs": started, "target": "each" }));
+    }
+
+    let store = match state.writable(asked) {
         Ok(s) => s,
         // Nothing to write to, and no store named: this is the first run. The
         // daemon was started on a machine with nothing indexed, so the store
@@ -1538,8 +1599,8 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         // `semlith index` would, and serve it without a restart. Before this,
         // the portal's first-run screen invited a developer to index a folder
         // and then answered the button with "no store is open".
-        Err(e) if named.is_none() && state.stores().is_empty() => {
-            match first_store(state, &paths[0]) {
+        Err(e) if asked.is_none() && state.stores().is_empty() => {
+            match store_for(state, &paths[0]) {
                 Ok(store) => store,
                 Err(made) => return Response::error(409, &format!("{e}: {made:#}")),
             }
@@ -1547,10 +1608,231 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
+    // A folder added to an existing store becomes one of its roots, so the
+    // watcher keeps it current and the boundary lets an agent index into it.
+    // Without this the folder is indexed once and then silently stops being
+    // watched, which is the shape of a bug nobody reports for a month.
+    adopt_roots(&store, &paths);
+
     match state.index(&store, paths) {
-        Ok(progress) => stream(progress),
+        Ok((run, _progress)) => Response::json(&json!({
+            "runs": [{ "run": run, "store": store.name }],
+            "target": "store",
+        })),
         Err(e) => Response::error(409, &e.to_string()),
     }
+}
+
+/// Every store's run, and the queue waiting behind them.
+///
+/// The standing answer to "is anything indexing and how far is it", from a
+/// page or from a script, replacing a stream that only the process which
+/// opened it could read. It holds a worker for one request and returns.
+fn index_runs(state: &Arc<State>) -> Response {
+    let admission = &state.admission;
+    let runs: Vec<Value> = state
+        .stores()
+        .iter()
+        .filter_map(|store| store.run_snapshot(admission.position_of(&store.name)))
+        .collect();
+    let queue: Vec<Value> = admission
+        .waiting()
+        .into_iter()
+        .enumerate()
+        .map(|(at, (run, store, paths))| {
+            json!({
+                "run": run,
+                "store": store,
+                "position": at + 1,
+                "paths": paths.iter()
+                    .map(|p| crate::plain(&p.display().to_string()))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    // Re-read here rather than cached at startup: one of the numbers behind
+    // the derivation is how much memory is free *now*.
+    let limits = daemon::Limits::in_force();
+    Response::json(&json!({
+        "runs": runs,
+        "queue": queue,
+        "running": admission.running(),
+        "limits": limits,
+    }))
+}
+
+/// One run's log lines after a cursor.
+///
+/// A cursor rather than an offset, so two clients reading the same run through
+/// their own cursors each see every line exactly once.
+fn index_log(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("store") else {
+        return Response::error(400, "missing store");
+    };
+    let Some(store) = state.store(name) else {
+        return Response::error(404, &format!("no store called {name} is open"));
+    };
+    let after = request.query("after").and_then(|v| v.parse::<u64>().ok());
+    let lines = store.log_after(after);
+    let last = lines
+        .last()
+        .and_then(|line| line.get("seq"))
+        .and_then(Value::as_u64)
+        .or(after);
+    Response::json(&json!({ "store": name, "lines": lines, "cursor": last }))
+}
+
+/// The projects directly under a directory, for the Index page's checklist.
+///
+/// A git repository is the unit, because it is the unit a developer means by
+/// "project" and the one thing on disk that says so. One level only: a
+/// monorepo is one store, and its nested repositories are its own business.
+/// Where nothing under the directory is a repository, its plain subfolders are
+/// offered instead, flagged as such, because a folder of folders is still what
+/// the person was pointing at.
+///
+/// Confined to the user's home exactly as `/api/dirs` is, and for the same
+/// reason: this is a browser asking a local server to list a filesystem.
+fn projects(request: &Request) -> Response {
+    let home = match crate::home::user_home() {
+        Ok(home) => crate::canonical(&home),
+        Err(e) => return Response::error(500, &e.to_string()),
+    };
+    let asked = request
+        .query("path")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let Ok(resolved) = std::fs::canonicalize(&asked) else {
+        return Response::error(400, "that path cannot be resolved");
+    };
+    if !resolved.starts_with(&home) {
+        return Response::error(400, "outside the home directory");
+    }
+
+    // The same discovery `semlith index --projects` runs, from the same
+    // function, so the checklist and the terminal cannot disagree about what
+    // is under a folder.
+    let (found, repositories) = match home::projects_under(&resolved) {
+        Ok(found) => found,
+        Err(e) => return Response::error(400, &format!("{e:#}")),
+    };
+    let registry = home::Registry::load().unwrap_or_default();
+    let rows: Vec<Value> = found
+        .iter()
+        .map(|path| {
+            json!({
+                "name": path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                "path": path.display().to_string(),
+                "repository": repositories,
+                // Shown and unticked rather than hidden, so a user can see
+                // what is already indexed from the same list they choose out
+                // of — "nothing here" and "all of it is done" are different
+                // answers.
+                "indexed": registry.covering(path).map(|(name, _)| name.to_string()),
+            })
+        })
+        .collect();
+
+    Response::json(&json!({
+        "path": resolved.display().to_string(),
+        "home": home.display().to_string(),
+        // Repositories where there are any, plain subfolders where there are
+        // none. One list either way, so the page has one thing to render.
+        "projects": rows,
+        "repositories": repositories,
+    }))
+}
+
+/// Six integers saying which domains have been written.
+///
+/// The one clock in the page. Everything that reads live — the Stores rows,
+/// the run cards, the Agents counts, the Ledger, the Privacy rules — polls
+/// this and refetches only what moved, so a quiet daemon with a tab open costs
+/// one small request a second and nothing else.
+fn changes(state: &Arc<State>) -> Response {
+    let _ = state;
+    // A store another process just made is a change to the stores domain, and
+    // nothing in *this* process bumped the counter for it. One `stat` here is
+    // what closes the circle; `/api/stores` does the reconciling, once, when
+    // the page comes to ask.
+    daemon::changes::notice_registry();
+    let mut out = serde_json::Map::new();
+    for domain in daemon::changes::DOMAINS {
+        out.insert(
+            domain.as_str().to_string(),
+            json!(daemon::changes::read(domain)),
+        );
+    }
+    Response::json(&Value::Object(out))
+}
+
+/// Save one or more of the three settings.
+///
+/// A field the user moved is saved and applies to the next run queued; a field
+/// the environment sets is refused, because an explicit variable is an
+/// instruction from whoever started the process and a page may not overrule it.
+fn index_settings(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let mut saved = home::Settings::load();
+    let limits = daemon::Limits::in_force();
+    let read = |key: &str| {
+        body.get(key)
+            .and_then(Value::as_u64)
+            .map(|n| n.max(1) as usize)
+    };
+
+    if let Some(n) = read("runs_at_once") {
+        if limits.runs_at_once.source == daemon::Source::Environment {
+            return Response::error(
+                409,
+                &format!(
+                    "{} is set in this daemon's environment, so the page cannot change it",
+                    daemon::PARALLEL_ENV
+                ),
+            );
+        }
+        saved.runs_at_once = Some(n);
+    }
+    if let Some(n) = read("embed_threads") {
+        if limits.embed_threads.source == daemon::Source::Environment {
+            return Response::error(
+                409,
+                &format!(
+                    "{} is set in this daemon's environment, so the page cannot change it",
+                    crate::embed::THREADS_ENV
+                ),
+            );
+        }
+        saved.embed_threads = Some(n);
+    }
+    if let Some(n) = read("index_memory_mb") {
+        if limits.index_memory_mb.source == daemon::Source::Environment {
+            return Response::error(
+                409,
+                &format!(
+                    "{} is set in this daemon's environment, so the page cannot change it",
+                    crate::index::INDEX_MEMORY_ENV
+                ),
+            );
+        }
+        saved.index_memory_mb = Some(n);
+    }
+    if let Err(e) = saved.save() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+
+    // Runs-at-once is the one of the three that means something to a queue
+    // already waiting, so it takes effect now rather than at the next start:
+    // raising it admits the head immediately.
+    let limits = daemon::Limits::in_force();
+    state.admission.set_limit(limits.runs_at_once.value);
+    Response::json(&json!({ "limits": limits }))
 }
 
 /// Pause, resume or stop the index run a store is working on.
@@ -1567,6 +1849,7 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
+    let mut dequeued = 0;
     match body.get("action").and_then(Value::as_str) {
         Some("pause") => store
             .paused
@@ -1575,9 +1858,11 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
             .paused
             .store(false, std::sync::atomic::Ordering::Relaxed),
         Some("stop") => {
-            // The queue first: a job that has not started is answered from
-            // here, immediately, because there is nothing of it to undo.
-            store.cancel_queued();
+            // The two queues first, in front of the running job: neither has
+            // embedded anything, so both are answered from here immediately
+            // rather than when the writer eventually reaches them.
+            dequeued += state.admission.dequeue(&store.name);
+            dequeued += store.cancel_queued();
             store
                 .cancelled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1585,14 +1870,58 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
             store
                 .paused
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            store.mark_stopping();
         }
-        _ => return Response::error(400, "action must be \"pause\", \"resume\" or \"stop\""),
+        // Taking a folder out of the queue before it starts. Told apart from
+        // `stop` because it costs nothing and undoes nothing: there is no run
+        // to unwind, only a place in a line.
+        Some("dequeue") => {
+            dequeued += state.admission.dequeue(&store.name);
+            if dequeued == 0 {
+                return Response::error(
+                    409,
+                    &format!("{} has nothing waiting in the queue", store.name),
+                );
+            }
+        }
+        _ => {
+            return Response::error(
+                400,
+                "action must be \"pause\", \"resume\", \"stop\" or \"dequeue\"",
+            );
+        }
     }
     Response::json(&json!({
         "store": store.name,
         "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
         "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "dequeued": dequeued,
     }))
+}
+
+/// Record paths as roots of a store that already exists.
+///
+/// Best-effort and never fatal: a `--store` path and a `.semlith` beside its
+/// corpus are deliberately not registered (`home::record` returns early for
+/// both), and a run into one of those is still a perfectly good run.
+fn adopt_roots(store: &Arc<Store>, paths: &[PathBuf]) {
+    let registry = match home::Registry::load() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let Some(name) = registry.name_of(&store.dir) else {
+        return;
+    };
+    let choice = home::Choice::Registered {
+        name: name.to_string(),
+        dir: store.dir.clone(),
+    };
+    // The model is the store's own; a root recorded against the wrong one
+    // would be a store claiming to hold vectors it cannot compare.
+    let model = crate::Semlith::open(&store.dir, None)
+        .map(|opened| opened.model().to_string())
+        .unwrap_or_default();
+    let _ = home::record(&choice, paths, &model);
 }
 
 /// Create the store `path` belongs in and open it in this daemon.
@@ -1600,8 +1929,11 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
 /// The resolution is `home`'s, not a second copy of it, so the portal puts the
 /// store exactly where `semlith index <path>` would have — same name, same
 /// directory under the store home, same registry entry — and the two ways in
-/// cannot disagree about where a corpus lives.
-fn first_store(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Error> {
+/// cannot disagree about where a corpus lives. That is what makes indexing one
+/// folder from the page and again from the terminal produce one store rather
+/// than two, and it is why `each` calls this per path instead of naming stores
+/// itself.
+fn store_for(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Error> {
     let choice = home::resolve(&[], path, None)?;
     let dir = choice.one()?;
 
@@ -1649,8 +1981,16 @@ fn add(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(400, &format!("{e:#}")),
     };
 
+    // The same immediate answer `/api/index` gives, for the same reason: the
+    // run is the store's and the page reads it from the snapshot. Only the
+    // fetch is synchronous here, because its refusals are what the page shows.
     match state.index(&store, vec![fetched.path.clone()]) {
-        Ok(progress) => stream(progress),
+        Ok((run, _progress)) => Response::json(&json!({
+            "runs": [{ "run": run, "store": store.name }],
+            "target": "store",
+            "fetched": fetched.path.display().to_string(),
+            "url": fetched.url,
+        })),
         Err(e) => Response::error(409, &e.to_string()),
     }
 }
@@ -2036,18 +2376,6 @@ fn rotate(state: &Arc<State>) -> Response {
 }
 
 // ---------------------------------------------------------------- helpers
-
-/// Turn a queue receiver into a chunked NDJSON body.
-fn stream(progress: std::sync::mpsc::Receiver<Value>) -> Response {
-    Response::stream(move |chunks| {
-        for event in progress {
-            let mut line = event.to_string();
-            line.push('\n');
-            chunks.send(&line)?;
-        }
-        Ok(())
-    })
-}
 
 /// The same `Filter` the `--path`/`--ext`/`--lang` flags build.
 fn filter_of(request: &Request) -> Result<Filter, String> {

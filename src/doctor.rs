@@ -306,6 +306,9 @@ pub fn apply(repair: &Repair, stores: &[(String, PathBuf)]) -> Result<Applied> {
     }
 
     set_mode(path, *to)?;
+    // The one place a privacy rule's reading changes, so the one place the
+    // portal's privacy counter moves. `apply_all` is this function in a loop.
+    crate::daemon::changes::bump(crate::daemon::changes::Domain::Privacy);
 
     let now = mode_of(path).map_or_else(|| "no mode".to_string(), |mode| format!("{mode:o}"));
     let rechecked_ok = privacy_findings(stores)

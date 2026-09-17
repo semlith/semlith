@@ -7,6 +7,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### A sliced run carries on instead of starting over
+
+- A run yields the writer back to the watcher every 45 seconds and returns as a
+  fresh job. That job carried the run's *roots*, so each slice walked the tree
+  from the top and re-opened and re-hashed every file the run had already done,
+  to be told each time that it was unchanged. It was correct — indexing is keyed
+  on content hashes — and it read as a run restarting every 45 seconds, and it
+  made a run of N files over S slices read N x S files instead of N. A slice now
+  carries the remainder of its own walk, and the orphan sweep happens on the
+  slice that reaches the end rather than on every one of them.
+- The progress a page shows belongs to the run rather than to the slice, so the
+  counter no longer returns to 1 partway through.
+
+### The run clock
+
+- Starts when the run is submitted, not when the writer reaches it: the wait for
+  a writer is time you are waiting.
+- Spans every slice. It used to be measured inside the one function a slice
+  runs, so it restarted from zero each time.
+- Stops while a run is held, and freezes at its total when the run ends.
+
+### The Doctor page
+
+- Has a navigation icon. It was the one item in the rail that rendered nothing.
+- Its Clients and Rules sections use the same layout as every other section in
+  the portal. They were bare cards with no padding, so the title sat against the
+  border and the table squared off the corner beneath it.
+
+### A run lives in the daemon, not in the page that started it
+
+- An index run is the daemon's: its id, paths, status, counters, clock, the last
+  500 lines of its log and its closing summary. Leaving the Index page,
+  refreshing it or closing the tab changes nothing, and coming back shows every
+  run where it is with its log carrying on from the last line that tab saw. Until
+  now the run *was* the streaming response the page held open, so the tab that
+  pressed the button was the only thing that knew the run was happening. The work
+  carried on — the work is the store's — but nothing on screen could find it
+  again. A run is cut short by its own Stop or by `semlith start` ending, and by
+  nothing else.
+- The snapshot is written by the same `say` closure that emits every event, so
+  the card and the log cannot disagree about what happened.
+- The Index page draws one card per store, each with its own Pause, its own Stop
+  and its own log, read by a cursor so two tabs open on the same run each see
+  every line exactly once.
+- **`POST /api/index` no longer streams.** It answers immediately with the run
+  ids and store names. A script reading its NDJSON is the one thing this release
+  breaks; poll `GET /api/index/runs` instead. The stream stays for a forwarded
+  `semlith_index`, whose caller blocks on the answer and never held an HTTP
+  worker. `POST /api/add` answers the same way, and its fetch is still
+  synchronous because its refusals are what the caller has to be told.
+- The elapsed clock was measured around one slice. A run hands the writer back to
+  the watcher every 45 seconds and returns as a fresh job, so the reading
+  restarted from zero every 45 seconds and the page faithfully redrew a run that
+  had just begun. The clock belongs to the run now: it starts at submission,
+  spans every slice, stops while the run is held, and freezes at its total.
+
+### One folder becomes one store
+
+- `POST /api/index` takes `"store": "each"` — one store per path, each resolved
+  through the same function `semlith index <path>` resolves through, suffix and
+  all, so indexing a folder from the page and again from a terminal produces one
+  store rather than two. No store named means `each` for several paths and what
+  it always did for one: three folders are three corpora, and putting them in one
+  store is a choice nobody made.
+- `semlith index --each` is the same choice in the terminal, sequential — one
+  process, one embedder, one store at a time. Somebody who wants them in parallel
+  runs the daemon, which is what it is for. `--each` with `--name` is refused,
+  because a name is a name for one store.
+- `semlith index --projects <FOLDER>` takes the paths from the git repositories
+  directly under that folder and implies `--each`. A `.git` file counts as much
+  as a `.git` directory, so a worktree and a submodule are on the list; where
+  none of the children is a repository its plain subfolders are used instead. One
+  level only: a monorepo is one store, and its nested repositories are its own
+  business.
+- The Index page has the same list as a checklist, from `GET /api/projects` and
+  the same discovery function, so the page and the terminal cannot disagree about
+  what is under a folder. A repository an existing store already covers is shown
+  unticked rather than hidden — "nothing here" and "all of it is done" are
+  different answers.
+
+### Runs wait for each other, and the daemon decides how many
+
+- Each store's writer used to take the next job on its own queue with nothing
+  above it, so eleven open stores meant eleven runs at once whatever the machine
+  had. A run is admitted only while fewer than runs-at-once are running and
+  otherwise waits in one queue ordered by submission, with its position on its
+  card and in the snapshot. The head is admitted the moment a run finishes, stops
+  or fails, with the page open or not. The watcher's own re-embeds bypass
+  admission: holding a file save behind eleven queued repositories would make the
+  watcher useless exactly when the machine is busy.
+- `POST /api/index/control` gains `dequeue`, and a queued card's button reads
+  **Remove**. It answers at once and confirms nothing, because nothing of it was
+  embedded — which is the whole difference from stopping a run that is going.
+- A new `src/system.rs` reads logical cores, physical cores where the platform
+  says, total memory and memory free now — `/proc/meminfo`, `sysctl` and
+  `host_statistics64`, `GlobalMemoryStatusEx` — with no new dependency. From that
+  it derives runs at once (memory free less a 2 GiB reserve over a per-run peak,
+  capped by the cores with one kept free so the portal still answers, floor 1),
+  threads per writer (the embedder's threads split between the runs and held
+  inside the cores) and index memory per store (512 MiB, doubled past 16 GiB of
+  headroom and again past 64 GiB). Each carries the one-line reason it chose what
+  it chose, and the portal prints that reason beside the field.
+- The three are settings rather than constants: `SEMLITH_INDEX_PARALLEL` (new),
+  `SEMLITH_EMBED_THREADS` and `SEMLITH_INDEX_MEMORY` win, then
+  `~/.semlith/settings.json`, then the derivation. An explicit variable is an
+  instruction from whoever started the process, so the page cannot overrule one
+  and says so on a field it cannot change. The file is written the first time a
+  field is moved and never before. `semlith start` prints all three with their
+  source.
+- Changing runs-at-once takes effect on the next admission: raising it admits the
+  head immediately, lowering it stops nothing already going, because a run holds
+  a writer and undoing it would cost the work it has done.
+- A daemon that ends with runs queued drops them, and its next start names each
+  on that store's event feed as never started — along with any run that was going
+  and what it had committed. A folder that never started otherwise leaves no
+  trace anywhere, and the way anybody finds out is noticing the search results
+  are thin.
+
+### The portal reads live
+
+- `GET /api/changes` returns six monotonic integers, one per data domain, each
+  bumped in the one function that writes that domain. Every page polls it once a
+  second and refetches only the domains that moved, so a quiet daemon with a tab
+  open costs one small request a second. The Stores rows and their event feed,
+  the Index cards, the Agents clients and their query counts, Ledger rows as they
+  land, Privacy rules after a fix and a run count in the navigation on every page
+  all read from that one clock. A tab in the background stops asking and catches
+  up in one pass when it comes back.
+- It is a poll and not a server-sent stream because a stream holds one of the
+  daemon's eight HTTP workers for as long as the tab is open, which is the same
+  constraint the run-state work above exists to respect.
+- Search, Read and Graph are not refetched on a timer. Each is the answer to a
+  question somebody asked, and redrawing it under them would be answering a
+  different one.
+
+### Also
+
+- The Doctor page has a navigation icon and the card padding every other page
+  uses. It was the one rail item with nothing to identify it, and its two
+  sections had titles sitting against the border.
+
 ## [0.19.0] - 2026-09-17
 
 ### One unreadable file no longer ends the run

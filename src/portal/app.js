@@ -224,10 +224,13 @@ const ICONS = {
   more:
     "M12 4.1a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|"
     + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
+  // Three tracks with a handle on each: the machine's three numbers.
+  sliders: "M4 7h10|M18 7h2|M4 12h4|M12 12h8|M4 17h11|M19 17h1|M15 5v4|M9 10v4|M16 15v4",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
  * more than a single stroke. */
+
 const NAV_ICONS = {
   stores: "M12 4l8 4-8 4-8-4 8-4|M4 12l8 4 8-4|M4 16.5l8 4 8-4",
   files: "M6 3h7l5 5v13H6z|M13 3v5h5",
@@ -237,6 +240,10 @@ const NAV_ICONS = {
   ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
   privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
+  // A trace with a beat in it: this page is a reading of the machine, and the
+  // rail is icons only — a nav item that rendered nothing was the one item
+  // with no way to tell what it was.
+  doctor: "M3 12h3l2-5 3 10 2.5-7 1.5 2h6",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
 };
 
@@ -648,8 +655,18 @@ function dataTable(spec) {
  * objects and not the one thing needed, which is the path itself.
  */
 function folderPicker(options) {
-  const { onChoose, choose, onError } = options || {};
+  const { onChoose, choose, onError, multiple } = options || {};
   const card = el("div", { class: "card picker", hidden: true });
+  /* Paths ticked across however many directories were walked into. Kept out
+   * here rather than per render, so browsing into a folder and back does not
+   * throw away what was already chosen. */
+  const ticked = new Set();
+
+  function done() {
+    card.hidden = true;
+    if (onChoose) onChoose(multiple ? [...ticked] : undefined);
+    ticked.clear();
+  }
 
   async function open(path) {
     let data;
@@ -678,15 +695,29 @@ function folderPicker(options) {
         ),
         el("span", { class: "where", text: data.path }),
         el("span", { class: "spacer" }),
-        el("button", {
-          class: "button small",
-          type: "button",
-          text: choose || "Use this folder",
-          onclick: () => {
-            card.hidden = true;
-            if (onChoose) onChoose(data.path);
-          },
-        }),
+        multiple
+          ? el("button", {
+              class: "button small",
+              type: "button",
+              text: ticked.size
+                ? `Use ${ticked.size} folder${ticked.size === 1 ? "" : "s"}`
+                : "Use this folder",
+              onclick: () => {
+                // Nothing ticked means the folder being looked at, which is
+                // what pressing the button while standing in one plainly means.
+                if (!ticked.size) ticked.add(data.path);
+                done();
+              },
+            })
+          : el("button", {
+              class: "button small",
+              type: "button",
+              text: choose || "Use this folder",
+              onclick: () => {
+                card.hidden = true;
+                if (onChoose) onChoose(data.path);
+              },
+            }),
         el("button", {
           class: "button ghost small",
           type: "button",
@@ -700,8 +731,8 @@ function folderPicker(options) {
         "div",
         { class: "entries" },
         data.entries.length
-          ? data.entries.map((entry) =>
-              el(
+          ? data.entries.map((entry) => {
+              const row = el(
                 "button",
                 {
                   class: "entry",
@@ -710,14 +741,30 @@ function folderPicker(options) {
                     if (entry.dir) open(entry.path);
                     else {
                       card.hidden = true;
-                      if (onChoose) onChoose(entry.path);
+                      if (onChoose) onChoose(multiple ? [entry.path] : entry.path);
                     }
                   },
                 },
                 icon(entry.dir ? ICONS.folder : ICONS.file),
                 el("span", { class: "name", text: entry.name }),
-              ),
-            )
+              );
+              if (!multiple || !entry.dir) return row;
+              /* The tick is its own control beside the row, not the row
+               * itself: walking into a folder and choosing it are different
+               * intentions and one button cannot mean both. */
+              const box = el("input", {
+                type: "checkbox",
+                class: "tick",
+                "aria-label": `Index ${entry.name}`,
+                checked: ticked.has(entry.path),
+                onchange: () => {
+                  if (box.checked) ticked.add(entry.path);
+                  else ticked.delete(entry.path);
+                  open(data.path);
+                },
+              });
+              return el("div", { class: "entry-row" }, box, row);
+            })
           : el("div", { class: "card pad" }, empty("Nothing here that Semlith can index.")),
       ),
     );
@@ -902,6 +949,12 @@ const state = {
   search: { query: "", stores: [] },
   /** How many clients are talking to the daemon, for the sidebar card. */
   agents: null,
+  /** The last `/api/index/runs` answer, shared by the navigation's count and
+   * the Index page's cards. */
+  runs: null,
+  /** The Index page's painter while that page is on screen, so one fetch of
+   * the runs route serves both readers. */
+  onRuns: null,
 };
 
 /* Pages, in the design's grouping. The ones the roadmap puts in a later
@@ -940,6 +993,142 @@ function paintStoreCount() {
 function noteAgents(data) {
   state.agents = (data.connections || []).length;
   paintStoreCount();
+}
+
+// ----------------------------------------------------------------- live
+
+/* One clock for the whole page.
+ *
+ * The daemon keeps a counter per data domain — stores, runs, clients, ledger,
+ * events, privacy — and bumps it in the one function that writes that domain.
+ * This polls those six integers once a second, works out which moved, and
+ * refetches only those, through the routes each view already uses. A quiet
+ * daemon with a tab open therefore costs one small request a second and
+ * nothing else.
+ *
+ * It is a poll rather than a server-sent stream because a stream holds one of
+ * the daemon's eight HTTP workers for as long as the tab is open, which is the
+ * constraint the whole run-state design exists to respect. Six integers a
+ * second is cheaper than the connection would be and cannot exhaust the pool.
+ *
+ * Every live view registers here. No view starts a timer of its own: a second
+ * timer is a second clock, and two clocks are how one panel updates and the
+ * one beside it does not. */
+const live = {
+  /** The counter value each domain was last acted on at. */
+  seen: {},
+  /** `{ domains, run }`, cleared on every navigation. */
+  watchers: [],
+  timer: null,
+};
+
+/** Ask to be called when any of these domains is written. */
+function watchLive(domains, run) {
+  live.watchers.push({ domains, run });
+}
+
+/** Drop every watcher. Called as a view is replaced, so nothing left behind
+ * keeps refetching for a page that is no longer on screen. */
+function resetLive() {
+  live.watchers = [];
+}
+
+async function pollChanges() {
+  // A hidden tab asks nothing. Its `seen` values stay where they were, so the
+  // first poll after it comes back sees everything that moved meanwhile and
+  // fires each watcher once rather than once per missed second.
+  if (document.visibilityState === "hidden") return;
+  let counters;
+  try {
+    counters = await api("/api/changes");
+  } catch (_) {
+    // A daemon that has stopped answering is not a reason to tear the page
+    // down; the next tick tries again.
+    return;
+  }
+  const moved = [];
+  for (const [domain, value] of Object.entries(counters)) {
+    // The first read is a baseline, not a change: everything the page drew on
+    // load is already current.
+    if (live.seen[domain] === undefined) {
+      live.seen[domain] = value;
+      continue;
+    }
+    if (live.seen[domain] !== value) {
+      live.seen[domain] = value;
+      moved.push(domain);
+    }
+  }
+  if (!moved.length) return;
+  for (const watcher of live.watchers) {
+    if (watcher.domains.some((domain) => moved.includes(domain))) {
+      try {
+        watcher.run(moved);
+      } catch (_) {
+        /* one view's refresh failing must not stop the others' */
+      }
+    }
+  }
+}
+
+function startLive() {
+  if (live.timer) return;
+  live.timer = setInterval(pollChanges, 1000);
+  // Straight away on return rather than up to a second later: coming back to a
+  // tab and watching it sit stale is the thing this replaces.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") pollChanges();
+  });
+}
+
+/** Every run the daemon knows about, refetched when the runs domain moves.
+ *
+ * One fetch serves both readers — the navigation's count on every page, and
+ * the Index page's cards — because two fetches of one route is how a count in
+ * the sidebar disagrees with the cards beside it. */
+async function refreshRuns() {
+  let data;
+  try {
+    data = await api("/api/index/runs");
+  } catch (_) {
+    return state.runs;
+  }
+  state.runs = data;
+  paintRunCount();
+  if (state.onRuns) state.onRuns(data);
+  return data;
+}
+
+/** "2 indexing" in the navigation, on every page, so a run is never something
+ * that happened out of sight. */
+function paintRunCount() {
+  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status)).length;
+  const waiting = (state.runs?.queue || []).length;
+  for (const node of document.querySelectorAll(".run-count")) {
+    node.textContent = on ? `${on} indexing${waiting ? ` · ${waiting} queued` : ""}` : "";
+    node.hidden = !on;
+  }
+}
+
+/** The statuses a run is still in. */
+const TICKING = new Set(["queued", "running", "paused", "stopping"]);
+
+/** Draw the view on screen again, keeping where the reader had scrolled to.
+ *
+ * What a live table wants is the rows it would have had on a reload, and the
+ * view functions already know how to produce exactly that from the routes they
+ * read. Redrawing them is therefore one line per page rather than a second,
+ * incremental renderer per page — and a second renderer is how a table ends up
+ * disagreeing with the reload of itself.
+ *
+ * The Index page does not use this: its cards hold logs and scroll positions
+ * of their own, so it paints in place. */
+async function repaintView() {
+  if (!shell.main) return;
+  const at = shell.main.querySelector(".scroller")?.scrollTop ?? 0;
+  await render();
+  const scroller = shell.main?.querySelector(".scroller");
+  if (scroller) scroller.scrollTop = at;
 }
 
 
@@ -1887,6 +2076,9 @@ async function ledgerView() {
   }
 
   const on = data.recording;
+  // Live: the ledger's one record call moves this counter, whichever surface
+  // answered the retrieval.
+  watchLive(["ledger"], repaintView);
   return el(
     "div",
     { class: "view" },
@@ -2098,6 +2290,9 @@ function agentsCard() {
   api("/api/agents")
     .then((data) => {
       noteAgents(data);
+  // Live: a client connecting, and every tool call it makes, moves the clients
+  // counter, so the table fills in as agents talk rather than on a reload.
+  watchLive(["clients"], repaintView);
       const live = data.connections || [];
       if (!live.length) {
         fill(
@@ -2223,6 +2418,12 @@ function note(text, bad) {
 
 async function storesView() {
   const stores = await refreshStores();
+  /* Live. A store the CLI just made, a watcher re-embed, a run's own note —
+   * each moves a counter the shared poll is watching, and this page redraws
+   * from the route it already reads rather than from a timer of its own.
+   * Deliberately not on `runs`: that counter moves on every file of every run,
+   * and a table that rebuilt forty times a second would be unreadable. */
+  watchLive(["stores", "events"], repaintView);
 
   const rootNote = el("div", { class: "note" });
   /* A root the registry lists and the disk no longer has. The picker is the
@@ -3689,27 +3890,486 @@ function egoGraph(name, data) {
 
 // ----------------------------------------------------------------- index
 
+/* The Index page.
+ *
+ * Until 0.20.0 this page *was* the run: it held the streaming response open,
+ * and the run existed only as the events travelling down it. Leaving the page
+ * threw that away — the work carried on, because the work is the store's, but
+ * nothing on screen could ever find it again.
+ *
+ * The run lives in the daemon now, so this page is a reader. On mount it asks
+ * `/api/index/runs` for every store's run and draws one card each; the shared
+ * live poll tells it when to ask again; each card pulls its own log lines
+ * after its own cursor. Nothing here outlives a poll, so navigating away,
+ * refreshing, or closing the tab for the length of a run changes nothing the
+ * page shows when it comes back.
+ */
+
+/** How long a run has taken, as `12:34` or `1:02:03`. */
+function spell(ms) {
+  const all = Math.max(0, Math.round(ms / 1000));
+  const seconds = String(all % 60).padStart(2, "0");
+  const hours = Math.floor(all / 3600);
+  const minutes = String(Math.floor(all / 60) % 60).padStart(2, "0");
+  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
+}
+
+const RUN_TONE = {
+  queued: "warn",
+  running: "good",
+  paused: "warn",
+  stopping: "warn",
+  done: "good",
+  stopped: "bad",
+  failed: "bad",
+};
+
+const RUN_WORD = {
+  queued: "queued",
+  running: "indexing",
+  paused: "paused",
+  stopping: "stopping",
+  done: "done",
+  stopped: "stopped",
+  failed: "failed",
+};
+
+/** One store's run: its bar, its counts, its log, and its own two controls. */
+function runCard(run, controls) {
+  const bar = el("span", {});
+  const pct = el("span", { class: "pct" });
+  const status = el("span", { class: "meta" });
+  const elapsed = el("span", { class: "meta" });
+  const log = el("div", { class: "log", "aria-live": "polite" });
+  const badge = pill("", "good");
+  const where = el("span", { class: "meta" });
+
+  const pause = el("button", { class: "button secondary small", type: "button" });
+  const stop = el("button", { class: "button ghost small", type: "button" });
+
+  /* The clock the daemon measured, ticked forward locally between polls.
+   *
+   * The daemon's number is the authority and it only ever goes forward — it
+   * runs from the moment the run was submitted, spans every slice, and stops
+   * while the run is held — so correcting to it can never make the reading
+   * jump backwards. The local tick exists only so the seconds move between
+   * one poll and the next. */
+  let shown = 0;
+  let readAt = 0;
+  let ticking = false;
+
+  function paintClock() {
+    const ms = ticking ? shown + (Date.now() - readAt) : shown;
+    elapsed.textContent = spell(ms);
+  }
+
+  function absorb(next) {
+    shown = next.elapsed_ms || 0;
+    readAt = Date.now();
+    ticking = !!next.ticking;
+    paintClock();
+
+    const share = next.total ? Math.min(100, (next.scanned / next.total) * 100) : 0;
+    const finished = next.status === "done";
+    // A stopped run undid everything it embedded, so a full bar would say the
+    // opposite of what happened.
+    const width = finished ? 100 : next.status === "stopped" ? 0 : share;
+    bar.style.width = `${width.toFixed(1)}%`;
+    pct.textContent = `${Math.round(width)}%`;
+
+    // Rebuilt rather than assigned: a pill carries its own dot, and setting
+    // the text alone would take the dot away with it.
+    fill(
+      badge,
+      el("i", {}),
+      next.status === "queued" && next.position
+        ? `queued · ${next.position} in line`
+        : RUN_WORD[next.status] || next.status,
+    );
+    badge.className = `pill ${RUN_TONE[next.status] || "warn"}`;
+
+    const rate = next.elapsed_ms ? Math.round((next.chunks / next.elapsed_ms) * 1000) : 0;
+    status.textContent = next.total
+      ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks${
+          rate ? ` · ${n(rate)} chunks/s` : ""
+        } ·`
+      : RUN_WORD[next.status] || next.status;
+    where.textContent = (next.paths || []).join(", ");
+
+    const held = next.status === "paused";
+    pause.textContent = held ? "Resume" : "Pause";
+    pause.hidden = !TICKING.has(next.status) || next.status === "queued";
+    // A queued run has embedded nothing, so taking it out of the line costs
+    // nothing and is not the same act as stopping one that is going.
+    stop.textContent = next.status === "queued" ? "Remove" : "Stop";
+    stop.hidden = !TICKING.has(next.status);
+    stop.disabled = next.status === "stopping";
+  }
+
+  pause.addEventListener("click", () => controls.hold(pause.textContent === "Pause"));
+  stop.addEventListener("click", () => controls.stop(stop.textContent === "Remove"));
+
+  const node = el(
+    "div",
+    { class: "card pad run-card" },
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "card-title", text: run.store }),
+      badge,
+      el("span", { class: "spacer" }),
+      pct,
+    ),
+    el("div", { class: "bar" }, bar),
+    el(
+      "div",
+      { class: "filters" },
+      // The clock sits with the counts it belongs to. Files, chunks, rate and
+      // elapsed are one reading of one run; across the card from them the
+      // clock read as a property of the page rather than of the work.
+      status,
+      elapsed,
+      el("span", { class: "spacer" }),
+      pause,
+      stop,
+    ),
+    where,
+    log,
+  );
+
+  absorb(run);
+  const clock = setInterval(() => {
+    if (!node.isConnected) return clearInterval(clock);
+    if (ticking) paintClock();
+  }, 1000);
+
+  return { node, absorb, log };
+}
+
+/** Append one log line, keeping the reader's place if they have scrolled up. */
+function logLine(log, event) {
+  const outcome = event.outcome || null;
+  const key =
+    event.event === "file" ? `${event.scanned}/${event.total}` : event.event || "";
+  const text =
+    event.event === "file"
+      ? event.why
+        ? `${event.path} — ${event.why}`
+        : event.path
+      : logText(event);
+  log.append(
+    el(
+      "div",
+      { class: outcome ? `line ${outcome}` : "line" },
+      key ? el("span", { class: "key", text: key }) : null,
+      outcome ? el("span", { class: "outcome", text: outcome }) : null,
+      el("span", { class: "what", text }),
+    ),
+  );
+  // Only while the reader is already at the end: scrolling back through a long
+  // run should not be yanked away by the next line.
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  if (atEnd) log.scrollTop = log.scrollHeight;
+  while (log.childElementCount > 500) log.firstElementChild.remove();
+}
+
+/** What a non-file event says on the log. */
+function logText(event) {
+  switch (event.event) {
+    case "submitted":
+      return event.ahead
+        ? `waiting — ${n(event.ahead)} run${event.ahead === 1 ? "" : "s"} ahead of this one`
+        : "submitted";
+    case "queued":
+      return event.ahead
+        ? `waiting for ${event.store}'s writer — ${n(event.ahead)} job${
+            event.ahead === 1 ? "" : "s"
+          } ahead of this one`
+        : `waiting for ${event.store}'s writer; it finishes what the watcher is doing first`;
+    case "started":
+      return "walking the tree and hashing what it finds";
+    case "slice":
+      return `${n(event.remaining)} paths left; the writer is giving the watcher a turn and will carry on`;
+    case "paused":
+      return "held between files — the writer is still this run's";
+    case "resumed":
+      return "carrying on";
+    case "error":
+      return event.error || "failed";
+    case "done":
+      if (event.dequeued) return "removed from the queue before it started; nothing was indexed";
+      if (event.stopped) {
+        return "stopped — everything this run embedded was undone, so the store is as it was before it started";
+      }
+      return `${n(event.indexed)} indexed, ${n(event.unchanged)} unchanged, ${n(
+        event.skipped,
+      )} skipped, ${n(event.removed)} removed, ${n(event.chunks)} chunks · ${spell(
+        event.elapsed_ms || 0,
+      )}`;
+    default:
+      return event.event || "";
+  }
+}
+
+/** One of the three settings, with what the machine derived and why. */
+function settingField(key, label, limit, onSave) {
+  const fixed = limit.source === "environment";
+  const input = el("input", {
+    type: "number",
+    min: "1",
+    value: String(limit.value),
+    disabled: fixed,
+    "aria-label": label,
+  });
+  const why = el("div", { class: "note" });
+
+  function explain() {
+    const asked = Number(input.value);
+    // A value above what the machine can carry is the user's to make, and it
+    // is made with the derivation in front of them rather than instead of it.
+    if (!fixed && asked > limit.derived) {
+      why.className = "note bad";
+      why.textContent = `Above the ${limit.derived} this machine derived — ${limit.reason}. It will be used as you set it.`;
+      return;
+    }
+    why.className = "note";
+    why.textContent = fixed
+      ? `Set by the environment, so the page cannot change it. Derived here: ${limit.derived} — ${limit.reason}`
+      : `${limit.derived} derived — ${limit.reason}`;
+  }
+
+  input.addEventListener("input", explain);
+  input.addEventListener("change", () => {
+    const asked = Math.max(1, Number(input.value) || 1);
+    input.value = String(asked);
+    onSave(key, asked);
+  });
+  explain();
+
+  return el(
+    "div",
+    { class: "setting" },
+    el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
+    why,
+  );
+}
+
 async function indexView() {
   await refreshStores();
+  const first = await refreshRuns();
 
-  // Hidden until there is something to say. An empty terminal-coloured slab
-  // under an idle page is a block of nothing pretending to be output.
-  const log = el("div", { class: "log", "aria-live": "polite", hidden: true });
-  const bar = el("span", {});
-  // Set through CSSOM rather than a style attribute: the CSP blocks the
-  // attribute, and this is the one value that genuinely has to be dynamic.
-  bar.style.width = "0%";
-  const pct = el("span", { class: "pct", text: "0%" });
-  const status = el("span", { class: "meta", text: "idle" });
+  const note = el("div", { class: "note" });
+  const cards = el("div", { class: "cards" });
+  const queueCard = el("div", { class: "card pad", hidden: true });
+  const settingsCard = el("div", { class: "card pad", hidden: true });
+  const urlCard = el("div", { class: "card pad", hidden: true });
+  const urlNote = el("div", { class: "note" });
+  const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
+
+  /* One card per store, kept across repaints so a card's log and its scroll
+   * position survive the run's next poll. */
+  const drawn = new Map();
+  /* Where each store's log has been read to. A cursor rather than an offset,
+   * so two tabs reading the same run each see every line exactly once. */
+  const cursors = new Map();
+
+  function complain(message, focus) {
+    note.className = "note bad";
+    note.textContent = message;
+    if (focus) focus.focus();
+  }
+
+  function say(message) {
+    note.className = "note";
+    note.textContent = message;
+  }
+
+  async function control(store, action) {
+    try {
+      await post("/api/index/control", { store, action });
+    } catch (e) {
+      complain(e.message);
+    }
+    await refreshRuns();
+  }
+
+  /** Pull whatever log lines a run has produced since this card last looked. */
+  async function catchUpLog(run, card) {
+    const after = cursors.get(run.store);
+    // A run whose ring has already scrolled past this cursor — a tab away for
+    // longer than five hundred lines — restarts from the oldest line still
+    // held rather than silently showing a gap as continuity.
+    const from = after === undefined ? run.log_from : after;
+    let data;
+    try {
+      data = await api(
+        `/api/index/log?store=${encodeURIComponent(run.store)}${
+          from === undefined || from === null ? "" : `&after=${from}`
+        }`,
+      );
+    } catch (_) {
+      return;
+    }
+    for (const line of data.lines || []) logLine(card.log, line);
+    if (data.cursor !== null && data.cursor !== undefined) cursors.set(run.store, data.cursor);
+  }
+
+  function paint(data) {
+    const runs = data?.runs || [];
+    const seen = new Set();
+    for (const run of runs) {
+      seen.add(run.store);
+      let card = drawn.get(run.store);
+      if (!card) {
+        card = runCard(run, {
+          hold: (wantPause) => control(run.store, wantPause ? "pause" : "resume"),
+          stop: (queued) => {
+            if (queued) return control(run.store, "dequeue");
+            ask({
+              title: `Stop ${run.store}'s index run?`,
+              body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. The other runs are untouched.",
+              confirm: "Stop and undo",
+              tone: "bad",
+              run: () => control(run.store, "stop"),
+            });
+          },
+        });
+        drawn.set(run.store, card);
+        cards.append(card.node);
+      } else {
+        card.absorb(run);
+      }
+      catchUpLog(run, card);
+    }
+    // A store whose run the daemon has forgotten — it was deleted, or the
+    // daemon restarted — loses its card rather than keeping a stale one.
+    for (const [store, card] of drawn) {
+      if (seen.has(store)) continue;
+      card.node.remove();
+      drawn.delete(store);
+      cursors.delete(store);
+    }
+
+    const queue = data?.queue || [];
+    queueCard.hidden = !queue.length;
+    if (queue.length) {
+      fill(
+        queueCard,
+        el("span", { class: "eyebrow", text: "Waiting" }),
+        el("p", {
+          class: "subtitle",
+          text: "In the order they will start. Each one begins by itself the moment a run finishes, whether or not this page is open.",
+        }),
+        el(
+          "div",
+          { class: "queue" },
+          queue.map((row) =>
+            el(
+              "div",
+              { class: "queue-row" },
+              el("span", { class: "key", text: `${row.position}` }),
+              el("span", { class: "name", text: row.store }),
+              pathCell((row.paths || []).join(", ")),
+              el("span", { class: "spacer" }),
+              el("button", {
+                class: "button ghost small",
+                type: "button",
+                text: "Remove",
+                // Nothing of it was embedded, so there is nothing to undo and
+                // nothing to confirm.
+                onclick: () => control(row.store, "dequeue"),
+              }),
+            ),
+          ),
+        ),
+      );
+    }
+
+    paintSettings(data?.limits);
+  }
+
+  async function saveSetting(key, value) {
+    try {
+      const answer = await post("/api/index/settings", { [key]: value });
+      say("Saved. It applies to the next run queued.");
+      paintSettings(answer.limits);
+    } catch (e) {
+      complain(e.message);
+    }
+  }
+
+  let limitsDrawn = null;
+  function paintSettings(limits) {
+    if (!limits) return;
+    // Redrawn only when a value or its reason actually changed: the memory
+    // figure moves every second, and a field that rebuilds under the cursor
+    // cannot be typed into.
+    const signature = JSON.stringify([
+      limits.runs_at_once,
+      limits.embed_threads,
+      limits.index_memory_mb,
+    ]);
+    if (signature === limitsDrawn) return;
+    limitsDrawn = signature;
+    const machine = limits.machine || {};
+    fill(
+      settingsCard,
+      el("span", { class: "eyebrow", text: "How hard this machine may work" }),
+      el("p", {
+        class: "subtitle",
+        text: `${machine.logical_cores} logical core(s), ${n(
+          machine.total_memory_mb,
+        )} MiB of memory, ${n(
+          machine.available_memory_mb,
+        )} MiB free now. Each value below is derived from that, and each is yours to change.`,
+      }),
+      el(
+        "div",
+        { class: "settings" },
+        settingField("runs_at_once", "runs at once", limits.runs_at_once, saveSetting),
+        settingField("embed_threads", "threads each", limits.embed_threads, saveSetting),
+        settingField("index_memory_mb", "MiB per store", limits.index_memory_mb, saveSetting),
+      ),
+    );
+  }
+
+  // The path field takes one path per line, so several folders can be started
+  // without the picker at all.
+  const field = el("textarea", {
+    rows: "2",
+    placeholder: "~/work/api\n~/work/cli",
+    value: state.pendingPath || "",
+  });
+  state.pendingPath = "";
+
+  const target = el(
+    "select",
+    { class: "field", "aria-label": "Where to index into" },
+    el("option", { value: "each", text: "each folder becomes its own store" }),
+    state.stores.map((store) =>
+      el("option", { value: store.name, text: `add to ${store.name}` }),
+    ),
+  );
+
   const picker = folderPicker({
-    onChoose: (path) => {
-      field.value = path;
+    multiple: true,
+    onChoose: (paths) => {
+      if (!paths || !paths.length) return;
+      const already = field.value.split("\n").map((p) => p.trim()).filter(Boolean);
+      field.value = [...new Set([...already, ...paths])].join("\n");
+      field.rows = Math.min(8, Math.max(2, field.value.split("\n").length));
     },
     onError: (message) => complain(message),
   });
-  const note = el("div", { class: "note" });
-  const urlCard = el("div", { class: "card pad", hidden: true });
-  const urlNote = el("div", { class: "note" });
+
+  const projects = projectsChecklist({
+    onChoose: (paths) => {
+      field.value = paths.join("\n");
+      field.rows = Math.min(8, Math.max(2, paths.length));
+      target.value = "each";
+    },
+    onError: (message) => complain(message),
+  });
 
   const folderButton = el(
     "button",
@@ -3720,7 +4380,18 @@ async function indexView() {
       onclick: () => reveal("picker"),
     },
     icon(ICONS.folder),
-    "Choose folder…",
+    "Choose folders…",
+  );
+  const projectsButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("projects"),
+    },
+    icon(ICONS.folder),
+    "Projects under a folder…",
   );
   const urlButton = el(
     "button",
@@ -3733,373 +4404,87 @@ async function indexView() {
     icon(ICONS.file),
     "Add from a URL",
   );
-
-  /* The two ways to start a queue are mutually exclusive: showing a folder
-   * picker and a URL field at once offers two answers to one question. Both
-   * start closed, so the page opens on the path field and its actions, and the
-   * button that opened one stays lit while it is open. */
-  function reveal(which) {
-    const wantPicker = which === "picker" && !picker.isOpen();
-    const wantUrl = which === "url" && urlCard.hidden;
-    if (!wantPicker) picker.close();
-    urlCard.hidden = !wantUrl;
-    if (wantPicker) picker.open("");
-    if (wantUrl) urlField.focus();
-    folderButton.setAttribute("aria-pressed", String(wantPicker));
-    urlButton.setAttribute("aria-pressed", String(wantUrl));
-  }
-
-  const field = el("input", {
-    type: "text",
-    placeholder: "~/work/api",
-    value: state.pendingPath || "",
-  });
-  state.pendingPath = "";
-  const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
-
-  const start = el("button", { class: "button", type: "button", text: "Start indexing" });
-  /* While a run is on, Start becomes Pause and Stop appears beside it. A run
-   * holds the writer, so these are the only two things a reader can do about
-   * one that is taking longer than they expected. */
-  const stopButton = el("button", {
-    class: "button secondary",
-    type: "button",
-    text: "Stop",
-    hidden: true,
-  });
-  let running = false;
-  let paused = false;
-
-  /** Send pause, resume or stop to the store the run is writing to. */
-  async function control(action) {
-    return post("/api/index/control", {
-      action,
-      store: storeSelect.value || undefined,
-    });
-  }
-
-  function showRunning(on) {
-    running = on;
-    paused = false;
-    stopButton.hidden = !on;
-    stopButton.disabled = false;
-    stopButton.textContent = "Stop";
-    start.textContent = on ? "Pause" : "Start indexing";
-    start.disabled = false;
-    addButton.disabled = on;
-  }
-  const addButton = el("button", { class: "button secondary", type: "button", text: "Fetch and index" });
-
-  const storeSelect = el(
-    "select",
-    { class: "field", "aria-label": "Store to write to" },
-    state.stores.map((store) => el("option", { value: store.name, text: store.name })),
+  /* The machine's three numbers are a panel like the others rather than a card
+   * standing open under the page. They are read once, changed rarely, and
+   * having them permanently on screen gave the most static thing here the most
+   * room. */
+  const settingsButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("settings"),
+    },
+    icon(ICONS.sliders),
+    "Machine limits",
   );
 
-  function say(text, key, outcome) {
-    log.hidden = false;
-    log.append(
-      el(
-        "div",
-        // The outcome colours the line, so a wall of "unchanged" reads as
-        // background and the files actually being embedded stand out of it.
-        { class: outcome ? `line ${outcome}` : "line" },
-        key ? el("span", { class: "key", text: key }) : null,
-        outcome ? el("span", { class: "outcome", text: outcome }) : null,
-        el("span", { class: "what", text }),
-      ),
-    );
-    // Only while the reader is already at the end: scrolling back through a
-    // long run should not be yanked away by the next line.
-    const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-    if (atEnd) log.scrollTop = log.scrollHeight;
+  /* The four ways to open something here are mutually exclusive: two open at
+   * once is two answers to one question. */
+  function reveal(which) {
+    const wantPicker = which === "picker" && !picker.isOpen();
+    const wantProjects = which === "projects" && !projects.isOpen();
+    const wantUrl = which === "url" && urlCard.hidden;
+    const wantSettings = which === "settings" && settingsCard.hidden;
+    if (!wantPicker) picker.close();
+    if (!wantProjects) projects.close();
+    urlCard.hidden = !wantUrl;
+    settingsCard.hidden = !wantSettings;
+    if (wantPicker) picker.open("");
+    if (wantProjects) projects.open("");
+    if (wantUrl) urlField.focus();
+    folderButton.setAttribute("aria-pressed", String(wantPicker));
+    projectsButton.setAttribute("aria-pressed", String(wantProjects));
+    urlButton.setAttribute("aria-pressed", String(wantUrl));
+    settingsButton.setAttribute("aria-pressed", String(wantSettings));
   }
 
-  function complain(message, focus) {
-    note.className = "note bad";
-    note.textContent = message;
-    if (focus) focus.focus();
-  }
-
-  /* How long the run has been going, measured by the daemon.
-   *
-   * The local tick exists only so the seconds move between file events; every
-   * file event, and the `done` event, correct it to what the daemon measured.
-   * A tab in the background has its timers throttled to about once a minute,
-   * so a clock that only counted here would be minutes short by the time
-   * anyone looked at it — and the number is meant to be the run's, not this
-   * tab's. */
-  const elapsed = el("span", { class: "meta", hidden: true });
-  let elapsedMs = 0;
-  let elapsedAt = 0;
-  let clockTimer = null;
-
-  function spell(ms) {
-    const all = Math.max(0, Math.round(ms / 1000));
-    const seconds = String(all % 60).padStart(2, "0");
-    const hours = Math.floor(all / 3600);
-    const minutes = String(Math.floor(all / 60) % 60).padStart(2, "0");
-    return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
-  }
-
-  function showElapsed(ms) {
-    elapsedMs = ms;
-    elapsedAt = Date.now();
-    elapsed.hidden = false;
-    elapsed.textContent = spell(ms);
-  }
-
-  function stopClock() {
-    if (clockTimer) clearInterval(clockTimer);
-    clockTimer = null;
-  }
-
-  function startClock() {
-    stopClock();
-    showElapsed(0);
-    clockTimer = setInterval(() => {
-      // Nothing tears a view down for us, so the clock has to notice that it
-      // has been navigated away from — the same test the graph canvas makes.
-      if (!elapsed.isConnected) return stopClock();
-      // The wall clock rather than a count of ticks: a throttled tab fires
-      // this far less often than once a second, and counting fires would
-      // under-report exactly when nobody is watching.
-      showElapsed(elapsedMs + (Date.now() - elapsedAt));
-    }, 1000);
-  }
-
-  /* One reader for both buttons. /api/add fetches the URL and then hands what
-   * landed to the same write queue a folder goes through, so it answers with
-   * the same event stream and there is no second progress mechanism. */
-  async function run(route, body) {
-    showRunning(true);
-    note.className = "note";
-    note.textContent = "";
-    log.replaceChildren();
-    say(`POST ${route} · newline-delimited JSON, chunked`, "→");
-    bar.style.width = "0%";
-    pct.textContent = "0%";
-    status.textContent = "working";
-    // Zeroed and on the page from the click, not from the first event: a run
-    // that queues behind the watcher can be seconds away from starting, and a
-    // clock that appears only then looks like a page that did nothing.
-    stopClock();
-    showElapsed(0);
-
-    try {
-      const response = await fetch(route, {
-        method: "POST",
-        credentials: "omit",
-        headers: authed({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...body, store: storeSelect.value || undefined }),
-      });
-      if (!response.ok) {
-        // The body is the same `{"error": ...}` shape every other route
-        // answers with, and showing the JSON rather than the sentence inside
-        // it is how a clear message arrives looking like a fault.
-        const body = await response.text();
-        let detail = body;
-        try {
-          detail = JSON.parse(body).error || body;
-        } catch (_) {
-          /* a plain-text body is fine too */
-        }
-        throw new Error(detail || response.statusText);
-      }
-
-      // The response is chunked and arrives while the writer works, so it is
-      // read as it comes rather than awaited whole — the point of streaming it.
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let cut;
-        while ((cut = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, cut).trim();
-          buffer = buffer.slice(cut + 1);
-          if (!line) continue;
-          const event = JSON.parse(line);
-          if (event.event === "queued") {
-            // The writer is one thread. Saying so is the difference between a
-            // page that looks stuck and a page that is waiting its turn.
-            status.textContent = event.ahead
-              ? `queued — ${n(event.ahead)} ahead of it`
-              : "queued for the writer";
-            say(
-              event.ahead
-                ? `waiting for ${event.store}'s writer — ${n(event.ahead)} job${
-                    event.ahead === 1 ? "" : "s"
-                  } ahead of this one`
-                : `waiting for ${event.store}'s writer; it finishes what the watcher is doing first`,
-              "queued",
-            );
-          } else if (event.event === "started") {
-            status.textContent = "walking the tree";
-            // The run begins here, so the clock does: the wait in the queue is
-            // not time this run spent indexing.
-            startClock();
-            say("walking the tree and hashing what it finds", "start");
-          } else if (event.event === "file") {
-            const share = event.total ? (event.scanned / event.total) * 100 : 0;
-            const shown = Math.min(100, share);
-            bar.style.width = `${shown.toFixed(1)}%`;
-            pct.textContent = `${Math.round(shown)}%`;
-            // The same three facts the terminal prints: which file, what is
-            // happening to it, and the run's totals so far. Every file says
-            // something, so a re-index of an unchanged corpus is a list of
-            // "unchanged" rather than a bar that sits at nothing and then
-            // jumps to done.
-            const rate = event.elapsed_ms
-              ? Math.round((event.chunks / event.elapsed_ms) * 1000)
-              : 0;
-            if (event.elapsed_ms) showElapsed(event.elapsed_ms);
-            status.textContent = `${event.scanned}/${event.total} files · ${n(
-              event.chunks,
-            )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
-            // The reason belongs on the line it explains. A run that says
-            // "skipped" or "failed" and nothing else leaves the reader to
-            // guess at the one thing they came to the log for.
-            say(
-              event.why ? `${event.path} — ${event.why}` : event.path,
-              `${event.scanned}/${event.total}`,
-              event.outcome,
-            );
-          } else if (event.event === "done") {
-            /* Named, one line each, with the rule that refused them. An agent
-             * or a person who asked for a file and got silence cannot tell that
-             * from a file that was not there. */
-            for (const refusal of event.refused || []) {
-              say(`${refusal.path} — ${refusal.why}`, "refused", "refused");
-            }
-            /* Named the same way, because a file that could not be read is at
-             * least as worth naming as one that was refused — and it is not
-             * the same thing: a refusal is a decision semlith made, a failure
-             * is one it could not avoid. */
-            const failures = event.failed || [];
-            for (const failure of failures) {
-              say(`${failure.path} — ${failure.why}`, "failed", "failed");
-            }
-            // The run is over however it ended, so the clock stops here and
-            // keeps the daemon's own total rather than wherever the local tick
-            // had got to.
-            stopClock();
-            if (event.elapsed_ms) showElapsed(event.elapsed_ms);
-            if (event.stopped) {
-              // Not 100%: nothing was kept, and a full bar would say the
-              // opposite of what happened.
-              bar.style.width = "0%";
-              pct.textContent = "0%";
-              status.textContent = "stopped";
-              say(
-                "stopped — everything this run embedded was undone, so the store is as it was before it started",
-                "stopped",
-              );
-              await refreshStores();
-              continue;
-            }
-            bar.style.width = "100%";
-            pct.textContent = "100%";
-            status.textContent = "done";
-            say(
-              `${event.indexed} indexed, ${event.unchanged} unchanged, ${event.skipped} skipped, ${
-                event.removed
-              } removed${failures.length ? `, ${failures.length} failed` : ""}, ${
-                event.chunks
-              } chunks · ${spell(event.elapsed_ms || elapsedMs)}`,
-              "done",
-            );
-            // What the skipped count was made of. A number on its own invites
-            // the assumption that something was lost; the kinds say it was a
-            // reader nobody has, or a file semlith was never going to index.
-            const reasons = Object.entries(event.skipped_reasons || {});
-            if (reasons.length) {
-              say(reasons.map(([kind, count]) => `${n(count)} ${kind}`).join(", "), "skipped", "skipped");
-            }
-
-            // The store list has changed. Without this, a first index left
-            // `state.stores` empty and the next visit to Stores bounced the
-            // user to the first-run screen with their work apparently gone.
-            await refreshStores();
-          } else if (event.event === "slice") {
-            // The writer handed itself back to the watcher and took the rest
-            // of this run back onto the queue. One run, one stream: there is
-            // nothing for the reader to do.
-            status.textContent = `${n(event.remaining)} left — yielding to the watcher`;
-            say(
-              `${n(event.remaining)} paths left; the writer is giving the watcher a turn and will carry on`,
-              "slice",
-            );
-          } else if (event.event === "paused") {
-            status.textContent = "paused";
-            say("held between files — the writer is still this run's", "paused");
-          } else if (event.event === "resumed") {
-            status.textContent = "working";
-            say("carrying on", "resumed");
-          } else if (event.event === "error") {
-            status.textContent = "failed";
-            stopClock();
-            say(event.error, "error");
-          } else if (event.event === "started") {
-            say(event.paths.join(", "), "indexing");
-          }
-        }
-      }
-    } catch (e) {
-      status.textContent = "failed";
-      say(e.message, "error");
-      return e.message;
-    } finally {
-      // Whatever ended the stream, no interval outlives it: the frozen reading
-      // stays on the page, and nothing is left ticking behind a view the user
-      // has left.
-      stopClock();
-      showRunning(false);
-    }
-    return null;
-  }
-
-  stopButton.addEventListener("click", () => {
-    ask({
-      title: "Stop this index run?",
-      body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. Indexing the same folder again begins at 0%.",
-      confirm: "Stop and undo",
-      tone: "bad",
-      run: async () => {
-        stopButton.disabled = true;
-        stopButton.textContent = "Stopping…";
-        status.textContent = "stopping — undoing what it embedded";
-        await control("stop");
-      },
-    });
+  const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  const addButton = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Fetch and index",
   });
 
-  start.addEventListener("click", async () => {
-    if (running) {
-      // Pause and resume are the same button: the run is the thing being
-      // toggled, and two buttons for one state is two things to read.
-      const want = paused ? "resume" : "pause";
-      start.disabled = true;
-      try {
-        await control(want);
-        paused = !paused;
-        start.textContent = paused ? "Resume" : "Pause";
-        status.textContent = paused ? "paused" : "working";
-      } catch (e) {
-        complain(e.message);
-      } finally {
-        start.disabled = false;
+  /** Ask the daemon to start the runs, and let the poll draw them. */
+  async function begin(route, body) {
+    start.disabled = true;
+    try {
+      const answer = await post(route, body);
+      const started = (answer.runs || []).filter((run) => run.run !== undefined);
+      const refused = (answer.runs || []).filter((run) => run.error);
+      say(
+        `${started.length} run${started.length === 1 ? "" : "s"} queued${
+          refused.length ? `; ${refused.length} refused` : ""
+        }.`,
+      );
+      if (refused.length) {
+        complain(refused.map((run) => `${run.path}: ${run.error}`).join("; "));
       }
-      return;
+      // Straight away rather than on the next tick: the cards are the answer
+      // to the button, and a second of nothing reads as a button that failed.
+      await refreshStores();
+      await refreshRuns();
+      return null;
+    } catch (e) {
+      complain(e.message);
+      return e.message;
+    } finally {
+      start.disabled = false;
     }
-    const path = field.value.trim();
-    if (!path) {
+  }
+
+  start.addEventListener("click", () => {
+    const paths = field.value
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    if (!paths.length) {
       complain("Give a path to index, or choose a folder.", field);
       return;
     }
-    run("/api/index", { path });
+    begin("/api/index", { path: paths, store: target.value });
   });
 
   addButton.addEventListener("click", async () => {
@@ -4112,10 +4497,13 @@ async function indexView() {
     }
     urlNote.className = "note";
     urlNote.textContent = "";
-    const failed = await run("/api/add", { url });
+    const failed = await begin("/api/add", {
+      url,
+      store: target.value === "each" ? undefined : target.value,
+    });
     // A failed fetch leaves the card open with what went wrong on it. Closing
-    // it would take the message away with it and leave the page looking as
-    // though nothing had been asked for.
+    // it would take the message away and leave the page looking as though
+    // nothing had been asked for.
     if (failed) {
       urlNote.className = "note bad";
       urlNote.textContent = failed;
@@ -4123,78 +4511,190 @@ async function indexView() {
     }
   });
 
+  paint(first);
+  // The page's only subscription. The shared poll decides when; this decides
+  // what with. No timer of this page's own.
+  state.onRuns = paint;
+  watchLive(["runs", "stores"], refreshRuns);
+
   return el(
     "div",
     { class: "view" },
     pageHead("Index"),
     says(
-      "The daemon is the writer, so this queues behind the watcher rather than fighting it — the same path ",
-      mono("semlith_index"),
-      " takes.",
+      "Each folder becomes its own store, indexed by its own writer. A run lives in the daemon, not in this page — leaving, refreshing or closing the tab changes nothing, and a run ends only on its Stop or when ",
+      mono("semlith start"),
+      " does.",
     ),
-    // The path field has the row to itself, above the actions: sharing a row
-    // with four buttons is what held it to 420px on a 1440px page.
     el(
       "div",
-      { class: "field tall full" },
-      el("span", { class: "prefix", text: "path" }),
-      labelled("index-path", "Path to index", field),
+      { class: "field tall full area" },
+      el("span", { class: "prefix", text: "paths" }),
+      labelled("index-path", "Paths to index, one per line", field),
     ),
     el(
       "div",
       { class: "filters" },
       folderButton,
+      projectsButton,
       urlButton,
-      state.stores.length > 1 ? storeSelect : null,
+      settingsButton,
+      target,
       start,
-      stopButton,
-      el("span", { class: "spacer" }),
-      // What the queue actually holds, from /api/stores. The line it replaces
-      // said "writer: daemon", which named a process rather than telling
-      // anyone anything about their work.
-      el("span", {
-        class: "meta",
-        text: `queue depth ${state.stores.reduce((sum, store) => sum + (store.queue || 0), 0)}`,
-      }),
     ),
     note,
     el(
       "div",
       { class: "scroller" },
-    picker.node,
+      picker.node,
+      projects.node,
+      fill(
+        urlCard,
+        el("span", { class: "eyebrow", text: "Add from a URL" }),
+        el("p", {
+          class: "subtitle",
+          text: "One https request, for exactly this URL — a page, a PDF, or a file on GitHub. Nothing is crawled and no credential is ever sent. The file is saved inside this store's downloads folder, never in your working tree.",
+        }),
+        el(
+          "div",
+          { class: "field tall full" },
+          el("span", { class: "prefix", text: "url" }),
+          labelled("index-url", "URL to fetch and index", urlField),
+        ),
+        el("div", { class: "actions" }, addButton),
+        urlNote,
+      ),
+      cards,
+      queueCard,
+      settingsCard,
+    ),
+  );
+}
+
+/** The repositories under a folder, as a checklist.
+ *
+ * A folder of projects is the case the folder picker handles badly: ticking
+ * twelve repositories one directory at a time is twelve walks into and back
+ * out of the same parent. This asks the daemon which of the children are
+ * repositories and offers them all at once, already ticked.
+ */
+function projectsChecklist(options) {
+  const { onChoose, onError } = options || {};
+  const card = el("div", { class: "card picker", hidden: true });
+  const ticked = new Set();
+
+  async function open(path) {
+    let data;
+    try {
+      data = await api(`/api/projects?path=${encodeURIComponent(path || "")}`);
+    } catch (e) {
+      if (onError) onError(e.message);
+      return false;
+    }
+    card.hidden = false;
+    const rows = data.projects || [];
+    // Repositories start ticked because that is what was asked for; one
+    // already indexed starts unticked but is shown, so the list says what is
+    // covered rather than quietly omitting it.
+    for (const row of rows) {
+      if (data.repositories && !row.indexed && !ticked.size) ticked.add(row.path);
+    }
+
+    const paint = () => open(data.path);
     fill(
-      urlCard,
-      el("span", { class: "eyebrow", text: "Add from a URL" }),
+      card,
+      el(
+        "div",
+        { class: "crumbs" },
+        el("span", { class: "where", text: data.path }),
+        el("span", { class: "spacer" }),
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "All",
+          onclick: () => {
+            for (const row of rows) ticked.add(row.path);
+            paint();
+          },
+        }),
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "None",
+          onclick: () => {
+            ticked.clear();
+            paint();
+          },
+        }),
+        el("button", {
+          class: "button small",
+          type: "button",
+          disabled: !ticked.size,
+          text: ticked.size ? `Use ${ticked.size}` : "Use",
+          onclick: () => {
+            card.hidden = true;
+            if (onChoose) onChoose([...ticked]);
+            ticked.clear();
+          },
+        }),
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Close",
+          onclick: () => {
+            card.hidden = true;
+          },
+        }),
+      ),
       el("p", {
         class: "subtitle",
-        text: "One https request, for exactly this URL — a page, a PDF, or a file on GitHub. Nothing is crawled and no credential is ever sent. The file is saved inside this store's downloads folder, never in your working tree.",
+        text: data.repositories
+          ? "The repositories directly under this folder. One level only: a monorepo is one store, and its nested repositories are its own business."
+          : "Nothing under this folder is a repository, so these are its plain subfolders.",
       }),
       el(
         "div",
-        { class: "field tall full" },
-        el("span", { class: "prefix", text: "url" }),
-        labelled("index-url", "URL to fetch and index", urlField),
+        { class: "entries" },
+        rows.length
+          ? rows.map((row) => {
+              const box = el("input", {
+                type: "checkbox",
+                class: "tick",
+                "aria-label": `Index ${row.name}`,
+                checked: ticked.has(row.path),
+                onchange: () => {
+                  if (box.checked) ticked.add(row.path);
+                  else ticked.delete(row.path);
+                  paint();
+                },
+              });
+              return el(
+                "div",
+                { class: "entry-row" },
+                box,
+                el(
+                  "span",
+                  { class: "entry" },
+                  icon(ICONS.folder),
+                  el("span", { class: "name", text: row.name }),
+                  row.indexed ? pill(`in ${row.indexed}`, "warn") : null,
+                ),
+              );
+            })
+          : empty("Nothing here that Semlith can index."),
       ),
-      el("div", { class: "actions" }, addButton),
-      urlNote,
-    ),
-    el(
-      "div",
-      { class: "card pad" },
-      el(
-        "div",
-        { class: "head" },
-        el("span", { class: "card-title", text: "Progress" }),
-        status,
-        el("span", { class: "spacer" }),
-        elapsed,
-        pct,
-      ),
-      el("div", { class: "bar" }, bar),
-    ),
-    log,
-    ),
-  );
+    );
+    return true;
+  }
+
+  return {
+    node: card,
+    open,
+    close: () => {
+      card.hidden = true;
+    },
+    isOpen: () => !card.hidden,
+  };
 }
 
 // -------------------------------------------------------- install panel
@@ -4453,6 +4953,13 @@ async function doctorView() {
   };
   paintRules(data.rules || []);
 
+  // What the table is a list of, said once above it rather than counted off
+  // the rows by the reader — the page is twenty-seven rows and two of them
+  // matter.
+  const rows = data.clients || [];
+  const registered = rows.filter((c) => c.registered).length;
+  const fixable = rows.filter((c) => !c.registered && c.repair).length;
+
   return el(
     "div",
     { class: "view" },
@@ -4462,17 +4969,36 @@ async function doctorView() {
     ),
     el(
       "div",
-      { class: "card" },
-      el("span", { class: "card-title", text: "Clients" }),
+      // `card pad`, like every other section on every other page. A bare card
+      // has no padding, so the title sat against the border and the table
+      // squared off the corner under it.
+      { class: "card pad" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Clients" }),
+        el("span", { class: "spacer" }),
+        el("span", {
+          class: "meta",
+          text: `${n(registered)} registered · ${n(fixable)} to fix · ${n(rows.length)} known`,
+        }),
+      ),
       clients.node,
     ),
+    // The rules are already cards — one `.stat` each — so they sit in the view
+    // beside their heading rather than inside a second card. A card of cards
+    // is a border drawn around some borders.
     el(
       "div",
-      { class: "card" },
+      { class: "head" },
       el("span", { class: "card-title", text: "Rules" }),
-      rulesBox,
-      note,
+      el("span", {
+        class: "meta",
+        text: "what the daemon found when it looked, not what the documentation says",
+      }),
     ),
+    rulesBox,
+    note,
   );
 }
 
@@ -4971,6 +5497,11 @@ async function privacyView() {
   } catch (e) {
     return el("div", { class: "view" }, pageHead("Privacy"), error(e.message));
   }
+
+  // Live: a repair applied here or from `semlith doctor --fix` moves the
+  // privacy counter, so the rows say what is true now rather than what was
+  // true when the page was opened.
+  watchLive(["privacy"], repaintView);
 
   const tokenBox = el("code", { class: "text", text: data.token_preview || "—" });
   const rotateNote = el("div", { class: "note" });
@@ -5761,6 +6292,15 @@ function buildShell() {
     ),
     el("span", { class: "divider-v" }),
     pageTitle,
+    // On every page, not only on Index: a run the user started and navigated
+    // away from should never be something that happened out of sight.
+    el("button", {
+      class: "pill good run-count",
+      type: "button",
+      hidden: true,
+      title: "Go to Index",
+      onclick: () => go("index"),
+    }),
     el("span", { class: "spacer" }),
     el(
       "button",
@@ -5912,12 +6452,18 @@ async function render() {
     setNav(state.navOpen);
   }
 
+  // Every watcher belongs to the view that registered it, so they go when it
+  // does. Without this, leaving a page would leave its refetch running.
+  resetLive();
+  state.onRuns = null;
+
   const view = VIEWS.find((v) => v.id === current) || VIEWS[0];
   shell.pageTitle.textContent = view.title;
   document.title = `Semlith · ${view.title}`;
   markCurrent(view.id);
 
   paintStoreCount();
+  paintRunCount();
 
   const mine = ++renderGeneration;
   fill(shell.main, el("div", { class: "view" }, el("p", { class: "subtitle", text: "Loading…" })));
@@ -5953,7 +6499,14 @@ async function boot() {
   // Not awaited: the sidebar's agent count is a detail, and `claude mcp list`
   // behind this route is slow on some machines. It fills itself in.
   api("/api/agents").then(noteAgents).catch(() => {});
+  // Likewise the run count: a page opened while three runs are on should say
+  // so, and the number is not worth holding the first paint for.
+  refreshRuns().catch(() => {});
   await render();
+
+  // One clock, started once, for the life of the tab. Every live view hangs
+  // off it; no view starts a timer of its own.
+  startLive();
 
   window.addEventListener("hashchange", render);
 

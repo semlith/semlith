@@ -1558,6 +1558,9 @@ pub fn record_retrieval(db: &Connection, row: &NewRetrieval<'_>) -> Result<()> {
             row.tokenizer
         ],
     )?;
+    // The one place a retrieval is written, so the one place the portal's
+    // ledger counter moves — every surface that records goes through here.
+    crate::daemon::changes::bump(crate::daemon::changes::Domain::Ledger);
     Ok(())
 }
 
