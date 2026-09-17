@@ -248,9 +248,6 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
             .max(1)
     };
     let runs = memory_runs.min(core_budget);
-    // `core_budget / runs` is at least 1 because runs never exceeds the budget,
-    // and multiplying it back out can never exceed the budget either.
-    let threads = (crate::embed::embed_threads() / runs).clamp(1, core_budget / runs);
 
     let runs_reason = if unknown_memory {
         format!(

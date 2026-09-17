@@ -352,6 +352,14 @@ pub struct RunState {
     pub indexed: u64,
     pub chunks: u64,
     pub symbols: u64,
+    /// What the run is doing when it is not reading a file.
+    ///
+    /// Every two hundred files a run flushes its batch and rewrites the
+    /// shards, which on a large corpus is twenty seconds with no counter
+    /// moving and nothing said — indistinguishable from a hang. Carried on the
+    /// snapshot rather than only on the log, so a page opened during one of
+    /// those twenty seconds sees it too.
+    pub phase: Option<String>,
     /// The `done` event as it was sent, with its refused, failed and
     /// skipped-by-reason lists.
     pub summary: Option<serde_json::Value>,
@@ -379,6 +387,7 @@ impl RunState {
             indexed: 0,
             chunks: 0,
             symbols: 0,
+            phase: None,
             summary: None,
             log: VecDeque::new(),
             next_seq: 0,
@@ -433,6 +442,17 @@ impl RunState {
             }
             Some("file") => {
                 self.status = RunStatus::Running;
+                // A `writing` line is the run saying it has stopped reading
+                // files for a moment; the next line of any other outcome ends
+                // the phase.
+                self.phase = match event.get("outcome").and_then(serde_json::Value::as_str) {
+                    Some("writing") => event
+                        .get("why")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| Some("writing the index to disk".to_string())),
+                    _ => None,
+                };
                 // Taken rather than added: every one of these is the run's
                 // own running total, so summing them would count each file
                 // once per event it appeared in.
@@ -460,6 +480,7 @@ impl RunState {
                 } else {
                     RunStatus::Done
                 };
+                self.phase = None;
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.unhold();
@@ -727,6 +748,7 @@ impl Store {
             "indexed": run.indexed,
             "chunks": run.chunks,
             "symbols": run.symbols,
+            "phase": run.phase,
             "summary": run.summary,
             // What a page's log cursor should be if it has never read this
             // run: the oldest line still on the ring, minus one.

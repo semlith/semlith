@@ -413,8 +413,9 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
             store::FileSort::Lines => a.lines.cmp(&b.lines),
             store::FileSort::Indexed => a.indexed_at.cmp(&b.indexed_at),
             store::FileSort::Store => a_store.cmp(b_store),
-            store::FileSort::Reader => chunk::reader_of(Path::new(&a.path))
-                .cmp(chunk::reader_of(Path::new(&b.path))),
+            store::FileSort::Reader => {
+                chunk::reader_of(Path::new(&a.path)).cmp(chunk::reader_of(Path::new(&b.path)))
+            }
             store::FileSort::Lang => {
                 language_of(Path::new(&a.path)).cmp(language_of(Path::new(&b.path)))
             }

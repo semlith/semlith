@@ -171,6 +171,16 @@ function bytes(value) {
   return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
 }
 
+/** The offset this machine is on, as `+05:30`, for a clock that says so. */
+function zone() {
+  // `getTimezoneOffset` is minutes *behind* UTC, so its sign is the opposite
+  // of the one written in a timestamp.
+  const minutes = -new Date().getTimezoneOffset();
+  const sign = minutes < 0 ? "-" : "+";
+  const off = Math.abs(minutes);
+  return `${sign}${String(Math.floor(off / 60)).padStart(2, "0")}:${String(off % 60).padStart(2, "0")}`;
+}
+
 function when(unix) {
   if (!unix) return "never";
   const seconds = Math.max(0, Math.floor(Date.now() / 1000) - unix);
@@ -181,7 +191,10 @@ function when(unix) {
 }
 
 function clock(unix) {
-  return new Date(unix * 1000).toTimeString().slice(0, 8);
+  // With the offset. This printed the browser's local time while `semlith
+  // ledger` printed UTC, with neither saying which — so a portal event and a
+  // ledger row for the same moment were hours apart and nothing admitted it.
+  return `${new Date(unix * 1000).toTimeString().slice(0, 8)} ${zone()}`;
 }
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -813,7 +826,14 @@ function folderPicker(options) {
 function pathCell(value, className) {
   return el(
     "span",
-    { class: className ? `one-line tail ${className}` : "one-line tail", "data-tip": value },
+    {
+      class: className ? `one-line tail ${className}` : "one-line tail",
+      "data-tip": value,
+      // The browser's own tooltip as well as the portal's. The styled one is
+      // better and it is not the only reader: a value with no `title` is a
+      // truncated path nothing but the DOM inspector can recover.
+      title: value,
+    },
     el("bdi", { text: value }),
   );
 }
@@ -823,6 +843,7 @@ function lineCell(value, className) {
   return el("span", {
     class: className ? `one-line ${className}` : "one-line",
     "data-tip": value,
+    title: value,
     text: value,
   });
 }
@@ -3826,10 +3847,20 @@ async function searchView() {
     if (path) params.append("path", path);
 
     meta.textContent = "searching…";
+    /* The first search after the daemon starts loads the embedding model,
+     * which is five seconds on a cold cache — and until this it was five
+     * seconds of "searching…" that looked like a search that had hung. Only
+     * shown once a search has taken longer than a warm one ever does. */
+    const slow = setTimeout(() => {
+      if (mine === generation) {
+        meta.textContent = "loading the embedding model — the first search after the daemon starts pays for it once";
+      }
+    }, 1200);
     let data;
     try {
       data = await api(`/api/search?${params}`);
     } catch (e) {
+      clearTimeout(slow);
       if (mine !== generation) return;
       fill(results, error(e.message));
       showBody(null, "");
@@ -3837,6 +3868,7 @@ async function searchView() {
       meta.textContent = "";
       return;
     }
+    clearTimeout(slow);
     if (mine !== generation) return;
 
     if (data.shape_label) {
@@ -4375,7 +4407,9 @@ function runCard(run, controls) {
 
   function paintClock() {
     const ms = ticking ? shown + (Date.now() - readAt) : shown;
-    elapsed.textContent = spell(ms);
+    // Under a second, tenths. `spell` counts in whole seconds, so every short
+    // run read `00:01` whatever it had actually taken.
+    elapsed.textContent = ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : spell(ms);
   }
 
   function absorb(next) {
@@ -4409,9 +4443,14 @@ function runCard(run, controls) {
      * every reset of the counter. */
     const perSecond = next.elapsed_ms ? (next.chunks / next.elapsed_ms) * 1000 : 0;
     const rate = perSecond >= 10 ? n(Math.round(perSecond)) : perSecond.toFixed(1);
-    status.textContent = next.total
-      ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · ${rate} chunks/s ·`
-      : RUN_WORD[next.status] || next.status;
+    // The phase, when the run is doing something other than reading files.
+    // Twenty seconds of a bar not moving is a hang unless the card says what
+    // it is: every two hundred files the run rewrites its shards.
+    status.textContent = next.phase
+      ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} ·`
+      : next.total
+        ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · ${rate} chunks/s ·`
+        : RUN_WORD[next.status] || next.status;
     where.textContent = (next.paths || []).join(", ");
 
     const held = next.status === "paused";
@@ -4584,9 +4623,17 @@ function settingField(key, label, limit, onSave) {
       return;
     }
     why.className = "note";
+    // Where the value in force came from, in the daemon's own words. The panel
+    // used to call every value "derived", including one the user had saved, so
+    // the two disagreed exactly when someone was trying to work out whether
+    // their setting had taken effect.
+    const from =
+      limit.source === "saved"
+        ? `${limit.value} saved; ${limit.derived} is what this machine derives`
+        : `${limit.derived} derived`;
     why.textContent = fixed
       ? `Set by the environment, so the page cannot change it. Derived here: ${limit.derived} — ${limit.reason}`
-      : `${limit.derived} derived — ${limit.reason}`;
+      : `${from} — ${limit.reason}`;
   }
 
   input.addEventListener("input", explain);
@@ -4851,6 +4898,45 @@ async function indexView() {
       el("option", { value: store.name, text: `add to ${store.name}` }),
     ),
   );
+
+  /* Which stores could hold the paths in the box.
+   *
+   * A store is about its roots, and indexing a folder into a store whose roots
+   * do not cover it is how the `semlith` store came to hold 262 files
+   * belonging to `ultraship`. The daemon refuses it now; this is so the
+   * dropdown does not offer it in the first place. */
+  function paintTargets() {
+    const paths = field.value
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    const covers = (store) =>
+      !paths.length ||
+      paths.every((path) =>
+        (store.roots || []).some((root) => root.present && path.startsWith(root.path)),
+      );
+    const chosen = target.value;
+    fill(
+      target,
+      el("option", { value: "each", text: "each folder becomes its own store" }),
+      liveStores().map((store) =>
+        el("option", {
+          value: store.name,
+          text: covers(store)
+            ? `add to ${store.name}`
+            : `add to ${store.name} — outside its roots`,
+          disabled: !covers(store),
+        }),
+      ),
+    );
+    // A selection that has just become invalid falls back to the choice that
+    // is always right: a folder of its own.
+    target.value = [...target.options].some((o) => o.value === chosen && !o.disabled)
+      ? chosen
+      : "each";
+  }
+  field.addEventListener("input", paintTargets);
+  paintTargets();
 
   fill(
     urlTarget,

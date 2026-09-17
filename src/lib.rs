@@ -507,6 +507,14 @@ pub enum FileOutcome {
     /// and a refused one is a file semlith will not read. An agent that asked
     /// for it needs to know which.
     Refused,
+    /// Not a file at all: the run is writing what it has embedded to disk.
+    ///
+    /// Every [`CHECKPOINT_FILES`] files a run flushes its batch and rewrites
+    /// the shards, which on a large corpus is twenty seconds in which nothing
+    /// is read and nothing was said. A progress bar that sits at 400/600 for
+    /// twenty seconds and then jumps to 462 is indistinguishable from a hang;
+    /// this is the run saying which of the two it is.
+    Writing,
     /// semlith tried to index it and the attempt failed on this file's own
     /// content — a decoder that rejected the bytes, a parser that could not
     /// read them, a path the operating system would not open.
@@ -523,6 +531,7 @@ impl FileOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Indexing => "indexing",
+            Self::Writing => "writing",
             Self::Unchanged => "unchanged",
             Self::Skipped => "skipped",
             Self::Removed => "removed",
@@ -1833,9 +1842,28 @@ impl Semlith {
             // different vectors from the same corpus.
             since_checkpoint += 1;
             if checkpointing && since_checkpoint >= every {
+                // Said before and after, because the work between these two
+                // lines is the longest thing a run does without reading a
+                // file: the batch is flushed and every shard is rewritten.
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Writing,
+                    Some("writing the index to disk".to_string()),
+                );
                 self.flush(&mut pending)?;
                 self.checkpoint(&mut completed)?;
                 since_checkpoint = 0;
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Indexing,
+                    None,
+                );
             }
         }
 

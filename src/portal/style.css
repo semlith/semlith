@@ -1830,6 +1830,19 @@ pre.code {
   line-height: var(--lh-code);
   overflow: auto;
   white-space: pre;
+  /* A visible edge where the line continues. On a desktop the overflow
+   * scrollbar is an overlay that only appears while scrolling, so a line
+   * running off the pane looked like a line that ended there — `… releases
+   * the l`. The fade is the cue; the scrollbar below it is the control. */
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  scrollbar-width: thin;
+}
+pre.code::-webkit-scrollbar {
+  height: 8px;
+}
+pre.code::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
 }
 
 /* The event log, styled as the terminal it is echoing. */
@@ -3662,6 +3675,15 @@ pre.code {
  * with it — stay; the store name, the reader, the chunk count and the like are
  * a scroll away on a desktop and noise on a phone. The data is unchanged: this
  * hides columns, it does not filter rows. */
+/* Five tiles at tablet width broke four across and one alone on a full-width
+ * row, which reads as a tile that means more than the other four. Three and
+ * two is the same information with no accidental emphasis. */
+@media (min-width: 521px) and (max-width: 899px) {
+  .strip .stat {
+    flex: 1 1 calc(33.333% - var(--sp-3));
+  }
+}
+
 @media (max-width: 820px) {
   .narrow-drop {
     display: none;
@@ -3844,6 +3866,28 @@ pre.code {
   }
   .stat {
     flex-basis: 100%;
+  }
+
+  /* Nine store chips wrapped to three rows above the results, which on a
+   * phone is the whole first screen spent on a filter nobody had asked for.
+   * One row, scrolled sideways, with the edge fading to say there is more. */
+  .store-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    mask-image: linear-gradient(to right, #000 88%, transparent);
+  }
+  .store-chips::-webkit-scrollbar {
+    display: none;
+  }
+  .store-chips > * {
+    flex: 0 0 auto;
+  }
+
+  /* The summary bar sits over the results on a phone, so the last card was
+   * half-covered by it. */
+  .results {
+    padding-bottom: var(--sp-8);
   }
 }
 
