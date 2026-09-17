@@ -131,6 +131,8 @@ class Fixtures:
         self._monorepo = None
         self._bulk = None
         self._small = None
+        self._second = None
+        self._unique = 0
         self._doomed = None
 
     def cleanup(self):
@@ -298,6 +300,34 @@ class Fixtures:
         self._write_corpus(directory, 3, prefix="small")
         self._small = directory
         return directory
+
+    def second(self):
+        """A second three-file corpus, so two stores can be open at once.
+
+        Finding 1.2 is about what a cross-store query does to the ledger, and a
+        drive that starts against an empty store home has no second store to
+        cross. A separate directory rather than `small()` twice: indexing one
+        directory twice makes one store, which is the thing 1.2 cannot use.
+        """
+        if self._second:
+            return self._second
+        self._second = self._write_corpus(
+            os.path.join(self.root, "second"), 3, prefix="second"
+        )
+        return self._second
+
+    def unique(self, prefix="solo"):
+        """A corpus nobody else indexes, so the store it makes is this call's.
+
+        For a check that has to name one card on a live page (finding 2.6): the
+        Index page grows cards from every other check's runs while this one
+        watches, and a store only this call indexes is the one handle on the
+        page that stays a handle.
+        """
+        self._unique += 1
+        return self._write_corpus(
+            os.path.join(self.root, "%s-%d" % (prefix, self._unique)), 3, prefix=prefix
+        )
 
     def doomed(self):
         """A corpus meant to be deleted out from under its store, for 3.1.

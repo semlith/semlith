@@ -2235,13 +2235,14 @@ impl Semlith {
         if roots.is_empty() {
             return Ok(Vec::new());
         }
-        let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
+        // Through the boundary rule rather than a second copy of it. A path
+        // and a root have to be compared in one shape — see
+        // `filter::within_boundary` — and a store that dropped rows by a rule
+        // slightly different from the one that refuses writes would hold
+        // exactly the files the daemon then declined to re-index.
         Ok(store::all_paths(&self.db)?
             .into_iter()
-            .filter(|key| {
-                let real = canonical(Path::new(key));
-                !roots.iter().any(|root| real.starts_with(root))
-            })
+            .filter(|key| !filter::within_boundary(Path::new(key), roots))
             .collect())
     }
 

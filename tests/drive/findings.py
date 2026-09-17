@@ -414,9 +414,22 @@ def _(d):
     # contributing store, all sharing one query id, and "queries recorded"
     # counts distinct query ids. So the count moves with what the agent did,
     # never with how many stores happen to be open.
+    #
+    # Both stores are built here rather than hoped for. This drive gets its own
+    # empty store home, so when this check runs nothing is open at all and a
+    # skip would quietly retire a P1 gate. Two corpora, because indexing one
+    # directory twice makes one store and one store shows no multiplier.
+    indexed_fixture(d, d.fixtures.small())
+    indexed_fixture(d, d.fixtures.second())
+
     open_stores = [row for row in stores(d) if not row.get("unopened")]
     if len(open_stores) < 2:
-        skip("the ledger multiplier only shows with two or more stores open")
+        fail(
+            "two fixture corpora were indexed and the daemon reports %d open "
+            "store(s): %s. The cross-store ledger count cannot be asserted "
+            "against one store."
+            % (len(open_stores), ", ".join(sorted(r["name"] for r in open_stores)))
+        )
 
     before = d.api("/api/ledger")["queries"]
     d.api("/api/search?query=release%20record%20sealed%20immutable&k=8")
@@ -629,6 +642,16 @@ def _(d):
     # is the rendered timestamp, so the assertion is on `when`: an epoch is
     # already unambiguous and asserting on it would prove nothing about what
     # either surface shows a person.
+    #
+    # A row to read, made rather than waited for. This drive gets its own empty
+    # store home, so nothing has been retrieved when this check runs and a skip
+    # would quietly retire a P1 gate.
+    indexed_fixture(d, d.fixtures.small())
+    d.api("/api/search?query=release%20record%20sealed%20immutable&k=8")
+    # The ledger write is on the search request's own path; the read below is a
+    # separate connection. One short settle beats a retry loop nobody reads.
+    time.sleep(1.0)
+
     ledger = d.api("/api/ledger")
     rows = ledger.get("rows")
     if rows is None:
@@ -638,7 +661,12 @@ def _(d):
             "with the CLI's"
         )
     if not rows:
-        skip("nothing has been recorded in the ledger yet")
+        fail(
+            "a search was just run through /api/search and /api/ledger lists no "
+            "rows, so nothing was recorded. The ledger is what makes a retrieval "
+            "auditable; an empty one is not a timestamp problem, it is a missing "
+            "record."
+        )
 
     stamped = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}$")
     offsets = set()
@@ -808,31 +836,58 @@ def _(d):
 
 @finding("2.3", "Open in Files filters the Files page to that store")
 def _(d):
-    open_stores = [row["name"] for row in stores(d) if not row.get("unopened") and row["files"] > 0]
-    if len(open_stores) < 2:
-        skip("telling a store filter from no filter needs two stores with files")
-    target = open_stores[0]
+    # Two stores with files, built rather than hoped for: telling a store filter
+    # from no filter needs something to filter out, and this drive starts
+    # against an empty store home.
+    target = indexed_fixture(d, d.fixtures.small())
+    indexed_fixture(d, d.fixtures.second())
 
     d.open_view("stores")
+    d.wait_for(
+        "[...document.querySelectorAll('tbody tr')].some(r =>"
+        " ((r.querySelector('.name') || {}).textContent || '').trim() === %s)"
+        % json.dumps(target),
+        what="the %s row on the Stores page" % target,
+    )
+    # Opened and chosen in one tick. The Stores page rebuilds its rows from a
+    # one-second poll, so a menu opened in one CDP call and clicked in the next
+    # can be hanging off a row that has since been replaced — which is how this
+    # check used to land on an unfiltered Files page and blame the product.
+    # `rowMenu` builds its items from the row's own store at open time, so the
+    # only thing that has to be atomic is open-then-click.
     opened = d.eval(
         """
         (() => {
           const rows = [...document.querySelectorAll('tbody tr')];
-          const row = rows.find(r => r.innerText.includes(%s));
-          if (!row) return 'no row';
-          const kebab = row.querySelector('button[aria-haspopup], button[aria-label*="more" i], td:last-child button');
-          if (!kebab) return 'no kebab';
+          // The store's own name cell — `lineCell(s.name, "name")` — not the
+          // row's text, which also carries its path, its badges and its counts.
+          const row = rows.find(r =>
+            ((r.querySelector('.name') || {}).textContent || '').trim() === %s);
+          if (!row) return 'no row for the store';
+          const kebab = row.querySelector('button[aria-haspopup], button[aria-label*="action" i], td:last-child button');
+          if (!kebab) return 'the row carries no actions control';
           kebab.click();
+          const item = [...document.querySelectorAll('.menu-item, [role=menuitem]')]
+            .find(b => (b.textContent || '').trim() === 'Open in Files');
+          if (!item) return 'the row menu opened with no Open in Files item';
+          item.click();
           return 'opened';
         })()
         """
         % json.dumps(target)
     )
     if opened != "opened":
-        fail("could not open the kebab menu on the %s row: %s" % (target, opened))
-    d.click_text("button, a, [role=menuitem]", "Open in Files")
-    d.wait_for("location.hash.startsWith('#files')", what="the Files view")
-    d.eval("new Promise(done => setTimeout(() => done(true), 800))")
+        fail("could not drive the %s row's menu to Open in Files: %s" % (target, opened))
+
+    # Both halves before anything is read: the view, and its store control
+    # actually reading the store the menu was opened on. A row read while the
+    # page is still showing every store is a read of the wrong page.
+    chip = '.store-chips [data-store=%s][aria-pressed="true"]' % json.dumps(target)
+    d.wait_for(
+        "location.hash.startsWith('#files') && !!document.querySelector(%s)"
+        " && document.querySelectorAll('tbody tr').length > 0" % json.dumps(chip),
+        what="the Files view's store control to read %s, with its rows drawn" % target,
+    )
 
     shown = [t for t in texts_of(d, "tbody tr") if t]
     if not shown:
@@ -966,30 +1021,60 @@ def stop_quietly(d, store):
 
 @finding("2.6", "finished runs can be dismissed and the active run sorts first")
 def _(d):
-    finished = indexed_fixture(d, d.fixtures.small())
+    # A corpus nobody else indexes, so exactly one card on the page carries this
+    # store and that card is this check's handle on its own run. Counting cards
+    # instead does not work on a live page: the Index page keeps painting while
+    # this check waits — its own second half starts another run, and so does
+    # every check after it — so the total can rise past where it started while
+    # the dismissed card is long gone. The assertion is on *that* card going.
+    finished = indexed_fixture(d, d.fixtures.unique("solo"))
     d.open_view("index")
+    mine = (
+        "[...document.querySelectorAll(%s)].filter(c =>"
+        " ((c.querySelector('.card-title') || {}).textContent || '').trim() === %s)"
+        % (json.dumps(RUN_CARD), json.dumps(finished))
+    )
+    # The card's own Remove, not the "Remove all finished" button above the
+    # cards and not another run's: found inside that one card, and a hidden
+    # button is skipped so only the control on offer can match.
+    #
+    # Waited for rather than assumed. A card is built from the page's last poll,
+    # which can be a second old, so a run this check has already watched finish
+    # is painted as live for up to that long — with Pause and Stop where its
+    # Remove will be.
+    offered = (
+        "%s.filter(c => [...c.querySelectorAll('button')].some(b =>"
+        " !b.hidden && b.offsetParent !== null"
+        " && (b.textContent || '').trim() === 'Remove'))" % mine
+    )
     d.wait_for(
-        "[...document.querySelectorAll(%s)].some(c => c.innerText.includes(%s))"
-        % (json.dumps(RUN_CARD), json.dumps(finished)),
-        what="the finished run card for %s" % finished,
+        "%s.length === 1" % offered,
+        what="the finished run card for %s, with its Remove on offer" % finished,
     )
 
-    before = d.eval("document.querySelectorAll(%s).length" % json.dumps(RUN_CARD))
-    # The card's own Remove, not the "Remove all finished" button above the
-    # cards and not a queued run's Remove: scoped to a card, and a hidden
-    # button reads as empty text so only the one on offer can match.
-    d.click_text(RUN_CARD + " button", "Remove")
-    d.wait_for(
-        "document.querySelectorAll(%s).length < %d" % (json.dumps(RUN_CARD), before),
-        what="the dismissed card to go",
+    clicked = d.eval(
+        """
+        (() => {
+          const card = %s[0];
+          if (!card) return 'the card went before it could be removed';
+          const remove = [...card.querySelectorAll('button')].find(
+            b => !b.hidden && b.offsetParent !== null
+                 && (b.textContent || '').trim() === 'Remove');
+          if (!remove) return 'that card offers no Remove';
+          remove.click();
+          return 'removed';
+        })()
+        """
+        % offered
     )
-    after = d.eval("document.querySelectorAll(%s).length" % json.dumps(RUN_CARD))
-    if after >= before:
-        fail(
-            "Remove on a finished run card left %d cards where there were %d. "
-            "With no dismiss and no auto-collapse, four runs are four full cards "
-            "and the live one is off-screen." % (after, before)
-        )
+    if clicked != "removed":
+        fail("Remove on the finished run card for %s: %s" % (finished, clicked))
+
+    d.wait_for(
+        "%s.length === 0" % mine,
+        timeout=30,
+        what="the dismissed card for %s to go" % finished,
+    )
 
     # And when something is actually running, it is the card at the top.
     _, busy = start_index(d, d.fixtures.bulk())
