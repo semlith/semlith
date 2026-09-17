@@ -1010,6 +1010,45 @@ pub mod changes {
         domain.cell().fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Notice a registry that another process wrote.
+    ///
+    /// `semlith index ~/work/new` in a terminal writes the registry and this
+    /// daemon opens that store on the next read of `/api/stores`, which is
+    /// what 0.19.0's reconciliation is for. But the page only reads that route
+    /// when the stores counter moves, and nothing *in this process* moved it —
+    /// so the counter waited for the open and the open waited for the counter,
+    /// and the row appeared on the next navigation rather than by itself.
+    /// That circle is the whole of "my new repository is not in the list".
+    ///
+    /// One `stat` of the registry against the last one seen, on the poll that
+    /// is already happening. Cheaper than reconciling per poll, which would
+    /// take the registry lock and try to open every unopened store once a
+    /// second; this only says "something changed", and the existing route does
+    /// the work exactly once in response.
+    pub fn notice_registry() {
+        use std::sync::Mutex;
+        use std::time::SystemTime;
+        static SEEN: Mutex<Option<SystemTime>> = Mutex::new(None);
+
+        let Ok(path) = crate::home::registry_path() else {
+            return;
+        };
+        let Ok(at) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            return;
+        };
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        match *seen {
+            // The first poll is a baseline, not a change: whatever the page
+            // drew on load already covers the registry as it stands.
+            None => *seen = Some(at),
+            Some(was) if was != at => {
+                *seen = Some(at);
+                bump(Domain::Stores);
+            }
+            Some(_) => {}
+        }
+    }
+
     /// What each counter stands at.
     pub fn read(domain: Domain) -> u64 {
         domain.cell().load(Ordering::Relaxed)
@@ -1757,7 +1796,13 @@ pub fn run(
         let lock = StoreLock::acquire(dir)
             .with_context(|| format!("{} cannot be opened by the daemon", dir.display()))?;
         let (name, roots) = roots_for(dir, &registry);
-        opening.push((name, dir.clone(), roots));
+        // Canonical, as `open_store` records it, because `reconcile` compares
+        // what it computes from the registry against what is already open. A
+        // home reached through a symlink — `/tmp` on macOS is one — gave those
+        // two different spellings of one directory, so every store opened at
+        // startup was reported as registered-but-not-open as well, and the
+        // Stores page listed each of them twice.
+        opening.push((name, crate::canonical(dir), roots));
         locks.push(lock);
     }
 

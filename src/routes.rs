@@ -1754,6 +1754,11 @@ fn projects(request: &Request) -> Response {
 /// one small request a second and nothing else.
 fn changes(state: &Arc<State>) -> Response {
     let _ = state;
+    // A store another process just made is a change to the stores domain, and
+    // nothing in *this* process bumped the counter for it. One `stat` here is
+    // what closes the circle; `/api/stores` does the reconciling, once, when
+    // the page comes to ask.
+    daemon::changes::notice_registry();
     let mut out = serde_json::Map::new();
     for domain in daemon::changes::DOMAINS {
         out.insert(
