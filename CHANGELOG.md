@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `install.ps1` can replace a semlith that is already installed. It moved the
+  unpacked binary into place with a single `Move-Item -Force`, and Windows will
+  not write a file over an executable that is already there — so every
+  re-install ended at "Cannot create a file when that file already exists"
+  while every first install worked. It now renames the installed binary out of
+  the way before moving the new one in, and puts it back if that fails, which
+  is the sequence `semlith upgrade` has always used. The installer is served
+  from `main`, so this reaches everyone without a release.
+
 ## [0.20.0] - 2026-09-17
 
 ### A sliced run carries on instead of starting over
