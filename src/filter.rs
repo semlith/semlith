@@ -747,15 +747,30 @@ mod deny_tests {
     #[test]
     fn a_store_with_roots_is_confined_to_them() {
         let roots = vec![PathBuf::from("/work/api")];
-        let home = crate::home::user_home().unwrap_or_else(|_| PathBuf::from("/nonexistent"));
-        // The home directory is not a licence to index into a store that has
-        // roots of its own. This is finding 1.1 of the 2026-09-17 drive.
-        assert!(!within_boundary(&home.join("elsewhere/lib.mjs"), &roots));
         assert!(within_boundary(Path::new("/work/api/src/lib.rs"), &roots));
+
+        // A machine with no home semlith can locate — a Windows runner, which
+        // sets no HOME — is one where the fallback has nothing to fall back
+        // to, and the rule under test is the roots one either way.
+        let Ok(home) = crate::home::user_home() else {
+            assert!(!within_boundary(
+                Path::new("/somewhere/else/lib.mjs"),
+                &roots
+            ));
+            return;
+        };
+        let elsewhere = home.join("elsewhere").join("lib.mjs");
+
+        // The home directory is not a licence to index into a store that has
+        // roots of its own. This is finding 1.1 of the 2026-09-17 drive: every
+        // store on a machine shares a home, so treating it as inside every
+        // boundary made the boundary no boundary at all.
+        assert!(!within_boundary(&elsewhere, &roots));
+
         // With no roots recorded at all, the home directory is the boundary,
         // because otherwise a `--store` the registry never saw could index
         // nothing whatever.
-        assert!(within_boundary(&home.join("elsewhere/lib.mjs"), &[]));
+        assert!(within_boundary(&elsewhere, &[]));
     }
 
     #[test]

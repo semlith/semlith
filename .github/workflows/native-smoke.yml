@@ -182,8 +182,18 @@ jobs:
           PY=python3
           command -v python3 >/dev/null 2>&1 || PY=python
           "$PY" -m pip install --quiet --disable-pip-version-check websocket-client
-          semlith start > drive-daemon.log 2>&1 &
-          for _ in $(seq 1 60); do
+
+          # Its own store home and its own port, so this cannot collide with
+          # whatever the two steps above left behind — a daemon still holding a
+          # store's write lock is a daemon this one cannot start beside, and
+          # the failure reads as "no portal URL" rather than as what it is.
+          # Starting from an empty home is also the honest test: the drive
+          # builds every corpus it asserts on.
+          export SEMLITH_HOME="$PWD/drive-home"
+          export SEMLITH_PORTAL_URL=http://127.0.0.1:7466
+          mkdir -p "$SEMLITH_HOME"
+          semlith start --port 7466 > drive-daemon.log 2>&1 &
+          for _ in $(seq 1 90); do
             grep -q 'token=' drive-daemon.log && break
             sleep 1
           done
@@ -204,6 +214,7 @@ jobs:
             smoke-${{ matrix.os }}.log
             drive-${{ matrix.os }}.log
             drive-${{ matrix.os }}/
+            drive-daemon.log
 
       # Both checks ran and both logs are uploaded; now say whether the job
       # passed. Without this the `continue-on-error` above would make a run
