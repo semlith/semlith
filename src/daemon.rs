@@ -201,6 +201,34 @@ enum Work {
     Rest(Vec<PathBuf>),
 }
 
+/// What a run has done so far, across every slice of it.
+///
+/// Carried between slices because each slice's report is its own: the `done`
+/// summary used to be whatever the last slice happened to do, so a run of 35
+/// files that took three slices ended by announcing the four the third slice
+/// reached. Every one of these is the run's, which is what the summary claims
+/// to be.
+#[derive(Default, Clone, Copy)]
+struct Tally {
+    indexed: u64,
+    unchanged: u64,
+    skipped: u64,
+    removed: u64,
+    chunks: u64,
+    images: u64,
+}
+
+impl Tally {
+    fn add(&mut self, report: &crate::IndexReport) {
+        self.indexed += report.indexed as u64;
+        self.unchanged += report.unchanged as u64;
+        self.skipped += report.skipped as u64;
+        self.removed += report.removed as u64;
+        self.chunks += report.chunks as u64;
+        self.images += report.images as u64;
+    }
+}
+
 struct Indexing {
     work: Work,
     /// Every file this run has embedded, across every slice, so a stop undoes
@@ -212,6 +240,8 @@ struct Indexing {
     /// a run that had begun again.
     scanned: u64,
     total: u64,
+    /// What the earlier slices of this run got through.
+    tally: Tally,
 }
 
 enum Job {
@@ -671,6 +701,7 @@ impl Store {
                 already: Vec::new(),
                 scanned: 0,
                 total: 0,
+                tally: Tally::default(),
             }),
             report,
         });
@@ -2047,6 +2078,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
             already,
             scanned: scanned_before,
             total: total_before,
+            mut tally,
         }) => {
             // Only the first slice announces itself; the rest are the same run
             // continuing, and a second "started" would read as a second run.
@@ -2165,6 +2197,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                     // channel, so the watcher gets a turn between slices and
                     // the reader keeps one stream rather than being asked to
                     // press the button again.
+                    tally.add(&done);
                     if done.remaining > 0 {
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
@@ -2185,27 +2218,31 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                                 already: written,
                                 scanned: scanned_before + done.scanned as u64,
                                 total,
+                                tally,
                             }),
                             report: back,
                         });
                         say(serde_json::json!({
                             "event": "slice",
                             "remaining": done.remaining,
-                            "indexed": done.indexed,
-                            "chunks": done.chunks,
+                            "indexed": tally.indexed,
+                            "chunks": tally.chunks,
                         }));
                         return;
                     }
 
-                    store.note(format!("{} indexed from the portal", done.indexed));
+                    store.note(format!("{} indexed from the portal", tally.indexed));
                     say(serde_json::json!({
                         "event": "done",
-                        "indexed": done.indexed,
-                        "unchanged": done.unchanged,
-                        "skipped": done.skipped,
-                        "removed": done.removed,
-                        "chunks": done.chunks,
-                        "images": done.images,
+                        // The run's, not this slice's. A run of 35 files over
+                        // three slices used to end by announcing the four the
+                        // last slice reached.
+                        "indexed": tally.indexed,
+                        "unchanged": tally.unchanged,
+                        "skipped": tally.skipped,
+                        "removed": tally.removed,
+                        "chunks": tally.chunks,
+                        "images": tally.images,
                         // Above zero means the slice ran out of time, not that
                         // anything failed: asking again continues where it
                         // stopped and redoes nothing.
