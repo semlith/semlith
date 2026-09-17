@@ -17,6 +17,7 @@ release under test writes rather than whatever this file thinks a store
 looks like.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -98,6 +99,12 @@ impl %(symbol)s {
     pub fn release(&mut self) {
         self.count = 0;
     }
+
+    /// One line far wider than any pane, so a check about a preview that
+    /// scrolls has something that actually scrolls. Finding 4.3.
+    pub fn describe_at_length(&self) -> String {
+        format!("{} holds {} and releases it when the run that acquired it has finished with it, which is the whole of what this line is for", self.name, self.count)
+    }
 }
 """
 
@@ -109,6 +116,8 @@ and the `prefer docs` weighting has something to prefer.
 
 The release record is sealed and immutable once the gates are green.
 """
+
+
 
 
 class Fixtures:
@@ -127,7 +136,40 @@ class Fixtures:
     def cleanup(self):
         if self.keep:
             return
+        # The corpora, and the stores the drive made out of them. A drive that
+        # left `small`, `bulk`, `doomed` and `adoptme` registered would leave
+        # the next one choosing `small-2`, and the developer who ran it looking
+        # at a store list that is not theirs.
+        #
+        # Found by root rather than by name, because the daemon picks the name
+        # and picks a free one. Anything registered against a directory inside
+        # this drive's own temp root is this drive's.
+        for name in sorted(self._stores_under_root()):
+            subprocess.run(
+                [semlith_bin(), "drop", name, "--yes"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def _stores_under_root(self):
+        """Every registered store whose roots lie inside this drive's corpora."""
+        home = os.environ.get("SEMLITH_HOME") or os.path.join(
+            os.path.expanduser("~"), ".semlith"
+        )
+        try:
+            with open(os.path.join(home, "registry.json"), encoding="utf-8") as handle:
+                registry = json.load(handle)
+        except (OSError, ValueError):
+            return []
+        mine = os.path.realpath(self.root)
+        out = []
+        for name, entry in (registry.get("stores") or {}).items():
+            roots = [os.path.realpath(root) for root in entry.get("roots") or []]
+            if roots and all(root.startswith(mine) for root in roots):
+                out.append(name)
+        return out
 
     # ---------------------------------------------------------------- pieces
 

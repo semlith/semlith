@@ -1949,7 +1949,16 @@ def _(d):
     scan = d.api("/api/privacy/scan")
     refused = scan.get("files") or scan.get("refused") or []
     if not refused:
-        skip("the privacy scan finds nothing to refuse in this corpus")
+        # The badge and the scan can only be caught disagreeing on a machine
+        # whose stores are holding something today's rules refuse, and staging
+        # one is not within a check's reach: the daemon holds the write lock,
+        # the routes are held to the deny-list, and a store adopted now joins
+        # on the next start. The copy assertion above this line — the "Scan
+        # Scan" doubling — runs either way.
+        skip(
+            "no open store is holding a file today's rules would refuse, so "
+            "there is no disagreement for the badge to have with the scan"
+        )
 
     if re.search(r"rules\s*[—-]\s*all holding", body, re.IGNORECASE):
         fail(
