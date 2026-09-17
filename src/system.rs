@@ -303,8 +303,14 @@ pub fn derive(machine: &Machine, per_run_peak_mb: u64) -> Derived {
 /// this machine would have chosen rather than for the runs in force.
 pub fn threads_for(machine: &Machine, runs: usize) -> Derivation {
     let core_budget = machine.logical_cores.saturating_sub(1).max(1);
-    let runs = runs.clamp(1, core_budget);
-    let threads = (crate::embed::embed_threads() / runs).clamp(1, core_budget / runs);
+    // The runs actually in force, not a number clamped to the cores. A user
+    // who sets three runs on a three-core machine gets three runs — the
+    // admission queue takes the value as given — so a sentence that described
+    // the split across two was describing a machine that is not this one. The
+    // clamp belongs on the threads each run gets, which cannot fall below one.
+    let runs = runs.max(1);
+    let per_run = (core_budget / runs).max(1);
+    let threads = (crate::embed::embed_threads() / runs).clamp(1, per_run);
     Derivation {
         value: threads,
         reason: format!(
@@ -315,7 +321,38 @@ pub fn threads_for(machine: &Machine, runs: usize) -> Derivation {
     }
 }
 
-/// The index budget rises in two steps rather than continuously, because a
+#[cfg(test)]
+mod threads_tests {
+    use super::*;
+
+    /// The sentence names the runs that will actually happen.
+    ///
+    /// Found by the browser drive on a three-core runner: asked for three runs
+    /// it said "split between 2 runs", because the run count was being clamped
+    /// to the core budget before it was printed. The admission queue takes the
+    /// value as given, so two was a description of a different machine.
+    #[test]
+    fn the_split_names_the_runs_in_force_however_few_cores_there_are() {
+        let small = Machine {
+            logical_cores: 3,
+            physical_cores: None,
+            total_memory_mb: 8192,
+            available_memory_mb: 4096,
+        };
+        let three = threads_for(&small, 3);
+        assert!(
+            three.reason.contains("3 runs"),
+            "the sentence describes a machine that is not this one: {}",
+            three.reason
+        );
+        assert!(three.value >= 1, "a run always gets at least one thread");
+
+        // And one run still reads as one run rather than as "1 runs".
+        assert!(threads_for(&small, 1).reason.contains("1 run "));
+    }
+}
+
+/// The index budget rises in two steps rather than continuously, because a/// The index budget rises in two steps rather than continuously, because a
 /// figure a user can recognise is worth more here than a fitted curve.
 fn index_memory_mb(headroom_mb: u64) -> usize {
     let base = crate::index::INDEX_MEMORY_MB;
