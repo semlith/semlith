@@ -950,6 +950,20 @@ def _(d):
     d.close_index_panel("Projects under a folder…")
 
 
+def stop_quietly(d, store):
+    """Stop a run if one is going, and say nothing when there is not.
+
+    Tidying up after a check. A run that finished on its own is refused with a
+    409 that names exactly that, which is the product being right rather than
+    something for the drive to raise.
+    """
+    try:
+        d.api("/api/index/control", method="POST", body={"store": store, "action": "stop"})
+    except cdp.ProtocolError as refused:
+        if "no run to stop" not in str(refused):
+            raise
+
+
 @finding("2.6", "finished runs can be dismissed and the active run sorts first")
 def _(d):
     finished = indexed_fixture(d, d.fixtures.small())
@@ -997,16 +1011,29 @@ def _(d):
             what="the live run on %s to be the first card on the Index page" % busy,
         )
     except cdp.ProtocolError:
+        # A run that finished while we were watching is not a failure of the
+        # ordering. The fixture corpus is already indexed by the time this
+        # check runs, so a second run over it can finish in under a second on a
+        # fast machine and there is no live card left to be first.
+        still_live = any(
+            run["store"] == busy and run["status"] in ("queued", "running", "paused", "stopping")
+            for run in (d.api("/api/index/runs").get("runs") or [])
+        )
         first = d.eval(
             "(document.querySelector(%s) || {}).innerText || ''" % json.dumps(RUN_CARD)
         )
-        d.api("/api/index/control", method="POST", body={"store": busy, "action": "stop"})
-        fail(
-            "a run that is still going (%s) never became the first card on the "
-            "page; after 30s of repaints the top card still reads %r"
-            % (busy, first[:120])
+        stop_quietly(d, busy)
+        if still_live:
+            fail(
+                "a run that is still going (%s) never became the first card on the "
+                "page; after 30s of repaints the top card still reads %r"
+                % (busy, first[:120])
+            )
+        skip(
+            "the run over %s finished before the ordering could be observed; "
+            "there was no live card to sort above the finished ones" % busy
         )
-    d.api("/api/index/control", method="POST", body={"store": busy, "action": "stop"})
+    stop_quietly(d, busy)
 
 
 @finding("2.7", "lang:, path: and budget re-run the query like every other filter")
@@ -1677,7 +1704,14 @@ def _(d):
     about = d.api("/api/about")
     in_use = about.get("model") or (about.get("embedding") or {}).get("model")
     if not in_use:
-        skip("/api/about does not name the model in use")
+        # `/api/about` describes the binary; the model belongs to a store, and
+        # every store's row names the one it was built with.
+        in_use = next(
+            (s["model"] for s in (d.api("/api/stores").get("stores") or []) if s.get("model")),
+            None,
+        )
+    if not in_use:
+        skip("no open store names the model it was built with")
 
     models = d.api("/api/models")
     rows = models.get("models") if isinstance(models, dict) else models
@@ -1996,7 +2030,11 @@ def _(d):
     rail = d.eval(
         """
         (() => {
-          const el = [...document.querySelectorAll('a, button')]
+          // Scoped to the graph's own rail. The top bar's launcher is a button
+          // on every view, matches the same words, and comes first in document
+          // order — so an unscoped search read the top bar twice and reported
+          // it as disagreeing with itself.
+          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button')]
             .find(e => /chunks it lives in|ask (the index|it)/i.test(e.innerText || ''));
           return el ? (el.innerText || '').trim() : null;
         })()
@@ -2540,8 +2578,11 @@ def _(d):
     tag = d.eval(
         """
         (() => {
-          const el = [...document.querySelectorAll('a, button')]
-            .find(e => /chunks it lives in/i.test(e.innerText || ''));
+          // The wording moved when finding 3.24 gave the destination one
+          // name; what this check is about is the element type, so it finds
+          // the control by either phrasing.
+          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button')]
+            .find(e => /chunks it lives in|ask the index/i.test(e.innerText || ''));
           return el ? el.tagName : null;
         })()
         """
@@ -2569,7 +2610,10 @@ def _(d):
     )
     d.eval("new Promise(done => setTimeout(() => done(true), 600))")
     body = view_text(d)
-    if not re.search(r"select all %d|all %d matches" % (total, total), body, re.IGNORECASE):
+    # The page groups thousands, so 1664 is drawn as "1,664". The separator is
+    # the page's, and the number is the assertion.
+    grouped = "{:,}".format(total).replace(",", "[,\u202f ]?")
+    if not re.search(r"select all %s|all %s matches" % (grouped, grouped), body, re.IGNORECASE):
         fail(
             "the header checkbox selects the page (the bulk bar honestly says so) "
             "and nothing offers to act on all %d matches" % total
