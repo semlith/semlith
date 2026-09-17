@@ -675,12 +675,46 @@ fn ledger(state: &Arc<State>) -> Response {
     })
 }
 
+/// Notes fastembed's catalogue gets wrong about its own models.
+///
+/// These strings are shown in semlith's UI, beside a model the user is invited
+/// to choose between, so they are semlith's statements whatever their origin.
+/// Four of them described a different model than the row they sat on: two
+/// called a base model large, two called an English-only model multilingual,
+/// and one called itself the default when semlith's default is granite.
+///
+/// Keyed on the name the row shows. A model whose upstream note is right is
+/// not listed, so this table stays the list of known errors rather than a
+/// second catalogue that has to be kept in step.
+const MODEL_NOTES: &[(&str, &str)] = &[
+    (
+        "BGEBaseENV15Q",
+        "Quantized v1.5 release of the base English model",
+    ),
+    (
+        "GTEBaseENV15",
+        "Base English embedding model from Alibaba DAMO Academy",
+    ),
+    (
+        "GTEBaseENV15Q",
+        "Quantized base English embedding model from Alibaba DAMO Academy",
+    ),
+    (
+        "BGESmallENV15",
+        "Fast and small English model. semlith's default is granite, listed above",
+    ),
+];
+
 fn models() -> Response {
     let mut out = vec![
         json!({
             "name": embed::GRANITE_NAME,
             "dim": 384,
             "description": "default. IBM Granite R2 small, int8, English",
+            // The repository it is fetched from, which is also how its cache
+            // directory is named — so the model semlith actually runs shows
+            // its size like every other cached model rather than a dash.
+            "code": embed::GRANITE_REPO,
         }),
         // Not a choice, so it is listed apart from the models a store can be
         // built with: both halves of it are loaded together, on the first
@@ -693,10 +727,16 @@ fn models() -> Response {
         }),
     ];
     for info in TextEmbedding::list_supported_models() {
+        let name = info.model.to_string();
+        let description = MODEL_NOTES
+            .iter()
+            .find(|(model, _)| *model == name)
+            .map(|(_, note)| (*note).to_string())
+            .unwrap_or_else(|| info.description.clone());
         out.push(json!({
-            "name": info.model.to_string(),
+            "name": name,
             "dim": info.dim,
-            "description": info.description,
+            "description": description,
             "code": info.model_code,
         }));
     }
@@ -2614,5 +2654,21 @@ mod tests {
             vec!["a", "b"]
         );
         assert!(strings(&json!({}), "path").is_empty());
+    }
+
+    /// A correction for a model that no longer exists is a correction that has
+    /// silently stopped applying, and the wrong note comes back.
+    #[test]
+    fn every_corrected_model_note_names_a_model_that_is_listed() {
+        let listed: Vec<String> = TextEmbedding::list_supported_models()
+            .into_iter()
+            .map(|info| info.model.to_string())
+            .collect();
+        for (name, _) in MODEL_NOTES {
+            assert!(
+                listed.iter().any(|model| model == name),
+                "{name} is corrected here and is not in fastembed's catalogue any more"
+            );
+        }
     }
 }

@@ -86,7 +86,7 @@ so semlith never writes it.
 ```
 
 ```sh
-claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
+claude mcp add --scope user --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 Or as a subprocess, which needs no key:
@@ -1016,7 +1016,7 @@ the command and the page list what they changed. A client configured somewhere
 else still needs the new stanza pasted in.
 
 ```sh
-claude mcp add --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
+claude mcp add --scope user --transport http semlith http://127.0.0.1:7365/mcp --header "Authorization: Bearer ${SEMLITH_AGENT_KEY}"
 ```
 
 ```json

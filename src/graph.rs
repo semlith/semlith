@@ -1976,6 +1976,13 @@ pub fn scoped(
 
     // Only edges whose both ends are drawn. An edge to something off-canvas is
     // not a line anyone can follow.
+    //
+    // Deduplicated across stores. Every store open is asked about every drawn
+    // name, so a symbol two stores both know produced the same edge twice —
+    // and a 20-node subgraph reported 836 edges where the whole 43-node graph
+    // reported 623, which cannot both be true and is not a number anyone can
+    // read.
+    let mut seen: std::collections::HashSet<(usize, usize, String)> = Default::default();
     for (from_name, from_index) in &index {
         for (_, store) in stores {
             for end in crate::store::edges_out(store.db(), from_name, &[])? {
@@ -1983,6 +1990,9 @@ pub fn scoped(
                     continue;
                 };
                 if from_index == to_index {
+                    continue;
+                }
+                if !seen.insert((*from_index, *to_index, end.kind.clone())) {
                     continue;
                 }
                 edges.push(serde_json::json!({
