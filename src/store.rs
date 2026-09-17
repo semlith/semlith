@@ -884,6 +884,26 @@ pub fn all_paths(db: &Connection) -> Result<Vec<String>> {
     filtered_paths(db, &[])
 }
 
+/// Everything this store holds for one file, its chunks in order, joined.
+///
+/// What `semlith scan` reads. The store's own copy rather than the file on
+/// disk: the question the scan answers is what this store is holding, and a
+/// file that has since been cleaned or deleted is still a credential sitting
+/// in an index an agent can search.
+pub fn text_of(db: &Connection, path: &str) -> Result<String> {
+    let mut stmt = db.prepare(
+        "SELECT c.text FROM chunks c JOIN files f ON f.id = c.file_id
+         WHERE f.path = ?1 ORDER BY c.ord",
+    )?;
+    let rows = stmt.query_map([path], |r| r.get::<_, String>(0))?;
+    let mut out = String::new();
+    for row in rows {
+        out.push_str(&row?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Indexed paths whose file matches `groups`, in path order.
 ///
 /// The same predicate the search halves are built on, so "which files would

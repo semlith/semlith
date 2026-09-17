@@ -414,6 +414,19 @@ pub struct Client {
     pub seen: u64,
 }
 
+/// A registered store the daemon could not open, and why.
+///
+/// Reported on the Stores page rather than swallowed: a store that is in the
+/// registry and not in the list is a store the user will look for and not
+/// find, and "another process is writing it" and "it is not there any more"
+/// are two different things to do about it.
+#[derive(Debug, Clone)]
+pub struct Unopened {
+    pub name: String,
+    pub dir: PathBuf,
+    pub why: String,
+}
+
 impl State {
     /// Every open store, as a snapshot.
     ///
@@ -424,12 +437,79 @@ impl State {
         self.stores.read().expect("the stores lock").clone()
     }
 
-    pub fn store(&self, name: &str) -> Option<Arc<Store>> {
+    /// A store by name, opening it from the registry if this daemon has not
+    /// got it open yet.
+    ///
+    /// The miss is what triggers the reconciliation, not a timer: `semlith
+    /// index ~/work/new-project` from a second process writes a store this
+    /// daemon has never heard of, and until 0.19.0 every agent asking for it
+    /// by name got "no store called new-project is open" until the daemon was
+    /// restarted.
+    pub fn store(self: &Arc<Self>, name: &str) -> Option<Arc<Store>> {
+        if let Some(open) = self.stores().into_iter().find(|s| s.name == name) {
+            return Some(open);
+        }
+        self.reconcile();
         self.stores().into_iter().find(|s| s.name == name)
     }
 
+    /// Open every registered store this daemon does not have open, and report
+    /// the ones it could not.
+    ///
+    /// Called on a by-name miss and on every `/api/stores` read, which is the
+    /// cheap place to notice: both are already the slow path, and neither runs
+    /// in the indexing loop.
+    ///
+    /// A directory another process holds the lock on is left alone and
+    /// reported as being written, never forced: `open_store` takes the lock
+    /// first, so the daemon cannot become a second writer of one store. The
+    /// next read tries again, which is what makes a `semlith index` that is
+    /// still running appear by itself when it finishes.
+    pub fn reconcile(self: &Arc<Self>) -> Vec<Unopened> {
+        let Ok(registry) = Registry::load() else {
+            return Vec::new();
+        };
+        let open: Vec<PathBuf> = self.stores().iter().map(|s| s.dir.clone()).collect();
+        let mut out = Vec::new();
+        for name in registry.stores.keys() {
+            let Ok(dir) = Registry::dir_of(name) else {
+                continue;
+            };
+            let dir = crate::canonical(&dir);
+            if open.contains(&dir) {
+                continue;
+            }
+            if !dir.exists() {
+                out.push(Unopened {
+                    name: name.clone(),
+                    dir,
+                    why: "registered, but there is nothing at that path".to_string(),
+                });
+                continue;
+            }
+            if let Err(e) = self.open_store(&dir) {
+                out.push(Unopened {
+                    name: name.clone(),
+                    dir,
+                    why: format!("{e:#}"),
+                });
+            }
+        }
+        out
+    }
+
     /// The one store a write means, or an error naming the alternatives.
-    pub fn writable(&self, name: Option<&str>) -> Result<Arc<Store>> {
+    pub fn writable(self: &Arc<Self>, name: Option<&str>) -> Result<Arc<Store>> {
+        // A write naming a store this daemon has not opened is the same miss
+        // as a read naming one, and gets the same reconciliation.
+        if let Some(name) = name
+            && let Some(open) = self.store(name)
+        {
+            return Ok(open);
+        }
+        if name.is_none() && self.stores().is_empty() {
+            self.reconcile();
+        }
         let stores = self.stores();
         match (name, stores.as_slice()) {
             (Some(name), _) => self
@@ -484,7 +564,7 @@ impl State {
     ///
     /// The indexed files themselves are not touched — this deletes what
     /// semlith derived from them.
-    pub fn delete_store(&self, name: &str) -> Result<PathBuf> {
+    pub fn delete_store(self: &Arc<Self>, name: &str) -> Result<PathBuf> {
         let Some(store) = self.store(name) else {
             anyhow::bail!("this daemon is not serving a store called {name}");
         };
@@ -1095,6 +1175,17 @@ fn tend(
                     report(&format!("{}: watch error: {e}", store.name));
                     store.note(format!("error: {e}"));
                 }
+                Progress::Failed { path, why } => {
+                    // A note on the store's feed, not a watch error: the
+                    // thread is still running and `watching` is still true.
+                    // One corrupt file used to take the whole watcher with it.
+                    let text = format!(
+                        "could not index {}: {why}",
+                        crate::plain(&path.display().to_string())
+                    );
+                    report(&format!("{}: {text}", store.name));
+                    store.note(text);
+                }
                 Progress::File(_) => {}
             }
         },
@@ -1169,10 +1260,18 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                 writer.index_within_held_under(&paths, SLICE, &control, |path, progress| {
                     say(serde_json::json!({
                         "event": "file",
-                        "path": path.display().to_string(),
+                        // Plain, like every other path semlith hands out. The
+                        // store keeps the verbatim form; a `\\?\C:\` prefix in
+                        // an event is a path no editor opens and no shell
+                        // completes.
+                        "path": crate::plain(&path.display().to_string()),
                         // What is happening to this file, so a page can say
                         // "unchanged" rather than showing nothing at all.
                         "outcome": progress.outcome.as_str(),
+                        // Why, for the outcomes that owe an explanation. A
+                        // page showing "skipped" against two thousand files
+                        // and nothing else is a page nobody can act on.
+                        "why": progress.why,
                         "scanned": progress.scanned,
                         "total": progress.total,
                         "indexed": progress.indexed,
@@ -1258,8 +1357,22 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued) {
                         // Named, with the rule that refused each. A count would
                         // be a number somebody has to go and investigate.
                         "refused": done.refused.iter().map(|(path, why)| {
-                            serde_json::json!({ "path": path, "why": why })
+                            serde_json::json!({ "path": crate::plain(path), "why": why })
                         }).collect::<Vec<_>>(),
+                        // Named for the same reason as the refused, and the
+                        // reason this release exists: a run that ends with
+                        // "one file failed" and no name is a run whose one
+                        // failure nobody can find.
+                        "failed": done.failed.iter().map(|(path, why)| {
+                            serde_json::json!({ "path": crate::plain(path), "why": why })
+                        }).collect::<Vec<_>>(),
+                        // How the skipped divide up. The total alone is the
+                        // number that made an Angular tree look like a run
+                        // that had lost two thousand files.
+                        "skipped_reasons": done.skipped_reasons,
+                        // The daemon's own elapsed, so the page's clock is
+                        // corrected to the run rather than to the tab.
+                        "elapsed_ms": started_at.elapsed().as_millis() as u64,
                     }));
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
@@ -1467,6 +1580,9 @@ mod tests {
             ledger: false,
         };
 
+        // An `Arc` because the reconciliation a miss triggers opens stores,
+        // and opening one hands `Arc<State>` to the watcher thread it spawns.
+        let state = Arc::new(state);
         let err = match state.writable(None) {
             Err(e) => e.to_string(),
             Ok(store) => panic!("an unnamed write picked {}", store.name),

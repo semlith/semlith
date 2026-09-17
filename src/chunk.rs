@@ -39,22 +39,29 @@ pub struct Chunk {
 ///
 /// `path` is only consulted for its extension; the caller has the bytes
 /// already because it needs them to hash the file anyway.
-pub fn extract(path: &Path, bytes: &[u8]) -> Option<String> {
+pub fn extract(path: &Path, bytes: &[u8]) -> Result<String, crate::SkipReason> {
+    use crate::SkipReason;
     if bytes.is_empty() {
-        return None;
+        return Err(SkipReason::Empty);
     }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
+    // An `Option` before 0.19.0, which is why the index loop's branch for it
+    // reported nothing: there was nothing to report. "A reader ran and got
+    // nothing out" and "these bytes are not text" are different answers and
+    // the person chasing a missing file needs to be told which.
     match ext.as_deref() {
-        Some("pdf") => extract_pdf(bytes),
-        Some(ext) if formats::handles(ext) => guard(|| formats::extract(ext, bytes)),
+        Some("pdf") => extract_pdf(bytes).ok_or(SkipReason::NoText),
+        Some(ext) if formats::handles(ext) => {
+            guard(|| formats::extract(ext, bytes)).ok_or(SkipReason::NoText)
+        }
         _ => {
             if is_binary(bytes) {
-                return None;
+                return Err(SkipReason::Binary);
             }
-            Some(String::from_utf8_lossy(bytes).into_owned())
+            Ok(String::from_utf8_lossy(bytes).into_owned())
         }
     }
 }

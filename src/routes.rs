@@ -65,6 +65,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/languages") => languages(),
         (true, _, "/api/dirs") => dirs(request),
         (true, _, "/api/privacy") => privacy(state),
+        (true, _, "/api/privacy/scan") => privacy_scan(state),
         (true, _, "/api/about") => about(state),
         (true, _, "/api/agents") => agents(state),
         (true, _, "/api/pattern") => pattern(state, request),
@@ -128,6 +129,11 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
 
 /// Every open store, what it holds, and whether it is being kept current.
 fn stores(state: &Arc<State>) -> Response {
+    // Before the fleet, because it may add to what the fleet has to cover. A
+    // store the CLI wrote while this daemon was running is registered and not
+    // open, and this is the read that notices — which is what makes `semlith
+    // index ~/work/new-project` show up on this page without a restart.
+    let unopened = state.reconcile();
     // Opened here rather than at startup: it is None until the first read, and
     // None again after a store joins, so every read route has to be able to
     // put it back. Cheap when it is already open.
@@ -212,6 +218,32 @@ fn stores(state: &Arc<State>) -> Response {
             "queue": handle.queue_depth(),
             "last_write": handle.last_write.load(Ordering::Relaxed),
             "events": handle.events(),
+        }));
+    }
+
+    // Registered and not served. Listed rather than dropped, because a store
+    // the user can see in `semlith stats` and not on this page reads as the
+    // portal having lost it. A directory another process is writing comes back
+    // on the next read of this route, by itself.
+    for store in unopened {
+        out.push(json!({
+            "name": store.name,
+            "dir": store.dir.display().to_string(),
+            "unopened": store.why,
+            "roots": [],
+            "files": 0,
+            "chunks": 0,
+            "bytes": 0,
+            "model": "",
+            "dim": 0,
+            "vectors": 0,
+            "lines": 0,
+            "formats": 0,
+            "readers": 0,
+            "watching": false,
+            "queue": 0,
+            "last_write": 0,
+            "events": [],
         }));
     }
 
@@ -969,6 +1001,49 @@ fn doctor(state: &Arc<State>) -> Response {
     }))
 }
 
+/// Every file the open stores hold that semlith would refuse today.
+///
+/// The Privacy page's half of `semlith scan`, and the same function behind it:
+/// `Semlith::scan` applies the deny-list to the name and the credential table
+/// to the text the store is actually holding. Two implementations of "what
+/// should not be here" would eventually disagree, and the one that mattered
+/// would be whichever the user did not run.
+///
+/// Read-only. The Forget buttons beside the rows post to `/api/forget`, which
+/// is the daemon's one eviction path — queued through the writer thread like
+/// every other write, rather than a second one opened here.
+fn privacy_scan(state: &Arc<State>) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::json(&json!({ "findings": [] }));
+    };
+    let mut findings = Vec::new();
+    for (label, opened) in fleet.each() {
+        match opened.scan() {
+            Ok(found) => {
+                for finding in found {
+                    findings.push(json!({
+                        "store": label,
+                        // Two spellings of one path, on purpose. `path` is
+                        // what a person reads; `key` is what the store is
+                        // holding it under, which on Windows carries the
+                        // `\\?\` prefix — and a Forget is a lookup, so it has
+                        // to be spelled the store's way or it finds nothing.
+                        "path": crate::plain(&finding.path),
+                        "key": finding.path,
+                        "why": finding.why,
+                    }));
+                }
+            }
+            Err(e) => return Response::error(500, &e.to_string()),
+        }
+    }
+    Response::json(&json!({ "findings": findings }))
+}
+
 /// Apply one Privacy repair, or every one that qualifies.
 ///
 /// Calls `doctor::apply`, which is what `semlith doctor --fix` calls. The
@@ -1255,17 +1330,22 @@ fn pattern(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, "missing lang");
     };
     let only = request.query_all("store");
+    // The same two arguments the tool and the command take, so the page can
+    // narrow a pattern and page past the cap exactly as an agent can.
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
+    let offset = request
+        .query("offset")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
     let empty = json!({ "language": lang, "matches": [], "files": 0, "truncated": false });
     with_fleet(state, empty, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
         // A bad pattern or an unknown language is the caller's to correct, and
         // comes back as the parser's own words rather than an empty list.
-        match fleet.pattern_in(
-            only.as_deref(),
-            lang,
-            query,
-            &crate::filter::Filter::default(),
-        ) {
+        match fleet.pattern_in(only.as_deref(), lang, query, &filter, offset) {
             Ok(found) => Ok(serde_json::to_value(found)?),
             Err(e) => Ok(json!({
                 "language": lang,

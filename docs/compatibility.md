@@ -18,6 +18,8 @@ break, and is treated as one.
 | CLI commands added in 0.14.0 | `trust <dir>` and `trust --list`, and `index --include-secrets`. |
 | CLI commands added in 0.18.0 | `doctor`, with `--json` and `--fix`, and `setup --register-all`. |
 | CLI commands added in 0.16.0 | `read <target>` — `path:start-end`, `path:line` or a symbol name — and `pattern <query> --lang <name>`. `search` gains `--prefer code\|docs\|any`, defaulting to `any`. |
+| CLI commands added in 0.19.0 | `scan [STORE]`, with `--forget` and `--json`. It exits non-zero while the store still holds anything today's rules would refuse, which is a contract a script can gate on. `pattern` gains `--path` (a repeatable glob) and `--offset`. |
+| MCP tool arguments added in 0.19.0 | `semlith_pattern` takes `path`, an array of globs, and `offset`, an integer. Both are optional and both default to what 0.18.0 did, so a client that passes neither sees no change. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
 | The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME` and `SEMLITH_YES`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
@@ -691,6 +693,171 @@ directions. `tests/retrieval.rs` changed what it indexes — a snapshot of `src`
 `tests`, `docs` and `AGENTS.md` rather than the repository root — which moves
 every number that harness reports; it is a test, not a surface, and the reason is
 issue #88.
+
+## 0.19.0
+
+**One change alters what a store holds; everything else is a run that stops
+giving up.** No command is removed, no argument changes meaning, and nothing
+about ranking or scoring moves — a question answered by 0.18.0 is answered the
+same way here. `FORMAT_VERSION` does not move either: a store written by 0.18.0
+opens under 0.19.0, and a 0.18.0 binary opens a store 0.19.0 wrote, with no
+table and no column added in either direction.
+
+### The hidden-file rule now applies only to a path the caller named
+
+**This is the change to know about, because it changes what a store holds.**
+Through 0.18.0 any dotfile was refused, however semlith arrived at it. From
+0.19.0 the rule splits on who chose the path. A dotfile the walk yielded is
+indexed, because the walk only yielded it after the user's own `.gitignore`
+whitelisted it — `dist/*` followed by `!dist/.gitkeep` — and refusing it as
+hidden is the walk contradicting itself. A dotfile the caller named is still
+refused as hidden: `semlith index ~/.npmrc`, `semlith_index` with that path and
+`semlith add` all get the same answer they got before.
+
+**What that means for an existing store.** The next index pass over a tree that
+holds whitelisted dotfiles puts files into the store that were not there before.
+Nothing is removed by this rule and no store changes until it is indexed again,
+but a re-index is no longer guaranteed to produce the corpus 0.18.0 produced. If
+that matters for a particular tree, `semlith scan` says what the store holds
+that today's rules would refuse, and the deny-list below is what stops the
+change reaching a credential.
+
+**Every other rule applies to both.** The credential directories and the
+credential names are checked whether a path was walked to or named, exactly as
+they were.
+
+### The credential deny-list is wider
+
+`DENIED_NAMES` gains three environment-file patterns and eight per-user
+credential dotfiles. `.env` and `.env.*` are gone as separate entries because
+`.env*` subsumes them and also covers `.envrc`, `.env-local` and `.env.vault`;
+`*.env` and `*.env.*` are new and cover `dev.env`, `production.env.local` and
+the files a Docker `env_file` points at. `.npmrc`, `.netrc`, `.pypirc`,
+`.pgpass`, `.htpasswd`, `.boto`, `.s3cfg` and `*.ppk` are new outright.
+
+Those last eight were caught by the hidden-file rule alone until this release,
+which is why widening the list is not a separate improvement but the half of the
+change above that keeps it safe: without it, whitelisting a dotfile would put an
+npm token into a store. [`docs/security.md`](security.md) has the whole list and
+what each entry is for. `--include-secrets` is still the only way past it.
+
+### A credential content scan refuses a file for what is inside it
+
+New in this release, and the first rule semlith applies that a file's name
+cannot decide. Every file's text is scanned before it is chunked, stored or
+embedded, including the text a reader produced for a `.docx` or a notebook.
+Images and binaries are never scanned; they were never text. A match refuses the
+whole file, and the reason names the kind of credential and the line it sits on
+and never a character of what was matched.
+
+`--include-secrets` indexes such a file anyway and the run then reports how many
+files the scan would have refused, so the flag is never silent about what it
+did. The shapes are listed in [`docs/security.md`](security.md), along with the
+caveat that matters most: the scan covers the shapes in that table and nothing
+else.
+
+### A refused file an earlier run indexed is evicted in the same pass
+
+A rule that widens otherwise leaves every store indexed under the old rule still
+holding what the new one refuses. So a path refused by the deny-list or by the
+content scan has its rows and vectors removed on the spot, and the refusal line
+says so. This is how a `dev.env` that 0.18.0 indexed leaves the store on the
+first run under 0.19.0, and how a file that was clean when it was indexed and
+has since gained a token leaves it. The file on disk is untouched.
+
+### `semlith scan` is added, and there is deliberately no MCP tool for it
+
+`semlith scan [STORE]` runs both halves of the decision over every file a store
+already holds — the deny-list against the name, the content table against the
+text the store is holding — and prints each file semlith would refuse today with
+the rule, or with the kind of credential and the line. It exits non-zero while
+anything is found, so it is usable as a check; `--forget` evicts what it found
+and `--json` emits JSON. This is the path for a store indexed before this
+release.
+
+There is no `semlith_scan`. An agent is not the party that decides what a store
+may hold, and a tool that evicts files is a tool that can be talked into
+evicting files. The portal's half is a Scan section on the Privacy page, which
+calls the same `Semlith::scan` the command does.
+
+### A file that fails on its own content no longer ends the run
+
+**A new per-file outcome, `failed`.** Through 0.18.0 an index run died on the
+first file it could not read, so one truncated PNG in a tree of ten thousand
+files ended the run and left the rest unindexed. A decoder that rejects an
+image's bytes, a parser that cannot read a source file, and an entry the walk
+itself could not read are now reported as `failed`, carrying the underlying
+error's own message, and the run indexes the next file. Every failed path is
+named with its reason by the `done` event, by the CLI's summary and by what
+`semlith_index` returns — a count is a number somebody has to go and
+investigate.
+
+**A failure of the embedding batch is still fatal.** That is the model failing
+rather than a file, and a run that carried on past it would be a run producing a
+store with holes in it that nothing had said were there.
+
+**The watcher survives a per-file failure too.** A save that failed to embed
+used to come back as an error from the re-index and end the watcher thread for
+that store, so every later save anywhere in that tree was silently never
+indexed. It is now a line on that store's event feed and `watching` stays true.
+An error that is not a file's — the store cannot be opened, the index cannot be
+saved — still stops the watcher, and still says so.
+
+### The event stream says why
+
+**`IndexProgress` and the daemon's `file` event carry `why`**, a string for the
+`skipped`, `refused` and `failed` outcomes and null for the rest, where the
+outcome is the whole of what there is to say. The skip reasons are a closed set:
+`empty`, `over 8 MiB`, `not a regular file`, `unreadable: <the operating
+system's own message>`, `binary`, `no text in this document` and `not a
+decodable image`. "Skipped" against two thousand files and nothing else is
+indistinguishable from a run that lost them, which is the report this release
+came out of.
+
+**The `done` event gains three fields**: `failed`, an array of `{path, why}` in
+the same shape as the existing `refused` array; `skipped_reasons`, an object of
+`{"<kind>": <count>}`; and `elapsed_ms`, the daemon's own elapsed time for the
+run. These are additive under the *Additive fields* rule above, and the daemon's
+HTTP routes are [not a covered surface](#what-is-not-covered) in any case.
+
+### A running daemon notices a store another process created
+
+On every read of `/api/stores`, and on every by-name miss in the daemon's own
+store lookup, the registry is re-read and any registered directory the daemon
+does not have open is opened. So `semlith index ~/work/new-project` from a
+second process while `semlith start` is running shows up on the Stores page and
+answers over MCP without a restart; until 0.19.0 an agent asking for it by name
+was told no such store was open until the daemon was restarted.
+
+Reconciliation is triggered by the miss rather than by a timer, and both places
+it runs are already the slow path, so nothing in the indexing loop pays for it.
+A directory whose lock another process holds is left alone and listed as being
+written, never forced, because the daemon must not become a second writer of one
+store — the next read tries again, which is what makes a `semlith index` that is
+still running appear by itself when it finishes. A directory the registry names
+and the disk no longer has is listed as missing. Such a row carries an
+`unopened` field saying which of the two it is.
+
+### Paths are rendered plain everywhere
+
+`semlith_symbol` and `semlith_path` returned Windows verbatim paths —
+`\\?\C:\work\api\src\lock.rs` — which no editor opens and no shell completes.
+They now render the way every other surface has since 0.17.1, as do the daemon's
+`file` event path and the `refused` and `failed` paths on `done`. The store
+still holds the verbatim form, because that is what makes a path longer than 260
+characters work; only the text on its way out is plain. A Windows script that
+matched a leading `\\?\` in a graph tool's reply stops matching, and one that
+hands the printed path to an editor starts working.
+
+### `pattern` gains two arguments
+
+`semlith_pattern`, `semlith pattern` and `GET /api/pattern` take `path` — the
+same repeatable glob filter the other surfaces take, which the MCP tool
+previously accepted nowhere and ignored — and `offset`, which skips that many
+matches so a listing the 200-match cap cut short can be continued. The
+truncation line now names the offset that continues it rather than leaving a
+caller to guess at a narrower pattern. Neither cap has moved, the order is
+total, and two calls with the same offset return the same matches.
 
 ## What a break would look like
 

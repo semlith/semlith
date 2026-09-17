@@ -2426,6 +2426,11 @@ async function storesView() {
         // been written to is neither good news nor a warning, so it carries a
         // plain pill with no dot at all.
         render: (s) => {
+          // Registered, and this daemon does not have it open — another
+          // process is writing it, or the directory has gone. The row is here
+          // rather than dropped, because a store the user can see in `semlith
+          // stats` and not on this page reads as the portal having lost it.
+          if (s.unopened) return pill("not opened", "warn", { title: s.unopened });
           if (!s.watching) return pill("not watching", "warn");
           return s.last_write ? pill(when(s.last_write), "good") : pill("never");
         },
@@ -3816,6 +3821,53 @@ async function indexView() {
     if (focus) focus.focus();
   }
 
+  /* How long the run has been going, measured by the daemon.
+   *
+   * The local tick exists only so the seconds move between file events; every
+   * file event, and the `done` event, correct it to what the daemon measured.
+   * A tab in the background has its timers throttled to about once a minute,
+   * so a clock that only counted here would be minutes short by the time
+   * anyone looked at it — and the number is meant to be the run's, not this
+   * tab's. */
+  const elapsed = el("span", { class: "meta", hidden: true });
+  let elapsedMs = 0;
+  let elapsedAt = 0;
+  let clockTimer = null;
+
+  function spell(ms) {
+    const all = Math.max(0, Math.round(ms / 1000));
+    const seconds = String(all % 60).padStart(2, "0");
+    const hours = Math.floor(all / 3600);
+    const minutes = String(Math.floor(all / 60) % 60).padStart(2, "0");
+    return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
+  }
+
+  function showElapsed(ms) {
+    elapsedMs = ms;
+    elapsedAt = Date.now();
+    elapsed.hidden = false;
+    elapsed.textContent = spell(ms);
+  }
+
+  function stopClock() {
+    if (clockTimer) clearInterval(clockTimer);
+    clockTimer = null;
+  }
+
+  function startClock() {
+    stopClock();
+    showElapsed(0);
+    clockTimer = setInterval(() => {
+      // Nothing tears a view down for us, so the clock has to notice that it
+      // has been navigated away from — the same test the graph canvas makes.
+      if (!elapsed.isConnected) return stopClock();
+      // The wall clock rather than a count of ticks: a throttled tab fires
+      // this far less often than once a second, and counting fires would
+      // under-report exactly when nobody is watching.
+      showElapsed(elapsedMs + (Date.now() - elapsedAt));
+    }, 1000);
+  }
+
   /* One reader for both buttons. /api/add fetches the URL and then hands what
    * landed to the same write queue a folder goes through, so it answers with
    * the same event stream and there is no second progress mechanism. */
@@ -3828,6 +3880,11 @@ async function indexView() {
     bar.style.width = "0%";
     pct.textContent = "0%";
     status.textContent = "working";
+    // Zeroed and on the page from the click, not from the first event: a run
+    // that queues behind the watcher can be seconds away from starting, and a
+    // clock that appears only then looks like a page that did nothing.
+    stopClock();
+    showElapsed(0);
 
     try {
       const response = await fetch(route, {
@@ -3881,6 +3938,9 @@ async function indexView() {
             );
           } else if (event.event === "started") {
             status.textContent = "walking the tree";
+            // The run begins here, so the clock does: the wait in the queue is
+            // not time this run spent indexing.
+            startClock();
             say("walking the tree and hashing what it finds", "start");
           } else if (event.event === "file") {
             const share = event.total ? (event.scanned / event.total) * 100 : 0;
@@ -3895,10 +3955,18 @@ async function indexView() {
             const rate = event.elapsed_ms
               ? Math.round((event.chunks / event.elapsed_ms) * 1000)
               : 0;
+            if (event.elapsed_ms) showElapsed(event.elapsed_ms);
             status.textContent = `${event.scanned}/${event.total} files · ${n(
               event.chunks,
             )} chunks${rate ? ` · ${n(rate)} chunks/s` : ""}`;
-            say(event.path, `${event.scanned}/${event.total}`, event.outcome);
+            // The reason belongs on the line it explains. A run that says
+            // "skipped" or "failed" and nothing else leaves the reader to
+            // guess at the one thing they came to the log for.
+            say(
+              event.why ? `${event.path} — ${event.why}` : event.path,
+              `${event.scanned}/${event.total}`,
+              event.outcome,
+            );
           } else if (event.event === "done") {
             /* Named, one line each, with the rule that refused them. An agent
              * or a person who asked for a file and got silence cannot tell that
@@ -3906,6 +3974,19 @@ async function indexView() {
             for (const refusal of event.refused || []) {
               say(`${refusal.path} — ${refusal.why}`, "refused", "refused");
             }
+            /* Named the same way, because a file that could not be read is at
+             * least as worth naming as one that was refused — and it is not
+             * the same thing: a refusal is a decision semlith made, a failure
+             * is one it could not avoid. */
+            const failures = event.failed || [];
+            for (const failure of failures) {
+              say(`${failure.path} — ${failure.why}`, "failed", "failed");
+            }
+            // The run is over however it ended, so the clock stops here and
+            // keeps the daemon's own total rather than wherever the local tick
+            // had got to.
+            stopClock();
+            if (event.elapsed_ms) showElapsed(event.elapsed_ms);
             if (event.stopped) {
               // Not 100%: nothing was kept, and a full bar would say the
               // opposite of what happened.
@@ -3923,9 +4004,20 @@ async function indexView() {
             pct.textContent = "100%";
             status.textContent = "done";
             say(
-              `${event.indexed} indexed, ${event.unchanged} unchanged, ${event.skipped} skipped, ${event.removed} removed, ${event.chunks} chunks`,
+              `${event.indexed} indexed, ${event.unchanged} unchanged, ${event.skipped} skipped, ${
+                event.removed
+              } removed${failures.length ? `, ${failures.length} failed` : ""}, ${
+                event.chunks
+              } chunks · ${spell(event.elapsed_ms || elapsedMs)}`,
               "done",
             );
+            // What the skipped count was made of. A number on its own invites
+            // the assumption that something was lost; the kinds say it was a
+            // reader nobody has, or a file semlith was never going to index.
+            const reasons = Object.entries(event.skipped_reasons || {});
+            if (reasons.length) {
+              say(reasons.map(([kind, count]) => `${n(count)} ${kind}`).join(", "), "skipped", "skipped");
+            }
 
             // The store list has changed. Without this, a first index left
             // `state.stores` empty and the next visit to Stores bounced the
@@ -3948,6 +4040,7 @@ async function indexView() {
             say("carrying on", "resumed");
           } else if (event.event === "error") {
             status.textContent = "failed";
+            stopClock();
             say(event.error, "error");
           } else if (event.event === "started") {
             say(event.paths.join(", "), "indexing");
@@ -3959,6 +4052,10 @@ async function indexView() {
       say(e.message, "error");
       return e.message;
     } finally {
+      // Whatever ended the stream, no interval outlives it: the frozen reading
+      // stays on the page, and nothing is left ticking behind a view the user
+      // has left.
+      stopClock();
       showRunning(false);
     }
     return null;
@@ -4090,6 +4187,7 @@ async function indexView() {
         el("span", { class: "card-title", text: "Progress" }),
         status,
         el("span", { class: "spacer" }),
+        elapsed,
         pct,
       ),
       el("div", { class: "bar" }, bar),
@@ -4997,6 +5095,142 @@ async function privacyView() {
   };
   paintRules(data.rules || []);
 
+  /* The scan, behind a button rather than in the page's load.
+   *
+   * It reads the stored text of every file in every store, which on a large one
+   * takes long enough that loading it with the page would make the whole
+   * Privacy page wait on a measurement most visits never look at. */
+  const scanNote = el("div", { class: "note" });
+  const scanBox = el("div", { class: "rows tight" });
+
+  const scanTable = dataTable({
+    sort: "path",
+    columns: [
+      { key: "store", label: "Store", className: "meta", sortable: true, value: (f) => f.store },
+      {
+        key: "path",
+        label: "Path",
+        sortable: true,
+        value: (f) => f.path,
+        render: (f) => pathCell(f.path),
+      },
+      /* The rule, or the kind of credential and the line it sits on — never
+       * the text that matched. The route does not return it, and a page whose
+       * subject is what stays on this machine would be a poor place to reprint
+       * a secret in order to report that one was found. */
+      {
+        key: "why",
+        label: "Why it would be refused",
+        sortable: false,
+        render: (f) => lineCell(f.why),
+      },
+      {
+        key: "forget",
+        label: "",
+        sortable: false,
+        render: (f) =>
+          el("button", {
+            class: "forget",
+            type: "button",
+            text: "Forget",
+            onclick: () =>
+              ask({
+                title: "Forget this file?",
+                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched.`,
+                confirm: "Forget it",
+                tone: "bad",
+                run: () => forgetFound([f]),
+              }),
+          }),
+      },
+    ],
+    rows: [],
+  });
+
+  async function forgetFound(findings) {
+    scanNote.className = "note";
+    scanNote.textContent = "";
+    // One call per store: a write names the store it is for, and a set that
+    // spans two of them is two writes rather than an ambiguous one.
+    const byStore = new Map();
+    for (const f of findings) {
+      if (!byStore.has(f.store)) byStore.set(f.store, []);
+      // The store's own key, not the plain path beside it. On Windows they
+      // differ — the key carries the `\\?\` prefix — and a forget is a
+      // lookup, so it has to be spelled the way the store spelled it. `path`
+      // is what the row shows a person.
+      byStore.get(f.store).push(f.key || f.path);
+    }
+    try {
+      for (const [store, paths] of byStore) await post("/api/forget", { paths, store });
+    } catch (e) {
+      scanNote.className = "note bad";
+      scanNote.textContent = e.message;
+      // Rethrown so the dialog that asked stays open and shows it too.
+      throw e;
+    }
+    // Scanned again rather than spliced: the list has to redraw from a fresh
+    // reading, not from the assumption that the write did what it was asked.
+    await runScan();
+  }
+
+  const scanButton = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Scan",
+    onclick: () => runScan(),
+  });
+
+  async function runScan() {
+    scanButton.disabled = true;
+    scanButton.textContent = "Scanning…";
+    scanNote.className = "note";
+    scanNote.textContent = "";
+    try {
+      const found = (await api("/api/privacy/scan")).findings || [];
+      scanTable.update(found);
+      const stores = [...new Set(found.map((f) => f.store))];
+      fill(
+        scanBox,
+        found.length
+          ? [
+              el(
+                "div",
+                { class: "bulk" },
+                el("span", {
+                  class: "meta",
+                  text: `${n(found.length)} file${found.length === 1 ? "" : "s"} would be refused today`,
+                }),
+                el("span", { class: "spacer" }),
+                el("button", {
+                  class: "button danger small",
+                  type: "button",
+                  text: "Forget all",
+                  onclick: () =>
+                    ask({
+                      title: `Forget ${n(found.length)} file${found.length === 1 ? "" : "s"}?`,
+                      body: `Their chunks and vectors are dropped from ${stores.join(
+                        " and ",
+                      )}. The files on disk are untouched.`,
+                      confirm: `Forget ${n(found.length)} file${found.length === 1 ? "" : "s"}`,
+                      tone: "bad",
+                      run: () => forgetFound(found),
+                    }),
+                }),
+              ),
+              scanTable.node,
+            ]
+          : empty("Nothing this store holds would be refused today."),
+      );
+    } catch (e) {
+      scanNote.className = "note bad";
+      scanNote.textContent = e.message;
+    } finally {
+      scanButton.disabled = false;
+      scanButton.textContent = "Scan again";
+    }
+  }
+
   /* The four steps, numbered, each with its own copy button. A packet capture
    * is the only one of them that proves anything on its own; the others are
    * what make the first one quick to believe. */
@@ -5093,6 +5327,23 @@ async function privacyView() {
           }),
           rulesBox,
           fixNote,
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Scan" }),
+            el("span", { class: "spacer" }),
+            scanButton,
+          ),
+          el("p", {
+            class: "subtitle",
+            text: "Every file a store is still holding that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
+          }),
+          scanBox,
+          scanNote,
         ),
         el(
           "div",

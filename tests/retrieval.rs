@@ -112,6 +112,18 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
     let store = tempfile::tempdir().expect("a temporary store");
     let mut semlith = Semlith::open(store.path(), None).expect("the store opens");
     semlith.quiet = true;
+    // The whole corpus, credential-shaped strings included. 0.19.0's content
+    // scan refuses a file that holds one, and this repository holds five of
+    // them on purpose — the pattern table's own examples, the fixtures that
+    // prove each pattern matches, and the documentation page that explains
+    // why a quoted example is refused like any other match. Two of the
+    // question set's expected spans are in those files, so a harness that
+    // indexed without this flag would report a ranking change that is really
+    // a corpus change, and would keep reporting it for ever.
+    semlith.boundary = semlith::Boundary {
+        roots: None,
+        allow_secrets: true,
+    };
     semlith
         .index_paths(std::slice::from_ref(&root), |_, _| {})
         .expect("the repository indexes");

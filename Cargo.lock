@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2476,6 +2476,7 @@ dependencies = [
  "notify",
  "ort",
  "pdf-extract",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

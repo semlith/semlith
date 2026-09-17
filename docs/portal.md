@@ -133,6 +133,19 @@ commands find it without `--store`. **mode 755** or similar means the directory 
 readable by other users of this machine; the next open narrows it to `700`, and
 the row says so rather than silently fixing it.
 
+**A store this daemon did not start with still appears.** Every load of this
+page re-reads the registry and opens any registered directory the daemon does
+not already have open, so `semlith index ~/work/new-project` run from another
+terminal while the daemon is up shows up here — and answers over MCP — without a
+restart. A directory the daemon could not open is listed all the same, with zero
+counts and a `not opened` pill whose hover says why, because a store you can see
+in `semlith stats` and not on this page reads as the portal having lost it. There are two reasons it
+can happen and they are different things to do about: another process holds that
+store's write lock, in which case it is being written and the next load of this
+page picks it up by itself; or the registry names a directory the disk no longer
+has, in which case nothing is coming. `/api/stores` carries the reason on the
+row as `unopened`.
+
 **Re-point** changes which directory a store's root names. It is a registry edit
 and nothing more: no re-embedding, nothing rewritten. Use it when a project has
 moved.
@@ -219,12 +232,46 @@ store is the rule that stops two passes corrupting each other.
 **Progress** shows a percentage, a bar and a status line carrying files scanned
 over files found, chunks written, and a chunks-per-second rate. The log beneath
 it prints one line per file with the outcome that file got — `indexed`,
-`unchanged`, `skipped`, `removed` — coloured so that a re-index of an unchanged
-corpus reads as a wall of background with the handful of real writes standing out
-of it. A file that was refused is named with the rule that refused it, because an
-agent or a person who asked for a file and got silence cannot tell that from a
-file that was not there. The run ends with a counted line: indexed, unchanged,
-skipped, removed, chunks.
+`unchanged`, `skipped`, `removed`, `refused`, `failed` — coloured so that a
+re-index of an unchanged corpus reads as a wall of background with the handful of
+real writes standing out of it. The run ends with a counted line: indexed,
+unchanged, skipped, removed, failed where there were any, chunks, and the total
+elapsed.
+
+**Three of those outcomes owe an explanation, and the line gives it.** A
+`skipped`, `refused` or `failed` line carries the reason beside the path, because
+a log that says "skipped" against two thousand files and nothing else is a log
+nobody can act on. A refusal names the rule that refused it — the credential
+deny-list, or the kind of credential the content scan found and the line it sat
+on, never the text that matched. A skip names one of a closed set: `empty`, `over
+8 MiB`, `not a regular file`, `unreadable` with the operating system's own words,
+`binary`, `no text in this document`, `not a decodable image`. And the final
+counted line is followed by what the skipped count was made of, kind by kind, so
+that a large number is a fact rather than an invitation to assume something was
+lost.
+
+**`failed` is the outcome that used to be the end of the run.** Before 0.19.0 a
+file that could not be read — a truncated image a decoder rejected, a source file
+tree-sitter could not parse — ended the whole pass, so a tree of ten thousand
+files stopped at the first bad one. It is now one line with the decoder's or the
+parser's own message on it, and the run carries on to the next file. A refusal is
+a decision semlith made; a failure is one it could not avoid, and the two are
+coloured and counted apart for that reason. Every failed path is named again on
+the closing line rather than only counted, because a run that ends with "eleven
+failed" and no names is a run whose eleven files nobody goes and looks at.
+
+**The elapsed clock** sits beside the counts. It reads `00:00` from the moment you
+press the button, and begins moving when the run actually starts — a run that
+queues behind the watcher can be seconds from starting, and a clock that appeared
+only then would look like a page that did nothing, while one that counted the
+wait would be reporting time this run did not spend indexing. It ticks once a
+second, and every `file` event
+corrects it to the daemon's own measurement, so it is the run's elapsed time and
+not the tab's: a browser throttles a background tab's timers to about once a
+minute, and a clock that only counted here would be minutes short by the time
+anybody looked at it. It keeps counting through a pause, because a paused run is
+still a run that has been going this long, and it is not reset by a slice. It
+freezes on `done`, `stopped` or `failed`, holding the daemon's total.
 
 **What Stop does that Pause does not.**
 
@@ -755,6 +802,39 @@ repair, and the row says so rather than showing a tick it has not earned.
 
 The button posts to the engine `semlith doctor --fix` calls. Neither surface has a
 repair the other lacks.
+
+**Scan** is the rules pointed backwards, at what the stores are already holding.
+The rows above say what semlith would refuse today; this says what it took in
+before those rules were what they are — a file indexed before the credential
+deny-list widened, or before the content scan existed at all. Press **Scan** and
+the daemon runs both halves of the decision over every file every open store
+holds: the deny-list against the file's name, and the credential shapes against
+the text the store is actually keeping. It is the same `Semlith::scan` that
+`semlith scan` calls in a terminal, because two implementations of "what should
+not be here" would eventually disagree and the one that mattered would be
+whichever you did not run.
+
+Each row is the store, the path, and why it would be refused — the rule, or the
+kind of credential and the line it sits on. It is never the text that matched:
+the route does not return it, and a page whose subject is what stays on this
+machine would be a poor place to reprint a secret in order to report that one
+was found.
+
+**Forget** on a row drops that file's chunks and vectors from its store, and
+**Forget all** does the whole list; both confirm first, both post to the same
+route the Files page's Forget uses, and the file on disk is untouched either way.
+A list spanning two stores becomes two writes, because a write names the store it
+is for.
+Afterwards the scan is run again from scratch rather than the row being spliced
+out, so the list you are left looking at is a fresh reading rather than the
+assumption that the write did what it was asked. When nothing is found the card
+says so, which is a different statement from a card that has not been pressed.
+
+This is not a rule row and has no Fix button, and that is the distinction worth
+keeping: the rules are readings of this machine that the daemon can repair, and
+this is a list of files whose removal is a decision about your corpus. There is
+also no MCP tool for it — an agent is not the party that decides what a store may
+hold.
 
 **The one outbound connection that exists** is the embedding model, downloaded
 once on first index and cached. `semlith upgrade` and `semlith add` reach the

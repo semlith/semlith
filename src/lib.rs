@@ -505,6 +505,15 @@ pub enum FileOutcome {
     /// and a refused one is a file semlith will not read. An agent that asked
     /// for it needs to know which.
     Refused,
+    /// semlith tried to index it and the attempt failed on this file's own
+    /// content — a decoder that rejected the bytes, a parser that could not
+    /// read them, a path the operating system would not open.
+    ///
+    /// Told apart from `Skipped` because a skipped file is a decision and a
+    /// failed one is an accident, and from an error because the run continues:
+    /// one corrupt PNG in a tree of ten thousand files used to end the whole
+    /// run, which is the defect this release exists to fix.
+    Failed,
 }
 
 impl FileOutcome {
@@ -516,6 +525,64 @@ impl FileOutcome {
             Self::Skipped => "skipped",
             Self::Removed => "removed",
             Self::Refused => "refused",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Why a file was skipped, as a closed set.
+///
+/// Closed on purpose. "Skipped" with no reason is the line that sent this
+/// release's Windows logs in: a run that says nothing about two thousand files
+/// is indistinguishable from a run that lost them. Every branch that produces
+/// [`FileOutcome::Skipped`] names one of these, and `tests/index_failure.rs`
+/// fails if a `file` event ever carries `skipped` without a `why`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Zero bytes. A generated `.component.scss` or a package's `__init__.py`.
+    Empty,
+    /// Over [`chunk::MAX_FILE_BYTES`].
+    TooLarge,
+    /// A socket, a fifo, a directory entry that is not a file.
+    NotRegular,
+    /// The operating system refused to open or read it, with its own words.
+    Unreadable(String),
+    /// Bytes no text reader will take.
+    Binary,
+    /// A reader ran and produced nothing — an empty `.docx`, a notebook with
+    /// no cells. Not the same as binary, and a user chasing a missing file
+    /// needs to know which of the two happened.
+    NoText,
+    /// An image whose header no decoder recognised.
+    NotDecodableImage,
+}
+
+impl SkipReason {
+    /// The words that go in `why`. Short, lower-case, and the same string in
+    /// the CLI, the portal and the MCP summary.
+    pub fn as_str(&self) -> String {
+        match self {
+            Self::Empty => "empty".to_string(),
+            Self::TooLarge => format!("over {} MiB", chunk::MAX_FILE_BYTES / (1024 * 1024)),
+            Self::NotRegular => "not a regular file".to_string(),
+            Self::Unreadable(e) => format!("unreadable: {e}"),
+            Self::Binary => "binary".to_string(),
+            Self::NoText => "no text in this document".to_string(),
+            Self::NotDecodableImage => "not a decodable image".to_string(),
+        }
+    }
+
+    /// The reason with its detail stripped, so a summary can count by kind
+    /// without every operating-system message becoming its own bucket.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::TooLarge => "too large",
+            Self::NotRegular => "not a regular file",
+            Self::Unreadable(_) => "unreadable",
+            Self::Binary => "binary",
+            Self::NoText => "no text in this document",
+            Self::NotDecodableImage => "not a decodable image",
         }
     }
 }
@@ -551,24 +618,59 @@ impl Boundary {
     }
 
     /// Why this path may not be indexed, in a line naming the rule.
-    pub fn refuses(&self, path: &Path) -> Option<String> {
+    ///
+    /// `walked` is whether the walk yielded this path or the caller named it,
+    /// and it decides one rule only: the hidden-file rule. A dotfile the walk
+    /// yielded is there because the user's own `.gitignore` whitelisted it —
+    /// `dist/*` then `!dist/.gitkeep` — and refusing it as hidden is the walk
+    /// contradicting itself, which is what ended a run on the reporter's
+    /// Angular tree. A dotfile the caller named is still refused: `semlith
+    /// index ~/.npmrc` is a mistake worth catching. Every other rule — the
+    /// credential directories, the credential names — applies to both.
+    pub fn refuses(&self, path: &Path, walked: bool, home: Option<&Path>) -> Option<Refusal> {
         if let Some(roots) = &self.roots
             && !filter::within_boundary(path, roots)
         {
-            return Some(
-                "is outside this store's roots and outside the home directory, so \
-                 semlith will not index it. Add it as a root first, or index it \
-                 from the command line."
+            return Some(Refusal {
+                why: "is outside this store's roots and outside the home directory, so \
+                      semlith will not index it. Add it as a root first, or index it \
+                      from the command line."
                     .to_string(),
-            );
+                // Emphatically not. This says nothing about the file's
+                // contents — only that this caller may not reach it — and a
+                // caller who may not read a path must not be able to delete
+                // what a caller who could has already indexed.
+                credential: false,
+            });
         }
         if !self.allow_secrets
-            && let Some(why) = filter::denied(path)
+            && let Some(why) = filter::denied_against(path, home)
         {
-            return Some(why.reason());
+            if walked && why == filter::Denied::Hidden {
+                return None;
+            }
+            return Some(Refusal {
+                why: why.reason(),
+                credential: matches!(why, filter::Denied::Name(_) | filter::Denied::Directory(_)),
+            });
         }
         None
     }
+}
+
+/// Why a path was refused, and whether the refusal is about what it holds.
+///
+/// The second half decides whether an earlier run's copy is evicted. A file
+/// refused because it names a credential should not go on sitting in a store
+/// that has decided it will not hold it. A file refused because *this caller*
+/// may not reach it is a different statement entirely: an agent confined to one
+/// root that asks to index a path outside it would otherwise be able to delete
+/// what the command line put there, which is a caller who cannot read a file
+/// deleting it.
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub why: String,
+    pub credential: bool,
 }
 
 /// Where an index run has got to, handed to the callback once per file.
@@ -576,7 +678,7 @@ impl Boundary {
 /// `total` is what the walk found, so `scanned` against it is a real fraction
 /// rather than a spinner — which is the difference between a long wait and a
 /// wait a person is willing to sit through.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct IndexProgress {
     /// What this file is: being embedded, unchanged, skipped or removed.
     pub outcome: FileOutcome,
@@ -592,6 +694,14 @@ pub struct IndexProgress {
     /// Symbols extracted so far in this run. Zero for a corpus of languages
     /// that carry no edges, which is not an error — see [`crate::graph`].
     pub symbols: usize,
+    /// Why, for the three outcomes that owe an explanation: `skipped`,
+    /// `refused` and `failed`. `None` for the rest, where the outcome is the
+    /// whole of what there is to say.
+    ///
+    /// A `String` rather than a code, because the operating system's own
+    /// message and the decoder's own message are the useful part and neither
+    /// is drawn from a set semlith controls.
+    pub why: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -612,6 +722,20 @@ pub struct IndexReport {
     /// as a file that quietly failed to index.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<(String, String)>,
+    /// Paths that failed on their own content, each with what failed.
+    ///
+    /// Listed like `refused`, and for the same reason: a count of failures is
+    /// a number somebody has to go and investigate, and this release exists
+    /// because those investigations had nothing to go on.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<(String, String)>,
+    /// How many files were skipped for each reason, by kind.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skipped_reasons: std::collections::BTreeMap<String, usize>,
+    /// Files the content scan would have refused and `--include-secrets`
+    /// indexed anyway. Reported so that the flag is never silent about what it
+    /// did: a store that holds credentials should say how many.
+    pub secrets_indexed: usize,
     /// Symbols extracted in this run, and the edges between them.
     pub symbols: usize,
     pub edges: usize,
@@ -623,6 +747,83 @@ pub struct IndexReport {
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
     pub written: Vec<String>,
+}
+
+/// Hand one file's verdict to the caller's callback.
+///
+/// A free function rather than a closure because the loop it serves holds
+/// `report` mutably between calls, and a closure capturing both would be
+/// borrowing the report for the whole run. It exists to make the nine
+/// emission sites in `index_set_writing` one line each: they used to be a
+/// nine-line struct literal apiece, and the branch that forgot to call it at
+/// all — `chunk::extract` returning nothing — is why the portal's counter
+/// never reached its total.
+fn say_file(
+    on_file: &mut impl FnMut(&Path, IndexProgress),
+    report: &IndexReport,
+    total: usize,
+    path: &Path,
+    outcome: FileOutcome,
+    why: Option<String>,
+) {
+    debug_assert!(
+        why.is_some()
+            || !matches!(
+                outcome,
+                FileOutcome::Skipped | FileOutcome::Refused | FileOutcome::Failed
+            ),
+        "{} must say why",
+        outcome.as_str()
+    );
+    on_file(
+        path,
+        IndexProgress {
+            outcome,
+            scanned: report.scanned,
+            indexed: report.indexed,
+            chunks: report.chunks,
+            total,
+            symbols: report.symbols,
+            why,
+        },
+    );
+}
+
+/// Count one skip, by kind as well as in total.
+///
+/// The per-reason counts are what turn "1 847 skipped" into a line somebody
+/// can act on, and keeping them here means no branch can raise `skipped`
+/// without also saying what kind of skip it was.
+fn skip(report: &mut IndexReport, why: &SkipReason) {
+    report.skipped += 1;
+    *report
+        .skipped_reasons
+        .entry(why.kind().to_string())
+        .or_insert(0) += 1;
+}
+
+/// Record one file that failed on its own content.
+///
+/// `{e:#}` rather than `{e}` so the decoder's own message survives the
+/// `anyhow` context above it. "failed to embed image" alone is not a reason,
+/// and the reason is the point of the line.
+fn failed(report: &mut IndexReport, path: &Path, e: &anyhow::Error) {
+    report
+        .failed
+        .push((path.display().to_string(), format!("{e:#}")));
+}
+
+/// One file a store holds that today's rules would refuse.
+///
+/// The path as a person reads it and the rule, never the credential: `why` is
+/// a kind and a line number, and no character of what was matched appears in
+/// it. See [`filter::Found`].
+#[derive(Debug, Clone, Serialize)]
+pub struct Finding {
+    /// The store's own key, serialised plain for whoever reads it.
+    #[serde(serialize_with = "serialize_plain")]
+    pub path: String,
+    pub why: String,
 }
 
 /// What a controlled run should do at the next file boundary.
@@ -1011,7 +1212,20 @@ impl Semlith {
         paths: Vec<PathBuf>,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(paths, false, None, None, on_file)
+        self.index_set(
+            // Every one of these came out of a filesystem event on a watched
+            // tree and was filtered through the same walk, so they are walked
+            // paths and not paths a caller named.
+            Walked {
+                files: paths,
+                named: Vec::new(),
+                unreadable: Vec::new(),
+            },
+            false,
+            None,
+            None,
+            on_file,
+        )
     }
 
     /// The body both entry points share. `sweep` drops every recorded file
@@ -1019,7 +1233,7 @@ impl Semlith {
     /// events, which only knows about the paths in it.
     fn index_set(
         &mut self,
-        paths: Vec<PathBuf>,
+        walked: Walked,
         sweep: bool,
         deadline: Option<std::time::Instant>,
         control: Option<&dyn Fn() -> Flow>,
@@ -1028,7 +1242,7 @@ impl Semlith {
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.
-        self.writing(move |me| me.index_set_writing(paths, sweep, deadline, control, on_file))
+        self.writing(move |me| me.index_set_writing(walked, sweep, deadline, control, on_file))
     }
 
     /// Do something that writes, with the connection's refusal lifted for
@@ -1047,7 +1261,7 @@ impl Semlith {
 
     fn index_set_writing(
         &mut self,
-        paths: Vec<PathBuf>,
+        walked: Walked,
         sweep: bool,
         deadline: Option<std::time::Instant>,
         control: Option<&dyn Fn() -> Flow>,
@@ -1076,33 +1290,82 @@ impl Semlith {
         // that refused it, rather than dropped from the walk — an agent that
         // asked for a file and got silence cannot tell that from a file that
         // was not there.
-        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, String)>) = {
-            let mut allowed = Vec::with_capacity(paths.len());
+        let Walked {
+            files: walked_paths,
+            named,
+            unreadable: unwalkable,
+        } = walked;
+        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = {
+            let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
             let mut refused = Vec::new();
-            for path in paths {
-                match self.boundary.refuses(&path) {
+            // Once for the run, not once for the file. The home directory
+            // cannot move while a run is going, and resolving it per file was
+            // an opened handle per file on Windows.
+            let home = crate::home::user_home().ok().map(|h| canonical(&h));
+            let all = named
+                .into_iter()
+                .map(|p| (p, false))
+                .chain(walked_paths.into_iter().map(|p| (p, true)));
+            for (path, walked) in all {
+                match self.boundary.refuses(&path, walked, home.as_deref()) {
                     Some(why) => refused.push((path, why)),
                     None => allowed.push(path),
                 }
             }
+            allowed.sort();
             (allowed, refused)
         };
-        let total = paths.len() + refused.len();
-        for (path, why) in &refused {
+        let total = paths.len() + refused.len() + unwalkable.len();
+        for (path, refusal) in &refused {
+            // A file semlith has decided it will not hold is a file it does
+            // not keep holding. A rule that widens — this release widened two
+            // of them — otherwise leaves every store that was indexed under
+            // the old rule still carrying what the new one refuses. Only for a
+            // refusal about the file's own contents: see `Refusal`.
+            let evicted = if refusal.credential {
+                let key = path.to_string_lossy().into_owned();
+                let (chunks, images) = self.evict(&key)?;
+                chunks + images
+            } else {
+                0
+            };
+            report.removed += usize::from(evicted > 0);
+            let why = if evicted > 0 {
+                format!(
+                    "{} Its earlier contents have been removed from this store.",
+                    refusal.why
+                )
+            } else {
+                refusal.why.clone()
+            };
             report
                 .refused
                 .push((path.display().to_string(), why.clone()));
             report.scanned += 1;
-            on_file(
+            say_file(
+                &mut on_file,
+                &report,
+                total,
                 path,
-                IndexProgress {
-                    outcome: FileOutcome::Refused,
-                    scanned: report.scanned,
-                    indexed: report.indexed,
-                    chunks: report.chunks,
-                    total,
-                    symbols: report.symbols,
-                },
+                FileOutcome::Refused,
+                Some(why),
+            );
+        }
+        // Entries the walk could not read. They used to be a line on stderr,
+        // which the daemon and the portal never see, so an unreadable
+        // directory looked like a tree that simply had nothing in it.
+        for (path, why) in &unwalkable {
+            report
+                .failed
+                .push((path.display().to_string(), why.clone()));
+            report.scanned += 1;
+            say_file(
+                &mut on_file,
+                &report,
+                total,
+                path,
+                FileOutcome::Failed,
+                Some(why.clone()),
             );
         }
 
@@ -1156,47 +1419,52 @@ impl Semlith {
             // and the read was read in full anyway, so the cap was advisory.
             let opened = std::fs::File::open(&path);
             let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
-            match measured {
-                Some(m) if m.is_file() && m.len() > 0 && m.len() <= chunk::MAX_FILE_BYTES => {}
-                _ => {
-                    // A batch of events can name a file that has just been
-                    // deleted or renamed away. Evicting it here is what makes
-                    // a deletion visible without a full sweep.
-                    if !path.exists() {
-                        let ids = store::delete_file(&self.db, &key)?;
-                        if !ids.is_empty() {
-                            for id in ids {
-                                self.index.remove(id)?;
-                            }
-                            report.removed += 1;
-                            on_file(
-                                &path,
-                                IndexProgress {
-                                    outcome: FileOutcome::Removed,
-                                    scanned: report.scanned,
-                                    indexed: report.indexed,
-                                    chunks: report.chunks,
-                                    total,
-                                    symbols: report.symbols,
-                                },
-                            );
-                            continue;
+            // Named, not just detected. Every one of these used to be the same
+            // silent `skipped`, and a person looking at two thousand of them
+            // could not tell an empty `__init__.py` from a file the operating
+            // system would not open.
+            let unusable = match (&opened, &measured) {
+                (Err(e), _) => Some(SkipReason::Unreadable(e.to_string())),
+                (_, None) => Some(SkipReason::Unreadable(
+                    "its metadata could not be read".to_string(),
+                )),
+                (_, Some(m)) if !m.is_file() => Some(SkipReason::NotRegular),
+                (_, Some(m)) if m.len() == 0 => Some(SkipReason::Empty),
+                (_, Some(m)) if m.len() > chunk::MAX_FILE_BYTES => Some(SkipReason::TooLarge),
+                _ => None,
+            };
+            if let Some(why) = unusable {
+                // A batch of events can name a file that has just been
+                // deleted or renamed away. Evicting it here is what makes
+                // a deletion visible without a full sweep.
+                if !path.exists() {
+                    let ids = store::delete_file(&self.db, &key)?;
+                    if !ids.is_empty() {
+                        for id in ids {
+                            self.index.remove(id)?;
                         }
-                    }
-                    report.skipped += 1;
-                    on_file(
-                        &path,
-                        IndexProgress {
-                            outcome: FileOutcome::Skipped,
-                            scanned: report.scanned,
-                            indexed: report.indexed,
-                            chunks: report.chunks,
+                        report.removed += 1;
+                        say_file(
+                            &mut on_file,
+                            &report,
                             total,
-                            symbols: report.symbols,
-                        },
-                    );
-                    continue;
+                            &path,
+                            FileOutcome::Removed,
+                            None,
+                        );
+                        continue;
+                    }
                 }
+                skip(&mut report, &why);
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Skipped,
+                    Some(why.as_str()),
+                );
+                continue;
             }
             // From the handle that was measured, through a reader that stops
             // one byte past the cap: a file that grew between the two is
@@ -1210,18 +1478,32 @@ impl Semlith {
             });
             let bytes = match read {
                 Ok(bytes) if bytes.len() as u64 <= chunk::MAX_FILE_BYTES => bytes,
-                _ => {
-                    report.skipped += 1;
-                    on_file(
+                // Grew past the cap between the measure and the read, or the
+                // read itself failed. Two different answers, and the person
+                // chasing the file needs to know which.
+                Ok(_) => {
+                    let why = SkipReason::TooLarge;
+                    skip(&mut report, &why);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
                         &path,
-                        IndexProgress {
-                            outcome: FileOutcome::Skipped,
-                            scanned: report.scanned,
-                            indexed: report.indexed,
-                            chunks: report.chunks,
-                            total,
-                            symbols: report.symbols,
-                        },
+                        FileOutcome::Skipped,
+                        Some(why.as_str()),
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    let why = SkipReason::Unreadable(e.to_string());
+                    skip(&mut report, &why);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Skipped,
+                        Some(why.as_str()),
                     );
                     continue;
                 }
@@ -1230,16 +1512,13 @@ impl Semlith {
             let hash = blake3::hash(&bytes).to_hex().to_string();
             if store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
                 report.unchanged += 1;
-                on_file(
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
                     &path,
-                    IndexProgress {
-                        outcome: FileOutcome::Unchanged,
-                        scanned: report.scanned,
-                        indexed: report.indexed,
-                        chunks: report.chunks,
-                        total,
-                        symbols: report.symbols,
-                    },
+                    FileOutcome::Unchanged,
+                    None,
                 );
                 continue;
             }
@@ -1255,47 +1534,61 @@ impl Semlith {
                 // gigabytes in memory, and the refusal says which file and how
                 // big it claimed to be.
                 if let Some(why) = image::too_large(&bytes) {
-                    report.refused.push((path.display().to_string(), why));
-                    on_file(
+                    report
+                        .refused
+                        .push((path.display().to_string(), why.clone()));
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
                         &path,
-                        IndexProgress {
-                            outcome: FileOutcome::Refused,
-                            scanned: report.scanned,
-                            indexed: report.indexed,
-                            chunks: report.chunks,
-                            total,
-                            symbols: report.symbols,
-                        },
+                        FileOutcome::Refused,
+                        Some(why),
                     );
                     continue;
                 }
                 let Some((width, height)) = image::dimensions(&bytes) else {
-                    report.skipped += 1;
-                    on_file(
+                    let why = SkipReason::NotDecodableImage;
+                    skip(&mut report, &why);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
                         &path,
-                        IndexProgress {
-                            outcome: FileOutcome::Skipped,
-                            scanned: report.scanned,
-                            indexed: report.indexed,
-                            chunks: report.chunks,
-                            total,
-                            symbols: report.symbols,
-                        },
+                        FileOutcome::Skipped,
+                        Some(why.as_str()),
                     );
                     continue;
                 };
-                on_file(
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
                     &path,
-                    IndexProgress {
-                        outcome: FileOutcome::Indexing,
-                        scanned: report.scanned,
-                        indexed: report.indexed,
-                        chunks: report.chunks,
-                        total,
-                        symbols: report.symbols,
-                    },
+                    FileOutcome::Indexing,
+                    None,
                 );
-                let vector = self.clip.embed_image(&path, self.quiet)?;
+                // The one call in the image path that can fail on this file's
+                // own bytes — a header the dimension reader accepted and the
+                // decoder did not. Caught here, before a single row is
+                // written, so the file leaves the store exactly as it found
+                // it and the next file is embedded. Everything after this line
+                // is the store's, and a failure there is the run's.
+                let vector = match self.clip.embed_image(&path, self.quiet) {
+                    Ok(vector) => vector,
+                    Err(e) => {
+                        failed(&mut report, &path, &e);
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Failed,
+                            Some(format!("{e:#}")),
+                        );
+                        continue;
+                    }
+                };
                 // Replacing an image: its old vector goes before the new one
                 // arrives, and the row goes with the file's cascade.
                 for id in store::image_ids_of(&self.db, &key)? {
@@ -1315,37 +1608,109 @@ impl Semlith {
                 continue;
             }
 
-            let Some(text) = chunk::extract(&path, &bytes) else {
-                report.skipped += 1;
-                continue;
+            // This branch reported nothing at all before 0.19.0 — no event,
+            // no reason, no counter movement — so a tree of binaries left the
+            // portal's progress bar short of its own total with no line
+            // saying why.
+            let text = match chunk::extract(&path, &bytes) {
+                Ok(text) => text,
+                Err(why) => {
+                    skip(&mut report, &why);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Skipped,
+                        Some(why.as_str()),
+                    );
+                    continue;
+                }
             };
+            // Before a single chunk, a single row or a single vector. The
+            // scan is the one rule that cannot be decided from a file's name,
+            // so it is decided from the text a reader produced — which is also
+            // what catches an AWS key sitting in the body of a `.docx`. Images
+            // never reach this line; they were never text.
+            match filter::scan_text(&text) {
+                Some(found) if self.boundary.allow_secrets => {
+                    // Counted, not hidden. `--include-secrets` is the user
+                    // saying they meant it, not semlith agreeing it is fine.
+                    let _ = found;
+                    report.secrets_indexed += 1;
+                }
+                Some(found) => {
+                    let why = found.reason();
+                    // A file that held no credential when it was indexed and
+                    // holds one now leaves the store on this run.
+                    let (gone, images) = self.evict(&key)?;
+                    let evicted = gone + images;
+                    report.removed += usize::from(evicted > 0);
+                    let why = if evicted > 0 {
+                        format!("{why}. Its earlier contents have been removed from this store.")
+                    } else {
+                        why
+                    };
+                    report
+                        .refused
+                        .push((path.display().to_string(), why.clone()));
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Refused,
+                        Some(why),
+                    );
+                    continue;
+                }
+                None => {}
+            }
+
             let chunks = chunk::chunk_text(&text);
             if chunks.is_empty() {
-                report.skipped += 1;
-                on_file(
+                let why = SkipReason::NoText;
+                skip(&mut report, &why);
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
                     &path,
-                    IndexProgress {
-                        outcome: FileOutcome::Skipped,
-                        scanned: report.scanned,
-                        indexed: report.indexed,
-                        chunks: report.chunks,
-                        total,
-                        symbols: report.symbols,
-                    },
+                    FileOutcome::Skipped,
+                    Some(why.as_str()),
                 );
                 continue;
             }
 
-            on_file(
+            // Parsed before a single row is written, which is the whole reason
+            // this call moved up here from below the inserts: tree-sitter
+            // failing on this file's own bytes is the text path's one
+            // file-shaped failure, and catching it before the rows exist means
+            // there is nothing to undo and the shared pending batch is never
+            // left holding an id whose row was rolled back.
+            let extraction = match graph::extract(&path, &text) {
+                Ok(extraction) => extraction,
+                Err(e) => {
+                    failed(&mut report, &path, &e);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Failed,
+                        Some(format!("{e:#}")),
+                    );
+                    continue;
+                }
+            };
+
+            say_file(
+                &mut on_file,
+                &report,
+                total,
                 &path,
-                IndexProgress {
-                    outcome: FileOutcome::Indexing,
-                    scanned: report.scanned,
-                    indexed: report.indexed,
-                    chunks: report.chunks,
-                    total,
-                    symbols: report.symbols,
-                },
+                FileOutcome::Indexing,
+                None,
             );
 
             // Replacing a file: evict its old vectors before adding new ones.
@@ -1376,7 +1741,7 @@ impl Semlith {
             // had them deleted by `delete_file` above, along with its chunks
             // and the edges leaving them, so this writes a whole fresh set
             // rather than reconciling one.
-            let (symbols, edges) = self.extract_graph(&path, &text, file_id, &spans)?;
+            let (symbols, edges) = self.write_graph(extraction, file_id, &spans)?;
             report.symbols += symbols;
             report.edges += edges;
 
@@ -1620,14 +1985,19 @@ impl Semlith {
     /// Edges are written by name, so an edge to something not indexed yet — or
     /// never — is still recorded and resolves when and if its target appears.
     /// That is what lets a repository be indexed in any order.
-    fn extract_graph(
+    /// Write an already-parsed extraction into the store.
+    ///
+    /// Split from the parse in 0.19.0. The parse is the half that can fail on
+    /// a file's own bytes and it now runs before any row is inserted; what is
+    /// left here touches only the database, so a failure in it is the run's
+    /// and not the file's.
+    fn write_graph(
         &self,
-        path: &Path,
-        text: &str,
+        extraction: Option<graph::Extraction>,
         file_id: i64,
         spans: &[(u32, u32, i64)],
     ) -> Result<(usize, usize)> {
-        let Some(extraction) = graph::extract(path, text)? else {
+        let Some(extraction) = extraction else {
             return Ok((0, 0));
         };
 
@@ -1714,21 +2084,99 @@ impl Semlith {
 
     fn forget_writing(&mut self, path: &Path) -> Result<(usize, usize)> {
         let key = canonical(path).to_string_lossy().into_owned();
+        let (chunks, images) = self.evict(&key)?;
+        if chunks > 0 || images > 0 {
+            self.save()?;
+        }
+        Ok((chunks, images))
+    }
+
+    /// Take one file's rows and vectors out of the store, without saving.
+    ///
+    /// The save is the caller's, because an index run evicts many files and
+    /// writing the whole index out after each one would make a re-index of a
+    /// tree that gained a `.env` quadratic. `forget` saves straight away
+    /// because it is the whole of what it was asked to do.
+    fn evict(&mut self, key: &str) -> Result<(usize, usize)> {
         // Read before the delete: the cascade that removes the rows is what
         // makes their ids unreadable, and the vectors they address still have
         // to leave the image index.
-        let images = store::image_ids_of(&self.db, &key)?;
-        let ids = store::delete_file(&self.db, &key)?;
+        let images = store::image_ids_of(&self.db, key)?;
+        let ids = store::delete_file(&self.db, key)?;
         for id in &ids {
             self.index.remove(*id)?;
         }
         for id in &images {
             self.images.remove(*id as u64)?;
         }
-        if !ids.is_empty() || !images.is_empty() {
-            self.save()?;
-        }
         Ok((ids.len(), images.len()))
+    }
+
+    /// Every file this store holds that today's rules would refuse.
+    ///
+    /// The path for a store indexed before a rule widened. Both halves of the
+    /// decision run here — the deny-list against the name, and the content
+    /// table against the text the store is actually holding — so a finding is
+    /// exactly what an index run today would refuse. The CLI's `semlith scan`
+    /// and the portal's Privacy page both call this one function; two
+    /// implementations of "what should not be here" would eventually disagree,
+    /// and the one that mattered would be whichever the user did not run.
+    pub fn scan(&self) -> Result<Vec<Finding>> {
+        // Refused outright rather than answered. The directory rules fail
+        // closed, so with no home every file in the store comes back as
+        // `NoHome` — and this is the one function with a `--forget` behind it,
+        // which would then evict the whole store on the strength of a missing
+        // environment variable.
+        let home = match crate::home::user_home() {
+            Ok(home) => canonical(&home),
+            Err(e) => bail!(
+                "semlith cannot tell where your home directory is, so it cannot say which \
+                 of this store's files sit under a credential directory: {e}. Set \
+                 SEMLITH_HOME, or HOME, and scan again."
+            ),
+        };
+        let home = Some(home);
+        let mut out = Vec::new();
+        for key in store::all_paths(&self.db)? {
+            let path = Path::new(&key);
+            // Walked, because everything in a store got there through a walk
+            // or through a caller who named it and was checked then. Applying
+            // the hidden rule here would report every whitelisted dotfile this
+            // release deliberately indexes.
+            if let Some(why) = filter::denied_against(path, home.as_deref())
+                && why != filter::Denied::Hidden
+            {
+                out.push(Finding {
+                    path: key,
+                    why: why.reason(),
+                });
+                continue;
+            }
+            if let Some(found) = filter::scan_text(&store::text_of(&self.db, &key)?) {
+                out.push(Finding {
+                    path: key,
+                    why: found.reason(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Evict everything [`Semlith::scan`] found, and say how many files went.
+    pub fn forget_findings(&mut self, findings: &[Finding]) -> Result<usize> {
+        self.writing(|me| {
+            let mut gone = 0;
+            for finding in findings {
+                let (chunks, images) = me.evict(&finding.path)?;
+                if chunks > 0 || images > 0 {
+                    gone += 1;
+                }
+            }
+            if gone > 0 {
+                me.save()?;
+            }
+            Ok(gone)
+        })
     }
 
     /// Top-`k` chunks for `query`, best first, over the whole store.
@@ -2453,7 +2901,22 @@ pub fn serialize_plain<S: serde::Serializer>(path: &str, s: S) -> Result<S::Ok, 
     s.serialize_str(&plain(path))
 }
 
+/// How many times this process has canonicalised a path.
+///
+/// Counted because the cost is invisible until it is not: a `canonicalize` is
+/// an opened handle on Windows, and 0.18.0 did three per file — one in the
+/// walk, one on the home directory and one on the path, the last two on every
+/// file for a home that cannot change mid-run. `tests/filter_canonical.rs`
+/// asserts the count over a walk of N files stays near N rather than near 3N.
+static CANONICAL_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The reading for [`CANONICAL_CALLS`], for the test that pins the cost.
+pub fn canonical_calls() -> u64 {
+    CANONICAL_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn canonical(path: &Path) -> PathBuf {
+    CANONICAL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -2540,11 +3003,55 @@ pub fn check_roots(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) 
 
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
 /// canonical paths so the same file reached two ways is one entry.
-fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
+/// Which path a walk error is about.
+///
+/// `ignore` wraps its errors — a path around a depth around an io error — and
+/// exposes no accessor for the path, so unwrapping it is the caller's. Without
+/// it every unreadable entry would be reported against the root rather than
+/// against the directory that could not be read.
+fn walk_error_path(e: &ignore::Error) -> Option<PathBuf> {
+    match e {
+        ignore::Error::WithPath { path, .. } => Some(path.clone()),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            walk_error_path(err)
+        }
+        ignore::Error::Loop { child, .. } => Some(child.clone()),
+        _ => None,
+    }
+}
+
+/// What a walk found, and what it could not read.
+///
+/// A pair rather than a bare `Vec` since 0.19.0: the entries the walk gave up
+/// on are part of what the run has to report, and a function that returns only
+/// the successes gives its caller nothing to report them with.
+pub(crate) struct Walked {
+    pub files: Vec<PathBuf>,
+    /// Roots that were files rather than directories, so the caller named them
+    /// one by one. They are held to the hidden-file rule; the walked ones are
+    /// not. See [`Boundary::refuses`].
+    pub named: Vec<PathBuf>,
+    /// Paths the walk could not read, each with what the walk said.
+    pub unreadable: Vec<(PathBuf, String)>,
+}
+
+fn walk(roots: &[PathBuf]) -> Walked {
     let mut out = Vec::new();
+    let mut named = Vec::new();
+    let mut unreadable = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     for root in roots {
+        // A root that is a file is a path the caller named, not one a walk
+        // found — `semlith index ~/notes/.env` is one argument, and the rules
+        // for a named path are the stricter ones.
+        if root.is_file() {
+            let path = canonical(root);
+            if seen.insert(path.clone()) {
+                named.push(path);
+            }
+            continue;
+        }
         let mut builder = ignore::WalkBuilder::new(root);
         builder
             .hidden(true)
@@ -2564,7 +3071,12 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
             let entry = match result {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("semlith: skipping unreadable path: {e}");
+                    // Carried out rather than printed. `eprintln!` reaches a
+                    // terminal and nothing else: the daemon, the portal and
+                    // every agent were told nothing, so an unreadable
+                    // directory read as a tree that was simply empty.
+                    let at = walk_error_path(&e).unwrap_or_else(|| root.clone());
+                    unreadable.push((at, format!("the walk could not read it: {e}")));
                     continue;
                 }
             };
@@ -2589,7 +3101,13 @@ fn walk(roots: &[PathBuf]) -> Vec<PathBuf> {
     // the filesystem happened to be in, which is worth having on its own: two
     // people indexing the same checkout get the same store.
     out.sort();
-    out
+    named.sort();
+    unreadable.sort();
+    Walked {
+        files: out,
+        named,
+        unreadable,
+    }
 }
 
 #[cfg(test)]
