@@ -166,10 +166,17 @@ class Fixtures:
         except (OSError, ValueError):
             return []
         mine = os.path.realpath(self.root)
+        inside_home = os.path.realpath(os.path.join(home, "stores"))
         out = []
         for name, entry in (registry.get("stores") or {}).items():
             roots = [os.path.realpath(root) for root in entry.get("roots") or []]
-            if roots and all(root.startswith(mine) for root in roots):
+            # A store that fetched a URL has gained a root inside the store
+            # home — its own downloads directory — which is not under this
+            # drive's corpora and never will be. Judged on the corpus roots
+            # only, or a store the drive made gets left behind and the next
+            # drive in the same home finds files it did not put there.
+            corpus_roots = [r for r in roots if not r.startswith(inside_home)]
+            if corpus_roots and all(root.startswith(mine) for root in corpus_roots):
                 out.append(name)
         return out
 
