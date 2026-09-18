@@ -7,21 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.22.0] - 2026-09-18
+## [0.22.0] - 2026-09-19
 
 Retrieval was measured by an instrument that could not measure it. This release
-rebuilt the instrument first, and only then moved the number — which is why the
-figures below are lower than the ones it replaces and mean more.
+rebuilt the instrument first and only then moved the number, which is why the
+figures below are lower than the ones they replace and mean more.
+
+On thirty questions held out before any ranking work, scored once at the end:
+hit@1 **66 %**, hit@3 **76 %**, hit@8 **83 %**, against 0.21.0's 60 / 73 / 83 on
+the same corpus through the same harness. On the seventy-seven the work was
+tuned against: 71 / 81 / 87 against 48 / 56 / 65 — and the distance between those
+two gains is what tuning against a visible set is worth.
 
 **The gate this release was specified against is not met.** It asked for hit@8
-at 95 %, hit@3 at 85 % and hit@1 at 70 % on a sealed question set. What ships is
-hit@1 56 %, hit@3 66 %, hit@8 73 % on those thirty sealed questions, scored once
-by this binary at the end. On the seventy-seven the work was tuned against, the
-same binary scores 68 / 79 / 87 where 0.21.0 scored 62 / 72 / 84 on the same
-corpus through the same instrument. The gap between the two sets is what tuning
-against a visible set is worth, and it is stated rather than chosen between. The
-gate moves to the next release rather than being restated as met, and what
-stands in its way is named on the performance page.
+at 95 %, hit@3 at 85 % and hit@1 at 70 %. The gate moves to the next release
+rather than being restated as met, and what stands in its way is named on the
+performance page.
+
+**Every retrieval number this project published before today was wrong**, and in
+the same direction. They were taken over a corpus that moved with every commit;
+against a question set in which 47 of 92 spans no longer held the symbol they
+named; and by a harness in which a `path` question counted in the denominator
+and could never record a hit, which capped hit@8 at 87 % by construction. They
+are withdrawn rather than updated.
 
 ### The measuring stick, before the ranking work
 
