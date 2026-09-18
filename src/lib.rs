@@ -39,6 +39,7 @@ pub mod mcp;
 pub mod pattern;
 pub mod portal;
 pub mod proxy;
+pub mod rerank;
 pub mod routes;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
@@ -945,6 +946,16 @@ pub struct Semlith {
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
+    /// Whether the cross-encoder reorders the head of an answer.
+    ///
+    /// On by default, and the reason it is a field rather than a constant is
+    /// that it costs real milliseconds: see `rerank::TOP` and the warm-query
+    /// figures on the performance page. A caller that wants the fusion's own
+    /// order — a benchmark, a machine with no reranker cached — turns it off.
+    pub reranking: bool,
+    /// Loaded on the first search that needs it, never on open. A store that
+    /// is only indexed or only asked for `stats` pays nothing for it.
+    reranker: Option<fastembed::TextRerank>,
     /// What this caller may index. The default is the command line's: the
     /// deny-list, and no confinement.
     pub boundary: Boundary,
@@ -1016,6 +1027,8 @@ impl Semlith {
         let generation = generation(&db)?;
 
         Ok(Self {
+            reranking: true,
+            reranker: None,
             dir,
             db,
             index,
@@ -2860,6 +2873,52 @@ impl Semlith {
                 .then_with(|| a.0.path.cmp(&b.0.path))
                 .then_with(|| a.0.start_line.cmp(&b.0.start_line))
         });
+        // The second stage, over the first few and not over the fifty the
+        // fusion considered. See `rerank::TOP`.
+        //
+        // After the preference and the rerank multipliers rather than before:
+        // those express what the caller asked for and what the store knows
+        // about freshness, and a cross-encoder that has read neither should not
+        // overrule them wholesale — it reorders the short list they produced.
+        //
+        // A definition lifted by an identifier query is left where it is. The
+        // lift is a statement that the asker typed this name and this chunk
+        // defines it, which no amount of passage scoring improves on, and the
+        // lifted scores sit far above the fused range so the sort keeps them in
+        // front either way.
+        if self.reranking && hits.len() > 1 {
+            let head = hits.len().min(rerank::TOP);
+            let lifted = hits
+                .iter()
+                .take(head)
+                .filter(|(hit, _)| hit.lists.contains(&"definition"))
+                .count();
+            if head > lifted + 1 {
+                let cache = model_cache_dir()?;
+                if self.reranker.is_none() {
+                    self.reranker = Some(rerank::load(cache, self.quiet)?);
+                }
+                let documents: Vec<String> = hits[lifted..head]
+                    .iter()
+                    .map(|(hit, _)| hit.text.clone())
+                    .collect();
+                if documents.iter().any(|d| !d.is_empty()) {
+                    let passages: Vec<&str> = documents.iter().map(String::as_str).collect();
+                    let reranker = self.reranker.as_mut().expect("just loaded");
+                    let scored = reranker
+                        .rerank(query, &passages, false, None)
+                        .map_err(|e| anyhow::anyhow!("reranking: {e}"))?;
+                    let order: Vec<usize> = scored.iter().map(|r| r.index).collect();
+                    let tail: Vec<(Hit, f32)> = hits.splice(lifted..head, []).collect();
+                    let mut reordered: Vec<(Hit, f32)> =
+                        order.iter().map(|at| tail[*at].clone()).collect();
+                    for (offset, entry) in reordered.drain(..).enumerate() {
+                        hits.insert(lifted + offset, entry);
+                    }
+                }
+            }
+        }
+
         hits.truncate(k);
         Ok(hits)
     }

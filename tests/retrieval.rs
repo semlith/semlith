@@ -251,7 +251,7 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
         for (k, floor) in [(8usize, 95usize), (3, 85), (1, 70)] {
             let hits = summary.median(|r| r.hit_at.get(&k).copied().unwrap_or(0));
             let percent = hits * 100 / scored.max(1);
-            let needed = scored * floor / 100 + usize::from(scored * floor % 100 != 0);
+            let needed = scored * floor / 100 + usize::from(!(scored * floor).is_multiple_of(100));
             if percent < floor {
                 against_the_gate.push(format!(
                     "hit@{k} is {hits} of {scored} ({percent}%), the gate is {floor}% \
@@ -306,6 +306,9 @@ fn index_and_score(root: &Path, questions: &[Question], check_determinism: bool)
         roots: None,
         allow_secrets: true,
     };
+    // The second stage is what the release is measuring, so it is on unless a
+    // run deliberately asks for the fusion's own order.
+    semlith.reranking = std::env::var_os("SEMLITH_NO_RERANK").is_none();
     // Timed, because the chunking rule is allowed to change the number of
     // chunks and is not allowed to halve the indexing rate — and one corpus on
     // one machine measured by the same harness is the only way that comparison

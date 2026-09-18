@@ -10,6 +10,30 @@
 # its `note`; do not fix it by widening the span until something passes.
 #
 #
+# ## The sealed thirty stopped being held out on 2026-09-19
+#
+# Read this before quoting any number measured against this file after that
+# date. Eight questions had a correct answer in the corpus that no span covered
+# — `AGENTS.md` states outright what `concept-clip-text-encoder`,
+# `concept-two-indexers-at-once`, `concept-airgap`, `concept-find-running-daemon`,
+# `concept-which-languages-have-edges`, `shape-pair-prefer-question` and
+# `concept-client-stanzas-source` ask for, and `docs/security.md` answers
+# `concept-owner-only-modes`. A tool returning those lines gave a correct answer
+# and was scored a miss.
+#
+# The spans were completed, and they were completed *after* the sealed thirty
+# had been scored and the misses read. Each edit is defensible on its own; the
+# timing is not. From this point the sealed thirty are no longer a held-out set,
+# and a figure measured against them is a figure measured against questions the
+# work has seen. The owner made that call with the cost stated.
+#
+# What that means for anyone reading a number from this file: the 0.22.0 sealed
+# figures taken before this change (hit@1 17, hit@3 20, hit@8 22 of 30, and
+# 19/22/23 after the defect fixes) are the last ones taken against an unseen
+# set. Anything after is not, until a fresh split is drawn from questions the
+# work has not been tuned against — which these 107 no longer are.
+#
+#
 # ## The baseline the line numbers came from
 #
 # Spans are line ranges in `corpus/`, the pinned snapshot beside this file: the
@@ -724,6 +748,10 @@ questions:
         symbol: embed_query
         start_line: 198
         end_line: 226
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 383
+        end_line: 389
     note: >-
       Seed Q14, measured as a hit. `Images::embed_query` is the only place a
       text query is turned into a CLIP vector; its doc comment is the sentence
@@ -782,6 +810,10 @@ questions:
         symbol: acquire
         start_line: 30
         end_line: 85
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 180
+        end_line: 186
     note: >-
       `lock.rs` is 200 lines and has not changed since 0.12.0, so this is a
       durable span. The file is also small enough that a hit anywhere in it is
@@ -826,6 +858,10 @@ questions:
         symbol: language_of
         start_line: 158
         end_line: 161
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 251
+        end_line: 263
     note: >-
       Rewritten in 0.17.0, because the release inverted the question's answer
       rather than moving it.
@@ -1260,6 +1296,10 @@ questions:
         symbol: shape_of
         start_line: 144
         end_line: 157
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 224
+        end_line: 234
     note: The question half of the same subject.
 
   - id: prefer-code-over-prose
@@ -1908,6 +1948,10 @@ questions:
         symbol: refuse_if_airgapped
         start_line: 368
         end_line: 391
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 518
+        end_line: 528
     note: >-
       `airgap` is the predicate and `refuse_if_airgapped` is the refusal, and
       which one answers depends on whether the asker wants the switch or the
@@ -2030,6 +2074,10 @@ questions:
         symbol: DISCOVERY_FILE
         start_line: 37
         end_line: 42
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 185
+        end_line: 197
     note: >-
       `proxy::find` is the mechanism — read the discovery file, probe the port,
       fall through to opening the store directly — and `DISCOVERY_FILE` is the
@@ -2082,6 +2130,10 @@ questions:
         symbol: ~
         start_line: 1
         end_line: 20
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 552
+        end_line: 560
     note: >-
       The module comment and the `include_str!` under it, which is the whole
       answer: `docs/clients.md` is the source and the Rust side parses it at
@@ -2134,6 +2186,10 @@ questions:
         symbol: OWNER_ONLY
         start_line: 101
         end_line: 108
+      - path: docs/security.md
+        symbol: ~
+        start_line: 233
+        end_line: 239
     note: >-
       `OWNER_ONLY` is the mode bits that must be clear and `MODES` is the
       platform question sitting immediately under it, which is why one span
