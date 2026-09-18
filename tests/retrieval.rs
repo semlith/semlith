@@ -171,10 +171,10 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
     let runs = std::env::var("SEMLITH_RETRIEVAL_RUNS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(3);
+        .unwrap_or(5);
     assert!(runs > 0, "a run count of zero measures nothing");
 
-    // Three runs, each its own index.
+    // Five runs, each its own index.
     //
     // Scoring the same store three times is not three runs: every query-time
     // source of drift is asserted away below, so three scorings of one store
