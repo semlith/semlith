@@ -777,11 +777,29 @@ c_mcp_handshake_without_model() {
     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
     | SEMLITH_AIRGAP=1 SEMLITH_MODEL_CACHE="$work/no-model" \
       semlith mcp 2> "$work/mcp-airgap.err" > "$work/mcp-airgap.out"
-  # Two complete responses, and the reason searches will fail on stderr where a
-  # stdio client captures it.
-  [ "$(grep -c '"result"' "$work/mcp-airgap.out")" = "2" ] &&
-    grep -q '"tools"' "$work/mcp-airgap.out" &&
-    grep -q 'could not load the embedding model' "$work/mcp-airgap.err"
+  # Two complete responses, and stderr saying the model is being loaded behind
+  # them — where a stdio client captures it.
+  #
+  # The line asserted is the one printed on the way past, not the one the warm
+  # thread prints when it fails. The process ends when stdin closes, and on a
+  # loaded machine that can happen before the thread has got as far as failing:
+  # asserting the thread's line made this check fail once on a macOS runner and
+  # pass everywhere else, which is a race in the check, not a defect it found.
+  # What the release promises is that the handshake does not wait for the model
+  # and that stderr says so, and that is what this asserts.
+  ok=1
+  [ "$(grep -c '"result"' "$work/mcp-airgap.out")" = "2" ] || {
+    echo "expected 2 responses, got $(grep -c '"result"' "$work/mcp-airgap.out"):"
+    sed 's/^/    /' "$work/mcp-airgap.out" | head -4
+    ok=0
+  }
+  grep -q '"tools"' "$work/mcp-airgap.out" || { echo "tools/list carried no tools"; ok=0; }
+  grep -q 'loading the embedding model in the background' "$work/mcp-airgap.err" || {
+    echo "stderr did not say the model was loading behind the handshake:"
+    sed 's/^/    /' "$work/mcp-airgap.err" | head -6
+    ok=0
+  }
+  [ "$ok" = 1 ]
 }
 check cli/mcp/handshake-no-model "initialize answers with no model" c_mcp_handshake_without_model
 
