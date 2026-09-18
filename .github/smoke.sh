@@ -828,9 +828,19 @@ c_service_install() {
     *)       return 1 ;;
   esac
 }
-if semlith start --service > "$work/service-probe.out" 2>&1; then
+if semlith start --service > "$work/service-probe.out" 2>&1 &&
+   ! grep -q 'does not report it as installed' "$work/service-probe.out"; then
   service_installed=1
   check cli/service/install "the login service installs"   c_service_install
+elif grep -q 'does not report it as installed' "$work/service-probe.out" 2>/dev/null; then
+  # The definition was written and the service manager will not own it. A
+  # headless macOS session has no `gui/<uid>` domain and a container has no
+  # systemd user session; in both the daemon can be started but not supervised.
+  # semlith says so rather than claiming a login service it has not got, and
+  # this is that answer, not a defect to fail the product for.
+  sed 's/^/           /' "$work/service-probe.out" | head -4
+  skip cli/service/install "this session has no domain a login service can live in"
+  semlith start --no-service > /dev/null 2>&1 || true
 else
   # A runner with no user session has no systemd --user and no launchd GUI
   # domain. That is the runner's shape, not semlith's defect, and blaming the

@@ -129,8 +129,25 @@ mod platform {
         let Ok(path) = plist_path() else {
             return Status::absent(MECHANISM);
         };
+        // The file is the definition; whether launchd knows the job is whether
+        // anything is supervising it. A headless session — a CI runner, a
+        // machine reached only over ssh — has no `gui/<uid>` domain, so
+        // `bootstrap` fails, the `load -w` fallback starts the daemon once, and
+        // nothing restarts it when it dies. The plist is still on disk, and
+        // reporting that as an installed login service is the same claim
+        // without the thing it claims. Measured on a GitHub macOS runner, where
+        // the daemon ran, was killed, and never came back.
+        let known = path.is_file()
+            && run(
+                "launchctl",
+                &[
+                    "print",
+                    &format!("gui/{}/{LABEL}", unsafe { libc::getuid() }),
+                ],
+            )
+            .is_ok();
         Status {
-            installed: path.is_file(),
+            installed: known,
             definition: path.is_file().then_some(path),
             log: log_path().ok(),
             restarts: true,
