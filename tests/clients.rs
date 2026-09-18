@@ -57,6 +57,30 @@ const CLIENTS: [&str; 27] = [
 /// directly rather than left to be noticed.
 const NO_PATHS: &str = "--store";
 
+/// What the document writes where the binary goes, and what `src/clients.rs`
+/// substitutes the running binary's own path into before anything reads a
+/// stanza. Every block here is read through that same substitution, because a
+/// stanza with the placeholder still in it is not a stanza any client was ever
+/// handed.
+const BIN_PLACEHOLDER: &str = "${SEMLITH_BIN}";
+
+/// The path `src/clients.rs` would resolve, for this test binary's own build.
+///
+/// Forward slashes to match what that function emits: on Windows it turns the
+/// canonical `\\?\C:\…` spelling into `C:/…` so the one path is legal in JSON,
+/// TOML, YAML and a shell word alike.
+fn binary_under_test() -> String {
+    env!("CARGO_BIN_EXE_semlith").replace('\\', "/")
+}
+
+/// Whether a token is the binary rather than the server's name, which is also
+/// the word `semlith` and sits two lines above it in most of these stanzas.
+fn is_binary(token: &str) -> bool {
+    ["semlith", "semlith.exe"]
+        .iter()
+        .any(|name| token == *name || token.ends_with(&format!("/{name}")))
+}
+
 #[test]
 fn every_promised_client_has_a_stanza() {
     let section = section();
@@ -118,6 +142,49 @@ fn no_stanza_carries_a_store_path() {
             args_of(&body),
             vec!["mcp".to_string()],
             "a {language} stanza does not run a bare `semlith mcp`:\n{body}"
+        );
+    }
+}
+
+/// Every stanza that launches the binary names it by an absolute path.
+///
+/// The bare word `semlith` only launches from a `PATH` that happens to carry
+/// it, and the process that reads these files is very often not a login shell:
+/// an editor started from a desktop icon, a launchd or systemd agent, and a
+/// desktop app all inherit a `PATH` that has never sourced a profile and so has
+/// never heard of `~/.cargo/bin`. The client then reports that the server
+/// exited and says nothing about why, which is indistinguishable from semlith
+/// being broken. Asserted over every launching block rather than over the ones
+/// `semlith setup` runs, because a stanza somebody pastes by hand fails in
+/// exactly the same way.
+#[test]
+fn every_launching_stanza_names_an_absolute_path() {
+    for (language, body) in blocks(&section()) {
+        if !launches(&language, &body) {
+            continue;
+        }
+        let named = launched_binary(&body);
+        assert!(
+            // `C:/Users/…` on Windows, where there is no leading separator and
+            // the drive letter is what makes the path absolute.
+            named.starts_with('/') || named.contains(":/"),
+            "a {language} stanza launches {named:?} rather than an absolute \
+             path, so it only starts from a PATH that carries the binary:\n{body}"
+        );
+    }
+}
+
+/// Nothing reaches a client still carrying the placeholder.
+///
+/// A stanza with `${SEMLITH_BIN}` left in it is a configuration file naming a
+/// program that does not exist, which is a worse failure than the bare command
+/// it replaced: the shell at least had a chance of finding that one.
+#[test]
+fn no_stanza_still_carries_the_binary_placeholder() {
+    for (language, body) in blocks(CLIENTS_DOC) {
+        assert!(
+            !body.contains(BIN_PLACEHOLDER),
+            "a {language} block still carries {BIN_PLACEHOLDER}:\n{body}"
         );
     }
 }
@@ -221,11 +288,68 @@ fn every_stanza_launches_a_server_that_answers() {
     }
 }
 
+/// The acceptance criterion of 0.21.0, run as it is written.
+///
+/// A `PATH` with no semlith on it, and every launch line the document hands a
+/// client, put through a shell. Before the fix the bare command fails with
+/// `sh: semlith: command not found`; after it the registered absolute path
+/// answers `initialize`. Through `sh -c` rather than spawned directly, because
+/// the failure being ruled out is a `PATH` lookup and only a shell performs
+/// one.
+///
+/// `unix` only: there is no `/bin/sh` on Windows, and the spelling of the path
+/// is what can go wrong there — `every_launching_stanza_names_an_absolute_path`
+/// and `the_resolved_binary_path_is_absolute_and_not_verbatim` are what cover
+/// it, and they run on every platform.
+#[cfg(unix)]
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn every_registered_command_launches_from_a_path_without_semlith_on_it() {
+    let home = two_registered_stores();
+
+    // Deduplicated: every stanza names the same binary and the same subcommand,
+    // so this is one launch however many blocks produce it. Collected from the
+    // document rather than assembled here, because the document is the thing
+    // under test.
+    let mut lines: Vec<String> = blocks(&section())
+        .into_iter()
+        .filter(|(language, body)| launches(language, body))
+        .map(|(_, body)| format!("'{}' {}", launched_binary(&body), args_of(&body).join(" ")))
+        .collect();
+    lines.sort();
+    lines.dedup();
+    assert!(!lines.is_empty(), "no stanza launches the binary at all");
+
+    for line in &lines {
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg(line)
+            // The criterion's own environment. `handshake` puts the store home
+            // and the model cache back afterwards: what is under test is that
+            // the binary is found, not that a server with no home works.
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin:/usr/local/bin");
+        let named = handshake(shell, &home, line);
+        assert!(
+            named.contains("api") && named.contains("cli"),
+            "{line} answered without the registered stores: {named}"
+        );
+    }
+}
+
 /// Drive a server started with `argv` through the opening a client performs,
 /// then ask it what it opened. Returns the text of `semlith_stats`.
 fn answers(home: &Path, argv: &[String]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
-        .args(argv)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
+    command.args(argv);
+    handshake(command, home, &format!("{argv:?}"))
+}
+
+/// The same handshake against a command the caller has already built, for the
+/// test that has to control the environment the binary is launched from.
+fn handshake(mut command: Command, home: &Path, argv: &str) -> String {
+    let mut child = command
         .env("SEMLITH_HOME", home)
         .env("HOME", home)
         .env("SEMLITH_MODEL_CACHE", real_model_cache())
@@ -319,7 +443,16 @@ fn blocks(text: &str) -> Vec<(String, String)> {
         // `unregister`, `config path=…`, `scope=…` — and it is kept whole here
         // so a caller can ask which kind of block it is looking at. Only the
         // first word is the language.
-        out.push((language.trim().to_string(), body));
+        //
+        // The binary placeholder is expanded here, once, for the same reason
+        // `src/clients.rs` expands it before anything reads a stanza: the text
+        // under test is the text a client is handed, and the document holds a
+        // placeholder precisely because no document can know where this machine
+        // put the binary.
+        out.push((
+            language.trim().to_string(),
+            body.replace(BIN_PLACEHOLDER, &binary_under_test()),
+        ));
     }
     out
 }
@@ -327,9 +460,27 @@ fn blocks(text: &str) -> Vec<(String, String)> {
 /// Whether the block launches semlith rather than something else — a bare
 /// `semlith` on the `PATH` or an absolute path ending in it.
 fn names_semlith(body: &str) -> bool {
+    tokens(body).iter().any(|t| is_binary(t))
+}
+
+/// Whether a block is one a client launches the binary from: not an HTTP
+/// stanza, which holds a URL and a header and starts no process, and not an
+/// `unregister` fence, whose only `semlith` is the name of the entry the
+/// client's own CLI is being asked to remove.
+fn launches(language: &str, body: &str) -> bool {
+    !is_http(body)
+        && !language.split_whitespace().any(|word| word == "unregister")
+        && names_semlith(body)
+}
+
+/// The binary a launching block names: the last token that is the binary
+/// rather than the first, because the server's name is spelled `semlith` too
+/// and comes first in every one of these formats.
+fn launched_binary(body: &str) -> String {
     tokens(body)
-        .iter()
-        .any(|t| t == "semlith" || t.ends_with("/semlith"))
+        .into_iter()
+        .rfind(|t| is_binary(t))
+        .expect("a launching block names the binary")
 }
 
 /// The arguments a stanza hands the binary: everything after the last mention
@@ -339,10 +490,7 @@ fn names_semlith(body: &str) -> bool {
 /// is the thing under test, so the arguments have to come from it.
 fn args_of(body: &str) -> Vec<String> {
     let tokens = tokens(body);
-    let Some(binary) = tokens
-        .iter()
-        .rposition(|t| t == "semlith" || t.ends_with("/semlith"))
-    else {
+    let Some(binary) = tokens.iter().rposition(|t| is_binary(t)) else {
         return Vec::new();
     };
     // Stops at the subcommand: a client's own keys can follow the argument

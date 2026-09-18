@@ -46,6 +46,10 @@ fn fixture(dir: &std::path::Path) {
 fn call(dir: &std::path::Path, tool: &str, args: serde_json::Value) -> String {
     let mut fleet = Fleet::open(&[dir.to_path_buf()]).unwrap();
     fleet.quiet = true;
+    // 0.21.0 moved the model load off the handshake, so the server takes the
+    // fleet behind a lock and the store names `tools/list` prints separately.
+    let labels = fleet.labels().join(", ");
+    let fleet = std::sync::Mutex::new(fleet);
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -54,7 +58,7 @@ fn call(dir: &std::path::Path, tool: &str, args: serde_json::Value) -> String {
     });
     let input = format!("{request}\n");
     let mut out = Vec::new();
-    semlith::mcp::serve(&mut fleet, Cursor::new(input.into_bytes()), &mut out).unwrap();
+    semlith::mcp::serve(&fleet, &labels, Cursor::new(input.into_bytes()), &mut out).unwrap();
     String::from_utf8(out).unwrap()
 }
 

@@ -582,7 +582,11 @@ check cli/trust/list           "trust --list answers"               c_trust_list
 
 # --------------------------------------------------------------- setup, upgrade
 
-c_setup_idempotent() { semlith setup --yes --airgap > /dev/null 2>&1; }
+# `--no-service` because this check is about setup re-running cleanly, and from
+# 0.21.0 setup installs a login service by default — which starts a daemon on
+# the port the `cli/daemon/*` checks below need to bind, and every one of them
+# then fails on a port this harness took from itself.
+c_setup_idempotent() { semlith setup --yes --airgap --no-service > /dev/null 2>&1; }
 c_upgrade_check() {
   semlith upgrade --check > /dev/null 2>&1
   rc=$?
@@ -760,6 +764,129 @@ c_daemon_releases_lock() {
   semlith index --quiet "$corpus/src" > /dev/null 2>&1
 }
 check cli/daemon/releases-lock "the lock is free after it stops"    c_daemon_releases_lock
+
+# ------------------------------------------------------------------- 0.21.0
+
+# The handshake must not be behind the embedding model. Proved by making the
+# model impossible to load — airgapped, empty cache — so a server that still
+# answers is a server that never waited for one. On 0.20.2 this printed nothing
+# at all and exited.
+c_mcp_handshake_without_model() {
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    | SEMLITH_AIRGAP=1 SEMLITH_MODEL_CACHE="$work/no-model" \
+      semlith mcp 2> "$work/mcp-airgap.err" > "$work/mcp-airgap.out"
+  # Two complete responses, and the reason searches will fail on stderr where a
+  # stdio client captures it.
+  [ "$(grep -c '"result"' "$work/mcp-airgap.out")" = "2" ] &&
+    grep -q '"tools"' "$work/mcp-airgap.out" &&
+    grep -q 'could not load the embedding model' "$work/mcp-airgap.err"
+}
+check cli/mcp/handshake-no-model "initialize answers with no model" c_mcp_handshake_without_model
+
+# A fresh install wired into a client used to be a server that exited on
+# startup: the client reports no server, and nothing says why.
+c_mcp_without_a_store() {
+  printf '%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+    | SEMLITH_HOME="$work/empty-home" semlith mcp 2> /dev/null > "$work/mcp-bare.out"
+  [ "$(grep -c '"result"' "$work/mcp-bare.out")" = "2" ] &&
+    grep -q '"tools"' "$work/mcp-bare.out"
+}
+check cli/mcp/no-store          "a store-less machine still serves" c_mcp_without_a_store
+
+# `doctor` has to be usable from a script: a machine that is fine exits zero.
+c_doctor_exit_code() {
+  semlith doctor > "$work/doctor.out" 2>&1
+  rc=$?
+  # Either answer is legitimate on a runner; what is not legitimate is a
+  # non-zero exit with nothing naming a fault, which is a doctor nobody can act
+  # on.
+  if [ $rc -eq 0 ]; then
+    grep -q 'Clients' "$work/doctor.out"
+  else
+    grep -qE 'FAIL|not registered|OFF HERE|run:' "$work/doctor.out"
+  fi
+}
+check cli/doctor/exit-code      "doctor exits with a reason"       c_doctor_exit_code
+
+# ------------------------------------------------------------------- service
+
+# A login service is the whole of "semlith is already there". It is installed
+# and removed here rather than assumed: the three mechanisms share no code and
+# only one of them is ever exercised on a given runner.
+service_installed=0
+c_service_install() {
+  semlith start --service > "$work/service.out" 2>&1 || return 1
+  grep -q 'login service' "$work/service.out" || return 1
+  case "$platform" in
+    macos)   launchctl list 2>/dev/null | grep -q com.semlith.daemon ;;
+    linux)   systemctl --user is-enabled semlith.service 2>/dev/null | grep -q enabled ;;
+    windows) schtasks //Query //TN semlith > /dev/null 2>&1 ;;
+    *)       return 1 ;;
+  esac
+}
+if semlith start --service > "$work/service-probe.out" 2>&1; then
+  service_installed=1
+  check cli/service/install "the login service installs"   c_service_install
+else
+  # A runner with no user session has no systemd --user and no launchd GUI
+  # domain. That is the runner's shape, not semlith's defect, and blaming the
+  # product for it is what rule 3 at the top of this file forbids.
+  skip cli/service/install "$(head -1 "$work/service-probe.out" 2>/dev/null)"
+fi
+
+# The service exists so that a daemon which dies comes back with nobody
+# watching. macOS KeepAlive and systemd Restart=always do that; a Windows logon
+# task restarts a task that failed and does not supervise one that exited, which
+# the product says out loud rather than claiming parity.
+c_service_recovers() {
+  pid=$(pgrep -f 'semlith start' | head -1)
+  [ -n "$pid" ] || return 1
+  kill -9 "$pid" 2>/dev/null
+  i=0
+  while [ $i -lt 20 ]; do
+    sleep 2
+    back=$(pgrep -f 'semlith start' | head -1)
+    if [ -n "$back" ] && [ "$back" != "$pid" ]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+if [ "$service_installed" = "1" ] && [ "$platform" != "windows" ]; then
+  sleep 5
+  check cli/service/recovers "a killed daemon is restarted"  c_service_recovers
+elif [ "$platform" = "windows" ]; then
+  skip cli/service/recovers "a logon task does not supervise a clean exit"
+else
+  skip cli/service/recovers "the service did not install"
+fi
+
+# Removing is the rollback, so it has to work and has to be safe twice.
+c_service_remove() {
+  semlith start --no-service > "$work/unservice.out" 2>&1 || return 1
+  grep -q 'removed' "$work/unservice.out" || return 1
+  # Second time: still exits zero, and says there was nothing there.
+  semlith start --no-service > "$work/unservice2.out" 2>&1 || return 1
+  grep -q 'no login service' "$work/unservice2.out"
+}
+if [ "$service_installed" = "1" ]; then
+  check cli/service/remove "the service removes, twice"      c_service_remove
+else
+  skip cli/service/remove "the service did not install"
+fi
+
+# Nothing of this release may be left running on the runner — and removing the
+# service is not enough. A service that is removed leaves the daemon it started
+# running, deliberately: `--no-service` is documented as not touching one. So
+# the daemon is stopped here too, or the next run of this harness meets a port
+# it cannot bind and blames the product for it.
+semlith start --no-service > /dev/null 2>&1 || true
+pkill -f 'semlith start' 2>/dev/null || true
 
 # ------------------------------------------------------------------- summary
 

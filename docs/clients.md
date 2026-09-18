@@ -59,9 +59,14 @@ because a `.semlith` directory can arrive inside a repository you cloned.
 `semlith adopt ./.semlith` moves it into the home instead, so these stanzas
 reach it with no flags.
 
-`cargo install semlith` puts the binary at `~/.cargo/bin/semlith`, which is on
-your `PATH` in a shell but often not in an editor launched from a desktop icon
-— the editor and desktop entries below use the absolute path.
+Every stanza below writes `${SEMLITH_BIN}` where the binary goes, and that
+expands to the absolute path of the semlith that is running: `semlith setup`
+substitutes it before it registers anything, and by hand it is whatever `which
+semlith` prints — `~/.cargo/bin/semlith` after a `cargo install`. The bare word
+`semlith` is not enough. It is on your `PATH` in a shell and usually not in an
+editor launched from a desktop icon, a launchd or systemd agent, or a desktop
+app, none of which ever sources a profile; the client then reports that the
+server exited and says nothing about why.
 
 #### Terminal
 
@@ -99,7 +104,7 @@ claude mcp remove --scope user semlith
 ```
 
 ```sh register
-claude mcp add --scope user semlith -- semlith mcp
+claude mcp add --scope user semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
@@ -121,12 +126,12 @@ codex mcp remove semlith
 ```
 
 ```sh register
-codex mcp add semlith -- semlith mcp
+codex mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 ```toml config path=~/.codex/config.toml
 [mcp_servers.semlith]
-command = "semlith"
+command = "${SEMLITH_BIN}"
 args = ["mcp"]
 ```
 
@@ -154,7 +159,7 @@ then the user-level file below is the thing that covers every project, and
   "mcp": {
     "semlith": {
       "type": "local",
-      "command": ["semlith", "mcp"],
+      "command": ["${SEMLITH_BIN}", "mcp"],
       "enabled": true
     }
   }
@@ -177,7 +182,7 @@ Or against a daemon on another machine, over HTTP:
 ```
 
 ```sh register scope=project
-opencode mcp add semlith -- semlith mcp
+opencode mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **IO CLI** — `io.local.toml` in the project root. The servers are an array of
@@ -202,7 +207,7 @@ io mcp remove semlith
 ```
 
 ```sh register
-io mcp add --scope user semlith -- semlith mcp
+io mcp add --scope user semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **GitHub Copilot CLI** — `~/.copilot/mcp-config.json`, or `/mcp add` in a
@@ -218,7 +223,7 @@ already covers every repository, and a per-repository entry means editing
   "mcpServers": {
     "semlith": {
       "type": "local",
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"],
       "tools": ["*"]
     }
@@ -252,7 +257,7 @@ copilot mcp remove semlith
 ```
 
 ```sh register
-copilot mcp add semlith -- semlith mcp
+copilot mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **Gemini CLI** — `~/.gemini/settings.json`. The key for a streamable-HTTP
@@ -266,7 +271,7 @@ writes `~/.gemini/settings.json` for `user` and `.gemini/settings.json` for
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -298,7 +303,7 @@ gemini mcp remove --scope user semlith
 ```
 
 ```sh register
-gemini mcp add --scope user semlith semlith mcp
+gemini mcp add --scope user semlith "${SEMLITH_BIN}" mcp
 ```
 
 **Qwen Code** — `~/.qwen/settings.json`, the same schema as Gemini CLI down to
@@ -311,7 +316,7 @@ writes `.qwen/settings.json`
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -343,7 +348,7 @@ qwen mcp remove semlith
 ```
 
 ```sh register
-qwen mcp add --scope user semlith semlith mcp
+qwen mcp add --scope user semlith "${SEMLITH_BIN}" mcp
 ```
 
 **Amp** — `~/.config/amp/settings.json`, or the editor extension's own
@@ -358,7 +363,7 @@ entry means editing `.amp/settings.json` by hand
 {
   "amp.mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -379,7 +384,7 @@ Or against a daemon on another machine, over HTTP:
 ```
 
 ```sh register
-amp mcp add semlith -- semlith mcp
+amp mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **Crush** — `crush.json` in the project root. The root key is `mcp`, not
@@ -414,7 +419,7 @@ takes the command as one quoted argument rather than after a `--`.
   "mcpServers": {
     "semlith": {
       "type": "stdio",
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -446,7 +451,7 @@ droid mcp remove semlith
 ```
 
 ```sh register
-droid mcp add semlith "semlith mcp" --type stdio
+droid mcp add semlith "${SEMLITH_BIN} mcp" --type stdio
 ```
 
 **Goose** — `goose configure` → Add Extension → Remote Extension, or
@@ -462,7 +467,7 @@ extensions:
     type: stdio
     name: semlith
     enabled: true
-    cmd: "semlith"
+    cmd: "${SEMLITH_BIN}"
     args:
       - mcp
     timeout: 300
@@ -493,7 +498,7 @@ spells its scope `--scope global`, against `workspace` and `default`
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -508,7 +513,7 @@ q mcp remove --name semlith --scope global
 ```
 
 ```sh register
-q mcp add --name semlith --command semlith --args mcp --scope global
+q mcp add --name semlith --command "${SEMLITH_BIN}" --args mcp --scope global
 ```
 
 **OpenClaw** — `~/.openclaw/openclaw.json`. The servers are nested two deep
@@ -523,7 +528,7 @@ either way is a global one (<https://docs.openclaw.ai/cli/mcp/registry>).
   "mcp": {
     "servers": {
       "semlith": {
-        "command": "semlith",
+        "command": "${SEMLITH_BIN}",
         "args": ["mcp"]
       }
     }
@@ -559,7 +564,7 @@ openclaw mcp unset semlith
 ```
 
 ```sh register
-openclaw mcp add semlith --command semlith --arg mcp
+openclaw mcp add semlith --command "${SEMLITH_BIN}" --arg mcp
 ```
 
 **DeepSeek** — `~/.deepseek/mcp.json`, read by DeepSeek-TUI, which has since
@@ -577,7 +582,7 @@ header flag, so for the HTTP form the key goes in the environment:
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"],
       "env": {},
       "disabled": false
@@ -600,7 +605,7 @@ Or against a daemon on another machine, over HTTP:
 ```
 
 ```sh register
-codewhale mcp add semlith --command "semlith" --arg "mcp"
+codewhale mcp add semlith --command "${SEMLITH_BIN}" --arg "mcp"
 ```
 
 **Warp** — `~/.warp/.mcp.json`, or Settings → AI → MCP servers → + Add, which
@@ -611,7 +616,7 @@ rejects one holding both.
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"],
       "start_on_launch": true
     }
@@ -660,7 +665,7 @@ code --add-mcp '{"name":"semlith","type":"http","url":"http://127.0.0.1:7365/mcp
 ```
 
 ```sh register
-code --add-mcp '{"name":"semlith","command":"semlith","args":["mcp"]}'
+code --add-mcp '{"name":"semlith","command":"${SEMLITH_BIN}","args":["mcp"]}'
 ```
 
 **Cursor** — `~/.cursor/mcp.json` everywhere, or `.cursor/mcp.json` in one
@@ -671,7 +676,7 @@ field of its own; adding one copied from another client confuses it.
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -699,7 +704,7 @@ restart, not on a window reload.
 {
   "mcpServers": {
     "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -733,7 +738,7 @@ paste the stanza in.
   "context_servers": {
     "semlith": {
       "source": "custom",
-      "command": "/Users/you/.cargo/bin/semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -749,7 +754,7 @@ with a hyphen.
 {
   "mcpServers": {
     "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -795,7 +800,7 @@ configuration file, `~/.cline/mcp.json`
 ```
 
 ```sh register
-cline mcp install semlith -- semlith mcp
+cline mcp install semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **Roo Code** — `.roo/mcp.json` in the project, or the global file the MCP
@@ -851,7 +856,7 @@ a subprocess entry is `type: "local"` with the command as an array:
   "mcp": {
     "semlith": {
       "type": "local",
-      "command": ["semlith", "mcp"],
+      "command": ["${SEMLITH_BIN}", "mcp"],
       "enabled": true
     }
   }
@@ -859,7 +864,7 @@ a subprocess entry is `type: "local"` with the command as an array:
 ```
 
 ```sh register scope=project
-kilo mcp add semlith -- semlith mcp
+kilo mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
 **Continue** — one block file per server at
@@ -873,7 +878,7 @@ version: 0.0.1
 schema: v1
 mcpServers:
   - name: semlith
-    command: /Users/you/.cargo/bin/semlith
+    command: "${SEMLITH_BIN}"
     args:
       - mcp
 ```
@@ -904,7 +909,7 @@ the one you just edited — only the user-level file below is written for you.
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"],
       "disabled": false,
       "autoApprove": ["semlith_search"]
@@ -935,7 +940,7 @@ kiro-cli mcp remove --name semlith --scope global
 ```
 
 ```sh register
-kiro-cli mcp add --name semlith --command "semlith" --args "mcp" --scope global
+kiro-cli mcp add --name semlith --command "${SEMLITH_BIN}" --args "mcp" --scope global
 ```
 
 #### Desktop apps
@@ -948,7 +953,7 @@ transport field and a `url` is enough.
 {
   "mcpServers": {
     "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -978,7 +983,7 @@ mcp` proxies to the running daemon. Quit and reopen the app after editing.
 {
   "mcpServers": {
     "semlith": {
-      "command": "/Users/you/.cargo/bin/semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -989,7 +994,7 @@ mcp` proxies to the running daemon. Quit and reopen the app after editing.
 {
   "mcpServers": {
     "semlith": {
-      "command": "semlith",
+      "command": "${SEMLITH_BIN}",
       "args": ["mcp"]
     }
   }
@@ -1043,3 +1048,45 @@ running, which is what makes it work whether or not `semlith start` is up. The
 HTTP endpoint is for clients that would rather hold a URL than spawn a process.
 Close it with `semlith start --no-mcp-http`, or from the portal's Agents page
 while the daemon runs — closing it drops the route, not the daemon.
+
+## Knowing it is there
+
+A registration that reads correctly is not a server that answers. `semlith
+doctor` runs the steps rather than reading the file: what a client would run,
+whether that launches with the environment a service manager gives a job,
+how many tools it lists, and — for Claude Code, from a directory that is
+nobody's project — what the client itself says. It names the first step that
+failed and the command that shows it.
+
+It also catches the case nothing else reports: a server registered at user
+scope and **switched off for one directory**. `~/.claude.json` can carry
+
+```json
+"projects": {
+  "/path/to/your/repo": { "disabledMcpjsonServers": ["semlith"] }
+}
+```
+
+and every check run from any other directory says the server is connected,
+because it is. `semlith doctor` run in that directory names the file, the key
+and the directory, and prints the command that turns it back on. It never turns
+it back on by itself: switching a server off is a choice.
+
+`semlith doctor --brief` is one line and an exit code — non-zero when an agent
+opening a session in this directory would not find semlith. It reads and never
+writes, which is what makes it safe in a hook that runs every time you open a
+session. For Claude Code, in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "semlith doctor --brief" }] }
+    ]
+  }
+}
+```
+
+semlith does not write that for you. A hook runs on every session you open, and
+a tool that adds one to your settings without being asked is doing something
+you should have chosen.

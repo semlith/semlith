@@ -101,6 +101,20 @@ enum Command {
     /// current as files are saved, and serve the portal on 127.0.0.1. Runs
     /// until interrupted.
     Start {
+        /// Install the daemon as a login service and start it, instead of
+        /// running in this terminal.
+        ///
+        /// A launchd user agent on macOS, a systemd user unit on Linux, a logon
+        /// task on Windows. It runs from the next login onwards, and on macOS
+        /// and Linux a daemon that exits is restarted. Safe to run twice.
+        #[arg(long, conflicts_with = "no_service")]
+        service: bool,
+
+        /// Remove the login service. Leaves a running daemon and every store
+        /// exactly as they are, and is not an error when none is installed.
+        #[arg(long)]
+        no_service: bool,
+
         /// Stores to open. Defaults to every registered store.
         paths: Vec<PathBuf>,
 
@@ -342,6 +356,15 @@ enum Command {
     /// with the agents you use. Every step is idempotent, so this is also the
     /// repair command.
     Setup {
+        /// Do not install the daemon as a login service.
+        ///
+        /// It is installed by default, including when nothing can answer a
+        /// prompt — a piped installer, CI, `--yes`. A user who never reads the
+        /// prompt is exactly the user a login service is for, and the cost of
+        /// opting out is this flag.
+        #[arg(long)]
+        no_service: bool,
+
         /// Take the default at every prompt — add to PATH, download the model,
         /// register no agent — so a script or an agent can run it unattended.
         #[arg(long, short)]
@@ -375,6 +398,15 @@ enum Command {
         /// it was before.
         #[arg(long)]
         fix: bool,
+
+        /// One line and an exit code, for a shell prompt or an agent's
+        /// session-start hook.
+        ///
+        /// Reads and never writes: the full `doctor` repairs a registration
+        /// that cannot launch, and a hook that runs on every session opened is
+        /// not a place to edit configuration files from.
+        #[arg(long, conflicts_with_all = ["json", "fix"])]
+        brief: bool,
     },
 
     /// Replace this binary with the newest release for this machine. Runs only
@@ -519,7 +551,7 @@ fn main() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match cli.command {
-        Command::Doctor { json, fix } => {
+        Command::Doctor { json, fix, brief } => {
             let stores: Vec<(String, std::path::PathBuf)> = home::Registry::load()
                 .unwrap_or_default()
                 .stores
@@ -531,13 +563,37 @@ fn main() -> Result<()> {
             } else {
                 Vec::new()
             };
-            let report = semlith::doctor::clients_report();
+            // `--brief` takes the read-only report. It is the one flag that
+            // may run on every session a person opens, and a check that
+            // rewrites a configuration file as a side effect of being asked
+            // "is this working?" is not a check.
+            let report = if brief {
+                semlith::doctor::clients_report_read_only()
+            } else {
+                semlith::doctor::clients_report()
+            };
             let rules = semlith::doctor::privacy_findings(&stores);
+            // Not for `--brief`, which may run on every session a person
+            // opens, and not from the portal, which reads `clients_report` on
+            // every page load. This one starts a server and asks a client.
+            let proof = (!brief).then(semlith::doctor::proof);
+
+            if brief {
+                print_brief(&report, &rules);
+                let faults = report.iter().filter(|c| c.fault).count()
+                    + rules.iter().filter(|r| !r.ok).count();
+                if faults > 0 {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
 
             if json {
                 let out = serde_json::json!({
                     "clients": report,
                     "rules": rules,
+                    "service": semlith::service::status(),
+                    "proof": proof,
                     "applied": applied
                         .iter()
                         .map(|r| match r {
@@ -549,13 +605,17 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&out)?);
             } else {
                 print_doctor(&report, &rules, &applied);
+                if let Some(proof) = &proof {
+                    print_proof(proof);
+                }
             }
 
             // Non-zero when something on this machine is not as it should be,
             // so a script can gate on it. A client that is simply not installed
             // is not a fault: most people have two or three of twenty-seven.
-            let faults =
-                report.iter().filter(|c| c.fault).count() + rules.iter().filter(|r| !r.ok).count();
+            let faults = report.iter().filter(|c| c.fault).count()
+                + rules.iter().filter(|r| !r.ok).count()
+                + usize::from(proof.as_ref().is_some_and(|p| p.failed.is_some()));
             if faults > 0 {
                 std::process::exit(1);
             }
@@ -565,9 +625,10 @@ fn main() -> Result<()> {
             yes,
             airgap,
             register_all,
+            no_service,
         } => {
             arm_airgap(airgap);
-            semlith::setup::run(yes, airgap, register_all)?;
+            semlith::setup::run(yes, airgap, register_all, !no_service)?;
         }
 
         Command::Upgrade {
@@ -1690,6 +1751,8 @@ fn main() -> Result<()> {
         }
 
         Command::Start {
+            service,
+            no_service,
             paths,
             no_ledger,
             port,
@@ -1697,6 +1760,27 @@ fn main() -> Result<()> {
             airgap,
             no_mcp_http,
         } => {
+            // Both of these end the process. `--service` hands the daemon to
+            // the thing that will keep starting it; running one in this
+            // terminal as well would be two daemons racing for every store's
+            // write lock, and the second would lose and say so.
+            if no_service {
+                let removed = semlith::service::remove()?;
+                println!(
+                    "{}",
+                    if removed {
+                        "semlith: login service removed — a daemon already running is untouched"
+                    } else {
+                        "semlith: no login service was installed"
+                    }
+                );
+                return Ok(());
+            }
+            if service {
+                let installed = semlith::service::install(None, port)?;
+                print_service(&installed);
+                return Ok(());
+            }
             arm_airgap(airgap);
             let dirs = semlith::daemon::stores_to_open(&cli.store, &paths, &cwd)?;
             if dirs.is_empty() {
@@ -1886,26 +1970,82 @@ fn main() -> Result<()> {
                 );
             }
 
-            let mut fleet = read_fleet(&cli.store, &cwd, true)?;
-            // Load each distinct model before the first tool call so an agent
-            // does not sit through a cold start mid-conversation.
+            // A machine with no store registered used to end the process
+            // here, before a byte of protocol was written: a fresh install
+            // wired into a client produced a server that exited on startup,
+            // which the client reports as nothing at all. That is the same
+            // absence this release exists to remove, so it is served instead —
+            // the handshake and the tool list are answered, and the first
+            // `tools/call` carries the message that used to be fatal.
+            let mut fleet = match read_fleet(&cli.store, &cwd, true) {
+                Ok(fleet) => fleet,
+                Err(e) => {
+                    eprintln!("semlith: {e}");
+                    Fleet::empty()
+                }
+            };
             fleet.quiet = true;
-            fleet.warm()?;
+
+            // Read once, here, while nothing else holds the fleet. `tools/list`
+            // names the open stores, and a fleet's membership is fixed by
+            // `Fleet::open` and never added to, so this cannot go stale — which
+            // is what lets the handshake be answered without taking the lock.
+            let labels = fleet.labels().join(", ");
+            let stores = fleet.len();
+
             // stdout is the protocol, so this goes to stderr — which a stdio
             // client captures. A server opened on the wrong store answers
             // every question with nothing, and this is the only place that is
             // visible before a query comes back empty.
-            eprintln!(
-                "semlith {}: serving {} on {}",
-                env!("CARGO_PKG_VERSION"),
-                match fleet.len() {
-                    1 => "1 store".to_string(),
-                    n => format!("{n} stores"),
-                },
-                fleet.labels().join(", "),
-            );
+            match stores {
+                0 => eprintln!(
+                    "semlith {}: serving no store — the tools are listed, and the first one that \
+                     needs a corpus will say so",
+                    env!("CARGO_PKG_VERSION"),
+                ),
+                1 => eprintln!(
+                    "semlith {}: serving 1 store on {labels}",
+                    env!("CARGO_PKG_VERSION"),
+                ),
+                n => eprintln!(
+                    "semlith {}: serving {n} stores on {labels}",
+                    env!("CARGO_PKG_VERSION"),
+                ),
+            }
+            let fleet = std::sync::Arc::new(std::sync::Mutex::new(fleet));
+
+            // Behind the handshake, not in front of it. This used to be
+            // `fleet.warm()` on this thread, before `serve` read its first
+            // line: an ONNX session takes a second or two to build and a model
+            // that is not cached yet is a download, and a client with a startup
+            // timeout saw neither an `initialize` result nor an error — it saw
+            // silence, and reported no server. The cost still has to be paid by
+            // somebody; paying it here means it overlaps the client's own
+            // startup instead of blocking it, and only a `tools/call` waits.
+            if stores > 0 {
+                let warming = std::sync::Arc::clone(&fleet);
+                std::thread::spawn(move || {
+                    let started = std::time::Instant::now();
+                    let mut fleet = warming.lock().unwrap_or_else(|e| e.into_inner());
+                    match fleet.warm() {
+                        Ok(()) => eprintln!(
+                            "semlith: embedding model ready in {}ms; searches are warm from here",
+                            started.elapsed().as_millis(),
+                        ),
+                        // Not fatal: every tool that does not embed still works,
+                        // and a search will fail with this same reason attached.
+                        Err(e) => eprintln!("semlith: could not load the embedding model: {e}"),
+                    }
+                });
+                eprintln!(
+                    "semlith: loading the embedding model in the background — the first search \
+                     waits for it, everything else does not"
+                );
+            }
+
             semlith::mcp::serve(
-                &mut fleet,
+                &fleet,
+                &labels,
                 std::io::stdin().lock(),
                 std::io::stdout().lock(),
             )?;
@@ -2214,6 +2354,170 @@ fn human_time(at: i64) -> String {
     semlith::clock::local_clock(at)
 }
 
+/// The four steps, and the first one that failed.
+///
+/// A file can say semlith is registered while nothing can launch it. That was
+/// true on the machine this release was found on, twice, and every check that
+/// read a file passed both times. These lines are what happened when something
+/// tried.
+fn print_proof(proof: &semlith::doctor::Proof) {
+    println!();
+    println!("{}Proof{}", bold(), reset());
+    let service = semlith::service::status();
+    println!(
+        "  {:<4} {:<20} {}",
+        if service.installed { "ok  " } else { "--  " },
+        "login service",
+        if service.installed {
+            match semlith::service::last_started() {
+                Some(at) => format!(
+                    "installed ({}), daemon last started {}",
+                    service.mechanism,
+                    human_time(at)
+                ),
+                None => format!("installed ({}), no daemon running", service.mechanism),
+            }
+        } else {
+            "not installed — `semlith start --service`".to_string()
+        },
+    );
+    println!(
+        "  {:<4} {:<20} {}",
+        "ok  ", "a client would run", proof.command
+    );
+    println!(
+        "  {:<4} {:<20} {}",
+        if proof.launched { "ok  " } else { "FAIL" },
+        "launched",
+        if proof.launched {
+            "answered `initialize` with the environment a service manager gives a job"
+        } else {
+            "did not answer with a plain PATH"
+        },
+    );
+    match proof.tools {
+        Some(n) if n > 0 => println!("  {:<4} {:<20} {n} tools", "ok  ", "listed the tools"),
+        _ => println!("  {:<4} {:<20} none", "FAIL", "listed the tools"),
+    }
+    match &proof.client {
+        Some(verdict) => println!(
+            "  {:<4} {:<20} {}: {}",
+            if verdict.connected { "ok  " } else { "FAIL" },
+            "client says",
+            verdict.name,
+            verdict.says,
+        ),
+        // Named rather than implied. Every other client is read from its
+        // configuration file, which is exactly the check that passed twice
+        // while there was no server.
+        None => println!(
+            "  {:<4} {:<20} no client with a command semlith can ask is installed",
+            "n/a ", "client says",
+        ),
+    }
+    if let Some(failed) = &proof.failed {
+        println!("  first failure: {failed}");
+    }
+}
+
+/// One line: whether an agent opening a session here would find semlith.
+///
+/// Short enough for a shell prompt and specific enough to act on. A green line
+/// says the version, the stores and whether a login service is keeping the
+/// daemon up; a red one names the first client that cannot reach semlith and
+/// why, because "something is wrong" in a prompt is worse than nothing.
+fn print_brief(clients: &[semlith::doctor::ClientReport], rules: &[semlith::doctor::Finding]) {
+    let service = semlith::service::status();
+    // A client switched off for this directory outranks one that was never
+    // registered: the first is why the session in front of the reader has no
+    // semlith, the second is a client they may not even use.
+    let broken = clients
+        .iter()
+        .find(|c| c.disabled_here)
+        .or_else(|| clients.iter().find(|c| c.fault));
+    if let Some(broken) = broken {
+        // The first sentence only. A prompt has one line, and the rest of
+        // `explain` is for the full report.
+        let why = match broken.explain.as_deref() {
+            Some(explain) => explain
+                .split_once(". ")
+                .map(|(head, _)| head)
+                .unwrap_or(explain)
+                .to_string(),
+            None => "is installed and cannot reach semlith".to_string(),
+        };
+        // The command, separated from the reason, and without the trailing
+        // comment the full report has room for.
+        let fix = broken
+            .repair
+            .as_deref()
+            .map(|r| r.split_once("  #").map(|(cmd, _)| cmd).unwrap_or(r).trim())
+            .map(|cmd| format!(" — run: {cmd}"))
+            .unwrap_or_default();
+        println!("semlith: {} {why}{fix}", broken.name);
+        return;
+    }
+    if let Some(failed) = rules.iter().find(|r| !r.ok) {
+        println!("semlith: {}", failed.check);
+        return;
+    }
+    let stores = semlith::home::Registry::load()
+        .map(|r| r.stores.len())
+        .unwrap_or(0);
+    println!(
+        "semlith {} · {} store{} · {}",
+        env!("CARGO_PKG_VERSION"),
+        stores,
+        if stores == 1 { "" } else { "s" },
+        if service.installed {
+            format!("{} service", service.mechanism)
+        } else {
+            "no login service — `semlith start --service`".to_string()
+        },
+    );
+}
+
+/// What `--service` installed, and where to look when it misbehaves.
+fn print_service(status: &semlith::service::Status) {
+    if !status.installed {
+        println!(
+            "semlith: the {} definition was written but {} does not report it as installed",
+            status.mechanism, status.mechanism,
+        );
+        return;
+    }
+    if status.started_now {
+        println!(
+            "semlith: installed as a {} login service — running now, and from every login",
+            status.mechanism,
+        );
+    } else {
+        // Not a failure, and worth saying plainly: something was already
+        // listening, so this registered the service and left the running
+        // daemon alone rather than starting a second one to lose the bind.
+        println!(
+            "semlith: installed as a {} login service — a daemon is already listening, so this              one starts at the next login",
+            status.mechanism,
+        );
+    }
+    if let Some(definition) = &status.definition {
+        println!("  definition  {}", definition.display());
+    }
+    if let Some(log) = &status.log {
+        println!("  log         {}", log.display());
+    }
+    // Stated rather than implied. A Windows logon task restarts a task that
+    // failed; it does not supervise one that ended cleanly, and a user who
+    // reads "login service" on all three platforms would assume it did.
+    if !status.restarts {
+        println!(
+            "  note        this platform restarts a service that fails, \
+             but does not restart one that exits cleanly"
+        );
+    }
+    println!("  remove      semlith start --no-service");
+}
+
 /// `semlith doctor`'s human output.
 ///
 /// One line per client, then the rules that are readings of this machine. A
@@ -2234,6 +2538,22 @@ fn print_doctor(
         // fault that is not one.
         let state = match (client.registered, &client.note, &client.command) {
             (_, Some(_), _) => "cannot register".to_string(),
+            // Registered and switched off reads as "registered" everywhere
+            // else, which is how it stayed invisible: the row was green while
+            // the session had no server.
+            (true, _, _) if client.disabled_here => {
+                format!("registered ({}), OFF HERE", client.scope.unwrap_or("user"))
+            }
+            // A row whose entry names a command that cannot launch is not
+            // "registered" in the only sense that matters. `explain` carried
+            // the truth and `fault` carried the exit code while the one word a
+            // reader actually scans stayed optimistic.
+            (true, _, _) if client.fault => {
+                format!(
+                    "registered ({}), CANNOT LAUNCH",
+                    client.scope.unwrap_or("user")
+                )
+            }
             (true, _, _) => format!("registered ({})", client.scope.unwrap_or("user")),
             (false, _, None) => "not registered".to_string(),
             (false, _, Some(_)) if !client.present => "not installed".to_string(),
@@ -2245,6 +2565,15 @@ fn print_doctor(
         println!("  {:<28} {state}", client.name);
         if let Some(note) = &client.note {
             println!("      {note}");
+        }
+        if let Some(explain) = &client.explain {
+            println!("      {explain}");
+        }
+        // Named even when it is not this directory, because a user who
+        // switched semlith off in one project and forgot is the next person
+        // to file "it works everywhere except one repository".
+        for dir in client.disabled_in.iter().filter(|_| !client.disabled_here) {
+            println!("      switched off for {dir}");
         }
         if let Some(repair) = &client.repair {
             println!("      run: {repair}");

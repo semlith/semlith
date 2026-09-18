@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 /// The suffix a backup carries. Beside the original rather than in a temporary
 /// directory, so a user who wants to undo the write can see it next to what it
 /// undoes.
-const BACKUP: &str = ".semlith-backup";
+pub(crate) const BACKUP: &str = ".semlith-backup";
 
 /// What semlith would do to one file, decided before anything is written.
 #[derive(Debug, Clone, serde::Serialize)]

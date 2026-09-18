@@ -53,6 +53,13 @@ impl Fleet {
     /// corpus — `initialize`, `tools/list`, `ping`. An agent that connects to
     /// a daemon before anything has been indexed should be told which tools
     /// exist, not that the daemon is broken.
+    ///
+    /// Only the daemon used this until 0.21.0. `semlith mcp` on stdio took the
+    /// other path and ended the process with "no semlith store covers …"
+    /// before writing a byte of protocol, so a fresh install wired into a
+    /// client was a server that exited on startup and a client that reported
+    /// nothing at all — the same silent absence, reached from the side nobody
+    /// had checked.
     pub fn empty() -> Self {
         Self {
             members: Vec::new(),

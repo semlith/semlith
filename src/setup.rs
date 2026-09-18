@@ -191,7 +191,7 @@ pub fn status() -> Status {
 /// form: no key lands in a file, and nothing outside the client's own registry
 /// is touched. `register_all` is the one part that does ask, and it asks with
 /// the list of files in front of the user.
-pub fn run(yes: bool, airgap: bool, register_all: bool) -> Result<()> {
+pub fn run(yes: bool, airgap: bool, register_all: bool, service: bool) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
     // Reported as they run rather than replayed at the end, so the line about
@@ -201,6 +201,7 @@ pub fn run(yes: bool, airgap: bool, register_all: bool) -> Result<()> {
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
+        announce(step_service(service)?),
         announce(step_verify()?),
     ];
 
@@ -1021,7 +1022,65 @@ fn first_line(stderr: &[u8], stdout: &[u8]) -> Option<String> {
 /// one of those exports this themselves.
 pub const KEY_ENV: &str = "SEMLITH_AGENT_KEY";
 
-/// Step 5. Runs the binary that was just installed, not this process, because
+/// Step 5. Install the daemon as a login service.
+///
+/// On by default, and on even when nothing can answer a prompt. The argument
+/// for asking is that a background process is a thing a user should consent to;
+/// the argument against is the whole of this release. A client that starts
+/// before any daemon finds nothing and says nothing, and the user who meets
+/// that is precisely the one who ran a piped installer and never read a
+/// question. `--no-service` opts out, `semlith start --no-service` undoes it,
+/// and the step prints what it installed and how to remove it.
+///
+/// Points at the binary `step_binary` installed rather than the one running
+/// this code, which during an install is the downloaded installer.
+fn step_service(wanted: bool) -> Result<Step> {
+    if !wanted {
+        return Ok(Step {
+            name: "service",
+            state: State::Skipped,
+            detail: "--no-service: start the daemon yourself with `semlith start`".to_string(),
+        });
+    }
+    let target = home::bin_dir()?.join(exe_name());
+    let binary = target.exists().then_some(target);
+    match crate::service::install(binary.as_deref(), None) {
+        Ok(status) if status.installed => Ok(Step {
+            name: "service",
+            state: State::Done,
+            detail: if status.started_now {
+                format!(
+                    "running now and from every login ({}) — remove with `semlith start --no-service`",
+                    status.mechanism,
+                )
+            } else {
+                format!(
+                    "a daemon is already listening, so this one starts at the next login ({}) — remove with `semlith start --no-service`",
+                    status.mechanism,
+                )
+            },
+        }),
+        // Not fatal, and not silent. A machine with no systemd user session, or
+        // a binary somewhere macOS will not run a background job from, still
+        // gets a working semlith — it just has to be started by hand, and this
+        // is the line that says so.
+        Ok(status) => Ok(Step {
+            name: "service",
+            state: State::Failed,
+            detail: format!(
+                "{} did not report the service as installed — start the daemon with `semlith start`",
+                status.mechanism,
+            ),
+        }),
+        Err(e) => Ok(Step {
+            name: "service",
+            state: State::Failed,
+            detail: format!("{e} — start the daemon with `semlith start`"),
+        }),
+    }
+}
+
+/// Step 6. Runs the binary that was just installed, not this process, because
 /// the question is whether the installed one works.
 fn step_verify() -> Result<Step> {
     let target = home::bin_dir()?.join(exe_name());

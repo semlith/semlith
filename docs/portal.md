@@ -809,6 +809,30 @@ and the portal keeps working. A closed endpoint answers 404 rather than 401, so 
 client that has been told to stop learns the same thing whether or not it still
 holds a key.
 
+**Login service.** Whether the daemon is installed as one — a launchd user
+agent, a systemd user unit, a Windows logon task — and when it last started. The
+page has always said "one endpoint, every client"; until 0.21.0 that endpoint
+existed only as long as somebody held a terminal open for it. The card names the
+mechanism, the definition it wrote and the log to read when it misbehaves. On
+Windows it also says that a logon task restarts a task that failed and does not
+supervise one that exited cleanly, because the three mechanisms are not equally
+strong and a page that implied they were would be wrong on one of them. When no
+service is installed, the card carries the command — `semlith start --service` —
+rather than a button: installing a background process on a machine is not
+something a web page should do on a click.
+
+**Clients** is the same four-step report `semlith doctor` prints, from the same
+function, so the page and the terminal cannot disagree about which client can
+reach semlith. One row per client that is actually on this machine; the three
+semlith cannot register carry their reason and are not faults.
+
+A client with semlith registered at user scope and switched off for one
+directory is shown with the directories that override names — not as a state of
+this page. "Here" for the daemon is wherever a service manager started it, which
+is nobody's working directory; the reader is the one who knows which of those
+directories they work in. Run `semlith doctor` in the directory itself for the
+verdict that applies to it.
+
 **Agent key.** The credential a client carries. It is shown masked — `sml_`
 followed by dots — and the route does not send a preview either, because a preview
 of an agent key still begins `sml_` and the point is that nothing about the

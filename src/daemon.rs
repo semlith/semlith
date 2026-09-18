@@ -111,11 +111,14 @@ impl Discovery {
             return None;
         }
         let path = store_dir.join(DISCOVERY_FILE);
-        if !owner_only(&path) {
+        if worth_warning_about(&path) {
             eprintln!(
                 "semlith: ignoring {} — it is not a file this user wrote privately",
                 path.display()
             );
+            return None;
+        }
+        if !owner_only(&path) {
             return None;
         }
         let text = std::fs::read_to_string(&path).ok()?;
@@ -157,6 +160,21 @@ impl Discovery {
     fn remove(store_dir: &Path) {
         let _ = std::fs::remove_file(store_dir.join(DISCOVERY_FILE));
     }
+}
+
+/// Whether a discovery file is one worth complaining about.
+///
+/// `owner_only` answers `false` for a file that is not there, because
+/// `metadata` fails and there is no mode to read. Routing absence through it
+/// meant a store with no daemon running — the ordinary case, and the case on
+/// every one of six stores on this machine — was reported as a privacy
+/// rejection. Every `semlith mcp` start printed six lines of "it is not a file
+/// this user wrote privately" naming six paths that answer `No such file or
+/// directory`, and those six lines were the first thing in a client's log for
+/// anyone trying to work out why no server had appeared. A missing file is
+/// missing; only a file that exists and fails the check is worth a line.
+fn worth_warning_about(path: &Path) -> bool {
+    path.exists() && !owner_only(path)
 }
 
 /// Whether a file is one this user wrote and nobody else can read.
@@ -2899,6 +2917,40 @@ pub fn port_of(flag: Option<u16>) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Six false privacy warnings on every `semlith mcp` start, one per store,
+    /// naming six paths that do not exist.
+    #[test]
+    fn a_discovery_file_that_is_not_there_is_not_a_privacy_rejection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join(DISCOVERY_FILE);
+        assert!(
+            !missing.exists(),
+            "the fixture wrote a file it should not have"
+        );
+
+        // The old predicate still answers `false` — that is correct and is
+        // what made it the wrong thing to warn on.
+        assert!(!owner_only(&missing));
+        assert!(
+            !worth_warning_about(&missing),
+            "a missing {DISCOVERY_FILE} was reported as a privacy rejection",
+        );
+
+        // A file that is there and fails the check still gets its line.
+        let present = dir.path().join("present.json");
+        std::fs::write(&present, "{}").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&present, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod");
+            assert!(
+                worth_warning_about(&present),
+                "a world-readable discovery file stopped being worth a line",
+            );
+        }
+    }
 
     /// The change counters are process-global — deliberately, because two of
     /// the six are bumped by code that has no `State` in hand. That makes them

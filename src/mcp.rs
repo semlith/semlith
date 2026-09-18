@@ -21,6 +21,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// The MCP revisions this server implements, newest first.
@@ -141,8 +142,29 @@ impl Session {
 }
 
 /// Read requests from `input` until EOF, answering on `output`.
-pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) -> Result<()> {
-    stores.quiet = true;
+///
+/// The fleet arrives behind a lock rather than as `&mut`, because something
+/// else holds it: the caller warms the embedding model on a background thread
+/// so the first search is not a cold start. A handshake must not queue behind
+/// that. `initialize`, `ping`, `server/discover` and `tools/list` are answered
+/// from `labels` without touching the lock at all, and only a `tools/call` —
+/// which needs the model anyway — waits for it.
+///
+/// `labels` is the store list `tools/list` names, read once when the fleet was
+/// opened. It cannot change for the life of this process, and reading it per
+/// request is the one thing that would put the handshake back behind the lock.
+pub fn serve(
+    stores: &Mutex<Fleet>,
+    labels: &str,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
+    // stdout is the protocol here, so model-download progress must not go to
+    // it. The caller sets this too; it is set again because this function is
+    // the boundary, and a future caller that forgets would corrupt a stream
+    // rather than print an untidy line.
+    stores.lock().unwrap_or_else(|e| e.into_inner()).quiet = true;
+
     // One connection is one conversation, so the id is made once here and every
     // row this client writes carries it.
     let mut session = Session::new(format!("stdio-{}", std::process::id()));
@@ -172,7 +194,13 @@ pub fn serve(stores: &mut Fleet, input: impl BufRead, mut output: impl Write) ->
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let result = dispatch(stores, None, method, &params, &mut session);
+        let result = match without_stores(labels, method, &params, &mut session) {
+            Some(answered) => answered,
+            None => {
+                let mut fleet = stores.lock().unwrap_or_else(|e| e.into_inner());
+                dispatch(&mut fleet, None, method, &params, &mut session)
+            }
+        };
         respond(&mut output, &id, result)?;
     }
     Ok(())
@@ -206,6 +234,47 @@ fn dispatch(
     params: &Value,
     session: &mut Session,
 ) -> Result<Value, Fail> {
+    // The handshake first, and through the same function `serve` uses, so
+    // there is one implementation of it rather than two that agree today.
+    if let Some(answered) = without_stores(&stores.labels().join(", "), method, params, session) {
+        return answered;
+    }
+    let declared = declared_version(params);
+    let modern = declared == Some(MODERN);
+
+    match method {
+        "tools/call" => {
+            let called = call_tool(stores, writer, params, session)?;
+            Ok(if modern {
+                modernize(called, None)
+            } else {
+                called
+            })
+        }
+
+        other => Err((-32601, format!("unknown method: {other}"), None)),
+    }
+}
+
+/// The part of the protocol that can be answered with no store open.
+///
+/// `None` for a method that needs one. Split out so `serve` can answer a
+/// handshake without taking the fleet's lock: the model is loaded on a
+/// background thread that holds that lock for as long as an ONNX session takes
+/// to build, and a client blocked on `initialize` behind it is a client whose
+/// startup timeout expires with no server — which is the whole of what this
+/// release is about. `dispatch` calls this first, so the stdio path and the
+/// loopback path answer a handshake with the same bytes by construction.
+///
+/// `labels` is what `tools/list` names the open stores as. It is read once when
+/// the fleet is opened rather than per request, because it cannot change for
+/// the life of the process and reading it is what would need the lock.
+fn without_stores(
+    labels: &str,
+    method: &str,
+    params: &Value,
+    session: &mut Session,
+) -> Option<Result<Value, Fail>> {
     let declared = declared_version(params);
 
     // Checked before the method runs, so a client on a revision we do not
@@ -214,15 +283,15 @@ fn dispatch(
     if let Some(version) = declared
         && !SUPPORTED.contains(&version)
     {
-        return Err((
+        return Some(Err((
             UNSUPPORTED_VERSION,
             "Unsupported protocol version".into(),
             Some(json!({ "supported": SUPPORTED, "requested": version })),
-        ));
+        )));
     }
     let modern = declared == Some(MODERN);
 
-    match method {
+    Some(match method {
         // Mandatory in the modern era, and the probe a dual-era client opens
         // with on stdio: there is no HTTP status code here to fall back on, so
         // this answer is how a client tells a 2026-07-28 server from a 2025 one.
@@ -273,7 +342,7 @@ fn dispatch(
         "ping" => Ok(json!({})),
 
         "tools/list" => {
-            let listed = json!({ "tools": tools(stores) });
+            let listed = json!({ "tools": tool_defs(labels) });
             // Private, not public: the descriptions name the stores this
             // process was opened on, so the answer is this server's, not one
             // an intermediary may hand to another client.
@@ -284,17 +353,9 @@ fn dispatch(
             })
         }
 
-        "tools/call" => {
-            let called = call_tool(stores, writer, params, session)?;
-            Ok(if modern {
-                modernize(called, None)
-            } else {
-                called
-            })
-        }
-
-        other => Err((-32601, format!("unknown method: {other}"), None)),
-    }
+        // Everything else needs a store, and is the caller's to answer.
+        _ => return None,
+    })
 }
 
 /// The revision to answer a handshake with.
@@ -312,13 +373,6 @@ fn negotiate(requested: Option<&str>) -> &'static str {
             .unwrap_or(LEGACY_NEWEST),
         None => LEGACY_OLDEST,
     }
-}
-
-fn tools(stores: &Fleet) -> Value {
-    // An agent cannot narrow to a store whose name it has never seen, so the
-    // open stores are part of the tool description rather than something to
-    // discover by trial.
-    tool_defs(&stores.labels().join(", "))
 }
 
 /// Every tool name this server serves.
