@@ -290,9 +290,15 @@ fn index_and_score(root: &Path, questions: &[Question], check_determinism: bool)
         roots: None,
         allow_secrets: true,
     };
+    // Timed, because the chunking rule is allowed to change the number of
+    // chunks and is not allowed to halve the indexing rate — and one corpus on
+    // one machine measured by the same harness is the only way that comparison
+    // means anything.
+    let started = std::time::Instant::now();
     semlith
         .index_paths(std::slice::from_ref(&root.to_path_buf()), |_, _| {})
         .expect("the pinned corpus indexes");
+    let indexed_in = started.elapsed();
 
     let score_all = |semlith: &mut Semlith| {
         let mut report = Report::default();
@@ -310,6 +316,13 @@ fn index_and_score(root: &Path, questions: &[Question], check_determinism: bool)
     };
 
     let mut report = score_all(&mut semlith);
+    // What the corpus became. The chunking rule changes how many chunks 146
+    // files are, which changes the indexing cost and the precision of every
+    // hit, so the number belongs beside the hit@k rather than in a separate
+    // measurement nobody runs.
+    let (_, chunks, _) = semlith.stats().expect("the store counts its chunks");
+    report.chunks = chunks as usize;
+    report.index_seconds = indexed_in.as_secs() as usize;
 
     if check_determinism {
         // The harness asserts its own determinism — issue #88, where three runs
@@ -379,6 +392,10 @@ struct Report {
     /// What share of this run's call edges settled. One census per run, because
     /// the extraction is part of what a run measures.
     census: Option<Census>,
+    /// How many chunks the corpus indexed to.
+    chunks: usize,
+    /// How long the index pass took, in whole seconds.
+    index_seconds: usize,
 }
 
 /// The environment variable that unseals the sealed thirty.
@@ -603,6 +620,11 @@ impl Summary {
             self.median(|r| r.chain_length_matches)
         );
         println!("  tools/list         {tool_list} bytes, about {tool_tokens} tokens");
+        println!(
+            "  corpus chunks      {}   indexed in {}s (median)",
+            self.median(|r| r.chunks),
+            self.median(|r| r.index_seconds)
+        );
 
         if let Some(census) = self.runs[0].census.as_ref() {
             census.print();

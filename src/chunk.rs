@@ -19,12 +19,35 @@ pub const OVERLAP_LINES: usize = 2;
 /// nobody wants to read the middle of anyway.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Chunk {
     /// 1-based, inclusive.
     pub start_line: u32,
     pub end_line: u32,
     pub text: String,
+    /// What the embedding model is shown in front of `text`, and nothing else
+    /// is.
+    ///
+    /// A Markdown chunk two headings deep says what it is about in its
+    /// ancestors and not in its own words — "it is rewritten on the next index
+    /// pass" means nothing until you know the section is about the store
+    /// format. The ancestors are not contiguous lines, so they cannot be part
+    /// of `text`: `Semlith::read` maps every line of a chunk to
+    /// `start_line + offset`, and one invented line at the front would shift
+    /// every span the store can answer with by one. So the model sees the path
+    /// and the store keeps the file's own bytes.
+    pub context: String,
+}
+
+impl Chunk {
+    /// What is embedded: the context, then the text.
+    pub fn embedded(&self) -> String {
+        if self.context.is_empty() {
+            self.text.clone()
+        } else {
+            format!("{}\n{}", self.context, self.text)
+        }
+    }
 }
 
 /// Turn already-read file contents into text. `None` means "deliberately
@@ -125,8 +148,34 @@ fn is_binary(bytes: &[u8]) -> bool {
 ///
 /// Lines longer than the budget on their own (minified JS, embedded base64)
 /// are hard-split on a char boundary rather than emitted oversized.
+///
+/// The fallback for text with no structure. Where the structure is known,
+/// [`chunk_at`] is given the lines a chunk must start on.
 pub fn chunk_text(text: &str) -> Vec<Chunk> {
+    chunk_at(text, &[])
+}
+
+/// Split text into chunks, starting a new one at every line in `cuts`.
+///
+/// `cuts` are 1-based line numbers, sorted. A budget still ends a chunk, so a
+/// definition longer than [`MAX_CHARS`] is split the way anything else is —
+/// what a cut buys is that a definition never *begins* in the middle of a
+/// chunk, and so is never separated from the doc comment above it.
+///
+/// This is the whole of the fix for the miss class the 0.22.0 contract calls a
+/// chunk boundary. A fixed 800-character window put `MAX_NODES` and the six
+/// lines explaining what it bounds in different chunks, so the chunk holding
+/// the constant said nothing about what it was for and the chunk that said it
+/// did not hold the constant. Neither answered a question about `MAX_NODES`.
+///
+/// The overlap is dropped where the next chunk starts on a cut. Two repeated
+/// lines exist so a match straddling an arbitrary boundary keeps some context;
+/// a boundary that is a definition's own first line is not arbitrary, and
+/// repeating the tail of the previous definition into the front of this one is
+/// exactly the blurring the cut is for.
+pub fn chunk_at(text: &str, cuts: &[u32]) -> Vec<Chunk> {
     let lines: Vec<&str> = text.lines().collect();
+    let cut = |line_index: usize| -> bool { cuts.binary_search(&(line_index as u32 + 1)).is_ok() };
     let mut chunks = Vec::new();
     let mut i = 0;
 
@@ -134,8 +183,10 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
         let start = i;
         let mut len = 0;
         // The `len == 0` arm guarantees progress: a line wider than the whole
-        // budget is still taken, then hard-split below.
-        while i < lines.len() && (len == 0 || len + lines[i].len() < MAX_CHARS) {
+        // budget is still taken, then hard-split below. The cut test is second
+        // so that a cut on the first line of a chunk does not end it before it
+        // has a line in it.
+        while i < lines.len() && (len == 0 || (len + lines[i].len() < MAX_CHARS && !cut(i))) {
             len += lines[i].len() + 1;
             i += 1;
         }
@@ -153,6 +204,7 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
                     start_line: line,
                     end_line: line,
                     text: piece,
+                    context: String::new(),
                 });
             }
         } else {
@@ -160,16 +212,118 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
                 start_line: start as u32 + 1,
                 end_line: i as u32,
                 text: body,
+                context: String::new(),
             });
         }
 
-        // Step back so the next chunk repeats a couple of lines of context.
-        if i < lines.len() {
+        // Step back so the next chunk repeats a couple of lines of context —
+        // unless it is about to start on a cut, which is a boundary that means
+        // something.
+        if i < lines.len() && !cut(i) {
             i = i.saturating_sub(OVERLAP_LINES).max(start + 1);
         }
     }
 
     chunks
+}
+
+/// Chunk one file, cutting where its own structure says to.
+///
+/// Three cases, in the order they are tried. Markdown cuts at its headings and
+/// carries the heading path as embedding context. Anything tree-sitter found
+/// definitions in cuts at those definitions. Everything else — a plain text
+/// file, a language with no grammar, a document a reader turned into prose —
+/// keeps the fixed window, which is what it always had.
+pub fn chunk_file(path: &Path, text: &str, definitions: &[(u32, u32)]) -> Vec<Chunk> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(ext.as_deref(), Some("md" | "markdown" | "mdx")) {
+        let cuts = heading_cuts(text);
+        if cuts.is_empty() {
+            return chunk_text(text);
+        }
+        let mut chunks = chunk_at(text, &cuts);
+        for chunk in &mut chunks {
+            chunk.context = heading_path(text, chunk.start_line);
+        }
+        return chunks;
+    }
+    if definitions.is_empty() {
+        return chunk_text(text);
+    }
+    chunk_at(text, &definition_cuts(text, definitions))
+}
+
+/// The lines a definition starts on, doc comment and attributes included.
+///
+/// `spans` are the symbols tree-sitter found, as `(start_line, end_line)`. A
+/// grammar's node for an item does not include the comment above it — `///` is
+/// a sibling, not a child — so a cut taken at the node's own first line would
+/// leave the doc comment at the end of the previous chunk, which is where it
+/// was before this release and is the reason for it. The walk upwards stops at
+/// a blank line, so it takes the comment block attached to this definition and
+/// not the tail of whatever is above it.
+///
+/// The comment markers are the ones the corpus actually uses rather than a
+/// table per language: a line that begins with any of them, directly above a
+/// definition and with no blank line between, belongs to that definition in
+/// every language this indexes. Being wrong here costs two lines of context in
+/// one chunk, which is why it is a list and not a parser.
+pub fn definition_cuts(text: &str, spans: &[(u32, u32)]) -> Vec<u32> {
+    const ATTACHED: [&str; 10] = [
+        "///", "//!", "//", "#[", "#'", "--", "/*", "*", "@", "\"\"\"",
+    ];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut cuts: Vec<u32> = Vec::with_capacity(spans.len());
+    for (start, _) in spans {
+        let mut at = *start as usize; // 1-based
+        while at > 1 {
+            let above = lines.get(at - 2).map(|l| l.trim()).unwrap_or("");
+            if above.is_empty() || !ATTACHED.iter().any(|m| above.starts_with(m)) {
+                break;
+            }
+            at -= 1;
+        }
+        cuts.push(at as u32);
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts
+}
+
+/// The lines Markdown headings start on.
+pub fn heading_cuts(text: &str) -> Vec<u32> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with('#') && line.trim_start_matches('#').starts_with(' '))
+        .map(|(at, _)| at as u32 + 1)
+        .collect()
+}
+
+/// The heading path a line sits under, as `Store format > Shards`.
+///
+/// Handed to the embedding model in front of the chunk, never stored as part of
+/// it — see [`Chunk::context`]. A section three levels down is usually written
+/// as though the reader has the two above it in mind, because they do.
+pub fn heading_path(text: &str, line: u32) -> String {
+    let mut path: Vec<(usize, String)> = Vec::new();
+    for (at, raw) in text.lines().enumerate() {
+        if at as u32 + 1 > line {
+            break;
+        }
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
+        if hashes == 0 || !raw[hashes..].starts_with(' ') {
+            continue;
+        }
+        path.retain(|(level, _)| *level < hashes);
+        path.push((hashes, raw[hashes..].trim().to_string()));
+    }
+    path.into_iter()
+        .map(|(_, title)| title)
+        .collect::<Vec<_>>()
+        .join(" > ")
 }
 
 fn split_chars(s: &str, n: usize) -> Vec<String> {
@@ -226,5 +380,126 @@ mod tests {
     fn binary_is_detected() {
         assert!(is_binary(b"abc\0def"));
         assert!(!is_binary(b"fn main() {}"));
+    }
+
+    /// The miss this release's chunking exists to close: a constant and the
+    /// comment that says what it is for, in one chunk rather than two halves
+    /// of two.
+    #[test]
+    fn a_definition_keeps_the_doc_comment_above_it() {
+        let text = "\
+use std::path::Path;
+
+fn earlier() {
+    // padding so the constant is not the first thing in the file
+}
+
+/// How many nodes a traversal may visit.
+///
+/// The bound that keeps peak memory flat as the corpus grows.
+pub const MAX_NODES: usize = 4000;
+
+fn later() {}
+";
+        // As tree-sitter would report them: the node's own lines, without the
+        // comment above it.
+        let definitions = [(3, 5), (10, 10), (12, 12)];
+        let cuts = definition_cuts(text, &definitions);
+        assert!(
+            cuts.contains(&7),
+            "the cut should be at the doc comment, not at the const: {cuts:?}"
+        );
+
+        let chunks = chunk_at(text, &cuts);
+        let holding = chunks
+            .iter()
+            .find(|c| c.text.contains("MAX_NODES"))
+            .expect("some chunk holds the constant");
+        assert!(
+            holding
+                .text
+                .contains("How many nodes a traversal may visit"),
+            "the constant is separated from its doc comment:\n{}",
+            holding.text
+        );
+        assert!(
+            holding.text.starts_with("/// How many nodes"),
+            "the chunk should begin at the doc comment:\n{}",
+            holding.text
+        );
+    }
+
+    #[test]
+    fn a_cut_ends_a_chunk_even_under_budget() {
+        let text = "fn a() {}\nfn b() {}\nfn c() {}\n";
+        let chunks = chunk_at(text, &[1, 2, 3]);
+        assert_eq!(chunks.len(), 3, "{chunks:#?}");
+        assert_eq!(
+            chunks.iter().map(|c| c.start_line).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "a cut did not start a chunk"
+        );
+    }
+
+    /// A definition longer than the budget is still split. What a cut buys is
+    /// that it never *begins* mid-chunk.
+    #[test]
+    fn an_over_long_definition_is_still_split() {
+        let body: String = (1..=100)
+            .map(|i| format!("    let x{i} = {i};\n"))
+            .collect();
+        let text = format!("fn big() {{\n{body}}}\n");
+        let chunks = chunk_at(&text, &[1]);
+        assert!(chunks.len() > 1, "a 100-line function fit in one chunk?");
+        assert_eq!(chunks[0].start_line, 1);
+        for chunk in &chunks {
+            assert!(chunk.text.chars().count() <= MAX_CHARS);
+        }
+    }
+
+    #[test]
+    fn a_markdown_chunk_carries_its_heading_path() {
+        let text = "\
+# Architecture
+
+Prose.
+
+## Store format
+
+More prose.
+
+### Shards
+
+The part a reader needs the two headings above to understand.
+";
+        let chunks = chunk_file(Path::new("docs/architecture.md"), text, &[]);
+        let deepest = chunks
+            .iter()
+            .find(|c| c.text.contains("the two headings above"))
+            .expect("the deepest section is a chunk");
+        assert_eq!(deepest.context, "Architecture > Store format > Shards");
+        assert!(
+            deepest
+                .embedded()
+                .starts_with("Architecture > Store format > Shards\n"),
+            "the model should see the path first: {:?}",
+            deepest.embedded()
+        );
+        // And the stored text is still the file's own bytes, because
+        // `Semlith::read` maps line `start_line + offset`.
+        assert!(
+            !deepest.text.contains("Architecture > Store format"),
+            "the path leaked into the stored text, which would shift every span \
+             this store can answer with by one line"
+        );
+    }
+
+    #[test]
+    fn text_with_no_structure_keeps_the_fixed_window() {
+        let text: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(
+            chunk_file(Path::new("notes.txt"), &text, &[]),
+            chunk_text(&text)
+        );
     }
 }

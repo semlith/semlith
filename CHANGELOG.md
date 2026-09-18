@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The measuring stick, before the ranking work
+
+- **The retrieval harness indexes a pinned corpus, not the working tree.**
+  `tests/fixtures/retrieval/corpus` is the 0.21.0 tree at `4e8df39`, less
+  `tests/drive` and less the retrieval fixtures themselves — 146 files and
+  3.1 MB, recorded in `corpus.yaml` and asserted by file count and byte total
+  on every run. Until now the harness copied `src`, `tests`, `docs` and
+  `AGENTS.md` out of whatever tree it was compiled in, so every figure it
+  printed moved with the repository as well as with the ranking. That is why
+  the README said 12/18/26 of 47 on the same day the harness said 10/14/19.
+- **The question set is 107 questions, split 77 development / 30 sealed.** The
+  57 written for 0.14.0 are re-pinned to the snapshot — 47 of their 92 spans no
+  longer held the symbol they named — and 50 new ones were written from reading
+  the snapshot, reaching into the files the old set never touched. The split is
+  seeded and stratified by shape and tool, and the sealed thirty are scored once
+  at completion, behind `SEMLITH_RETRIEVAL_SEALED`; the harness prints which set
+  it is scoring on its first line.
+- **Every figure is the median of three runs, with the spread beside it,** and a
+  run is an index and a scoring rather than a second scoring of one store. The
+  drift issue #88 records was at index time, so three scorings of one store are
+  one run reported three times. `symbol` and `neighbors` questions are scored
+  rather than skipped.
+
+### Retrieval
+
+- **An identifier-shaped query puts the definition first.** Typing a name you
+  already know returns the chunks that define that name above the fused order,
+  badged `definition`. Reciprocal-rank fusion is nearly flat across the first
+  ranks, so one authoritative list placing a definition first was outvoted by
+  two vague lists placing something else fourth and fifth — and five identifier
+  questions on the pinned corpus had no satisfying span in the first eight
+  results, two of them definitions that ranked first in the keyword index alone.
+
+### Fixed
+
+- **The native smoke harness no longer writes under your own home** (#106). It
+  pinned `SEMLITH_HOME` and not `HOME`, and a client configuration lives under
+  the user's home, so a run on a developer's machine rewrote that developer's
+  real Claude Code, Cursor and Codex registrations. It now redirects `HOME` too,
+  and a new check compares every client configuration path in `docs/clients.md`
+  by checksum before and after the run.
+- **A supervision check that cannot run says so in the run's own output**
+  (#104). `cli/service/recovers` was carried in `known-failures.txt` for macOS,
+  which made a check that could not run read as a check that ran and failed as
+  expected. The harness now probes for the facility — `launchctl print
+  gui/<uid>`, `systemctl --user show-environment` — prints what it found, and
+  skips with that as the reason. `known-failures.txt` is empty.
+
 ## [0.21.0] - 2026-09-18
 
 On 2026-09-17 a session opened with no semlith server. The registration was

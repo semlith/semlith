@@ -99,7 +99,7 @@ Module responsibilities:
 | `src/lib.rs` | `Semlith`: open, index, search, persist |
 | `src/store.rs` | Every SQL statement. Nothing else touches the database |
 | `src/index.rs` | Vector side: `Single` vs `Sharded` layouts, memory budget |
-| `src/chunk.rs` | File bytes → text → chunks (800 chars, 2 overlap lines, 8 MiB cap) |
+| `src/chunk.rs` | File bytes → text → chunks. Cut at definitions where tree-sitter found them and at headings in Markdown; 800 chars and 2 overlap lines are the fallback and the budget; 8 MiB cap |
 | `src/formats.rs` | Readers for the thirteen non-plain-text formats. Private on purpose |
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
@@ -174,6 +174,35 @@ Module responsibilities:
   through a path that does not call it will work on every platform except the one
   the release ships.
 
+- **A chunk starts where the code does, and the fixed window is the fallback.**
+  From 0.22.0 `chunk::chunk_file` cuts a file at the definitions `graph::extract`
+  found, walking each one upwards over the doc comment and attributes attached to
+  it, so a constant and the six lines saying what it is for are one chunk instead
+  of two halves of two. Markdown cuts at its headings. Everything else — a
+  language with no grammar, a document a reader turned into prose, a plain text
+  file — keeps the 800-character window it always had. The budget still ends a
+  chunk, so a function longer than the budget is split as anything else is; what
+  a cut buys is that a definition never *begins* mid-chunk. The two-line overlap
+  is dropped where the next chunk starts on a cut, because that boundary is not
+  arbitrary and repeating across it is the blurring the cut exists to remove.
+  This is why `graph::extract` now runs above the chunking in `index_set_writing`
+  rather than below it.
+- **`Chunk::context` is shown to the model and stored nowhere.** A Markdown
+  chunk three headings deep is written as though the reader has the two above it
+  in mind, so the heading path is prepended to what is embedded. It cannot be
+  part of `chunk.text`: `Semlith::read` maps every line of a chunk to
+  `start_line + offset`, and one invented line at the front would shift every
+  span the store can answer with. FTS5 indexes the stored text, so the path is
+  not keyword-searchable either — which is correct, because it is not in the
+  file.
+- **Definition chunking is a store format, and it is format 3.** A store written
+  by 0.21.0 holds fixed windows, opens unchanged and answers; its files have not
+  changed, the rule for what a chunk is has, so the hash check would leave it on
+  the old rule for ever. The first index pass under 0.22.0 therefore re-chunks
+  everything it walks, and writes the format row only at the end of a pass that
+  swept the whole store and was not stopped — a pass over one directory leaves
+  the rest of the store on the old rule, and the row would be a claim about files
+  the run never opened. `semlith stats` says which rule a store is on.
 - **The model is fixed when a store is created.** Vectors from two models are
   not comparable; switching means delete and re-index. Changing
   `embed::GRANITE_NAME` orphans every store that recorded the old string.
@@ -221,6 +250,20 @@ Module responsibilities:
   add a learned weight here. The per-repository learned profile is still a
   roadmap item; the version it used to be numbered as was reassigned when the
   roadmap was renumbered on 2026-09-16, so this sentence names no release.
+- **An identifier-shaped query is answered by the definition, above the
+  fusion.** `search_preferring` reads the chunks that define the exact name
+  through `store::symbols_by_names` — the same filter every other list sees, so
+  it cannot return a chunk the filter excluded — and lifts them to the front of
+  the ranked list with a stable sort, badged `definition`. It is precedence, not
+  a weight: the list contributes 0.0 to the fusion score and exists in the fused
+  set only so the chunk is present and carries its badge. Reciprocal-rank fusion
+  is nearly flat across the first ranks, so one authoritative list placing a
+  definition first was outvoted by two vague lists placing something else fourth
+  and fifth plus a graph list derived from them — five identifier questions on
+  the pinned corpus had no satisfying span in the first eight results, two of
+  them definitions FTS5 ranked first by itself. Do not give this list a weight
+  instead: tuned high it drags a definition's neighbours up through the graph
+  list, tuned low it does nothing.
 - **The query's shape is read in one place.** `shape_of` in `lib.rs`, from the
   query text and nothing else, so every surface that prints it calls that
   function and there is no second classifier. The portal draws the hint from
