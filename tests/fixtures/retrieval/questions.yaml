@@ -1365,14 +1365,29 @@ questions:
   - id: multi-hop-alias-crossing
     shape: multi-hop
     tool: path
-    from: shape_of
-    to: keyword_weight
+    from: reading
+    to: shape_of
     connected: true
     hops: 1
     note: >-
       A short chain inside the shape work, used as the control for the alias
       questions: it must keep being found while `aliases` joins the walkable
-      kinds. The repository has no aliased re-export of its own, so the
+      kinds.
+
+      Corrected for 0.22.0. It asked for `shape_of` to `keyword_weight` in one
+      hop, and that chain does not exist and never did: both are called from
+      `search_preferring` — `shape_of(query)` and `shape.keyword_weight()` — so
+      they are siblings rather than a caller and a callee. The path finder
+      answered "not connected", which is right, and the question scored it a
+      miss. `mcp::reading` to `shape_of` is a real one-hop call and keeps what the
+      question was for.
+
+      `search_preferring` was tried as the `from` first and was wrong for a
+      second reason worth recording: that name has two definitions,
+      `Semlith::search_preferring` and `Fleet::search_preferring`, and the path
+      finder refuses an ambiguous endpoint by default, so the corrected question
+      would have failed exactly as the broken one did. `reading` has one
+      definition in this corpus. The repository has no aliased re-export of its own, so the
       alias-crossing case is proven in `tests/graph.rs` over a fixture corpus
       instead, and that is said here rather than faked with a question this file
       cannot ask.
