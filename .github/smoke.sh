@@ -13,6 +13,15 @@
 #   3. A check whose precondition did not hold is skipped, not failed. A
 #      harness that blames the product for its own breakage is worse than none.
 #
+#   4. A harness may not write outside its own working directory. This one did,
+#      for four releases, and issue #106 is the record of it: SEMLITH_HOME
+#      redirects the store home, the model cache and the agent key, and nothing
+#      else — a *client* configuration lives under the user's own home, and
+#      `home::user_home` reads HOME to find it. So `cli/setup/idempotent`, run
+#      on a developer's machine, rewrote that developer's real Claude Code,
+#      Cursor and Codex registrations. HOME is redirected below for that reason,
+#      and `cli/harness/leaves-the-real-home-alone` proves the redirect held.
+#
 # SEMLITH_HOME is set here deliberately. The native resolution of the home
 # directory is what portal-check.ps1 tests, in the native shell, without it;
 # pinning it here means one unresolved bug does not mask the other fifty checks.
@@ -33,6 +42,16 @@ esac
 
 work=$(mktemp -d)
 export SEMLITH_HOME="$work/home"
+
+# Issue #106. `user_home` reads HOME before anything else on every platform
+# including Windows, so redirecting HOME is the whole of the fix: every client
+# configuration `semlith setup` writes now lands under $work.
+#
+# The real home is remembered, and only so that the check below can prove
+# nothing under it moved. Nothing else reads it.
+real_home=${HOME:-}
+export HOME="$work/user-home"
+mkdir -p "$HOME"
 corpus="$work/corpus"
 side="$work/side"
 repo_root=$PWD
@@ -94,12 +113,42 @@ skip() {
 echo "platform : $platform ($(uname -s))"
 echo "semlith  : $(command -v semlith || echo '<not on PATH>')"
 echo "home     : $SEMLITH_HOME"
+echo "HOME     : $HOME  (real home: ${real_home:-<unset>})"
 echo "work     : $work"
 
 command -v semlith >/dev/null || { echo "semlith is not on PATH"; exit 1; }
 command -v jq >/dev/null || { echo "jq is not on PATH"; exit 1; }
 echo "jq       : $(jq --version)"
 echo
+
+# ------------------------------------------- the real home, before and after
+
+# The client configuration paths `semlith setup` writes, read out of
+# `docs/clients.md`, which is the file `src/clients.rs` parses and therefore the
+# only list that cannot drift from what setup actually touches. Resolved against
+# the *real* home, which is the thing that must not move.
+#
+# `cksum` rather than a size, because a registration rewritten in place is the
+# failure mode and it is often the same length.
+client_config_fingerprint() {
+  [ -n "$real_home" ] || return 0
+  {
+    grep -o 'config \(os=[a-z]* \)\?path=[^ `]*' "$repo_root/docs/clients.md" 2>/dev/null |
+      sed -e 's/.*path=//' -e 's/^"//' -e 's/"$//'
+    echo '~/.claude.json'
+    echo '~/.claude/settings.json'
+  } | sort -u | while read -r target; do
+    case "$target" in
+      *%*) continue ;;                       # %APPDATA%, which this shell cannot expand
+      "~/"*) target="$real_home/${target#\~/}" ;;
+      "~") continue ;;
+    esac
+    [ -f "$target" ] || continue
+    printf '%s %s\n' "$target" "$(cksum < "$target" 2>/dev/null)"
+  done
+}
+
+home_before=$(client_config_fingerprint)
 
 # ----------------------------------------------------------------- the corpus
 
@@ -866,6 +915,55 @@ else
   skip cli/service/install "$(head -1 "$work/service-probe.out" 2>/dev/null)"
 fi
 
+# Whether this session has a facility that can restart a daemon nobody is
+# watching, and what that facility is.
+#
+# Issue #104. A GitHub macOS runner has no Aqua login session, so `launchctl`
+# loads a user agent, runs it once, and never keeps it alive: the plist is on
+# disk, `launchctl print` finds the label, and nothing restarts it. The same
+# shape on Linux is a container with no `systemd --user` manager, where
+# `enable --now` reports success and starts nothing.
+#
+# That was carried in known-failures.txt as `cli/service/recovers macos 104`,
+# which is worse than it sounds: a row in that file turns a check that cannot
+# run into a check that ran and failed as expected, and the run prints `xfail`
+# either way. Somebody reading the log cannot tell the runner's shape from a
+# regression in the product. So the probe is here, its answer is printed, and
+# the run itself says which facility was missing.
+supervision_facility() {
+  case "$platform" in
+    macos)
+      if launchctl print "gui/$(id -u)" > /dev/null 2>&1; then
+        echo "launchd gui/$(id -u): present"
+      else
+        echo "launchd gui/$(id -u): absent — this session is not an Aqua login session, so launchd runs a user agent once and does not keep it alive"
+      fi
+      ;;
+    linux)
+      if systemctl --user show-environment > /dev/null 2>&1; then
+        echo "systemd --user: present"
+      else
+        echo "systemd --user: absent — no user manager is running for this uid, so a unit enables and never starts"
+      fi
+      ;;
+    windows)
+      echo "Windows logon task: restarts a task that failed, and does not supervise one that exited cleanly"
+      ;;
+    *)
+      echo "no supervision facility is known for $platform"
+      ;;
+  esac
+}
+
+# Zero when this session can actually keep a daemon alive.
+supervision_present() {
+  case "$platform" in
+    macos) launchctl print "gui/$(id -u)" > /dev/null 2>&1 ;;
+    linux) systemctl --user show-environment > /dev/null 2>&1 ;;
+    *)     return 1 ;;
+  esac
+}
+
 # The service exists so that a daemon which dies comes back with nobody
 # watching. macOS KeepAlive and systemd Restart=always do that; a Windows logon
 # task restarts a task that failed and does not supervise one that exited, which
@@ -919,10 +1017,15 @@ if [ "$service_installed" = "1" ]; then
   done
 fi
 
-if [ "$service_running" = "1" ] && [ "$platform" != "windows" ]; then
+echo "           supervision: $(supervision_facility)"
+if [ "$service_running" = "1" ] && [ "$platform" != "windows" ] && supervision_present; then
   check cli/service/recovers "a killed daemon is restarted"  c_service_recovers
 elif [ "$platform" = "windows" ]; then
   skip cli/service/recovers "a logon task does not supervise a clean exit"
+elif ! supervision_present; then
+  # Not a defect and not an expected failure: the facility the check needs is
+  # not present, and the line above names it.
+  skip cli/service/recovers "$(supervision_facility)"
 elif [ "$service_installed" = "1" ]; then
   # Captured, not summarised: the next person reading this log needs the
   # service manager's own words about why nothing started.
@@ -956,6 +1059,31 @@ fi
 # it cannot bind and blames the product for it.
 semlith start --no-service > /dev/null 2>&1 || true
 pkill -f 'semlith start' 2>/dev/null || true
+
+# ------------------------------------------------- the real home, afterwards
+
+# Issue #106, proven rather than asserted. Every check above has run, including
+# `semlith setup`, and not one byte of the developer's own client configuration
+# may have moved. `real_home` is empty only where the environment had no HOME to
+# begin with, and there is then nothing to protect.
+c_home_untouched() {
+  if [ -z "$real_home" ]; then
+    echo "no HOME was set when this run started; there is nothing to compare"
+    return 0
+  fi
+  after=$(client_config_fingerprint)
+  if [ "$after" = "$home_before" ]; then
+    return 0
+  fi
+  echo "the run changed a client configuration under the real home ($real_home):"
+  printf '%s\n' "$home_before" > "$work/home-before.txt"
+  printf '%s\n' "$after" > "$work/home-after.txt"
+  diff "$work/home-before.txt" "$work/home-after.txt" | sed 's/^/    /' | head -20
+  return 1
+}
+
+check cli/harness/leaves-the-real-home-alone \
+  "the run writes nothing under the developer's own home" c_home_untouched
 
 # ------------------------------------------------------------------- summary
 

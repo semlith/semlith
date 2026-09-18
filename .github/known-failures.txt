@@ -11,4 +11,11 @@
 # Platform is one of: all, unix, windows, linux, macos.
 
 
-cli/service/recovers macos 104 a GitHub macOS runner has no Aqua session, so a user agent loads but is not kept alive; measured working on real hardware in ~2s
+# Empty, and it is meant to stay that way.
+#
+# `cli/service/recovers macos 104` used to live here. A row in this file makes a
+# check that *cannot run* on a host report as `xfail`, which is the same word a
+# check that ran and failed gets — so the log could not tell a runner's missing
+# Aqua session from a regression in the login service. The harness now probes
+# the supervision facility directly, prints what it found, and skips with that
+# reason. See `supervision_facility` in smoke.sh.
