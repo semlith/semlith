@@ -879,26 +879,53 @@ fn score_path(semlith: &Semlith, question: &Question, report: &mut Report) {
     )
     .unwrap_or_else(|e| panic!("{}: path failed: {e}", question.id));
 
-    match question.connected {
-        Some(false) if found.is_some() => {
-            report.wrong_yes += 1;
-            report.misses.push(format!("{} (wrong yes)", question.id));
+    // A path question is answered or it is not, and that is its rank.
+    //
+    // Until 0.22.0 this function recorded no rank at all while still counting
+    // the question in `scored`, so every `path` question was a permanent miss
+    // in hit@k however well the tool answered it. The run that found this
+    // reported "chains found 6 of 7, 6 at the expected length" and "wrong yes
+    // 0" in the same breath as ten path questions missing at k=8 — the tool was
+    // right and the instrument said it was wrong. With ten of seventy-seven
+    // questions unable to score, hit@8 was capped at 87 % against a 95 % gate,
+    // so the gate was unreachable by construction rather than by retrieval.
+    //
+    // There is no rank to speak of here: `shortest_path` returns one answer or
+    // none, so a right answer is rank 1 and a wrong one is a miss. The chain's
+    // length stays a separate figure rather than a condition of the hit,
+    // because `hops` is written against a tree that moves and a chain of a
+    // different length is still a chain.
+    let correct = match question.connected {
+        Some(false) => {
+            if found.is_some() {
+                report.wrong_yes += 1;
+                report.misses.push(format!("{} (wrong yes)", question.id));
+                false
+            } else {
+                true
+            }
         }
-        Some(false) => {}
         Some(true) => {
             report.chains_expected += 1;
-            match found {
+            match &found {
                 Some(chain) => {
                     report.chains_found += 1;
                     if question.hops == Some(chain.steps.len()) {
                         report.chain_length_matches += 1;
                     }
+                    true
                 }
-                None => report.misses.push(format!("{} (no chain)", question.id)),
+                None => {
+                    report.misses.push(format!("{} (no chain)", question.id));
+                    false
+                }
             }
         }
-        None => {}
-    }
+        // A path question with no `connected` is a question with no ground
+        // truth, which the set does not contain and must not acquire.
+        None => panic!("{}: a path question with no `connected`", question.id),
+    };
+    record_rank(report, question, correct.then_some(1));
 }
 
 /// Whether one hit answers one span.
