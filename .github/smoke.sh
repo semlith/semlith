@@ -844,17 +844,35 @@ fi
 # the product says out loud rather than claiming parity.
 c_service_recovers() {
   pid=$(pgrep -f 'semlith start' | head -1)
-  [ -n "$pid" ] || return 1
+  [ -n "$pid" ] || { echo "nothing to kill: no 'semlith start' is running"; return 1; }
   kill -9 "$pid" 2>/dev/null
+  # Sixty seconds, not forty: launchd throttles a job that exited within ten
+  # seconds of starting, and this kills one that has just started.
   i=0
-  while [ $i -lt 20 ]; do
+  while [ $i -lt 30 ]; do
     sleep 2
     back=$(pgrep -f 'semlith start' | head -1)
     if [ -n "$back" ] && [ "$back" != "$pid" ]; then
+      echo "restarted: $pid -> $back after $((i * 2 + 2))s"
       return 0
     fi
     i=$((i + 1))
   done
+  # Captured, not summarised. "It did not come back" is not something anybody
+  # can act on, and this check runs where nobody can attach a debugger.
+  echo "killed $pid; nothing came back in 60s"
+  case "$platform" in
+    macos)
+      launchctl print "gui/$(id -u)/com.semlith.daemon" 2>&1 |
+        grep -iE 'state|pid|last exit|runs|throttle|program|path' | sed 's/^/    /' | head -12
+      ;;
+    linux)
+      systemctl --user status semlith.service 2>&1 | sed 's/^/    /' | head -12
+      ;;
+  esac
+  echo "    port 7365: $(curl -s -o /dev/null -w '%{http_code}' -m 3 http://127.0.0.1:7365/ || echo unreachable)"
+  log="${SEMLITH_HOME:-$HOME/.semlith}/logs/daemon.log"
+  [ -f "$log" ] && { echo "    --- $log ---"; tail -15 "$log" | sed 's/^/    /'; }
   return 1
 }
 # Registered is not running. `systemctl --user enable --now` reports success and
