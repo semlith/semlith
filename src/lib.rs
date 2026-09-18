@@ -39,7 +39,6 @@ pub mod mcp;
 pub mod pattern;
 pub mod portal;
 pub mod proxy;
-pub mod rerank;
 pub mod routes;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
@@ -267,21 +266,6 @@ const GRAPH_PROXIMITY: f32 = 0.15;
 /// already flags it as stale. This only means a current answer of equal
 /// quality is preferred to it.
 const STALE_PENALTY: f32 = 0.10;
-
-/// How much the cross-encoder may lift a candidate it likes.
-///
-/// A tiebreak like the two above and bounded by the same rule: with
-/// `GRAPH_PROXIMITY` at 0.15 and `STALE_PENALTY` at 0.10, the whole post-fusion
-/// span is 1.15 × 1.15 over 0.90, which is 1.47 and under the 1.5 that
-/// `every_rerank_factor_is_a_tiebreak_rather_than_a_ranking` allows.
-///
-/// The first version of this reordered the head outright, discarding the fused
-/// score, the preference and the freshness penalty inside the top ten. That is
-/// a second ranking rather than a tiebreak, and it exempted the one new factor
-/// from the rule every other factor in this file is held to. A cross-encoder
-/// over a strong first stage should move what the first stage was unsure about
-/// and nothing else.
-const RERANK_LIFT: f32 = 0.15;
 
 /// One candidate in the fusion: which id space it is in, its id, the score it
 /// has accumulated, and which lists put it there.
@@ -961,16 +945,6 @@ pub struct Semlith {
     /// Print model-download progress to stderr. Off for the MCP server, where
     /// stdout/stderr are a protocol channel.
     pub quiet: bool,
-    /// Whether the cross-encoder reorders the head of an answer.
-    ///
-    /// On by default, and the reason it is a field rather than a constant is
-    /// that it costs real milliseconds: see `rerank::TOP` and the warm-query
-    /// figures on the performance page. A caller that wants the fusion's own
-    /// order — a benchmark, a machine with no reranker cached — turns it off.
-    pub reranking: bool,
-    /// Loaded on the first search that needs it, never on open. A store that
-    /// is only indexed or only asked for `stats` pays nothing for it.
-    reranker: Option<fastembed::TextRerank>,
     /// What this caller may index. The default is the command line's: the
     /// deny-list, and no confinement.
     pub boundary: Boundary,
@@ -1042,8 +1016,6 @@ impl Semlith {
         let generation = generation(&db)?;
 
         Ok(Self {
-            reranking: true,
-            reranker: None,
             dir,
             db,
             index,
@@ -2888,77 +2860,6 @@ impl Semlith {
                 .then_with(|| a.0.path.cmp(&b.0.path))
                 .then_with(|| a.0.start_line.cmp(&b.0.start_line))
         });
-        // The second stage, over the first few and not over the fifty the
-        // fusion considered. See `rerank::TOP`.
-        //
-        // After the preference and the rerank multipliers rather than before:
-        // those express what the caller asked for and what the store knows
-        // about freshness, and a cross-encoder that has read neither should not
-        // overrule them wholesale — it reorders the short list they produced.
-        //
-        // A definition lifted by an identifier query is left where it is. The
-        // lift is a statement that the asker typed this name and this chunk
-        // defines it, which no amount of passage scoring improves on, and the
-        // lifted scores sit far above the fused range so the sort keeps them in
-        // front either way.
-        if self.reranking && hits.len() > 1 {
-            // Only within what will be returned. Reranking a window wider than
-            // `k` lets a candidate at rank nine displace a good answer at rank
-            // eight, so hit@k could fall by construction however good the model
-            // is. Reordering inside the returned window cannot change hit@k at
-            // all — only the order within it, which is the whole point.
-            let head = hits.len().min(rerank::TOP).min(k.max(1));
-            let lifted = hits
-                .iter()
-                .take(head)
-                .filter(|(hit, _)| hit.lists.contains(&"definition"))
-                .count();
-            if head > lifted + 1 {
-                let cache = model_cache_dir()?;
-                if self.reranker.is_none() {
-                    self.reranker = Some(rerank::load(cache, self.quiet)?);
-                }
-                // What the first stage was shown, not less than it.
-                //
-                // The embedding compared the query against `Chunk::embedded()`
-                // — the heading path and then the text. Handing the
-                // cross-encoder a bare 800-character window asks it to
-                // overrule a stage that had strictly more to go on, and for a
-                // question like "where does a retrieval get written down" the
-                // window may not even contain the name of the function it sits
-                // in. `name_enclosing_symbols` has already run, so the path and
-                // the symbol are here for the taking.
-                let documents: Vec<String> = hits[lifted..head]
-                    .iter()
-                    .map(|(hit, _)| match &hit.symbol {
-                        Some(symbol) => format!("{}\n{symbol}\n{}", hit.path, hit.text),
-                        None => format!("{}\n{}", hit.path, hit.text),
-                    })
-                    .collect();
-                if documents.iter().any(|d| !d.is_empty()) {
-                    let passages: Vec<&str> = documents.iter().map(String::as_str).collect();
-                    let reranker = self.reranker.as_mut().expect("just loaded");
-                    let scored = reranker
-                        .rerank(query, &passages, false, None)
-                        .map_err(|e| anyhow::anyhow!("reranking: {e}"))?;
-                    // A multiplier, not a new order. `sigmoid` because a
-                    // cross-encoder emits a logit and the fused score is a sum
-                    // of rank reciprocals: what is wanted is "how sure is it",
-                    // bounded, not the raw margin.
-                    for result in &scored {
-                        let sure = 1.0 / (1.0 + (-result.score).exp());
-                        hits[lifted + result.index].0.score *= 1.0 + RERANK_LIFT * sure;
-                    }
-                    hits[lifted..head].sort_by(|a, b| {
-                        b.0.score
-                            .total_cmp(&a.0.score)
-                            .then_with(|| a.0.path.cmp(&b.0.path))
-                            .then_with(|| a.0.start_line.cmp(&b.0.start_line))
-                    });
-                }
-            }
-        }
-
         hits.truncate(k);
         Ok(hits)
     }
@@ -3599,10 +3500,7 @@ mod tests {
     /// it matched well, and large enough to separate two that matched equally.
     #[test]
     fn every_rerank_factor_is_a_tiebreak_rather_than_a_ranking() {
-        // The cross-encoder is a factor like the others and is held to the same
-        // rule. It was not, in the version of it that shipped nothing: it
-        // reordered the head outright and discarded every factor below it.
-        let strongest = (1.0 + GRAPH_PROXIMITY) * (1.0 + RERANK_LIFT);
+        let strongest = 1.0 + GRAPH_PROXIMITY;
         let weakest = 1.0 - STALE_PENALTY;
         assert!(
             strongest / weakest < 1.5,

@@ -306,9 +306,6 @@ fn index_and_score(root: &Path, questions: &[Question], check_determinism: bool)
         roots: None,
         allow_secrets: true,
     };
-    // The second stage is what the release is measuring, so it is on unless a
-    // run deliberately asks for the fusion's own order.
-    semlith.reranking = std::env::var_os("SEMLITH_NO_RERANK").is_none();
     // Timed, because the chunking rule is allowed to change the number of
     // chunks and is not allowed to halve the indexing rate — and one corpus on
     // one machine measured by the same harness is the only way that comparison
