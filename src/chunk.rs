@@ -300,12 +300,30 @@ pub fn definition_cuts(text: &str, spans: &[(u32, u32)]) -> Vec<u32> {
 }
 
 /// The lines Markdown headings start on.
+///
+/// Fenced code is skipped, because a great deal of the prose this indexes is
+/// shell transcripts and `# install semlith` is a comment rather than a
+/// heading. Taken as a heading it would cut a chunk in the middle of a command
+/// and, worse, reset the heading path to a line the section is not about.
 pub fn heading_cuts(text: &str) -> Vec<u32> {
-    text.lines()
-        .enumerate()
-        .filter(|(_, line)| line.starts_with('#') && line.trim_start_matches('#').starts_with(' '))
-        .map(|(at, _)| at as u32 + 1)
-        .collect()
+    let mut cuts = Vec::new();
+    let mut fenced = false;
+    for (at, line) in text.lines().enumerate() {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced && is_heading(line) {
+            cuts.push(at as u32 + 1);
+        }
+    }
+    cuts
+}
+
+/// A line that opens an ATX heading: one to six hashes, then a space.
+fn is_heading(line: &str) -> bool {
+    let hashes = line.len() - line.trim_start_matches('#').len();
+    (1..=6).contains(&hashes) && line[hashes..].starts_with(' ')
 }
 
 /// The heading path a line sits under, as `Store format > Shards`.
@@ -315,14 +333,19 @@ pub fn heading_cuts(text: &str) -> Vec<u32> {
 /// as though the reader has the two above it in mind, because they do.
 pub fn heading_path(text: &str, line: u32) -> String {
     let mut path: Vec<(usize, String)> = Vec::new();
+    let mut fenced = false;
     for (at, raw) in text.lines().enumerate() {
         if at as u32 + 1 > line {
             break;
         }
-        let hashes = raw.len() - raw.trim_start_matches('#').len();
-        if hashes == 0 || !raw[hashes..].starts_with(' ') {
+        if raw.starts_with("```") || raw.starts_with("~~~") {
+            fenced = !fenced;
             continue;
         }
+        if fenced || !is_heading(raw) {
+            continue;
+        }
+        let hashes = raw.len() - raw.trim_start_matches('#').len();
         path.retain(|(level, _)| *level < hashes);
         path.push((hashes, raw[hashes..].trim().to_string()));
     }
@@ -498,6 +521,33 @@ The part a reader needs the two headings above to understand.
             "the path leaked into the stored text, which would shift every span \
              this store can answer with by one line"
         );
+    }
+
+    /// A shell comment in a fenced block is not a heading. Most of the prose
+    /// this indexes is documentation full of transcripts.
+    #[test]
+    fn a_hash_inside_a_code_fence_is_not_a_heading() {
+        let text = "\
+# Install
+
+```sh
+# install semlith
+curl -fsSL https://example.invalid/install.sh | sh
+```
+
+Text after the fence.
+";
+        assert_eq!(
+            heading_cuts(text),
+            vec![1],
+            "a fenced comment was cut as a heading"
+        );
+        let after = text
+            .lines()
+            .position(|l| l.starts_with("Text after"))
+            .unwrap() as u32
+            + 1;
+        assert_eq!(heading_path(text, after), "Install");
     }
 
     #[test]
