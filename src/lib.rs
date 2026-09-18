@@ -2680,14 +2680,7 @@ impl Semlith {
                 graph_ids.iter().map(|r| (r.id, r.weight)).collect(),
             ),
         ] {
-            // MEASUREMENT TOGGLE — removed before the pull request. The two
-            // fusion schemes 2.3 has to record a pair for, in one binary.
-            let flat = std::env::var_os("SEMLITH_FLAT_FUSION").is_some();
-            let constant = if flat {
-                RRF_K
-            } else {
-                shape.list_constant(name)
-            };
+            let constant = shape.list_constant(name);
             for (rank, (id, weight)) in ranking.iter().enumerate() {
                 let key = (is_image, *id);
                 let contribution = weight / (constant + rank as f32 + 1.0);

@@ -254,12 +254,6 @@ pub fn chunk_at(text: &str, cuts: &[u32]) -> Vec<Chunk> {
 /// 1 to 3, `id-key-grace` 3 to 6. They were one scope item and they pull in
 /// opposite directions, so only the half that wins is here.
 pub fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
-    // MEASUREMENT TOGGLE — removed before the pull request. 2.1 and 2.2 each
-    // need their own before/after pair against the pinned corpus, and they are
-    // one commit; this turns 2.2 off so 2.1 can be measured alone.
-    if std::env::var_os("SEMLITH_FIXED_WINDOWS").is_some() {
-        return chunk_text(text);
-    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
