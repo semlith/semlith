@@ -144,6 +144,28 @@ impl Shape {
             Self::Question => 1.0,
         }
     }
+
+    /// The reciprocal-rank constant each list is fused with, under this shape.
+    ///
+    /// One constant for every list flattens the curve equally for all of them,
+    /// which is the same as saying no list is ever more certain about its own
+    /// first place than any other. That is false, and measurably: FTS5 is exact
+    /// about an identifier and vague about a sentence, and the embedding is the
+    /// other way round. A chunk found at ranks four and five by the two vague
+    /// lists, plus the graph list derived from them, outscored the chunk the one
+    /// authoritative list put first.
+    ///
+    /// A smaller constant steepens a list's curve, so its own first place is
+    /// worth much more than its fourth. `RRF_K` stays the value for a list this
+    /// shape has no reason to trust.
+    fn list_constant(self, list: &str) -> f32 {
+        const STEEP: f32 = 12.0;
+        match (self, list) {
+            (Self::Identifier, "keyword") => STEEP,
+            (Self::Question, "vector") => STEEP,
+            _ => RRF_K,
+        }
+    }
 }
 
 /// Whether a query is shaped like an identifier or like a question.
@@ -2672,9 +2694,17 @@ impl Semlith {
                 graph_ids.iter().map(|r| (r.id, r.weight)).collect(),
             ),
         ] {
+            // MEASUREMENT TOGGLE — removed before the pull request. The two
+            // fusion schemes 2.3 has to record a pair for, in one binary.
+            let flat = std::env::var_os("SEMLITH_FLAT_FUSION").is_some();
+            let constant = if flat {
+                RRF_K
+            } else {
+                shape.list_constant(name)
+            };
             for (rank, (id, weight)) in ranking.iter().enumerate() {
                 let key = (is_image, *id);
-                let contribution = weight / (RRF_K + rank as f32 + 1.0);
+                let contribution = weight / (constant + rank as f32 + 1.0);
                 match seen.get(&key) {
                     Some(&slot) => {
                         fused[slot].1 += contribution;
