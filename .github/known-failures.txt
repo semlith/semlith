@@ -11,3 +11,4 @@
 # Platform is one of: all, unix, windows, linux, macos.
 
 
+cli/service/recovers macos 104 a GitHub macOS runner has no Aqua session, so a user agent loads but is not kept alive; measured working on real hardware in ~2s

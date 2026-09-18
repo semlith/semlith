@@ -4,6 +4,7 @@
 # SEMLITH_VERSION=v0.10.0  pin a release tag (default: the latest release)
 # SEMLITH_HOME=<dir>       install into <dir>/bin (default: ~/.semlith/bin)
 # SEMLITH_YES=1            answer yes to every `semlith setup` prompt
+# SEMLITH_NO_SERVICE=1     do not install the daemon as a login service
 set -eu
 repo=semlith/semlith
 # One origin, with no way to be told another: a script that read one from the
@@ -150,17 +151,25 @@ fi
 say "Installed $bin_dir/semlith"
 
 if "$bin_dir/semlith" setup --help >/dev/null 2>&1; then
+  # The login service is installed unless this says not to. A user who never
+  # reads a prompt is exactly the user a login service is for, and a piped
+  # install has no prompt to read — so the opt-out is an environment variable
+  # rather than nothing at all.
+  no_service=
+  if [ "${SEMLITH_NO_SERVICE:-}" = 1 ]; then
+    no_service=--no-service
+  fi
   if [ "${SEMLITH_YES:-}" = 1 ]; then
-    "$bin_dir/semlith" setup --yes
+    "$bin_dir/semlith" setup --yes $no_service
   elif [ -t 0 ]; then
-    "$bin_dir/semlith" setup
+    "$bin_dir/semlith" setup $no_service
   elif (: </dev/tty) 2>/dev/null; then
     # `curl | sh` leaves stdin on the pipe, so read the terminal instead of
     # silently taking defaults. Opening it is the test: in a container
     # /dev/tty exists and passes -r but cannot be opened.
-    "$bin_dir/semlith" setup </dev/tty
+    "$bin_dir/semlith" setup $no_service </dev/tty
   else
-    "$bin_dir/semlith" setup --yes
+    "$bin_dir/semlith" setup --yes $no_service
   fi
 else
   say ""

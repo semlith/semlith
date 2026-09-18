@@ -753,3 +753,159 @@ fn model_cache() -> String {
         std::env::var("HOME").unwrap_or_default()
     )
 }
+
+// ---------------------------------------------------------------- T05
+
+/// The handshake used to be behind the embedding model.
+///
+/// `semlith mcp` called `fleet.warm()` before `mcp::serve` read its first line,
+/// so a client's `initialize` waited on an ONNX session — or, on a machine that
+/// had never fetched the weights, on a download. A client whose startup timeout
+/// expired in that window saw no server and no reason for it, which is the
+/// absence 0.21.0 exists to remove.
+///
+/// Asserted by ordering rather than by a stopwatch: the model is made
+/// *impossible* to load — airgapped, with a model cache that is empty — so a
+/// handshake that still answers is a handshake that never waited for one. On
+/// 0.20.2 this produced zero responses and an exit; the failure is unambiguous
+/// either way.
+///
+/// Needs no download, so it runs on every machine and in CI, which is the point.
+#[test]
+fn the_handshake_is_answered_without_the_embedding_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store").join(".semlith");
+    let corpus = dir.path().join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    // An empty corpus makes a real store with no vectors in it, which is the
+    // one way to get a store without first loading the model this test is
+    // proving the server does not need.
+    let made = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(&store)
+        .arg("index")
+        .arg(&corpus)
+        .env("SEMLITH_HOME", dir.path().join("home"))
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "could not build the fixture store");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(&store)
+        .arg("mcp")
+        .env("SEMLITH_HOME", dir.path().join("home"))
+        .env("SEMLITH_AIRGAP", "1")
+        .env("SEMLITH_MODEL_CACHE", dir.path().join("empty-cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2024-11-05", "capabilities": {},
+                        "clientInfo": { "name": "t", "version": "1" } },
+        })
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} })
+    )
+    .unwrap();
+    drop(stdin);
+
+    let done = child.wait_with_output().unwrap();
+    let answers: Vec<Value> = String::from_utf8_lossy(&done.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("each line is one JSON-RPC response"))
+        .collect();
+
+    assert_eq!(
+        answers.len(),
+        2,
+        "the handshake waited on a model it cannot load: {}",
+        String::from_utf8_lossy(&done.stderr),
+    );
+    assert_eq!(answers[0]["result"]["serverInfo"]["name"], "semlith");
+    assert_eq!(
+        answers[1]["result"]["tools"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        tools().len(),
+        "the tool list shrank when it was answered without the model",
+    );
+
+    // The reason is on stderr, where a stdio client captures it, rather than
+    // nowhere — a server that quietly cannot search is the same defect wearing
+    // a different hat.
+    let said = String::from_utf8_lossy(&done.stderr);
+    assert!(
+        said.contains("could not load the embedding model"),
+        "nothing said why searches will fail: {said}",
+    );
+}
+
+/// A machine with nothing indexed is a server, not an exit code.
+///
+/// `read_fleet` ended the process with "no semlith store covers …" before a
+/// byte of protocol was written, so a fresh install wired into a client was a
+/// client that reported no server at all. The tools are listed; the first call
+/// that needs a corpus is where the message belongs.
+#[test]
+fn a_machine_with_no_store_still_answers_the_handshake() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("mcp")
+        .env("SEMLITH_HOME", dir.path().join("home"))
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} })
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {} })
+    )
+    .unwrap();
+    drop(stdin);
+
+    let done = child.wait_with_output().unwrap();
+    let answers: Vec<Value> = String::from_utf8_lossy(&done.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("each line is one JSON-RPC response"))
+        .collect();
+    assert_eq!(
+        answers.len(),
+        2,
+        "a store-less machine got no server: {}",
+        String::from_utf8_lossy(&done.stderr),
+    );
+    assert_eq!(
+        answers[1]["result"]["tools"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0),
+        tools().len(),
+        "a store-less server listed a different tool surface",
+    );
+}

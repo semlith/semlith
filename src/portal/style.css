@@ -2451,6 +2451,18 @@ pre.code::-webkit-scrollbar-thumb {
   min-width: 480px;
 }
 
+/* The Agents page's reason column. A repair line carries its own explanation
+ * after a `#` and is longer than any screen, so unbounded the cell asks for
+ * the width of the whole command and carries its own Copy button past the edge
+ * of the card — the one control in the cell, off the only edge that matters.
+ * The field is capped rather than the cell: capping the cell collapsed the
+ * column to its shortest row, and this leaves the reasons a readable width
+ * while the command scrolls inside its own box with the button still beside
+ * it. It is a maximum, so the field still shrinks on a phone. */
+td.why .copyfield {
+  max-width: 30rem;
+}
+
 .field.wide {
   width: 280px;
   max-width: 100%;
