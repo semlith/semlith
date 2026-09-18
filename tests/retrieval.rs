@@ -642,6 +642,32 @@ impl Summary {
             self.median(|r| r.index_seconds)
         );
 
+        // Per shape, because an aggregate hit@k over three kinds of question
+        // answers none of them. "Seven concept questions miss" is a sentence
+        // somebody can act on; "hit@8 is 87 %" is not, and until this printed
+        // it was counted by hand off the miss list.
+        println!("\n  by shape, at k=1 / k=3 / k=8:");
+        let mut shapes: Vec<&str> = questions.iter().map(|q| q.shape.as_str()).collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+        for shape in shapes {
+            let of_this_shape: Vec<&Question> =
+                questions.iter().filter(|q| q.shape == shape).collect();
+            let at = |k: usize| {
+                of_this_shape
+                    .iter()
+                    .filter(|q| matches!(self.rank_of(&q.id).0, Some(rank) if rank <= k))
+                    .count()
+            };
+            let total = of_this_shape.len();
+            println!(
+                "    {shape:<11} {:>3} / {:>3} / {:>3}  of {total}",
+                at(1),
+                at(3),
+                at(8)
+            );
+        }
+
         if let Some(census) = self.runs[0].census.as_ref() {
             census.print();
         }

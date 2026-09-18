@@ -2168,7 +2168,10 @@ mod tests {
         let registry = named("REGISTRY")
             .unwrap_or_else(|| panic!("REGISTRY is not a symbol: {:?}", e.symbols));
         assert_eq!(registry.kind, "constant", "{registry:?}");
-        assert!(named("helper").is_some(), "the supplement broke the tags query");
+        assert!(
+            named("helper").is_some(),
+            "the supplement broke the tags query"
+        );
     }
 
     #[test]

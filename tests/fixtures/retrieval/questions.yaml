@@ -1339,7 +1339,7 @@ questions:
   - id: read-one-span-by-line
     shape: identifier
     tool: read
-    target: src/graph.rs:1491-1499
+    target: src/graph.rs:1496-1516
     spans:
       - path: src/graph.rs
         symbol: call_site
@@ -1350,7 +1350,12 @@ questions:
       store-relative path and a line range. This is the exact string an agent
       copies out of a `semlith_search` reply.
 
-      Re-derived in 0.17.0. Unlike every other question here, this one's target
+      Re-pinned again for 0.22.0, and it is the one question the snapshot
+      re-pinning first got wrong: the spans were walked to their definitions in
+      the pinned corpus and `target` was left at the 0.14.0 line range, so this
+      question asked for lines 1491-1499 while demanding a span beginning at
+      1496. It scored as a miss on the sealed set for that reason and for no
+      other. Unlike every other question here, this one's target
       is a literal line range rather than a symbol, so it is the one question
       the file's "the symbol is the durable anchor" rule cannot protect: 0.17.0
       added four hundred lines to `src/graph.rs` above `call_site` and the range

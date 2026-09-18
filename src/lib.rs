@@ -2681,12 +2681,31 @@ impl Semlith {
             ),
         ] {
             let constant = shape.list_constant(name);
+            // The graph list brings candidates and never votes on them.
+            //
+            // It is derived from the other two: `graph_expansion` walks out
+            // from what the dense and keyword lists already found. So when it
+            // returns a chunk those lists also returned, its contribution is
+            // not a second opinion — it is the first opinion counted twice,
+            // and a chunk two lists ranked mediocrely beats the one an
+            // authoritative list ranked first partly on that double count.
+            //
+            // It earns its place by reaching chunks neither list found, and
+            // that half is kept. On the pinned corpus the baseline run
+            // reported "graph-only hits 0 of 20 satisfied a span" — twenty
+            // chunks no other list found, none of them right — so the walk
+            // pays for itself only where a later reranking can sort its
+            // candidates, and it must not be allowed to reorder what the other
+            // lists were already sure about.
+            let derived = name == "graph";
             for (rank, (id, weight)) in ranking.iter().enumerate() {
                 let key = (is_image, *id);
                 let contribution = weight / (constant + rank as f32 + 1.0);
                 match seen.get(&key) {
                     Some(&slot) => {
-                        fused[slot].1 += contribution;
+                        if !derived {
+                            fused[slot].1 += contribution;
+                        }
                         lists[slot].push(name);
                     }
                     None => {
