@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drift issue #88 records was at index time, so three scorings of one store are
   one run reported three times. `symbol` and `neighbors` questions are scored
   rather than skipped.
+- **A `path` question can be a hit.** It was counted in the denominator and could
+  never record one, so every path question was a permanent miss however well the
+  tool answered it — one run reported "chains found 6 of 7" and "wrong yes 0"
+  beside ten path questions missing at k=8. Ten of seventy-seven questions unable
+  to score capped hit@8 at 87 %, which is below the gate this release ships
+  against, so the gate was unreachable by construction rather than by retrieval.
+  Every retrieval figure this project has published understates itself for this
+  reason.
 
 ### Retrieval
 

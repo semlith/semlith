@@ -152,15 +152,25 @@ fn is_binary(bytes: &[u8]) -> bool {
 /// The fallback for text with no structure. Where the structure is known,
 /// [`chunk_at`] is given the lines a chunk must start on.
 pub fn chunk_text(text: &str) -> Vec<Chunk> {
-    chunk_at(text, &[])
+    chunk_at(text, &[], false)
 }
 
-/// Split text into chunks, starting a new one at every line in `cuts`.
+/// Split text into chunks, ending one where a definition begins.
 ///
-/// `cuts` are 1-based line numbers, sorted. A budget still ends a chunk, so a
-/// definition longer than [`MAX_CHARS`] is split the way anything else is —
-/// what a cut buys is that a definition never *begins* in the middle of a
-/// chunk, and so is never separated from the doc comment above it.
+/// `cuts` are 1-based line numbers, sorted: the lines definitions start on. They
+/// are where a chunk *may* end, not where it must. The budget decides how much
+/// goes in a chunk, and when it runs out part-way through a definition the
+/// chunk ends where that definition began instead, so the definition starts the
+/// next chunk whole and is never separated from the doc comment above it. A
+/// definition longer than [`MAX_CHARS`] is still split the way anything else is.
+///
+/// Forcing a cut at every definition was tried first and measured worse at every
+/// depth — 45/53/64 against 51/57/66 on the development set. It fragments a file
+/// into one chunk per definition, and a chunk holding four lines has almost
+/// nothing for a concept query to match: the gain on the boundary was smaller
+/// than the loss from the shrinking. Aligning the boundary to the budget keeps
+/// the chunks the size the embedding wants and still never cuts a definition in
+/// half.
 ///
 /// This is the whole of the fix for the miss class the 0.22.0 contract calls a
 /// chunk boundary. A fixed 800-character window put `MAX_NODES` and the six
@@ -173,7 +183,7 @@ pub fn chunk_text(text: &str) -> Vec<Chunk> {
 /// a boundary that is a definition's own first line is not arbitrary, and
 /// repeating the tail of the previous definition into the front of this one is
 /// exactly the blurring the cut is for.
-pub fn chunk_at(text: &str, cuts: &[u32]) -> Vec<Chunk> {
+pub fn chunk_at(text: &str, cuts: &[u32], forced: bool) -> Vec<Chunk> {
     let lines: Vec<&str> = text.lines().collect();
     let cut = |line_index: usize| -> bool { cuts.binary_search(&(line_index as u32 + 1)).is_ok() };
     let mut chunks = Vec::new();
@@ -182,13 +192,35 @@ pub fn chunk_at(text: &str, cuts: &[u32]) -> Vec<Chunk> {
     while i < lines.len() {
         let start = i;
         let mut len = 0;
+        // Where definitions began inside this chunk. The last one is where the
+        // budget backs off to when it stops mid-definition; the first is where
+        // a forced cut ends the chunk.
+        let mut last_cut: Option<usize> = None;
+        let mut first_cut: Option<usize> = None;
         // The `len == 0` arm guarantees progress: a line wider than the whole
-        // budget is still taken, then hard-split below. The cut test is second
-        // so that a cut on the first line of a chunk does not end it before it
-        // has a line in it.
-        while i < lines.len() && (len == 0 || (len + lines[i].len() < MAX_CHARS && !cut(i))) {
+        // budget is still taken, then hard-split below.
+        while i < lines.len() && (len == 0 || len + lines[i].len() < MAX_CHARS) {
+            if i > start && cut(i) {
+                last_cut = Some(i);
+                first_cut = first_cut.or(Some(i));
+            }
             len += lines[i].len() + 1;
             i += 1;
+        }
+        // The budget ran out part-way through a definition. End the chunk where
+        // that definition began instead, so it starts the next one whole.
+        if i < lines.len()
+            && !cut(i)
+            && let Some(boundary) = last_cut
+        {
+            i = boundary;
+        }
+        // A forced cut ends the chunk wherever it falls. Markdown takes this:
+        // a section is the unit a reader and a writer both think in, and a
+        // chunk spanning two of them would carry the first one's heading path
+        // over text belonging to the second.
+        if forced && let Some(boundary) = first_cut {
+            i = i.min(boundary);
         }
 
         let body = lines[start..i].join("\n");
@@ -250,7 +282,7 @@ pub fn chunk_file(path: &Path, text: &str, definitions: &[(u32, u32)]) -> Vec<Ch
         if cuts.is_empty() {
             return chunk_text(text);
         }
-        let mut chunks = chunk_at(text, &cuts);
+        let mut chunks = chunk_at(text, &cuts, true);
         for chunk in &mut chunks {
             chunk.context = heading_path(text, chunk.start_line);
         }
@@ -259,7 +291,7 @@ pub fn chunk_file(path: &Path, text: &str, definitions: &[(u32, u32)]) -> Vec<Ch
     if definitions.is_empty() {
         return chunk_text(text);
     }
-    chunk_at(text, &definition_cuts(text, definitions))
+    chunk_at(text, &definition_cuts(text, definitions), false)
 }
 
 /// The lines a definition starts on, doc comment and attributes included.
@@ -439,7 +471,7 @@ fn later() {}
             "the cut should be at the doc comment, not at the const: {cuts:?}"
         );
 
-        let chunks = chunk_at(text, &cuts);
+        let chunks = chunk_at(text, &cuts, false);
         let holding = chunks
             .iter()
             .find(|c| c.text.contains("MAX_NODES"))
@@ -451,22 +483,68 @@ fn later() {}
             "the constant is separated from its doc comment:\n{}",
             holding.text
         );
-        assert!(
-            holding.text.starts_with("/// How many nodes"),
-            "the chunk should begin at the doc comment:\n{}",
-            holding.text
-        );
     }
 
+    /// The property the cuts exist for, on a file too big for one chunk: no
+    /// chunk begins part-way through a definition, so none is ever separated
+    /// from the doc comment above it.
     #[test]
-    fn a_cut_ends_a_chunk_even_under_budget() {
+    fn no_chunk_begins_in_the_middle_of_a_definition() {
+        let mut text = String::new();
+        let mut definitions = Vec::new();
+        for n in 1..=30 {
+            let start = text.lines().count() as u32 + 2; // the line after the doc comment
+            text.push_str(&format!("/// What thing {n} is for, at some length.\n"));
+            text.push_str(&format!("fn thing_{n}() {{\n"));
+            for line in 1..=4 {
+                text.push_str(&format!("    let value_{line} = {line} * {n};\n"));
+            }
+            text.push_str("}\n");
+            definitions.push((start, start + 5));
+        }
+        let cuts = definition_cuts(&text, &definitions);
+        let chunks = chunk_at(&text, &cuts, false);
+        assert!(chunks.len() > 1, "the fixture fits in one chunk");
+        for chunk in &chunks {
+            let first = chunk.text.lines().next().unwrap_or("");
+            assert!(
+                first.starts_with("///") || first.starts_with("fn "),
+                "a chunk begins inside a definition, at {first:?}"
+            );
+        }
+        for n in 1..=30 {
+            let holding = chunks
+                .iter()
+                .find(|c| c.text.contains(&format!("fn thing_{n}(")))
+                .unwrap_or_else(|| panic!("no chunk holds thing_{n}"));
+            assert!(
+                holding.text.contains(&format!("What thing {n} is for")),
+                "thing_{n} was separated from its doc comment"
+            );
+        }
+    }
+
+    /// Small definitions share a chunk. Forcing a boundary at each of them was
+    /// tried and measured worse at every depth: a chunk of four lines has
+    /// almost nothing for a concept query to match.
+    #[test]
+    fn small_definitions_are_not_split_into_one_chunk_each() {
         let text = "fn a() {}\nfn b() {}\nfn c() {}\n";
-        let chunks = chunk_at(text, &[1, 2, 3]);
-        assert_eq!(chunks.len(), 3, "{chunks:#?}");
+        let chunks = chunk_at(text, &[1, 2, 3], false);
+        assert_eq!(chunks.len(), 1, "{chunks:#?}");
+    }
+
+    /// A forced cut is what Markdown takes, and it does end a chunk wherever it
+    /// falls — a section is the unit, and a chunk spanning two would carry the
+    /// first one's heading path over the second one's text.
+    #[test]
+    fn a_forced_cut_ends_a_chunk_even_under_budget() {
+        let text = "fn a() {}\nfn b() {}\nfn c() {}\n";
+        let chunks = chunk_at(text, &[1, 2, 3], true);
         assert_eq!(
             chunks.iter().map(|c| c.start_line).collect::<Vec<_>>(),
             vec![1, 2, 3],
-            "a cut did not start a chunk"
+            "a forced cut did not start a chunk"
         );
     }
 
@@ -478,7 +556,7 @@ fn later() {}
             .map(|i| format!("    let x{i} = {i};\n"))
             .collect();
         let text = format!("fn big() {{\n{body}}}\n");
-        let chunks = chunk_at(&text, &[1]);
+        let chunks = chunk_at(&text, &[1], false);
         assert!(chunks.len() > 1, "a 100-line function fit in one chunk?");
         assert_eq!(chunks[0].start_line, 1);
         for chunk in &chunks {
