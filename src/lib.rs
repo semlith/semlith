@@ -1796,10 +1796,6 @@ impl Semlith {
             // nothing to undo and the shared pending batch is never left
             // holding an id whose row was rolled back.
             //
-            // It is also above the chunking now, because from 0.22.0 the
-            // chunking reads it: a file is cut at the definitions tree-sitter
-            // found, so a function and the doc comment above it are one chunk
-            // rather than two halves of two.
             let extraction = match graph::extract(&path, &text) {
                 Ok(extraction) => extraction,
                 Err(e) => {
@@ -1816,17 +1812,7 @@ impl Semlith {
                 }
             };
 
-            let definitions: Vec<(u32, u32)> = extraction
-                .as_ref()
-                .map(|found| {
-                    found
-                        .symbols
-                        .iter()
-                        .map(|symbol| (symbol.start_line, symbol.end_line))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let chunks = chunk::chunk_file(&path, &text, &definitions);
+            let chunks = chunk::chunk_file(&path, &text);
             if chunks.is_empty() {
                 let why = SkipReason::NoText;
                 skip(&mut report, &why);
