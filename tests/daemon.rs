@@ -1097,18 +1097,42 @@ fn the_agents_route_serves_the_documented_stanzas_verbatim() {
         .find(|stanza| stanza["register"] == true)
         .and_then(|stanza| stanza["text"].as_str())
         .expect("Claude Code carries a registration");
-    assert_eq!(
-        stanza.trim(),
-        "claude mcp add --scope user semlith -- semlith mcp",
-        "the registration the portal serves must carry the scope that means every project"
+    let stanza = stanza.trim();
+    assert!(
+        stanza.starts_with("claude mcp add --scope user semlith -- ") && stanza.ends_with(" mcp"),
+        "the registration the portal serves must carry the scope that means every project: {stanza}"
+    );
+    // And an absolute path, not the bare command. 0.21.0 changed this because
+    // a bare `semlith` launches only from a PATH that happens to carry it, and
+    // the PATH a login shell builds is not the one a service manager hands a
+    // job — which is how a correctly registered semlith comes to be absent
+    // with nothing saying so. Asserted as a property rather than as the exact
+    // string, because the string is this machine's own binary path.
+    let program = stanza
+        .trim_start_matches("claude mcp add --scope user semlith -- ")
+        .trim_end_matches(" mcp")
+        .trim_matches('"');
+    assert!(
+        std::path::Path::new(program).is_absolute(),
+        "the registration names `{program}`, which launches only from a PATH that carries it"
+    );
+    assert!(
+        !program.starts_with(r"\\?\"),
+        "the registration carries a verbatim path, which a client configuration cannot use: {program}"
     );
 
     let doc =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/clients.md"))
             .expect("docs/clients.md is beside the crate");
+    // The document holds the placeholder; the route serves it with this
+    // machine's own binary path substituted in. Putting the placeholder back is
+    // what keeps this assertion about the thing it was written to protect —
+    // that the route serves what the documentation says, and not a second
+    // hand-written copy of it — now that one token of the stanza is per-machine.
+    let documented = stanza.replace(program, "${SEMLITH_BIN}");
     assert!(
-        doc.contains(stanza.trim()),
-        "the route serves a stanza docs/clients.md does not contain: {stanza}"
+        doc.contains(&documented),
+        "the route serves a stanza docs/clients.md does not contain: {documented}"
     );
 
     for client in clients {

@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-18
+
+On 2026-09-17 a session opened with no semlith server. The registration was
+correct, at user scope, and the installed binary answered `initialize` in well
+under a second over six stores. It happened again on 2026-09-18. Nothing
+anywhere said why.
+
+The cause was found before a line of this release was written: `~/.claude.json`
+held `projects["…/live/semlith"].disabledMcpjsonServers` containing `semlith`.
+The server was registered and switched off for one directory. `claude mcp list`
+run from anywhere else reported it connected, so every check short of asking
+from the affected directory passed.
+
+This release is about that class of failure — semlith absent, with nothing
+saying so — from every side it can be reached.
+
+### semlith is there before a client asks
+
+- `semlith start --service` installs the daemon as a login service: a launchd
+  user agent on macOS, a systemd user unit on Linux, a logon task on Windows.
+  It runs from the next login onwards, and on macOS and Linux a daemon that
+  exits is restarted within seconds with nobody present. `semlith start
+  --no-service` removes it and leaves a running daemon and every store exactly
+  as they are.
+- `semlith setup` and the installers install it, including where nothing can
+  answer a prompt — a piped installer, CI, `--yes`. A user who never reads the
+  prompt is the user a login service is for. `--no-service` opts out, and so
+  does `SEMLITH_NO_SERVICE=1`, which both install scripts and `semlith setup`
+  itself read — so a provisioning script gets the same answer whichever of them
+  it reaches for. **Installing semlith now starts a daemon**, so anything that
+  wants to run its own should opt out; that is what the harness does.
+- Installing onto a port something already holds registers the service for the
+  next login and leaves the running daemon alone. Starting a second one would
+  lose the bind and exit, and `KeepAlive` would start it again.
+- On macOS, a binary inside `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud
+  Drive is refused rather than installed. A launchd agent pointing at one
+  installs cleanly, reports a live pid, and then stops inside the dynamic
+  linker before it can write a word to its own log: no error, no timeout, no
+  port. The refusal names the directory and where to install instead.
+
+### The handshake no longer waits for the embedding model
+
+- `semlith mcp` answers `initialize` and `tools/list` before any model is
+  loaded. It used to load every distinct model first, so a client's startup
+  timeout could expire on an ONNX session or a model download and report no
+  server at all. The model now loads on a background thread; only a tool call
+  that needs it waits. The tool list is byte-identical to 0.20.2's.
+- A machine with nothing indexed gets a server instead of an exit code. A fresh
+  install wired into a client used to end the process with "no semlith store
+  covers …" before writing a byte of protocol. The tools are listed, and the
+  first call that needs a corpus carries the message that used to be fatal.
+- `semlith mcp` no longer claims a privacy rejection for a file that is not
+  there. Every start printed one line per store — six on the machine this was
+  found on — saying `daemon.json` "is not a file this user wrote privately",
+  naming paths that answer `No such file or directory`. Those lines were the
+  first thing in a client's log for anyone debugging an absent server.
+
+### `semlith doctor` names the step that failed
+
+- A server registered at user scope and switched off for one directory is
+  reported as a fault in that directory, naming the file, the key and the
+  directory, with the command that turns it back on. It is never re-enabled
+  without being asked: switching a server off is a choice, and naming it is
+  semlith's job. From any other directory the row is green and still says which
+  directory it is off in.
+- Every registration semlith writes names the resolved absolute path of the
+  binary rather than the bare command `semlith`. A bare command launches only
+  from a PATH that happens to carry the binary, and the PATH a login shell
+  builds is not the one a service manager hands a job.
+
+### Housekeeping
+
+- The native smoke harness on all three platforms installs the login service,
+  kills the daemon and confirms it comes back, and checks that the handshake
+  answers with the embedding model made impossible to load.
+
 ## [0.20.2] - 2026-09-18
 
 A full manual drive of every portal page on 2026-09-17 — every button, filter,

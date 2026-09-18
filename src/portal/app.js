@@ -6183,6 +6183,204 @@ async function agentsView() {
     planNote,
   );
 
+  // ---- the login service
+  /* Whether the endpoint survives a reboot.
+   *
+   * The header above says "One endpoint, every client, no per-client process",
+   * and until 0.21.0 that endpoint existed only for as long as somebody kept a
+   * terminal open for it. This card is where that sentence is either true on
+   * this machine or not, named in the mechanism the platform actually uses.
+   *
+   * There is no Install button. No route installs a login service, and a
+   * button that posts to nothing is worse than the command it would hide. */
+  const MECHANISMS = {
+    launchd: "a launchd login agent",
+    systemd: "a systemd user service",
+    schtasks: "a Windows logon task",
+  };
+
+  /** A path or a command, labelled, monospace, and copyable. */
+  const labelled = (label, value) =>
+    el(
+      "div",
+      { class: "rows tight" },
+      el("span", { class: "eyebrow", text: label }),
+      copyField(value),
+    );
+
+  const serviceCard = () => {
+    // An older daemon, or a page cached from one, sends no `service` at all.
+    // No card is better than a card reporting "not installed" because it was
+    // never told either way.
+    if (!data.service) return null;
+    const status = data.service.status || {};
+    const mechanism = MECHANISMS[status.mechanism] || "a login service";
+    // Nothing at all when the daemon has not recorded a start: "never started"
+    // under a daemon that is answering this very request is a sentence that
+    // reads as a bug in the page.
+    const started = data.service.last_started
+      ? ` Last started ${when(data.service.last_started)}.`
+      : "";
+
+    const bits = [];
+    if (status.installed) {
+      bits.push(
+        says(
+          `The daemon is installed as ${mechanism}, so the endpoint is answering again after a reboot without anybody opening a terminal for it.${started}`,
+        ),
+      );
+    } else {
+      bits.push(
+        says(
+          `The daemon is not installed as a login service, so the endpoint lives exactly as long as whatever started it: close that terminal, or reboot, and every client configured below loses semlith until somebody starts it again.${started}`,
+        ),
+        labelled("To install", "semlith start --service"),
+      );
+    }
+    if (status.definition) bits.push(labelled("Definition", status.definition));
+    if (status.log) bits.push(labelled("Log", status.log));
+    // Said rather than left implied. A logon task is restarted when it *fails*;
+    // nothing supervises one that exited cleanly. A page that prints
+    // "installed" over both platforms claims a parity the product does not
+    // have.
+    if (status.installed && status.restarts === false) {
+      bits.push(
+        el("div", {
+          class: "note",
+          text: "A logon task is restarted only when it failed. One that exited cleanly stays stopped until the next logon, so a daemon stopped on purpose is a daemon started again on purpose.",
+        }),
+      );
+    }
+
+    return el(
+      "div",
+      { class: "card pad dense" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Login service" }),
+        el("span", { class: "spacer" }),
+        pill(
+          status.installed ? "installed" : "not installed",
+          status.installed ? "good" : "warn",
+        ),
+      ),
+      bits,
+    );
+  };
+
+  // ---- the clients somebody on this machine actually has
+  /* `semlith doctor`, cut to the clients in use.
+   *
+   * All twenty-seven rows are the Doctor page's job. The question here is
+   * narrower — of the clients this machine has, is each one reaching the
+   * endpoint — so the rows are the ones `doctor` itself calls in use and
+   * nothing else. A client nobody has is not a finding.
+   *
+   * `disabled_here` is deliberately not a state on this page. "Here" for the
+   * daemon is wherever a service manager started it, usually `/`, which is
+   * nobody's working directory; a row reading "switched off here" would be
+   * answering a question about a directory the reader has never stood in.
+   * `disabled_in` is the honest form — it names directories, and the reader is
+   * the one who knows which of them they work in. */
+  const inUse = (data.doctor || []).filter((c) => c && c.in_use);
+
+  const clientState = (c) => {
+    if (c.note) return { text: "cannot register", kind: null };
+    if (c.registered) return { text: `registered (${c.scope || "user"})`, kind: "good" };
+    if (!c.command) return { text: "not registered", kind: "bad" };
+    if (!c.present) return { text: "not installed", kind: null };
+    if (c.scope === "project") return { text: "one project only", kind: "bad" };
+    return { text: "installed, not registered", kind: "bad" };
+  };
+
+  /* Why a row is not green, and what to run about it.
+   *
+   * `explain` is written for `semlith doctor` run from a directory, so it says
+   * "this directory" — true of the shell that ran the command, and not of a
+   * daemon a launch agent started from the root of the disk. Where it says
+   * that, the line is composed from `disabled_in` instead, which names the
+   * directories rather than pointing at one. */
+  const clientWhy = (c) => {
+    const lines = [];
+    if (c.note) lines.push(el("span", { class: "sub", text: c.note }));
+    if (c.explain && !/this directory/i.test(c.explain))
+      lines.push(el("span", { class: "sub", text: c.explain }));
+    const off = (c.disabled_in || []).filter(Boolean);
+    if (off.length)
+      lines.push(el("span", { class: "meta", text: `switched off for: ${off.join(", ")}` }));
+    if (c.repair) lines.push(copyField(c.repair));
+    // A row the daemon calls a fault is coloured like one, so it does not get
+    // to stay silent about why: a red pill over an em dash is an accusation
+    // with no sentence after it. There is nothing to repair for a client that
+    // is not here, so what it gets is the reading rather than a command.
+    if (!lines.length && !c.present && c.fault)
+      lines.push(
+        el("span", {
+          class: "sub",
+          text: c.command
+            ? `Nothing named ${c.command} is on this machine.`
+            : "None of this client's configuration files are on this machine.",
+        }),
+      );
+    return lines.length
+      ? el("div", { class: "rows tight" }, lines)
+      : el("span", { class: "sub", text: "—" });
+  };
+
+  const inUseTable = inUse.length
+    ? dataTable({
+        caption:
+          "Every agent client installed on this machine, whether it is registered with semlith, and what to run for the ones that are not.",
+        sort: "name",
+        grow: false,
+        perPage: 10,
+        rows: inUse,
+        columns: [
+          { key: "name", label: "Client", sortable: true, value: (c) => c.name },
+          {
+            key: "state",
+            label: "semlith",
+            sortable: true,
+            value: (c) => clientState(c).text,
+            // `fault` is the daemon's own verdict, so a row it calls a fault
+            // reads as one whatever the text works out to. A client with a
+            // note is not a fault and must not borrow the colour of one.
+            render: (c) => {
+              const s = clientState(c);
+              return pill(s.text, c.fault ? "bad" : s.kind);
+            },
+          },
+          // Not `narrow-drop`: the reason is the point of the row, so on a
+          // phone the table scrolls sideways inside its card — the Doctor
+          // page's behaviour with the same rows — rather than hiding the one
+          // column that says what to do. The page itself never scrolls.
+          { key: "why", label: "Why", className: "why", render: clientWhy },
+        ],
+      })
+    : null;
+
+  const inUseCard = data.doctor
+    ? el(
+        "div",
+        { class: "card pad" },
+        el(
+          "div",
+          { class: "head" },
+          el("span", { class: "card-title", text: "Clients in use" }),
+          el("span", { class: "spacer" }),
+          el("span", {
+            class: "meta",
+            text: `${n(inUse.length)} of ${n((data.doctor || []).length)} known`,
+          }),
+        ),
+        inUseTable
+          ? inUseTable.node
+          : empty("No documented client is installed on this machine."),
+        says("All twenty-seven, including the ones nobody here has, are on the Doctor page."),
+      )
+    : null;
+
   return el(
     "div",
     { class: "view" },
@@ -6195,6 +6393,7 @@ async function agentsView() {
       ],
     }),
     endpointNote,
+    serviceCard(),
     el(
       "div",
       { class: "card pad dense" },
@@ -6212,6 +6411,7 @@ async function agentsView() {
     ),
     keyNote,
     registerAll,
+    inUseCard,
     el(
       "div",
       { class: "grid scroller" },

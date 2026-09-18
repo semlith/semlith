@@ -9,6 +9,7 @@
     SEMLITH_VERSION  pin a release tag such as v0.10.0 (default: latest)
     SEMLITH_HOME     install into <dir>\bin (default: ~\.semlith\bin)
     SEMLITH_YES      set to 1 to answer yes to every `semlith setup` prompt
+    SEMLITH_NO_SERVICE  set to 1 to skip installing the daemon as a logon task
 #>
 $ErrorActionPreference = 'Stop'
 
@@ -142,11 +143,18 @@ catch {
 }
 
 if ($hasSetup) {
+    # The logon task is installed unless this says not to. A user who never
+    # reads a prompt is exactly the user a login service is for, and a piped
+    # install has no prompt to read.
+    $serviceArgs = @()
+    if ($env:SEMLITH_NO_SERVICE -eq '1') {
+        $serviceArgs = @('--no-service')
+    }
     if ($env:SEMLITH_YES -eq '1') {
-        & $installed setup --yes
+        & $installed setup --yes @serviceArgs
     }
     else {
-        & $installed setup
+        & $installed setup @serviceArgs
     }
 }
 else {

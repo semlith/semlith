@@ -1415,6 +1415,23 @@ fn agents(state: &Arc<State>) -> Response {
         "tool_list_bytes": crate::mcp::tool_list_bytes(),
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
+        // Whether semlith is there without being asked, and since when. The
+        // page said "one endpoint, every client" while the endpoint existed
+        // only as long as somebody held a terminal open for it.
+        "service": {
+            "status": crate::service::status(),
+            "last_started": crate::service::last_started(),
+        },
+        // The same four-step report `semlith doctor` prints, from the same
+        // function, so the page and the terminal cannot disagree about which
+        // client can reach semlith.
+        //
+        // `disabled_here` is deliberately not surfaced: "here" for this process
+        // is wherever a service manager started the daemon, which is nobody's
+        // working directory. The page shows `disabled_in` — the directories the
+        // override names — because that is the fact, and the reader is the one
+        // who knows which of them they work in.
+        "doctor": crate::doctor::clients_report(),
         "endpoint": {
             "url": format!("http://127.0.0.1:{}{}", state.server.port(), crate::http::MCP_PATH),
             "open": state.server.mcp_open(),

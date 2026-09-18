@@ -75,6 +75,12 @@ pub struct Status {
 
 /// The macOS and Linux one-liner. The URL resolves at run time, which is what
 /// lets a fix to the script reach people without a release.
+/// Set to `1` to skip installing the daemon as a login service.
+///
+/// Read by `semlith setup` itself as well as by the two install scripts, so it
+/// works whichever of them a provisioning script reaches for.
+pub const NO_SERVICE_ENV: &str = "SEMLITH_NO_SERVICE";
+
 pub const INSTALL_SH: &str =
     "curl -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh";
 
@@ -191,7 +197,7 @@ pub fn status() -> Status {
 /// form: no key lands in a file, and nothing outside the client's own registry
 /// is touched. `register_all` is the one part that does ask, and it asks with
 /// the list of files in front of the user.
-pub fn run(yes: bool, airgap: bool, register_all: bool) -> Result<()> {
+pub fn run(yes: bool, airgap: bool, register_all: bool, service: bool) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
     // Reported as they run rather than replayed at the end, so the line about
@@ -201,6 +207,7 @@ pub fn run(yes: bool, airgap: bool, register_all: bool) -> Result<()> {
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
+        announce(step_service(service)?),
         announce(step_verify()?),
     ];
 
@@ -1021,7 +1028,107 @@ fn first_line(stderr: &[u8], stdout: &[u8]) -> Option<String> {
 /// one of those exports this themselves.
 pub const KEY_ENV: &str = "SEMLITH_AGENT_KEY";
 
-/// Step 5. Runs the binary that was just installed, not this process, because
+/// Step 5. Install the daemon as a login service.
+///
+/// On by default, and on even when nothing can answer a prompt. The argument
+/// for asking is that a background process is a thing a user should consent to;
+/// the argument against is the whole of this release. A client that starts
+/// before any daemon finds nothing and says nothing, and the user who meets
+/// that is precisely the one who ran a piped installer and never read a
+/// question. `--no-service` opts out, `semlith start --no-service` undoes it,
+/// and the step prints what it installed and how to remove it.
+///
+/// Points at the binary `step_binary` installed rather than the one running
+/// this code, which during an install is the downloaded installer.
+fn step_service(wanted: bool) -> Result<Step> {
+    if !wanted {
+        return Ok(Step {
+            name: "service",
+            state: State::Skipped,
+            detail: "--no-service: start the daemon yourself with `semlith start`".to_string(),
+        });
+    }
+    let target = home::bin_dir()?.join(exe_name());
+    let binary = target.exists().then_some(target);
+
+    // `setup` promises to be a no-op once it has run, and says so in its own
+    // last line. Re-bootstrapping a service that is already installed and
+    // already names this binary breaks that promise and restarts a daemon
+    // somebody may be using. The definition is read rather than trusted:
+    // a service still pointing at a binary an upgrade moved is one that has to
+    // be rewritten, which is the case this check must not swallow.
+    let installed = crate::service::status();
+    if installed.installed && names_the_binary(&installed, binary.as_deref()) {
+        return Ok(Step {
+            name: "service",
+            state: State::AlreadyDone,
+            detail: format!(
+                "running from every login ({}) — remove with `semlith start --no-service`",
+                installed.mechanism,
+            ),
+        });
+    }
+
+    match crate::service::install(binary.as_deref(), None) {
+        Ok(status) if status.installed => Ok(Step {
+            name: "service",
+            state: State::Done,
+            detail: if status.started_now {
+                format!(
+                    "running now and from every login ({}) — remove with `semlith start --no-service`",
+                    status.mechanism,
+                )
+            } else {
+                format!(
+                    "a daemon is already listening, so this one starts at the next login ({}) — remove with `semlith start --no-service`",
+                    status.mechanism,
+                )
+            },
+        }),
+        // Not fatal, and not silent. A machine with no systemd user session, or
+        // a binary somewhere macOS will not run a background job from, still
+        // gets a working semlith — it just has to be started by hand, and this
+        // is the line that says so.
+        Ok(status) => Ok(Step {
+            name: "service",
+            state: State::Failed,
+            detail: format!(
+                "{} did not report the service as installed — start the daemon with `semlith start`",
+                status.mechanism,
+            ),
+        }),
+        Err(e) => Ok(Step {
+            name: "service",
+            state: State::Failed,
+            detail: format!("{e} — start the daemon with `semlith start`"),
+        }),
+    }
+}
+
+/// Whether an installed service already points at the binary setup would name.
+///
+/// `false` when there is no definition file to read — Windows registers a task
+/// rather than writing one semlith can inspect — so that platform reinstalls,
+/// which its `/F` makes safe and which is the only way a moved binary gets
+/// picked up there.
+fn names_the_binary(status: &crate::service::Status, binary: Option<&std::path::Path>) -> bool {
+    let Some(definition) = status.definition.as_deref() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(definition) else {
+        return false;
+    };
+    let wanted = match binary {
+        Some(path) => path.to_path_buf(),
+        None => match crate::service::exe() {
+            Ok(exe) => exe,
+            Err(_) => return false,
+        },
+    };
+    text.contains(&wanted.to_string_lossy().into_owned())
+}
+
+/// Step 6. Runs the binary that was just installed, not this process, because
 /// the question is whether the installed one works.
 fn step_verify() -> Result<Step> {
     let target = home::bin_dir()?.join(exe_name());

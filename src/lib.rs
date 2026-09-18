@@ -40,6 +40,8 @@ pub mod pattern;
 pub mod portal;
 pub mod proxy;
 pub mod routes;
+/// The daemon as a login service, so a client never finds nothing.
+pub mod service;
 pub mod setup;
 pub mod store;
 pub mod system;

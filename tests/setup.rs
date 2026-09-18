@@ -53,6 +53,7 @@ impl Machine {
         let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
         command
             .arg("setup")
+            .arg("--no-service")
             .args(args)
             .env("HOME", &self.home)
             .env_remove("SHELL")
@@ -63,9 +64,21 @@ impl Machine {
         command.output().expect("running semlith setup")
     }
 
+    /// Always `--no-service`.
+    ///
+    /// `HOME` and `SEMLITH_HOME` are redirected into the fixture, but a login
+    /// service is not a file: `launchctl` and `systemctl --user` register into
+    /// the real user session whatever `HOME` says. Without this flag a
+    /// `cargo test` run leaves a launchd agent on the developer's machine,
+    /// pointing at a binary under a temp directory that the run then deletes —
+    /// and `KeepAlive` keeps starting it. That happened once, on 2026-09-18,
+    /// and this flag is why it cannot happen again. The service itself is
+    /// tested in `src/service.rs` and by the native smoke harness, both of
+    /// which are explicit about installing one.
     fn setup(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_semlith"))
             .arg("setup")
+            .arg("--no-service")
             .args(args)
             .env("HOME", &self.home)
             .env("SHELL", "/bin/zsh")
@@ -581,7 +594,23 @@ fn register_all_writes_every_file_only_client_and_is_idempotent() {
         parsed["mcpServers"]["other"]["command"], "other",
         "the merge dropped a server that was already there:\n{merged}"
     );
-    assert_eq!(parsed["mcpServers"]["semlith"]["command"], "semlith");
+    // An absolute path, not the bare command. A bare `semlith` launches only
+    // from a PATH that happens to carry it, and the PATH a login shell builds
+    // is not the one a client or a service manager hands a spawned server —
+    // which is how a correctly registered semlith comes to be absent with
+    // nothing saying so. Asserted as a property: the exact string is whichever
+    // binary wrote the file.
+    let written = parsed["mcpServers"]["semlith"]["command"]
+        .as_str()
+        .expect("the merged entry has a command");
+    assert!(
+        std::path::Path::new(written).is_absolute(),
+        "the merge wrote `{written}`, which launches only from a PATH that carries it"
+    );
+    assert!(
+        written.ends_with("semlith") || written.ends_with("semlith.exe"),
+        "the merge wrote a command that is not semlith: {written}"
+    );
     assert!(
         machine
             .home
@@ -724,13 +753,24 @@ fn global_registrations() -> Vec<(String, String)> {
                 // and a quoting change in the documentation is still caught
                 // because the split is the thing under test.
                 semlith::setup::argv(&command).map(|(program, args)| {
-                    (
-                        client.name.clone(),
-                        std::iter::once(program)
-                            .chain(args)
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    )
+                    let line = std::iter::once(program)
+                        .chain(args)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    // From 0.21.0 a registration names the resolved absolute
+                    // path of the running binary rather than the bare command,
+                    // and "the running binary" differs on the two sides of this
+                    // comparison: here it is this test harness, under
+                    // `target/debug/deps/`, while the thing actually invoking
+                    // the clients is the `semlith` child this test spawns. Put
+                    // the child's path in, so the assertion stays about the
+                    // command line the documentation promises and not about
+                    // which process happened to build the string.
+                    let mine = semlith::clients::binary_path();
+                    let child = std::fs::canonicalize(env!("CARGO_BIN_EXE_semlith"))
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_semlith").to_string());
+                    (client.name.clone(), line.replace(mine, &child))
                 })
             })
         })

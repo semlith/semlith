@@ -201,9 +201,13 @@ fn a_search_and_a_graph_call_over_stdio_are_recorded_under_the_client_name() {
     ]
     .join("\n");
 
-    let mut fleet = semlith::fleet::Fleet::open(&[store.path().to_path_buf()]).unwrap();
+    let fleet = semlith::fleet::Fleet::open(&[store.path().to_path_buf()]).unwrap();
+    // 0.21.0 moved the model load off the handshake, so the server takes the
+    // fleet behind a lock and the store names `tools/list` prints separately.
+    let labels = fleet.labels().join(", ");
+    let fleet = std::sync::Mutex::new(fleet);
     let mut out = Vec::new();
-    semlith::mcp::serve(&mut fleet, script.as_bytes(), &mut out).unwrap();
+    semlith::mcp::serve(&fleet, &labels, script.as_bytes(), &mut out).unwrap();
     drop(fleet);
 
     let s = Semlith::open(store.path(), None).unwrap();

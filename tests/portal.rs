@@ -859,3 +859,113 @@ fn the_portal_names_no_release_in_anything_a_user_reads() {
         }
     }
 }
+
+/// The Agents page's two newest cards have something to read.
+///
+/// From this release the endpoint can be installed as a login service, and the
+/// page that claims one endpoint for every client is the page that owes a
+/// reader the answer to whether this machine actually kept one across a reboot.
+/// Both halves — the service status and the per-client report — arrive on
+/// `/api/agents`, and a route that quietly stops sending either leaves the two
+/// cards blank with nothing failing anywhere else.
+#[test]
+fn the_agents_route_reports_the_service_and_every_client() {
+    let daemon = Daemon::start();
+    let agents = daemon.json("/api/agents");
+
+    let service = &agents["service"];
+    assert!(
+        service.is_object(),
+        "/api/agents sends no service block: {agents}"
+    );
+    let status = &service["status"];
+    assert!(
+        status["installed"].is_boolean(),
+        "service `installed` is not a boolean: {status}"
+    );
+    // Not a boolean on one platform and absent on the others: the card says
+    // out loud where a login task restarts only a failure, and it can only say
+    // that from a value it was given.
+    assert!(
+        status["restarts"].is_boolean(),
+        "service `restarts` is not a boolean: {status}"
+    );
+    let mechanism = status["mechanism"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no service mechanism: {status}"));
+    assert!(
+        ["launchd", "systemd", "schtasks", "none"].contains(&mechanism),
+        "unknown service mechanism {mechanism:?}; the portal names the mechanism \
+         in prose and would print nothing for one it does not know"
+    );
+    for key in ["definition", "log"] {
+        assert!(
+            status[key].is_string() || status[key].is_null(),
+            "service status {key} is neither a path nor null: {status}"
+        );
+    }
+    assert!(
+        service["last_started"].is_u64() || service["last_started"].is_null(),
+        "last_started is neither unix seconds nor null: {service}"
+    );
+
+    let clients = agents["doctor"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/api/agents sends no doctor report: {agents}"));
+    assert!(
+        !clients.is_empty(),
+        "the doctor report on /api/agents is empty; the Agents page lists no client at all"
+    );
+    for client in clients {
+        let name = client["name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a doctor entry with no name: {client}"));
+        // `in_use` is what the Agents page filters on — it shows the clients
+        // somebody here has, not the full catalogue — so an entry missing it
+        // would silently drop off the card.
+        for key in ["present", "registered", "fault", "in_use", "disabled_here"] {
+            assert!(
+                client[key].is_boolean(),
+                "{name}: {key} is not a boolean: {client}"
+            );
+        }
+        for key in ["command", "repair", "note", "explain"] {
+            assert!(
+                client[key].is_string() || client[key].is_null(),
+                "{name}: {key} is neither a string nor null: {client}"
+            );
+        }
+        let scope = &client["scope"];
+        assert!(
+            scope.is_null() || matches!(scope.as_str(), Some("user" | "project")),
+            "{name}: unexpected scope {scope}"
+        );
+        // The directories the override names. The page renders these and not
+        // `disabled_here`, because "here" for a daemon a service manager
+        // started is the root of the disk and nobody's working directory.
+        let disabled_in = client["disabled_in"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: disabled_in is not an array: {client}"));
+        for dir in disabled_in {
+            assert!(
+                dir.is_string(),
+                "{name}: disabled_in holds {dir}, not a path"
+            );
+        }
+        let files = client["files"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: files is not an array: {client}"));
+        for file in files {
+            assert!(
+                file["path"].is_string(),
+                "{name}: a file with no path: {file}"
+            );
+            for key in ["exists", "parses", "names_semlith"] {
+                assert!(
+                    file[key].is_boolean(),
+                    "{name}: file {key} is not a boolean: {file}"
+                );
+            }
+        }
+    }
+}

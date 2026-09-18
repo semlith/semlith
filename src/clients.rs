@@ -27,6 +27,23 @@ const HTTP_SECTION: &str = "### Connecting over HTTP";
 /// literal value into this only when the reader has pressed Reveal.
 const KEY_PLACEHOLDER: &str = "${SEMLITH_AGENT_KEY}";
 
+/// What a stanza names where the semlith binary goes.
+///
+/// A registration naming the bare word `semlith` only launches from a `PATH`
+/// that happens to carry it, and the process that reads these files is very
+/// often not a login shell: an editor started from a desktop icon, a launchd or
+/// systemd agent, and a desktop app all inherit a `PATH` that never sourced a
+/// profile and so has never heard of `~/.cargo/bin`. The client reports that
+/// the server exited and says nothing about why, which reads as semlith being
+/// broken. So every registration semlith writes names the absolute path of the
+/// binary that wrote it.
+///
+/// A placeholder in the document rather than a path assembled in Rust, for the
+/// same reason as `KEY_PLACEHOLDER` above: `docs/clients.md` is the one copy of
+/// every stanza, and a path built here would be a second one that looks right
+/// for exactly as long as nobody edits the other.
+const BIN_PLACEHOLDER: &str = "${SEMLITH_BIN}";
+
 /// One pasteable block.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Stanza {
@@ -279,18 +296,74 @@ fn parse_http(readme: &str) -> Vec<Stanza> {
             text.push_str(body);
             text.push('\n');
         }
-        let info = info(format);
-        out.push(Stanza {
-            format: info.format,
-            text,
-            register: info.register,
-            unregister: info.unregister,
-            path: info.path,
-            os: info.os,
-            scope: info.scope,
-        });
+        out.push(stanza(info(format), &text));
     }
     out
+}
+
+/// The absolute path of the binary this process is running from, resolved once.
+///
+/// Every stanza goes through here on its way out of `docs/clients.md`, so a
+/// caller cannot forget it and there is no second spelling of the path for a
+/// client to disagree with — which also makes registering twice write the same
+/// bytes twice.
+pub fn binary_path() -> &'static str {
+    static RESOLVED: OnceLock<String> = OnceLock::new();
+    RESOLVED.get_or_init(resolve_binary_path)
+}
+
+/// The running binary, spelled with forward slashes on every platform.
+///
+/// Forward slashes deliberately, and not only for tidiness. `canonicalize` on
+/// Windows returns the verbatim form — `\\?\C:\Users\you\.cargo\bin\semlith.exe`
+/// — which several client launchers refuse to execute, and whose backslashes
+/// would each have to be doubled to survive being embedded in the JSON, TOML
+/// and double-quoted YAML these stanzas are written in. Miss one of those
+/// escapes and the client's parser rejects the whole file, taking every other
+/// server in it with semlith. `C:/Users/you/.cargo/bin/semlith.exe` is accepted
+/// by `CreateProcess`, needs no escaping in any of the four formats, and is the
+/// one spelling in all of them. On unix the separator is already `/` and the
+/// replacement does nothing.
+///
+/// The bare command when `current_exe` fails, rather than a guess: it can fail
+/// on a platform with no `/proc` and a binary that has been unlinked, and a
+/// stanza naming `semlith` at least works wherever the `PATH` is right — which
+/// is where this release found everybody. A wrong absolute path works nowhere,
+/// and unlike the bare word it gives the reader nothing to recognise.
+fn resolve_binary_path() -> String {
+    let Ok(running) = std::env::current_exe() else {
+        return "semlith".to_string();
+    };
+    // `unwrap_or`: `current_exe` already hands back an absolute path, and
+    // canonicalising it only resolves the symlinks a package manager leaves
+    // behind. If that fails the absolute path is still worth writing.
+    let resolved = std::fs::canonicalize(&running).unwrap_or(running);
+    let text = resolved.to_string_lossy().into_owned();
+    if !cfg!(windows) {
+        return text;
+    }
+    // `\\?\UNC\server\share\…` is the verbatim spelling of `\\server\share\…`,
+    // and stripping only the `\\?\` off it would leave a path beginning with a
+    // literal `UNC` that names nothing.
+    match text.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+    }
+    .replace('\\', "/")
+}
+
+/// One parsed fence, with the binary path substituted for the placeholder
+/// `docs/clients.md` writes.
+fn stanza(info: Info, text: &str) -> Stanza {
+    Stanza {
+        format: info.format,
+        text: text.replace(BIN_PLACEHOLDER, binary_path()),
+        register: info.register,
+        unregister: info.unregister,
+        path: info.path,
+        os: info.os,
+        scope: info.scope,
+    }
 }
 
 /// Every documented client, parsed once.
@@ -374,16 +447,7 @@ fn parse(readme: &str) -> Vec<Client> {
                 text.push_str(body);
                 text.push('\n');
             }
-            let info = info(format);
-            stanzas.push(Stanza {
-                format: info.format,
-                text,
-                register: info.register,
-                unregister: info.unregister,
-                path: info.path,
-                os: info.os,
-                scope: info.scope,
-            });
+            stanzas.push(stanza(info(format), &text));
         }
 
         if !stanzas.is_empty() {
@@ -649,11 +713,68 @@ mod tests {
         );
         // The stdio form, at user scope, is what `semlith setup` runs from
         // 0.18.0. The scope flag is the release: without it this command
-        // registers the directory it was typed in.
+        // registers the directory it was typed in. The path is this test
+        // binary's own, because `binary_path` resolves whatever is running.
         assert_eq!(
             first.register_command().as_deref(),
-            Some("claude mcp add --scope user semlith -- semlith mcp")
+            Some(
+                format!(
+                    "claude mcp add --scope user semlith -- \"{}\" mcp",
+                    binary_path()
+                )
+                .as_str()
+            )
         );
         assert!(first.registers_globally());
+    }
+
+    /// Every command `semlith setup` runs hands the client the binary's
+    /// absolute path, in one piece.
+    ///
+    /// Asserted through `setup::argv`, which is what actually splits these
+    /// commands, rather than over the text: the path has to be quoted in the
+    /// document or a machine whose home has a space in it — `C:/Users/Ada
+    /// Lovelace/…`, and every Windows machine with a full name on it — would
+    /// register a program called `C:/Users/Ada` and an argument called
+    /// `Lovelace/…`. Word-containment rather than equality because one client,
+    /// Droid, takes the whole command line as a single quoted argument.
+    #[test]
+    fn every_registration_hands_the_client_the_resolved_path_whole() {
+        for client in clients() {
+            let Some(command) = client.register_command() else {
+                continue;
+            };
+            let (_, args) = crate::setup::argv(&command).unwrap_or_else(|| {
+                panic!("{}'s registration does not split: {command}", client.name)
+            });
+            assert!(
+                args.iter().any(|word| word.contains(binary_path())),
+                "{}'s registration does not hand over {} in one piece:\n{command}",
+                client.name,
+                binary_path()
+            );
+        }
+    }
+
+    /// The resolved path is absolute and carries no `\\?\` prefix.
+    ///
+    /// A verbatim path is what `canonicalize` hands back on Windows, and one
+    /// written into a client's configuration is a defect: several launchers
+    /// refuse to execute it, and its backslashes have to be escaped again for
+    /// every format these stanzas are written in.
+    #[test]
+    fn the_resolved_binary_path_is_absolute_and_not_verbatim() {
+        let path = binary_path();
+        assert!(
+            // `C:/Users/…` on Windows, where the drive letter is what makes it
+            // absolute and there is no leading separator.
+            path.starts_with('/') || path.contains(":/"),
+            "the resolved binary path is not absolute: {path}"
+        );
+        assert!(
+            !path.contains('\\'),
+            "the resolved binary path is in the verbatim or backslash \
+             spelling, which no stanza can embed unescaped: {path}"
+        );
     }
 }

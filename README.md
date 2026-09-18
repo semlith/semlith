@@ -95,10 +95,11 @@ The Windows line runs in PowerShell, and Windows PowerShell 5.1 is enough. The
 script picks the release for your machine, checks the download against the
 release's `SHA256SUMS`, unpacks it into `~/.semlith/bin`, and hands off to
 `semlith setup`, which puts that directory on your `PATH`, pre-downloads the
-embedding model, and registers semlith with the agents you say you use. `setup`
-is also the repair command, and `--yes` takes every default so a script can run
-it unattended. `SEMLITH_VERSION` pins a release by its tag, `SEMLITH_HOME` moves
-where it lands, and `semlith upgrade` swaps the binary for the newest release —
+embedding model, registers semlith with the agents you say you use, and installs
+the daemon as a login service. `setup` is also the repair command, and `--yes`
+takes every default so a script can run it unattended. `SEMLITH_VERSION` pins a
+release by its tag, `SEMLITH_HOME` moves where it lands, `SEMLITH_NO_SERVICE=1`
+skips the login service, and `semlith upgrade` swaps the binary for the newest release —
 never on its own, since semlith has no startup check, no timer and no update
 banner. Or build it with `cargo install semlith`, or take an archive from
 [the releases page](https://github.com/semlith/semlith/releases).
@@ -374,6 +375,16 @@ semlith implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and
 command, at the scope that means every project**; `semlith doctor` says which it
 could not and what to run for them. [docs/clients.md](docs/clients.md) holds the
 stanzas for all 27 and the HTTP transport, and `tests/clients.rs` launches each.
+
+**A server that is silently absent does not exist.** `setup` installs the daemon
+as a login service — launchd agent, systemd user unit, logon task — so it answers
+before any client asks; `semlith start --no-service` removes it. `semlith doctor`
+asks whether each client can actually reach it: it names the first step that
+failed and the command that shows it, repairs a registration that cannot launch,
+and catches what nothing else does — a server registered at user scope and
+switched off for one directory, which every check run from elsewhere calls
+healthy. `--brief` is one line and an exit code for a shell prompt or a
+session-start hook, and [docs/clients.md](docs/clients.md) has that snippet.
 
 ## What gets indexed
 
