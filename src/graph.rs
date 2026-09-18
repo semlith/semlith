@@ -2148,6 +2148,29 @@ mod tests {
         );
     }
 
+    /// A `const` and a `static` are definitions. The bundled tags query tags
+    /// neither, so without the supplement the definition lift in
+    /// `search_preferring` cannot fire for one and `semlith symbol MAX_NODES`
+    /// answers nothing.
+    #[test]
+    fn rust_constants_and_statics_are_symbols() {
+        let e = run(
+            "limits.rs",
+            "/// How many nodes a traversal may visit.\n\
+             pub const MAX_NODES: usize = 4000;\n\
+             static REGISTRY: &str = \"registry.json\";\n\
+             fn helper() {}\n",
+        );
+        let named = |n: &str| e.symbols.iter().find(|s| s.name == n);
+        let max_nodes = named("MAX_NODES")
+            .unwrap_or_else(|| panic!("MAX_NODES is not a symbol: {:?}", e.symbols));
+        assert_eq!(max_nodes.kind, "constant", "{max_nodes:?}");
+        let registry = named("REGISTRY")
+            .unwrap_or_else(|| panic!("REGISTRY is not a symbol: {:?}", e.symbols));
+        assert_eq!(registry.kind, "constant", "{registry:?}");
+        assert!(named("helper").is_some(), "the supplement broke the tags query");
+    }
+
     #[test]
     fn rust_carries_every_edge_kind_it_can_express() {
         let e = run(
