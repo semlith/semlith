@@ -12,17 +12,55 @@
 #
 # ## The baseline the line numbers came from
 #
-# Spans are line ranges in commit `199463c` (the `develop` merge that is
-# semlith 0.14.0), which is also the tree the two study documents measured. They
-# were taken from that commit rather than from the working tree on purpose: the
-# resolution-hint work began landing in `src/graph.rs`, `src/lib.rs` and
-# `src/store.rs` while this file was being written, and a question set whose
-# line numbers came out of a tree that was being edited to answer it would prove
-# nothing. Pinning to the release the questions were written against is what
-# makes "these were not fitted to the resolver" checkable rather than asserted.
+# Spans are line ranges in `corpus/`, the pinned snapshot beside this file: the
+# 0.21.0 tree at commit `4e8df39`, less `tests/drive` and less this directory.
+# `corpus.yaml` records it and the harness asserts its file count and byte total
+# on every run.
 #
-# Line numbers drift. The `symbol` on every span is the durable anchor, and the
+# Until 0.22.0 the spans were line ranges in `199463c` — the `develop` merge
+# that is semlith 0.14.0 — while the harness indexed whatever working tree it
+# was compiled in. Both halves of that were deliberate and together they were
+# wrong: 47 of the 92 spans no longer contained the symbol they named, and every
+# one of those scored only through the `symbol` clause of the matching rule, or
+# not at all. Re-pinning them to the snapshot was mechanical — walk each
+# `symbol` to its definition in the snapshot and take the range — and it moved
+# 43 span occurrences. Four needed a judgement and each is noted on its
+# question: `routes::record` is gone and the ledger is the one writer now, so
+# those spans name `ledger::search`, `reply` and `graph`; `extract_graph` was
+# renamed `write_graph`; the proto fixture's `rpc Hold` sits one line lower; and
+# the "only ledger gate in the crate" span, which pointed at what is now a file
+# sort comparator, names `ledger::enabled`.
+#
+# Line numbers still drift, and re-pinning is a deliberate act that belongs with
+# a snapshot bump. The `symbol` on every span is the durable anchor, and the
 # matching rule below is written so that a moved function still scores.
+#
+#
+# ## What the set is made of
+#
+# 107 questions. The 57 written for 0.14.0 and re-pinned as above, and 50 added
+# for 0.22.0's gate, which the contract requires to be written from reading the
+# corpus rather than from reading a resolver that answers them.
+#
+# The 50 were drafted to these proportions, and they hold:
+#
+#   shape   identifier 18, concept 22, multi-hop 10
+#   tool    search 30, read 6, path 6, symbol 4, neighbors 4
+#
+# and to spread the corpus: the 57 put 39 of their 92 spans in `store.rs`,
+# `lib.rs` and `graph.rs`, and the 50 put none there, reaching instead into
+# `filter.rs`, `home.rs`, `embed.rs`, `index.rs`, `formats.rs`, `add.rs`,
+# `http.rs`, `mcp.rs`, `chunk.rs`, `proxy.rs`, `watch.rs`, `clients.rs`,
+# `clientfile.rs`, `ledger.rs`, `image.rs`, `lock.rs`, `daemon.rs`, `doctor.rs`,
+# the `docs/` pages and `AGENTS.md`.
+#
+# Four of the 50 were corrected before they were merged, and each carries the
+# correction in its note. All four had the same defect: a question whose correct
+# answers were only partly spanned, so a tool returning an unspanned correct
+# answer would have scored as a miss. The rule the header already states —
+# a question found wrong is fixed, never widened until something passes — cuts
+# both ways, and completing a ground truth that was incomplete is the fix, not
+# the widening.
 #
 #
 # ## Schema
@@ -142,16 +180,15 @@
 version: 1
 
 baseline:
-  commit: 199463c
-  release: 0.14.0
-  read_on: 2026-09-14
+  commit: 4e8df391ebf2fd79671aed1658a05ce63b3dfc06
+  release: 0.21.0
+  read_on: 2026-09-18
 
 corpus:
-  # The repository itself, which is the corpus both study documents measured,
-  # plus the document-format fixtures so the non-code readers are exercised too.
-  roots:
-    - .
-    - tests/fixtures
+  # The pinned snapshot beside this file. Not a list of roots in the working
+  # tree any more: the harness indexes `corpus/` and nothing else, so the same
+  # binary gives the same number on any commit and on any machine.
+  snapshot: corpus
 
 defaults:
   k: 8
@@ -176,8 +213,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: edges_out
-        start_line: 948
-        end_line: 970
+        start_line: 1166
+        end_line: 1231
     note: >-
       Seed Q12. `edges_out` has exactly one definition in the crate, which is
       what makes it a clean identifier case: there is no name collision to
@@ -192,8 +229,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: chain_hash
-        start_line: 1096
-        end_line: 1110
+        start_line: 1635
+        end_line: 1679
     note: >-
       The report's §2.6 note 3 records that `chain_hash` never appeared at all
       when the query was the prose description (see `concept-ledger-chain`),
@@ -209,8 +246,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: MAX_NODES
-        start_line: 590
-        end_line: 597
+        start_line: 1088
+        end_line: 1095
     note: >-
       Span starts at the doc comment, which is where the answer actually is —
       the constant is `2000` and the reason is the four lines above it. In
@@ -224,8 +261,8 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: RRF_K
-        start_line: 87
-        end_line: 91
+        start_line: 95
+        end_line: 99
     note: >-
       The constant and its doc comment. The loop that uses it is inside
       `search_ranked`, a 170-line function; listing that whole span here would
@@ -240,8 +277,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: PARSE_TIMEOUT
-        start_line: 32
-        end_line: 33
+        start_line: 35
+        end_line: 36
       - path: src/graph.rs
         symbol: extract
         start_line: 236
@@ -292,8 +329,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: DEPENDENCY_KINDS
-        start_line: 599
-        end_line: 608
+        start_line: 1097
+        end_line: 1111
     note: >-
       Doc comment included: it is the part that says why `defines` and
       `contains` are excluded, which is the answer anyone asking this wants.
@@ -306,8 +343,8 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: IMAGE_FLOOR
-        start_line: 105
-        end_line: 126
+        start_line: 254
+        end_line: 265
     note: >-
       One span covering `IMAGE_FLOOR`, `IMAGE_FLOOR_ENV` and `image_floor()`,
       which are consecutive and only make sense together. An environment
@@ -355,8 +392,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: edges_out
-        start_line: 948
-        end_line: 970
+        start_line: 1166
+        end_line: 1231
     note: >-
       Seed Q13. The report measured this at 106 bytes against grep's 107 — the
       one row where semlith already matches grep on cost while being
@@ -371,8 +408,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: chain_hash
-        start_line: 1096
-        end_line: 1110
+        start_line: 1635
+        end_line: 1679
     note: >-
       A private function, unlike `edges_out`. Included to check that `symbol`
       answers for a name with no `pub`, since nothing in the extraction path
@@ -386,10 +423,18 @@ questions:
     want: callers
     grep: grep -rn 'record_retrieval' src tests
     spans:
-      - path: src/routes.rs
-        symbol: record
-        start_line: 428
-        end_line: 472
+      - path: src/ledger.rs
+        symbol: search
+        start_line: 129
+        end_line: 200
+      - path: src/ledger.rs
+        symbol: reply
+        start_line: 208
+        end_line: 248
+      - path: src/ledger.rs
+        symbol: graph
+        start_line: 286
+        end_line: 328
       - path: tests/ledger.rs
         symbol: one_recorded_retrieval_is_one_row_the_cli_prints
         start_line: 30
@@ -416,20 +461,20 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: neighbours
-        start_line: 630
-        end_line: 636
+        start_line: 1545
+        end_line: 1570
       - path: src/graph.rs
         symbol: shortest_path
-        start_line: 638
-        end_line: 691
+        start_line: 1742
+        end_line: 1873
       - path: src/lib.rs
         symbol: graph_expansion
-        start_line: 1143
-        end_line: 1212
+        start_line: 1952
+        end_line: 2084
       - path: src/fleet.rs
         symbol: neighbours_in
-        start_line: 264
-        end_line: 273
+        start_line: 437
+        end_line: 461
     note: >-
       Four production callers, each verified by reading the call site. There are
       further call sites inside `graph.rs`'s own unit tests and inside
@@ -447,8 +492,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: record_retrieval
-        start_line: 1037
-        end_line: 1093
+        start_line: 1550
+        end_line: 1601
     note: >-
       One production caller, and it is the only one. The other reference is in
       `store.rs`'s own test at 1166, which recomputes the hash to prove the
@@ -498,12 +543,12 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: RRF_K
-        start_line: 87
-        end_line: 91
+        start_line: 95
+        end_line: 99
       - path: src/lib.rs
         symbol: search_ranked
-        start_line: 1433
-        end_line: 1603
+        start_line: 2437
+        end_line: 2454
     note: >-
       Seed Q2, measured at rank 4 with the top three being docs and a wrapper,
       and the fusion loop itself only 9th at k=20. The second span is the whole
@@ -542,8 +587,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: PARSE_TIMEOUT
-        start_line: 32
-        end_line: 33
+        start_line: 35
+        end_line: 36
       - path: src/graph.rs
         symbol: extract
         start_line: 236
@@ -580,12 +625,12 @@ questions:
     spans:
       - path: src/store.rs
         symbol: record_retrieval
-        start_line: 1037
-        end_line: 1093
+        start_line: 1550
+        end_line: 1601
       - path: src/store.rs
         symbol: chain_hash
-        start_line: 1096
-        end_line: 1110
+        start_line: 1635
+        end_line: 1679
     note: >-
       Seed Q6, and a measured miss — §2.6 note 3 records that docs, tests and
       `record_retrieval` outranked `chain_hash` at store.rs:1096, which never
@@ -604,12 +649,12 @@ questions:
     spans:
       - path: src/filter.rs
         symbol: denied
-        start_line: 406
-        end_line: 437
+        start_line: 490
+        end_line: 499
       - path: src/filter.rs
         symbol: Denied
-        start_line: 388
-        end_line: 404
+        start_line: 452
+        end_line: 467
       - path: docs/security.md
         symbol: ~
         start_line: 99
@@ -630,8 +675,8 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: graph_expansion
-        start_line: 1143
-        end_line: 1212
+        start_line: 1952
+        end_line: 2084
     note: >-
       Seed Q8, measured as a hit. `SEEDS` is a function-local constant at line
       1165, so there is nothing to anchor on but the enclosing function; the
@@ -646,16 +691,16 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: refresh
-        start_line: 488
-        end_line: 519
+        start_line: 1024
+        end_line: 1055
       - path: src/lib.rs
         symbol: GENERATION
-        start_line: 78
-        end_line: 85
+        start_line: 86
+        end_line: 93
       - path: src/lib.rs
         symbol: generation
-        start_line: 1691
-        end_line: 1697
+        start_line: 3024
+        end_line: 3030
     note: >-
       Seed Q9, reworded. The seed asked "what keeps the index from going stale
       when a file is saved" and accepted a hit anywhere in `watch.rs`, `lib.rs`
@@ -692,8 +737,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: read_only
-        start_line: 215
-        end_line: 227
+        start_line: 221
+        end_line: 233
       - path: src/store.rs
         symbol: Writing
         start_line: 226
@@ -775,8 +820,8 @@ questions:
         end_line: 89
       - path: src/graph.rs
         symbol: has_graph
-        start_line: 140
-        end_line: 142
+        start_line: 137
+        end_line: 145
       - path: src/graph.rs
         symbol: language_of
         start_line: 158
@@ -811,8 +856,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: DEPENDENCY_KINDS
-        start_line: 599
-        end_line: 608
+        start_line: 1097
+        end_line: 1111
     note: >-
       The doc comment answers it directly: every symbol is reached in one hop
       from the file it lives in, so including `defines` would make a path
@@ -827,14 +872,22 @@ questions:
     query: where does a search get written down so the savings can be counted later
     grep: grep -rn 'record_retrieval\|state.ledger' src
     spans:
-      - path: src/routes.rs
-        symbol: record
-        start_line: 428
-        end_line: 472
+      - path: src/ledger.rs
+        symbol: search
+        start_line: 129
+        end_line: 200
+      - path: src/ledger.rs
+        symbol: reply
+        start_line: 208
+        end_line: 248
+      - path: src/ledger.rs
+        symbol: graph
+        start_line: 286
+        end_line: 328
       - path: src/store.rs
         symbol: record_retrieval
-        start_line: 1037
-        end_line: 1093
+        start_line: 1550
+        end_line: 1601
     note: >-
       Two spans, and they are the whole of it. `routes.rs:416` holds the only
       `if state.ledger` gate in the crate and `routes.rs:417` is the only
@@ -889,12 +942,12 @@ questions:
     spans:
       - path: src/mcp.rs
         symbol: call_tool
-        start_line: 552
-        end_line: 603
-      - path: src/routes.rs
-        symbol: ~
-        start_line: 412
-        end_line: 421
+        start_line: 616
+        end_line: 1187
+      - path: src/ledger.rs
+        symbol: enabled
+        start_line: 32
+        end_line: 42
     note: >-
       Seed Q11, and the origin of the whole finding. The reported false chain
       was `call_tool -> index -> first_store -> record -> record_retrieval`,
@@ -945,10 +998,10 @@ questions:
         symbol: answer
         start_line: 93
         end_line: 98
-      - path: src/routes.rs
-        symbol: ~
-        start_line: 412
-        end_line: 421
+      - path: src/ledger.rs
+        symbol: enabled
+        start_line: 32
+        end_line: 42
     note: >-
       The reported false chain was five hops:
       `answer -> handler -> route -> search -> record -> record_retrieval`.
@@ -971,10 +1024,10 @@ questions:
         symbol: search_in
         start_line: 168
         end_line: 218
-      - path: src/routes.rs
-        symbol: ~
-        start_line: 412
-        end_line: 421
+      - path: src/ledger.rs
+        symbol: enabled
+        start_line: 32
+        end_line: 42
     note: >-
       The reported false chain was
       `search_in -> search_ranked -> search -> record -> record_retrieval`.
@@ -1018,12 +1071,12 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: graph_expansion
-        start_line: 1143
-        end_line: 1212
+        start_line: 1952
+        end_line: 2084
       - path: src/store.rs
         symbol: edges_out
-        start_line: 948
-        end_line: 970
+        start_line: 1166
+        end_line: 1231
     note: >-
       A real one-hop chain, verified by reading the call at lib.rs:1183:
       `store::edges_out(&self.db, name, &[])`. Both names have exactly one
@@ -1046,12 +1099,12 @@ questions:
     spans:
       - path: src/store.rs
         symbol: record_retrieval
-        start_line: 1037
-        end_line: 1093
+        start_line: 1550
+        end_line: 1601
       - path: src/store.rs
         symbol: chain_hash
-        start_line: 1096
-        end_line: 1110
+        start_line: 1635
+        end_line: 1679
     note: >-
       One hop, verified at store.rs:1066. Both functions are in the same file
       and neither name has a second definition anywhere in the crate, which
@@ -1072,16 +1125,16 @@ questions:
     spans:
       - path: src/lib.rs
         symbol: index_paths
-        start_line: 621
-        end_line: 631
+        start_line: 1166
+        end_line: 1178
       - path: src/lib.rs
         symbol: index_walk
-        start_line: 694
-        end_line: 700
+        start_line: 1273
+        end_line: 1281
       - path: src/lib.rs
         symbol: index_set
-        start_line: 718
-        end_line: 730
+        start_line: 1309
+        end_line: 1324
       - path: src/lib.rs
         symbol: index_set_writing
         start_line: 746
@@ -1114,8 +1167,8 @@ questions:
         end_line: 104
       - path: src/graph.rs
         symbol: shortest_path
-        start_line: 638
-        end_line: 691
+        start_line: 1742
+        end_line: 1873
       - path: src/graph.rs
         symbol: ~
         start_line: 21
@@ -1156,8 +1209,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: expand
-        start_line: 876
-        end_line: 939
+        start_line: 1165
+        end_line: 1265
     note: >-
       The identifier half of the pair. Its question-shaped twin is
       `shape-pair-ppr-question`; both ask for `graph::expand`. Written first as
@@ -1177,8 +1230,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: expand
-        start_line: 876
-        end_line: 939
+        start_line: 1165
+        end_line: 1265
     note: >-
       The question half. Names nothing in the code, which is where the vector
       list has to carry it.
@@ -1240,11 +1293,11 @@ questions:
       - path: docs/architecture.md
         symbol: ~
         start_line: 1
-        end_line: 4000
+        end_line: 878
       - path: AGENTS.md
         symbol: ~
         start_line: 1
-        end_line: 1000
+        end_line: 612
     note: >-
       The mirror of the question above. "Why" is a question the prose answers
       and the code cannot, so `prefer: docs` should reach the documents. Whole
@@ -1258,12 +1311,12 @@ questions:
     spans:
       - path: src/store.rs
         symbol: insert_edge
-        start_line: 949
-        end_line: 975
+        start_line: 1072
+        end_line: 1087
       - path: src/lib.rs
-        symbol: extract_graph
-        start_line: 1400
-        end_line: 1560
+        symbol: write_graph
+        start_line: 2101
+        end_line: 2143
     note: >-
       "Where is X invoked" is the question `edges.line` exists for. Either the
       definition or the one call site in `extract_graph` satisfies it; the
@@ -1276,8 +1329,8 @@ questions:
     spans:
       - path: src/store.rs
         symbol: chunks_overlapping
-        start_line: 593
-        end_line: 616
+        start_line: 618
+        end_line: 647
     note: >-
       The second stage of a retrieval, asked by name. What is measured is the
       size of what came back as much as whether it was right: the claim is one
@@ -1290,8 +1343,8 @@ questions:
     spans:
       - path: src/graph.rs
         symbol: call_site
-        start_line: 1491
-        end_line: 1499
+        start_line: 1496
+        end_line: 1516
     note: >-
       The same second stage asked the way a locate answer prints it — a
       store-relative path and a line range. This is the exact string an agent
@@ -1388,7 +1441,7 @@ questions:
       - path: tests/fixtures/graph/proto/lock.proto
         symbol: Hold
         start_line: 9
-        end_line: 9
+        end_line: 11
     note: >-
       An RPC in a protobuf service. A `.proto` file is a contract between two
       services, so "where is this RPC defined" is asked across repositories more
@@ -1426,3 +1479,1025 @@ questions:
       Asked in English against configuration rather than code. Both answers are
       right — the same setting is written twice in two formats — which is the
       case where returning one file and stopping is the wrong answer.
+
+  # ------------------------------------------------------------------
+  # identifier — the asker already knows the term.
+  #
+  # Written against the pinned corpus at `tests/fixtures/retrieval/corpus/`,
+  # which is the 0.21.0 tree. Every line range below was read out of that
+  # snapshot rather than out of the working tree, and every span covers a whole
+  # definition — the constant with its doc comment, or the function with its.
+  #
+  # These deliberately avoid `store.rs`, `lib.rs` and `graph.rs`, which the
+  # existing set already leans on. The point of that is not fairness to files:
+  # a ranking that is good at the three files every seed question lives in and
+  # bad at `filter.rs`, `http.rs` and `formats.rs` would score well here and be
+  # useless in a repository shaped differently.
+  # ------------------------------------------------------------------
+
+  - id: id-key-grace
+    shape: identifier
+    tool: search
+    query: KEY_GRACE
+    grep: grep -rn 'KEY_GRACE' src
+    spans:
+      - path: src/http.rs
+        symbol: KEY_GRACE
+        start_line: 346
+        end_line: 353
+    note: >-
+      The span starts at the doc comment, which is where the answer is: the
+      constant is fifteen minutes and the four lines above it say why it is not
+      "until the process exits". One definition in the crate and one use, so
+      there is no collision to excuse a miss.
+
+  - id: id-denied-dirs
+    shape: identifier
+    tool: search
+    query: DENIED_DIRS
+    grep: grep -rn 'DENIED_DIRS' src
+    spans:
+      - path: src/filter.rs
+        symbol: DENIED_DIRS
+        start_line: 392
+        end_line: 410
+    note: >-
+      The list itself, from its doc comment through the closing bracket. The
+      sibling `DENIED_NAMES` starts at 412 and is deliberately outside the span:
+      it answers a different question and a span covering both would make a hit
+      anywhere in the deny-list section count.
+
+  - id: id-shard-vectors
+    shape: identifier
+    tool: search
+    query: SHARD_VECTORS
+    grep: grep -rn 'SHARD_VECTORS' src
+    spans:
+      - path: src/index.rs
+        symbol: SHARD_VECTORS
+        start_line: 46
+        end_line: 54
+    note: >-
+      The constant and the paragraph that justifies 65536. `SHARD_VECTORS_ENV`
+      at 61 is a near-identical token and is not in the span, so a hit on the
+      override rather than the value does not score — which is the distinction
+      worth measuring for a name that appears twice in nine lines.
+
+  - id: id-max-pixels
+    shape: identifier
+    tool: search
+    query: MAX_PIXELS
+    grep: grep -rn 'MAX_PIXELS' src
+    spans:
+      - path: src/image.rs
+        symbol: MAX_PIXELS
+        start_line: 117
+        end_line: 124
+    note: >-
+      A decompression-bomb bound, in a file the existing set touches only for
+      `embed_query` and `is_image`. The doc comment is the answer to "why 64
+      megapixels", so the span begins there.
+
+  - id: id-agent-key-prefix
+    shape: identifier
+    tool: search
+    query: AGENT_KEY_PREFIX
+    grep: grep -rn 'AGENT_KEY_PREFIX' src
+    spans:
+      - path: src/home.rs
+        symbol: AGENT_KEY_PREFIX
+        start_line: 226
+        end_line: 228
+    note: >-
+      Three lines, which is the whole definition — a two-line doc comment and
+      the constant. Nothing wider is honest here: `agent_key_path` above it and
+      `agent_key` below it are different questions, and folding either in would
+      let a hit on the key-creation logic count as an answer about the prefix.
+
+  - id: id-granite-revision
+    shape: identifier
+    tool: search
+    query: GRANITE_REVISION
+    grep: grep -rn 'GRANITE_REVISION' src
+    spans:
+      - path: src/embed.rs
+        symbol: GRANITE_REVISION
+        start_line: 539
+        end_line: 546
+    note: >-
+      The pinned commit and the reason it is pinned. `GRANITE_FILES` at 553
+      references it in its own doc comment, so the term appears twice within
+      fifteen lines; the span is the definition only.
+
+  - id: id-call-timeout
+    shape: identifier
+    tool: search
+    query: CALL_TIMEOUT
+    grep: grep -rn 'CALL_TIMEOUT' src
+    spans:
+      - path: src/proxy.rs
+        symbol: CALL_TIMEOUT
+        start_line: 26
+        end_line: 29
+    note: >-
+      `proxy.rs` is 268 lines and nothing in the existing set reaches it. The
+      constant sits four lines from the top of the file after the imports, which
+      makes it a fair test of whether a small file's head is reachable at all.
+
+  - id: id-min-entropy
+    shape: identifier
+    tool: search
+    query: MIN_ENTROPY
+    grep: grep -rn 'MIN_ENTROPY' src
+    spans:
+      - path: src/filter.rs
+        symbol: MIN_ENTROPY
+        start_line: 995
+        end_line: 1000
+    note: >-
+      The threshold and the two measured numbers either side of it. The one use
+      is inside `scan_text` at 1061, which `path-scan-text-to-entropy` covers;
+      listing that function here too would make any hit in the credential
+      scanner count for an identifier question.
+
+  - id: id-read-negotiate
+    shape: identifier
+    tool: read
+    target: negotiate
+    spans:
+      - path: src/mcp.rs
+        symbol: negotiate
+        start_line: 361
+        end_line: 376
+    note: >-
+      Sixteen lines asked by name out of a 1772-line file, which is the claim
+      `read` makes: one span, not one file. `negotiate` has exactly one
+      definition in the crate.
+
+  - id: id-read-is-public
+    shape: identifier
+    tool: read
+    target: is_public
+    spans:
+      - path: src/add.rs
+        symbol: is_public
+        start_line: 217
+        end_line: 256
+    note: >-
+      A function that recurses into itself at 253 for the IPv4-mapped case, so
+      the name appears inside its own body. The span is the definition with its
+      doc comment, from 217.
+
+  - id: id-read-glob-match
+    shape: identifier
+    tool: read
+    target: glob_match
+    spans:
+      - path: src/filter.rs
+        symbol: glob_match
+        start_line: 540
+        end_line: 579
+    note: >-
+      Read by name, where `id-neighbors-glob-match` asks the same file for the
+      same symbol's callers. The pair is the control the existing set builds
+      around `edges_out`: same subject, two surfaces, so a difference in the
+      answers is a difference in the surfaces.
+
+  - id: id-read-describe-holder
+    shape: identifier
+    tool: read
+    target: describe_holder
+    spans:
+      - path: src/lock.rs
+        symbol: describe_holder
+        start_line: 111
+        end_line: 117
+    note: >-
+      A private function with no doc comment at all, which is the case the
+      symbol-first readers are most likely to miss: there is no prose in it and
+      the only English is inside a `format!`.
+
+  - id: id-read-zip-entry-by-line
+    shape: identifier
+    tool: read
+    target: src/formats.rs:283-304
+    spans:
+      - path: src/formats.rs
+        symbol: entry
+        start_line: 283
+        end_line: 304
+    note: >-
+      The line-range form, the exact string a `locate` reply hands an agent to
+      copy. `entry` is also the name of a test helper in `src/home.rs`, so this
+      is the same subject `multihop-entry-two-definitions` asks about by symbol
+      — here the range removes the ambiguity and there it is the whole question.
+
+  - id: id-read-write-private
+    shape: identifier
+    tool: read
+    target: write_private
+    spans:
+      - path: src/home.rs
+        symbol: write_private
+        start_line: 402
+        end_line: 423
+    note: >-
+      Asked by name. The span runs from the doc comment, which carries the
+      reasoning — the mode is set at creation rather than after — through the
+      `tighten_file` call that narrows a file an older release left loose.
+
+  - id: id-symbol-max-archive-text
+    shape: identifier
+    tool: symbol
+    name: MAX_ARCHIVE_TEXT
+    grep: grep -rn 'MAX_ARCHIVE_TEXT' src
+    spans:
+      - path: src/formats.rs
+        symbol: MAX_ARCHIVE_TEXT
+        start_line: 27
+        end_line: 35
+    note: >-
+      A `pub(crate)` constant rather than a function, asked through `symbol`.
+      Included because nothing in the existing set asks `symbol` about anything
+      that is not a function, and a definition extractor that only records
+      callables would fail this and pass every other symbol question here.
+
+  - id: id-symbol-resident-bytes
+    shape: identifier
+    tool: symbol
+    name: resident_bytes
+    grep: grep -rn 'fn resident_bytes' src
+    spans:
+      - path: src/index.rs
+        symbol: resident_bytes
+        start_line: 102
+        end_line: 113
+    note: >-
+      One definition, public, with the arithmetic that the doc comment above it
+      explains term by term. The span starts at that comment because the answer
+      to "what does a vector cost" is the list of five things, not the
+      multiplication on 112.
+
+  - id: id-neighbors-glob-match
+    shape: identifier
+    tool: neighbors
+    name: glob_match
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'glob_match(' src
+    spans:
+      - path: src/filter.rs
+        symbol: denied_against
+        start_line: 501
+        end_line: 538
+    note: >-
+      Exactly one production caller, verified by grepping every occurrence of
+      `glob_match(` in `src`: the loop at 530 inside `denied_against`. The other
+      nine occurrences are all in `filter.rs`'s own unit test at 641 onwards,
+      which are correct callers and which a tool listing them is not wrong
+      about; the hit is scored on the production one.
+
+  - id: id-neighbors-require-public
+    shape: identifier
+    tool: neighbors
+    name: require_public
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'require_public' src
+    spans:
+      - path: src/add.rs
+        symbol: get
+        start_line: 258
+        end_line: 332
+    note: >-
+      One caller, called twice — `get` at 272 for the first hop and again at 289
+      for each redirect, which is the point the function's doc comment makes.
+      A caller set of one function and two call sites is the useful control
+      against `id-neighbors-glob-match`, where the set is one of each.
+
+  # ------------------------------------------------------------------
+  # concept — the asker knows the idea and not the name.
+  #
+  # Each query below is written the way somebody who has never read this
+  # repository would ask it, and the span is the code or the doc page that
+  # genuinely answers it rather than the one that shares the most words with it.
+  # Where a doc page is the better answer it is listed first, and where the doc
+  # and the code both answer they are alternatives.
+  # ------------------------------------------------------------------
+
+  - id: concept-no-cookie
+    shape: concept
+    tool: search
+    query: why does the web page send a header instead of setting a cookie
+    prefer: docs
+    spans:
+      - path: docs/portal.md
+        symbol: ~
+        start_line: 41
+        end_line: 67
+    note: >-
+      The doc is the answer and the code is not: the reasoning is that every
+      port on localhost is one site to a browser, so `SameSite=Strict` would not
+      separate this daemon from anything else on 127.0.0.1. Nothing in `src/`
+      states that — the code's contribution is an absence, which is unsearchable
+      — so this question has one span and it is prose.
+
+  - id: concept-private-address-fetch
+    shape: concept
+    tool: search
+    query: what stops a fetched url from reaching a service only my machine can see
+    spans:
+      - path: src/add.rs
+        symbol: require_public
+        start_line: 169
+        end_line: 215
+    note: >-
+      The SSRF guard. `is_public` at 217 is the predicate and `require_public`
+      is the rule, and the rule is what the question asks: it is the function
+      that resolves the host, checks every address the name resolves to, and
+      says so per redirect hop. The doc comment above it is where the reasoning
+      about a 302 to 169.254.169.254 lives.
+
+  - id: concept-plain-http-refused
+    shape: concept
+    tool: search
+    query: why is a plain http url refused instead of being upgraded to https
+    spans:
+      - path: src/add.rs
+        symbol: require_https
+        start_line: 136
+        end_line: 154
+    note: >-
+      The answer is entirely in the doc comment at 136-141 — silently rewriting
+      a URL means the thing fetched is not the thing asked for. The span runs
+      through the body because the `SEMLITH_ADD_ORIGIN` escape hatch at 146 is
+      part of the true answer to "is it always refused".
+
+  - id: concept-zip-expansion-budget
+    shape: concept
+    tool: search
+    query: how much can a compressed document expand to before it is refused
+    spans:
+      - path: src/formats.rs
+        symbol: entry
+        start_line: 283
+        end_line: 304
+      - path: src/formats.rs
+        symbol: MAX_ARCHIVE_TEXT
+        start_line: 27
+        end_line: 35
+    note: >-
+      Two spans because the mechanism genuinely is two things: the number, and
+      the per-archive budget that is spent down entry by entry so a document
+      cannot get around the cap with a thousand entries just under it. The
+      `entry` span is listed first because the declared size at 292 and the
+      bounded read at 298 are what actually refuses a bomb.
+
+  - id: concept-model-digest-check
+    shape: concept
+    tool: search
+    query: how do I know the model weights that were downloaded are the ones semlith expects
+    prefer: any
+    spans:
+      - path: src/embed.rs
+        symbol: verify
+        start_line: 669
+        end_line: 683
+      - path: docs/models.md
+        symbol: ~
+        start_line: 77
+        end_line: 90
+    note: >-
+      The code half is `verify`, which compares a SHA-256 against the pinned
+      table and whose error text tells the reader what to do about a mismatch.
+      The doc half is the section that shows the two commands for checking the
+      same digest against Hugging Face without reading any of this code, which
+      is a genuine second answer to "how do I know" rather than an essay about
+      the first.
+
+  - id: concept-airgap
+    shape: concept
+    tool: search
+    query: how do I stop it from reaching the network at all
+    spans:
+      - path: src/embed.rs
+        symbol: airgap
+        start_line: 355
+        end_line: 360
+      - path: src/embed.rs
+        symbol: refuse_if_airgapped
+        start_line: 368
+        end_line: 391
+    note: >-
+      `airgap` is the predicate and `refuse_if_airgapped` is the refusal, and
+      which one answers depends on whether the asker wants the switch or the
+      behaviour. Both are listed. Note that the doc comment immediately above
+      `refuse_if_airgapped` at 362-367 belongs to a different function and is
+      stale in the snapshot; the span starts at 368, where the comment that
+      really describes this function begins.
+
+  - id: concept-home-not-set
+    shape: concept
+    tool: search
+    query: where does it look for my home directory when the environment does not say
+    spans:
+      - path: src/home.rs
+        symbol: user_home
+        start_line: 38
+        end_line: 80
+    note: >-
+      One function, and the file's own invariant is that it is the only place in
+      `src/` that reads `HOME`. The span covers the doc comment, which states
+      the resolution order and says there is deliberately no variant that
+      returns a path when it does not know one — that last sentence is the
+      actual answer to the question as asked.
+
+  - id: concept-shard-size
+    shape: concept
+    tool: search
+    query: what decides how many vectors end up in one shard
+    spans:
+      - path: src/index.rs
+        symbol: SHARD_VECTORS
+        start_line: 46
+        end_line: 54
+      - path: src/index.rs
+        symbol: shard_capacity
+        start_line: 68
+        end_line: 74
+    note: >-
+      The constant answers "how many" and `shard_capacity` answers "what
+      decides", because the environment override is the part a reader does not
+      know to look for. Asked in English, where `id-shard-vectors` asks for the
+      same constant by name — the pair is the cost comparison the report is
+      built on.
+
+  - id: concept-vector-memory-budget
+    shape: concept
+    tool: search
+    query: how much memory may a store's vectors take up at once
+    spans:
+      - path: src/index.rs
+        symbol: INDEX_MEMORY_MB
+        start_line: 76
+        end_line: 100
+    note: >-
+      A wider span than most here, and deliberately: the answer is the 512 MB
+      default, the environment override and `index_budget_bytes`, which are
+      three consecutive definitions saying one thing. `resident_bytes` at 102 is
+      what a vector costs, not what the budget is, so it is left out and carries
+      its own question.
+
+  - id: concept-unsupported-protocol-version
+    shape: concept
+    tool: search
+    query: what happens when a client asks for a protocol revision this server does not implement
+    spans:
+      - path: src/mcp.rs
+        symbol: negotiate
+        start_line: 361
+        end_line: 376
+    note: >-
+      The doc comment states the rule — a server that echoes what it was asked
+      claims every revision that exists — and the body implements it by falling
+      back to `LEGACY_NEWEST`. The error path for a *modern* client naming an
+      unknown version is separate, at 284-300, and is not spanned: it is the
+      answer to a narrower question and including it would make a hit anywhere
+      in the request preamble count.
+
+  - id: concept-connection-cap
+    shape: concept
+    tool: search
+    query: how many connections will the local server hold open at once
+    spans:
+      - path: src/http.rs
+        symbol: MAX_CONNECTIONS
+        start_line: 119
+        end_line: 127
+    note: >-
+      `WORKERS` at 97 is the nearer-sounding answer and is the wrong one: eight
+      is the number of threads, thirty-two is the number of connections, and the
+      doc comment on `MAX_CONNECTIONS` is explicit that the cap covers workers,
+      the waiting room and departed streams together. A hit on `WORKERS` does
+      not score.
+
+  - id: concept-slow-refusal
+    shape: concept
+    tool: search
+    query: why does a request with the wrong token take so long to be refused
+    spans:
+      - path: src/http.rs
+        symbol: charge
+        start_line: 1167
+        end_line: 1193
+    note: >-
+      The three constants and the `charge` method that reads them are one
+      answer: 250 ms, doubling every twenty refusals in a minute, capped at four
+      seconds. The span starts at `REFUSAL_DELAY` rather than at `impl Penalty`
+      because the numbers are the answer and the arithmetic at 1190 is
+      unreadable without them.
+
+  - id: concept-find-running-daemon
+    shape: concept
+    tool: search
+    query: how does a second process find out that one is already running for this store
+    spans:
+      - path: src/proxy.rs
+        symbol: find
+        start_line: 43
+        end_line: 72
+      - path: src/daemon.rs
+        symbol: DISCOVERY_FILE
+        start_line: 37
+        end_line: 42
+    note: >-
+      `proxy::find` is the mechanism — read the discovery file, probe the port,
+      fall through to opening the store directly — and `DISCOVERY_FILE` is the
+      file it reads, whose doc comment says why it sits beside the lock rather
+      than in the home. Either is a fair answer. `find` is an extremely common
+      name, which is part of what makes this worth measuring.
+
+  - id: concept-watcher-batch-admissible
+    shape: concept
+    tool: search
+    query: how does the watcher decide which changed paths are worth re-indexing
+    spans:
+      - path: src/watch.rs
+        symbol: admissible
+        start_line: 289
+        end_line: 308
+    note: >-
+      The filter, including the half a reader would not guess: a deleted file
+      has no walk entry and still has to be passed through, which is why the
+      function returns early when every path in the batch is gone. The doc
+      comment carries a `ponytail:` note naming the cost of the per-batch walk,
+      which is part of the honest answer.
+
+  - id: concept-binary-file-skipped
+    shape: concept
+    tool: search
+    query: how does it decide a file is binary and skip it
+    spans:
+      - path: src/chunk.rs
+        symbol: is_binary
+        start_line: 119
+        end_line: 122
+      - path: src/chunk.rs
+        symbol: extract
+        start_line: 30
+        end_line: 67
+    note: >-
+      `is_binary` is four lines — a NUL byte in the first 8 KiB, the same
+      heuristic git uses — and on its own it is an incomplete answer, because
+      the ordering is what matters: `extract` dispatches on the extension
+      *before* the binary check, which is the only reason a `.docx` is readable
+      at all. Both spans are listed and the wider one carries the reasoning.
+
+  - id: concept-client-stanzas-source
+    shape: concept
+    tool: search
+    query: where does the text of each client's setup snippet actually come from
+    spans:
+      - path: src/clients.rs
+        symbol: ~
+        start_line: 1
+        end_line: 20
+    note: >-
+      The module comment and the `include_str!` under it, which is the whole
+      answer: `docs/clients.md` is the source and the Rust side parses it at
+      compile time so the portal, the test and the doc cannot drift. The span
+      has no enclosing definition, hence `symbol: ~`. `AGENTS.md` says the same
+      thing at 551-553 and is not listed, because a question about where text
+      comes from should be answered by the file that holds the `include_str!`.
+
+  - id: concept-unregisterable-clients
+    shape: concept
+    tool: search
+    query: which agent clients cannot be set up automatically and why not
+    spans:
+      - path: src/clients.rs
+        symbol: UNREGISTERABLE
+        start_line: 247
+        end_line: 257
+    note: >-
+      Three names and a paragraph saying that this is a decision rather than a
+      gap — two document only a project-level file, and writing semlith into a
+      committed repository config is the defect the release was about. The doc
+      comment is nine of the eleven lines, which is why the span starts there.
+
+  - id: concept-token-count-no-model
+    shape: concept
+    tool: search
+    query: how are the tokens counted when no embedding model has been loaded
+    spans:
+      - path: src/ledger.rs
+        symbol: Counter
+        start_line: 44
+        end_line: 63
+      - path: src/ledger.rs
+        symbol: CHARS4
+        start_line: 19
+        end_line: 23
+    note: >-
+      `estimate` is the four-characters-to-a-token rule and `Counter` is the
+      choice between it and the real tokenizer; the span covers both because
+      they sit together and neither answers alone. `CHARS4` is the label written
+      onto the row, which is what makes two rows counted different ways never
+      get summed — a second, narrower answer to the same question.
+
+  - id: concept-owner-only-modes
+    shape: concept
+    tool: search
+    query: what does it check about the permissions on the files it wrote
+    spans:
+      - path: src/doctor.rs
+        symbol: OWNER_ONLY
+        start_line: 101
+        end_line: 108
+    note: >-
+      `OWNER_ONLY` is the mode bits that must be clear and `MODES` is the
+      platform question sitting immediately under it, which is why one span
+      covers both: on Windows the two rules that are readings of a file mode are
+      reported as not applicable rather than as passing, and an answer that
+      omits that is wrong on a third of the platforms.
+
+  - id: concept-unsafe-table
+    shape: concept
+    tool: search
+    query: where is every unsafe block in this codebase listed with its justification
+    prefer: docs
+    spans:
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 589
+        end_line: 611
+    note: >-
+      A table, which is a shape most of this corpus does not contain. The answer
+      is the whole section: the rule that adding a site means adding a row, the
+      eleven rows, and the closing claim that none is on a per-file or
+      per-request path.
+
+  - id: concept-portal-parity
+    shape: concept
+    tool: search
+    query: when is a new command considered finished in this project
+    prefer: docs
+    spans:
+      - path: AGENTS.md
+        symbol: ~
+        start_line: 535
+        end_line: 555
+    note: >-
+      A convention rather than a mechanism, and the kind of question an agent
+      dropped into a repository asks first. The section states the rule, what
+      counts as a view, where a deliberate exemption has to be argued, and which
+      test is the gate.
+
+  - id: concept-sharding-recall-cost
+    shape: concept
+    tool: search
+    query: how much worse are the results when a store is split into shards
+    prefer: docs
+    spans:
+      - path: docs/performance.md
+        symbol: ~
+        start_line: 91
+        end_line: 103
+    note: >-
+      A measured number with its variance and the reason for the variance —
+      ONNX Runtime reduces across threads in completion order, so the same
+      question does not embed to the same vector twice. No code says this;
+      `index.rs` holds the shard size and not its cost. One span, prose.
+
+  # ------------------------------------------------------------------
+  # multi-hop — questions only the graph answers.
+  #
+  # Every `connected: true` below was traced by reading each call site in the
+  # source, and the chain is written into the note so it can be re-checked
+  # without re-deriving it. Both `connected: false` questions have a `from` that
+  # calls nothing defined in this crate at all, which was established by reading
+  # the whole body rather than by failing to find a chain with a tool.
+  # ------------------------------------------------------------------
+
+  - id: path-scan-text-to-entropy
+    shape: multi-hop
+    tool: path
+    from: scan_text
+    to: entropy
+    depth: 6
+    connected: true
+    hops: 1
+    grep: grep -n 'entropy(' src/filter.rs
+    spans:
+      - path: src/filter.rs
+        symbol: scan_text
+        start_line: 1040
+        end_line: 1073
+    note: >-
+      One hop, read at the call site: `scan_text` at 1047 calls `entropy` at
+      1061, inside the `&&` chain that decides whether a generic assignment is a
+      credential. Both names have exactly one definition in the crate —
+      `entropy` at 1104 and `scan_text` at 1047 — so neither endpoint is
+      ambiguous and the chain cannot be welded at a seam. Only the `from` span
+      is listed; `entropy`'s definition is in the same file and the file is
+      already at its span budget for this draft.
+
+  - id: path-denied-to-glob-match
+    shape: multi-hop
+    tool: path
+    from: denied
+    to: glob_match
+    depth: 6
+    connected: true
+    hops: 2
+    grep: grep -n 'denied_against\|glob_match(' src/filter.rs
+    spans:
+      - path: src/filter.rs
+        symbol: denied
+        start_line: 490
+        end_line: 499
+    note: >-
+      Two hops, both read: `denied` at 496 calls `denied_against` at 498, and
+      `denied_against` calls `glob_match` at 530 inside the `DENIED_NAMES` loop.
+      Each of the three names has one definition in `src/`. The indirection is
+      the whole point of the question — `denied` never mentions `glob_match`, so
+      a grep for one from the other returns nothing and the two hops are the
+      only way to connect them.
+
+  - id: path-refuse-airgapped-to-airgap
+    shape: multi-hop
+    tool: path
+    from: refuse_if_airgapped
+    to: airgap
+    depth: 6
+    connected: true
+    hops: 1
+    grep: grep -n 'fn airgap\|airgap()' src/embed.rs
+    spans:
+      - path: src/embed.rs
+        symbol: refuse_if_airgapped
+        start_line: 368
+        end_line: 391
+      - path: src/embed.rs
+        symbol: airgap
+        start_line: 355
+        end_line: 360
+    note: >-
+      One hop: `refuse_if_airgapped` at 380 calls `airgap()` at 382, thirteen
+      lines below `airgap`'s own definition. A short chain in a file the
+      existing set does not touch, chosen as the easy control against the
+      two-hop questions — if this one is not found, the failure is not about
+      chain length.
+
+  - id: path-agent-key-path-to-user-home
+    shape: multi-hop
+    tool: path
+    from: agent_key_path
+    to: user_home
+    depth: 6
+    connected: true
+    hops: 2
+    grep: grep -n 'fn agent_key_path\|home_or_error\|fn user_home' src/home.rs
+    spans:
+      - path: src/home.rs
+        symbol: agent_key_path
+        start_line: 216
+        end_line: 224
+      - path: src/home.rs
+        symbol: home_or_error
+        start_line: 82
+        end_line: 93
+    note: >-
+      Two hops inside one file, read at both sites: `agent_key_path` at 223
+      calls `home_or_error`, and `home_or_error` at 92 calls `user_home`. All
+      three names have one definition each in `src/`. Same file throughout,
+      which is the variable this pairs against `path-denied-to-glob-match`: if
+      one is found and the other is not, the difference is not file distance.
+
+  - id: path-is-binary-to-scan-text
+    shape: multi-hop
+    tool: path
+    from: is_binary
+    to: scan_text
+    depth: 6
+    connected: false
+    grep: grep -rn 'fn is_binary' src
+    spans:
+      - path: src/chunk.rs
+        symbol: is_binary
+        start_line: 119
+        end_line: 122
+    note: >-
+      A deliberate trap rather than an arbitrary pair. Both ends are rules about
+      refusing a file's contents and they run within a few lines of each other
+      in the index loop, so the two read as though one must call the other —
+      they do not. `is_binary` is three lines and its whole body is
+      `bytes.iter().take(8192).any(...)`: `iter`, `take` and `any` are inherent
+      iterator methods and none of the three is defined in this crate, so
+      `is_binary` has no outgoing call to anything here. Checked by reading the
+      body at 120-122, not by failing to find a chain.
+
+  - id: path-negotiate-to-edges-out
+    shape: multi-hop
+    tool: path
+    from: negotiate
+    to: edges_out
+    depth: 6
+    connected: false
+    grep: grep -rn 'fn negotiate' src
+    spans:
+      - path: src/mcp.rs
+        symbol: negotiate
+        start_line: 361
+        end_line: 376
+    note: >-
+      The second half of the wrong-yes gate, and the one with a real seam to
+      walk through. `negotiate`'s body is `SUPPORTED.iter().find(...).copied()
+      .unwrap_or(LEGACY_NEWEST)` — four method calls, none of them a function
+      defined here. But `find` *is* a name this crate defines, at
+      `src/proxy.rs:48`, and `proxy::find` reaches a chain of its own through
+      `Upstream::alive` and `request`. A traversal over collapsed names
+      therefore has somewhere to go from a leaf that calls nothing, which is
+      exactly the failure mode `docs/graph-path-inferred-edges.md` describes.
+      The true answer is no: read at 367-376, `negotiate` calls nothing in this
+      crate, so no chain to `edges_out` or to anything else exists.
+
+  - id: multihop-resolve-four-definitions
+    shape: multi-hop
+    tool: symbol
+    name: resolve
+    grep: grep -rn 'fn resolve' src
+    spans:
+      - path: src/watch.rs
+        symbol: resolve
+        start_line: 310
+        end_line: 321
+      - path: src/clientfile.rs
+        symbol: resolve
+        start_line: 166
+        end_line: 191
+      - path: src/home.rs
+        symbol: resolve
+        start_line: 730
+        end_line: 793
+      - path: src/store.rs
+        symbol: resolve
+        start_line: 1252
+        end_line: 1350
+    note: >-
+      `resolve` has four definitions in `src/` and they are four unrelated
+      things: canonicalizing a watcher event path (`watch.rs:313`), expanding a
+      `path=` attribute in a client stanza (`clientfile.rs:173`), picking which
+      store a command acts on (`home.rs:730`), and grouping graph edge rows back
+      into edges (`store.rs:1252`). All four are spanned. Two of them were left
+      out of the first draft under a per-file span budget, which is a
+      housekeeping rule and not a rule about truth: any one of a question's
+      spans counts as a hit, so an unspanned correct definition is a right
+      answer scored as a miss. What is measured is whether `symbol` returns
+      definitions at all for a name this ambiguous, or collapses them into one.
+
+  - id: multihop-entry-two-definitions
+    shape: multi-hop
+    tool: symbol
+    name: entry
+    grep: grep -rn 'fn entry' src
+    spans:
+      - path: src/formats.rs
+        symbol: entry
+        start_line: 283
+        end_line: 304
+      - path: src/home.rs
+        symbol: entry
+        start_line: 1130
+        end_line: 1136
+    note: >-
+      Two definitions, both spanned: the ZIP reader at `formats.rs:287` and a
+      test helper building a registry `Entry` at `home.rs:1130`. The second was
+      left out of the first draft under a per-file span budget and put back,
+      because a tool that returns it is right and a question that scores a right
+      answer as a miss is measuring itself. `entry` is also a `HashMap` method used in `filter.rs`'s
+      `entropy`, which is the false edge this name attracts.
+
+  - id: multihop-scan-text-callers
+    shape: multi-hop
+    tool: neighbors
+    name: scan_text
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'scan_text' src tests
+    spans:
+      - path: tests/scan.rs
+        symbol: every_shape_matches_its_example_and_not_its_near_miss
+        start_line: 71
+        end_line: 95
+      - path: tests/scan.rs
+        symbol: the_finding_names_the_line
+        start_line: 111
+        end_line: 118
+      - path: src/lib.rs
+        symbol: index_set_writing
+        start_line: 1340
+        end_line: 1913
+    note: >-
+      Verified by grepping every occurrence in `src` and `tests`. Three callers,
+      all three spanned: two production call sites inside
+      `Store::index_set_writing` (1719 for a file being indexed, 2312 for one
+      being re-checked) and two tests. The production span covers the whole
+      570-line function, which is what the span rule calls a span — and here it
+      costs nothing, because `neighbors` is scored on the caller's own symbol
+      row rather than on a chunk that landed inside it. Leaving it out was the
+      real risk: a tool naming only the production caller, which is a right
+      answer, would have scored as a miss.
+
+  - id: multihop-user-home-callers
+    shape: multi-hop
+    tool: neighbors
+    name: user_home
+    kinds: [calls]
+    want: callers
+    grep: grep -rn 'user_home()' src
+    spans:
+      - path: src/clientfile.rs
+        symbol: resolve
+        start_line: 166
+        end_line: 191
+      - path: src/doctor.rs
+        symbol: claude_config_path
+        start_line: 1143
+        end_line: 1145
+      - path: src/doctor.rs
+        symbol: launches
+        start_line: 1394
+        end_line: 1443
+      - path: src/filter.rs
+        symbol: a_store_with_roots_is_confined_to_them
+        start_line: 808
+        end_line: 834
+      - path: src/filter.rs
+        symbol: denied
+        start_line: 496
+        end_line: 499
+      - path: src/filter.rs
+        symbol: within_boundary
+        start_line: 589
+        end_line: 605
+      - path: src/home.rs
+        symbol: home_or_error
+        start_line: 82
+        end_line: 93
+      - path: src/lib.rs
+        symbol: index_set_writing
+        start_line: 1340
+        end_line: 1913
+      - path: src/lib.rs
+        symbol: model_cache_dir
+        start_line: 3126
+        end_line: 3134
+      - path: src/lib.rs
+        symbol: scan
+        start_line: 2281
+        end_line: 2320
+      - path: src/routes.rs
+        symbol: dirs
+        start_line: 944
+        end_line: 1023
+      - path: src/routes.rs
+        symbol: projects
+        start_line: 1911
+        end_line: 1974
+      - path: src/service.rs
+        symbol: a_binary_in_a_privacy_gated_directory_is_refused_rather_than_hung
+        start_line: 601
+        end_line: 615
+      - path: src/service.rs
+        symbol: plist_path
+        start_line: 121
+        end_line: 126
+      - path: src/service.rs
+        symbol: tcc_guarded
+        start_line: 527
+        end_line: 545
+      - path: src/service.rs
+        symbol: unit_path
+        start_line: 249
+        end_line: 255
+      - path: src/setup.rs
+        symbol: client_configs
+        start_line: 1231
+        end_line: 1297
+      - path: src/setup.rs
+        symbol: rc_file
+        start_line: 301
+        end_line: 321
+    note: >-
+      The wide-caller-set control against `id-neighbors-glob-match`, which has
+      one. Every one of the eighteen callers is spanned, enumerated by walking
+      each `user_home()` occurrence in `corpus/src` back to its enclosing
+      definition; `user_home`'s own signature is not a call and is not among
+      them. The first draft spanned two of the eighteen and said in its note
+      that the other sixteen were also correct — which would have scored a right
+      answer as a miss sixteen times out of eighteen, since the scoring is the
+      rank of the first *spanned* caller and not of the first correct one.
+      Completing the ground truth makes this a capability question rather than a
+      ranking one: it asks whether a caller set this large comes back at all,
+      which is what its note always claimed it asked.
