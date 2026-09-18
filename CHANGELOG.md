@@ -24,10 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seeded and stratified by shape and tool, and the sealed thirty are scored once
   at completion, behind `SEMLITH_RETRIEVAL_SEALED`; the harness prints which set
   it is scoring on its first line.
-- **Every figure is the median of five runs, with the spread beside it,** and a
+- **Every figure is the median of three runs, with the spread beside it,** and a
   run is an index and a scoring rather than a second scoring of one store. The
-  drift issue #88 records was at index time, so five scorings of one store are
-  one run reported five times. `symbol` and `neighbors` questions are scored
+  drift issue #88 records was at index time, so three scorings of one store are
+  one run reported three times. `symbol` and `neighbors` questions are scored
   rather than skipped.
 
 ### Retrieval
