@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-18
+
+Retrieval was measured by an instrument that could not measure it. This release
+rebuilt the instrument first, and only then moved the number — which is why the
+figures below are lower than the ones it replaces and mean more.
+
+**The gate this release was specified against is not met.** It asked for hit@8
+at 95 %, hit@3 at 85 % and hit@1 at 70 % on a sealed question set. What ships is
+hit@1 56 %, hit@3 66 %, hit@8 73 % on those thirty sealed questions, scored once
+by this binary at the end. On the seventy-seven the work was tuned against, the
+same binary scores 68 / 79 / 87 where 0.21.0 scored 62 / 72 / 84 on the same
+corpus through the same instrument. The gap between the two sets is what tuning
+against a visible set is worth, and it is stated rather than chosen between. The
+gate moves to the next release rather than being restated as met, and what
+stands in its way is named on the performance page.
+
 ### The measuring stick, before the ranking work
 
 - **The retrieval harness indexes a pinned corpus, not the working tree.**

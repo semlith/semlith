@@ -240,15 +240,31 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
     // The gate itself, scored once, on the sealed thirty, by the binary the
     // release ships. Below it there is no release.
     if sealed {
+        // Every depth, then one failure carrying all of them.
+        //
+        // Asserting depth by depth stops at the first one that falls short and
+        // says nothing about the rest, so a reader learns hit@8 missed and has
+        // to run it again to find out about hit@3 and hit@1. The release record
+        // states the whole distance, and so does this.
         let scored = summary.scored();
+        let mut against_the_gate: Vec<String> = Vec::new();
         for (k, floor) in [(8usize, 95usize), (3, 85), (1, 70)] {
             let hits = summary.median(|r| r.hit_at.get(&k).copied().unwrap_or(0));
             let percent = hits * 100 / scored.max(1);
-            assert!(
-                percent >= floor,
-                "sealed hit@{k} is {hits} of {scored} ({percent}%), and the gate is {floor}%"
-            );
+            let needed = scored * floor / 100 + usize::from(scored * floor % 100 != 0);
+            if percent < floor {
+                against_the_gate.push(format!(
+                    "hit@{k} is {hits} of {scored} ({percent}%), the gate is {floor}% \
+                     ({needed} of {scored}), short by {}",
+                    needed.saturating_sub(hits)
+                ));
+            }
         }
+        assert!(
+            against_the_gate.is_empty(),
+            "the sealed set does not meet the gate:\n    {}",
+            against_the_gate.join("\n    ")
+        );
         let stragglers = summary.identifier_stragglers(&questions, 3);
         assert!(
             stragglers.is_empty(),

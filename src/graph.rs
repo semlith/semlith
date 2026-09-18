@@ -172,6 +172,15 @@ fn supplement(lang: &str) -> &'static str {
     match lang {
         "rust" => {
             r#"
+            ; A `const` or a `static` is a definition an agent types by name,
+            ; and the bundled tags query tags neither. Without a symbol row the
+            ; definition lift in `search_preferring` cannot fire for one, which
+            ; is why `MAX_NODES`, `RRF_K` and `KEY_GRACE` were the identifier
+            ; questions 0.22.0 could not put in the top three while `edges_out`
+            ; and `DEPENDENCY_KINDS` — a function and an array the query does
+            ; tag — sat at rank 1.
+            (const_item name: (identifier) @name) @definition.constant
+            (static_item name: (identifier) @name) @definition.constant
             (use_declaration argument: (_) @reference.import)
             ; `use store::Semlith as Store;` — the alias is a symbol of its own
             ; and the path it stands for is what it reaches. Without the edge a

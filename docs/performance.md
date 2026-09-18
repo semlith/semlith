@@ -169,28 +169,56 @@ oldest distribution the project promises to start on.
 
 ## Retrieval quality
 
-Measured for 0.17.1 over the 57-question harness in
-`tests/fixtures/retrieval/questions.yaml`, which carries ground-truth spans and
-covers identifier-shaped, concept-shaped and multi-hop questions:
+Measured for 0.22.0 over the 107-question harness in
+`tests/fixtures/retrieval/questions.yaml`, against the corpus pinned beside it
+at `tests/fixtures/retrieval/corpus` — the 0.21.0 tree at commit `4e8df39`, 146
+files and 3 119 835 bytes, asserted by file count and byte total on every run:
 
 ```sh
 cargo test --release --test retrieval -- --ignored --nocapture
 ```
 
-| what | measured |
-|---|---|
-| hit@1 | **12** of 47 |
-| hit@3 | **18** of 47 |
-| hit@8 | **26** of 47 |
-| wrong yes, on `path` | **0** — asserted, not reported |
-| call-edge resolution | **67 %** settled, against a 50 % gate |
+The set is split 77 development / 30 sealed by a recorded seed, before the first
+ranking change of the release. Every ranking decision was read off the
+development set; the sealed thirty were scored once, at the end, by the binary
+this release ships. Both are here, and the sealed figures are the ones that
+count.
 
-The denominator is 47 rather than 57 because ten of the questions are about
-chains and costs rather than about a ranked answer. Printing the absolute
-figures rather than percentages is deliberate: the denominator is what makes
-them honest, and a store that answers a quarter of hard questions first try is
-what this is, not what a rounded percentage would let it sound like.
+| what | sealed 30 | development 77 | 0.21.0, same corpus |
+|---|---|---|---|
+| hit@1 | **17** of 30 (56 %) | 53 (68 %) | 48 (62 %) |
+| hit@3 | **20** of 30 (66 %) | 61 (79 %) | 56 (72 %) |
+| hit@8 | **22** of 30 (73 %) | 67 (87 %) | 65 (84 %) |
+| wrong yes, on `path` | **0** — asserted, not reported | 0 | 0 |
+| call-edge resolution | **66 %** settled, against a 50 % gate | | |
 
-A moved number here is a report, never an adjective. `SEMLITH_MEASURE_CORPUS`
-pins the harness to a fixed tree, so a self-editing repository does not move its
-own figures between two runs of the same release.
+Each figure is the median of three runs, and each of those runs is its own index
+of the corpus. The spread was zero on every figure of every configuration this
+release measured.
+
+**The sealed set scores twelve to fourteen points below the development set at
+every depth, and that gap is the point of having one.** The development
+questions are the ones the work was tuned against — the decision to cut Markdown
+at its headings and to leave code alone was made by reading which development
+questions moved — so the development number measures the retrieval and the
+tuning together. The sealed number measures only the retrieval. Thirty questions
+is a small sample and one of them is 3.3 points, which is the honest limit on
+reading it too finely.
+
+0.22.0 was specified against a gate of hit@8 95 %, hit@3 85 %, hit@1 70 %. **It
+does not meet it**, and the gate moves to the next release rather than being
+quietly restated as met. What stands in the way is now named rather than
+guessed: seven concept questions of the development seventy-seven miss at k=8,
+and twenty more are found inside the top eight while sitting outside the top
+three. The second of those is a ranking problem, not a recall one — an A/B
+against a larger, higher-scoring embedding model gained two questions at k=8 and
+exactly none at hit@3.
+
+Two earlier figures on this page and in the README were wrong in the same
+direction, and both are withdrawn. They were taken over a corpus that moved with
+every commit rather than a pinned one; against a question set in which 47 of 92
+spans no longer contained the symbol they named; and by a harness in which no
+`path` question could ever record a hit while still counting in the denominator,
+which capped hit@8 at 87 % by construction. A moved number here is a report,
+never an adjective — and a number taken by a broken instrument is not a report
+at all.
