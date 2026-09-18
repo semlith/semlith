@@ -628,6 +628,13 @@ fn main() -> Result<()> {
             no_service,
         } => {
             arm_airgap(airgap);
+            // The flag or the variable. The installers translate their own
+            // `SEMLITH_NO_SERVICE` into the flag, but `semlith setup` is also
+            // run directly — by a provisioning script, by CI, by the native
+            // smoke harness — and a knob that only works through one of two
+            // entry points is a knob somebody will set and watch do nothing.
+            let no_service =
+                no_service || std::env::var(semlith::setup::NO_SERVICE_ENV).is_ok_and(|v| v == "1");
             semlith::setup::run(yes, airgap, register_all, !no_service)?;
         }
 

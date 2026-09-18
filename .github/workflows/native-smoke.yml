@@ -71,6 +71,14 @@ jobs:
     env:
       SEMLITH_VERSION: ${{ inputs.version }}
       SEMLITH_YES: "1"
+      # The install step runs the real installer, and from 0.21.0 that installs
+      # the daemon as a login service and starts it. That is the feature working
+      # — and it takes port 7365 before `cli/daemon/*` can bind it, so every
+      # daemon check fails on a port the harness took from itself. The harness
+      # installs without one and tests the service in its own block, where
+      # installing a login service is the explicit subject rather than a side
+      # effect of getting semlith onto the runner.
+      SEMLITH_NO_SERVICE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -119,8 +127,11 @@ jobs:
           fi
           "$home/.semlith/bin/$name" --version
           # The rest of what the installer does -- PATH, the model, the client
-          # registration -- run by the binary under test.
-          "$home/.semlith/bin/$name" setup --yes
+          # registration -- run by the binary under test. Explicitly without the
+          # login service: `SEMLITH_NO_SERVICE` above covers it, and saying so
+          # here as well means this line does not depend on a variable set
+          # sixty lines away to avoid taking the port the daemon checks need.
+          "$home/.semlith/bin/$name" setup --yes --no-service
 
       - name: Install the release the way a user does
         if: github.event_name != 'pull_request' && runner.os != 'Windows'

@@ -75,6 +75,12 @@ pub struct Status {
 
 /// The macOS and Linux one-liner. The URL resolves at run time, which is what
 /// lets a fix to the script reach people without a release.
+/// Set to `1` to skip installing the daemon as a login service.
+///
+/// Read by `semlith setup` itself as well as by the two install scripts, so it
+/// works whichever of them a provisioning script reaches for.
+pub const NO_SERVICE_ENV: &str = "SEMLITH_NO_SERVICE";
+
 pub const INSTALL_SH: &str =
     "curl -fsSL https://raw.githubusercontent.com/semlith/semlith/main/install.sh | sh";
 

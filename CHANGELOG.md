@@ -32,8 +32,15 @@ saying so — from every side it can be reached.
   --no-service` removes it and leaves a running daemon and every store exactly
   as they are.
 - `semlith setup` and the installers install it, including where nothing can
-  answer a prompt — a piped installer, CI, `--yes`. `--no-service` opts out. A
-  user who never reads the prompt is the user a login service is for.
+  answer a prompt — a piped installer, CI, `--yes`. A user who never reads the
+  prompt is the user a login service is for. `--no-service` opts out, and so
+  does `SEMLITH_NO_SERVICE=1`, which both install scripts and `semlith setup`
+  itself read — so a provisioning script gets the same answer whichever of them
+  it reaches for. **Installing semlith now starts a daemon**, so anything that
+  wants to run its own should opt out; that is what the harness does.
+- Installing onto a port something already holds registers the service for the
+  next login and leaves the running daemon alone. Starting a second one would
+  lose the bind and exit, and `KeepAlive` would start it again.
 - On macOS, a binary inside `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud
   Drive is refused rather than installed. A launchd agent pointing at one
   installs cleanly, reports a live pid, and then stops inside the dynamic
