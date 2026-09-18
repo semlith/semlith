@@ -1044,6 +1044,25 @@ fn step_service(wanted: bool) -> Result<Step> {
     }
     let target = home::bin_dir()?.join(exe_name());
     let binary = target.exists().then_some(target);
+
+    // `setup` promises to be a no-op once it has run, and says so in its own
+    // last line. Re-bootstrapping a service that is already installed and
+    // already names this binary breaks that promise and restarts a daemon
+    // somebody may be using. The definition is read rather than trusted:
+    // a service still pointing at a binary an upgrade moved is one that has to
+    // be rewritten, which is the case this check must not swallow.
+    let installed = crate::service::status();
+    if installed.installed && names_the_binary(&installed, binary.as_deref()) {
+        return Ok(Step {
+            name: "service",
+            state: State::AlreadyDone,
+            detail: format!(
+                "running from every login ({}) — remove with `semlith start --no-service`",
+                installed.mechanism,
+            ),
+        });
+    }
+
     match crate::service::install(binary.as_deref(), None) {
         Ok(status) if status.installed => Ok(Step {
             name: "service",
@@ -1078,6 +1097,29 @@ fn step_service(wanted: bool) -> Result<Step> {
             detail: format!("{e} — start the daemon with `semlith start`"),
         }),
     }
+}
+
+/// Whether an installed service already points at the binary setup would name.
+///
+/// `false` when there is no definition file to read — Windows registers a task
+/// rather than writing one semlith can inspect — so that platform reinstalls,
+/// which its `/F` makes safe and which is the only way a moved binary gets
+/// picked up there.
+fn names_the_binary(status: &crate::service::Status, binary: Option<&std::path::Path>) -> bool {
+    let Some(definition) = status.definition.as_deref() else {
+        return false;
+    };
+    let Ok(text) = std::fs::read_to_string(definition) else {
+        return false;
+    };
+    let wanted = match binary {
+        Some(path) => path.to_path_buf(),
+        None => match crate::service::exe() {
+            Ok(exe) => exe,
+            Err(_) => return false,
+        },
+    };
+    text.contains(&wanted.to_string_lossy().into_owned())
 }
 
 /// Step 6. Runs the binary that was just installed, not this process, because

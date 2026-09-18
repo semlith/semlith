@@ -857,11 +857,34 @@ c_service_recovers() {
   done
   return 1
 }
-if [ "$service_installed" = "1" ] && [ "$platform" != "windows" ]; then
-  sleep 5
+# Registered is not running. `systemctl --user enable --now` reports success and
+# leaves the unit enabled-but-not-running wherever the user session cannot run
+# one — a container, a runner, a machine with no lingering — and there is
+# nothing for a restart check to restart. That is the session's shape, not
+# semlith's defect, so it is a skip that says why rather than a failure that
+# does not.
+service_running=0
+if [ "$service_installed" = "1" ]; then
+  i=0
+  while [ $i -lt 15 ]; do
+    if pgrep -f 'semlith start' > /dev/null 2>&1; then service_running=1; break; fi
+    sleep 2
+    i=$((i + 1))
+  done
+fi
+
+if [ "$service_running" = "1" ] && [ "$platform" != "windows" ]; then
   check cli/service/recovers "a killed daemon is restarted"  c_service_recovers
 elif [ "$platform" = "windows" ]; then
   skip cli/service/recovers "a logon task does not supervise a clean exit"
+elif [ "$service_installed" = "1" ]; then
+  # Captured, not summarised: the next person reading this log needs the
+  # service manager's own words about why nothing started.
+  case "$platform" in
+    linux) systemctl --user status semlith.service 2>&1 | sed 's/^/           /' | head -12 ;;
+    macos) launchctl print "gui/$(id -u)/com.semlith.daemon" 2>&1 | sed 's/^/           /' | head -12 ;;
+  esac
+  skip cli/service/recovers "the service is registered but no daemon started in this session"
 else
   skip cli/service/recovers "the service did not install"
 fi

@@ -52,6 +52,14 @@ pub struct Status {
 }
 
 impl Status {
+    /// A service that is not there, and the base every platform body builds on.
+    ///
+    /// The three bodies are each compiled on one operating system only, so a
+    /// field added to `Status` and filled in on two of them breaks the third on
+    /// a machine the author cannot run — which is exactly how a Windows-only
+    /// compile error reached CI during this release. Each body now overrides
+    /// what it knows and takes the rest from here, so a new field is additive
+    /// on every platform by construction rather than by remembering.
     fn absent(mechanism: &'static str) -> Self {
         Self {
             installed: false,
@@ -123,11 +131,10 @@ mod platform {
         };
         Status {
             installed: path.is_file(),
-            mechanism: MECHANISM,
             definition: path.is_file().then_some(path),
             log: log_path().ok(),
             restarts: true,
-            started_now: false,
+            ..Status::absent(MECHANISM)
         }
     }
 
@@ -243,11 +250,10 @@ mod platform {
             .unwrap_or(false);
         Status {
             installed: path.is_file() && enabled,
-            mechanism: MECHANISM,
             definition: path.is_file().then_some(path),
             log: log_path().ok(),
             restarts: true,
-            started_now: false,
+            ..Status::absent(MECHANISM)
         }
     }
 
@@ -305,14 +311,13 @@ mod platform {
         let installed = run("schtasks", &["/Query", "/TN", TASK]).is_ok();
         Status {
             installed,
-            mechanism: MECHANISM,
-            definition: None,
             log: log_path().ok(),
-            // A logon task restarts a task that *failed*; it does not supervise
-            // one that ended cleanly, the way launchd's KeepAlive and systemd's
-            // Restart=always do. Said here rather than left for a caller to
-            // assume parity it does not have.
-            restarts: false,
+            // `restarts` and `started_now` are both false here and both come
+            // from `absent`. A logon task restarts a task that *failed*; it
+            // does not supervise one that ended cleanly, the way launchd's
+            // KeepAlive and systemd's Restart=always do — said rather than
+            // left for a caller to assume parity it does not have.
+            ..Status::absent(MECHANISM)
         }
     }
 
@@ -447,8 +452,30 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
         return Ok(status);
     }
     let mut status = platform::install(&exe, port)?;
-    status.started_now = status.installed;
+    // Whether a daemon actually came up, asked rather than assumed. On Linux
+    // `systemctl --user enable --now` reports success and leaves the unit
+    // enabled-but-not-running wherever the user session cannot run one — a
+    // container, a CI runner, a machine with no lingering — and "enabled" is a
+    // statement about the next login, not about now. Reporting that as running
+    // is how a page comes to say semlith is there while nothing answers, which
+    // is the whole of what this release is about.
+    status.started_now = status.installed && waits_for(answering);
     Ok(status)
+}
+
+/// Whether something answers on the port within a few seconds of being asked to.
+///
+/// A service manager returns as soon as it has accepted the job, not when the
+/// job is listening, so a single immediate check would answer "no" on a machine
+/// where everything is fine.
+fn waits_for(port: u16) -> bool {
+    for _ in 0..20 {
+        if already_answering(port) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
 }
 
 /// Whether something is already listening on the daemon's port.
