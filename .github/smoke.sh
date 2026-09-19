@@ -946,15 +946,24 @@ fi
 supervision_facility() {
   case "$platform" in
     macos)
-      # `launchctl managername`, not `launchctl print gui/<uid>`. The GitHub
-      # macOS runner has a gui domain and answers `print` perfectly well — that
-      # was the first version of this probe and it let the recovery check run
-      # and fail there, which is the whole of #104 restated. What it does not
-      # have is an Aqua session, and `managername` is what says so: "Aqua" in a
-      # real login session, "Background" or "StandardIO" otherwise. Without one
-      # launchd loads a user agent, runs it, and never keeps it alive.
+      # Two probes for this were written for 0.22.0 and both were disproved on
+      # the real runner. `launchctl print gui/<uid>` answers there, so the check
+      # ran and failed. `launchctl managername` returns "Aqua" there too, so it
+      # ran and failed again. The GitHub-hosted macOS runner presents every
+      # property a real login session has and still will not bring a killed
+      # agent back.
+      #
+      # So the host is named instead of probed. That is not a proxy for the
+      # facility — it is the one host where the facility's own answers are
+      # known to be wrong, and there is no third property to ask. #104 is closed
+      # as won't-fix on exactly this: measured working in about two seconds on
+      # real hardware, and not demonstrable on a GitHub-hosted runner. The check
+      # still runs everywhere else, including a self-hosted macOS runner and a
+      # developer's laptop, which is where a regression in it would matter.
       name=$(launchctl managername 2>/dev/null || echo unknown)
-      if [ "$name" = "Aqua" ]; then
+      if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
+        echo "launchd: GitHub-hosted macOS runner — reports \"$name\" and still does not keep a user agent alive; not demonstrable here (#104, won't-fix)"
+      elif [ "$name" = "Aqua" ]; then
         echo "launchd: Aqua session, KeepAlive can work"
       else
         echo "launchd: session manager is \"$name\", not Aqua — launchd runs a user agent once here and does not keep it alive"
@@ -979,7 +988,12 @@ supervision_facility() {
 # Zero when this session can actually keep a daemon alive.
 supervision_present() {
   case "$platform" in
-    macos) [ "$(launchctl managername 2>/dev/null)" = "Aqua" ] ;;
+    macos)
+      # A GitHub-hosted runner answers "Aqua" and supervises nothing, so it is
+      # excluded by name. See `supervision_facility` and #104.
+      [ "${RUNNER_ENVIRONMENT:-}" != "github-hosted" ] &&
+        [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]
+      ;;
     linux) systemctl --user show-environment > /dev/null 2>&1 ;;
     *)     return 1 ;;
   esac

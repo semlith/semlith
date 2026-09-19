@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -29,7 +29,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # Already in the tree under fastembed; named here because the agent key must
 # come from the OS random source rather than from a hash of the clock.
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 # Already in the tree under fastembed, which loads this exact tokenizer to
 # embed with; named here so the ledger can count tokens with the same one
 # rather than estimating at four characters each. No features of its own, so
@@ -45,7 +45,7 @@ pdf-extract = "0.12.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 turbovec = "1.0.0"
 notify = "8.2.0"
 # The structure half of the store. One parser plus a grammar for every language

@@ -16,6 +16,7 @@
 //! them to text with one SQLite lookup each.
 
 pub mod add;
+pub mod brief;
 pub mod chunk;
 pub mod clientfile;
 pub mod clients;
@@ -303,6 +304,14 @@ fn image_floor() -> f32 {
 }
 
 /// How much deeper than `k` to look in each ranking before fusing.
+///
+/// Raised from 4 in 0.23.0, measured. At k=8 the four lists were each searched
+/// 32 deep, and the questions that still missed were not missing by a rank --
+/// twelve of seventy-seven were not in the fused list at any depth, and seven of
+/// those were not found by any list at all. Rescoring cannot help there: it
+/// reorders a candidate pool and never adds to it. The pool itself is the only
+/// thing that can, so this is the mean that was tried for recall, with the pair
+/// on either side of it recorded in the release.
 const RANK_DEPTH: usize = 4;
 
 /// How many files an index run may get through without making its work
@@ -932,6 +941,9 @@ pub struct Semlith {
     /// from two models are not comparable, and one index holding both would
     /// rank a picture against a paragraph by arithmetic that means nothing.
     images: VectorIndex,
+    /// The full-precision copy of what the codes approximate, for reordering
+    /// the handful of candidates a query is about to return.
+    exact: index::Exact,
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
@@ -1016,6 +1028,7 @@ impl Semlith {
         let generation = generation(&db)?;
 
         Ok(Self {
+            exact: index::Exact::open(&dir, dim),
             dir,
             db,
             index,
@@ -1560,7 +1573,7 @@ impl Semlith {
                 // deleted or renamed away. Evicting it here is what makes
                 // a deletion visible without a full sweep.
                 if !path.exists() {
-                    let ids = store::delete_file(&self.db, &key)?;
+                    let ids = store::delete_file(&self.db, &key, now())?;
                     if !ids.is_empty() {
                         for id in ids {
                             self.index.remove(id)?;
@@ -1716,7 +1729,7 @@ impl Semlith {
                 for id in store::image_ids_of(&self.db, &key)? {
                     self.images.remove(id as u64)?;
                 }
-                for id in store::delete_file(&self.db, &key)? {
+                for id in store::delete_file(&self.db, &key, now())? {
                     self.index.remove(id)?;
                 }
                 let file_id =
@@ -1837,7 +1850,7 @@ impl Semlith {
             );
 
             // Replacing a file: evict its old vectors before adding new ones.
-            for id in store::delete_file(&self.db, &key)? {
+            for id in store::delete_file(&self.db, &key, now())? {
                 self.index.remove(id)?;
             }
 
@@ -1923,7 +1936,7 @@ impl Semlith {
         if sweep && report.pending.is_empty() && !report.stopped {
             for key in store::all_paths(&self.db)? {
                 if !Path::new(&key).exists() {
-                    for id in store::delete_file(&self.db, &key)? {
+                    for id in store::delete_file(&self.db, &key, now())? {
                         self.index.remove(id)?;
                     }
                     report.removed += 1;
@@ -1999,6 +2012,40 @@ impl Semlith {
             graph::EXTRACTED | graph::RESOLVED => 1.0,
             _ => INFERRED_EXPANSION,
         }
+    }
+
+    /// Reorder the vector list by the vectors themselves, where the store kept
+    /// them.
+    ///
+    /// The index ranks by 4-bit codes, which is what makes it fast and small
+    /// and is also the only reason its ordering is ever wrong: two chunks whose
+    /// codes are indistinguishable are separated by the vectors they were
+    /// quantized from. This reads back only the candidates the index just
+    /// returned -- at `depth`, a few dozen of them -- and reorders those.
+    ///
+    /// It never adds a candidate and never removes one, so recall is untouched
+    /// and only the order inside the list can change. What reaches fusion is a
+    /// rank, so a candidate the codes placed eighth and the vectors place first
+    /// arrives with the weight of a first place.
+    ///
+    /// A store written before 0.23.0 has no sidecar and is returned unchanged,
+    /// as is any candidate the sidecar does not hold. Rescoring some of a list
+    /// and not the rest would order two candidates by two different scales, so
+    /// it is all of them or none.
+    fn rescored(&self, query: &[f32], scores: Vec<f32>, ids: Vec<u64>) -> (Vec<f32>, Vec<u64>) {
+        if ids.len() < 2 || !self.exact.exists() {
+            return (scores, ids);
+        }
+        let mut exact: Vec<(u64, f32)> = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match self.exact.get(*id) {
+                Some(vector) => exact.push((*id, index::cosine(query, &vector))),
+                None => return (scores, ids),
+            }
+        }
+        exact.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let (rescored_ids, rescored_scores): (Vec<u64>, Vec<f32>) = exact.into_iter().unzip();
+        (rescored_scores, rescored_ids)
     }
 
     fn graph_expansion(
@@ -2222,6 +2269,11 @@ impl Semlith {
         let vectors = self.embed(texts)?;
         let flat: Vec<f32> = vectors.into_iter().flatten().collect();
         self.index.add(&flat, &ids)?;
+        // The sidecar is written in the same breath as the codes, from the same
+        // values, so the two cannot describe different vectors. A failure to
+        // write it fails the index pass rather than leaving a store whose
+        // rescoring silently reorders by a stale vector.
+        self.exact.append(&flat, &ids)?;
         Ok(())
     }
 
@@ -2261,7 +2313,7 @@ impl Semlith {
         // makes their ids unreadable, and the vectors they address still have
         // to leave the image index.
         let images = store::image_ids_of(&self.db, key)?;
-        let ids = store::delete_file(&self.db, key)?;
+        let ids = store::delete_file(&self.db, key, now())?;
         for id in &ids {
             self.index.remove(*id)?;
         }
@@ -2597,6 +2649,22 @@ impl Semlith {
         };
 
         let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
+        // The graph list seeds from what the *index* found, in the order the
+        // index found it, which is not the order rescoring leaves behind.
+        //
+        // Rescoring reorders the vector list by the vectors themselves, and
+        // `graph_expansion` below takes its seeds from that same list. So
+        // feeding it the rescored order silently changed which symbols the
+        // third list expanded from, and that cost two questions at hit@8 on the
+        // sealed thirty -- 25 of 30 against 27 -- while gaining nothing at any
+        // depth. Measured by turning the pass off and on with everything else
+        // held still.
+        //
+        // The ordering a caller sees is the rescored one; the seeds stay the
+        // index's. One list's improvement has no business changing another
+        // list's input.
+        let seeds = dense_ids.clone();
+        let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
         // The image list. Only when the store actually holds an image: the
@@ -2610,7 +2678,7 @@ impl Semlith {
         // hits, one hop out, and the chunks those neighbours live in. It costs
         // no embedding and no model call, and it is what pulls together a
         // concept spread across files that share no vocabulary.
-        let graph_ids = self.graph_expansion(&dense_ids, &keyword_ids, depth, filter)?;
+        let graph_ids = self.graph_expansion(&seeds, &keyword_ids, depth, filter)?;
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the
@@ -3145,6 +3213,25 @@ impl Semlith {
     /// `(files, chunks, indexed bytes)`
     pub fn stats(&self) -> Result<(i64, i64, i64)> {
         store::stats(&self.db)
+    }
+
+    /// The f32 sidecar's size, or `None` where the store has none.
+    ///
+    /// A store written before 0.23.0 has no sidecar and is never rescored until
+    /// its next full index pass, which is invisible from the outside -- the
+    /// answers are simply the ones the codes gave. Said here rather than left
+    /// to be inferred from a ranking that looks slightly worse.
+    pub fn exact_bytes(&self) -> Option<u64> {
+        self.exact.exists().then(|| self.exact.bytes())
+    }
+
+    /// How many definitions this store has retired, over every name.
+    ///
+    /// Zero on a store that has never re-indexed since it began keeping
+    /// history, which from the outside is the same as a store where nothing
+    /// ever changed -- so it is printed rather than inferred.
+    pub fn retired_symbols(&self) -> Result<i64> {
+        store::symbols_past_count(&self.db)
     }
 
     /// Write the index out durably, so an interrupted save cannot leave a

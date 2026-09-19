@@ -48,6 +48,7 @@ const VIEWS: &[(&str, &str)] = &[
     // and per-store "watching" flag are read from.
     ("watch", "/api/stores"),
     ("search", "/api/search"),
+    ("brief", "/api/brief"),
     ("stats", "/api/stores"),
     ("files", "/api/files"),
     ("forget", "/api/forget"),
@@ -93,6 +94,10 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
     // Search page's second stage, and `semlith_pattern` is a query syntax no
     // one types into a browser. The Agents page is where a person sees that
     // they exist and what they are for, so that is the view named here.
+    // The Brief view on the Search page, which is the same assembly this tool
+    // returns -- the parity rule applied in the release that added it, not the
+    // one after next.
+    ("semlith_brief", "/api/brief"),
     ("semlith_read", "/api/agents"),
     ("semlith_pattern", "/api/agents"),
     ("semlith_index", "/api/index"),

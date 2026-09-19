@@ -3819,6 +3819,41 @@ async function searchView() {
     el("span", { class: "segs" }, preferPills),
   );
 
+  /* Two answers to one question, from the same store and the same ranking.
+   *
+   * `results` is the two-stage list this page has always been: locate, then
+   * open a row and read it. `brief` is what an agent gets from one call --
+   * the same spans, the text of the top ones, and the one-hop callers and
+   * callees of the symbols they sit inside, all of it fitted to the budget
+   * dial beside it. Free, because every primitive under it is free.
+   *
+   * A view rather than a second page: it is the same question, and making a
+   * person retype it somewhere else to see the other shape of the answer is
+   * how two pages end up disagreeing about what the store says. */
+  let view = "results";
+  const viewPills = ["results", "brief"].map((name) =>
+    el("button", {
+      class: "seg",
+      type: "button",
+      "aria-pressed": String(name === view),
+      text: name,
+      onclick: () => {
+        if (view === name) return;
+        view = name;
+        for (const pill of viewPills) {
+          pill.setAttribute("aria-pressed", String(pill.textContent === view));
+        }
+        run();
+      },
+    }),
+  );
+  const viewDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-label", text: "View" }),
+    el("span", { class: "segs" }, viewPills),
+  );
+
   /* Re-run as the filter is typed, like every other control on this page.
    *
    * `change` alone fires on blur, so a reader who typed a glob and looked at
@@ -3893,6 +3928,19 @@ async function searchView() {
     },
   });
 
+  /* The second stage's column, which the Brief view has no use for: a brief
+   * *is* the opened row, so "pick a row, the span opens here" would be an
+   * instruction for something that has already happened. Hidden by a class on
+   * the container rather than by emptying the column, so the locate side takes
+   * the whole width instead of leaving a gap where the panel was. */
+  const bodyCol = el("div", { class: "body-col" }, bodyCard, aroundHead, stage);
+  const twoStage = el(
+    "div",
+    { class: "two-stage" },
+    el("div", { class: "locate-col" }, results, footer),
+    bodyCol,
+  );
+
   const nothing = () =>
     empty("Type a phrase or an identifier. Both halves of the search run either way.");
 
@@ -3906,6 +3954,12 @@ async function searchView() {
       fill(footer);
       meta.textContent = "";
       return;
+    }
+
+    twoStage.classList.remove("one-stage");
+    if (view === "brief") {
+      twoStage.classList.add("one-stage");
+      return runBrief(query);
     }
 
     const mine = ++generation;
@@ -4109,6 +4163,139 @@ async function searchView() {
   let definitions = 0;
   let bodyGeneration = 0;
 
+  /* The Brief view: one call, rendered as it comes back.
+   *
+   * Nothing is re-derived here. The labels on each part -- which ranked list
+   * found a span, and that an edge came from the graph -- are the tool's own,
+   * because a page that decided for itself which list found something would be
+   * a second classifier disagreeing with the one that ranked the answer. */
+  async function runBrief(question) {
+    const mine = ++generation;
+    const params = new URLSearchParams({ question, budget: String(budget()), prefer });
+    for (const store of picker.stores()) params.append("store", store);
+    const lang = langField.value.trim();
+    const path = pathField.value.trim();
+    if (lang) params.append("lang", lang);
+    if (path) params.append("path", path);
+
+    showBody(null, "");
+    shapeHint.hidden = true;
+    meta.textContent = "assembling…";
+    const slow = setTimeout(() => {
+      if (mine === generation) {
+        meta.textContent =
+          "loading the embedding model — the first search after the daemon starts pays for it once";
+      }
+    }, 1200);
+    let data;
+    try {
+      data = await api(`/api/brief?${params}`);
+    } catch (e) {
+      clearTimeout(slow);
+      if (mine !== generation) return;
+      fill(results, error(e.message));
+      fill(footer);
+      meta.textContent = "";
+      return;
+    }
+    clearTimeout(slow);
+    if (mine !== generation) return;
+
+    const brief = data.brief || {};
+    const spans = brief.spans || [];
+    meta.textContent = spans.length ? `one call · ${(data.micros / 1000).toFixed(1)} ms` : "";
+    if (!spans.length) {
+      fill(footer);
+      fill(
+        results,
+        empty(
+          "No chunk in the selected stores matches that. If a store chip is on it is the filter, not the corpus — clear it and ask again.",
+        ),
+      );
+      return;
+    }
+
+    const rows = [];
+    for (const span of spans) {
+      rows.push(
+        el(
+          "div",
+          { class: "brief-span" },
+          el(
+            "div",
+            { class: "brief-head" },
+            el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
+            span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
+            el(
+              "span",
+              { class: "brief-lists" },
+              ...(span.lists || []).map((list) => el("span", { class: "tag", text: list })),
+            ),
+          ),
+          span.text
+            ? el("pre", { class: "brief-text", text: span.text })
+            : el("div", { class: "brief-dropped", text: "text left out for the budget" }),
+        ),
+      );
+    }
+    for (const symbol of brief.symbols || []) {
+      const edges = [];
+      for (const end of symbol.callers || []) {
+        edges.push(
+          el(
+            "div",
+            { class: "brief-edge" },
+            el("span", { class: "k", text: "called by" }),
+            el("span", { class: "v", text: `${end.name} · ${shortPath(end.path)}:${end.start_line}` }),
+          ),
+        );
+      }
+      for (const end of symbol.callees || []) {
+        edges.push(
+          el(
+            "div",
+            { class: "brief-edge" },
+            el("span", { class: "k", text: "calls" }),
+            el("span", { class: "v", text: `${end.name} · ${shortPath(end.path)}:${end.start_line}` }),
+          ),
+        );
+      }
+      if (symbol.hidden) {
+        edges.push(el("div", { class: "brief-dropped", text: `and ${symbol.hidden} more edges` }));
+      }
+      rows.push(
+        el(
+          "div",
+          { class: "brief-symbol" },
+          el(
+            "div",
+            { class: "brief-head" },
+            el("span", { class: "sym", text: symbol.name }),
+            el("span", { class: "brief-lists" }, el("span", { class: "tag", text: symbol.found_by })),
+          ),
+          ...edges,
+        ),
+      );
+    }
+    fill(results, el("div", { class: "brief-view" }, ...rows));
+
+    /* What it cost and what it dropped, in the tool's own numbers. A budget
+     * nothing reported would be a number for decoration. */
+    const cut = brief.cut || {};
+    const dropped = [];
+    if (cut.spans) dropped.push(`${cut.spans} spans not located`);
+    if (cut.span_text) dropped.push(`${cut.span_text} left without text`);
+    if (cut.symbols) dropped.push(`${cut.symbols} symbols' edges`);
+    fill(
+      footer,
+      el("span", {
+        text:
+          `${brief.tokens} of ${brief.budget} tokens · counted with ${brief.counted_with}` +
+          (dropped.length ? ` · dropped ${dropped.join(", ")}` : ""),
+      }),
+    );
+  }
+
   function showBody(hit, query) {
     openHit = hit;
     openQuery = query;
@@ -4303,24 +4490,14 @@ async function searchView() {
         el("span", { class: "rule" }),
         kDial,
         preferDial,
+        viewDial,
         langDial,
         pathDial,
         budgetDial,
         el("span", { class: "dial-note", text: "what one answer may cost an agent" }),
       ),
     ),
-    el(
-      "div",
-      { class: "two-stage" },
-      el("div", { class: "locate-col" }, results, footer),
-      el(
-        "div",
-        { class: "body-col" },
-        bodyCard,
-        aroundHead,
-        stage,
-      ),
-    ),
+    twoStage,
   );
 }
 

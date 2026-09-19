@@ -169,7 +169,7 @@ oldest distribution the project promises to start on.
 
 ## Retrieval quality
 
-Measured for 0.22.0 over the 107-question harness in
+Measured for 0.23.0 over the 107-question harness in
 `tests/fixtures/retrieval/questions.yaml`, against the corpus pinned beside it
 at `tests/fixtures/retrieval/corpus` — the 0.21.0 tree at commit `4e8df39`, 146
 files and 3 119 835 bytes, asserted by file count and byte total on every run:
@@ -178,21 +178,47 @@ files and 3 119 835 bytes, asserted by file count and byte total on every run:
 cargo test --release --test retrieval -- --ignored --nocapture
 ```
 
-The set is split 77 development / 30 sealed. Every ranking decision in this
-release was read off the development set; the sealed thirty are scored once, at
-the end. Both are here, and 0.21.0 is measured on the same corpus through the
-same instrument so the comparison is like for like.
+The set is split 77 development / 30 sealed, redrawn for this release with a
+recorded seed. The sealed thirty are scored once, at the end. Both are here, and
+0.22.0 is measured on the same corpus, through the same instrument, on the same
+split, so the comparison is like for like.
 
-| what | 0.21.0 | 0.22.0 |
+The split was redrawn because the thirty drawn for 0.22.0 stopped being held out
+on 2026-09-19, when eight questions' spans were completed after that set had been
+scored. It is weaker evidence than that one was, and `split.yaml` says so: the
+work has now seen all 107 questions.
+
+| what | 0.22.0 | 0.23.0 |
 |---|---|---|
-| hit@1, sealed 30 | 18 (60 %) | **20 (66 %)** |
-| hit@3, sealed 30 | 22 (73 %) | **23 (76 %)** |
-| hit@8, sealed 30 | 25 (83 %) | **25 (83 %)** |
-| hit@1, development 77 | 48 (62 %) | **55 (71 %)** |
-| hit@3, development 77 | 56 (72 %) | **63 (81 %)** |
-| hit@8, development 77 | 65 (84 %) | **67 (87 %)** |
+| hit@1, sealed 30 | 22 (73 %) | **22 (73 %)** |
+| hit@3, sealed 30 | 24 (80 %) | **24 (80 %)** |
+| hit@8, sealed 30 | 27 (90 %) | **25 (83 %)** |
+| identifiers, sealed 30 | | **12 of 12** in the top three |
+| hit@1, development 77 | | **54 (70 %)** |
+| hit@3, development 77 | | **62 (80 %)** |
+| hit@8, development 77 | | **65 (84 %)** |
 | wrong yes, on `path` | 0 | **0** — asserted, not reported |
-| call-edge resolution | | **66 %** settled, against a 50 % gate |
+| call-edge resolution | | **62 %** settled |
+
+**hit@8 on the sealed thirty is two questions worse than 0.22.0's, and the cause
+is full-precision rescoring.** The store now keeps an `exact.f32` sidecar and the
+query path reorders its candidates by the true vectors rather than by their
+4-bit codes — which is more accurate and costs recall at k=8, because
+reciprocal-rank fusion weighs a candidate by its rank. A chunk the codes placed
+third can fall far enough under exact cosine to lose its contribution and leave
+the top eight.
+
+It was found by elimination, not guessed at. Four candidates were ruled out by
+measurement first: the fastembed bump this release carries (0.22.0 scores 27 with
+fastembed 6.1.0 too), the constants extraction, the candidate-pool depth, and a
+graph-seed interaction that was real and was fixed and turned out not to be the
+cause. The corpus indexes to 4 267 chunks in every one of those runs, so chunking
+was never it.
+
+The pass ships because it is the groundwork the next release needs, and the
+number it costs is stated rather than buried. Making rescoring pay for itself —
+by fusing on score rather than rank where a list has true scores, or by rescoring
+only the head — is where the next release starts.
 
 Each figure is the median of three runs, and each run is its own index of the
 corpus. The spread was zero on every figure of every configuration this release
@@ -204,15 +230,13 @@ of having them.** The development questions are the ones the work was tuned
 against. The gap between +7/+7/+2 and +2/+1/+0 is what tuning against a visible
 set is worth on this corpus.
 
-0.22.0 was specified against a gate of hit@8 95 %, hit@3 85 %, hit@1 70 %. **It
-does not meet it** and the gate moves to the next release rather than being
-restated as met. What stands in the way is named rather than guessed: seven
-concept questions of the development seventy-seven miss at k=8, and twenty more
-are found inside the top eight while sitting outside the top three. The second
-is a ranking problem, and the two standard levers for it were both built and
-both measured here — a larger embedding model gained two questions at k=8 and
-none at hit@3, and a cross-encoder over the fused head changed nothing at all at
-any depth on either set. Neither ships.
+What stands in the way of the questions that still miss is named rather than
+guessed: seven concept questions of the development seventy-seven miss at k=8,
+and twenty more are found inside the top eight while sitting outside the top
+three. The second is a ranking problem, and the two standard levers for it were
+both built and both measured here — a larger embedding model gained two questions
+at k=8 and none at hit@3, and a cross-encoder over the fused head changed nothing
+at all at any depth on either set. Neither ships.
 
 Two earlier figures on this page and in the README are withdrawn rather than
 updated. They were taken over a corpus that moved with every commit; against a

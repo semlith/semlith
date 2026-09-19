@@ -73,6 +73,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/stores") => stores(state),
         (true, _, "/api/files") => files(state, request),
         (true, _, "/api/search") => search(state, request),
+        (true, _, "/api/brief") => brief(state, request),
         (true, _, "/api/models") => models(),
         (true, _, "/api/languages") => languages(),
         (true, _, "/api/dirs") => dirs(request),
@@ -463,6 +464,80 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
 }
 
 /// The same fused search the CLI and `semlith_search` run.
+/// One question, one answer, under a token budget -- what `semlith brief` and
+/// `semlith_brief` return, for the page that shows a person the same thing.
+///
+/// Free, like every primitive under it. The assembly is the tool's, serialised
+/// as the tool serialises it, so the page cannot drift into showing something
+/// the agent surface does not return.
+fn brief(state: &Arc<State>, request: &Request) -> Response {
+    let Some(question) = request.query("question").filter(|q| !q.trim().is_empty()) else {
+        return Response::error(400, "missing question");
+    };
+    let budget = request
+        .query("budget")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(crate::brief::DEFAULT_BUDGET)
+        .clamp(1, 200_000);
+    let filter = match filter_of(request) {
+        Ok(f) => f,
+        Err(e) => return Response::error(400, &e),
+    };
+    let prefer = match request.query("prefer") {
+        Some(raw) => match crate::Prefer::parse(raw) {
+            Ok(p) => p,
+            Err(e) => return Response::error(400, &e.to_string()),
+        },
+        None => crate::Prefer::default(),
+    };
+    let only: Vec<String> = request
+        .query("store")
+        .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &e.to_string());
+    }
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::json(&json!({ "spans": [], "symbols": [] }));
+    };
+
+    let started = std::time::Instant::now();
+    let only = (!only.is_empty()).then_some(only);
+    let brief = match crate::brief::brief(fleet, only.as_deref(), question, budget, &filter, prefer)
+    {
+        Ok(b) => b,
+        Err(e) => return Response::error(500, &e.to_string()),
+    };
+    let elapsed = started.elapsed();
+
+    let body = match serde_json::to_value(&brief) {
+        Ok(v) => v,
+        Err(e) => return Response::error(500, &e.to_string()),
+    };
+    if state.ledger {
+        // Counted from the answer, exactly as the CLI and the MCP tool count
+        // it, so the portal's rows and the agents' rows mean the same thing.
+        crate::ledger::reply(
+            fleet,
+            &crate::ledger::Who {
+                client: "portal",
+                session: "portal",
+            },
+            "brief",
+            question,
+            &body.to_string(),
+            elapsed,
+        );
+    }
+    Response::json(&json!({
+        "brief": body,
+        "chunks": fleet.chunks(),
+        "micros": elapsed.as_micros() as u64,
+    }))
+}
+
 fn search(state: &Arc<State>, request: &Request) -> Response {
     let Some(query) = request.query("query").filter(|q| !q.trim().is_empty()) else {
         return Response::error(400, "missing query");

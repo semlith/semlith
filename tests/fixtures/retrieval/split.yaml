@@ -1,69 +1,78 @@
 # Which questions the gate is scored on, and which the work may look at.
 #
-# A number tuned against is not a measurement. The 107 questions in
-# `questions.yaml` are split 77 development / 30 sealed here, once, before the
-# first ranking change of 0.22.0. Development work sees the development set's
-# numbers and nothing else; the sealed thirty are scored once, at completion, by
-# the binary the release ships, and they are the figures the release record
-# states.
+# REDRAWN for 0.23.0 on 2026-09-19, with seed 20260919, and the record says why.
 #
-# The split is stratified by (shape, tool) with largest-remainder allocation and
-# a seeded shuffle inside each stratum, so the sealed set is not accidentally
-# all of one shape — the contract names that as a risk, and this is the
-# mitigation. Reproduce it by re-running the generator with the seed below.
+# The thirty drawn for 0.22.0 stopped being held out on 2026-09-19: eight
+# questions had a correct answer in the corpus that no span covered, and the
+# spans were completed after the set had been scored and the misses read. Each
+# edit is defensible; the timing is not, so those thirty cannot measure anything
+# again. This split draws thirty fresh ones from the same 107.
 #
-# Five identifier questions are held out of the sealed set deliberately, because
-# the contract names them: `DEPENDENCY_KINDS`, `SEMLITH_IMAGE_FLOOR`, `RRF_K`,
-# `MAX_NODES` and `edges_out` are the five that missed at k=8 on 2026-09-18, and
-# the acceptance criterion that each must rank first is written against the
-# development set. A question that is both the named example and the sealed
-# measurement would be neither.
+# It is weaker evidence than 0.22.0's was, and that is stated rather than
+# implied: the work has now seen all 107 questions. What it still rules out is
+# fitting *this release's* ranking changes to the set it is scored on, because
+# the draw happens before the first of them and the seed is recorded here.
+# The figure that carries the most weight is therefore the binary-for-binary
+# comparison against 0.22.0 on this same split, where both sides saw the same
+# questions.
+#
+# Stratified by (shape, tool) with largest-remainder allocation and a seeded
+# shuffle inside each stratum, so the sealed set is not accidentally all of one
+# shape -- the contract names that as a risk, and this is the mitigation.
+#
+# Four identifier questions are held out of the sealed set deliberately, because
+# the contract names them: `id-dependency-kinds`, `id-edges-out`, `id-max-nodes`
+# and `id-rrf-k`. They are the ones that missed at k=8 on 2026-09-18 and are
+# still in the set; the fifth the 0.22.0 record named, `SEMLITH_IMAGE_FLOOR`, has
+# no question under that id here. The acceptance criterion that each must rank
+# first is written against the development set, and a question that is both the
+# named example and the sealed measurement would be neither.
 #
 # The harness refuses to score the sealed set unless `SEMLITH_RETRIEVAL_SEALED`
 # is set, and prints which set it is scoring on its first line.
 #
 # Shape and tool, either side of the split:
 #
-#   concept    search     development 31   sealed 13
-#   identifier neighbors  development  4   sealed  1
-#   identifier read       development  5   sealed  3
-#   identifier search     development 17   sealed  5
+#   concept    search     development 32   sealed 12
+#   identifier neighbors  development  3   sealed  2
+#   identifier read       development  6   sealed  2
+#   identifier search     development 16   sealed  6
 #   identifier symbol     development  6   sealed  2
 #   multi-hop  neighbors  development  2   sealed  1
 #   multi-hop  path       development 10   sealed  4
 #   multi-hop  search     development  1   sealed  0
 #   multi-hop  symbol     development  1   sealed  1
 
-seed: 20260918
+seed: 20260919
 
 sealed:
-  - concept-airgap
   - concept-chunk-overlap
-  - concept-clip-text-encoder
+  - concept-find-running-daemon
   - concept-hidden-files-refused
-  - concept-home-not-set
-  - concept-ledger-chain
-  - concept-model-digest-check
   - concept-null-chunk-id
-  - concept-sharding-recall-cost
-  - concept-slow-refusal
+  - concept-shard-size
   - concept-token-compared
-  - concept-two-indexers-at-once
+  - concept-token-count-no-model
   - concept-unsafe-table
-  - id-chain-hash
+  - concept-vector-memory-budget
+  - concept-which-languages-have-edges
+  - concept-why-defines-excluded-from-path
+  - id-agent-key-prefix
   - id-granite-revision
+  - id-image-floor-env
   - id-keyword-search
+  - id-max-pixels
   - id-min-entropy
-  - id-neighbors-glob-match
-  - id-parse-timeout
-  - id-read-negotiate
-  - id-read-zip-entry-by-line
-  - id-symbol-max-archive-text
+  - id-neighbors-record-retrieval
+  - id-neighbors-require-public
+  - id-read-glob-match
   - identifier-powershell-function
-  - multi-hop-sql-view-reads-table
+  - identifier-sql-table
   - multihop-entry-two-definitions
-  - path-answer-to-ledger
+  - multihop-scan-text-callers
+  - path-call-tool-to-ledger
   - path-denied-to-glob-match
-  - path-is-binary-to-scan-text
-  - path-refuse-airgapped-to-airgap
-  - read-one-span-by-line
+  - path-index-paths-to-writing
+  - path-search-in-to-ledger
+  - read-one-span-by-symbol
+  - shape-pair-ppr-question

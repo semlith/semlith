@@ -7,6 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-19
+
+An agent asking semlith a question used to spend four round trips on it: search,
+read the span, ask what calls it, read those. Three of them re-established what
+the first already found. `semlith brief` answers it in one.
+
+### One call instead of four
+
+`semlith brief "<question>"`, `semlith_brief` over MCP, and a Brief view on the
+portal's Search page — the command, the tool and the view in one release. Each
+returns the spans a search would find, the text of the top ones, and the
+resolved callers and callees of the symbols those spans sit inside, one hop each
+way, every part labelled with the ranked list or the edge that found it.
+
+The whole assembly is fitted to a token budget the caller sets, counted with the
+store's own tokenizer, defaulting to 4 000. Locators are bought first, then the
+one-hop edges, then the text of the top three spans — so a small budget drops
+text from the bottom of the ranking up and says what it dropped, rather than
+erroring or cutting a span in half. The best-ranked locator is the one thing a
+budget cannot drop, and its cost is reported as `floor`.
+
+Measured on the pinned corpus over the questions both paths answer: **1.00 calls
+against 2.61**, at 1 934 tokens against 696. One call instead of several, at more
+tokens — a brief carries the one-hop neighbourhood that the search-then-read path
+never asks for, and the number is stated as measured rather than reframed.
+
+Nothing here reaches past one hop.
+
+### A symbol has a past
+
+A re-index no longer simply deletes the definitions of a file it is about to
+rewrite: it copies them into `symbols_past` first, stamped with the content hash
+they were true for. `semlith symbol --history` and `semlith_symbol` with
+`history: true` answer what a definition used to be.
+
+Additive, like the 0.12.0 graph tables, so the store format does not move: a
+store written by 0.22.0 opens unchanged, is not migrated by opening, and starts
+keeping history at its next index pass. Nothing prunes it in this release.
+
+### Retrieval
+
+On thirty sealed questions, scored once by the release binary, median of three
+runs, with 0.22.0 measured on the same corpus, the same instrument and the same
+split:
+
+| | 0.22.0 | 0.23.0 |
+|---|---|---|
+| hit@1 | 22/30 (73 %) | **22/30 (73 %)** |
+| hit@3 | 24/30 (80 %) | **24/30 (80 %)** |
+| hit@8 | 27/30 (90 %) | **25/30 (83 %)** |
+| identifiers in the top three | | **12 of 12** |
+| wrong-yes on `path` | 0 | **0** |
+
+Spread was zero on every figure of every configuration measured.
+
+**hit@8 is two questions worse than 0.22.0, and this release knows exactly
+why.**
+
+The cause is full-precision rescoring, which 0.22.0 named as unbuildable because
+the store kept only 4-bit codes. Stores now write an `exact.f32` sidecar beside
+the codes and the query path reads back only the candidates it is about to
+reorder — and reordering them by exact cosine costs recall at k=8. Reciprocal-
+rank fusion weighs a candidate by its rank, so a chunk the codes placed third can
+fall far enough under the true vectors to lose its contribution and leave the top
+eight. The pass ships because it is the groundwork the next release needs, and
+the number it costs is stated here rather than buried.
+
+It was found by elimination, not guessed at, and four candidates were ruled out
+by measurement first: the fastembed bump this release carries (0.22.0 scores 27
+with fastembed 6.1.0 too), the constants extraction, the candidate-pool depth,
+and a graph-seed interaction that was real, was fixed, and turned out not to be
+the cause. The corpus indexes to 4 267 chunks in every one of those runs, so
+chunking was never it.
+
+Constants are extracted as symbols in twenty more languages, not Rust alone.
+
+The sealed split is redrawn from the same 107 questions with a new recorded
+seed, because the thirty drawn for 0.22.0 stopped being held out when eight
+questions' spans were completed after that set had been scored. It is weaker
+evidence than that one was — the work has now seen all 107 — and `split.yaml`
+says so rather than leaving it to be noticed.
+
+### Fixed
+
+- Warm query p50 and peak indexing memory are measured again. The stage that
+  produces them returned early unless `OLD` named a 0.6.0 binary, so 0.22.0
+  recorded both as NOT MEASURED while the suite still exited 0. Against 0.21.0
+  on identical corpora: **6.5 / 13.7 / 129.9 ms** at 700 / 7 000 / 70 000 chunks,
+  against 5.2 / 12.4 / 130.4 ms. Opening a store is now flat with corpus size —
+  150 MB at 700 chunks and 149 MB at 70 000, where 0.21.0 paid 215 MB for a
+  small one.
+- `#104` closes. The GitHub-hosted macOS runner reports an Aqua session and a gui
+  domain and still will not keep a user agent alive; two probes were written for
+  it and both were disproved, so the host is named in the harness's own output
+  and the known-failures row is gone. A row there turns a check that cannot run
+  into one that ran and failed as expected, which is how a skipped check comes to
+  read as a passing run.
+- The native smoke harness runs only on release pull requests. Three runners and
+  eight minutes per dependabot bump bought nothing: the installer and the shipped
+  artifact do not change because a transitive crate did.
+- sha2 0.11 finalises to a value that no longer implements `LowerHex`. One place
+  now produces every SHA-256 hex string semlith emits, and a test pins the
+  published vectors, so the bump is proven to move no digest and therefore no
+  store's content hashes.
+
+### Changed
+
+- `tools/list` is thirteen tools at 4 441 bytes, about 1 111 tokens, against
+  twelve at 3 995 and 999. Both ceilings are restated at the measured figure
+  rather than at a round number chosen to fit it.
+- `semlith stats` says whether a store carries the rescoring sidecar and how many
+  definitions it has retired. A store without either answers slightly worse and
+  slightly less, and neither was visible from the answers themselves.
+
 ## [0.22.0] - 2026-09-19
 
 Retrieval was measured by an instrument that could not measure it. This release
