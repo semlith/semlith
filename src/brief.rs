@@ -41,6 +41,20 @@ pub const SPANS: usize = 8;
 /// answer. The count of what was left out travels with the brief.
 const EDGES_PER_SYMBOL: usize = 8;
 
+/// How many spans carry their text.
+///
+/// "The text of the top ones", which is a different instruction from "as much
+/// text as the budget will hold" -- and the harness is what told the two apart.
+/// Filling the budget cost 3 660 tokens per answered question against
+/// search-then-read's 708 on the same questions, because a brief that spends
+/// every token it is allowed is a brief that spends every token it is allowed,
+/// whatever the question needed.
+///
+/// A budget is a ceiling, not a target. Three is what an agent reads before it
+/// decides it has the answer, and the spans past it keep their locators -- which
+/// is the part it would act on next anyway.
+const TEXT_SPANS: usize = 3;
+
 /// What one call returns.
 #[derive(Debug, Clone, Serialize)]
 pub struct Brief {
@@ -150,12 +164,17 @@ impl Cut {
 /// 2. The one-hop edges of the symbols those spans sit inside. Small, and the
 ///    reason this call exists at all: it is what the caller would otherwise
 ///    spend a second and third round trip asking for.
-/// 3. The text of the spans, best-ranked first, until the budget runs out.
+/// 3. The text of the top [`TEXT_SPANS`] spans, best-ranked first, for as much
+///    of it as the budget has left.
 ///
 /// So text is what a tight budget drops, and it drops from the bottom of the
 /// ranking up. That order is a decision, not an accident: a locator plus a
 /// caller list tells an agent where to go next, while a single span of text
 /// with no neighbourhood is what it already had before this call existed.
+///
+/// The budget is never a target. A brief that filled its 4 000 tokens because
+/// it was allowed to cost five times what searching and reading cost for the
+/// same answers, which the harness measured and is why the cap exists.
 pub fn brief(
     fleet: &mut Fleet,
     only: Option<&[String]>,
@@ -191,10 +210,15 @@ pub fn brief(
         kept.push(i);
     }
 
-    // 2. Edges, for each distinct enclosing symbol, in span order.
+    // 2. Edges, for the symbols enclosing the spans this brief actually shows.
+    //
+    // Not for all eight. The neighbourhood of a span whose text was never
+    // included is a list of names with nothing to attach them to, and eight
+    // symbols at sixteen edges each is a data dump rather than an answer -- it
+    // was two thirds of what a brief cost when the harness first measured one.
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for hit in kept.iter().map(|&i| &hits[i]) {
+    for hit in kept.iter().take(TEXT_SPANS).map(|&i| &hits[i]) {
         let Some(name) = hit.symbol.as_deref() else {
             continue;
         };
@@ -226,8 +250,16 @@ pub fn brief(
         symbols.push(symbol);
     }
 
-    // 3. Span text, best-ranked first.
-    for (span, hit) in spans.iter_mut().zip(kept.iter().map(|&i| &hits[i])) {
+    // 3. Span text, best-ranked first, for the top few only.
+    for (i, (span, hit)) in spans
+        .iter_mut()
+        .zip(kept.iter().map(|&i| &hits[i]))
+        .enumerate()
+    {
+        if i >= TEXT_SPANS {
+            cut.span_text += 1;
+            continue;
+        }
         let cost = counter.count(&hit.text);
         if tokens + cost > budget {
             cut.span_text += 1;

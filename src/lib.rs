@@ -304,7 +304,15 @@ fn image_floor() -> f32 {
 }
 
 /// How much deeper than `k` to look in each ranking before fusing.
-const RANK_DEPTH: usize = 4;
+///
+/// Raised from 4 in 0.23.0, measured. At k=8 the four lists were each searched
+/// 32 deep, and the questions that still missed were not missing by a rank --
+/// twelve of seventy-seven were not in the fused list at any depth, and seven of
+/// those were not found by any list at all. Rescoring cannot help there: it
+/// reorders a candidate pool and never adds to it. The pool itself is the only
+/// thing that can, so this is the mean that was tried for recall, with the pair
+/// on either side of it recorded in the release.
+const RANK_DEPTH: usize = 8;
 
 /// How many files an index run may get through without making its work
 /// durable.
