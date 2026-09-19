@@ -536,16 +536,22 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(500, &e.to_string()),
     };
     if state.ledger {
-        // Counted from the answer, exactly as the CLI and the MCP tool count
-        // it, so the portal's rows and the agents' rows mean the same thing.
-        crate::ledger::reply(
+        // From the brief rather than from its rendering. `reply` recovers the
+        // files an answer named by reading them back out of rendered text, and
+        // what this route hands it is JSON -- so every brief from this page was
+        // recorded with no hits and no saving, exactly as every brief from the
+        // command line was. The MCP tool still goes through `reply` because
+        // what it hands over really is the rendered text `paths_in` was written
+        // for, and because a span whose text the budget dropped should be
+        // counted at its locator rather than at its file.
+        crate::ledger::brief(
             fleet,
             &crate::ledger::Who {
                 client: "portal",
                 session: "portal",
             },
-            "brief",
             question,
+            &brief,
             &body.to_string(),
             elapsed,
         );

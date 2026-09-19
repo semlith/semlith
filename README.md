@@ -157,7 +157,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
 | `semlith trust <DIR>` | Say that a store outside the store home may be opened, once. Nothing is moved. `--list` prints what is trusted. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
-| `semlith hook` | Answer one `PreToolUse` event on stdin. When a store holds the file a client is about to read whole, it adds one line naming the semlith call that answers the same question, and records the read in the ledger. Never blocks; `--strict` refuses the first such read of a session. `semlith setup` writes it into the clients that support it. |
+| `semlith hook` | Answer one `PreToolUse` event on stdin. When a store holds the file a client is about to read whole, it adds one line naming the semlith call that answers the same question, and records the read in the ledger. Never blocks; `--strict` refuses the first such read of a session. Written for you by `semlith setup`. |
 | `semlith models` | List available embedding models. See [docs/models.md](docs/models.md). |
 | `semlith languages` | List the language names `--lang` accepts. |
 | `semlith setup [--yes] [--register-all] [--no-hooks] [--strict]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key — install the semlith Agent Skill and link it into every user-level skill directory a client reads, and write the `PreToolUse` steering hook into the clients that document one. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, and the rules file of the clients that document one, listing every path first and backing each file up beside itself. `--no-hooks` removes the hook; `--strict` writes its refusing form; `--airgap` skips the model. |
@@ -338,12 +338,20 @@ $ semlith ledger --last 3
 
 Each row carries the hash of the row before it, so an edited or removed row is
 detectable rather than merely unlikely — an audit record rather than a log file,
-and `semlith ledger --verify` names the first row that does not verify.
-Recording is on by default and local: the rows never leave the store, the daemon
-says on every start that it is recording and names the flag that stops it, and
-erasing every row is one `DELETE` against a SQLite file you already own.
-`--no-ledger` stops a session and `SEMLITH_LEDGER=0` stops a machine. The
-command needs no licence key, now or ever.
+and `semlith ledger --verify` names the first row that does not verify and
+prints what the ledger adds up to. Recording is on by default and local: the
+rows never leave the store, erasing every row is one `DELETE` against a SQLite
+file you already own, `--no-ledger` stops a session and `SEMLITH_LEDGER=0` stops
+a machine. It needs no licence key, now or ever.
+
+### What it saved, on this repository
+Ask `semlith brief` all 107 questions of this repository's own retrieval harness
+against a store of `src/`, then run `semlith ledger --verify`: **3 982 tokens**
+per answered question is what the agent was sent, **105 132** is what reading
+the 4.1 files those answers named would have cost whole — **26×**, at 100 %
+coverage, counted by the store's own tokenizer rather than estimated. It is an
+upper bound: a file two answers both name is counted twice, where one real read
+would have served both. The command reproduces it against any store you have.
 
 ## Using it from an agent
 
@@ -478,9 +486,9 @@ at. Query latency does grow: the index scan is linear.
   searchable at all — but if your store fits, raising the budget is free speed.
 - The default model is English-only and is fixed when a store is created. Image
   search is not OCR, and the CLIP pair behind it is fixed.
-- Generated and vendored directories are not indexed: `node_modules` and its
-  kind always, `target`/`build`/`dist`/`vendor` when the manifest that makes
-  them sits beside them. `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.
+- Generated and vendored directories are not indexed: `node_modules` and its kind
+  always, `target`/`build`/`dist`/`vendor` when their manifest sits beside them.
+  `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.
 - Search filters are SQLite `GLOB`: no regex, though a leading `!` excludes.
   `--lang` maps a fixed table of extensions and never reads contents.
 - Results are not reranked by a cross-encoder, multi-store search is a merge

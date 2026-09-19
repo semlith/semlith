@@ -422,7 +422,7 @@ fn with_block(text: &str) -> String {
     else {
         return format!("{}\n{marked}", text.trim_end());
     };
-    format!("{}{marked}{}", &text[..start], &text[end..].trim_start())
+    format!("{}{marked}{}", &text[..start], text[end..].trim_start())
 }
 
 /// Pretty JSON with a trailing newline, the way every other file semlith writes

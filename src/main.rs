@@ -2984,7 +2984,7 @@ fn brief(
     // the budget dropped cost its locator and nothing more, and a row
     // that counted the text would overstate what was saved.
     let rendered = serde_json::to_string(&brief)?;
-    semlith::ledger::reply(&fleet, &CLI_LEDGER, "brief", &question, &rendered, elapsed);
+    semlith::ledger::brief(&fleet, &CLI_LEDGER, &question, &brief, &rendered, elapsed);
 
     if json {
         println!(

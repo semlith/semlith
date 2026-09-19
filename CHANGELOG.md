@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The number, and the defect the number found
+
+`semlith ledger --verify` now prints what the ledger adds up to beneath the
+chain result, and the README carries a savings paragraph again — the first since
+0.17.2 removed the double-counted one, and only because it is now measured.
+Asking `semlith brief` all 107 questions of this repository's own retrieval
+harness against a store of `src/`: 3 982 tokens per answered question is what
+the agent was sent, 105 132 is what reading the 4.1 files those answers named
+would have cost whole. 26×, at 100 % coverage, counted by the store's own
+tokenizer. It is an upper bound and says so.
+
+Measuring it found the defect that made it worth measuring. `semlith brief` at a
+terminal, and the portal's Brief view, both recorded every answer as a retrieval
+that found nothing: the ledger recovers the files an answer named by reading
+them back out of the rendered reply, and both of those hand it JSON instead. The
+first run of this paragraph's own measurement read *saved 0 tokens over 0 of 107
+retrievals, coverage 0 %* — for the one command 0.23.0 exists for. A brief knows
+which files it named; it is asked now rather than parsed. Any 0.23.0 ledger
+holding CLI or portal briefs has under-counted them, and re-running the query is
+the only way to correct rows that are, by design, not rewritten.
+
 ### The graph reads as a graph
 
 Three things were wrong with what a freshly indexed project drew. The page

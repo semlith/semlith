@@ -327,6 +327,60 @@ pub fn graph(
     }
 }
 
+/// Record one brief, from the brief itself rather than from its rendering.
+///
+/// [`reply`] recovers the files an answer named by reading them back out of the
+/// rendered text, which works for the MCP tools whose rendering it was written
+/// against and silently does not for `semlith brief` at a terminal: the CLI
+/// hands it the JSON, `paths_in` finds no bare path or `path:start-end` row in
+/// it, and every brief is recorded with no hits and no saving.
+///
+/// The cost of that was not a missing row. It was a ledger in which the one
+/// command 0.23.0 exists for was counted, 107 times out of 107, as a retrieval
+/// that answered nothing — so Coverage read 0 %, the saving read zero, and the
+/// figures this release is built on described the opposite of what happened.
+///
+/// A brief already knows which files it named. This asks it instead of parsing
+/// its own output back.
+pub fn brief(
+    fleet: &Fleet,
+    who: &Who<'_>,
+    question: &str,
+    brief: &crate::brief::Brief,
+    body: &str,
+    elapsed: std::time::Duration,
+) {
+    if !enabled() {
+        return;
+    }
+    let counter = fleet.counter();
+    let paths: std::collections::BTreeSet<&str> =
+        brief.spans.iter().map(|s| s.path.as_str()).collect();
+    let whole: i64 = paths
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| counter.count_bytes(m.len()))
+        .sum();
+    if let Some((_, store)) = fleet.each().next() {
+        let _ = store::record_retrieval(
+            store.db(),
+            &store::NewRetrieval {
+                client: who.client,
+                session: who.session,
+                tool: "brief",
+                query: question,
+                hits: paths.len() as i64,
+                micros: elapsed.as_micros() as i64,
+                excerpt_tokens: counter.count(body),
+                whole_file_tokens: whole,
+                stale_hits: 0,
+                tokenizer: counter.label(),
+                query_id: &query_id(),
+            },
+        );
+    }
+}
+
 /// The tool name on a row the steering hook wrote.
 ///
 /// Its own name rather than a column of its own: the ledger is one table with a
