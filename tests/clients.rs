@@ -266,8 +266,10 @@ fn every_stanza_launches_a_server_that_answers() {
         CLIENTS.len()
     );
 
-    let stanzas: Vec<(String, String)> =
-        all.into_iter().filter(|(_, body)| !is_http(body)).collect();
+    let stanzas: Vec<(String, String)> = all
+        .into_iter()
+        .filter(|(language, body)| !is_http(body) && !is_listing(language))
+        .collect();
     for (language, body) in &stanzas {
         assert!(
             names_semlith(body),
@@ -480,14 +482,18 @@ fn launches(language: &str, body: &str) -> bool {
         && names_semlith(body)
 }
 
-/// A fence that names something other than a server to launch: a skill
-/// directory to link into, or a rules file to append prose to. Both name
-/// semlith, neither is a command line, and the checks below are about command
-/// lines.
+/// A fence that is not a command line launching the MCP server.
+///
+/// Three kinds, all of which name semlith and none of which is `semlith mcp`: a
+/// `skills` fence names a directory to link the Agent Skill into, a `rules`
+/// fence carries prose to append to somebody's rules file, and a `hook` fence
+/// runs `semlith hook` rather than `semlith mcp`. Every check in this file that
+/// is about the stdio server has to skip all three, and they skip them through
+/// here rather than each keeping its own list.
 fn is_listing(language: &str) -> bool {
     language
         .split_whitespace()
-        .any(|word| word == "skills" || word == "rules")
+        .any(|word| word == "skills" || word == "rules" || word == "hook")
 }
 
 /// The binary a launching block names: the last token that is the binary

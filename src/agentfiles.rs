@@ -118,19 +118,70 @@ pub fn install_skill() -> Result<Vec<PathBuf>> {
 }
 
 /// Remove the canonical skill and every link into it.
-pub fn remove_skill() -> Result<()> {
+///
+/// Only what semlith installed. A symlink is removed when it points at the
+/// canonical directory and left alone when it points anywhere else; a real
+/// directory is removed only when it holds exactly the skill semlith wrote and
+/// nothing besides. Anything else belongs to whoever put it there, and a
+/// directory named `semlith` under someone's skills is not proof that semlith
+/// made it — `remove_dir_all` on that reasoning is how an opt-out takes a
+/// user's own work with it.
+///
+/// The paths it declined are returned, so a caller can say so rather than
+/// reporting a clean removal it did not perform.
+pub fn remove_skill() -> Result<Vec<PathBuf>> {
     let canonical = canonical_skill_dir()?;
+    let mut declined = Vec::new();
     for dir in skill_dirs() {
         let at = dir.join(SKILL_NAME);
+        if at == canonical {
+            continue;
+        }
         if at.is_symlink() {
-            let _ = std::fs::remove_file(&at);
-        } else if at.is_dir() && at != canonical {
-            // A copy, which is what Windows gets instead of a link.
+            match std::fs::read_link(&at) {
+                Ok(target) if target == canonical => {
+                    let _ = std::fs::remove_file(&at);
+                }
+                _ if at.exists() => declined.push(at),
+                // A link into a directory that is gone, pointing at us. Ours.
+                _ => {
+                    let _ = std::fs::remove_file(&at);
+                }
+            }
+            continue;
+        }
+        if !at.is_dir() {
+            continue;
+        }
+        if ours_alone(&at) {
             let _ = std::fs::remove_dir_all(&at);
+        } else {
+            declined.push(at);
         }
     }
     let _ = std::fs::remove_dir_all(&canonical);
-    Ok(())
+    Ok(declined)
+}
+
+/// Whether this directory holds the skill semlith wrote, and nothing else.
+///
+/// The Windows install is a copy rather than a link, so removal has to be able
+/// to recognise its own copy. One file, whose text is the skill this binary
+/// carries: a directory somebody has added to is not semlith's to delete, and
+/// neither is one whose `SKILL.md` is somebody else's.
+fn ours_alone(at: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(at) else {
+        return false;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    if names != ["SKILL.md"] {
+        return false;
+    }
+    std::fs::read_to_string(at.join("SKILL.md")).ok().as_deref() == Some(clients::SKILL)
 }
 
 /// Where the skill is, per directory.
@@ -181,6 +232,15 @@ fn link(canonical: &Path, at: &Path) -> Result<()> {
         // which a user running an installer usually does not have. A copy is
         // the honest fallback: `doctor` reports it stale when the text moves on
         // and `setup` rewrites it.
+        //
+        // Into an empty or absent directory only. On unix the symlink above
+        // fails when something is already there, which is the behaviour that
+        // keeps semlith out of a directory it did not create; a bare
+        // `create_dir_all` here would instead drop a `SKILL.md` into whatever
+        // somebody already had at that path.
+        if at.exists() && !ours_alone(at) {
+            anyhow::bail!("{} already exists and is not semlith's skill", at.display());
+        }
         std::fs::create_dir_all(at)?;
         std::fs::copy(canonical.join("SKILL.md"), at.join("SKILL.md"))
             .with_context(|| format!("copying the skill to {}", at.display()))?;
@@ -529,6 +589,38 @@ mod tests {
         let without = without_entry(&with).unwrap();
         assert!(!without.contains("PreToolUse"), "{without}");
         assert!(!without.contains("hooks"), "{without}");
+    }
+
+    /// An opt-out must not take somebody's own work with it.
+    ///
+    /// A directory named `semlith` under a user's skills is not proof that
+    /// semlith made it, and `remove_dir_all` on that reasoning is data loss on
+    /// the one path a cautious user reaches for.
+    #[test]
+    fn removal_declines_a_directory_semlith_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Ours: exactly the skill this binary carries, and nothing else.
+        let ours = dir.path().join("ours");
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::write(ours.join("SKILL.md"), clients::SKILL).unwrap();
+        assert!(ours_alone(&ours), "semlith's own copy was not recognised");
+
+        // Theirs: the same name, their content.
+        let theirs = dir.path().join("theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("SKILL.md"), "# my own skill\n").unwrap();
+        assert!(!ours_alone(&theirs), "somebody else's skill read as ours");
+
+        // Ours, that they then added to. Theirs now.
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("SKILL.md"), clients::SKILL).unwrap();
+        std::fs::write(shared.join("notes.md"), "mine\n").unwrap();
+        assert!(
+            !ours_alone(&shared),
+            "a directory somebody added to is not semlith's to delete"
+        );
     }
 
     /// A settings file that mentions semlith and the word "hook" for unrelated
