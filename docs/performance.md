@@ -200,14 +200,25 @@ work has now seen all 107 questions.
 | wrong yes, on `path` | 0 | **0** — asserted, not reported |
 | call-edge resolution | | **62 %** settled |
 
-**hit@8 on the sealed thirty is two questions worse than 0.22.0's**, and the
-cause is not established. It was chased by elimination, not guessed at, and four
-candidates were ruled out by measurement: the fastembed bump that came with this
-release (0.22.0 scores 27 with fastembed 6.1.0 too), the constants extraction,
-the candidate-pool depth, and the rescoring pass. The corpus indexes to 4 267
-chunks in every one of those runs, so chunking is not it either. The finding is
-recorded rather than left for a reader to discover, and it is where the next
-release starts.
+**hit@8 on the sealed thirty is two questions worse than 0.22.0's, and the cause
+is full-precision rescoring.** The store now keeps an `exact.f32` sidecar and the
+query path reorders its candidates by the true vectors rather than by their
+4-bit codes — which is more accurate and costs recall at k=8, because
+reciprocal-rank fusion weighs a candidate by its rank. A chunk the codes placed
+third can fall far enough under exact cosine to lose its contribution and leave
+the top eight.
+
+It was found by elimination, not guessed at. Four candidates were ruled out by
+measurement first: the fastembed bump this release carries (0.22.0 scores 27 with
+fastembed 6.1.0 too), the constants extraction, the candidate-pool depth, and a
+graph-seed interaction that was real and was fixed and turned out not to be the
+cause. The corpus indexes to 4 267 chunks in every one of those runs, so chunking
+was never it.
+
+The pass ships because it is the groundwork the next release needs, and the
+number it costs is stated rather than buried. Making rescoring pay for itself —
+by fusing on score rather than rank where a list has true scores, or by rescoring
+only the head — is where the next release starts.
 
 Each figure is the median of three runs, and each run is its own index of the
 corpus. The spread was zero on every figure of every configuration this release

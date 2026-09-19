@@ -824,8 +824,10 @@ impl Exact {
         file.read_exact(&mut buf).ok()?;
         let id = u64::from_le_bytes(buf[..8].try_into().ok()?);
         let vector = buf[8..]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         Some((id, vector))
     }
