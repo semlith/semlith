@@ -2643,6 +2643,15 @@ td.why .copyfield {
   text-overflow: ellipsis;
 }
 
+/* A brief is the opened row, so the second stage's column has nothing to hold.
+ * Hidden rather than emptied, so the answer takes the whole width. */
+.two-stage.one-stage .body-col {
+  display: none;
+}
+.two-stage.one-stage {
+  grid-template-columns: 1fr;
+}
+
 /* The Brief view: one call's answer, in the column the locate list uses.
  *
  * Deliberately the same type scale, the same rules and the same tags as the

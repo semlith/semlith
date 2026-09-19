@@ -3928,6 +3928,19 @@ async function searchView() {
     },
   });
 
+  /* The second stage's column, which the Brief view has no use for: a brief
+   * *is* the opened row, so "pick a row, the span opens here" would be an
+   * instruction for something that has already happened. Hidden by a class on
+   * the container rather than by emptying the column, so the locate side takes
+   * the whole width instead of leaving a gap where the panel was. */
+  const bodyCol = el("div", { class: "body-col" }, bodyCard, aroundHead, stage);
+  const twoStage = el(
+    "div",
+    { class: "two-stage" },
+    el("div", { class: "locate-col" }, results, footer),
+    bodyCol,
+  );
+
   const nothing = () =>
     empty("Type a phrase or an identifier. Both halves of the search run either way.");
 
@@ -3943,7 +3956,11 @@ async function searchView() {
       return;
     }
 
-    if (view === "brief") return runBrief(query);
+    twoStage.classList.remove("one-stage");
+    if (view === "brief") {
+      twoStage.classList.add("one-stage");
+      return runBrief(query);
+    }
 
     const mine = ++generation;
     const params = new URLSearchParams({ query, k: String(k), prefer });
@@ -4480,18 +4497,7 @@ async function searchView() {
         el("span", { class: "dial-note", text: "what one answer may cost an agent" }),
       ),
     ),
-    el(
-      "div",
-      { class: "two-stage" },
-      el("div", { class: "locate-col" }, results, footer),
-      el(
-        "div",
-        { class: "body-col" },
-        bodyCard,
-        aroundHead,
-        stage,
-      ),
-    ),
+    twoStage,
   );
 }
 
