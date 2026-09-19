@@ -275,8 +275,10 @@ fn the_readme_is_short() {
 /// that file ever disagree.
 #[test]
 fn the_readme_savings_paragraph_matches_the_run_that_produced_it() {
-    const RECORDED: &str =
-        include_str!("../.ultraship/products/semlith/evidence/0.24.0/readme-savings.json");
+    // A tracked fixture, not the release record: the record lives under
+    // `.ultraship/`, which this repository gitignores, so a test that read it
+    // there compiled on the machine that wrote it and nowhere else.
+    const RECORDED: &str = include_str!("fixtures/readme-savings.json");
     let recorded: serde_json::Value = serde_json::from_str(RECORDED).expect("the recorded run");
 
     // Spelled in the README with thin spaces between the thousands, which is

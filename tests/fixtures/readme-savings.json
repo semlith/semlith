@@ -1,0 +1,12 @@
+{
+  "measured_on": "0.24.0 release binary, 2026-09-19",
+  "corpus": "this repository, src/ only",
+  "questions": 107,
+  "excerpt_tokens_per_answered_question": 3982,
+  "whole_file_tokens_per_answered_question": 105132,
+  "files_named_per_question": 4.1,
+  "coverage_percent": 100,
+  "tier": "measured",
+  "note": "An upper bound: a file two answers both name is counted twice, where one real read would have served both.",
+  "ratio": 26
+}
