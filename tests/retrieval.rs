@@ -30,6 +30,17 @@ use std::path::{Path, PathBuf};
 struct Question {
     id: String,
     shape: String,
+    /// What the 0.25.0 judgment audit decided about this question's miss:
+    /// `wrong` when the ranking returned the wrong chunks, `unspanned-correct`
+    /// when a returned chunk answered the question and no span covered it,
+    /// `unsure` when it could be read either way. Empty for a question the
+    /// audit never had to look at.
+    audit: String,
+    /// How many spans that decision added. The number is here so the decision
+    /// can be checked rather than believed: a question recorded as
+    /// unspanned-correct that gained nothing is a decision that was not acted
+    /// on, and a hit bought that way would be bought from the span file.
+    audit_added: usize,
     tool: String,
     query: String,
     name: String,
@@ -93,6 +104,45 @@ fn the_retrieval_metrics_are_measured() {
          may not be trimmed to suit a result",
         all.len()
     );
+
+    // Every audit decision is one of the three words, and an
+    // unspanned-correct decision added at least one span.
+    //
+    // The audit is the one part of this release that changes the measuring
+    // stick, so it is the part that has to be checkable from outside. A
+    // question marked unspanned-correct with nothing added would be a hit
+    // bought by relabelling rather than by finding anything.
+    for question in &all {
+        if question.audit.is_empty() {
+            continue;
+        }
+        assert!(
+            ["wrong", "unspanned-correct", "unsure"].contains(&question.audit.as_str()),
+            "{} carries an audit decision of {:?}, which is not one of the three",
+            question.id,
+            question.audit
+        );
+        if question.audit == "unspanned-correct" {
+            assert!(
+                question.audit_added > 0,
+                "{} was judged correct-but-unspanned and gained no span",
+                question.id
+            );
+            assert!(
+                question.spans.len() > question.audit_added,
+                "{} claims to have gained {} spans and holds only {}",
+                question.id,
+                question.audit_added,
+                question.spans.len()
+            );
+        } else {
+            assert_eq!(
+                question.audit_added, 0,
+                "{} was not judged correct-but-unspanned and yet added spans",
+                question.id
+            );
+        }
+    }
 
     // Every question carries a class, and only one of the three.
     //
@@ -1555,6 +1605,8 @@ fn assign(
     match key {
         "id" => question.id = value.to_string(),
         "shape" => question.shape = value.to_string(),
+        "audit" => question.audit = value.to_string(),
+        "audit_added" => question.audit_added = value.parse().unwrap_or(0),
         "tool" => question.tool = value.to_string(),
         "query" => question.query = value.to_string(),
         "name" => question.name = value.to_string(),

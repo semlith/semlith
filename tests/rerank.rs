@@ -77,6 +77,20 @@ fn the_stage_switches_off_to_the_fused_order() {
         "the rescored order is not deterministic for one query over one store"
     );
 
+    // It ran. A stage that failed to load its model, or skipped every
+    // candidate, would leave an order identical to the fused one and no badge
+    // — which is exactly what a silent no-op looks like from outside.
+    let badged = semlith
+        .search("how does the client wait between attempts", 8)
+        .unwrap()
+        .into_iter()
+        .filter(|hit| hit.lists.contains(&"rerank"))
+        .count();
+    assert!(
+        badged > 0,
+        "no hit carries the rerank badge: the stage did not run"
+    );
+
     // Present or absent, the stage never loses or invents a candidate: it
     // reorders what fusion already found.
     let mut sorted_off = off.clone();
