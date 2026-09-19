@@ -1911,7 +1911,7 @@ async function graphView() {
           let all;
           try {
             all = await api(
-              `/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`,
+              scoped(`/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`),
             );
           } catch (e) {
             return fill(nested, error(e.message));
@@ -1980,7 +1980,7 @@ async function graphView() {
     fill(rail, el("div", { class: "rail-hint", text: "Loading…" }));
     let data;
     try {
-      data = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}`);
+      data = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}`));
     } catch (e) {
       return fill(rail, error(e.message));
     }
@@ -2040,7 +2040,7 @@ async function graphView() {
                 button.textContent = "Loading…";
                 let all;
                 try {
-                  all = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`);
+                  all = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`));
                 } catch (err) {
                   button.replaceWith(error(err.message));
                   return;
@@ -2080,6 +2080,17 @@ async function graphView() {
     );
   }
 
+  /* The store chips scope the canvas, and until 0.24.0 they did not scope the
+   * rail: a name defined in two open stores listed both stores' callers under
+   * a chip that named one of them. The panel then contradicted the picture
+   * beside it, which is worse than either answer on its own. */
+  function scoped(path) {
+    const query = new URLSearchParams();
+    for (const store of chosen) query.append("store", store);
+    const tail = query.toString();
+    return tail ? `${path}${path.includes("?") ? "&" : "?"}${tail}` : path;
+  }
+
   async function load(params) {
     meta.textContent = "loading…";
     const query = new URLSearchParams(params || {});
@@ -2102,6 +2113,19 @@ async function graphView() {
     }
     canvas.draw(data, kinds);
     counts();
+    /* Nodes with nothing between them is a state, not a drawing. It happens
+     * for a real reason — a language whose parser extracts definitions and no
+     * call edges, or a scope narrow enough that both ends of every edge fell
+     * outside it — and a field of unconnected boxes with no explanation reads
+     * as a broken page. Said rather than drawn silently. */
+    if (!data.edges.length) {
+      return blank(
+        "Nothing in view is connected. Either this scope holds both ends of no " +
+          "edge — widen it, or clear it — or the language here is one semlith " +
+          "parses for definitions but not yet for calls. The Index page's " +
+          "per-language table says which.",
+      );
+    }
     // A focused view arrives with its centre chosen, so the rail says something
     // before the first click rather than asking for one.
     const centre = (params && params.name) || canvas.best();

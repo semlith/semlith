@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The graph reads as a graph
+
+Three things were wrong with what a freshly indexed project drew. The page
+opened on the busiest symbol, which in any codebase is its most *reused* name —
+`new`, `len`, `get` — earning its degree from forty unrelated callers the
+extractor could only match by spelling, so the first thing anyone saw was a star
+of dashed `inferred` lines between functions with nothing to do with each other.
+The opening symbol is now the one with the most edges the extractor actually
+resolved, and a name defined once in the store beats a name defined forty times
+however busy it is. When the node budget cuts a neighbourhood — and on a hub it
+always does — the resolved edges are drawn and the spelling matches are the ones
+left out, rather than whichever sorted first.
+
+The store chips scoped the canvas and not the panel beside it, so a symbol
+defined in two open stores listed both stores' callers under a chip naming one
+of them: the rail contradicted the picture next to it. It is scoped to the same
+stores now.
+
+And a view where nothing is connected says so. It is a real state — a language
+semlith parses for definitions but not yet for calls, or a scope holding both
+ends of no edge — and a field of unconnected boxes with no explanation reads as
+a broken page.
+
 ### A corpus is the project, not its dependencies
 
 The walk carries a table of generated and vendored directories of its own, for
