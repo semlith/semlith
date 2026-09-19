@@ -414,36 +414,71 @@ const SCALE_FILES: [usize; 3] = [700, 7_000, 70_000];
 /// is not this release's to make.
 const FIXED_OVERHEAD_MB: u64 = 200;
 
-/// What a large store costs to open, to search, and to change one file in —
-/// against the release before it, on the same corpora.
+/// How the binaries under test are labelled in the tables below.
 ///
-/// This is the release's central claim and the only place it is a number.
-/// Point `OLD` at a 0.6.0 binary:
+/// Labels rather than version numbers, because the version each binary actually
+/// reports is printed beside its label under `--- binaries` and is the honest
+/// place for it. The file carried the literals `"0.6.0"` and `"0.7.0"` until
+/// 0.23.0, by which point neither was the binary being measured and the tables
+/// said so in every run.
+const CURRENT: &str = "current";
+const BASELINE: &str = "baseline";
+
+/// What a large store costs to open, to search, and to change one file in.
+///
+/// This is the release's central claim and the only place it is a number, so
+/// the current binary is measured every run: the three corpora are indexed,
+/// warm query p50 and peak indexing memory are printed as a table, and the
+/// invariants this file's own constants justify are asserted against that one
+/// binary.
+///
+/// Comparing against an earlier release is a second arm rather than the point
+/// of the stage. Point `OLD` at a binary to get it, and every figure below is
+/// taken for that binary too, on the same corpora:
 ///
 /// ```sh
 /// OLD=/path/to/semlith-0.6.0 cargo test --release --test measure -- \
 ///     --ignored --nocapture measure_the_store_at_scale
 /// ```
+///
+/// It was the other way round until 0.23.0: a missing `OLD` returned before
+/// anything was indexed, so the stage measured nothing and still exited 0.
+/// 0.22.0 recorded warm query p50 and peak indexing memory as NOT MEASURED for
+/// exactly that reason, and the suite's green exit stood for the five other
+/// stages rather than for this one. A baseline binary the machine may not have
+/// is a reason to skip the comparison; it was never a reason to skip the
+/// measurement.
+///
+/// From 0.23.0 the index also carries an `exact.f32` sidecar beside the 4-bit
+/// codes and the query path rescores against it, so both the bytes on disk and
+/// the work a warm search does are larger here than in 0.22.0. That is the
+/// feature, and the numbers below report it rather than guard against it.
 #[test]
 #[ignore = "indexes a hundred thousand chunks twice over; takes tens of minutes"]
 fn measure_the_store_at_scale() {
-    // Comparative by construction: without the release before it there is
-    // nothing to compare against, and a measurement with no baseline is a
-    // number rather than evidence. Say what is missing and stop, rather than
-    // failing a suite for want of a binary the machine may not have.
-    let Ok(old) = std::env::var("OLD") else {
-        println!(
-            "\nskipped: set OLD to a 0.6.0 release binary to run the scale comparison, e.g.\n  \
+    let current = env!("CARGO_BIN_EXE_semlith").to_string();
+    let baseline = std::env::var("OLD").ok();
+
+    println!("\n--- binaries");
+    println!("{CURRENT}: {}", version(&current));
+    match &baseline {
+        Some(old) => println!("{BASELINE}: {}", version(old)),
+        None => println!(
+            "{BASELINE}: none. Set OLD to an earlier release binary for the comparison arm:\n  \
              cargo install semlith --version 0.6.0 --root /tmp/old\n  \
              OLD=/tmp/old/bin/semlith cargo test --release --test measure -- --ignored \
              --nocapture measure_the_store_at_scale"
-        );
-        return;
-    };
-    let new = env!("CARGO_BIN_EXE_semlith").to_string();
-    println!("\n--- binaries");
-    println!("old: {}", version(&old));
-    println!("new: {}", version(&new));
+        ),
+    }
+
+    // Baseline first where there is one, so the current binary's figures are
+    // the last thing printed under each corpus and the comparison reads in the
+    // direction it is written: what changed, against what.
+    let mut binaries: Vec<(&str, &str)> = Vec::new();
+    if let Some(old) = &baseline {
+        binaries.push((BASELINE, old));
+    }
+    binaries.push((CURRENT, &current));
 
     let root = tempfile::tempdir().unwrap();
     let mut rows = Vec::new();
@@ -463,7 +498,7 @@ fn measure_the_store_at_scale() {
             fs::write(corpus.join(format!("note_{i:06}.md")), body).unwrap();
         }
 
-        for (label, binary) in [("0.6.0", &old), ("0.7.0", &new)] {
+        for &(label, binary) in &binaries {
             let store = root.path().join(format!("store_{label}_{files}"));
             let started = Instant::now();
             let index_rss = index_and_measure(binary, &store, &corpus, None);
@@ -496,7 +531,7 @@ fn measure_the_store_at_scale() {
     // --- what a store past its budget costs ---------------------------------
     let biggest = rows
         .iter()
-        .filter(|r| r.0 == "0.7.0")
+        .filter(|r| r.0 == CURRENT)
         .max_by_key(|r| r.1)
         .unwrap()
         .clone();
@@ -509,8 +544,11 @@ fn measure_the_store_at_scale() {
     // is not only how much a churning store holds but whether that number
     // settles. Freed shard memory is not necessarily handed back to the
     // operating system, so a plateau is the honest form of "bounded" here.
-    println!("\n--- 0.7.0 on {} chunks, budget cut to 8 MB", biggest.1);
-    let mut squeezed = McpServer::start_with(&new, std::slice::from_ref(&biggest.6), Some("8"));
+    println!(
+        "\n--- {CURRENT} on {} chunks, budget cut to 8 MB",
+        biggest.1
+    );
+    let mut squeezed = McpServer::start_with(&current, std::slice::from_ref(&biggest.6), Some("8"));
     squeezed.handshake();
     println!("idle RSS {} MB", squeezed.rss_kb() / 1024);
     let squeezed_median = squeezed.median_search();
@@ -531,7 +569,7 @@ fn measure_the_store_at_scale() {
 
     // --- what changing one file costs ---------------------------------------
     println!("\n--- one file changed, on the largest corpus");
-    for (label, binary) in [("0.6.0", &old), ("0.7.0", &new)] {
+    for &(label, binary) in &binaries {
         let row = rows
             .iter()
             .filter(|r| r.0 == label)
@@ -555,13 +593,13 @@ fn measure_the_store_at_scale() {
     println!("\n--- one file changed, on a store of many shards");
     let many = root.path().join("store_many_shards");
     let corpus = root.path().join(format!("corpus_{}", SCALE_FILES[1]));
-    index_with_shards(&new, &many, &corpus, Some("512"));
+    index_with_shards(&current, &many, &corpus, Some("512"));
     let shards = fs::read_dir(many.join("index"))
         .map(|d| d.flatten().count())
         .unwrap_or(0);
-    let (rewritten, total, took) = change_one_file(&new, &many, &corpus, Some("512"));
+    let (rewritten, total, took) = change_one_file(&current, &many, &corpus, Some("512"));
     println!(
-        "0.7.0, {} chunks in {shards} shards of 512: {} KB rewritten of a {} KB index, \
+        "{CURRENT}, {} chunks in {shards} shards of 512: {} KB rewritten of a {} KB index, \
          whole run {:.1}s",
         chunk_count(&many),
         rewritten / 1024,
@@ -575,7 +613,7 @@ fn measure_the_store_at_scale() {
 
     println!("\n--- what a hundredfold corpus costs an open store");
     let mut slopes = Vec::new();
-    for label in ["0.6.0", "0.7.0"] {
+    for &(label, _) in &binaries {
         let mine: Vec<_> = rows.iter().filter(|r| r.0 == label).collect();
         let (small, large) = (mine.first().unwrap(), mine.last().unwrap());
         let idle_growth = large.2 as i64 - small.2 as i64;
@@ -595,26 +633,98 @@ fn measure_the_store_at_scale() {
         slopes.push((label, idle_growth, busy_growth));
     }
 
-    let new_rows: Vec<_> = rows.iter().filter(|r| r.0 == "0.7.0").collect();
-    let (new_idle, old_idle) = (slopes[1].1, slopes[0].1);
+    // Ordered as `binaries` is, so the current binary is last whether or not a
+    // baseline was measured beside it.
+    let current_rows: Vec<_> = rows.iter().filter(|r| r.0 == CURRENT).collect();
+    let current_idle = slopes.last().unwrap().1;
+
+    // --- the current binary, as a table --------------------------------------
+    // The two figures the release notes quote, gathered out of the per-corpus
+    // blocks above and into one place. Warm query p50 is the median of the
+    // twenty warm searches `median_search` drives against a real MCP server —
+    // the first three are thrown away, so this is a session's queries rather
+    // than a process starting up. Peak indexing memory is the kernel's maximum
+    // resident set size for the whole index run, as `/usr/bin/time -l` reports
+    // it.
+    println!("\n--- {CURRENT}: warm query p50 and peak indexing memory");
+    println!("| chunks | warm query p50 | peak RSS while indexing | idle RSS | searching RSS |");
+    println!("|---|---|---|---|---|");
+    for row in &current_rows {
+        println!(
+            "| {} | {:.1} ms | {} MB | {} MB | {} MB |",
+            row.1,
+            row.4.as_secs_f64() * 1000.0,
+            row.5 / 1024,
+            row.2 / 1024,
+            row.3 / 1024,
+        );
+    }
+
+    // Opening cost against the release before it, when a baseline was given.
+    // Only the comparison waits on `OLD`: whether opening a store is cheap in
+    // absolute terms is asserted below on the current binary alone, and that is
+    // the part that must run every time.
+    if baseline.is_some() {
+        let (new_idle, old_idle) = (slopes[1].1, slopes[0].1);
+        assert!(
+            new_idle < old_idle,
+            "an opened-but-unsearched {CURRENT} store grew by {new_idle} KB across a hundredfold \
+             corpus against the {BASELINE}'s {old_idle} KB — opening is still loading vectors"
+        );
+    }
     assert!(
-        new_idle < old_idle,
-        "an opened-but-unsearched 0.7.0 store grew by {new_idle} KB across a hundredfold \
-         corpus against 0.6.0's {old_idle} KB — opening is still loading vectors"
-    );
-    assert!(
-        new_idle < 16 * 1024,
-        "an opened-but-unsearched store grew {new_idle} KB with the corpus"
+        current_idle < 16 * 1024,
+        "an opened-but-unsearched store grew {current_idle} KB with the corpus"
     );
 
-    let budget_mb = 512u64;
+    // The resident vector budget the binary itself enforces, read from the
+    // crate rather than written out here: a literal 512 would keep asserting
+    // against the old figure for a release after the constant moved, and would
+    // do it silently.
+    let budget_mb = semlith::index::INDEX_MEMORY_MB as u64;
     let ceiling = (budget_mb + FIXED_OVERHEAD_MB) * 1024;
     assert!(
-        new_rows.last().unwrap().3 < ceiling,
+        current_rows.last().unwrap().3 < ceiling,
         "searching the largest store held {} MB, past the {budget_mb} MB budget plus \
          {FIXED_OVERHEAD_MB} MB of fixed overhead",
-        new_rows.last().unwrap().3 / 1024,
+        current_rows.last().unwrap().3 / 1024,
     );
+    // Peak indexing memory, on every corpus rather than only the largest. The
+    // claim is that it does not grow with the corpus, so a run that sits under
+    // the ceiling at seven hundred files and goes through it at seventy
+    // thousand is precisely the failure this is here for, and only checking the
+    // last row would miss it.
+    //
+    // The same ceiling: an index run holds the batch it is embedding and the
+    // vectors it has not yet flushed, both inside the budget, on top of the
+    // model and the runtime that `FIXED_OVERHEAD_MB` stands for. 0.23.0's
+    // `exact.f32` sidecar is written out as the shards are, so it costs disk
+    // rather than another resident copy of the corpus.
+    for row in &current_rows {
+        assert!(
+            row.5 < ceiling,
+            "indexing {} chunks peaked at {} MB, past the {budget_mb} MB vector budget plus \
+             {FIXED_OVERHEAD_MB} MB of fixed overhead",
+            row.1,
+            row.5 / 1024,
+        );
+    }
+    // Warm query p50 is a recorded figure, not a gate. Nothing in this file
+    // says what a search ought to cost — it grows with the corpus by design,
+    // the scan being linear — and a threshold invented here would fail on a
+    // loaded machine rather than on the code. The one bound it can honestly
+    // carry is `LATENCY_BUDGET`, the contract's ceiling for a save becoming
+    // searchable, which a single warm search is one part of: a median above the
+    // whole budget means the search path is broken rather than slow.
+    for row in &current_rows {
+        assert!(
+            row.4 < LATENCY_BUDGET,
+            "warm query p50 on {} chunks was {:.1} ms, over the whole {LATENCY_BUDGET:?} \
+             edit-to-searchable budget that one search sits inside",
+            row.1,
+            row.4.as_secs_f64() * 1000.0,
+        );
+    }
     // Not a bound on RSS: a store past its budget reloads shards constantly and
     // the allocator keeps what it frees. What must be true is that it settles.
     assert!(
