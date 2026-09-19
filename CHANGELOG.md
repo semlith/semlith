@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-19
+
 ### The number, and the defect the number found
 
 `semlith ledger --verify` now prints what the ledger adds up to beneath the
@@ -2625,7 +2627,12 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/semlith/semlith/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/semlith/semlith/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/semlith/semlith/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/semlith/semlith/compare/v0.20.2...v0.21.0
+[0.20.2]: https://github.com/semlith/semlith/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/semlith/semlith/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/semlith/semlith/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/semlith/semlith/compare/v0.18.0...v0.19.0
