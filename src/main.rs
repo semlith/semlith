@@ -591,8 +591,35 @@ enum KeyCommand {
     },
 }
 
+/// Windows gives a process's main thread 1 MiB of stack, and `run` below is one
+/// `match` over twenty-six subcommands whose frame holds every arm's locals at
+/// once. 0.23.0 added an arm and the binary started dying on `semlith brief`
+/// before it could print anything -- a test saw an empty stderr and an exit
+/// status that was not success, which is exactly what a refusal looks like, so
+/// the only reason this was caught rather than shipped is that the test
+/// asserted on the *words* of the refusal and not just on the exit code.
+///
+/// Moving one arm into its own function bought a little room and did not fix
+/// it, because the frame is the sum of all of them. So the work runs on a
+/// thread with a stack that is not the platform's default, and the next arm
+/// added does not have to think about it. Unix is unaffected: 8 MiB there
+/// already, and this asks for 16.
 fn main() -> Result<()> {
     quiet_on_a_closed_pipe();
+    let worker = std::thread::Builder::new()
+        .name("semlith".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run)?;
+    match worker.join() {
+        Ok(result) => result,
+        // The thread panicked and has already printed its own message. Exiting
+        // with the status a panicking process uses keeps the shell's view of it
+        // the same as before this indirection existed.
+        Err(_) => std::process::exit(101),
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
