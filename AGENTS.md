@@ -35,11 +35,18 @@ cargo test --release --test retrieval -- --ignored --nocapture # retrieval quali
 ```
 
 `tests/retrieval.rs` is the harness behind every retrieval claim this repository
-makes. It runs a fixed set of 57 questions with ground-truth spans from
+makes. It runs a fixed set of 107 questions with ground-truth spans from
 `tests/fixtures/retrieval/questions.yaml` — identifier-shaped, concept-shaped and
-multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer and the graph list's
-marginal contribution. It asserts two things: the wrong-yes count for `path` is
-zero, and `tools/list` costs under 1 000 tokens. Change ranking, chunking or the
+multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, the graph list's
+marginal contribution, and from 0.23.0 calls and tokens per answered question for
+`brief` against the search-then-read path. It asserts two things: the wrong-yes
+count for `path` is zero, and `tools/list` costs under 1 120 tokens — thirteen
+tools measure 4 441 bytes, about 1 111.
+
+The questions are split development/sealed by a recorded seed in
+`tests/fixtures/retrieval/split.yaml`, and the sealed set is scored only when
+`SEMLITH_RETRIEVAL_SEALED` is set. Development work sees the development set and
+nothing else; a number tuned against is not a measurement. Change ranking, chunking or the
 tool schemas and run it; a number moving is the report, and an adjective is not.
 The question set's spans are line ranges in the 0.14.0 merge, and the `symbol`
 field is the durable anchor when one moves — the file's header says how to
@@ -70,6 +77,11 @@ A store directory holds two pieces of state that must agree:
   records shard boundaries, so nothing else can disagree with it. Format 1
   stores (pre-0.7.0) keep a single `index.tv` and are never migrated.
 - **`store.db`** — SQLite: chunk text, file path, line span, content hash.
+- **`exact.f32`** — from 0.23.0, the full-precision copy of what the codes
+  approximate. Fixed-size `[id][dim f32]` records appended in id order, read back
+  by binary search for the handful of candidates a query is about to reorder. A
+  store written before 0.23.0 has none and is ranked by the codes alone, which
+  `semlith stats` says out loud.
 
 A store that has indexed an image holds a third, `images/`, in the same shard
 layout at CLIP's 512 dimensions. It is opened lazily, so a store that never
@@ -97,6 +109,7 @@ Module responsibilities:
 | File | Responsibility |
 |---|---|
 | `src/lib.rs` | `Semlith`: open, index, search, persist |
+| `src/brief.rs` | `semlith brief` / `semlith_brief`: the ranked spans, their text and one-hop edges, composed from the primitives and fitted to a token budget. No engine of its own |
 | `src/store.rs` | Every SQL statement. Nothing else touches the database |
 | `src/index.rs` | Vector side: `Single` vs `Sharded` layouts, memory budget |
 | `src/chunk.rs` | File bytes → text → chunks. Cut at definitions where tree-sitter found them and at headings in Markdown; 800 chars and 2 overlap lines are the fallback and the budget; 8 MiB cap |

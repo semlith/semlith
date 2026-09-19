@@ -1289,6 +1289,37 @@ h2 {
   flex-shrink: 0;
 }
 
+/* On a phone the filter row is chips, dials and a store picker, and wrapping
+ * them spends the whole first screen before a single result. They scroll
+ * sideways instead of stacking, which is what a row of filters does on a phone
+ * everywhere else -- nothing is hidden, and the results stay above the fold.
+ *
+ * The drive gate's finding 4.8 is the standing check: more than two rows of
+ * chips at 390px, with no overflow affordance, fails. 0.23.0 added the View
+ * dial to this row and pushed it to three. */
+@media (max-width: 599px) {
+  .search-band .filters {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .search-band .filters::-webkit-scrollbar {
+    display: none;
+  }
+  /* A flex item in a scrolling row shrinks to nothing without this, which
+   * turns every chip into an ellipsis. */
+  .search-band .filters > * {
+    flex: 0 0 auto;
+  }
+  /* The note explains the budget dial and is the one thing here worth losing
+   * when the row has to scroll. */
+  .search-band .dial-note {
+    display: none;
+  }
+}
+
 .field {
   transition: border-color var(--d-fade) var(--e-in-out);
   display: flex;
@@ -2641,6 +2672,91 @@ td.why .copyfield {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A brief is the opened row, so the second stage's column has nothing to hold.
+ * Hidden rather than emptied, so the answer takes the whole width. */
+.two-stage.one-stage .body-col {
+  display: none;
+}
+.two-stage.one-stage {
+  grid-template-columns: 1fr;
+}
+
+/* The Brief view: one call's answer, in the column the locate list uses.
+ *
+ * Deliberately the same type scale, the same rules and the same tags as the
+ * list beside it — it is the same store answering the same question, and a
+ * second visual language would say otherwise. */
+.brief-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-2h) var(--sp-5);
+  min-width: 0;
+}
+.brief-span,
+.brief-symbol {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line-soft);
+  min-width: 0;
+}
+.brief-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.brief-head .path {
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.brief-head .sym {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.brief-lists {
+  display: inline-flex;
+  gap: var(--sp-1);
+  margin-left: auto;
+}
+.brief-text {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  line-height: var(--lh-code);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.brief-edge {
+  display: flex;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  min-width: 0;
+}
+.brief-edge .k {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.brief-edge .v {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+/* What the budget dropped, said rather than left blank: a span with no text
+ * under it looks like a span with no text in it. */
+.brief-dropped {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--muted);
+  font-style: italic;
 }
 
 .locate-footer {

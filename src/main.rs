@@ -241,6 +241,44 @@ enum Command {
         json: bool,
     },
 
+    /// Everything one question needs, in one call, under a token budget.
+    ///
+    /// The spans a search would find, the text of the top ones, and the
+    /// callers and callees of the symbols they sit inside, one hop each way --
+    /// what `search`, `read` and `neighbors` answer in four round trips.
+    ///
+    /// `semlith brief "how does a store decide it is stale"`
+    Brief {
+        question: String,
+
+        /// The token ceiling for the whole answer, counted with the store's
+        /// own tokenizer. Locators and edges are kept first, so a small budget
+        /// drops span text from the bottom of the ranking up and says so.
+        #[arg(long, short, default_value_t = semlith::brief::DEFAULT_BUDGET)]
+        budget: i64,
+
+        /// Only look at files matching this glob. Repeatable.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Only look at files with this extension. Repeatable.
+        #[arg(long, short)]
+        ext: Vec<String>,
+
+        /// Only look at files of this language. Repeatable.
+        #[arg(long, short)]
+        lang: Vec<String>,
+
+        /// Lift the implementation (`code`), the prose about it (`docs`), or
+        /// neither (`any`, the default).
+        #[arg(long, default_value = "any")]
+        prefer: String,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print one span, or one symbol's definition, and nothing around it.
     ///
     /// The second stage after a search: `semlith read src/store.rs:1041-1080`
@@ -461,6 +499,14 @@ enum Command {
         #[arg(long, short, default_value_t = 20)]
         k: usize,
 
+        /// What this name used to be: the definitions a re-index replaced,
+        /// each with the content hash of the file version it was true for.
+        ///
+        /// Empty on a store that has not re-indexed since 0.23.0, which is
+        /// what `semlith stats` says.
+        #[arg(long)]
+        history: bool,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -545,8 +591,35 @@ enum KeyCommand {
     },
 }
 
+/// Windows gives a process's main thread 1 MiB of stack, and `run` below is one
+/// `match` over twenty-six subcommands whose frame holds every arm's locals at
+/// once. 0.23.0 added an arm and the binary started dying on `semlith brief`
+/// before it could print anything -- a test saw an empty stderr and an exit
+/// status that was not success, which is exactly what a refusal looks like, so
+/// the only reason this was caught rather than shipped is that the test
+/// asserted on the *words* of the refusal and not just on the exit code.
+///
+/// Moving one arm into its own function bought a little room and did not fix
+/// it, because the frame is the sum of all of them. So the work runs on a
+/// thread with a stack that is not the platform's default, and the next arm
+/// added does not have to think about it. Unix is unaffected: 8 MiB there
+/// already, and this asks for 16.
 fn main() -> Result<()> {
     quiet_on_a_closed_pipe();
+    let worker = std::thread::Builder::new()
+        .name("semlith".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run)?;
+    match worker.join() {
+        Ok(result) => result,
+        // The thread panicked and has already printed its own message. Exiting
+        // with the status a panicking process uses keeps the shell's view of it
+        // the same as before this indirection existed.
+        Err(_) => std::process::exit(101),
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -994,6 +1067,18 @@ fn main() -> Result<()> {
             )?;
         }
 
+        Command::Brief {
+            question,
+            budget,
+            path,
+            ext,
+            lang,
+            prefer,
+            json,
+        } => brief(
+            &cli.store, &cwd, question, budget, &path, &ext, &lang, &prefer, json,
+        )?,
+
         Command::Search {
             query,
             k,
@@ -1214,8 +1299,42 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Symbol { name, k, json } => {
+        Command::Symbol {
+            name,
+            k,
+            history,
+            json,
+        } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
+            if history {
+                let past = fleet.past_in(None, &name, k)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&past)?);
+                } else if past.is_empty() {
+                    eprintln!(
+                        "no earlier definition of {name} is recorded \
+                         (a store keeps history from its first index pass under 0.23.0)"
+                    );
+                } else {
+                    let mut out = std::io::stdout().lock();
+                    for row in &past {
+                        writeln!(
+                            out,
+                            "{}{} {}{} {}:{}-{}  until {}  hash {}",
+                            bold(),
+                            row.kind,
+                            row.qualified,
+                            reset(),
+                            display(std::path::Path::new(&row.path)),
+                            row.start_line,
+                            row.end_line,
+                            semlith::clock::local_stamp(row.retired_at),
+                            &row.content_hash[..row.content_hash.len().min(12)],
+                        )?;
+                    }
+                }
+                return Ok(());
+            }
             // One answer rather than three: the definition, who calls it, what
             // it calls, and the ring beyond that. Asking for a definition and
             // then having to ask twice more to know whether it was the right
@@ -1550,6 +1669,20 @@ fn main() -> Result<()> {
                     );
                 }
                 println!("indexed  {}", semlith::human_bytes(bytes));
+                // What rescoring costs in bytes, and whether this store has it
+                // at all. A store from before 0.23.0 says so rather than
+                // quietly ranking by codes alone.
+                match store.exact_bytes() {
+                    Some(exact) => println!(
+                        "exact    {} (full-precision rescoring)",
+                        semlith::human_bytes(exact as i64)
+                    ),
+                    None => println!("exact    none (re-index to rescore in full precision)"),
+                }
+                // Zero here reads the same as "nothing ever changed", so the
+                // line says which by naming the table rather than the number
+                // alone.
+                println!("history  {} retired definitions", store.retired_symbols()?);
                 // One line, and never a number without its denominator. A
                 // store that has recorded nothing prints nothing here rather
                 // than a zero that reads like a measurement.
@@ -2629,4 +2762,141 @@ fn print_doctor(
             }
         }
     }
+}
+
+/// `semlith brief`, in its own frame.
+///
+/// `main`'s dispatch is one `match` over every subcommand, and every arm's
+/// locals share its stack frame. Windows gives the main thread 1 MiB, and this
+/// arm's renderer was enough to overflow it -- the process died before it could
+/// print the refusal its own test was asserting on, which is how the release
+/// found out. An arm that does real work gets its own function.
+#[allow(clippy::too_many_arguments)]
+fn brief(
+    store: &[PathBuf],
+    cwd: &std::path::Path,
+    question: String,
+    budget: i64,
+    path: &[String],
+    ext: &[String],
+    lang: &[String],
+    prefer: &str,
+    json: bool,
+) -> Result<()> {
+    let filter = Filter::new(path, ext, lang)?;
+    let prefer = semlith::Prefer::parse(prefer)?;
+    if budget < 1 {
+        anyhow::bail!("--budget is a number of tokens, so it has to be at least 1");
+    }
+
+    let mut fleet = read_fleet(store, cwd, false)?;
+    fleet.quiet = json;
+
+    let started = Instant::now();
+    let brief = semlith::brief::brief(&mut fleet, None, &question, budget, &filter, prefer)?;
+    let elapsed = started.elapsed();
+
+    // Built from the answer rather than from the hits, because the
+    // answer is what a brief actually hands over -- a span whose text
+    // the budget dropped cost its locator and nothing more, and a row
+    // that counted the text would overstate what was saved.
+    let rendered = serde_json::to_string(&brief)?;
+    semlith::ledger::reply(&fleet, &CLI_LEDGER, "brief", &question, &rendered, elapsed);
+
+    if json {
+        println!(
+            "{rendered_pretty}",
+            rendered_pretty = serde_json::to_string_pretty(&brief)?
+        );
+        return Ok(());
+    }
+
+    if brief.spans.is_empty() {
+        eprintln!("no matches (store has {} chunks)", fleet.chunks());
+        return Ok(());
+    }
+
+    let mut out = std::io::stdout().lock();
+    for (i, span) in brief.spans.iter().enumerate() {
+        let from = match &span.store {
+            Some(label) => format!("[{label}] "),
+            None => String::new(),
+        };
+        // The same one-letter list badges `search` prints, because it
+        // is the same hit and a reader should not have to learn the
+        // notation twice.
+        let via: String = span
+            .lists
+            .iter()
+            .map(|l| match *l {
+                "vector" => 'v',
+                "keyword" => 'f',
+                "image" => 'i',
+                _ => 'g',
+            })
+            .collect();
+        let what = match (&span.symbol, &span.symbol_kind) {
+            (Some(name), Some(kind)) => format!(" {kind} {name}"),
+            (Some(name), None) => format!(" {name}"),
+            _ => String::new(),
+        };
+        writeln!(
+            out,
+            "{}{}. {via:<3} {from}{}:{}-{}{what}{}",
+            bold(),
+            i + 1,
+            display(std::path::Path::new(&span.path)),
+            span.start_line,
+            span.end_line,
+            reset()
+        )?;
+        match &span.text {
+            Some(text) => {
+                for line in text.lines() {
+                    writeln!(out, "   {line}")?;
+                }
+            }
+            // Said rather than left blank: a span with no text under it
+            // looks like a span with no text in it.
+            None => writeln!(out, "   (text left out for the budget)")?,
+        }
+        writeln!(out)?;
+    }
+
+    for symbol in &brief.symbols {
+        writeln!(out, "{}{} (graph){}", bold(), symbol.name, reset())?;
+        for (label, edges) in [("called by", &symbol.callers), ("calls", &symbol.callees)] {
+            for edge in edges {
+                writeln!(
+                    out,
+                    "   {label} {} {}:{}",
+                    edge.symbol.name,
+                    display(std::path::Path::new(&edge.symbol.path)),
+                    edge.symbol.start_line
+                )?;
+            }
+        }
+        if symbol.hidden > 0 {
+            writeln!(out, "   and {} more edges", symbol.hidden)?;
+        }
+        writeln!(out)?;
+    }
+
+    let mut tail = format!(
+        "{} tokens of {budget}, counted with {}",
+        brief.tokens, brief.counted_with
+    );
+    if !brief.cut.is_empty() {
+        let mut dropped = Vec::new();
+        if brief.cut.span_text > 0 {
+            dropped.push(format!("{} spans left without text", brief.cut.span_text));
+        }
+        if brief.cut.symbols > 0 {
+            dropped.push(format!("{} symbols' edges", brief.cut.symbols));
+        }
+        tail.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
+    }
+    writeln!(out, "{tail}")?;
+
+    Ok(())
 }

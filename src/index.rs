@@ -702,6 +702,160 @@ fn load_or_new(path: &Path, dim: usize, bit_width: usize) -> Result<IdMapIndex> 
     Ok(index)
 }
 
+/// The full-precision copy of what the codes approximate.
+///
+/// turbovec keeps 4-bit codes and a repacked copy of them, and nothing in the
+/// crate reconstructs a vector from either -- which is why 0.22.0 specified
+/// full-precision rescoring, could not build it, and shipped the gap as a named
+/// limitation. This is the missing half: every vector the index is given is
+/// also appended here at f32, and the query path reads back only the handful it
+/// is about to reorder.
+///
+/// One file of fixed-size records, `[id: u64 little-endian][dim f32 little-
+/// endian]`, appended in the order the index sees them. Chunk ids come from an
+/// `AUTOINCREMENT` column that SQLite never reissues, so the ids in the file
+/// ascend, and a record is found by binary search over the record count rather
+/// than by an index that would have to be kept in step with two other things.
+///
+/// A record whose chunk has since been deleted stays in the file. It costs its
+/// bytes until the next full pass rewrites the store, and it can never be
+/// returned: the only ids ever looked up are candidates the live index just
+/// produced.
+///
+/// Every read verifies the id in the record it landed on. If a file's ids are
+/// ever not ascending, the search misses and the caller keeps the code-based
+/// score -- the failure is "no rescoring", never a vector belonging to another
+/// chunk.
+pub struct Exact {
+    path: PathBuf,
+    dim: usize,
+}
+
+impl Exact {
+    /// The sidecar beside a store's vectors, whether or not it exists yet.
+    pub fn open(dir: &Path, dim: usize) -> Self {
+        Self {
+            path: dir.join("exact.f32"),
+            dim,
+        }
+    }
+
+    /// Does this store carry one? A store written before 0.23.0 does not, and
+    /// is simply never rescored until its next full index pass.
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
+    pub fn bytes(&self) -> u64 {
+        std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn record_size(&self) -> usize {
+        8 + self.dim * 4
+    }
+
+    /// Append the vectors the index was just given, in the same order.
+    ///
+    /// `vectors` is flat, `dim` values per id, exactly as [`VectorIndex::add`]
+    /// takes it.
+    pub fn append(&self, vectors: &[f32], ids: &[u64]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            vectors.len() == ids.len() * self.dim,
+            "{} values for {} vectors of {} dimensions",
+            vectors.len(),
+            ids.len(),
+            self.dim
+        );
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut out = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?,
+        );
+        use std::io::Write;
+        for (slot, id) in ids.iter().enumerate() {
+            out.write_all(&id.to_le_bytes())?;
+            for value in &vectors[slot * self.dim..(slot + 1) * self.dim] {
+                out.write_all(&value.to_le_bytes())?;
+            }
+        }
+        out.flush()?;
+        Ok(())
+    }
+
+    /// The vector stored for `id`, or `None` if this store has no sidecar, the
+    /// id is not in it, or the file's ids are not ascending.
+    pub fn get(&self, id: u64) -> Option<Vec<f32>> {
+        let mut file = std::fs::File::open(&self.path).ok()?;
+        let size = self.record_size() as u64;
+        let records = file.metadata().ok()?.len() / size;
+        if records == 0 {
+            return None;
+        }
+        let (mut low, mut high) = (0u64, records - 1);
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            let (found, vector) = self.read_at(&mut file, mid)?;
+            match found.cmp(&id) {
+                std::cmp::Ordering::Equal => return Some(vector),
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => {
+                    if mid == 0 {
+                        return None;
+                    }
+                    high = mid - 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn read_at(&self, file: &mut std::fs::File, record: u64) -> Option<(u64, Vec<f32>)> {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(record * self.record_size() as u64))
+            .ok()?;
+        let mut buf = vec![0u8; self.record_size()];
+        file.read_exact(&mut buf).ok()?;
+        let id = u64::from_le_bytes(buf[..8].try_into().ok()?);
+        let vector = buf[8..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        Some((id, vector))
+    }
+}
+
+/// Cosine similarity, on vectors the embedder already normalised.
+///
+/// The norms are computed anyway rather than assumed: a vector read back from
+/// disk is data, and a model that ever stops normalising would otherwise turn
+/// into a silent ranking change rather than a visible one.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut na = 0.0f32;
+    let mut nb = 0.0f32;
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
