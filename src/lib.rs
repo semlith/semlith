@@ -31,6 +31,7 @@ pub mod fleet;
 mod formats;
 pub mod graph;
 pub mod home;
+pub mod hook;
 pub mod http;
 pub mod image;
 pub mod index;

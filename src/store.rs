@@ -2160,6 +2160,28 @@ pub fn grep_cost(db: &Connection, name: &str) -> Result<i64> {
     )?)
 }
 
+/// Whether this store has `path` indexed.
+///
+/// Compared the way every filter compares a path — normalised separators,
+/// lowercased — so a Windows store answers the same question a unix one does
+/// about the same file. The steering hook's ledger row depends on it: a raw
+/// read is only a refund against the store that could have answered it.
+pub fn holds_path(db: &Connection, path: &str) -> Result<bool> {
+    // Canonical, because that is the form a store records and a caller may hand
+    // over whatever the client said — a relative path, a symlink, or on macOS a
+    // `/var` that is really `/private/var`.
+    let canonical = crate::canonical(std::path::Path::new(path));
+    let wanted = canonical
+        .to_string_lossy()
+        .to_lowercase()
+        .replace('\\', "/");
+    let sql = format!("SELECT 1 FROM files f WHERE {GLOB_PATH} = ?1 LIMIT 1");
+    Ok(db
+        .query_row(&sql, params![wanted], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
 /// One definition's span and identity: `(start, end, name, kind)`.
 pub type SymbolSpan = (u32, u32, String, String);
 

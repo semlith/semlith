@@ -392,6 +392,30 @@ enum Command {
     /// Run as an MCP server over stdio, for agents to call as a tool.
     Mcp,
 
+    /// Answer one `PreToolUse` event, for an agent client to call before it
+    /// reads a file or greps the tree.
+    ///
+    /// Reads the event as JSON on stdin and writes the client's answer on
+    /// stdout. When a registered store holds the file, that answer is one line
+    /// naming the semlith call which would have answered the same question; for
+    /// anything else it is nothing at all. It never blocks and never fails: a
+    /// hook that errors inside a client's tool call is a broken client.
+    ///
+    /// `semlith setup` writes this into the clients that support it, so it is
+    /// rarely typed by hand.
+    Hook {
+        /// Refuse the first qualifying read of each session instead of adding a
+        /// line to it, and revert to the line for the rest of that session.
+        ///
+        /// Opt-in. The default never refuses anything.
+        #[arg(long)]
+        strict: bool,
+
+        /// The client's own name for itself, as the ledger should record it.
+        #[arg(long, default_value = "claude-code")]
+        client: String,
+    },
+
     /// Put semlith on PATH, pre-fetch the embedding model and register it
     /// with the agents you use. Every step is idempotent, so this is also the
     /// repair command.
@@ -2091,6 +2115,18 @@ fn run() -> Result<()> {
                         target.display(),
                     );
                 }
+            }
+        }
+
+        Command::Hook { strict, client } => {
+            // Everything here is best-effort and silent. This runs inside
+            // another program's tool call, where stderr is noise in somebody's
+            // terminal and a non-zero exit is a client reporting a broken hook.
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input);
+            let answer = semlith::hook::run(&input, strict, &client);
+            if !answer.is_empty() {
+                println!("{answer}");
             }
         }
 

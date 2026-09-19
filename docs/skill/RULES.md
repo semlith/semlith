@@ -1,0 +1,12 @@
+## semlith
+
+When a semlith store covers the file you are about to open, ask semlith before you
+read it and before you grep for it. The store already holds the chunks, the symbols
+and the call edges, so one call returns the few hundred tokens that bear on the
+question, where a whole-file read or a repository-wide grep returns thousands that do not.
+
+`semlith_brief` is the default call: it answers "how does X work" in one round
+trip — the spans, their text, and the one-hop callers and callees — under a token
+budget. Use `semlith_search` to locate, `semlith_read` for one span or symbol,
+`semlith_symbol` and `semlith_neighbors` for graph questions. Read a file
+directly only to edit it, or when `semlith_files` says it is not indexed.

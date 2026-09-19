@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The agent is steered, not only taught
+
+`semlith hook` answers one `PreToolUse` event. When a registered store holds
+the file a client is about to read whole — or the tree it is about to grep — it
+adds one line naming the `semlith_brief` or `semlith_read` call that answers the
+same question, and otherwise it says nothing at all. It decides from
+`registry.json` alone, so a file no store holds costs one path comparison, and
+it never sends a permission decision: answering `allow` would approve a read the
+user's own rules were about to be consulted about. `--strict` refuses the first
+qualifying read of a session and then reverts to the line.
+
+Each whole-file read it sees becomes one ledger row — kind `raw-read`, the path,
+what reading it whole cost, the client and the session — chained like every
+other row and uncredited, because semlith answered none of it. That is what
+makes Refunds a measurement rather than an estimate: until now the ledger
+counted only the questions semlith was asked, which leaves out every one it was
+not. The row goes through a running daemon or not at all; the hook never opens a
+store from inside a client's tool call, and `--no-ledger` and `SEMLITH_LEDGER=0`
+stop these rows exactly as they stop the rest.
+
 ### Every search filter negates
 
 A leading `!` on a `--path`, `--ext` or `--lang` value — and on the `path`,

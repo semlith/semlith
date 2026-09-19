@@ -327,6 +327,64 @@ pub fn graph(
     }
 }
 
+/// The tool name on a row the steering hook wrote.
+///
+/// Its own name rather than a column of its own: the ledger is one table with a
+/// `tool`, and a raw read is a retrieval semlith did not get to serve.
+pub const RAW_READ: &str = "raw-read";
+
+/// Record one whole-file read an agent made instead of asking semlith.
+///
+/// This is what turns Refunds from an estimate into a measurement. Everything
+/// else in the ledger counts what semlith answered, which flatters the ratio by
+/// leaving out every question it was never asked; the steering hook sees those
+/// and this is where they land.
+///
+/// `hits` is zero, deliberately. A raw read is a retrieval that returned
+/// nothing from semlith, so it is uncredited: it lowers Coverage and is
+/// excluded from the saving, which is exactly what happened.
+///
+/// The row goes into the store whose roots cover the file. A file no open store
+/// holds is not recorded at all, and `false` says so — Refunds counts reads of
+/// files semlith could have answered, and nothing else.
+pub fn raw_read(fleet: &Fleet, client: &str, session: &str, path: &str) -> bool {
+    if !enabled() {
+        return false;
+    }
+    let counter = fleet.counter();
+    let whole = std::fs::metadata(path)
+        .map(|m| counter.count_bytes(m.len()))
+        .unwrap_or(0);
+    for (_, store) in fleet.each() {
+        if !store::holds_path(store.db(), path).unwrap_or(false) {
+            continue;
+        }
+        let recorded = store::record_retrieval(
+            store.db(),
+            &store::NewRetrieval {
+                client,
+                session,
+                tool: RAW_READ,
+                query: path,
+                // Nothing was retrieved from semlith. This is the row's whole
+                // point, and crediting it would make the ledger count a read it
+                // failed to prevent as a saving.
+                hits: 0,
+                micros: 0,
+                excerpt_tokens: 0,
+                whole_file_tokens: whole,
+                stale_hits: 0,
+                // The denominator is a file size, which is counted the same way
+                // on every row whose denominator is one.
+                tokenizer: CHARS4,
+                query_id: &query_id(),
+            },
+        );
+        return recorded.is_ok();
+    }
+    false
+}
+
 /// Who made a retrieval, and which conversation it belonged to.
 #[derive(Debug, Clone, Copy)]
 pub struct Who<'a> {

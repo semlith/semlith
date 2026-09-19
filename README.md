@@ -157,6 +157,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
 | `semlith trust <DIR>` | Say that a store outside the store home may be opened, once. Nothing is moved. `--list` prints what is trusted. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
+| `semlith hook` | Answer one `PreToolUse` event on stdin. When a store holds the file a client is about to read whole, it adds one line naming the semlith call that answers the same question, and records the read in the ledger. Never blocks; `--strict` refuses the first such read of a session. `semlith setup` writes it into the clients that support it. |
 | `semlith models` | List available embedding models. See [docs/models.md](docs/models.md). |
 | `semlith languages` | List the language names `--lang` accepts. |
 | `semlith setup [--yes] [--register-all]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, and register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, listing every path first. `--airgap` skips the model. |
@@ -439,7 +440,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **13** |
-| CLI commands | **26** |
+| CLI commands | **27** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

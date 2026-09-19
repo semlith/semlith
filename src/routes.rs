@@ -101,6 +101,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
+        (_, true, "/api/ledger/raw-read") => raw_read(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
@@ -681,6 +682,40 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
 }
 
 /// The free half of the ledger: whether it is recording, and the totals.
+/// Record one whole-file read an agent made without asking semlith.
+///
+/// The steering hook is the only caller. It runs inside a client's tool call
+/// and must not open a store itself, so it posts the fact here and the daemon —
+/// which already holds every store open — writes the row.
+///
+/// The row is written into the store whose roots cover the file, so Refunds is
+/// per store the way every other ledger figure is, and a read of a file no open
+/// store holds is recorded nowhere rather than against whichever store happened
+/// to be first.
+fn raw_read(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(path) = body.get("path").and_then(Value::as_str) else {
+        return Response::error(400, "no path given");
+    };
+    let client = body
+        .get("client")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session = body.get("session").and_then(Value::as_str).unwrap_or("");
+
+    // `--no-ledger` is a promise about this session, and it covers rows the
+    // hook asks for exactly as it covers rows a search writes.
+    if !state.ledger {
+        return Response::json(&json!({ "recorded": false, "reason": "not recording" }));
+    }
+    with_fleet(state, json!({ "recorded": false }), move |fleet| {
+        Ok(json!({ "recorded": crate::ledger::raw_read(fleet, client, session, path) }))
+    })
+}
+
 fn ledger(state: &Arc<State>) -> Response {
     let empty = json!({
         "recording": state.ledger,
