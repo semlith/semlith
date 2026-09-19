@@ -13,7 +13,6 @@
 //! `semlith.old` and removed by the next run.
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -196,7 +195,7 @@ fn swap(base: &str, archive: &str, work: &Path, current: &Path, tag: &str) -> Re
         })
         .with_context(|| format!("{archive} has no line in the release's SHA256SUMS"))?;
 
-    let actual = format!("{:x}", Sha256::digest(&bytes));
+    let actual = crate::embed::digest(&bytes);
     if actual != expected {
         bail!(
             "checksum mismatch for {archive}\n  expected {expected}\n  got      {actual}\n\
