@@ -755,16 +755,32 @@ a kind chip is turned off.
 
 The graph is deliberately small. A force layout is readable at dozens of nodes and
 a hairball at hundreds, so a view is capped and the scope box is how you ask for a
-different part of the graph rather than for more of it at once. The page opens on
-the busiest symbol's neighbourhood rather than on everything: the whole store
+different part of the graph rather than for more of it at once. The whole store
 drawn at once is honest and unreadable.
+
+**What it opens on.** Not the busiest symbol, which is what it did until 0.24.0.
+A codebase's busiest name is its most *reused* one — `new`, `len`, `get` — and it
+earns its degree from dozens of unrelated callers the extractor could only match
+by spelling, so the page opened on a star of dashed `inferred` lines between
+functions with nothing to do with each other. Three keys decide it now, in order:
+a name defined once in the store, then how many of its edges the extractor
+actually resolved, then raw degree. The last key is what keeps a store with
+nothing but inferred edges drawing what it always drew. When the cap cuts a hub's
+neighbourhood, the resolved edges are the ones kept.
+
+**When nothing is connected**, the rail says so rather than leaving a field of
+unexplained boxes. It happens for two real reasons: a scope holding both ends of
+no edge, and a language semlith parses for definitions but not yet for calls.
 
 - **The scope box** takes either. A value containing `/` or `.` is read as a path
   and scopes the graph to that part of the tree; anything else is read as a symbol
   name and centres the graph on it. Enter with the box empty returns to the
   overview.
 - **The store chips** appear when more than one store is open and restrict the
-  graph to the ones that are lit.
+  graph to the ones that are lit — the canvas and the rail alike. Until 0.24.0
+  they scoped only the canvas, so a name defined in two open stores listed both
+  stores' callers under a chip naming one of them, and the panel contradicted the
+  picture beside it.
 - **The edge-kind chips** — one per kind — turn a kind off and on. This filters
   what is *drawn*, instantly, without asking the server again.
 
@@ -902,7 +918,39 @@ names the flag that stops it. `semlith start --no-ledger` stops a session;
 Rows are hash-chained — each carries the hash of the one before it — so an edited
 or deleted row can be found. `semlith ledger --verify` re-walks the chain and
 names the first row that does not verify, and the page reports whether the chain
-is intact.
+is intact. From 0.24.0 `--verify` also prints the savings block below it: a
+verify that says only "intact" proves the record was not edited and says nothing
+about what it records, which is the question somebody defending a figure is
+actually asked.
+
+**The figures, and why each one is beside the others.** A saving never appears
+without its coverage and its tier, on this page or anywhere else, because a
+figure a reader cannot check is one they are being asked to take on trust.
+
+- **Coverage** — the share of recorded retrievals the saving is computed over.
+  A retrieval that found nothing saved nothing and is excluded from the figure
+  and counted in the denominator.
+- **Tier** — `measured` when every credited row was counted by the store's own
+  tokenizer, `modelled` when any of them was estimated at four characters per
+  token. A mixed ledger reports `modelled`, because that is what the weaker half
+  makes the whole.
+- **Zero-hit** — retrievals semlith answered with nothing. Read from the ledger
+  rather than derived by subtracting credited from total, which since 0.24.0
+  would have counted every raw read as a question the corpus could not answer.
+- **Refunds** — files an agent read whole after all, on a file this store holds.
+  It is a *measurement* on a client carrying the steering hook, which writes one
+  `raw-read` row for each such read, and a *floor* everywhere else — the tile
+  says which, and a floor carries a `+`. Without it the ledger counts only the
+  questions semlith was asked, which flatters every ratio on the page by leaving
+  out the ones it was not.
+
+Refunds and zero-hit are two figures rather than one on purpose. A refund is an
+agent that did not reach for semlith; a zero hit is semlith that did not reach
+the answer. They call for opposite things, so adding them together would say
+neither.
+
+Each store's row on the Stores page carries the same three facts in one cell —
+tokens, coverage, tier — and no chart.
 
 **The figures:**
 

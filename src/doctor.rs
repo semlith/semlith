@@ -648,6 +648,17 @@ pub struct ClientReport {
     /// the same as not reporting at all. A fault is a client that is on this
     /// machine and cannot see semlith.
     pub fault: bool,
+    /// Whether the Agent Skill is linked into a directory this client reads,
+    /// and whether the link is current.
+    ///
+    /// `paste` for a client that documents no skill directory, which is most of
+    /// them: there is nothing to link and nothing wrong.
+    pub skill: crate::agentfiles::State,
+    /// Whether the `PreToolUse` steering hook is in this client's settings.
+    pub hook: crate::agentfiles::State,
+    /// Whether the always-on rule block is in this client's rules file, or
+    /// `paste` when semlith knows of no rules file to write for it.
+    pub rules: crate::agentfiles::State,
     /// Whether this client is on this machine at all.
     ///
     /// Wider than `present`, which is only about a CLI on `PATH`: a client
@@ -667,6 +678,68 @@ pub struct FileReport {
     /// worth naming, because `--register-all` will refuse it.
     pub parses: bool,
     pub names_semlith: bool,
+}
+
+/// Whether the skill is linked where this client would read it.
+///
+/// A client that documents no skill directory is `Paste` rather than `Absent`:
+/// nothing is wrong, and reporting it as missing would put a red row against
+/// twenty clients that never asked for one.
+fn skill_state_for(client: &crate::clients::Client) -> crate::agentfiles::State {
+    use crate::agentfiles::State;
+    let dirs: Vec<PathBuf> = client
+        .skill_dirs()
+        .filter_map(crate::clientfile::resolve)
+        .collect();
+    if dirs.is_empty() {
+        return State::Paste;
+    }
+    let states = crate::agentfiles::skill_state();
+    // Worst first: one stale link is a stale row, and one missing link is a
+    // missing row, whatever the others say.
+    for wanted in &dirs {
+        match states
+            .iter()
+            .find(|(at, _)| at.parent() == Some(wanted.as_path()))
+        {
+            Some((_, State::Present)) => {}
+            Some((_, state)) => return *state,
+            None => return State::Absent,
+        }
+    }
+    State::Present
+}
+
+/// Whether the steering hook is in this client's settings.
+///
+/// Read for both strictnesses, because a machine set up with `--strict` has a
+/// different command in the file and neither is out of date.
+fn hook_state_for(client: &crate::clients::Client) -> crate::agentfiles::State {
+    use crate::agentfiles::State;
+    if client.hook_stanza().is_none() {
+        return State::Paste;
+    }
+    let found = |strict: bool| {
+        crate::agentfiles::hook_state(strict)
+            .into_iter()
+            .find(|(name, _, _)| name == &client.name)
+            .map(|(_, _, state)| state)
+            .unwrap_or(State::Absent)
+    };
+    match (found(false), found(true)) {
+        (State::Present, _) | (_, State::Present) => State::Present,
+        (State::Stale, _) | (_, State::Stale) => State::Stale,
+        _ => State::Absent,
+    }
+}
+
+/// Whether the rule block is in this client's rules file.
+fn rules_state_for(client: &crate::clients::Client) -> crate::agentfiles::State {
+    crate::agentfiles::rules_state()
+        .into_iter()
+        .find(|(name, _, _)| name == &client.name)
+        .map(|(_, _, state)| state)
+        .unwrap_or(crate::agentfiles::State::Paste)
 }
 
 /// A registration that named a bare command, and what it was rewritten to.
@@ -1007,6 +1080,9 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
             };
 
             ClientReport {
+                skill: skill_state_for(client),
+                hook: hook_state_for(client),
+                rules: rules_state_for(client),
                 name: client.name.clone(),
                 command,
                 present,

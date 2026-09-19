@@ -169,19 +169,28 @@ impl Filter {
         // Extensions and languages are both extension sets, so they share one
         // group: `--ext rs --lang markdown` means "Rust or Markdown", the same
         // way two `--ext` flags do.
-        let mut patterns: Vec<String> = exts
-            .iter()
-            .map(|e| format!("*.{}", e.trim_start_matches('.').to_ascii_lowercase()))
-            .collect();
+        //
+        // A leading `!` is carried onto every pattern the value expands into,
+        // so `--lang '!makefile'` excludes all three of the spellings that
+        // `--lang makefile` would have included.
+        let mut patterns: Vec<String> = Vec::new();
+        for e in exts {
+            let (bang, value) = negation(e);
+            patterns.push(format!(
+                "{bang}*.{}",
+                value.trim_start_matches('.').to_ascii_lowercase()
+            ));
+        }
         for name in langs {
-            let Some(entry) = language(name) else {
-                bail!("unknown language {name:?}; run `semlith languages` for the list");
+            let (bang, value) = negation(name);
+            let Some(entry) = language(value) else {
+                bail!("unknown language {value:?}; run `semlith languages` for the list");
             };
-            patterns.extend(entry.extensions.iter().map(|e| format!("*.{e}")));
+            patterns.extend(entry.extensions.iter().map(|e| format!("{bang}*.{e}")));
             // A filename pattern resolves into the same group as an extension
             // one, so `--lang dockerfile --ext md` unions exactly the way two
             // extensions do and nothing downstream has a second case to handle.
-            patterns.extend(entry.filenames.iter().map(|f| f.to_string()));
+            patterns.extend(entry.filenames.iter().map(|f| format!("{bang}{f}")));
         }
         if !patterns.is_empty() {
             groups.push(patterns.iter().map(|p| anchor(p)).collect());
@@ -222,7 +231,26 @@ impl Filter {
 ///
 /// Lowercased, because the query side compares against `lower(files.path)`:
 /// `README.MD` and `readme.md` are the same file to anyone typing `--ext md`.
+/// Split a user's value into its exclusion marker and the value under it.
+///
+/// A leading `!` is the marker, the way Sourcebot and every `.gitignore`
+/// reader spell it. It is punctuation rather than part of the value, so what
+/// follows is anchored, lowercased and reported in errors exactly as the same
+/// value without the `!` would be.
+fn negation(value: &str) -> (&'static str, &str) {
+    match value.strip_prefix('!') {
+        Some(rest) => ("!", rest),
+        None => ("", value),
+    }
+}
+
 fn anchor(pattern: &str) -> String {
+    // The marker stays in front of the anchored pattern rather than being
+    // anchored into the middle of it: `!src/**` is the exclusion of `*/src/**`,
+    // not a search for a directory named `!src`.
+    if let ("!", rest) = negation(pattern) {
+        return format!("!{}", anchor(rest));
+    }
     // Always `/`, on every platform. The query side compares against a path
     // whose separators have been normalised to `/` (`store::GLOB_PATH`), so a
     // pattern written the way everyone writes one matches a Windows store as
@@ -361,6 +389,57 @@ mod tests {
     #[test]
     fn no_flags_is_no_filter() {
         assert!(Filter::new(&[], &[], &[]).unwrap().is_empty());
+    }
+
+    /// A leading `!` excludes. The exclusion stays in the group its kind
+    /// belongs to, because it applies after the inclusions of that kind and
+    /// nowhere else: `--path 'src/**' --path '!src/vendor/**'` is one group.
+    #[test]
+    fn a_leading_bang_marks_a_pattern_as_an_exclusion() {
+        let f = Filter::new(&s(&["src/**", "!src/vendor/**"]), &[], &[]).unwrap();
+        assert_eq!(f.groups().len(), 1, "one kind is one group");
+        assert_eq!(f.groups()[0], ["*/src/**", "!*/src/vendor/**"]);
+    }
+
+    /// The `!` survives anchoring rather than being anchored into the middle
+    /// of the pattern, and the pattern under it is anchored exactly as an
+    /// inclusion of the same shape would be.
+    #[test]
+    fn an_excluded_pattern_is_anchored_under_its_bang() {
+        let f = Filter::new(&s(&["!/home/me/proj/vendor/*"]), &[], &[]).unwrap();
+        assert_eq!(f.groups()[0], ["!/home/me/proj/vendor/*"]);
+
+        let f = Filter::new(&s(&[r"!src\vendor\**"]), &[], &[]).unwrap();
+        assert_eq!(f.groups()[0], ["!*/src/vendor/**"]);
+    }
+
+    /// An excluded extension and an excluded language expand the same way
+    /// their included forms do, with every pattern they produce excluded.
+    #[test]
+    fn an_extension_and_a_language_both_negate() {
+        let f = Filter::new(&[], &s(&["!md"]), &[]).unwrap();
+        assert_eq!(f.groups()[0], ["!*/*.md"]);
+
+        let f = Filter::new(&[], &[], &s(&["!makefile"])).unwrap();
+        assert_eq!(f.groups()[0], ["!*/*.mk", "!*/gnumakefile", "!*/makefile"]);
+    }
+
+    /// An unknown language is still named without its `!`, so the error reads
+    /// as the language the user typed rather than as punctuation.
+    #[test]
+    fn an_excluded_unknown_language_still_names_the_language() {
+        let err = Filter::new(&[], &[], &s(&["!klingon"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("klingon"), "unhelpful error: {err}");
+        assert!(!err.contains("!klingon"), "the bang is punctuation: {err}");
+    }
+
+    /// A filter holding nothing but exclusions is a filter: everything except.
+    #[test]
+    fn an_exclusion_on_its_own_is_not_an_empty_filter() {
+        let f = Filter::new(&s(&["!vendor/**"]), &[], &[]).unwrap();
+        assert!(!f.is_empty());
     }
 
     /// Every entry must be lowercase and its extensions sorted, since `--lang`

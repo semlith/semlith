@@ -458,14 +458,30 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
     let mut binds = Vec::new();
     let mut clauses = Vec::new();
     for group in groups {
-        let ors: Vec<String> = group
-            .iter()
-            .map(|p| {
-                binds.push(p.clone());
-                format!("{GLOB_PATH} GLOB ?")
-            })
-            .collect();
-        clauses.push(format!("({})", ors.join(" OR ")));
+        // A pattern marked with a leading `!` by `filter::anchor` excludes.
+        // Exclusions apply after the inclusions of their own kind, which is
+        // what keeps them inside this group rather than becoming a group of
+        // their own: `--path 'src/**' --path '!src/vendor/**'` is one
+        // requirement, not two intersecting ones.
+        let (excluded, included): (Vec<&String>, Vec<&String>) =
+            group.iter().partition(|p| p.starts_with('!'));
+        let placeholder = format!("{GLOB_PATH} GLOB ?");
+        let ors = vec![placeholder.clone(); included.len()].join(" OR ");
+        let nots = vec![placeholder; excluded.len()].join(" OR ");
+
+        // Binds are positional, so they are pushed in the order the clause
+        // below writes their placeholders — inclusions first — rather than in
+        // the order the user typed them.
+        binds.extend(included.into_iter().cloned());
+        binds.extend(excluded.into_iter().map(|p| p[1..].to_string()));
+
+        clauses.push(match (ors.is_empty(), nots.is_empty()) {
+            (true, true) => continue,
+            (false, true) => format!("({ors})"),
+            // Exclusions with nothing beside them mean everything except.
+            (true, false) => format!("(NOT ({nots}))"),
+            (false, false) => format!("(({ors}) AND NOT ({nots}))"),
+        });
     }
     if clauses.is_empty() {
         return ("1".to_string(), binds);
@@ -2057,6 +2073,47 @@ impl Savings {
     }
 }
 
+/// What the ledger says about the questions semlith did *not* answer.
+///
+/// `refunds` counts the whole-file reads the steering hook saw on a file this
+/// store holds: semlith could have answered them and was not asked. `zero_hit`
+/// counts the retrievals semlith *was* asked and found nothing for. They are
+/// separate figures because they call for opposite things — a refund means the
+/// agent is not reaching for semlith, a zero hit means semlith is not reaching
+/// the answer — and adding them together would say neither.
+///
+/// `measured` is false when no hook has ever written into this store, which is
+/// what makes `refunds` a floor rather than a count on such a machine.
+pub fn ledger_misses(db: &Connection) -> Result<Misses> {
+    let refunds: i64 = db.query_row(
+        "SELECT COUNT(*) FROM retrievals WHERE tool = ?1",
+        params![crate::ledger::RAW_READ],
+        |r| r.get(0),
+    )?;
+    let zero_hit: i64 = db.query_row(
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+         WHERE hits = 0 AND (tool IS NULL OR tool != ?1)",
+        params![crate::ledger::RAW_READ],
+        |r| r.get(0),
+    )?;
+    Ok(Misses {
+        refunds,
+        zero_hit,
+        measured: refunds > 0,
+    })
+}
+
+/// The two figures for what semlith did not answer.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct Misses {
+    /// Whole-file reads of a file this store holds, seen by the steering hook.
+    pub refunds: i64,
+    /// Retrievals semlith answered with nothing.
+    pub zero_hit: i64,
+    /// Whether a hook has ever written here. Without one, `refunds` is a floor.
+    pub measured: bool,
+}
+
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
@@ -2142,6 +2199,28 @@ pub fn grep_cost(db: &Connection, name: &str) -> Result<i64> {
         params![name],
         |r| r.get(0),
     )?)
+}
+
+/// Whether this store has `path` indexed.
+///
+/// Compared the way every filter compares a path — normalised separators,
+/// lowercased — so a Windows store answers the same question a unix one does
+/// about the same file. The steering hook's ledger row depends on it: a raw
+/// read is only a refund against the store that could have answered it.
+pub fn holds_path(db: &Connection, path: &str) -> Result<bool> {
+    // Canonical, because that is the form a store records and a caller may hand
+    // over whatever the client said — a relative path, a symlink, or on macOS a
+    // `/var` that is really `/private/var`.
+    let canonical = crate::canonical(std::path::Path::new(path));
+    let wanted = canonical
+        .to_string_lossy()
+        .to_lowercase()
+        .replace('\\', "/");
+    let sql = format!("SELECT 1 FROM files f WHERE {GLOB_PATH} = ?1 LIMIT 1");
+    Ok(db
+        .query_row(&sql, params![wanted], |_| Ok(()))
+        .optional()?
+        .is_some())
 }
 
 /// One definition's span and identity: `(start, end, name, kind)`.
@@ -2761,6 +2840,59 @@ mod tests {
     fn no_filter_counts_every_file() {
         let db = mixed();
         assert_eq!(matching_files(&db, &[]).unwrap(), 4);
+    }
+
+    /// An exclusion on its own means everything except, so it needs no
+    /// inclusion beside it to be a filter.
+    #[test]
+    fn an_exclusion_alone_means_everything_except() {
+        let db = mixed();
+        let f = filter(&["!**/vendor/**"], &[], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 3);
+    }
+
+    /// The exclusion applies after the inclusions of its own kind, so the two
+    /// intersect rather than the later one replacing the earlier.
+    #[test]
+    fn an_exclusion_narrows_the_inclusions_of_its_kind() {
+        let db = mixed();
+        let f = filter(&["proj/**", "!**/vendor/**"], &[], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 3);
+
+        let f = filter(&["proj/src/**", "!**/notes.md"], &[], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 1);
+    }
+
+    /// The bind values are positional, so an exclusion written before an
+    /// inclusion must still bind to the `?` the clause puts it against.
+    #[test]
+    fn an_exclusion_written_first_still_binds_to_its_own_placeholder() {
+        let db = mixed();
+        let written_first = filter(&["!**/vendor/**", "proj/**"], &[], &[]);
+        let written_last = filter(&["proj/**", "!**/vendor/**"], &[], &[]);
+        assert_eq!(
+            matching_files(&db, &written_first).unwrap(),
+            matching_files(&db, &written_last).unwrap(),
+        );
+        assert_eq!(matching_files(&db, &written_first).unwrap(), 3);
+    }
+
+    /// Extensions negate the way paths do, and case-insensitively: a store
+    /// holding `README.MD` loses it to `--ext '!md'`.
+    #[test]
+    fn an_excluded_extension_removes_every_spelling_of_it() {
+        let db = mixed();
+        let f = filter(&[], &["!md"], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 2);
+    }
+
+    /// A group holding only exclusions still selects from everything, and the
+    /// two kinds still intersect across groups.
+    #[test]
+    fn exclusions_of_different_kinds_intersect() {
+        let db = mixed();
+        let f = filter(&["!**/vendor/**"], &["!md"], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 1);
     }
 
     #[test]
