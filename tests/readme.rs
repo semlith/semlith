@@ -234,23 +234,30 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
     );
 }
 
-/// Under 535 lines, because the document that has to convert a first-time
+/// Under 540 lines, because the document that has to convert a first-time
 /// reader was 1 816 of them and mostly a reference table.
 ///
 /// The ceiling was 500 until 0.17.3, which raised it by twenty for the `Prior
-/// art` section, and 520 until 0.21.0, which raised it by fifteen for the
+/// art` section, 520 until 0.21.0, which raised it by fifteen for the
 /// paragraph on the login service and `semlith doctor`. That release exists
 /// because a correctly registered semlith can be absent with nothing saying
 /// so; a reader who installs it and meets that has met the product's worst
 /// failure, and the front page is where the two commands that prevent it
-/// belong. The gate exists to keep a reference catalogue out of the front
-/// page — but the number moves in a release that decided to move it, with the
-/// reason recorded, and not in whatever edit next runs out of room.
+/// belong. 0.23.0 raises it by five: `semlith brief` and `semlith_brief` each
+/// need a row in the table they belong to, and the release's own figure —
+/// what one answered question costs an agent, one call against several — is
+/// the number the front page exists to state. Two rows of the numbers table
+/// were merged first, so the five is what is left after trimming rather than
+/// instead of it.
+///
+/// The gate exists to keep a reference catalogue out of the front page — but
+/// the number moves in a release that decided to move it, with the reason
+/// recorded, and not in whatever edit next runs out of room.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 535,
-        "the README is {lines} lines; the ceiling is 535"
+        lines < 540,
+        "the README is {lines} lines; the ceiling is 540"
     );
 }

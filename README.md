@@ -451,8 +451,7 @@ of these drifts from its source:
 | one search across three stores | **1 query embed**, ~39 MB per extra store | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
 | `tools/list` | **4 441 bytes**, ~1 111 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
-| retrieval, on 30 sealed questions of 107 | **hit@1 73 %, hit@3 80 %, hit@8 83 %**, wrong-yes **0** | the same |
-| identifiers, on the same thirty | **12 of 12** in the top three | the same |
+| retrieval, on 30 sealed questions of 107 | **hit@1 73 %, hit@3 80 %, hit@8 83 %**, identifiers **12 of 12** in the top three, wrong-yes **0** | the same |
 | the same binary, on the 77 it was tuned against | hit@1 70 %, hit@3 80 %, hit@8 84 % | the same |
 | 0.22.0, same corpus, instrument and split | sealed hit@1 73 %, hit@3 80 %, hit@8 90 % | the same |
 | one answered question, `brief` against search-then-read | **1.00 calls vs 2.61**, 1 934 tokens vs 696 | the same |
