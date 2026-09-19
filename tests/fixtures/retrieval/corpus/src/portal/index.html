@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Semlith</title>
+    <link rel="stylesheet" href="style.css" />
+    <!-- Every one of these is served from the binary, so the tab icon and the
+         home-screen icon cost a loopback request and nothing else. -->
+    <link rel="icon" href="favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <link rel="manifest" href="icons/site.webmanifest" />
+    <meta name="theme-color" content="#1e2a35" />
+  </head>
+  <body>
+    <!-- Everything below is built by app.js. The page ships empty rather than
+         with a skeleton to hide, because the first paint is a local fetch away
+         and a flash of the wrong state is worse than a moment of nothing. -->
+    <div id="root"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

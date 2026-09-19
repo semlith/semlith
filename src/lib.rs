@@ -98,6 +98,12 @@ const GENERATION: &str = "index_generation";
 /// flattens the curve enough that a result ranked third is not dismissed.
 const RRF_K: f32 = 60.0;
 
+/// How many definitions of a typed name are lifted above the fused order.
+///
+/// See the lift in [`Semlith::search_preferring`]. Three, so an ambiguous name
+/// says it is ambiguous without spending the whole answer on it.
+const DEFINITION_LIFT: usize = 3;
+
 /// What a query looks like, which decides which half of the fusion is trusted.
 ///
 /// Read off the query's own text, deterministically, with no model: an agent
@@ -136,6 +142,28 @@ impl Shape {
         match self {
             Self::Identifier => 2.0,
             Self::Question => 1.0,
+        }
+    }
+
+    /// The reciprocal-rank constant each list is fused with, under this shape.
+    ///
+    /// One constant for every list flattens the curve equally for all of them,
+    /// which is the same as saying no list is ever more certain about its own
+    /// first place than any other. That is false, and measurably: FTS5 is exact
+    /// about an identifier and vague about a sentence, and the embedding is the
+    /// other way round. A chunk found at ranks four and five by the two vague
+    /// lists, plus the graph list derived from them, outscored the chunk the one
+    /// authoritative list put first.
+    ///
+    /// A smaller constant steepens a list's curve, so its own first place is
+    /// worth much more than its fourth. `RRF_K` stays the value for a list this
+    /// shape has no reason to trust.
+    fn list_constant(self, list: &str) -> f32 {
+        const STEEP: f32 = 12.0;
+        match (self, list) {
+            (Self::Identifier, "keyword") => STEEP,
+            (Self::Question, "vector") => STEEP,
+            _ => RRF_K,
         }
     }
 }
@@ -1363,6 +1391,16 @@ impl Semlith {
         let every = checkpoint_files();
         let mut since_checkpoint = 0usize;
 
+        // A store written before 0.22.0 holds fixed-window chunks, and the
+        // hash check below would leave it holding them for ever: its files have
+        // not changed, the rule for what a chunk is has. So the first pass
+        // under this release re-chunks everything it walks, and the format row
+        // moves at the end of a pass that swept the whole store — a pass over
+        // one directory leaves the rest of the store on the old rule, and
+        // saying otherwise in the meta row would be a claim about files this
+        // run never looked at.
+        let rechunk = store::format(&self.db)? < store::DEFINITION_CHUNKS;
+
         // Refused before anything is read. A path that names a credential or
         // sits outside this caller's boundary is reported by name with the rule
         // that refused it, rather than dropped from the walk — an agent that
@@ -1594,7 +1632,7 @@ impl Semlith {
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
-            if store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
+            if !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
                 report.unchanged += 1;
                 say_file(
                     &mut on_file,
@@ -1751,27 +1789,13 @@ impl Semlith {
                 None => {}
             }
 
-            let chunks = chunk::chunk_text(&text);
-            if chunks.is_empty() {
-                let why = SkipReason::NoText;
-                skip(&mut report, &why);
-                say_file(
-                    &mut on_file,
-                    &report,
-                    total,
-                    &path,
-                    FileOutcome::Skipped,
-                    Some(why.as_str()),
-                );
-                continue;
-            }
-
-            // Parsed before a single row is written, which is the whole reason
-            // this call moved up here from below the inserts: tree-sitter
-            // failing on this file's own bytes is the text path's one
-            // file-shaped failure, and catching it before the rows exist means
-            // there is nothing to undo and the shared pending batch is never
-            // left holding an id whose row was rolled back.
+            // Parsed before a single row is written, which is the whole
+            // reason this call sits above the inserts: tree-sitter failing on
+            // this file's own bytes is the text path's one file-shaped
+            // failure, and catching it before the rows exist means there is
+            // nothing to undo and the shared pending batch is never left
+            // holding an id whose row was rolled back.
+            //
             let extraction = match graph::extract(&path, &text) {
                 Ok(extraction) => extraction,
                 Err(e) => {
@@ -1787,6 +1811,21 @@ impl Semlith {
                     continue;
                 }
             };
+
+            let chunks = chunk::chunk_file(&path, &text);
+            if chunks.is_empty() {
+                let why = SkipReason::NoText;
+                skip(&mut report, &why);
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Skipped,
+                    Some(why.as_str()),
+                );
+                continue;
+            }
 
             say_file(
                 &mut on_file,
@@ -1809,7 +1848,7 @@ impl Semlith {
                     store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
                 spans.push((c.start_line, c.end_line, id));
                 pending.ids.push(id as u64);
-                pending.texts.push(c.text.clone());
+                pending.texts.push(c.embedded());
 
                 // Flush per chunk, not per file. One 8 MB file chunks into
                 // thousands of pieces, and holding them all to embed in a
@@ -1900,6 +1939,19 @@ impl Semlith {
         }
 
         self.commit_hashes(&mut completed)?;
+
+        // The chunking rule this store is now on, recorded only when a pass
+        // that swept the whole store ran to the end. A slice that yielded, a
+        // run that was stopped, or an index of one directory leaves files
+        // behind on the old rule, and a meta row saying otherwise would be a
+        // claim about files this run never opened.
+        if rechunk && sweep && report.pending.is_empty() && !report.stopped {
+            store::set_meta(
+                &self.db,
+                store::FORMAT_KEY,
+                &store::FORMAT_VERSION.to_string(),
+            )?;
+        }
 
         Ok(report)
     }
@@ -2492,6 +2544,58 @@ impl Semlith {
             return Ok(Vec::new());
         }
 
+        // The chunks that *define* the thing the query named, when the query
+        // named a thing.
+        //
+        // An agent that already knows a term is the one case where retrieval
+        // has no excuse, and it was the largest measured miss class on the
+        // pinned corpus: `DEPENDENCY_KINDS` and `SEMLITH_IMAGE_FLOOR` ranked
+        // first in FTS5 alone and still missed at k=8. Fusion is why. A
+        // contribution of `weight / (60 + rank)` is nearly flat across the
+        // first ranks, so one authoritative list placing a chunk first adds
+        // 2/61 while two vague lists placing a chunk fourth and fifth add
+        // 1/65 + 1/66 — and a third list derived from those two adds again.
+        // Rank is the thing that carries the information and the formula
+        // spends it.
+        //
+        // So this is precedence rather than a weight. The `symbols` table
+        // already knows which chunk holds which definition, and
+        // `symbols_by_names` already applies the same filter the other lists
+        // see, so there is no new query shape and no way for this list to
+        // return a chunk the filter excluded. It is read only for an
+        // identifier-shaped query: a sentence naming a symbol in passing is
+        // not a request for that symbol's definition, which is what `prefer`
+        // and the fusion are for.
+        let definitions: Vec<u64> = if shape == Shape::Identifier {
+            let name = query.trim().to_string();
+            let mut ids = Vec::new();
+            for row in
+                store::symbols_by_names(&self.db, std::slice::from_ref(&name), filter.groups())?
+            {
+                if let Some(chunk) = row.chunk_id {
+                    let id = chunk as u64;
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+                // Capped, because the lift is a promise about the first few
+                // results and not a licence to fill them. A name like `record`
+                // or `resolve` has several definitions in this corpus alone,
+                // and a name like `new` has dozens; lifting all of them would
+                // answer "where is this defined" and bury every call site,
+                // which is the other half of what an identifier query is
+                // usually for. Three is enough to say "here it is, and it is
+                // ambiguous"; past that the answer is `semlith symbol`, which
+                // is the tool for exactly that question.
+                if ids.len() >= DEFINITION_LIFT {
+                    break;
+                }
+            }
+            ids
+        } else {
+            Vec::new()
+        };
+
         let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
@@ -2543,6 +2647,19 @@ impl Semlith {
             .collect();
 
         for (name, is_image, ranking) in [
+            // Weightless on purpose. A definition does not out-*score* the
+            // other lists, it is lifted past them below, and a score here
+            // would be a second mechanism doing the same job badly: tuned
+            // high it would drag a definition's neighbours up with it through
+            // the graph list, tuned low it would do nothing. What it is here
+            // for is to make sure the chunk exists in the fused set at all,
+            // and to carry its badge, so a caller can see which hits arrived
+            // this way.
+            (
+                "definition",
+                false,
+                definitions.iter().map(|id| (*id, 0.0)).collect(),
+            ),
             ("image", true, image_list),
             (
                 "vector",
@@ -2563,12 +2680,32 @@ impl Semlith {
                 graph_ids.iter().map(|r| (r.id, r.weight)).collect(),
             ),
         ] {
+            let constant = shape.list_constant(name);
+            // The graph list brings candidates and never votes on them.
+            //
+            // It is derived from the other two: `graph_expansion` walks out
+            // from what the dense and keyword lists already found. So when it
+            // returns a chunk those lists also returned, its contribution is
+            // not a second opinion — it is the first opinion counted twice,
+            // and a chunk two lists ranked mediocrely beats the one an
+            // authoritative list ranked first partly on that double count.
+            //
+            // It earns its place by reaching chunks neither list found, and
+            // that half is kept. On the pinned corpus the baseline run
+            // reported "graph-only hits 0 of 20 satisfied a span" — twenty
+            // chunks no other list found, none of them right — so the walk
+            // pays for itself only where a later reranking can sort its
+            // candidates, and it must not be allowed to reorder what the other
+            // lists were already sure about.
+            let derived = name == "graph";
             for (rank, (id, weight)) in ranking.iter().enumerate() {
                 let key = (is_image, *id);
-                let contribution = weight / (RRF_K + rank as f32 + 1.0);
+                let contribution = weight / (constant + rank as f32 + 1.0);
                 match seen.get(&key) {
                     Some(&slot) => {
-                        fused[slot].1 += contribution;
+                        if !derived {
+                            fused[slot].1 += contribution;
+                        }
                         lists[slot].push(name);
                     }
                     None => {
@@ -2579,6 +2716,30 @@ impl Semlith {
                 }
             }
         }
+        // The lift, written as a score rather than as a second sort.
+        //
+        // A stable sort that moved the definitions to the front would order
+        // this store's answer correctly and lose that order the moment the
+        // answer left it: `fleet::merge` takes the best `k` across stores by
+        // fused score, so a definition lifted to rank 1 here on a score of 0.0
+        // would merge behind every scored hit of every other store. Putting the
+        // lift in the score is the same order in one store and the right order
+        // in several, and `merge` needs to know nothing about it.
+        //
+        // Above the maximum rather than at a fixed constant, because the
+        // maximum is a sum of rank reciprocals and no constant is reliably
+        // above it. Descending within the definitions, so several definitions
+        // of one name arrive in the order `symbols_by_names` gave them — by
+        // path, then by line, which is the same on every run.
+        if !definitions.is_empty() {
+            let top = fused.iter().map(|(_, score)| *score).fold(0.0f32, f32::max);
+            for (at, id) in definitions.iter().enumerate() {
+                if let Some(&slot) = seen.get(&(false, *id)) {
+                    fused[slot].1 = top + (definitions.len() - at) as f32;
+                }
+            }
+        }
+
         // Sorted together with their provenance, so a hit never carries the
         // badges of whichever chunk happened to land in its slot.
         let mut ranked: Vec<Candidate> = fused.into_iter().zip(lists).collect();

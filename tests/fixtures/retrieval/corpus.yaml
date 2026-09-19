@@ -1,0 +1,30 @@
+# The pinned corpus the retrieval harness indexes.
+#
+# Until 0.22.0 the harness copied `src`, `tests`, `docs` and `AGENTS.md` out of
+# whatever working tree it was compiled in. That made every figure it printed a
+# reading of two things at once — the ranking, and whatever the repository
+# happened to contain that afternoon — so a before/after pair across two commits
+# compared two codebases and called the difference a ranking change. The README
+# said 12/18/26 of 47 and the harness said 10/14/19 on the same day, for that
+# reason and no other.
+#
+# The corpus is now the tree under `corpus/`, checked in at the commit below and
+# never regenerated to suit a result. It is the 0.21.0 tree with two directories
+# left out: `tests/drive`, a browser-replay corpus no question asks about, and
+# `tests/fixtures/retrieval`, because a benchmark that indexes its own answer key
+# measures the answer key.
+#
+# `files` and `bytes` are asserted by the harness on every run. A corpus that has
+# been edited fails loudly rather than moving every number by a question.
+#
+# Regenerating it is a deliberate act that re-pins every span in
+# `questions.yaml`:
+#
+#   git archive <commit> src tests docs AGENTS.md | tar -x -C tests/fixtures/retrieval/corpus
+#   rm -rf tests/fixtures/retrieval/corpus/tests/drive \
+#          tests/fixtures/retrieval/corpus/tests/fixtures/retrieval
+
+commit: 4e8df391ebf2fd79671aed1658a05ce63b3dfc06
+tag: v0.21.0
+files: 146
+bytes: 3119835

@@ -463,8 +463,19 @@ Check 'portal/search/empty-query' 'an empty query is handled' -When $script:hasD
     if ($r.StatusCode -ge 500) { Fail "an empty query was $($r.StatusCode): $($r.Content)" }
 }
 
+# The absolute path, because no suffix of this file is unique any more. From
+# 0.22.0 the repository carries a pinned snapshot of itself at
+# `tests/fixtures/retrieval/corpus`, so the cloned corpus holds both
+# `<repo>/src/main.rs` and `<repo>/tests/fixtures/retrieval/corpus/src/main.rs`,
+# and every suffix of the first is a suffix of the second. `read` answers 500
+# naming both rather than guessing, which is the documented behaviour and the
+# right one.
 Check 'portal/read/span' 'read returns one span' -When $script:hasData {
-    $body = Get-Json "/api/read?target=$([uri]::EscapeDataString('src/main.rs:28-40'))"
+    # A suffix only the snapshot's copy has, not an absolute path: the CLI side
+    # tried the absolute form and it failed on Windows, where the shell's path
+    # and the store's recorded path are different spellings of one place.
+    $target = 'retrieval/corpus/src/main.rs:28-40'
+    $body = Get-Json "/api/read?target=$([uri]::EscapeDataString($target))"
     if (($body | ConvertTo-Json -Depth 6).Length -lt 10) { Fail "read returned nothing" }
 }
 

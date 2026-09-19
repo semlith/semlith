@@ -3620,6 +3620,7 @@ function spanCard(span) {
  * hit the graph alone reached is a neighbour of a match rather than a match,
  * and `g` said that only to a reader who hovered it. */
 const LIST_LABELS = {
+  definition: "definition — this chunk defines the name that was typed",
   vector: "vector — the embedding matched",
   keyword: "full text — the terms matched",
   graph: "graph — reached from a neighbouring symbol",

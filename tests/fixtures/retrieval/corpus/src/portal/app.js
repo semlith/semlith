@@ -1,0 +1,7570 @@
+/* semlith portal
+ *
+ * Plain DOM, no framework, no build step. The whole file is served from the
+ * binary, so there is nothing to bundle and nothing to fetch: what you read
+ * here is what runs.
+ *
+ * Every view is a function that returns an element, and the router swaps one
+ * for another inside <main>. The shell around it — topbar, rail, drawer — is
+ * built once and then mutated in place. That split matters: rebuilding the
+ * shell to open a menu used to re-run the current view, which re-hit the API
+ * and threw away whatever the user had typed into it.
+ */
+
+"use strict";
+
+// ---------------------------------------------------------------- helpers
+
+/** Build an element. Attributes in `props`, children as the rest. */
+function el(tag, props, ...kids) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : String(value));
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+}
+
+/** Replace an element's children. */
+function fill(node, ...kids) {
+  node.replaceChildren();
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+}
+
+/* The session token.
+ *
+ * It arrives once, in the query of the URL the daemon printed, and from then on
+ * it lives in this page and in sessionStorage — never in a cookie. A cookie
+ * would be attached to a request any page on any other 127.0.0.1 port made,
+ * because every port on localhost is the same site; a header is attached only
+ * by this page.
+ *
+ * The token is taken out of the address bar as soon as it is read, so it is not
+ * in the history, not in a bookmark, and not in what someone screenshots. The
+ * reload path is why sessionStorage is here at all: refreshing the page sends a
+ * request this script did not make, so the URL it reloads must not need to
+ * carry the token.
+ */
+const TOKEN_HEADER = "Semlith-Token";
+
+const session = (() => {
+  const KEY = "semlith.token";
+  let token = "";
+  try {
+    const fromUrl = new URLSearchParams(location.search).get("token");
+    if (fromUrl) {
+      token = fromUrl;
+      sessionStorage.setItem(KEY, token);
+      const clean = location.pathname + location.hash;
+      history.replaceState(null, "", clean || "/");
+    } else {
+      token = sessionStorage.getItem(KEY) || "";
+    }
+  } catch (_) {
+    /* A browser with storage disabled still works for as long as this document
+     * lives; only the reload stops surviving. */
+  }
+  return {
+    get: () => token,
+    set(fresh) {
+      token = fresh;
+      try {
+        sessionStorage.setItem(KEY, fresh);
+      } catch (_) {
+        /* as above */
+      }
+    },
+  };
+})();
+
+/** The headers every request to this daemon carries. */
+function authed(extra) {
+  return { ...(extra || {}), [TOKEN_HEADER]: session.get() };
+}
+
+/* An image the store indexed, fetched rather than linked.
+ *
+ * A browser attaches no header to an `<img src>`, and since 0.14.0 the token is
+ * a header, so the bytes are read through `fetch` and handed to the element
+ * directly.
+ *
+ * A `data:` URL rather than an object URL, which is what this used until
+ * 0.16.0 and why no preview ever appeared: the policy the server sends is
+ * `img-src 'self' data:`, and a `blob:` URL is neither, so every one of them
+ * was refused before it decoded. `data:` costs the base64 third and has no
+ * handle to revoke — acceptable because the body panel holds one picture at a
+ * time. Widening the policy to `blob:` would have been the other fix, and the
+ * policy is the thing this product is checkable on. */
+function imagePreview(path) {
+  const img = el("img", { class: "preview", alt: "" });
+  const failed = () =>
+    img.replaceWith(el("pre", { class: "muted", text: `${path} could not be read` }));
+  fetch(`/api/image?path=${encodeURIComponent(path)}`, {
+    credentials: "omit",
+    headers: authed(),
+  })
+    .then((response) => (response.ok ? response.blob() : Promise.reject(response.statusText)))
+    .then((blob) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        img.src = String(reader.result);
+      };
+      reader.onerror = failed;
+      reader.readAsDataURL(blob);
+    })
+    .catch(failed);
+  return img;
+}
+
+async function api(path, options) {
+  const options_ = options || {};
+  const response = await fetch(path, {
+    // No cookie is sent because there is none to send, and saying so keeps a
+    // future one from being attached by accident.
+    credentials: "omit",
+    ...options_,
+    headers: authed(options_.headers),
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const body = await response.json();
+      if (body && body.error) detail = body.error;
+    } catch (_) {
+      /* an empty body is what 401 sends on purpose */
+    }
+    throw new Error(detail || "request failed");
+  }
+  return response.json();
+}
+
+function post(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+const NUM = new Intl.NumberFormat();
+const n = (value) => NUM.format(value || 0);
+
+function bytes(value) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = Number(value) || 0;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${unit === 0 ? size : size.toFixed(1)} ${units[unit]}`;
+}
+
+/** The offset this machine is on, as `+05:30`, for a clock that says so. */
+function zone() {
+  // `getTimezoneOffset` is minutes *behind* UTC, so its sign is the opposite
+  // of the one written in a timestamp.
+  const minutes = -new Date().getTimezoneOffset();
+  const sign = minutes < 0 ? "-" : "+";
+  const off = Math.abs(minutes);
+  return `${sign}${String(Math.floor(off / 60)).padStart(2, "0")}:${String(off % 60).padStart(2, "0")}`;
+}
+
+function when(unix) {
+  if (!unix) return "never";
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000) - unix);
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function clock(unix) {
+  // With the offset. This printed the browser's local time while `semlith
+  // ledger` printed UTC, with neither saying which — so a portal event and a
+  // ledger row for the same moment were hours apart and nothing admitted it.
+  return `${new Date(unix * 1000).toTimeString().slice(0, 8)} ${zone()}`;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** An inline icon. Decorative: the control around it carries the name. */
+function icon(d, size, solid) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size || 16));
+  svg.setAttribute("height", String(size || 16));
+  // A shape that is a shape rather than a stroke — the three dots of a menu
+  // control. Drawn as strokes they are zero-length segments whose whole size
+  // is the line width, which is as faint as a mark can be.
+  svg.setAttribute("fill", solid ? "currentColor" : "none");
+  svg.setAttribute("stroke", solid ? "none" : "currentColor");
+  svg.setAttribute("stroke-width", "1.7");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  for (const segment of String(d).split("|")) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", segment);
+    svg.append(path);
+  }
+  return svg;
+}
+
+const ICONS = {
+  menu: "M4 7h16|M4 12h16|M4 17h16",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M20 20l-3.5-3.5",
+  plus: "M12 5v14|M5 12h14",
+  sun: "M12 3v2|M12 19v2|M3 12h2|M19 12h2|M5.6 5.6 7 7|M17 17l1.4 1.4|M18.4 5.6 17 7|M7 17l-1.4 1.4|M12 7.8a4.2 4.2 0 1 0 0 8.4 4.2 4.2 0 0 0 0-8.4z",
+  folder: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v7a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 3 17z",
+  file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z|M14 3v5h5",
+  up: "M5 12h14|M11 6l-6 6 6 6",
+  alert: "M12 9v4|M12 17h.01|M12 4 3 19h18z",
+  monitor: "M4 5h16v10H4z|M9 19h6|M12 15v4",
+  moon: "M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z",
+  copy: "M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z|M6 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v1",
+  // Three filled dots, as circles rather than as dotted strokes.
+  more:
+    "M12 4.1a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4z|"
+    + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
+  // Three tracks with a handle on each: the machine's three numbers.
+  sliders: "M4 7h10|M18 7h2|M4 12h4|M12 12h8|M4 17h11|M19 17h1|M15 5v4|M9 10v4|M16 15v4",
+};
+
+/* The nav marks, from the design. `|` separates subpaths so one mark can be
+ * more than a single stroke. */
+
+const NAV_ICONS = {
+  stores: "M12 4l8 4-8 4-8-4 8-4|M4 12l8 4 8-4|M4 16.5l8 4 8-4",
+  files: "M6 3h7l5 5v13H6z|M13 3v5h5",
+  index: "M4 6h16|M4 12h10|M4 18h13",
+  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
+  graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
+  ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
+  agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
+  privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
+  // A trace with a beat in it: this page is a reading of the machine, and the
+  // rail is icons only — a nav item that rendered nothing was the one item
+  // with no way to tell what it was.
+  doctor: "M3 12h3l2-5 3 10 2.5-7 1.5 2h6",
+  about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
+};
+
+/** A button that copies text and says so for a moment.
+ *
+ * Invisible until the pointer enters the block it belongs to — see `.copy` in
+ * the stylesheet — so a page never shows a column of copy buttons competing
+ * with the content they copy. */
+function copyButton(getText, label, word) {
+  const was = label || "Copy";
+  // A field wide enough to hold a command has room for the word; the icon is
+  // for a code block, where the control sits over the text it copies.
+  const face = () => (word ? was : icon(ICONS.copy, 14));
+  const button = el("button", {
+    class: "button secondary small copy",
+    type: "button",
+    "aria-label": was,
+    title: was,
+    onclick: async () => {
+      const text = typeof getText === "function" ? getText() : getText;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        // No clipboard permission, or an insecure context. Selecting the text
+        // is still a way to copy it, and silently doing nothing is not.
+        const area = el("textarea", { class: "offscreen" });
+        area.value = text;
+        document.body.append(area);
+        area.select();
+        try {
+          document.execCommand("copy");
+        } catch (__) {
+          /* nothing else to try */
+        }
+        area.remove();
+      }
+      button.classList.add("done");
+      fill(button, "Copied");
+      setTimeout(() => {
+        button.classList.remove("done");
+        fill(button, face());
+      }, 1400);
+    },
+  });
+  fill(button, face());
+  return button;
+}
+
+function copyField(command, word) {
+  return el(
+    "div",
+    { class: word ? "copyfield worded" : "copyfield" },
+    el("code", { class: "text", text: command }),
+    copyButton(command, "Copy", word),
+  );
+}
+
+/** A code block with its copy control over the top-right corner. */
+function codeBlock(text, label) {
+  return el(
+    "div",
+    { class: "code-block" },
+    el("pre", { class: "code", text }),
+    copyButton(text, label || "Copy"),
+  );
+}
+
+/* A command, a path or an identifier set inside a sentence.
+ *
+ * This is what makes the capitalisation rule read as a rule rather than as a
+ * typo: the product is "Semlith" in prose and `semlith` is a command, and the
+ * only thing that tells a reader which one they are looking at is that one of
+ * them is set in mono. */
+function mono(text) {
+  return el("code", { class: "mono", text });
+}
+
+/** A paragraph of prose, where any part may be a mono command. */
+function says(...parts) {
+  return el("p", { class: "subtitle" }, parts);
+}
+
+/** A failure. Coloured like a problem, because it is one. */
+function error(message) {
+  return el(
+    "div",
+    { class: "error", role: "alert" },
+    icon(ICONS.alert, 17),
+    el("span", { class: "what", text: message }),
+  );
+}
+
+/** An absence. Nothing went wrong; there is simply nothing here. */
+function empty(message) {
+  return el("div", { class: "empty" }, message);
+}
+
+/* ------------------------------------------------------------------- tips */
+
+/* One tooltip for the whole portal.
+ *
+ * The element lives at the end of <body> and is positioned against the
+ * viewport, which is the whole point: the previous implementation was a
+ * `::after` on the element being described, and `.table-wrap` carries
+ * `overflow: auto`, so a scroll container clipped it. The Files page's path
+ * tip — the reason the feature exists — was the one that could not be read.
+ *
+ * `show` takes content and the rectangle to hang it off. It prefers to sit
+ * above and left-aligned, and flips or clamps when that would leave the
+ * viewport. The Graph canvas uses the same element for its richer card, so
+ * there is one implementation rather than two. */
+const tip = {
+  node: null,
+  owner: null,
+
+  ensure() {
+    if (!this.node) {
+      this.node = el("div", { class: "tip", role: "tooltip", "aria-hidden": "true" });
+      document.body.append(this.node);
+    }
+    return this.node;
+  },
+
+  /** `content` is a string or an element; `rect` is a viewport rectangle. */
+  show(content, rect, owner) {
+    const node = this.ensure();
+    this.owner = owner || null;
+    fill(node, content);
+    node.setAttribute("aria-hidden", "false");
+    // Measured after filling and before positioning: the size depends on the
+    // text, and a stale measurement puts the flip decision on the wrong side.
+    node.dataset.open = "true";
+    const box = node.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.left;
+    if (left + box.width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - margin - box.width);
+    }
+    let top = rect.top - box.height - 6;
+    // Above by default, below when there is no room — the flip the criterion
+    // asks for, and the reason this is measured against the viewport.
+    if (top < margin) top = rect.bottom + 6;
+    node.style.left = `${Math.max(margin, Math.round(left))}px`;
+    node.style.top = `${Math.round(top)}px`;
+  },
+
+  /** Hang a tip off an element. */
+  at(target, content) {
+    this.show(content || target.getAttribute("data-tip"), target.getBoundingClientRect(), target);
+  },
+
+  /** Hang a tip off a point, for the canvas, which has no elements to hang on. */
+  atPoint(x, y, content, owner) {
+    this.show(content, { left: x + 12, top: y - 8, bottom: y + 18 }, owner);
+  },
+
+  hide(owner) {
+    if (!this.node) return;
+    if (owner && this.owner !== owner) return;
+    this.node.dataset.open = "false";
+    this.node.setAttribute("aria-hidden", "true");
+    this.owner = null;
+  },
+};
+
+/* Delegated, so a tip costs nothing per row: every table in the portal renders
+ * its rows fresh, and binding two listeners to each of a thousand cells is how
+ * a scroll starts to stutter. */
+function wireTips() {
+  const find = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+
+  document.addEventListener("pointerover", (e) => {
+    const target = find(e.target);
+    if (target) tip.at(target);
+    else if (tip.owner && tip.owner.nodeType) tip.hide();
+  });
+  document.addEventListener("pointerout", (e) => {
+    const target = find(e.target);
+    if (target) tip.hide(target);
+  });
+  // Keyboard parity: focus shows the same label a hover does.
+  document.addEventListener("focusin", (e) => {
+    const target = find(e.target);
+    if (target) tip.at(target);
+  });
+  document.addEventListener("focusout", (e) => {
+    const target = find(e.target);
+    if (target) tip.hide(target);
+  });
+  // A fixed tip does not travel with the row it describes, so it leaves when
+  // the row does. Capture, because the scroll happens inside a card.
+  window.addEventListener("scroll", () => tip.hide(), true);
+  window.addEventListener("resize", () => tip.hide());
+}
+
+/* ----------------------------------------------------------------- table */
+
+/* One table for the whole portal: Stores, Files, Languages, the About model
+ * list and the Agents client list all render through this. Five hand-written
+ * tables is how one page gains sorting and the other four do not.
+ *
+ * Columns are `{ key, label, className, sortable, value, render }`. `value`
+ * pulls the sort key out of a row; `render` returns the cell's content. A
+ * table is client-side by default — its rows are already in hand — and
+ * `server: true` hands sorting and paging back to the caller instead, which is
+ * what the Files table needs: sorting has to order the whole store rather than
+ * the page of it that happens to be loaded.
+ */
+const PER_PAGE = [5, 10, 25, 50];
+
+function dataTable(spec) {
+  const columns = spec.columns;
+  const view = {
+    page: 1,
+    perPage: spec.perPage || 10,
+    sort: spec.sort || null,
+    dir: spec.dir || "asc",
+  };
+  let rows = spec.rows || [];
+  let total = spec.total === undefined ? rows.length : spec.total;
+
+  const headRow = el("tr", {});
+  const body = el("tbody", {});
+  const foot = el("div", { class: "table-foot" });
+  const table = el(
+    "table",
+    { class: spec.className || null },
+    // A caption, always. Four of these tables had neither a caption nor an
+    // `aria-label`, so a screen reader announced "table" and left the reader
+    // to work out which one from its columns.
+    spec.caption ? el("caption", { class: "sr-only", text: spec.caption }) : null,
+    el("thead", {}, headRow),
+    body,
+  );
+  // `grow: false` for a table that shares a page with other blocks: stretching
+  // a three-row table down a 900px page to fill it is empty space pretending
+  // to be a table.
+  const node = el(
+    "div",
+    { class: spec.grow ? "card table-card grow" : "card table-card" },
+    el("div", { class: "table-wrap" }, table),
+    foot,
+  );
+
+  function pages() {
+    return Math.max(1, Math.ceil(total / view.perPage));
+  }
+
+  function sorted() {
+    if (!view.sort) return rows;
+    const column = columns.find((c) => c.key === view.sort);
+    if (!column || !column.value) return rows;
+    const sign = view.dir === "desc" ? -1 : 1;
+    // A copy: sorting the caller's array in place would reorder the data
+    // behind whatever else is reading it.
+    return [...rows].sort((a, b) => {
+      // Rows with no value in this column sink, whichever way the sort runs.
+      // A column where most rows are blank otherwise hides its own data:
+      // sorting the About page's SIZE column ascending put all forty-three
+      // dashes first and the five real sizes on the last page.
+      if (column.empty) {
+        const blank = Number(column.empty(a)) - Number(column.empty(b));
+        if (blank) return blank;
+      }
+      const x = column.value(a);
+      const y = column.value(b);
+      if (typeof x === "number" && typeof y === "number") return (x - y) * sign;
+      return String(x).localeCompare(String(y), undefined, { numeric: true }) * sign;
+    });
+  }
+
+  function shown() {
+    if (spec.server) return rows;
+    const from = (view.page - 1) * view.perPage;
+    return sorted().slice(from, from + view.perPage);
+  }
+
+  function changed() {
+    if (spec.server && spec.onChange) spec.onChange({ ...view });
+    else paint();
+  }
+
+  function sortBy(key) {
+    if (view.sort === key) view.dir = view.dir === "asc" ? "desc" : "asc";
+    else {
+      view.sort = key;
+      view.dir = "asc";
+    }
+    view.page = 1;
+    changed();
+  }
+
+  function paintHead() {
+    fill(
+      headRow,
+      columns.map((column) => {
+        const on = view.sort === column.key;
+        if (column.head) {
+          // A header that is a control rather than a label — the select-all
+          // box above a column of checkboxes.
+          return el("th", { class: column.className || null }, column.head());
+        }
+        if (column.sortable === false) {
+          return el("th", { class: column.className || null, text: column.label });
+        }
+        return el(
+          "th",
+          {
+            class: column.className || null,
+            "aria-sort": on ? (view.dir === "asc" ? "ascending" : "descending") : "none",
+          },
+          el(
+            "button",
+            { class: "sort", type: "button", onclick: () => sortBy(column.key) },
+            column.label,
+            el("span", { class: "arrow", text: on ? (view.dir === "asc" ? "↑" : "↓") : "" }),
+          ),
+        );
+      }),
+    );
+  }
+
+  function paintBody() {
+    const page = shown();
+    fill(
+      body,
+      page.map((row, i) =>
+        el(
+          "tr",
+          {},
+          columns.map((column) =>
+            el(
+              "td",
+              { class: column.className || null },
+              column.render ? column.render(row, i) : String(column.value ? column.value(row) : ""),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  function paintFoot() {
+    const from = total === 0 ? 0 : (view.page - 1) * view.perPage + 1;
+    const to = Math.min(total, view.page * view.perPage);
+    fill(
+      foot,
+      el("span", { class: "meta", text: `${n(from)}–${n(to)} of ${n(total)}` }),
+      el("span", { class: "divider-v" }),
+      el("span", { class: "eyebrow", text: "per page" }),
+      el(
+        "span",
+        { class: "chips" },
+        PER_PAGE.map((size) =>
+          el("button", {
+            class: "chip",
+            type: "button",
+            "aria-pressed": String(size === view.perPage),
+            text: String(size),
+            onclick: () => {
+              view.perPage = size;
+              view.page = 1;
+              changed();
+            },
+          }),
+        ),
+      ),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Prev",
+        disabled: view.page <= 1,
+        onclick: () => {
+          view.page -= 1;
+          changed();
+        },
+      }),
+      el("span", { class: "meta", text: `Page ${n(view.page)} / ${n(pages())}` }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Next",
+        disabled: view.page >= pages(),
+        onclick: () => {
+          view.page += 1;
+          changed();
+        },
+      }),
+    );
+  }
+
+  function paint() {
+    paintHead();
+    paintBody();
+    paintFoot();
+  }
+
+  paint();
+
+  return {
+    node,
+    /** Replace the rows. `count` is the whole-store total in server mode. */
+    update(next, count) {
+      rows = next || [];
+      total = count === undefined ? rows.length : count;
+      if (view.page > pages()) view.page = pages();
+      paint();
+    },
+    /** What the server should sort and page by. */
+    query: () => ({ ...view }),
+  };
+}
+
+/* The server-side folder picker.
+ *
+ * One component, used by the Index page to choose what to index and by the
+ * Stores page to choose a directory to adopt. It browses the daemon's
+ * filesystem rather than the browser's, because the daemon is what has to open
+ * the path — a `<input type=file webkitdirectory>` hands over a list of file
+ * objects and not the one thing needed, which is the path itself.
+ */
+function folderPicker(options) {
+  const { onChoose, choose, onError, multiple } = options || {};
+  const card = el("div", { class: "card picker", hidden: true });
+  /* Paths ticked across however many directories were walked into. Kept out
+   * here rather than per render, so browsing into a folder and back does not
+   * throw away what was already chosen. */
+  const ticked = new Set();
+
+  function done() {
+    card.hidden = true;
+    if (onChoose) onChoose(multiple ? [...ticked] : undefined);
+    ticked.clear();
+  }
+
+  async function open(path) {
+    let data;
+    try {
+      data = await api(`/api/dirs?path=${encodeURIComponent(path || "")}`);
+    } catch (e) {
+      if (onError) onError(e.message);
+      return false;
+    }
+    card.hidden = false;
+    fill(
+      card,
+      el(
+        "div",
+        { class: "crumbs" },
+        el(
+          "button",
+          {
+            class: "button secondary small",
+            type: "button",
+            disabled: !data.parent,
+            onclick: () => open(data.parent),
+          },
+          icon(ICONS.up, 15),
+          "Up",
+        ),
+        el("span", { class: "where", text: data.path }),
+        el("span", { class: "spacer" }),
+        multiple
+          ? el("button", {
+              class: "button small",
+              type: "button",
+              text: ticked.size
+                ? `Use ${ticked.size} folder${ticked.size === 1 ? "" : "s"}`
+                : "Use this folder",
+              onclick: () => {
+                // Nothing ticked means the folder being looked at, which is
+                // what pressing the button while standing in one plainly means.
+                if (!ticked.size) ticked.add(data.path);
+                done();
+              },
+            })
+          : el("button", {
+              class: "button small",
+              type: "button",
+              text: choose || "Use this folder",
+              onclick: () => {
+                card.hidden = true;
+                if (onChoose) onChoose(data.path);
+              },
+            }),
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Close",
+          onclick: () => {
+            card.hidden = true;
+          },
+        }),
+      ),
+      el(
+        "div",
+        { class: "entries" },
+        data.entries.length
+          ? data.entries.map((entry) => {
+              // A file in a folder picker is not selectable, and rendering
+              // it at full contrast beside the folders that are says
+              // otherwise. Dimmed when it cannot be chosen, which in the
+              // multiple case is always.
+              const inert = multiple && !entry.dir;
+              const row = el(
+                "button",
+                {
+                  class: inert ? "entry inert" : "entry",
+                  type: "button",
+                  disabled: inert,
+                  title: entry.path,
+                  onclick: () => {
+                    if (entry.dir) open(entry.path);
+                    else {
+                      card.hidden = true;
+                      if (onChoose) onChoose(multiple ? [entry.path] : entry.path);
+                    }
+                  },
+                },
+                icon(entry.dir ? ICONS.folder : ICONS.file),
+                el("span", { class: "name", text: entry.name }),
+                // What "Adopt existing .semlith" is looking for. Nothing in
+                // the listing used to tell an adoptable folder from any other,
+                // which is the surface of the adopt feature not working.
+                entry.adoptable ? pill("a store", "good") : null,
+              );
+              if (!multiple || !entry.dir) return row;
+              /* The tick is its own control beside the row, not the row
+               * itself: walking into a folder and choosing it are different
+               * intentions and one button cannot mean both. */
+              const box = el("input", {
+                type: "checkbox",
+                class: "tick",
+                "aria-label": `Index ${entry.name}`,
+                checked: ticked.has(entry.path),
+                onchange: () => {
+                  if (box.checked) ticked.add(entry.path);
+                  else ticked.delete(entry.path);
+                  open(data.path);
+                },
+              });
+              return el("div", { class: "entry-row" }, box, row);
+            })
+          : el("div", { class: "card pad" }, empty("Nothing here that Semlith can index.")),
+      ),
+    );
+    return true;
+  }
+
+  return {
+    node: card,
+    open,
+    close: () => {
+      card.hidden = true;
+    },
+    isOpen: () => !card.hidden,
+  };
+}
+
+/** A path on one line, truncated at the start, whole on hover.
+ *
+ * The end is the part that identifies a file: every row on the Files page
+ * begins with the same `/Users/...` and differs in its last segment, so cutting
+ * the end throws away the only part worth reading. */
+function pathCell(value, className) {
+  return el(
+    "span",
+    {
+      class: className ? `one-line tail ${className}` : "one-line tail",
+      "data-tip": value,
+      // The browser's own tooltip as well as the portal's. The styled one is
+      // better and it is not the only reader: a value with no `title` is a
+      // truncated path nothing but the DOM inspector can recover.
+      title: value,
+    },
+    el("bdi", { text: value }),
+  );
+}
+
+/** A value on one line, truncated at the end, whole on hover. */
+function lineCell(value, className) {
+  return el("span", {
+    class: className ? `one-line ${className}` : "one-line",
+    "data-tip": value,
+    title: value,
+    text: value,
+  });
+}
+
+/** An input with a real label. A placeholder is not one: it leaves on typing. */
+function labelled(id, text, input) {
+  input.id = id;
+  return [el("label", { class: "sr-only", for: id, text }), input];
+}
+
+/* One page header for the whole portal.
+ *
+ * The title, its status pill immediately beside it, and any page actions at
+ * the end of that row; the subtitle on a row of its own at the page's full
+ * width. Every page uses it, so a pill is never floated to the far side of a
+ * header away from the title it describes, and a subtitle is never squeezed
+ * into a narrow column by a button sitting opposite it. */
+function pageHead(title, subtitle, extra) {
+  const { pill, actions } = extra || {};
+  return el(
+    "div",
+    { class: "page-head" },
+    el(
+      "div",
+      { class: "line" },
+      el("h1", { text: title }),
+      pill || null,
+      actions ? el("span", { class: "spacer" }) : null,
+      actions ? el("div", { class: "actions" }, actions) : null,
+    ),
+    subtitle ? el("p", { class: "subtitle", text: subtitle }) : null,
+  );
+}
+
+/* A row's actions, behind one control.
+ *
+ * A column of buttons per row is a column of noise, and the destructive one
+ * sits a mis-aimed click away from the ordinary one. The menu is a single
+ * host appended to the body for the same reason the tooltip is: a popup
+ * inside a cell is clipped by the table's own `overflow: auto`. */
+const menu = {
+  node: null,
+  owner: null,
+
+  ensure() {
+    if (this.node) return this.node;
+    this.node = el("div", { class: "menu", role: "menu", hidden: true });
+    document.body.append(this.node);
+    // One listener each, not one per menu: the host outlives every row that
+    // opens it.
+    document.addEventListener("pointerdown", (e) => {
+      if (this.node.hidden) return;
+      if (this.node.contains(e.target) || (this.owner && this.owner.contains(e.target))) return;
+      this.close();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this.close();
+    });
+    window.addEventListener("resize", () => this.close());
+    // A menu anchored to a row in a scrolling table has to go when the row
+    // moves, rather than hang over the wrong one.
+    window.addEventListener("scroll", () => this.close(), true);
+    return this.node;
+  },
+
+  /** `items` are `{ label, tone, onclick }`; `at` is the control it hangs off. */
+  open(at, items) {
+    const node = this.ensure();
+    if (this.owner === at && !node.hidden) return this.close();
+    this.owner = at;
+    at.setAttribute("aria-expanded", "true");
+    fill(
+      node,
+      items.map((item) =>
+        el("button", {
+          class: item.tone ? `menu-item ${item.tone}` : "menu-item",
+          type: "button",
+          role: "menuitem",
+          text: item.label,
+          onclick: () => {
+            this.close();
+            item.onclick();
+          },
+        }),
+      ),
+    );
+    node.hidden = false;
+    const box = node.getBoundingClientRect();
+    const rect = at.getBoundingClientRect();
+    const margin = 8;
+    let left = rect.right - box.width;
+    left = Math.min(Math.max(margin, left), window.innerWidth - margin - box.width);
+    let top = rect.bottom + 6;
+    if (top + box.height > window.innerHeight - margin) top = rect.top - box.height - 6;
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(Math.max(margin, top))}px`;
+    node.querySelector(".menu-item")?.focus();
+  },
+
+  close() {
+    if (!this.node) return;
+    this.node.hidden = true;
+    if (this.owner) this.owner.setAttribute("aria-expanded", "false");
+    this.owner = null;
+  },
+};
+
+/** The control that opens one, for the end of a table row. */
+function rowMenu(items) {
+  const button = el("button", {
+    class: "button secondary small icon",
+    type: "button",
+    "aria-haspopup": "menu",
+    "aria-expanded": "false",
+    "aria-label": "Actions",
+    title: "Actions",
+    onclick: () => menu.open(button, items()),
+  });
+  fill(button, icon(ICONS.more, 18, true));
+  return button;
+}
+
+/** A status pill. One shape, and a dot only where it reports a state. */
+function pill(text, tone, props) {
+  return el(
+    "span",
+    { class: tone ? `pill ${tone}` : "pill", ...(props || {}) },
+    tone ? el("i", {}) : null,
+    text,
+  );
+}
+
+// ---------------------------------------------------------------- state
+
+const NARROW = "(max-width: 899px)";
+
+const state = {
+  stores: [],
+  theme: "light",
+  navOpen: !window.matchMedia(NARROW).matches,
+  /** Carried from the welcome screen into the Index view's path field. */
+  pendingPath: "",
+  /** Carried from a search hit into the Graph page, or into Search. */
+  pendingSymbol: "",
+  pendingQuery: "",
+  /** The last search, kept so leaving the page and coming back does not throw
+   * the question away along with its answers. */
+  search: { query: "", stores: [] },
+  /** How many clients are talking to the daemon, for the sidebar card. */
+  agents: null,
+  /** The last `/api/index/runs` answer, shared by the navigation's count and
+   * the Index page's cards. */
+  runs: null,
+  /** The Index page's painter while that page is on screen, so one fetch of
+   * the runs route serves both readers. */
+  onRuns: null,
+};
+
+/* Pages, in the design's grouping. The ones the roadmap puts in a later
+ * release — Inside the index, Reports, License — are deliberately absent
+ * rather than stubbed: a nav item that leads nowhere is worse than one that
+ * does not exist yet. Everything listed here is free on every tier. */
+const VIEWS = [
+  { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
+  { group: "Workspace", id: "files", label: "Files", title: "Files" },
+  { group: "Workspace", id: "index", label: "Index", title: "Index" },
+  { group: "Explore", id: "search", label: "Search", title: "Search" },
+  { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
+  { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
+  { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
+  { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
+  { group: "Operate", id: "doctor", label: "Doctor", title: "Doctor" },
+  { group: "About", id: "about", label: "About", title: "About" },
+];
+
+/** The sidebar's count, kept with the data it describes rather than with the
+ * render that happened to be running when it changed. */
+function paintStoreCount() {
+  const node = document.getElementById("daemon-stores");
+  if (!node) return;
+  const many = state.stores.length;
+  const parts = [`${many} store${many === 1 ? "" : "s"}`];
+  // Only once the answer is known: "0 agents" while the route is still in
+  // flight reads as a fact rather than as a question nobody has asked yet.
+  if (state.agents !== null) {
+    parts.push(`${state.agents} agent${state.agents === 1 ? "" : "s"}`);
+  }
+  node.textContent = parts.join(" · ");
+}
+
+/** How many clients are connected, from whichever page last asked. */
+function noteAgents(data) {
+  state.agents = (data.connections || []).length;
+  paintStoreCount();
+}
+
+// ----------------------------------------------------------------- live
+
+/* One clock for the whole page.
+ *
+ * The daemon keeps a counter per data domain — stores, runs, clients, ledger,
+ * events, privacy — and bumps it in the one function that writes that domain.
+ * This polls those six integers once a second, works out which moved, and
+ * refetches only those, through the routes each view already uses. A quiet
+ * daemon with a tab open therefore costs one small request a second and
+ * nothing else.
+ *
+ * It is a poll rather than a server-sent stream because a stream holds one of
+ * the daemon's eight HTTP workers for as long as the tab is open, which is the
+ * constraint the whole run-state design exists to respect. Six integers a
+ * second is cheaper than the connection would be and cannot exhaust the pool.
+ *
+ * Every live view registers here. No view starts a timer of its own: a second
+ * timer is a second clock, and two clocks are how one panel updates and the
+ * one beside it does not. */
+const live = {
+  /** The counter value each domain was last acted on at. */
+  seen: {},
+  /** `{ domains, run }`, cleared on every navigation. */
+  watchers: [],
+  timer: null,
+};
+
+/** Ask to be called when any of these domains is written. */
+function watchLive(domains, run) {
+  live.watchers.push({ domains, run });
+}
+
+/** Drop every watcher. Called as a view is replaced, so nothing left behind
+ * keeps refetching for a page that is no longer on screen. */
+function resetLive() {
+  live.watchers = [];
+}
+
+async function pollChanges() {
+  // A hidden tab asks nothing. Its `seen` values stay where they were, so the
+  // first poll after it comes back sees everything that moved meanwhile and
+  // fires each watcher once rather than once per missed second.
+  if (document.visibilityState === "hidden") return;
+  let counters;
+  try {
+    counters = await api("/api/changes");
+  } catch (_) {
+    // A daemon that has stopped answering is not a reason to tear the page
+    // down; the next tick tries again.
+    return;
+  }
+  const moved = [];
+  for (const [domain, value] of Object.entries(counters)) {
+    // The first read is a baseline, not a change: everything the page drew on
+    // load is already current.
+    if (live.seen[domain] === undefined) {
+      live.seen[domain] = value;
+      continue;
+    }
+    if (live.seen[domain] !== value) {
+      live.seen[domain] = value;
+      moved.push(domain);
+    }
+  }
+  if (!moved.length) return;
+  for (const watcher of live.watchers) {
+    if (watcher.domains.some((domain) => moved.includes(domain))) {
+      try {
+        watcher.run(moved);
+      } catch (_) {
+        /* one view's refresh failing must not stop the others' */
+      }
+    }
+  }
+}
+
+function startLive() {
+  if (live.timer) return;
+  live.timer = setInterval(pollChanges, 1000);
+  // Straight away on return rather than up to a second later: coming back to a
+  // tab and watching it sit stale is the thing this replaces.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") pollChanges();
+  });
+}
+
+/** Every run the daemon knows about, refetched when the runs domain moves.
+ *
+ * One fetch serves both readers — the navigation's count on every page, and
+ * the Index page's cards — because two fetches of one route is how a count in
+ * the sidebar disagrees with the cards beside it. */
+async function refreshRuns() {
+  let data;
+  try {
+    data = await api("/api/index/runs");
+  } catch (_) {
+    return state.runs;
+  }
+  state.runs = data;
+  paintRunCount();
+  if (state.onRuns) state.onRuns(data);
+  return data;
+}
+
+/** "2 indexing" in the navigation, on every page, so a run is never something
+ * that happened out of sight. */
+function paintRunCount() {
+  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status)).length;
+  const waiting = (state.runs?.queue || []).length;
+  for (const node of document.querySelectorAll(".run-count")) {
+    node.textContent = on ? `${on} indexing${waiting ? ` · ${waiting} queued` : ""}` : "";
+    node.hidden = !on;
+  }
+}
+
+/** The statuses a run is still in. */
+const TICKING = new Set(["queued", "running", "paused", "stopping"]);
+
+/** Draw the view on screen again, keeping where the reader had scrolled to.
+ *
+ * What a live table wants is the rows it would have had on a reload, and the
+ * view functions already know how to produce exactly that from the routes they
+ * read. Redrawing them is therefore one line per page rather than a second,
+ * incremental renderer per page — and a second renderer is how a table ends up
+ * disagreeing with the reload of itself.
+ *
+ * The Index page does not use this: its cards hold logs and scroll positions
+ * of their own, so it paints in place. */
+async function repaintView() {
+  if (!shell.main) return;
+  const at = shell.main.querySelector(".scroller")?.scrollTop ?? 0;
+  await render();
+  const scroller = shell.main?.querySelector(".scroller");
+  if (scroller) scroller.scrollTop = at;
+}
+
+
+// ---------------------------------------------------------------- graph
+
+/* The colours the canvas draws with, read from the stylesheet rather than
+ * repeated here: the page is themed by CSS custom properties, and a canvas
+ * cannot inherit one. Re-read on every paint so a theme switch is picked up. */
+function graphInk() {
+  const style = getComputedStyle(document.documentElement);
+  const read = (name, fallback) => (style.getPropertyValue(name) || fallback).trim();
+  return {
+    edge: read("--line", "#dce3e8"),
+    hot: read("--blue", "#4c7088"),
+    node: read("--panel", "#ffffff"),
+    nodeLine: read("--line", "#dce3e8"),
+    text: read("--ink-2", "#3a4d5e"),
+    nearFill: read("--blue-soft", "#e3ecf2"),
+    nearLine: read("--blue", "#4c7088"),
+    nearText: read("--ink", "#1e2a35"),
+    // The tone an ambiguous edge is drawn in: the same amber the badge uses,
+    // so the canvas and the rail say one thing.
+    warn: read("--amber-ink", "#7a4e0a"),
+    sel: read("--accent", "#f0a43c"),
+    selLine: read("--accent-edge", "#c97f14"),
+    selText: read("--accent-ink", "#1e2a35"),
+    muted: read("--muted", "#64778a"),
+  };
+}
+
+/** The last two segments of a path: enough to recognise, short enough to read. */
+function shortPath(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || path;
+}
+
+/** True when the viewer has asked for less movement. */
+function stillness() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/* A force-directed canvas of labelled boxes.
+ *
+ * Positions are kept in 0..1 and multiplied by the canvas size on every frame,
+ * so a resize moves the graph rather than rebuilding it, and the constants
+ * below mean the same thing at any window width. They are the design bundle's:
+ * repulsion 5200 over distance squared, a spring at rest 138px, damping 0.86,
+ * and a weak pull to the centre.
+ *
+ * ponytail: O(n²) repulsion over every pair each frame. The node budget is 180,
+ * so that is ~16k pairs — fine at 60fps. Past a few hundred this wants a
+ * quadtree, not a faster loop.
+ */
+function graphCanvas(options) {
+  const { onPick, onHover } = options || {};
+  const canvas = el("canvas", { class: "graph-canvas" });
+  const wrap = el("div", { class: "graph-stage" }, canvas);
+  let nodes = [];
+  let edges = [];
+  /* Every symbol the scope holds, which is not the same as the number drawn:
+   * a force layout is readable at dozens of nodes and a hairball at hundreds,
+   * so the view is capped. Saying only what is drawn let the summary read as a
+   * statement about the whole graph, and then scoping to a symbol could report
+   * more edges than "the whole graph" had. */
+  let total = 0;
+  let drawn = [];
+  let selected = null;
+  let near = new Set();
+  let hovered = null;
+  let dragging = null;
+  let down = null;
+  let frame = null;
+  let running = true;
+  let settled = false;
+  /* Whether this canvas has ever been in the document. See `tick`. */
+  let attached = false;
+  /* How much of the force is still applied. The layout cools, but never to
+   * nothing: it bottoms out at `ALPHA_FLOOR`, so the springs keep holding the
+   * shape while the drift below moves it. Anything that changes the layout —
+   * a drag, a new scope, an edge-kind filter — re-heats it. */
+  let alpha = 1;
+  /* Springs are shared out by how many edges a node carries. A hub with forty
+   * edges feels forty pulls where a leaf feels one, and at this node count that
+   * is what turns the simulation into a two-frame bounce: every node overshoots
+   * its rest position, and the next step overshoots back. Dividing by the
+   * square root of the degree is what keeps a dense neighbourhood stable. */
+  let load = [];
+
+  function size() {
+    const ratio = window.devicePixelRatio || 1;
+    const box = wrap.getBoundingClientRect();
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 240);
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return { w, h, ctx };
+  }
+
+  /* The furthest a node may move in one step, in fractions of the canvas.
+   * Without it a single large force sends a node across the frame and the
+   * spring drags it back, which is the bounce this cap exists to stop. */
+  const MAX_STEP = 0.012;
+
+  /* The layout never freezes. Cooling to a standstill was what stopped the
+   * two-frame bounce, but a still picture is not what this view is for, so the
+   * heat bottoms out here and every node carries a slow wander on top of it.
+   *
+   * The wander is a sine of the clock and the node's own phase, not a random
+   * nudge: a random walk accumulates, drags nodes off their springs and is
+   * indistinguishable from the jitter this replaced. A smooth curve at this
+   * amplitude settles at under a pixel a frame, which reads as a drift. */
+  const ALPHA_FLOOR = 0;
+  const DRIFT = 0.00003;
+
+  function step(w, h) {
+    const clock = performance.now() * 0.00028;
+    for (let i = 0; i < nodes.length; i++) {
+      const a = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const b = nodes[j];
+        let dx = (b.x - a.x) * w;
+        let dy = (b.y - a.y) * h;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) {
+          // Exactly coincident nodes have no direction to separate along.
+          d2 = 1;
+          dx = 0.6;
+          dy = 0.4;
+        }
+        const d = Math.sqrt(d2);
+        const force = (5200 / d2) * alpha;
+        a.vx -= ((dx / d) * force) / w;
+        a.vy -= ((dy / d) * force) / h;
+        b.vx += ((dx / d) * force) / w;
+        b.vy += ((dy / d) * force) / h;
+      }
+    }
+    for (const edge of drawn) {
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      if (!a || !b) continue;
+      const dx = (b.x - a.x) * w;
+      const dy = (b.y - a.y) * h;
+      const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const pull = (d - 138) * 0.0025 * alpha;
+      // Shared out by degree at each end, so a hub is not dragged about by
+      // every edge it happens to carry.
+      const ax = Math.sqrt(load[edge.from] || 1);
+      const bx = Math.sqrt(load[edge.to] || 1);
+      a.vx += ((((dx / d) * pull * d) / w) * 0.02) / ax;
+      a.vy += ((((dy / d) * pull * d) / h) * 0.02) / ax;
+      b.vx -= ((((dx / d) * pull * d) / w) * 0.02) / bx;
+      b.vy -= ((((dy / d) * pull * d) / h) * 0.02) / bx;
+    }
+    let moved = 0;
+    for (const node of nodes) {
+      node.vx += (0.5 - node.x) * 0.006 * alpha;
+      node.vy += (0.5 - node.y) * 0.008 * alpha;
+      node.vx += Math.cos(clock + node.phase) * DRIFT;
+      node.vy += Math.sin(clock * 0.9 + node.phase * 1.7) * DRIFT;
+      if (node === dragging) {
+        node.vx = 0;
+        node.vy = 0;
+        continue;
+      }
+      node.vx *= 0.86;
+      node.vy *= 0.86;
+      // One step can only take a node so far. A force large enough to throw it
+      // across the frame is a force the spring will undo next step, which is
+      // the two-frame bounce rather than a layout.
+      node.vx = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vx));
+      node.vy = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vy));
+      moved += Math.abs(node.vx) + Math.abs(node.vy);
+      // Kept inside the frame: a node that drifts off-canvas is a node nobody
+      // can click.
+      node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
+      node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
+    }
+    alpha = Math.max(ALPHA_FLOOR, alpha * 0.985);
+    return moved;
+  }
+
+  /** Put the heat back in, for anything that changes the layout. */
+  function reheat(to) {
+    alpha = Math.max(alpha, to === undefined ? 0.35 : to);
+  }
+
+  /* Push overlapping labels apart, after the springs have had their say.
+   *
+   * The force layout solves for edge length and node repulsion and knows
+   * nothing about how wide a label is, so in the default view
+   * `the_queue_admits_in_subm…` sat on top of `a_dequeued_run_is_answere…` and
+   * one label was worn down to `…as`. This works on the boxes the last paint
+   * measured, which is the only place their real width exists.
+   *
+   * ponytail: O(n²) over every pair, four passes. The node budget is 180, so
+   * that is 130k comparisons once per layout change; a grid would be the
+   * upgrade if the budget ever rises. */
+  function separate() {
+    const box = wrap.getBoundingClientRect();
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 240);
+    for (let pass = 0; pass < 4; pass++) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const a = nodes[i];
+          const b = nodes[j];
+          // Before the first paint there are no measurements, and a guess
+          // here would push the layout around for no reason.
+          if (!a.w || !b.w) return;
+          const dx = (b.x - a.x) * w;
+          const dy = (b.y - a.y) * h;
+          const wantX = (a.w + b.w) / 2 + 8;
+          const wantY = (a.h + b.h) / 2 + 6;
+          const overX = wantX - Math.abs(dx);
+          const overY = wantY - Math.abs(dy);
+          // Boxes only collide when they overlap on both axes.
+          if (overX <= 0 || overY <= 0) continue;
+          // Along whichever axis needs the smaller move, so a label is nudged
+          // aside rather than thrown across the canvas.
+          if (overX / w < overY / h) {
+            const push = ((dx >= 0 ? 1 : -1) * overX) / w / 2;
+            a.x = Math.min(0.94, Math.max(0.06, a.x - push));
+            b.x = Math.min(0.94, Math.max(0.06, b.x + push));
+          } else {
+            const push = ((dy >= 0 ? 1 : -1) * overY) / h / 2;
+            a.y = Math.min(0.92, Math.max(0.08, a.y - push));
+            b.y = Math.min(0.92, Math.max(0.08, b.y + push));
+          }
+        }
+      }
+    }
+  }
+
+  /** A rounded rectangle, the shape every symbol is drawn as. */
+  function box(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function paint() {
+    const { w, h, ctx } = size();
+    const ink = graphInk();
+    ctx.clearRect(0, 0, w, h);
+
+    // Measured first: an edge stops at the box it points into, which means
+    // every box's size has to be known before the first edge is drawn.
+    ctx.font = '500 11px "IBM Plex Mono", ui-monospace, monospace';
+    for (const node of nodes) {
+      const ease = stillness() ? (node === hovered ? 1 : 0) : node.hover || 0;
+      node.hover = ease;
+      const text = ctx.measureText(node.label).width;
+      node.w = (text + 22) * (1 + 0.05 * ease);
+      node.h = 28 * (1 + 0.05 * ease);
+    }
+
+    for (const edge of drawn) {
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      if (!a || !b) continue;
+      const ax = a.x * w;
+      const ay = a.y * h;
+      const bx = b.x * w;
+      const by = b.y * h;
+      const hot = edge.from === selected || edge.to === selected;
+      const angle = Math.atan2(by - ay, bx - ax);
+      // To the edge of the box rather than to its centre, so the arrowhead
+      // lands where the reader sees the symbol begin.
+      const inset = Math.min(b.w / 2 + 6, Math.abs(b.h / 2 / Math.sin(angle) || b.w));
+      const ex = bx - Math.cos(angle) * Math.min(inset, b.w / 2 + 6);
+      const ey = by - Math.sin(angle) * (b.h / 2 + 3);
+      ctx.save();
+      ctx.strokeStyle = hot ? ink.hot : ink.edge;
+      ctx.fillStyle = hot ? ink.hot : ink.edge;
+      ctx.lineWidth = hot ? 1.7 : 1.1;
+      // Drawn with the same four values the rail shows. An edge the source
+      // settled is solid; one matched by bare name is dotted; one that could
+      // mean several different definitions is dashed and drawn in the warning
+      // tone, because it is not a claim about this code at all.
+      const settled = edge.confidence === "extracted" || edge.confidence === "resolved";
+      if (edge.confidence === "ambiguous") {
+        ctx.strokeStyle = hot ? ink.hot : ink.warn;
+        ctx.fillStyle = hot ? ink.hot : ink.warn;
+        ctx.setLineDash([6, 4]);
+      } else {
+        ctx.setLineDash(settled ? [] : [2, 3]);
+      }
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - Math.cos(angle - 0.4) * 7, ey - Math.sin(angle - 0.4) * 7);
+      ctx.lineTo(ex - Math.cos(angle + 0.4) * 7, ey - Math.sin(angle + 0.4) * 7);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    nodes.forEach((node, i) => {
+      const on = i === selected;
+      const beside = near.has(i);
+      const x = node.x * w - node.w / 2;
+      const y = node.y * h - node.h / 2;
+      box(ctx, x, y, node.w, node.h, 8);
+      ctx.fillStyle = on ? ink.sel : beside ? ink.nearFill : ink.node;
+      ctx.save();
+      if (node.hover) {
+        ctx.shadowColor = ink.nearLine;
+        ctx.shadowBlur = 14 * node.hover;
+      }
+      ctx.fill();
+      ctx.restore();
+      ctx.lineWidth = (on ? 1.6 : 1) + 0.8 * node.hover;
+      ctx.strokeStyle = on ? ink.selLine : beside ? ink.nearLine : ink.nodeLine;
+      ctx.stroke();
+      ctx.fillStyle = on ? ink.selText : beside ? ink.nearText : ink.text;
+      ctx.fillText(node.label, x + 11, y + node.h / 2 + 4);
+    });
+  }
+
+  function tick() {
+    // A view that has been navigated away from is not worth animating. The
+    // canvas is built before it is inserted, so the first frames legitimately
+    // run detached — only a canvas that *was* in the page and is not any more
+    // has been thrown away.
+    if (wrap.isConnected) attached = true;
+    else if (attached) {
+      frame = null;
+      running = false;
+      observer.disconnect();
+      return;
+    }
+    const box = wrap.getBoundingClientRect();
+    if (running || dragging) step(Math.max(box.width, 240), Math.max(box.height, 240));
+    // Hover is eased rather than switched, so a fast pointer sweep across a
+    // crowded graph does not strobe.
+    for (const node of nodes) {
+      node.hover = (node.hover || 0) + ((node === hovered ? 1 : 0) - (node.hover || 0)) * 0.16;
+      if (node.hover < 0.002) node.hover = 0;
+    }
+    paint();
+    frame = requestAnimationFrame(tick);
+  }
+
+  function at(event) {
+    const box = canvas.getBoundingClientRect();
+    return { x: event.clientX - box.left, y: event.clientY - box.top, w: box.width, h: box.height };
+  }
+
+  function hit(point) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const node = nodes[i];
+      const cx = node.x * point.w;
+      const cy = node.y * point.h;
+      if (
+        Math.abs(point.x - cx) < (node.w || 80) / 2 &&
+        Math.abs(point.y - cy) < (node.h || 28) / 2
+      ) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  function selectAt(index) {
+    selected = index;
+    near = new Set();
+    for (const edge of drawn) {
+      if (edge.from === index) near.add(edge.to);
+      if (edge.to === index) near.add(edge.from);
+    }
+  }
+
+  canvas.addEventListener("pointerdown", (event) => {
+    const index = hit(at(event));
+    if (index === null) return;
+    canvas.setPointerCapture(event.pointerId);
+    dragging = nodes[index];
+    reheat();
+    down = { x: event.clientX, y: event.clientY, index };
+    canvas.classList.add("dragging");
+    event.preventDefault();
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    const point = at(event);
+    if (dragging) {
+      dragging.x = Math.min(0.94, Math.max(0.06, point.x / point.w));
+      dragging.y = Math.min(0.92, Math.max(0.08, point.y / point.h));
+      if (!frame) paint();
+      return;
+    }
+    const index = hit(point);
+    const node = index === null ? null : nodes[index];
+    canvas.classList.toggle("over-node", Boolean(node));
+    if (node !== hovered) {
+      hovered = node;
+      if (!frame) paint();
+    }
+    if (onHover) onHover(node, event.clientX, event.clientY);
+  });
+
+  const release = (event) => {
+    if (down) {
+      // A drag that went nowhere is a click. Four pixels is the slack a
+      // pointer has on the way down.
+      const moved = Math.abs(event.clientX - down.x) + Math.abs(event.clientY - down.y);
+      if (moved < 4) {
+        selectAt(down.index);
+        if (onPick) onPick(nodes[down.index]);
+      }
+    }
+    dragging = null;
+    down = null;
+    canvas.classList.remove("dragging");
+    if (!frame) paint();
+  };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("pointerleave", () => {
+    hovered = null;
+    dragging = null;
+    down = null;
+    canvas.classList.remove("dragging", "over-node");
+    if (onHover) onHover(null);
+    if (!frame) paint();
+  });
+
+  // A canvas has no layout of its own to react to a resize with, and the
+  // stylesheet cannot repaint it.
+  const observer = new ResizeObserver(() => {
+    if (!frame) paint();
+  });
+  observer.observe(wrap);
+
+  return {
+    node: wrap,
+    draw(data, kinds) {
+      nodes = (data.nodes || []).map((row, i) => {
+        const angle = (i / Math.max((data.nodes || []).length, 1)) * Math.PI * 2;
+        return {
+          ...row,
+          // Truncated for the canvas only. Test names run past sixty
+          // characters, and a box that wide covers its neighbours and pushes
+          // the layout off the frame; the whole name is in the hover card and
+          // in the rail the moment the node is picked.
+          label: row.name.length > 26 ? `${row.name.slice(0, 25)}…` : row.name,
+          x: 0.5 + Math.cos(angle) * 0.28,
+          y: 0.5 + Math.sin(angle) * 0.28,
+          vx: 0,
+          vy: 0,
+          // Where this node is in its own wander, so forty nodes drift apart
+          // rather than sliding as one block.
+          phase: Math.random() * Math.PI * 2,
+          hover: 0,
+          callers: 0,
+          callees: 0,
+        };
+      });
+      edges = data.edges || [];
+      total = data.total || 0;
+      selected = null;
+      near = new Set();
+      hovered = null;
+      this.filter(kinds);
+      // Settled before the first painted frame, rather than exploding outward
+      // while the reader watches.
+      alpha = 1;
+      const box = wrap.getBoundingClientRect();
+      for (let i = 0; i < 220; i++) {
+        step(Math.max(box.width, 240), Math.max(box.height, 240));
+      }
+      settled = true;
+      // Once for the measurements, then the labels are pushed off each other
+      // using them, then again to draw the result.
+      paint();
+      separate();
+      paint();
+    },
+    /** Draw only the edge kinds asked for. Returns how many are drawn.
+     *
+     * An empty set means no kind is selected, which means no edges — not
+     * every edge. The old "no filter selected means no filter" fallback was
+     * indistinguishable from all six chips on, and the summary line asserted
+     * a number that did not describe what was drawn. */
+    filter(kinds) {
+      drawn = kinds ? edges.filter((e) => kinds.has(e.kind)) : edges;
+      // Counted over what is drawn rather than over what was fetched: a hover
+      // card that says "3 in" beside one line on the canvas is describing a
+      // graph the reader cannot see, and the reader believes the card.
+      load = nodes.map(() => 1);
+      for (const node of nodes) {
+        node.callers = 0;
+        node.callees = 0;
+      }
+      for (const edge of drawn) {
+        if (nodes[edge.from]) nodes[edge.from].callees += 1;
+        if (nodes[edge.to]) nodes[edge.to].callers += 1;
+        if (load[edge.from] !== undefined) load[edge.from] += 1;
+        if (load[edge.to] !== undefined) load[edge.to] += 1;
+      }
+      if (selected !== null) selectAt(selected);
+      // Fewer edges is a different layout, so the springs get another go at it.
+      reheat(0.25);
+      if (settled) paint();
+      return drawn.length;
+    },
+    /** Select a node by name, as though it had been clicked. */
+    pick(name) {
+      const index = nodes.findIndex((node) => node.name === name);
+      if (index < 0) return false;
+      selectAt(index);
+      paint();
+      if (onPick) onPick(nodes[index]);
+      return true;
+    },
+    counts: () => ({ nodes: nodes.length, edges: drawn.length, total }),
+
+    /** The symbol worth landing on: the one with the most edges that were
+     * actually found rather than guessed.
+     *
+     * The unscoped view used to open on whatever had the most edges of any
+     * kind, which in a Rust codebase is `new` — every type has one, and its
+     * neighbourhood is hundreds of inferred edges to unrelated code. A hub of
+     * extracted and resolved edges is a hub of the corpus rather than a hub of
+     * one very common word. */
+    best() {
+      const score = new Map();
+      for (const edge of drawn) {
+        if (edge.confidence !== "extracted" && edge.confidence !== "resolved") continue;
+        for (const end of [edge.from, edge.to]) {
+          score.set(end, (score.get(end) || 0) + 1);
+        }
+      }
+      let pick = null;
+      let most = 0;
+      for (const [index, count] of score) {
+        if (count <= most || !nodes[index]) continue;
+        most = count;
+        pick = nodes[index].name;
+      }
+      return pick;
+    },
+
+    /** Spread the layout back out to fill the frame. */
+    fit() {
+      if (!nodes.length) return;
+      const xs = nodes.map((node) => node.x);
+      const ys = nodes.map((node) => node.y);
+      const spread = (values, low, high) => {
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const span = max - min;
+        // Everything in one spot: nothing to spread, and dividing by the span
+        // would be dividing by zero.
+        if (span < 0.001) return () => (low + high) / 2;
+        return (value) => low + ((value - min) / span) * (high - low);
+      };
+      const toX = spread(xs, 0.08, 0.92);
+      const toY = spread(ys, 0.1, 0.9);
+      for (const node of nodes) {
+        node.x = toX(node.x);
+        node.y = toY(node.y);
+        node.vx = 0;
+        node.vy = 0;
+      }
+      separate();
+      paint();
+    },
+    running: () => running,
+    toggle() {
+      running = !running;
+      if (running) reheat(0.2);
+      return running;
+    },
+    start() {
+      // Under reduced motion the graph is solved once and then still: there is
+      // no loop to pause, and nothing moves unless the reader moves it.
+      if (stillness()) {
+        running = false;
+        paint();
+        return;
+      }
+      if (!frame) tick();
+    },
+    stop() {
+      running = false;
+      if (frame) cancelAnimationFrame(frame);
+      frame = null;
+      observer.disconnect();
+    },
+    repaint: paint,
+  };
+}
+
+// Every kind `graph::KINDS` stores. A kind missing here is fetched from
+// /api/graph and thrown away before painting, which is what `contains` and
+// `aliases` were until 0.17.2 - the rail counted them and the canvas did not
+// draw them. `tests/portal.rs` asserts this list against the Rust one.
+const EDGE_KINDS = ["defines", "calls", "imports", "references", "contains", "aliases"];
+
+async function graphView() {
+  await refreshStores();
+
+  const kinds = new Set(EDGE_KINDS);
+  const chosen = new Set();
+  const meta = el("span", { class: "graph-count" });
+  const rail = el("div", { class: "graph-rail" });
+
+  const canvas = graphCanvas({
+    onPick: (node) => select(node),
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("graph");
+      tip.atPoint(
+        x,
+        y,
+        [
+          el(
+            "div",
+            { class: "tip-head" },
+            el("i", {}),
+            node.name,
+          ),
+          row("kind", node.kind),
+          row("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`),
+          row("store", node.store || (state.stores[0] && state.stores[0].name) || "—"),
+          row("calls", `${node.callers} in · ${node.callees} out`),
+        ],
+        "graph",
+      );
+    },
+  });
+
+  function row(key, value) {
+    return el(
+      "div",
+      { class: "tip-row" },
+      el("span", { class: "k", text: key }),
+      el("span", { class: "v", text: String(value) }),
+    );
+  }
+
+  const pause = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Pause",
+    onclick: (e) => {
+      const on = canvas.toggle();
+      e.currentTarget.textContent = on ? "Pause" : "Resume";
+    },
+  });
+
+  /* Beside Pause, which used to be the only control the canvas had: a reader
+   * who dragged a node off the edge had no way back short of reloading. */
+  const fit = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Fit",
+    onclick: () => canvas.fit(),
+  });
+  const reset = el("button", {
+    class: "button ghost small",
+    type: "button",
+    text: "Reset",
+    onclick: () => load({}),
+  });
+
+  /* The label has to come from what the canvas is actually doing, not from a
+   * second reading of the media query: under reduced motion `start` never
+   * begins a loop, and a button reading "Pause" beside a still picture is a
+   * lie about which of the two is in charge. */
+  function paintPause() {
+    pause.textContent = canvas.running() ? "Pause" : "Settled";
+  }
+
+  function counts() {
+    const { nodes, edges, total } = canvas.counts();
+    // What is drawn, out of what the scope holds. The cap is the reason the
+    // two differ, and a summary that mentioned only the first read as a count
+    // of the whole graph.
+    const shown = total && total > nodes ? `${n(nodes)} of ${n(total)} symbols` : `${n(nodes)} symbols`;
+    meta.textContent = `${shown} · ${n(edges)} edges`;
+  }
+
+  function blank(message) {
+    return fill(
+      rail,
+      el("div", { class: "graph-selected" }, el("div", { class: "rail-hint", text: message })),
+    );
+  }
+
+  function ends(title, list, absent, extra) {
+    return el(
+      "div",
+      { class: "rail-group" },
+      el("h3", { text: title }),
+      list.length
+        ? el(
+            "ul",
+            { class: "rail-list" },
+            list.map((end) => endRow(end)),
+          )
+        : el("div", { class: "rail-hint", text: absent }),
+      extra || null,
+    );
+  }
+
+  /* One neighbour. An ambiguous row stands for several definitions and must
+   * not name one of them: a reader who follows it would open one of four files
+   * the call could have meant. It says how many instead, and opens on ask. */
+  function endRow(end) {
+    if (end.confidence === "ambiguous") {
+      const li = el("li", { class: "ambiguous-row" });
+      let open = false;
+      const toggle = el("button", {
+        class: "link-button",
+        type: "button",
+        text: `${end.name} · ${end.definitions} definitions`,
+        "aria-expanded": "false",
+        onclick: async () => {
+          open = !open;
+          toggle.setAttribute("aria-expanded", String(open));
+          if (!open) return fill(nested);
+          fill(nested, el("div", { class: "rail-hint", text: "Loading…" }));
+          let all;
+          try {
+            all = await api(
+              `/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`,
+            );
+          } catch (e) {
+            return fill(nested, error(e.message));
+          }
+          const each = all.callees.filter((c) => c.name === end.name);
+          fill(
+            nested,
+            el(
+              "ul",
+              { class: "rail-list nested" },
+              each.map((one) =>
+                el(
+                  "li",
+                  {},
+                  el("a", {
+                    href: `#graph?name=${encodeURIComponent(one.name)}`,
+                    text: `${shortPath(one.path)}:${one.start_line}`,
+                    onclick: (e) => {
+                      e.preventDefault();
+                      focus(one.name);
+                    },
+                  }),
+                ),
+              ),
+            ),
+          );
+        },
+      });
+      const nested = el("div", { class: "nested-wrap" });
+      return fill(li, toggle, confidenceBadge(end.confidence), el("span", { class: "via", text: end.kind }), nested);
+    }
+    return el(
+      "li",
+      {},
+      el("a", {
+        href: `#graph?name=${encodeURIComponent(end.name)}`,
+        text: end.name,
+        onclick: (e) => {
+          e.preventDefault();
+          focus(end.name);
+        },
+      }),
+      confidenceBadge(end.confidence),
+      el("span", { class: "via", text: end.kind }),
+    );
+  }
+
+  /* What the four values mean, once, under the rail. A badge whose meaning a
+   * reader has to guess is a badge that gets read as decoration. */
+  function confidenceLegend() {
+    return el(
+      "div",
+      { class: "conf-legend" },
+      Object.entries(CONFIDENCE).map(([value, [label, why]]) =>
+        el(
+          "span",
+          { class: "legend-chip" },
+          el("span", { class: `conf ${value}`, text: label }),
+          el("span", { class: "why", text: why }),
+        ),
+      ),
+    );
+  }
+
+  async function select(node) {
+    fill(rail, el("div", { class: "rail-hint", text: "Loading…" }));
+    let data;
+    try {
+      data = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}`);
+    } catch (e) {
+      return fill(rail, error(e.message));
+    }
+    state.graphSelected = node.name;
+    const edge = (e) => ({
+      name: e.name,
+      kind: e.kind,
+      confidence: e.confidence,
+      definitions: e.definitions,
+      path: e.path,
+      start_line: e.start_line,
+    });
+
+    fill(
+      rail,
+      el(
+        "div",
+        { class: "graph-selected" },
+        el("span", { class: "eyebrow", text: "Selected symbol" }),
+        el("h2", { class: "sym", text: node.name }),
+        el("div", {
+          class: "loc",
+          "data-tip": node.path,
+          text: `${shortPath(node.path)}:${node.start_line}-${node.end_line}`,
+        }),
+        el(
+          "div",
+          { class: "chips" },
+          el("span", { class: "chip static blue", text: node.kind }),
+          node.store ? el("span", { class: "chip static", text: node.store }) : null,
+          el("span", {
+            class: "chip static",
+            text: `${Math.max(node.end_line - node.start_line + 1, 1)} lines`,
+          }),
+        ),
+      ),
+      // "Incoming", because that is what the list holds. Under a heading
+      // reading CALLERS it carried a `defines` edge and a `references` edge,
+      // neither of which is a call — the section is every edge that points at
+      // this symbol and now says so.
+      ends("Incoming", data.callers.map(edge), "Nothing in the graph points at this."),
+      ends(
+        "Outgoing",
+        data.callees.map(edge),
+        "A leaf, as far as the extracted edges go.",
+        // Targets the store holds no definition for. Left out by default,
+        // because a list of names this corpus knows nothing about is noise —
+        // and counted, because "no callees" and "every callee is outside the
+        // index" are different facts.
+        data.hidden
+          ? el("button", {
+              class: "link-button quiet",
+              type: "button",
+              text: `Show ${data.hidden} unresolved`,
+              onclick: async (e) => {
+                const button = e.currentTarget;
+                button.textContent = "Loading…";
+                let all;
+                try {
+                  all = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`);
+                } catch (err) {
+                  button.replaceWith(error(err.message));
+                  return;
+                }
+                button.replaceWith(
+                  el(
+                    "ul",
+                    { class: "rail-list nested" },
+                    all.unresolved.map((one) =>
+                      el(
+                        "li",
+                        {},
+                        el("span", { text: one.name }),
+                        el("span", { class: "via", text: one.kind }),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            })
+          : null,
+      ),
+      confidenceLegend(),
+      el(
+        "div",
+        { class: "rail-actions" },
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "Ask the index a question",
+          onclick: () => {
+            state.pendingQuery = node.name;
+            go("search");
+          },
+        }),
+      ),
+    );
+  }
+
+  async function load(params) {
+    meta.textContent = "loading…";
+    const query = new URLSearchParams(params || {});
+    for (const store of chosen) query.append("store", store);
+    let data;
+    try {
+      data = await api(`/api/graph?${query}`);
+    } catch (e) {
+      meta.textContent = "";
+      return fill(rail, error(e.message));
+    }
+    if (!data.nodes.length) {
+      meta.textContent = "0 symbols";
+      canvas.draw({ nodes: [], edges: [] }, kinds);
+      return blank(
+        data.total === 0
+          ? "This store has no symbols yet. The graph is built as files are indexed — run Index once, or leave the daemon watching."
+          : "Nothing in this scope. Clear the filters, or pick a store.",
+      );
+    }
+    canvas.draw(data, kinds);
+    counts();
+    // A focused view arrives with its centre chosen, so the rail says something
+    // before the first click rather than asking for one.
+    const centre = (params && params.name) || canvas.best();
+    if (centre && canvas.pick(centre)) return;
+    blank("Pick a node to see what calls it and what it calls.");
+  }
+
+  function focus(name) {
+    load({ name, limit: "45" });
+  }
+
+  /** Apply whatever is in the scope box. */
+  function applyScope() {
+    const value = scopeInput.value.trim();
+    if (!value) return load({});
+    // A path fragment scopes; anything else is read as a symbol to centre on.
+    load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
+  }
+
+  const scopeInput = el("input", {
+    type: "search",
+    placeholder: "Scope to a path, or find a symbol",
+    // Every other control on this page applies on a click, so a text field
+    // that silently waits for Enter reads as broken. It still takes Enter, and
+    // now it also says so and has a button.
+    "aria-describedby": "graph-scope-hint",
+    onkeydown: (e) => {
+      if (e.key !== "Enter") return;
+      applyScope();
+    },
+  });
+  const scopeButton = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Scope",
+    onclick: () => applyScope(),
+  });
+
+  const kindChips = EDGE_KINDS.map((kind) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": "true",
+      text: kind,
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+        e.currentTarget.setAttribute("aria-pressed", String(on));
+        if (on) kinds.add(kind);
+        else kinds.delete(kind);
+        canvas.filter(kinds);
+        canvas.fit();
+        counts();
+      },
+    }),
+  );
+
+  const storeChips = liveStores().map((store) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": "false",
+      text: store.name,
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+        e.currentTarget.setAttribute("aria-pressed", String(on));
+        if (on) chosen.add(store.name);
+        else chosen.delete(store.name);
+        load({});
+      },
+    }),
+  );
+
+  const page = el(
+    "div",
+    { class: "graph-page" },
+    el(
+      "div",
+      { class: "graph-band" },
+      pageHead(
+        "Graph",
+        "Edges are re-extracted on the same pass that re-embeds a file. Never a stale build artifact.",
+        { actions: [el("div", { class: "filters" }, kindChips), fit, reset, pause] },
+      ),
+      el(
+        "div",
+        { class: "graph-controls" },
+        el(
+          "div",
+          { class: "graph-scope" },
+          icon(ICONS.search, 16),
+          labelled("graph-scope", "Scope the graph", scopeInput),
+          scopeButton,
+          el("span", {
+            class: "meta",
+            id: "graph-scope-hint",
+            text: "Enter applies it",
+          }),
+        ),
+        storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
+      ),
+    ),
+    el(
+      "div",
+      { class: "graph-body" },
+      el(
+        "div",
+        { class: "graph-frame" },
+        canvas.node,
+        el(
+          "div",
+          { class: "graph-legend" },
+          el("span", { class: "key extracted" }, el("i", {}), "extracted"),
+          el("span", { class: "key resolved" }, el("i", {}), "resolved"),
+          el("span", { class: "key inferred" }, el("i", {}), "inferred"),
+          el("span", { class: "key ambiguous" }, el("i", {}), "ambiguous"),
+          el("span", { class: "key selected" }, el("i", {}), "selected"),
+        ),
+        meta,
+      ),
+      rail,
+    ),
+  );
+
+  blank("Pick a node to see what calls it and what it calls.");
+  // The canvas has no size until it is in the document.
+  setTimeout(async () => {
+    canvas.start();
+    paintPause();
+    const pending = state.pendingSymbol;
+    state.pendingSymbol = "";
+    if (pending) return load({ name: pending, limit: "45" });
+    // Land on the busiest symbol's neighbourhood rather than on everything at
+    // once. The whole store drawn at once is honest and unreadable, and a
+    // reader arriving at a knot learns nothing.
+    try {
+      const overview = await api("/api/graph?limit=1");
+      const busiest = (overview.nodes || [])[0];
+      if (busiest) return focus(busiest.name);
+    } catch (_) {
+      /* fall through to the overview */
+    }
+    load({});
+  }, 0);
+  return page;
+}
+
+/** One figure with its label, as the design draws them. */
+/* Ring one card in the accent, for the single figure a page exists to show.
+ *
+ * A wrapper rather than an argument on `stat`, because emphasis is a property
+ * of the page's argument and not of the number: the same statistic is ringed on
+ * one page and plain on another. */
+function ringed(node) {
+  node.classList.add("ringed");
+  return node;
+}
+
+function stat(label, value, note) {
+  return el(
+    "div",
+    { class: "stat" },
+    el("span", { class: "eyebrow", text: label }),
+    el("span", { class: "value", text: value }),
+    note ? el("span", { class: "sub", text: note }) : null,
+  );
+}
+
+// --------------------------------------------------------------- ledger
+
+async function ledgerView() {
+  let data;
+  try {
+    data = await api("/api/ledger");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Retrieval ledger"), error(e.message));
+  }
+
+  const on = data.recording;
+  // Live: the ledger's one record call moves this counter, whichever surface
+  // answered the retrieval.
+  watchLive(["ledger"], repaintView);
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Retrieval ledger",
+      "Every query an agent ran, recorded locally. The honest token number, a debugging trail, and an audit record that never left the machine.",
+      {
+        pill: on
+          ? pill("recording", "on", {
+              title:
+                "On by default. Rows live in the store beside the chunks and never leave this machine.",
+            })
+          : pill("not recording", null),
+      },
+    ),
+    // Six across, then two wide, then who asked — the order the design puts
+    // them in, and the order they are read in: what was asked, what it cost,
+    // what it saved, and how much of the ledger that figure covers.
+    el(
+      "div",
+      { class: "strip" },
+      stat(
+        "Queries recorded",
+        n(data.queries),
+        `${n(data.clients)} client${data.clients === 1 ? "" : "s"}`,
+      ),
+      stat("Excerpt tokens", n(data.excerpt_tokens), "what agents were actually sent"),
+      stat(
+        "Whole-file tokens",
+        n(data.whole_file_tokens),
+        "what reading those files whole would have cost, counted with the store's tokenizer",
+      ),
+      // A ratio never stands alone. Coverage says how much of the ledger it is
+      // computed over, and the tier says whether the tokens were counted or
+      // estimated — without both, a number like 18.3x is a marketing claim.
+      // Ringed rather than merely present: it is the figure a reader came for,
+      // and the ring is what carries its two qualifiers with it.
+      ringed(
+        stat(
+          "Measured ratio",
+          data.ratio ? `${data.ratio.toFixed(1)}×` : "—",
+          data.ratio ? `coverage ${data.coverage}% · ${data.tier}` : "needs a recorded query",
+        ),
+      ),
+      stat(
+        "Coverage",
+        `${data.coverage || 0}%`,
+        `${n(data.credited || 0)} of ${n(data.queries)} retrievals credited`,
+      ),
+      stat(
+        "Net tokens",
+        n(data.net_tokens || 0),
+        "whole-file less excerpt, over rows that found something",
+      ),
+    ),
+    el(
+      "div",
+      { class: "strip" },
+      stat(
+        "Zero-hit",
+        `${data.queries ? Math.round(((data.queries - (data.credited || 0)) * 100) / data.queries) : 0}%`,
+        "queries the corpus could not answer — recorded, and credited nothing",
+      ),
+      stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
+    ),
+    clientBreakdown(data.by_client),
+    // The rows themselves. The page called itself a debugging trail and an
+    // audit record and had no table on it at all — three snippets telling the
+    // reader to go and run `semlith ledger` in a terminal instead, which is
+    // also the portal-parity rule broken: the CLI prints rows, so this does.
+    ledgerRows(data),
+    el(
+      "div",
+      { class: "scroller" },
+      el(
+        "div",
+        { class: "grid three" },
+        el(
+          "div",
+          { class: "card pad dense" },
+          copyField("semlith ledger --last 20"),
+          el("p", {
+            class: "subtitle",
+            text: "Prints the ledger on the command line. Nothing here needs a key.",
+          }),
+        ),
+        el(
+          "div",
+          { class: "card pad dense" },
+          copyField("semlith ledger --verify"),
+          el("p", {
+            class: "subtitle",
+            text: "Re-walks the hash chain and names the first row that does not verify.",
+          }),
+          el("p", {
+            class: "subtitle",
+            text: data.intact
+              ? "The chain is intact."
+              : "The chain does not verify. Some rows have been edited or removed.",
+          }),
+        ),
+        el(
+          "div",
+          { class: "card pad dense" },
+          copyField("semlith start --no-ledger"),
+          el("p", {
+            class: "subtitle",
+            text: "Run the daemon without recording, for this session only. SEMLITH_LEDGER=0 does the same for a machine.",
+          }),
+        ),
+      ),
+      on
+        ? null
+        : el(
+            "div",
+            { class: "notice" },
+            el("div", { class: "what", text: "Recording is off" }),
+            el(
+              "div",
+              {},
+              "The daemon was started with ",
+              mono("--no-ledger"),
+              ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+            ),
+          ),
+      says(
+        "Stored in ",
+        mono("~/.semlith/stores/<name>/store.db"),
+        ", table ",
+        mono("retrievals"),
+        ". On by default; ",
+        mono("--no-ledger"),
+        " or ",
+        mono("SEMLITH_LEDGER=0"),
+        " turns it off, and deleting the rows is one ",
+        mono("DELETE"),
+        ".",
+      ),
+    ),
+  );
+}
+
+/** The ledger's rows: the same ones `semlith ledger --last 200` prints. */
+function ledgerRows(data) {
+  const rows = data.rows || [];
+  const table = dataTable({
+    className: "w-ledger",
+    sort: "at",
+    dir: "desc",
+    perPage: 15,
+    rows,
+    caption: "Every retrieval recorded on this machine, newest first.",
+    columns: [
+      {
+        key: "at",
+        label: "When",
+        className: "meta",
+        value: (r) => r.at,
+        // Local time with the offset, as the server rendered it — the same
+        // string the CLI prints. One dataset, one clock: the two surfaces used
+        // to disagree by the UTC offset with neither of them saying so.
+        render: (r) => el("span", { class: "one-line", title: r.when, text: r.when }),
+      },
+      { key: "client", label: "Client", className: "meta", render: (r) => r.client },
+      { key: "store", label: "Store", className: "meta narrow-drop", render: (r) => r.store },
+      {
+        key: "query",
+        label: "Query",
+        className: "path",
+        render: (r) => el("span", { class: "one-line", title: r.query, text: r.query }),
+      },
+      { key: "hits", label: "Hits", className: "num", render: (r) => n(r.hits) },
+      {
+        key: "ms",
+        label: "ms",
+        className: "num narrow-drop",
+        render: (r) => n(r.ms),
+      },
+    ],
+  });
+  table.update(rows, rows.length);
+  return el(
+    "div",
+    { class: "card pad" },
+    el("span", { class: "card-title", text: "The rows" }),
+    rows.length
+      ? table.node
+      : empty("Nothing recorded yet. A search from any client writes a row here."),
+    data.legacy_rows
+      ? el("p", {
+          class: "subtitle",
+          text: "Some rows here are older than the query id, and were written once per open store — figures that include them may count one search several times. They are left as they are: the chain is never rewritten.",
+        })
+      : null,
+  );
+}
+
+/* Who the ledger recorded, and how often./* Who the ledger recorded, and how often.
+ *
+ * The row that says the ledger works. Before 0.15.0 it could only ever read
+ * `portal 31`, because the portal's own search box was the only thing that
+ * wrote to it; a line with `claude-code` on it is the whole point of the
+ * release. */
+function clientBreakdown(byClient) {
+  const entries = Object.entries(byClient || {}).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) return null;
+  return el(
+    "div",
+    { class: "client-breakdown" },
+    // Labelled, because a bare run of names and numbers under eight stat cards
+    // reads as a caption for the cards rather than as its own fact. The line
+    // after it is the fact: these are the client's own names, from the MCP
+    // handshake, not a guess made here.
+    el("span", { class: "eyebrow", text: "by client" }),
+    entries.map(([client, count], i) =>
+      el(
+        "span",
+        { class: "client" },
+        i ? el("span", { class: "sep", text: "·" }) : null,
+        el("span", { class: "who", text: client }),
+        el("span", { class: "count", text: n(count) }),
+      ),
+    ),
+    el("span", {
+      class: "client-note",
+      text: "— MCP, HTTP and CLI, under the client's own name",
+    }),
+  );
+}
+
+/** The stores that are actually there, for anywhere one can be chosen.
+ *
+ * A registry entry whose directory is missing is still a row on the Stores
+ * page — the user has to be able to see it to delete it — but it is not a
+ * store anything can be indexed into, searched or drawn. It used to be offered
+ * as "add to alpha" in the Index dropdown and as a chip on Search and Graph,
+ * which is the same mechanism that put one store's files into another. */
+function liveStores() {
+  return state.stores.filter((store) => {
+    if (store.missing || store.unopened) return false;
+    // A store whose every registered root has gone is a store nothing can
+    // sensibly be indexed into: the corpus it is about is not on the machine.
+    // A store with no roots recorded at all is a different thing — a `--store`
+    // directory the registry never saw — and is offered as it always was.
+    const roots = store.roots || [];
+    return !roots.length || roots.some((root) => root.present);
+  });
+}
+
+/** Read the store list into `state`, so every view agrees on how many exist. *//** Read the store list into `state`, so every view agrees on how many exist. */
+async function refreshStores() {
+  try {
+    const data = await api("/api/stores");
+    state.stores = data.stores || [];
+    paintStoreCount();
+  } catch (_) {
+    // A failed refresh must not empty the list: `state.stores.length` decides
+    // whether the app or the first-run screen is shown, and a dropped request
+    // is not the same as having no stores.
+  }
+  return state.stores;
+}
+
+// ---------------------------------------------------------------- stores
+
+/* "Agents connected", on the Stores page.
+ *
+ * The same list the Agents page draws, read from the same route, because two
+ * readings of "which agents are talking to this daemon" is how one page says
+ * two and the other says none. */
+function agentsCard() {
+  const card = el("div", { class: "card pad dense" });
+  const body = el("div", { class: "rows" });
+  fill(
+    card,
+    el("span", { class: "card-title", text: "Agents connected" }),
+    body,
+    el("span", { class: "spacer" }),
+    el("button", {
+      class: "button ghost small",
+      type: "button",
+      text: "Copy config for another client",
+      onclick: () => go("agents"),
+    }),
+  );
+  fill(body, el("div", { class: "rail-hint", text: "Asking the daemon…" }));
+
+  api("/api/agents")
+    .then((data) => {
+      noteAgents(data);
+  // Live: a client connecting, and every tool call it makes, moves the clients
+  // counter, so the table fills in as agents talk rather than on a reload.
+  watchLive(["clients"], repaintView);
+      const live = data.connections || [];
+      if (!live.length) {
+        fill(
+          body,
+          el("div", {
+            class: "rail-hint",
+            text: "No client is talking to this daemon right now.",
+          }),
+        );
+        return;
+      }
+      fill(
+        body,
+        live.map((client) =>
+          el(
+            "div",
+            { class: "kv" },
+            el("span", { text: client.name }),
+            el("span", { class: "spacer" }),
+            el("span", {
+              class: "meta",
+              text: `${client.transport} · ${n(client.queries)} quer${
+                client.queries === 1 ? "y" : "ies"
+              }`,
+            }),
+          ),
+        ),
+      );
+    })
+    .catch((e) => fill(body, error(e.message)));
+
+  return card;
+}
+
+/* A question that has to be answered before anything else happens.
+ *
+ * A native `<dialog>` rather than a div: the focus trap, the Escape key, the
+ * inert background and the backdrop are the platform's, and every one of them
+ * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
+ * it is pending the dialog says so, and an error is shown inside it rather
+ * than behind it. */
+function ask({ title, body, confirm, tone, run }) {
+  const dialog = el("dialog", { class: "modal" });
+  const problem = el("div", { class: "note" });
+  const go = el("button", {
+    class: tone === "bad" ? "button danger" : "button",
+    type: "button",
+    text: confirm,
+    onclick: async () => {
+      go.disabled = true;
+      const was = go.textContent;
+      go.textContent = "Working…";
+      problem.className = "note";
+      problem.textContent = "";
+      try {
+        await run();
+        dialog.close();
+      } catch (e) {
+        problem.className = "note bad";
+        problem.textContent = e.message;
+        go.disabled = false;
+        go.textContent = was;
+      }
+    },
+  });
+  fill(
+    dialog,
+    el("h2", { class: "card-title", text: title }),
+    el("p", { class: "subtitle", text: body }),
+    problem,
+    el(
+      "div",
+      { class: "actions" },
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button secondary",
+        type: "button",
+        text: "Cancel",
+        onclick: () => dialog.close(),
+      }),
+      go,
+    ),
+  );
+  // Removed on close, however it was closed — the button, Escape, or the
+  // backdrop — so the page never accumulates dialogs nobody can see.
+  dialog.addEventListener("close", () => dialog.remove());
+  dialog.addEventListener("click", (e) => {
+    if (e.target === dialog) dialog.close();
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+/** Ask before deleting a store.
+ *
+ * A store is minutes of embedding, so the question says what goes and what
+ * does not, and the button that answers it is the red one. */
+function confirmDelete(name) {
+  ask({
+    title: `Delete ${name}?`,
+    body: "Its vectors, chunks, graph and ledger are deleted, and the registry stops listing it. The files it indexed are untouched.",
+    confirm: `Delete ${name}`,
+    tone: "bad",
+    run: async () => {
+      const done = await post("/api/store/delete", { store: name });
+      await refreshStores();
+      // After the re-render, not before: the render replaces the element the
+      // message would have been written into.
+      await render();
+      note(done.message);
+    },
+  });
+}
+
+/** A line under the page head, for something that just happened to the page. */
+function note(text, bad) {
+  const holder = document.querySelector(".view > .note.page-note");
+  if (!holder) return;
+  holder.className = bad ? "note page-note bad" : "note page-note";
+  holder.textContent = text;
+}
+
+async function storesView() {
+  const stores = await refreshStores();
+  /* Live. A store the CLI just made, a watcher re-embed, a run's own note —
+   * each moves a counter the shared poll is watching, and this page redraws
+   * from the route it already reads rather than from a timer of its own.
+   * Deliberately not on `runs`: that counter moves on every file of every run,
+   * and a table that rebuilt forty times a second would be unreadable. */
+  watchLive(["stores", "events"], repaintView);
+
+  const rootNote = el("div", { class: "note" });
+  /* A root the registry lists and the disk no longer has. The picker is the
+   * same one the page already uses, and re-pointing is a registry edit: no
+   * re-embedding, nothing rewritten. */
+  const rootPicker = folderPicker({
+    choose: "Point the store here",
+    onError: (message) => {
+      rootNote.className = "note bad";
+      rootNote.textContent = message;
+    },
+    onChoose: async (path) => {
+      rootNote.className = "note";
+      rootNote.textContent = "Re-pointing…";
+      try {
+        const done = await post("/api/root", { store: rootPicker.store, root: path });
+        rootNote.textContent = done.message;
+        await refreshStores();
+      } catch (e) {
+        rootNote.className = "note bad";
+        rootNote.textContent = e.message;
+      }
+    },
+  });
+
+  function repoint(store, missing) {
+    rootPicker.store = store;
+    rootNote.className = "note";
+    rootNote.textContent = `Choose where ${missing.split("/").pop() || missing} lives now.`;
+    rootPicker.open("");
+  }
+
+  const adoptNote = el("div", { class: "note" });
+  const picker = folderPicker({
+    choose: "Adopt this directory",
+    onError: (message) => {
+      adoptNote.className = "note bad";
+      adoptNote.textContent = message;
+    },
+    onChoose: async (path) => {
+      adoptNote.className = "note";
+      adoptNote.textContent = "Adopting…";
+      try {
+        const done = await post("/api/adopt", { path });
+        adoptNote.textContent =
+          done.message || `${path} is registered. It joins on the next daemon start.`;
+        await refreshStores();
+      } catch (e) {
+        adoptNote.className = "note bad";
+        adoptNote.textContent = e.message;
+        // Back where it failed, rather than closed. A failed adopt used to
+        // drop the reader onto the Stores page, and reopening the picker
+        // started again at the home directory with every step of navigation
+        // lost.
+        picker.open(path);
+      }
+    },
+  });
+
+  const head = pageHead("Stores", "Everything indexed on this machine. Nothing leaves it.", {
+    actions: [
+      el(
+        "button",
+        { class: "button secondary", type: "button", onclick: () => picker.open("") },
+        icon(ICONS.folder),
+        "Adopt existing .semlith",
+      ),
+      el(
+        "button",
+        { class: "button", type: "button", onclick: () => go("index") },
+        icon(ICONS.plus),
+        "Index a folder",
+      ),
+    ],
+  });
+
+  if (!stores.length) {
+    return el(
+      "div",
+      { class: "view" },
+      head,
+      picker.node,
+      adoptNote,
+      empty("No store is open. Index a folder and it appears here."),
+    );
+  }
+
+  const totals = stores.reduce(
+    (sum, s) => ({
+      files: sum.files + s.files,
+      chunks: sum.chunks + s.chunks,
+      bytes: sum.bytes + s.bytes,
+      lines: sum.lines + (s.lines || 0),
+      watching: sum.watching + (s.watching ? 1 : 0),
+      formats: Math.max(sum.formats, s.formats || 0),
+      readers: Math.max(sum.readers, s.readers || 0),
+    }),
+    { files: 0, chunks: 0, bytes: 0, lines: 0, watching: 0, formats: 0, readers: 0 },
+  );
+  const dim = stores.find((s) => s.dim)?.dim;
+
+  const table = dataTable({
+    className: "w-stores",
+    caption: "Every store on this machine: where it is, what it holds, and when it was last written to.",
+    sort: "name",
+    perPage: 10,
+    rows: stores,
+    columns: [
+      {
+        key: "name",
+        label: "Store",
+        value: (s) => s.name,
+        render: (s) =>
+          el(
+            "div",
+            { class: "rows tight" },
+            lineCell(s.name, "name"),
+            pathCell(s.dir, "meta"),
+            // A registry entry whose directory is not there. Its own badge,
+            // naming the path that is absent, rather than a word in the "last
+            // write" column where it is not a last write.
+            s.missing
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill("missing", "bad", { title: `nothing at ${s.dir}` }),
+                  el("span", {
+                    class: "meta",
+                    text: `nothing at ${s.dir} — delete the entry, or put the store back`,
+                  }),
+                )
+              : null,
+            // A store whose corpus has gone. It opens, it answers, and what it
+            // answers about is not on disk any more — which is a different
+            // fault from a registry entry with no store, and was said nowhere
+            // but inside the ROOTS column that a phone drops.
+            !s.missing && (s.roots || []).length && !(s.roots || []).some((r) => r.present)
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill("root missing", "bad", {
+                    title: (s.roots || []).map((r) => r.path).join(", "),
+                  }),
+                  el("span", {
+                    class: "meta",
+                    text: `nothing at ${(s.roots || []).map((r) => r.path).join(", ")} — re-point it, or delete the store`,
+                  }),
+                )
+              : null,
+            // What the daemon reconciled away when it opened this store: rows
+            // it held for files outside every root it is registered against.
+            s.pruned
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill(`${n(s.pruned)} reconciled`, "warn"),
+                  el("span", {
+                    class: "meta",
+                    text: "files it held from outside its roots, dropped when this daemon opened it. The files on disk are untouched.",
+                  }),
+                )
+              : null,
+            // The root on a phone, where the ROOTS column is dropped and
+            // nothing else said what the store indexes.
+            el("span", {
+              class: "meta only-narrow",
+              text: (s.roots || []).map((r) => r.path).join(", ") || "no roots",
+            }),
+            // The model per store, which the About page states only once for
+            // the machine. Two stores can have been built with two models and
+            // their vectors are not comparable, so it belongs beside the row.
+            lineCell(`${s.model} · ${s.dim} dims`, "meta"),
+            // Two things worth saying about a store rather than about its
+            // contents: whether this machine has agreed to open it without
+            // being told to, and whether anybody else on the machine can read
+            // what it holds.
+            s.trusted === false
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill("not trusted", "warn"),
+                  el("button", {
+                    class: "button secondary small",
+                    type: "button",
+                    text: "Trust this store",
+                    onclick: async (e) => {
+                      const button = e.currentTarget;
+                      button.disabled = true;
+                      adoptNote.className = "note";
+                      adoptNote.textContent = "Trusting…";
+                      try {
+                        await post("/api/trust", { path: s.dir });
+                        adoptNote.textContent = `${s.dir} is trusted. semlith opens it from its own directory now, without --store.`;
+                        await refreshStores();
+                      } catch (err) {
+                        adoptNote.className = "note bad";
+                        adoptNote.textContent = err.message;
+                        button.disabled = false;
+                      }
+                    },
+                  }),
+                )
+              : null,
+            s.loose_mode
+              ? el(
+                  "div",
+                  { class: "chips" },
+                  pill(`mode ${s.loose_mode}`, "warn"),
+                  el("span", {
+                    class: "meta",
+                    text: "other users on this machine can read what this store indexed; the next open narrows it to 700",
+                  }),
+                )
+              : null,
+          ),
+      },
+      {
+        key: "roots",
+        label: "Roots",
+        className: "meta narrow-drop",
+        sortable: false,
+        render: (s) =>
+          (s.roots || []).length
+            ? s.roots.map((r) =>
+                r.present
+                  ? pathCell(r.path)
+                  : el(
+                      "div",
+                      { class: "gone-row" },
+                      pathCell(r.path, "gone"),
+                      // A root the registry still lists and the disk no longer
+                      // has. Re-pointing it is one click rather than a command
+                      // with two paths in it.
+                      el("button", {
+                        class: "button danger small",
+                        type: "button",
+                        text: "Re-point",
+                        onclick: () => repoint(s.name, r.path),
+                      }),
+                    ),
+              )
+            : "—",
+      },
+      { key: "files", label: "Files", className: "num", value: (s) => s.files, render: (s) => n(s.files) },
+      {
+        key: "chunks",
+        label: "Chunks",
+        className: "num narrow-drop",
+        value: (s) => s.chunks,
+        render: (s) => n(s.chunks),
+      },
+      {
+        key: "last_write",
+        label: "Last write",
+        value: (s) => s.last_write || 0,
+        // Green means a write landed. A store that is watched and has never
+        // been written to is neither good news nor a warning, so it carries a
+        // plain pill with no dot at all.
+        render: (s) => {
+          // Registered, and this daemon does not have it open — another
+          // process is writing it. One vocabulary in this column: every value
+          // here is a last write or the reason there is none to read, and a
+          // store's own state lives in its own badge beside its name.
+          // One vocabulary: either a time, or the em dash that means there is
+          // no time to show. Why there is none — the store is missing, or it
+          // was never written to — lives in its own badge beside the name,
+          // where it is a fact about the store rather than about this column.
+          // Read from the store rather than from this daemon's memory of its
+          // own session, so a store written yesterday no longer says "never".
+          return s.last_write
+            ? pill(when(s.last_write), "good")
+            : el("span", { class: "meta", text: "—" });
+        },
+      },
+      {
+        key: "open",
+        label: "",
+        className: "row-end",
+        sortable: false,
+        // One control rather than a button per action: the destructive one
+        // does not belong a mis-aimed click away from the ordinary one.
+        render: (s) =>
+          rowMenu(() => [
+            // With the store, so the page it opens is about the row the menu
+            // was opened from. Without it, "Open in Files" from any row — even
+            // a dead one — showed every store's files with another store's
+            // rows at the top.
+            {
+              label: "Open in Files",
+              onclick: () => {
+                state.pendingStore = s.name;
+                go("files");
+              },
+            },
+            {
+              label: "Delete store…",
+              tone: "bad",
+              onclick: () => confirmDelete(s.name),
+            },
+          ]),
+      },
+    ],
+  });
+
+  const feed = stores
+    .flatMap((s) => (s.events || []).map((e) => ({ at: e.at, text: e.text })))
+    .sort((a, b) => b.at - a.at)
+    .slice(0, 40);
+
+  return el(
+    "div",
+    { class: "view" },
+    head,
+    picker.node,
+    adoptNote,
+    rootPicker.node,
+    rootNote,
+    el("div", { class: "note page-note" }),
+    el(
+      "div",
+      { class: "strip" },
+      stat("Stores", n(stores.length), `${totals.watching} being watched`),
+      stat("Files", n(totals.files), `${n(totals.formats)} formats`),
+      stat("Chunks", n(totals.chunks), dim ? `${dim}-dimension vectors` : "embedded and searchable"),
+      // The caption describes this tile's own number, as every other one does.
+      // "11 readers in use" is a fact about format handlers, not about lines.
+      stat(
+        "Lines",
+        n(totals.lines),
+        `across ${n(totals.files)} files, read by ${n(totals.readers)} readers`,
+      ),
+      stat("On disk", bytes(totals.bytes), "int8 quantised"),
+    ),
+    el(
+      "div",
+      { class: "scroller" },
+      table.node,
+      el(
+        "div",
+        { class: "grid fill" },
+        el(
+          "div",
+          { class: "card pad dense" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Watcher" }),
+            el("span", { class: "meta", text: "live" }),
+          ),
+          feed.length
+            ? el(
+                "div",
+                { class: "feed" },
+                // One line per event, with the whole of it on the tooltip. A
+                // line that wraps is three lines when it names a path, and
+                // forty of those grew the card until it pushed the table it
+                // sits under off the page.
+                feed.map((e) =>
+                  el(
+                    "div",
+                    { class: "row" },
+                    // The whole stamp on the element as well as in it: the
+                    // zone offset is what makes this line to the second, and a
+                    // phone has no room for both the time and the offset.
+                    el("span", {
+                      class: "at",
+                      text: clock(e.at),
+                      title: clock(e.at),
+                    }),
+                    lineCell(e.text, "what"),
+                  ),
+                ),
+              )
+            : empty("Nothing has changed on disk since the daemon started."),
+        ),
+        agentsCard(),
+      ),
+    ),
+  );
+}
+
+// ----------------------------------------------------------------- files
+
+/** The most rows `/api/files` returns in one request. The route refuses a
+ * larger `limit` rather than clamping it. */
+const FILES_PER_REQUEST = 500;
+
+/** The most files "select all N matches" will gather.
+ *
+ * The same ceiling the route puts on `offset`: past it there are no more pages
+ * to ask for, so the answer is to narrow the filter — said, rather than a
+ * button that quietly acts on a prefix of what it named. */
+const FILES_SELECTABLE = 10_000;
+
+async function filesView() {
+  const chosenExt = new Set();
+  const summary = el("span", { class: "pill" });
+  const holder = el("div", {});
+  /* Announced rather than only drawn: a Forget made the row disappear and said
+   * nothing anywhere a screen reader would hear it. */
+  const announcer = el("div", { class: "sr-only", role: "status", "aria-live": "polite" });
+  /* Whether the last empty result was empty because a file was forgotten, so
+   * the empty state can say what happened instead of blaming the filter. */
+  let justForgot = false;
+  /* Which store's files to show. There used to be no way anywhere in the
+   * portal to look at one store's files: the Store column did not sort, the
+   * page had no store control, and "Open in Files" on a store row navigated
+   * here and applied no filter at all. */
+  const storeFilter = storePicker(state.pendingStore || "", () => load(true));
+  state.pendingStore = "";
+  const footnote = el("p", {
+    class: "subtitle",
+    text: "Forget drops the file's chunks and vectors. The file on disk is untouched.",
+  });
+
+  const pathInput = el("input", {
+    type: "text",
+    placeholder: "path glob, e.g. src/**",
+    oninput: () => {
+      clearTimeout(load.timer);
+      load.timer = setTimeout(() => load(true), 200);
+    },
+  });
+
+  /** Which request is current, so a slow one cannot overwrite a fast one. */
+  let generation = 0;
+
+  async function forget(path, row, store) {
+    try {
+      // Named, always. The row knows which store holds the file, and a daemon
+      // serving two stores cannot guess — it refuses a write that names none,
+      // which is what the page used to send.
+      await post("/api/forget", { path, store });
+      // The row goes, and the page is reloaded behind it: with the server
+      // paging, the row that moves up into the gap is on the server.
+      row.remove();
+      picked.delete(path);
+      paintBulk();
+      justForgot = true;
+      announcer.textContent = `${path} forgotten. Its chunks and vectors are gone from ${store}; the file on disk is untouched.`;
+      load();
+    } catch (e) {
+      // In the note, not over the table: an error that replaces the rows
+      // takes away the thing the reader was working with. Rethrown so a
+      // dialog waiting on this stays open and shows it too.
+      bulkNote.className = "note bad";
+      bulkNote.textContent = e.message;
+      throw e;
+    }
+  }
+
+  /* The rows ticked for a bulk forget, by path.
+   *
+   * Kept out here rather than in the table, because the table re-renders on
+   * every sort, page and filter and a selection that vanished when you sorted
+   * would be a selection nobody could trust. */
+  const picked = new Map();
+  // Announced as well as drawn: this is where a bulk Forget says what it did,
+  // and a row vanishing is not something a screen reader hears.
+  const bulkNote = el("div", { class: "note", role: "status", "aria-live": "polite" });
+  const bulkBar = el("div", { class: "bulk", hidden: true });
+
+  function paintBulk() {
+    bulkBar.hidden = picked.size === 0;
+    if (!picked.size) return;
+    const many = picked.size;
+    fill(
+      bulkBar,
+      el("span", {
+        class: "meta",
+        text: `${n(many)} file${many === 1 ? "" : "s"} selected`,
+      }),
+      // The header checkbox selects the page, honestly and deliberately. This
+      // is how the whole result set is reached, which before this there was no
+      // way to do at all. Bounded by what one request returns: past that the
+      // answer is to narrow the filter, said rather than a button that quietly
+      // acts on a prefix.
+      matches > many
+        ? matches <= FILES_SELECTABLE
+          ? el("button", {
+              class: "button ghost small",
+              type: "button",
+              text: `Select all ${n(matches)} matches`,
+              onclick: () => selectEveryMatch(),
+            })
+          : el("span", {
+              class: "meta",
+              text: `${n(matches)} files match — narrow the filter to ${n(
+                FILES_SELECTABLE,
+              )} or fewer to select them all`,
+            })
+        : null,
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button ghost small",
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          picked.clear();
+          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
+          paintBulk();
+        },
+      }),
+      el("button", {
+        class: "button danger small",
+        type: "button",
+        text: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
+        onclick: (e) => {
+          const button = e.currentTarget;
+          const stores = [...new Set(picked.values())];
+          ask({
+            title: `Forget ${n(many)} file${many === 1 ? "" : "s"}?`,
+            body: `Their chunks and vectors are dropped from ${stores.join(
+              " and ",
+            )}. The files on disk are untouched, and indexing the folder again brings them back.`,
+            confirm: `Forget ${n(many)} file${many === 1 ? "" : "s"}`,
+            tone: "bad",
+            run: () => forgetPicked(button),
+          });
+        },
+      }),
+    );
+  }
+
+  async function forgetPicked(button) {
+    button.disabled = true;
+    button.textContent = "Forgetting…";
+    bulkNote.className = "note";
+    bulkNote.textContent = "";
+    // One call per store: a write names the store it is for, and a selection
+    // made across two of them is two writes, not an ambiguous one.
+    const byStore = new Map();
+    for (const [path, store] of picked) {
+      if (!byStore.has(store)) byStore.set(store, []);
+      byStore.get(store).push(path);
+    }
+    try {
+      let files = 0;
+      let forgot = 0;
+      let absent = 0;
+      for (const [store, paths] of byStore) {
+        const done = await post("/api/forget", { paths, store });
+        // One path in a store answers in the single-file shape.
+        files += done.files === undefined ? 1 : done.files;
+        forgot += done.forgot || 0;
+        absent += (done.not_indexed || []).length;
+      }
+      picked.clear();
+      justForgot = true;
+      paintBulk();
+      bulkNote.textContent = absent
+        ? `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
+            forgot === 1 ? "" : "s"
+          } removed. ${n(absent)} were not indexed and were left alone.`
+        : `${n(files)} file${files === 1 ? "" : "s"} forgotten, ${n(forgot)} chunk${
+            forgot === 1 ? "" : "s"
+          } removed.`;
+      load();
+    } catch (e) {
+      bulkNote.className = "note bad";
+      bulkNote.textContent = e.message;
+      button.disabled = false;
+      paintBulk();
+      // Rethrown so the dialog that asked stays open and shows it too.
+      throw e;
+    }
+  }
+
+  const table = dataTable({
+    className: "w-files",
+    caption: "Every indexed file, the reader that parsed it, and what it contributed to the store.",
+    server: true,
+    sort: "path",
+    columns: [
+      {
+        key: "pick",
+        label: "",
+        className: "pick",
+        sortable: false,
+        // Selects every row on the page rather than every row in the store: a
+        // filter of ten thousand files behind one tick is a mistake nobody
+        // meant to make.
+        head: () => {
+          const all = el("input", {
+            type: "checkbox",
+            class: "pick all",
+            "aria-label": "Select every file on this page",
+            onchange: () => {
+              for (const box of table.node.querySelectorAll("tbody input.pick")) {
+                if (box.checked !== all.checked) box.click();
+              }
+            },
+          });
+          return all;
+        },
+        render: (f) => {
+          const box = el("input", {
+            type: "checkbox",
+            class: "pick",
+            "aria-label": `Select ${f.path}`,
+            onchange: () => {
+              if (box.checked) picked.set(f.path, f.store);
+              else picked.delete(f.path);
+              paintBulk();
+            },
+          });
+          box.checked = picked.has(f.path);
+          return box;
+        },
+      },
+      {
+        key: "path",
+        label: "Path",
+        className: "path",
+        // One line, with the whole path on the shared tooltip: a wrapped path
+        // makes every row a different height and the column unreadable.
+        render: (f) => pathCell(f.path),
+      },
+      {
+        key: "store",
+        label: "Store",
+        className: "meta narrow-drop",
+        render: (f) => f.store,
+      },
+      {
+        key: "reader",
+        label: "Read as",
+        className: "narrow-drop",
+        render: (f) => el("span", { class: "tag", text: f.reader }),
+      },
+      {
+        key: "lang",
+        label: "Language",
+        className: "meta narrow-drop",
+        render: (f) => f.lang || "—",
+      },
+      {
+        key: "lines",
+        label: "Lines",
+        className: "num",
+        // An image has no lines. Its pixel size goes here rather than a zero,
+        // which would read as a file that failed to parse.
+        render: (f) => (f.reader === "image" ? "—" : n(f.lines)),
+      },
+      { key: "chunks", label: "Chunks", className: "num narrow-drop", render: (f) => n(f.chunks) },
+      {
+        key: "indexed",
+        label: "Indexed",
+        className: "meta",
+        render: (f) => when(f.indexed_at),
+      },
+      {
+        key: "forget",
+        label: "",
+        sortable: false,
+        render: (f) => {
+          const button = el("button", {
+            class: "forget",
+            type: "button",
+            text: "Forget",
+            onclick: () => {
+              const row = button.closest("tr");
+              ask({
+                title: "Forget this file?",
+                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched, and indexing the folder again brings it back.`,
+                confirm: "Forget it",
+                tone: "bad",
+                run: async () => {
+                  button.disabled = true;
+                  button.textContent = "Forgetting…";
+                  await forget(f.path, row, f.store);
+                },
+              });
+            },
+          });
+          return button;
+        },
+      },
+    ],
+    rows: [],
+    total: 0,
+    onChange: () => load(),
+  });
+
+  async function load(reset) {
+    const mine = ++generation;
+    const view = table.query();
+    if (reset) view.page = 1;
+    const params = new URLSearchParams();
+    if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
+    for (const ext of chosenExt) params.append("ext", ext);
+    for (const store of storeFilter.stores()) params.append("store", store);
+    params.set("sort", view.sort || "path");
+    params.set("dir", view.dir);
+    params.set("limit", String(view.perPage));
+    params.set("offset", String((view.page - 1) * view.perPage));
+
+    let data;
+    try {
+      data = await api(`/api/files?${params}`);
+    } catch (e) {
+      if (mine !== generation) return;
+      fill(holder, el("div", { class: "card pad" }, error(e.message)));
+      summary.textContent = "";
+      return;
+    }
+    if (mine !== generation) return;
+
+    summary.textContent = `${n(data.total)} files · ${n(data.formats)} format${
+      data.formats === 1 ? "" : "s"
+    } · ${n(data.stores)} store${data.stores === 1 ? "" : "s"}`;
+
+    if (!data.total) {
+      // Which of the two empty states this is. "The filter, not the corpus" is
+      // right for a filter miss and exactly wrong immediately after a Forget,
+      // where the corpus is precisely why there is nothing.
+      const because = justForgot
+        ? "Nothing left under this filter — the file that matched it has been forgotten."
+        : "Nothing indexed matches that. The filter, not the corpus — clear it and look again.";
+      fill(holder, el("div", { class: "card pad" }, empty(because)));
+      // No rows means no Forget buttons, and a footnote about a button that is
+      // not on the page is a footnote about nothing.
+      footnote.hidden = true;
+      justForgot = false;
+      return;
+    }
+    footnote.hidden = false;
+    justForgot = false;
+    table.update(data.files, data.total);
+    if (!holder.contains(table.node)) fill(holder, table.node);
+    matches = data.total;
+  }
+
+  /** How many files the current filter matches, for "select all N". */
+  let matches = 0;
+
+  /** Tick every file the current filter matches, not just the page.
+   *
+   * Paged, because one request returns at most `FILES_PER_REQUEST` rows. The
+   * header checkbox selects the page, honestly and deliberately; this is how
+   * the whole result set is reached, which before this there was no way to do
+   * at all. */
+  async function selectEveryMatch() {
+    bulkNote.className = "note";
+    bulkNote.textContent = `Selecting ${n(matches)} files…`;
+    for (let offset = 0; offset < matches && offset < FILES_SELECTABLE; offset += FILES_PER_REQUEST) {
+      const params = new URLSearchParams();
+      if (pathInput.value.trim()) params.set("path", pathInput.value.trim());
+      for (const ext of chosenExt) params.append("ext", ext);
+      for (const store of storeFilter.stores()) params.append("store", store);
+      params.set("limit", String(FILES_PER_REQUEST));
+      params.set("offset", String(offset));
+      let data;
+      try {
+        data = await api(`/api/files?${params}`);
+      } catch (e) {
+        bulkNote.className = "note bad";
+        bulkNote.textContent = e.message;
+        return;
+      }
+      for (const file of data.files || []) picked.set(file.path, file.store);
+      if (!(data.files || []).length) break;
+    }
+    bulkNote.textContent = "";
+    for (const box of table.node.querySelectorAll("tbody input.pick")) box.checked = true;
+    paintBulk();
+  }
+
+  // The formats this release added are on the list, so they are one click away
+  // rather than something you have to know to type.
+  const EXTENSIONS = ["rs", "md", "py", "ts", "js", "go", "pdf", "docx", "epub", "png", "jpg"];
+  const extChips = EXTENSIONS.map((ext) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": "false",
+      text: `.${ext}`,
+      onclick: (e) => {
+        const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+        e.currentTarget.setAttribute("aria-pressed", String(on));
+        if (on) chosenExt.add(ext);
+        else chosenExt.delete(ext);
+        clearTimeout(load.timer);
+        load(true);
+      },
+    }),
+  );
+
+  load();
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Files",
+      "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
+      { pill: summary },
+    ),
+    el(
+      "div",
+      { class: "filters" },
+      el(
+        "div",
+        { class: "field wide" },
+        icon(ICONS.search, 15),
+        labelled("files-filter", "Filter files by path glob", pathInput),
+      ),
+      extChips,
+    ),
+    storeFilter.node,
+    bulkBar,
+    bulkNote,
+    holder,
+    footnote,
+    announcer,
+  );
+}
+
+// ------------------------------------------------------- read and pattern
+
+/* Which store a question is asked of. One choice rather than a row of
+ * independent toggles: "All stores" is a state a reader can name, where three
+ * chips half-lit is a filter they have to reconstruct from the lighting. */
+function storePicker(initial, onChange) {
+  let picked = initial || "";
+  const row = el("div", { class: "store-chips" });
+  const paint = () => {
+    for (const chip of row.children) {
+      chip.setAttribute("aria-pressed", String(chip.getAttribute("data-store") === picked));
+    }
+  };
+  const add = (name, label) =>
+    row.append(
+      el("button", {
+        class: "chip",
+        type: "button",
+        "data-store": name,
+        text: label,
+        onclick: () => {
+          picked = name;
+          paint();
+          onChange();
+        },
+      }),
+    );
+  add("", "All stores");
+  for (const store of liveStores()) add(store.name, store.name);
+  paint();
+  return { node: row, stores: () => (picked ? [picked] : []) };
+}
+
+/* Whether the file still looks the way it did when it was indexed — the dot
+ * and the word together. The dot alone was a colour with the meaning in a
+ * tooltip, which is no meaning at all on a phone or in a screenshot. */
+function freshMark(fresh) {
+  const ok = fresh !== false;
+  return el(
+    "span",
+    {
+      class: "fresh",
+      title: ok ? "indexed from the bytes on disk" : "file changed since it was indexed",
+    },
+    el("span", { class: `fresh-dot ${ok ? "is-fresh" : "is-stale"}` }),
+    el("span", { class: "word", text: ok ? "fresh" : "stale" }),
+  );
+}
+
+/* Code with a line-number gutter, numbered from the span's own first line —
+ * the same coordinates `semlith read` and every error message print, so a
+ * number read here can be typed back in without arithmetic. */
+function codeGutter(text, startLine) {
+  const from = Number(startLine) || 1;
+  return el(
+    "div",
+    { class: "gutter-code" },
+    String(text == null ? "" : text)
+      .split("\n")
+      .map((line, i) =>
+        el(
+          "div",
+          { class: "code-line" },
+          el("span", { class: "ln", text: String(from + i) }),
+          el("span", { class: "lt", text: line }),
+        ),
+      ),
+  );
+}
+
+/** One span, as `/api/read` returns it. */
+function spanCard(span) {
+  const named = span.symbol ? `${span.symbol_kind || ""} ${span.symbol}`.trim() : "";
+  return el(
+    "div",
+    { class: "span-card" },
+    el(
+      "div",
+      { class: "span-head" },
+      el("span", { class: "path", text: span.path }),
+      el("span", { class: "lines", text: `${span.start_line}-${span.end_line}` }),
+      span.store ? el("span", { class: "from", text: span.store }) : null,
+      el("span", { class: "spacer" }),
+      freshMark(span.fresh),
+    ),
+    named ? el("div", { class: "sig", text: named }) : null,
+    codeGutter(span.text, span.start_line),
+  );
+}
+// ---------------------------------------------------------------- search
+
+/* Which of the ranked lists found a hit. The word rather than an initial: a
+ * hit the graph alone reached is a neighbour of a match rather than a match,
+ * and `g` said that only to a reader who hovered it. */
+const LIST_LABELS = {
+  vector: "vector — the embedding matched",
+  keyword: "full text — the terms matched",
+  graph: "graph — reached from a neighbouring symbol",
+  image: "image — the picture matched the words",
+};
+
+function fusionBadges(lists) {
+  if (!lists || !lists.length) return null;
+  return el(
+    "span",
+    { class: "badges" },
+    lists.map((list) =>
+      el("span", { class: `badge ${list}`, title: LIST_LABELS[list] || list, text: list }),
+    ),
+  );
+}
+
+/* The four confidence values an edge or a graph-found hit can carry, and what
+ * each one actually claims. Never rendered without one: a hop with no badge is
+ * a hop a reader will assume was verified. */
+const CONFIDENCE = {
+  extracted: ["extracted", "the import names the target"],
+  resolved: ["resolved", "name and module hint agree on one definition"],
+  inferred: ["inferred", "matched by bare name"],
+  ambiguous: ["ambiguous", "several definitions, none chosen"],
+};
+
+function confidenceBadge(value) {
+  if (!value) return null;
+  const [label, why] = CONFIDENCE[value] || [value, ""];
+  return el("span", { class: `conf ${value}`, title: why, text: label });
+}
+
+/* What a graph-reached hit's provenance means, as a sentence rather than as a
+ * badge nobody can expand. A reader who does not know what `inferred` claims
+ * reads every row as verified. */
+const PROVENANCE_NOTE = {
+  extracted: "Found through the graph: the source names the target, so nothing had to be ranked.",
+  resolved: "Found through the graph: the name and its module hint agree on one definition.",
+  inferred: "Found through the graph by bare name. Corroborate before you rely on it.",
+  ambiguous:
+    "Found through the graph, but several definitions carry this name and none was chosen.",
+};
+
+/* The one line of a chunk worth showing in a locator row: the line with most
+ * of the query's words in it, or the first line with anything on it. */
+function bestLine(text, query) {
+  const terms = (query || "")
+    .split(/[^A-Za-z0-9_]+/)
+    .filter((t) => t.length > 2)
+    .map((t) => t.toLowerCase());
+  let best = null;
+  let bestScore = -1;
+  for (const raw of (text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const lowered = line.toLowerCase();
+    const score = terms.filter((t) => lowered.includes(t)).length;
+    if (score > bestScore) {
+      bestScore = score;
+      best = line;
+    }
+  }
+  if (!best) return "";
+  // Capped as the tool caps it, rather than left to the stylesheet's ellipsis:
+  // a row is one line of context, and a minified file would otherwise put a
+  // whole line of it into the page for the browser to hide.
+  return best.length > 120 ? `${best.slice(0, 120)}…` : best;
+}
+
+/* What one locator row costs, counted the way `mcp::locate` counts it: the
+ * text the row actually renders, at four characters to a token. */
+function rowCost(hit, query) {
+  const named = hit.symbol ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim() : "";
+  const marks = (hit.lists || []).join("+") + (hit.fresh === false ? " stale" : "");
+  const row = `  ${hit.start_line}-${hit.end_line} ${named} ${marks}\n    ${bestLine(
+    hit.text,
+    query,
+  )}\n`;
+  return Math.ceil(row.length / 4);
+}
+
+/** The likeliest symbol name in a hit, for the link into the graph. */
+function symbolIn(hit) {
+  const match = hit.text.match(
+    /(?:fn|function|def|func|class|struct|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)/,
+  );
+  return match ? match[1] : "";
+}
+
+async function searchView() {
+  await refreshStores();
+
+  const results = el("div", { class: "results locate-list" });
+  const bodyCard = el("div", { class: "span-card" });
+  const aroundName = el("span", { class: "sym" });
+  const footer = el("div", { class: "locate-footer" });
+  const meta = el("span", { class: "search-meta" });
+  /* The shape the ranker read and what it did about it, from the answer's own
+   * fields. Re-deriving the rule here would be a second classifier, and only
+   * one of the two ranked the hits underneath it. */
+  const shapeHint = el("div", { class: "shape-hint", hidden: true });
+
+  /* The second ring, drawn rather than linked. One canvas for the whole visit
+   * to the page: a fresh one per opened hit would be a fresh animation loop
+   * per click. */
+  const ego = graphCanvas({
+    /* The same two handlers the Graph page passes, so the panel behaves like
+     * the page it is a window onto rather than like a picture of it: a node
+     * lifts on hover with a card naming it, and a click selects it and its
+     * neighbours. Without these the hint underneath — "drag a node · click to
+     * select" — described something that did not happen. */
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("ego");
+      tip.atPoint(
+        x,
+        y,
+        [
+          el("div", { class: "tip-head" }, el("i", {}), node.name),
+          node.kind ? egoRow("kind", node.kind) : null,
+          node.path
+            ? egoRow("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`)
+            : null,
+        ].filter(Boolean),
+        "ego",
+      );
+    },
+    onPick: (node) => {
+      aroundName.textContent = node ? node.name : "—";
+    },
+  });
+  const stage = el(
+    "div",
+    { class: "ego-panel", hidden: true },
+    ego.node,
+    el("span", { class: "ego-hint", text: "drag a node · click to select" }),
+  );
+  /* Both hidden until a row is open. The panel is tall enough to be a graph
+   * rather than a thumbnail, which makes it a large empty box on a page nobody
+   * has searched yet — and "Around" with nothing after it is a heading for
+   * something that is not there. */
+  const aroundHead = el(
+    "div",
+    { class: "around-head", hidden: true },
+    el("span", { class: "title" }, "Around ", aroundName),
+    el("span", { class: "meta", text: "graph expansion" }),
+  );
+  const showRing = (on) => {
+    stage.hidden = !on;
+    aroundHead.hidden = !on;
+  };
+
+  // The dials, in the design's order. Each is the same control an agent sets
+  // on the tool, shown here so a person can see what the agent is holding.
+  let k = 8;
+  const kValue = el("span", { class: "dial-value", text: "k = 8" });
+  const bump = (delta) => {
+    const next = Math.min(50, Math.max(1, k + delta));
+    if (next === k) return;
+    k = next;
+    kValue.textContent = `k = ${k}`;
+    run();
+  };
+  const kDial = el(
+    "div",
+    { class: "dial" },
+    kValue,
+    el("button", { class: "step", type: "button", "aria-label": "fewer hits", title: "fewer hits", text: "–", onclick: () => bump(-1) }),
+    el("button", { class: "step", type: "button", "aria-label": "more hits", title: "more hits", text: "+", onclick: () => bump(1) }),
+  );
+
+  /* Which side of the corpus to lean towards. Live from 0.16.0: the query text
+   * says how a question was written, and this says what the asker is after,
+   * which the text cannot. */
+  let prefer = "any";
+  const preferPills = ["code", "docs", "any"].map((name) =>
+    el("button", {
+      class: "seg",
+      type: "button",
+      "aria-pressed": String(name === prefer),
+      text: name,
+      onclick: () => {
+        if (prefer === name) return;
+        prefer = name;
+        for (const pill of preferPills) {
+          pill.setAttribute("aria-pressed", String(pill.textContent === prefer));
+        }
+        run();
+      },
+    }),
+  );
+  const preferDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-label", text: "Prefer" }),
+    el("span", { class: "segs" }, preferPills),
+  );
+
+  /* Re-run as the filter is typed, like every other control on this page.
+   *
+   * `change` alone fires on blur, so a reader who typed a glob and looked at
+   * the rows was looking at results from before the glob — with the filter
+   * field showing the new value and nothing saying the two disagreed. */
+  let filterTimer = 0;
+  const rerun = () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(() => run(), 250);
+  };
+  const langField = el("input", {
+    class: "bare",
+    size: "8",
+    placeholder: "any",
+    oninput: rerun,
+    onchange: () => run(),
+  });
+  const pathField = el("input", {
+    class: "bare",
+    size: "8",
+    placeholder: "any",
+    oninput: rerun,
+    onchange: () => run(),
+  });
+  const langDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-prefix", text: "lang:" }),
+    labelled("search-lang", "Only this language", langField),
+  );
+  const pathDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-prefix", text: "path:" }),
+    labelled("search-path", "Only paths matching this glob", pathField),
+  );
+
+  const budgetField = el("input", {
+    class: "bare",
+    size: "5",
+    value: "1500",
+    inputmode: "numeric",
+    oninput: rerun,
+    onchange: () => run(),
+  });
+  const budgetDial = el(
+    "div",
+    { class: "dial" },
+    el("span", { class: "dial-label", text: "Budget" }),
+    labelled("search-budget", "Budget in tokens", budgetField),
+    el("span", { class: "unit", text: "tok" }),
+  );
+  const budget = () => Math.max(200, Number(String(budgetField.value).replace(/[^0-9]/g, "")) || 1500);
+
+  // Restored rather than reset: the question and the store filter survive a
+  // trip to another page, because coming back to an empty box means typing it
+  // again.
+  const picker = storePicker(state.search.stores[0] || "", () => run());
+  let generation = 0;
+
+  const input = el("input", {
+    type: "search",
+    // The same words as the launcher in the top bar. Two phrasings for one
+    // destination reads as two destinations.
+    placeholder: "Ask the index a question",
+    oninput: () => {
+      // The hint is about the query in the box. An empty box has no shape.
+      if (!input.value.trim()) shapeHint.hidden = true;
+    },
+    onkeydown: (e) => {
+      if (e.key === "Enter") run();
+    },
+  });
+
+  const nothing = () =>
+    empty("Type a phrase or an identifier. Both halves of the search run either way.");
+
+  async function run() {
+    const query = input.value.trim();
+    state.search = { query, stores: picker.stores() };
+    if (!query) {
+      shapeHint.hidden = true;
+      fill(results, nothing());
+      showBody(null, "");
+      fill(footer);
+      meta.textContent = "";
+      return;
+    }
+
+    const mine = ++generation;
+    const params = new URLSearchParams({ query, k: String(k), prefer });
+    for (const store of picker.stores()) params.append("store", store);
+    const lang = langField.value.trim();
+    const path = pathField.value.trim();
+    if (lang) params.append("lang", lang);
+    if (path) params.append("path", path);
+
+    meta.textContent = "searching…";
+    /* The first search after the daemon starts loads the embedding model,
+     * which is five seconds on a cold cache — and until this it was five
+     * seconds of "searching…" that looked like a search that had hung. Only
+     * shown once a search has taken longer than a warm one ever does. */
+    const slow = setTimeout(() => {
+      if (mine === generation) {
+        meta.textContent = "loading the embedding model — the first search after the daemon starts pays for it once";
+      }
+    }, 1200);
+    let data;
+    try {
+      data = await api(`/api/search?${params}`);
+    } catch (e) {
+      clearTimeout(slow);
+      if (mine !== generation) return;
+      fill(results, error(e.message));
+      showBody(null, "");
+      fill(footer);
+      meta.textContent = "";
+      return;
+    }
+    clearTimeout(slow);
+    if (mine !== generation) return;
+
+    if (data.shape_label) {
+      fill(
+        shapeHint,
+        el("span", { class: "dot" }),
+        el("span", { text: `${data.shape_label} · ${data.weighting}` }),
+      );
+      shapeHint.hidden = false;
+    }
+
+    // Hits and how long, which is what the question was. The corpus size is a
+    // fact about the store, and the Stores page is where it is asked.
+    meta.textContent = data.hits.length
+      ? `${data.hits.length} hit${data.hits.length === 1 ? "" : "s"} · ${(data.micros / 1000).toFixed(1)} ms`
+      : "";
+
+    if (!data.hits.length) {
+      showBody(null, "");
+      fill(footer);
+      fill(
+        results,
+        empty(
+          "No chunk in the selected stores matches that. If a store chip is on it is the filter, not the corpus — clear it and ask again.",
+        ),
+      );
+      return;
+    }
+
+    // Grouped by file, in the order the ranking put the files in: eight hits
+    // in one file are one file to open, and the best hit's file is the first
+    // thing read.
+    const groups = [];
+    for (const hit of data.hits) {
+      const found = groups.find((g) => g.path === hit.path && g.store === hit.store);
+      if (found) found.hits.push(hit);
+      else groups.push({ path: hit.path, store: hit.store, hits: [hit] });
+    }
+
+    // Cut to the budget, lowest-ranked first, exactly as the tool does — and
+    // the footer says so. A footer that reported a budget nothing enforced
+    // would be a number for decoration; a list that silently dropped rows
+    // would be worse.
+    const cap = budget();
+    let spent = 0;
+    const shown = [];
+    for (const group of groups) {
+      // What the *rows* cost, not what the chunks behind them cost. A locate
+      // row is one line of a chunk however long the chunk is, which is the
+      // whole point of the format — measuring the chunk here would make the
+      // page cut at a tenth of the budget the tool cuts at, for the same
+      // number in the same box.
+      const cost = group.hits.reduce((total, hit) => total + rowCost(hit, query), 4);
+      // The first group always shows, whatever it costs: a budget that
+      // returned nothing would turn a search into a silent failure.
+      if (shown.length && spent + cost > cap) break;
+      spent += cost;
+      shown.push(group);
+    }
+    const kept = shown.reduce((total, group) => total + group.hits.length, 0);
+
+    fill(
+      results,
+      shown.map((group) => {
+        const spans = group.hits.map((hit) => `${hit.start_line}-${hit.end_line}`);
+        return el(
+          "div",
+          { class: "locate-group" },
+          el(
+            "div",
+            { class: "locate-file" },
+            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
+            group.store ? el("span", { class: "from", text: group.store }) : null,
+            el("span", { class: "spacer" }),
+            el("span", {
+              class: "span-summary",
+              text: spans.length > 1 ? `${spans.length} spans · ${spans.join(", ")}` : spans[0],
+            }),
+          ),
+          group.hits.map((hit) => locateRow(hit, query)),
+        );
+      }),
+    );
+    fill(
+      footer,
+      el("span", {
+        text: `${kept} of ${data.hits.length} shown · ${n(spent)} tokens · budget ${n(cap)}`,
+      }),
+      kept < data.hits.length
+        ? el("span", {
+            class: "truncated",
+            text: `truncated: ${kept} of ${data.hits.length}`,
+          })
+        : null,
+    );
+    // The body panel starts on the best hit rather than empty: the first
+    // question anyone has about a result list is what the top one says.
+    const first = results.querySelector(".locate-row");
+    if (first) first.setAttribute("aria-pressed", "true");
+    showBody(shown[0].hits[0], query);
+  }
+
+  /* One locator line: where it is, what it is called, how it was found,
+   * whether the file has moved under it, and one line of it. Both lines sit
+   * inside the one control, so the excerpt is part of the target rather than
+   * a strip of dead pixels under it. */
+  function locateRow(hit, query) {
+    const line = bestLine(hit.text, query);
+    const row = el(
+      "button",
+      {
+        class: "locate-row",
+        type: "button",
+        "aria-pressed": "false",
+        onclick: () => {
+          for (const other of results.querySelectorAll(".locate-row")) {
+            other.setAttribute("aria-pressed", "false");
+          }
+          row.setAttribute("aria-pressed", "true");
+          showBody(hit, query);
+        },
+      },
+      el(
+        "span",
+        { class: "row-top" },
+        el("span", {
+          class: "lines",
+          text: hit.image
+            ? `${hit.image.width}×${hit.image.height} px`
+            : `${hit.start_line}-${hit.end_line}`,
+        }),
+        // A hit with no symbol is prose, said rather than left as a gap the
+        // reader has to interpret. An image is neither, and its badge and its
+        // pixel dimensions have already said so.
+        hit.image
+          ? null
+          : el("span", {
+              class: "sym",
+              text: hit.symbol ? `${hit.symbol_kind || ""} ${hit.symbol}`.trim() : "prose",
+            }),
+        fusionBadges(hit.lists),
+        el("span", { class: "spacer" }),
+        freshMark(hit.fresh),
+        // Only for a hit the graph reached: a vector match has no provenance
+        // to state beyond the badge it already carries.
+        confidenceBadge(hit.provenance),
+      ),
+      line ? el("span", { class: "locate-excerpt", text: line }) : null,
+    );
+    return row;
+  }
+
+  /* The second stage: the span itself, once a row has been chosen.
+   *
+   * What the row already carries is painted at once; the signature, the
+   * symbol's whole span and the neighbourhood arrive from `/api/read` and
+   * `/api/symbol` after it, because none of them is worth a spinner over the
+   * text the reader clicked for.
+   */
+  let openHit = null;
+  let openQuery = "";
+  let wholeSpan = null;
+  let signature = "";
+  let whole = false;
+  /* How many definitions the second read found. `many` is not a failure — it
+   * is the store saying it cannot tell which one this is, and the button says
+   * that rather than pretending there is nothing more to open. */
+  let definitions = 0;
+  let bodyGeneration = 0;
+
+  function showBody(hit, query) {
+    openHit = hit;
+    openQuery = query;
+    wholeSpan = null;
+    signature = "";
+    whole = false;
+    definitions = 0;
+    const mine = ++bodyGeneration;
+    paintBody();
+    if (!hit) {
+      ego.draw({ nodes: [], edges: [] }, null);
+      aroundName.textContent = "—";
+      return;
+    }
+
+    const target = hit.symbol || `${hit.path}:${hit.start_line}`;
+    const params = new URLSearchParams({ target });
+    if (hit.store) params.append("store", hit.store);
+    api(`/api/read?${params}`)
+      .then((data) => {
+        if (mine !== bodyGeneration) return;
+        if (!data.span) {
+          definitions = (data.definitions || []).length;
+          if (definitions) paintBody();
+          return;
+        }
+        wholeSpan = data.span;
+        // The signature is the first line of the definition, which is where
+        // every language this indexes puts it.
+        if (hit.symbol) {
+          signature = (data.span.text || "")
+            .split("\n")
+            .map((l) => l.trim())
+            .find((l) => l.length > 0) || "";
+        }
+        paintBody();
+      })
+      .catch(() => {
+        /* The row's own text is already on screen; a failed second read is
+         * not worth replacing it with an error. */
+      });
+
+    drawAround(hit, mine);
+  }
+
+  function paintBody() {
+    const hit = openHit;
+    if (!hit) {
+      fill(
+        bodyCard,
+        empty("Pick a row. The span opens here, with what it is called and how it was found."),
+      );
+      showRing(false);
+      return;
+    }
+    const showing = whole && wholeSpan ? wholeSpan : hit;
+    const lines = `${showing.start_line}-${showing.end_line}`;
+    // Nothing wider to open: a button that redraws the same lines is a button
+    // that makes a reader doubt they clicked it.
+    const wider =
+      wholeSpan &&
+      (wholeSpan.start_line < hit.start_line || wholeSpan.end_line > hit.end_line);
+
+    fill(
+      bodyCard,
+      el(
+        "div",
+        { class: "span-head" },
+        el("span", { class: "path", "data-tip": hit.path, text: shortPath(hit.path) }),
+        el("span", { class: "lines", text: lines }),
+        el("span", { class: "spacer" }),
+        freshMark(hit.fresh),
+        confidenceBadge(hit.provenance),
+      ),
+      hit.provenance && PROVENANCE_NOTE[hit.provenance]
+        ? el("p", { class: "prov-note", text: PROVENANCE_NOTE[hit.provenance] })
+        : null,
+      hit.fresh === false
+        ? el("p", {
+            class: "note",
+            text: "This file has changed since it was indexed. The lines below are what was read then.",
+          })
+        : null,
+      signature ? el("div", { class: "sig", text: signature }) : null,
+      hit.image ? imagePreview(hit.path) : codeGutter(showing.text, showing.start_line),
+      el(
+        "div",
+        { class: "span-foot" },
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          disabled: !wider,
+          title: wider
+            ? null
+            : definitions
+              ? `${definitions} definitions carry this name, and which one this is was not settled. The Read page lists them.`
+              : "this span is already the whole of it",
+          text: whole
+            ? "Collapse to the matched span"
+            : hit.symbol
+              ? "Read whole symbol"
+              : "Read the whole section",
+          onclick: () => {
+            whole = !whole;
+            paintBody();
+          },
+        }),
+        el("span", {
+          class: "body-meta",
+          "data-tip": hit.path,
+          text: `semlith_read · ${shortPath(hit.path)}:${lines} · second stage`,
+        }),
+        el("span", { class: "spacer" }),
+        el("a", {
+          href: "#graph",
+          class: "quiet",
+          text: "Open in graph",
+          onclick: (e) => {
+            e.preventDefault();
+            state.pendingSymbol = hit.symbol || symbolIn(hit);
+            go("graph");
+          },
+        }),
+      ),
+    );
+  }
+
+  /* The neighbourhood of the open hit, one ring out and then one more, from
+   * the evidence block `/api/symbol` already returns. Drawn here rather than
+   * linked to, because leaving the page to see what calls this loses the span
+   * that raised the question. */
+  async function drawAround(hit, mine) {
+    const name = hit.symbol || symbolIn(hit);
+    aroundName.textContent = name || "—";
+    // A hit in prose sits inside no definition, so there is no ring to draw
+    // and no heading worth showing over an empty canvas.
+    if (!name) {
+      showRing(false);
+      return ego.draw({ nodes: [], edges: [] }, null);
+    }
+    showRing(true);
+    const params = new URLSearchParams({ name });
+    if (hit.store) params.append("store", hit.store);
+    let data;
+    try {
+      data = await api(`/api/symbol?${params}`);
+    } catch (_) {
+      return;
+    }
+    if (mine !== bodyGeneration) return;
+    ego.draw(egoGraph(name, data), null);
+    /* Select the symbol the panel is about, so it arrives drawn in the accent
+     * with its neighbours lifted — the state the Graph page puts a focused node
+     * in. Before this the centre was one grey box among twenty. */
+    ego.pick(name);
+  }
+
+  fill(results, nothing());
+  paintBody();
+  setTimeout(() => {
+    ego.start();
+    if (state.pendingQuery) {
+      input.value = state.pendingQuery;
+      state.pendingQuery = "";
+      run();
+    } else if (state.search.query) {
+      input.value = state.search.query;
+      run();
+    }
+    input.focus();
+  }, 0);
+
+  return el(
+    "div",
+    { class: "search-page" },
+    el(
+      "div",
+      { class: "search-band" },
+      el("h1", { class: "sr-only", text: "Search" }),
+      el(
+        "div",
+        { class: "search-field" },
+        icon(ICONS.search, 18),
+        labelled("search-query", "Search the index", input),
+        meta,
+      ),
+      shapeHint,
+      el(
+        "div",
+        { class: "filters" },
+        picker.node,
+        el("span", { class: "rule" }),
+        kDial,
+        preferDial,
+        langDial,
+        pathDial,
+        budgetDial,
+        el("span", { class: "dial-note", text: "what one answer may cost an agent" }),
+      ),
+    ),
+    el(
+      "div",
+      { class: "two-stage" },
+      el("div", { class: "locate-col" }, results, footer),
+      el(
+        "div",
+        { class: "body-col" },
+        bodyCard,
+        aroundHead,
+        stage,
+      ),
+    ),
+  );
+}
+
+/* The evidence block, as a graph the canvas can draw: the symbol at the
+ * centre, its callers and callees around it, and the second ring hung off the
+ * first-ring name it was reached through — `via` is the whole of what makes
+ * it a second ring rather than another neighbour.
+ *
+ * A caller or callee row is an `EdgeEnd`, which flattens the symbol it
+ * reached into itself: the name is on the row, not under a `symbol` key, and
+ * `kind` is the edge's kind rather than the symbol's. */
+/** One `key  value` line in the ego panel's hover card. */
+function egoRow(key, value) {
+  return el(
+    "div",
+    { class: "tip-row" },
+    el("span", { class: "k", text: key }),
+    el("span", { class: "v", text: String(value) }),
+  );
+}
+
+function egoGraph(name, data) {
+  const centre = (data.symbols || [])[0] || {};
+  const nodes = [
+    {
+      name,
+      kind: centre.kind || "symbol",
+      path: centre.path,
+      start_line: centre.start_line,
+      end_line: centre.end_line,
+    },
+  ];
+  const index = new Map([[name, 0]]);
+  const edges = [];
+  /* `where` is the symbol row an edge resolved to, when there was one. The
+   * hover card says which file a neighbour lives in, which is most of what
+   * anyone wants from it. */
+  const add = (label, kind, where) => {
+    if (!index.has(label)) {
+      index.set(label, nodes.length);
+      nodes.push({
+        name: label,
+        kind,
+        path: where && where.path,
+        start_line: where && where.start_line,
+        end_line: where && where.end_line,
+      });
+    }
+    return index.get(label);
+  };
+  const link = (from, to, kind, confidence) => {
+    if (from !== to) edges.push({ from, to, kind, confidence });
+  };
+  for (const end of data.callers || []) {
+    link(add(end.name, end.kind, end), 0, end.kind, end.confidence);
+  }
+  for (const end of data.callees || []) {
+    link(0, add(end.name, end.kind, end), end.kind, end.confidence);
+  }
+  for (const hop of data.ego || []) {
+    const via = index.get(hop.via);
+    if (via === undefined) continue;
+    const it = add(hop.name, hop.kind);
+    if (hop.direction === "caller") link(it, via, hop.kind, hop.confidence);
+    else link(via, it, hop.kind, hop.confidence);
+  }
+  return { nodes, edges };
+}
+
+// ----------------------------------------------------------------- index
+
+/* The Index page.
+ *
+ * Until 0.20.0 this page *was* the run: it held the streaming response open,
+ * and the run existed only as the events travelling down it. Leaving the page
+ * threw that away — the work carried on, because the work is the store's, but
+ * nothing on screen could ever find it again.
+ *
+ * The run lives in the daemon now, so this page is a reader. On mount it asks
+ * `/api/index/runs` for every store's run and draws one card each; the shared
+ * live poll tells it when to ask again; each card pulls its own log lines
+ * after its own cursor. Nothing here outlives a poll, so navigating away,
+ * refreshing, or closing the tab for the length of a run changes nothing the
+ * page shows when it comes back.
+ */
+
+/** How long a run has taken, as `12:34` or `1:02:03`. */
+function spell(ms) {
+  const all = Math.max(0, Math.round(ms / 1000));
+  const seconds = String(all % 60).padStart(2, "0");
+  const hours = Math.floor(all / 3600);
+  const minutes = String(Math.floor(all / 60) % 60).padStart(2, "0");
+  return hours ? `${hours}:${minutes}:${seconds}` : `${minutes}:${seconds}`;
+}
+
+const RUN_TONE = {
+  queued: "warn",
+  running: "good",
+  paused: "warn",
+  stopping: "warn",
+  done: "good",
+  stopped: "bad",
+  failed: "bad",
+};
+
+const RUN_WORD = {
+  queued: "queued",
+  running: "indexing",
+  paused: "paused",
+  stopping: "stopping",
+  done: "done",
+  stopped: "stopped",
+  failed: "failed",
+};
+
+/** One store's run: its bar, its counts, its log, and its own two controls. */
+function runCard(run, controls) {
+  const bar = el("span", {});
+  const pct = el("span", { class: "pct" });
+  const status = el("span", { class: "meta" });
+  const elapsed = el("span", { class: "meta" });
+  const log = el("div", { class: "log", "aria-live": "polite" });
+  const badge = pill("", "good");
+  const where = el("span", { class: "meta" });
+
+  const pause = el("button", { class: "button secondary small", type: "button" });
+  const stop = el("button", { class: "button ghost small", type: "button" });
+  const remove = el("button", {
+    class: "button ghost small",
+    type: "button",
+    text: "Remove",
+    title: "Dismiss this card. The store is not touched.",
+  });
+  /* A finished card folds to its one line until someone opens it. Four
+   * finished runs used to be four full cards with their whole logs, and the
+   * live one was appended below them, off the bottom of the screen. */
+  const expand = el("button", {
+    class: "button ghost small",
+    type: "button",
+    "aria-expanded": "false",
+  });
+  let open = true;
+
+  /* The clock the daemon measured, ticked forward locally between polls.
+   *
+   * The daemon's number is the authority and it only ever goes forward — it
+   * runs from the moment the run was submitted, spans every slice, and stops
+   * while the run is held — so correcting to it can never make the reading
+   * jump backwards. The local tick exists only so the seconds move between
+   * one poll and the next. */
+  let shown = 0;
+  let readAt = 0;
+  let ticking = false;
+
+  function paintClock() {
+    const ms = ticking ? shown + (Date.now() - readAt) : shown;
+    // Under a second, tenths. `spell` counts in whole seconds, so every short
+    // run read `00:01` whatever it had actually taken.
+    elapsed.textContent = ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : spell(ms);
+  }
+
+  function absorb(next) {
+    shown = next.elapsed_ms || 0;
+    readAt = Date.now();
+    ticking = !!next.ticking;
+    paintClock();
+
+    const share = next.total ? Math.min(100, (next.scanned / next.total) * 100) : 0;
+    const finished = next.status === "done";
+    // A stopped run undid everything it embedded, so a full bar would say the
+    // opposite of what happened.
+    const width = finished ? 100 : next.status === "stopped" ? 0 : share;
+    bar.style.width = `${width.toFixed(1)}%`;
+    pct.textContent = `${Math.round(width)}%`;
+
+    // Rebuilt rather than assigned: a pill carries its own dot, and setting
+    // the text alone would take the dot away with it.
+    fill(
+      badge,
+      el("i", {}),
+      next.status === "queued" && next.position
+        ? `queued · ${next.position} in line`
+        : RUN_WORD[next.status] || next.status,
+    );
+    badge.className = `pill ${RUN_TONE[next.status] || "warn"}`;
+
+    /* Chunks a second, to one decimal under ten so a short run reads as
+     * "2.4 chunks/s" rather than rounding to nothing and dropping the field
+     * entirely — which is what made the rate vanish for several samples after
+     * every reset of the counter. */
+    const perSecond = next.elapsed_ms ? (next.chunks / next.elapsed_ms) * 1000 : 0;
+    const rate = perSecond >= 10 ? n(Math.round(perSecond)) : perSecond.toFixed(1);
+    // The phase, when the run is doing something other than reading files.
+    // Twenty seconds of a bar not moving is a hang unless the card says what
+    // it is: every two hundred files the run rewrites its shards.
+    status.textContent = next.phase
+      ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} ·`
+      : next.total
+        ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · ${rate} chunks/s ·`
+        : RUN_WORD[next.status] || next.status;
+    where.textContent = (next.paths || []).join(", ");
+
+    const held = next.status === "paused";
+    const live = TICKING.has(next.status);
+    pause.textContent = held ? "Resume" : "Pause";
+    pause.hidden = !live || next.status === "queued";
+    // A queued run has embedded nothing, so taking it out of the line costs
+    // nothing and is not the same act as stopping one that is going.
+    // "Take out of the queue" rather than "Remove": a finished card's Remove
+    // dismisses the card and touches nothing, and one word for both put two
+    // different acts on one page under one label.
+    stop.textContent = next.status === "queued" ? "Take out of the queue" : "Stop";
+    stop.hidden = !live;
+    stop.disabled = next.status === "stopping";
+    // A run that has finished has nothing to pause and nothing to stop. It
+    // used to offer Stop, whose confirm promised to undo everything the run
+    // had embedded; pressing it did nothing visible and left the store
+    // carrying a cancellation that killed the next run against it at 0%.
+    remove.hidden = live;
+
+    // Finished cards start folded, live ones start open, and whatever the
+    // reader has chosen since is kept.
+    if (touched === false) {
+      open = live;
+      touched = null;
+    }
+    paintFold();
+  }
+
+  function paintFold() {
+    log.hidden = !open;
+    where.hidden = !open;
+    expand.textContent = open ? "Hide the log" : "Show the log";
+    expand.setAttribute("aria-expanded", String(open));
+  }
+
+  /* `false` until the first reading has decided the default; `null` once the
+   * reader has taken it over. */
+  let touched = false;
+
+  pause.addEventListener("click", () => controls.hold(pause.textContent === "Pause"));
+  stop.addEventListener("click", () => controls.stop(stop.textContent !== "Stop"));
+  remove.addEventListener("click", () => controls.remove());
+  expand.addEventListener("click", () => {
+    open = !open;
+    touched = null;
+    paintFold();
+    // Its lines are wanted now. A folded card's log is not on screen, so it is
+    // not fetched until it is — which is what keeps a page of finished cards
+    // from costing one request each on the first paint.
+    if (open && controls.reveal) controls.reveal();
+  });
+
+  const node = el(
+    "div",
+    { class: "card pad run-card" },
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "card-title", text: run.store }),
+      badge,
+      el("span", { class: "spacer" }),
+      pct,
+    ),
+    el("div", { class: "bar" }, bar),
+    el(
+      "div",
+      { class: "filters" },
+      // The clock sits with the counts it belongs to. Files, chunks, rate and
+      // elapsed are one reading of one run; across the card from them the
+      // clock read as a property of the page rather than of the work.
+      status,
+      elapsed,
+      el("span", { class: "spacer" }),
+      expand,
+      pause,
+      stop,
+      remove,
+    ),
+    where,
+    log,
+  );
+
+  absorb(run);
+  const clock = setInterval(() => {
+    if (!node.isConnected) return clearInterval(clock);
+    if (ticking) paintClock();
+  }, 1000);
+
+  return { node, absorb, log, isOpen: () => open };
+}
+
+/** Append one log line, keeping the reader's place if they have scrolled up. */
+function logLine(log, event) {
+  const outcome = event.outcome || null;
+  const key =
+    event.event === "file" ? `${event.scanned}/${event.total}` : event.event || "";
+  const text =
+    event.event === "file"
+      ? event.why
+        ? `${event.path} — ${event.why}`
+        : event.path
+      : logText(event);
+  log.append(
+    el(
+      "div",
+      { class: outcome ? `line ${outcome}` : "line" },
+      key ? el("span", { class: "key", text: key }) : null,
+      outcome ? el("span", { class: "outcome", text: outcome }) : null,
+      el("span", { class: "what", text }),
+    ),
+  );
+  // Only while the reader is already at the end: scrolling back through a long
+  // run should not be yanked away by the next line.
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  if (atEnd) log.scrollTop = log.scrollHeight;
+  while (log.childElementCount > 500) log.firstElementChild.remove();
+}
+
+/** What a non-file event says on the log. */
+function logText(event) {
+  switch (event.event) {
+    case "submitted":
+      return event.ahead
+        ? `waiting — ${n(event.ahead)} run${event.ahead === 1 ? "" : "s"} ahead of this one`
+        : "submitted";
+    case "queued":
+      return event.ahead
+        ? `waiting for ${event.store}'s writer — ${n(event.ahead)} job${
+            event.ahead === 1 ? "" : "s"
+          } ahead of this one`
+        : `waiting for ${event.store}'s writer; it finishes what the watcher is doing first`;
+    case "started":
+      return "walking the tree and hashing what it finds";
+    case "slice":
+      return `${n(event.remaining)} paths left; the writer is giving the watcher a turn and will carry on`;
+    case "paused":
+      return "held between files — the writer is still this run's";
+    case "resumed":
+      return "carrying on";
+    case "error":
+      return event.error || "failed";
+    case "done":
+      if (event.dequeued) return "removed from the queue before it started; nothing was indexed";
+      if (event.stopped) {
+        return "stopped — everything this run embedded was undone, so the store is as it was before it started";
+      }
+      return `${n(event.indexed)} indexed, ${n(event.unchanged)} unchanged, ${n(
+        event.skipped,
+      )} skipped, ${n(event.removed)} removed, ${n(event.chunks)} chunks · ${spell(
+        event.elapsed_ms || 0,
+      )}`;
+    default:
+      return event.event || "";
+  }
+}
+
+/** One of the three settings, with what the machine derived and why. */
+function settingField(key, label, limit, onSave) {
+  const fixed = limit.source === "environment";
+  const input = el("input", {
+    type: "number",
+    min: "1",
+    value: String(limit.value),
+    disabled: fixed,
+    "aria-label": label,
+  });
+  const why = el("div", { class: "note" });
+
+  function explain() {
+    const asked = Number(input.value);
+    // A value above what the machine can carry is the user's to make, and it
+    // is made with the derivation in front of them rather than instead of it.
+    if (!fixed && asked > limit.derived) {
+      why.className = "note bad";
+      // Where it came from, on this branch too. A saved value above the
+      // derived one takes this branch every time, so saying only "derived"
+      // here is saying it in exactly the case where a user is trying to work
+      // out whether their setting took effect — and the daemon's own line
+      // calls the same value saved.
+      const held = limit.source === "saved" ? `${limit.value} saved. ` : "";
+      why.textContent = `${held}Above the ${limit.derived} this machine derived — ${limit.reason}. It will be used as you set it.`;
+      return;
+    }
+    why.className = "note";
+    // Where the value in force came from, in the daemon's own words. The panel
+    // used to call every value "derived", including one the user had saved, so
+    // the two disagreed exactly when someone was trying to work out whether
+    // their setting had taken effect.
+    const from =
+      limit.source === "saved"
+        ? `${limit.value} saved; ${limit.derived} is what this machine derives`
+        : `${limit.derived} derived`;
+    why.textContent = fixed
+      ? `Set by the environment, so the page cannot change it. Derived here: ${limit.derived} — ${limit.reason}`
+      : `${from} — ${limit.reason}`;
+  }
+
+  input.addEventListener("input", explain);
+  input.addEventListener("change", () => {
+    const asked = Math.max(1, Number(input.value) || 1);
+    input.value = String(asked);
+    onSave(key, asked);
+  });
+  explain();
+
+  return el(
+    "div",
+    { class: "setting" },
+    el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
+    why,
+  );
+}
+
+async function indexView() {
+  await refreshStores();
+  const first = await refreshRuns();
+
+  const note = el("div", { class: "note" });
+  const cards = el("div", { class: "cards" });
+  const queueCard = el("div", { class: "card pad", hidden: true });
+  const settingsCard = el("div", { class: "card pad", hidden: true });
+  const urlCard = el("div", { class: "card pad", hidden: true });
+  const urlNote = el("div", { class: "note" });
+  /* One placeholder, whatever has happened. It used to read "link to a page, a
+   * PDF or a file" on the first render and "URL to fetch and index" after a
+   * failed attempt, which reads as the field having changed its mind. */
+  const urlField = el("input", { type: "text", placeholder: "link to a page, a PDF or a file" });
+  /* The URL panel's own target store. The control the fetch actually read was
+   * the "each folder becomes its own store" dropdown in a different control
+   * group above, whose default is not a valid target for a URL — so every URL
+   * was refused with a store-selection error that never said where to pick
+   * one, and the private-address refusal was unreachable from this page. */
+  const urlTarget = el("select", { class: "select" });
+  const clearDone = el("button", {
+    class: "button ghost small",
+    type: "button",
+    text: "Remove all finished",
+    hidden: true,
+  });
+  /* Whether the note is holding an answer to a button that time can falsify —
+   * "3 runs queued." stayed on screen long after the three had finished. */
+  let transient = false;
+
+  /* One card per run, kept across repaints so a card's log and its scroll
+   * position survive the run's next poll.
+   *
+   * Keyed by the run's id rather than by its store. A second run against the
+   * same store used to find the first one's card and write its header over it
+   * while the body kept the previous run's log, so the card described two
+   * different runs at once. */
+  const drawn = new Map();
+  /* Where each run's log has been read to. A cursor rather than an offset, so
+   * two tabs reading the same run each see every line exactly once. */
+  const cursors = new Map();
+
+  function complain(message, focus) {
+    note.className = "note bad";
+    note.textContent = message;
+    if (focus) focus.focus();
+  }
+
+  function say(message) {
+    note.className = "note";
+    note.textContent = message;
+  }
+
+  async function control(store, action, run) {
+    try {
+      await post("/api/index/control", { store, action, run });
+    } catch (e) {
+      complain(e.message);
+    }
+    await refreshRuns();
+  }
+
+  /** Pull whatever log lines a run has produced since this card last looked. */
+  async function catchUpLog(run, card) {
+    const after = cursors.get(run.id);
+    // A run whose ring has already scrolled past this cursor — a tab away for
+    // longer than five hundred lines — restarts from the oldest line still
+    // held rather than silently showing a gap as continuity.
+    const from = after === undefined ? run.log_from : after;
+    let data;
+    try {
+      data = await api(
+        `/api/index/log?store=${encodeURIComponent(run.store)}&run=${run.id}${
+          from === undefined || from === null ? "" : `&after=${from}`
+        }`,
+      );
+    } catch (_) {
+      return;
+    }
+    for (const line of data.lines || []) logLine(card.log, line);
+    if (data.cursor !== null && data.cursor !== undefined) cursors.set(run.id, data.cursor);
+  }
+
+  function paint(data) {
+    const runs = data?.runs || [];
+    const seen = new Set();
+    for (const run of runs) {
+      seen.add(run.id);
+      let card = drawn.get(run.id);
+      if (!card) {
+        card = runCard(run, {
+          hold: (wantPause) => control(run.store, wantPause ? "pause" : "resume", run.id),
+          stop: (queued) => {
+            if (queued) return control(run.store, "dequeue", run.id);
+            ask({
+              title: `Stop ${run.store}'s index run?`,
+              body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. The other runs are untouched.",
+              confirm: "Stop and undo",
+              tone: "bad",
+              run: () => control(run.store, "stop", run.id),
+            });
+          },
+          // Dismissing a card, which touches nothing in the store. No confirm,
+          // for the same reason taking a folder out of the queue has none.
+          remove: () => control(run.store, "remove", run.id),
+          // The card has just been unfolded and wants the lines it skipped.
+          reveal: () => {
+            const card = drawn.get(run.id);
+            if (card) catchUpLog(run, card);
+          },
+        });
+        drawn.set(run.id, card);
+        cards.append(card.node);
+      } else {
+        card.absorb(run);
+      }
+      // Only what the reader can see. A finished card starts folded, and
+      // fetching the log of every one of them on the first paint is a request
+      // per card for lines nobody is looking at.
+      if (card.isOpen()) catchUpLog(run, card);
+    }
+    // A run the daemon has forgotten — its card was removed, its store was
+    // deleted, or the daemon restarted — loses its card rather than keeping a
+    // stale one.
+    for (const [id, card] of drawn) {
+      if (seen.has(id)) continue;
+      card.node.remove();
+      drawn.delete(id);
+      cursors.delete(id);
+    }
+
+    /* Live runs above finished ones, and newest first within each half. The
+     * run somebody is watching used to be appended below every card that had
+     * already finished, which on the fourth run put it off the bottom of the
+     * screen. */
+    const order = runs
+      .slice()
+      .sort((a, b) => {
+        const live = Number(TICKING.has(b.status)) - Number(TICKING.has(a.status));
+        return live || (b.id || 0) - (a.id || 0);
+      })
+      .map((run) => drawn.get(run.id)?.node)
+      .filter(Boolean);
+    for (const node of order) cards.append(node);
+
+    // "N runs queued." is an answer to a button, and it stopped being true the
+    // moment the last run finished.
+    if (transient && !runs.some((run) => TICKING.has(run.status)) && !(data?.queue || []).length) {
+      transient = false;
+      say("");
+    }
+
+    clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
+
+    const queue = data?.queue || [];
+    queueCard.hidden = !queue.length;
+    if (queue.length) {
+      fill(
+        queueCard,
+        el("span", { class: "eyebrow", text: "Waiting" }),
+        el("p", {
+          class: "subtitle",
+          text: "In the order they will start. Each one begins by itself the moment a run finishes, whether or not this page is open.",
+        }),
+        el(
+          "div",
+          { class: "queue" },
+          queue.map((row) =>
+            el(
+              "div",
+              { class: "queue-row" },
+              el("span", { class: "key", text: `${row.position}` }),
+              el("span", { class: "name", text: row.store }),
+              pathCell((row.paths || []).join(", ")),
+              el("span", { class: "spacer" }),
+              el("button", {
+                class: "button ghost small",
+                type: "button",
+                text: "Take out of the queue",
+                // Nothing of it was embedded, so there is nothing to undo and
+                // nothing to confirm.
+                onclick: () => control(row.store, "dequeue", row.run),
+              }),
+            ),
+          ),
+        ),
+      );
+    }
+
+    paintSettings(data?.limits);
+  }
+
+  async function saveSetting(key, value) {
+    try {
+      const answer = await post("/api/index/settings", { [key]: value });
+      say("Saved. It applies to the next run queued.");
+      paintSettings(answer.limits);
+    } catch (e) {
+      complain(e.message);
+    }
+  }
+
+  let limitsDrawn = null;
+  function paintSettings(limits) {
+    if (!limits) return;
+    // Redrawn only when a value or its reason actually changed: the memory
+    // figure moves every second, and a field that rebuilds under the cursor
+    // cannot be typed into.
+    const signature = JSON.stringify([
+      limits.runs_at_once,
+      limits.embed_threads,
+      limits.index_memory_mb,
+    ]);
+    if (signature === limitsDrawn) return;
+    limitsDrawn = signature;
+    const machine = limits.machine || {};
+    fill(
+      settingsCard,
+      el("span", { class: "eyebrow", text: "How hard this machine may work" }),
+      el("p", {
+        class: "subtitle",
+        text: `${machine.logical_cores} logical core(s), ${n(
+          machine.total_memory_mb,
+        )} MiB of memory, ${n(
+          machine.available_memory_mb,
+        )} MiB free now. Each value below is derived from that, and each is yours to change.`,
+      }),
+      el(
+        "div",
+        { class: "settings" },
+        settingField("runs_at_once", "runs at once", limits.runs_at_once, saveSetting),
+        settingField("embed_threads", "threads each", limits.embed_threads, saveSetting),
+        settingField("index_memory_mb", "MiB per store", limits.index_memory_mb, saveSetting),
+      ),
+    );
+  }
+
+  // The path field takes one path per line, so several folders can be started
+  // without the picker at all.
+  const field = el("textarea", {
+    rows: "2",
+    placeholder: "~/work/api\n~/work/cli",
+    value: state.pendingPath || "",
+  });
+  state.pendingPath = "";
+
+  const target = el(
+    "select",
+    { class: "field", "aria-label": "Where to index into" },
+    el("option", { value: "each", text: "each folder becomes its own store" }),
+    liveStores().map((store) =>
+      el("option", { value: store.name, text: `add to ${store.name}` }),
+    ),
+  );
+
+  /* Which stores could hold the paths in the box.
+   *
+   * A store is about its roots, and indexing a folder into a store whose roots
+   * do not cover it is how the `semlith` store came to hold 262 files
+   * belonging to `ultraship`. The daemon refuses it now; this is so the
+   * dropdown does not offer it in the first place. */
+  function paintTargets() {
+    const paths = field.value
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    const covers = (store) =>
+      !paths.length ||
+      paths.every((path) =>
+        (store.roots || []).some((root) => root.present && path.startsWith(root.path)),
+      );
+    const chosen = target.value;
+    fill(
+      target,
+      el("option", { value: "each", text: "each folder becomes its own store" }),
+      liveStores().map((store) =>
+        el("option", {
+          value: store.name,
+          text: covers(store)
+            ? `add to ${store.name}`
+            : `add to ${store.name} — outside its roots`,
+          disabled: !covers(store),
+        }),
+      ),
+    );
+    // A selection that has just become invalid falls back to the choice that
+    // is always right: a folder of its own.
+    target.value = [...target.options].some((o) => o.value === chosen && !o.disabled)
+      ? chosen
+      : "each";
+  }
+  field.addEventListener("input", paintTargets);
+  paintTargets();
+
+  fill(
+    urlTarget,
+    liveStores().map((store) => el("option", { value: store.name, text: store.name })),
+  );
+  // With one store there is no choice to make, so the panel makes it. With
+  // several the field starts empty and the button says so rather than the
+  // request being refused by a control on another panel.
+  const only = liveStores();
+  urlTarget.value = only.length === 1 ? only[0].name : "";
+  if (only.length !== 1) {
+    urlTarget.prepend(el("option", { value: "", text: "choose a store…" }));
+    urlTarget.value = "";
+  }
+
+  const picker = folderPicker({
+    multiple: true,
+    onChoose: (paths) => {
+      if (!paths || !paths.length) return;
+      const already = field.value.split("\n").map((p) => p.trim()).filter(Boolean);
+      field.value = [...new Set([...already, ...paths])].join("\n");
+      field.rows = Math.min(8, Math.max(2, field.value.split("\n").length));
+    },
+    onError: (message) => complain(message),
+  });
+
+  const projects = projectsChecklist({
+    onChoose: (paths) => {
+      field.value = paths.join("\n");
+      field.rows = Math.min(8, Math.max(2, paths.length));
+      target.value = "each";
+    },
+    onError: (message) => complain(message),
+  });
+
+  const folderButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("picker"),
+    },
+    icon(ICONS.folder),
+    "Choose folders…",
+  );
+  const projectsButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("projects"),
+    },
+    icon(ICONS.folder),
+    "Projects under a folder…",
+  );
+  const urlButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("url"),
+    },
+    icon(ICONS.file),
+    "Add from a URL",
+  );
+  /* The machine's three numbers are a panel like the others rather than a card
+   * standing open under the page. They are read once, changed rarely, and
+   * having them permanently on screen gave the most static thing here the most
+   * room. */
+  const settingsButton = el(
+    "button",
+    {
+      class: "button secondary",
+      type: "button",
+      "aria-pressed": "false",
+      onclick: () => reveal("settings"),
+    },
+    icon(ICONS.sliders),
+    "Machine limits",
+  );
+
+  /* The four ways to open something here are mutually exclusive: two open at
+   * once is two answers to one question. */
+  function reveal(which) {
+    const wantPicker = which === "picker" && !picker.isOpen();
+    const wantProjects = which === "projects" && !projects.isOpen();
+    const wantUrl = which === "url" && urlCard.hidden;
+    const wantSettings = which === "settings" && settingsCard.hidden;
+    if (!wantPicker) picker.close();
+    if (!wantProjects) projects.close();
+    urlCard.hidden = !wantUrl;
+    settingsCard.hidden = !wantSettings;
+    if (wantPicker) picker.open("");
+    if (wantProjects) projects.open("");
+    if (wantUrl) urlField.focus();
+    // "Projects under a folder…" makes each project its own store, so an
+    // "add to <store>" sitting beside it is an instruction that contradicts
+    // the picker that is open.
+    if (wantProjects) target.value = "each";
+    target.disabled = wantProjects;
+    target.title = wantProjects
+      ? "Each project under the folder becomes its own store."
+      : "";
+    folderButton.setAttribute("aria-pressed", String(wantPicker));
+    projectsButton.setAttribute("aria-pressed", String(wantProjects));
+    urlButton.setAttribute("aria-pressed", String(wantUrl));
+    settingsButton.setAttribute("aria-pressed", String(wantSettings));
+  }
+
+  const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  const addButton = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Fetch and index",
+  });
+
+  /** Ask the daemon to start the runs, and let the poll draw them. */
+  async function begin(route, body) {
+    start.disabled = true;
+    try {
+      const answer = await post(route, body);
+      const started = (answer.runs || []).filter((run) => run.run !== undefined);
+      const refused = (answer.runs || []).filter((run) => run.error);
+      transient = true;
+      say(
+        `${started.length} run${started.length === 1 ? "" : "s"} queued${
+          refused.length ? `; ${refused.length} refused` : ""
+        }.`,
+      );
+      if (refused.length) {
+        complain(refused.map((run) => `${run.path}: ${run.error}`).join("; "));
+      }
+      // Straight away rather than on the next tick: the cards are the answer
+      // to the button, and a second of nothing reads as a button that failed.
+      await refreshStores();
+      await refreshRuns();
+      return null;
+    } catch (e) {
+      complain(e.message);
+      return e.message;
+    } finally {
+      start.disabled = false;
+    }
+  }
+
+  start.addEventListener("click", () => {
+    const paths = field.value
+      .split("\n")
+      .map((path) => path.trim())
+      .filter(Boolean);
+    if (!paths.length) {
+      complain("Give a path to index, or choose a folder.", field);
+      return;
+    }
+    begin("/api/index", { path: paths, store: target.value });
+  });
+
+  addButton.addEventListener("click", async () => {
+    const url = urlField.value.trim();
+    if (!url) {
+      urlNote.className = "note bad";
+      urlNote.textContent = "Give an https URL to fetch.";
+      urlField.focus();
+      return;
+    }
+    urlNote.className = "note";
+    urlNote.textContent = "";
+    if (!urlTarget.value) {
+      urlNote.className = "note bad";
+      urlNote.textContent =
+        "Pick the store to fetch into, in the selector beside this field.";
+      urlTarget.focus();
+      return;
+    }
+    const failed = await begin("/api/add", { url, store: urlTarget.value });
+    // A failed fetch leaves the card open with what went wrong on it. Closing
+    // it would take the message away and leave the page looking as though
+    // nothing had been asked for.
+    if (failed) {
+      urlNote.className = "note bad";
+      urlNote.textContent = failed;
+      urlCard.hidden = false;
+    }
+  });
+
+  clearDone.addEventListener("click", async () => {
+    const stores = new Set(
+      (state.runs?.runs || [])
+        .filter((run) => !TICKING.has(run.status))
+        .map((run) => run.store),
+    );
+    for (const store of stores) await control(store, "clear");
+  });
+
+  paint(first);
+  // The page's only subscription. The shared poll decides when; this decides
+  // what with. No timer of this page's own.
+  state.onRuns = paint;
+  watchLive(["runs", "stores"], refreshRuns);
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead("Index"),
+    says(
+      "Each folder becomes its own store, indexed by its own writer. A run lives in the daemon, not in this page — leaving, refreshing or closing the tab changes nothing, and a run ends only on its Stop or when ",
+      mono("semlith start"),
+      " does.",
+    ),
+    el(
+      "div",
+      { class: "field tall full area" },
+      el("span", { class: "prefix", text: "paths" }),
+      labelled("index-path", "Paths to index, one per line", field),
+    ),
+    el(
+      "div",
+      { class: "filters" },
+      folderButton,
+      projectsButton,
+      urlButton,
+      settingsButton,
+      target,
+      start,
+    ),
+    note,
+    el(
+      "div",
+      { class: "scroller" },
+      picker.node,
+      projects.node,
+      fill(
+        urlCard,
+        el("span", { class: "eyebrow", text: "Add from a URL" }),
+        el("p", {
+          class: "subtitle",
+          text: "One https request, for exactly this URL — a page, a PDF, or a file on GitHub. Nothing is crawled and no credential is ever sent. The file is saved inside this store's downloads folder, never in your working tree.",
+        }),
+        el(
+          "div",
+          { class: "field tall full" },
+          el("span", { class: "prefix", text: "url" }),
+          labelled("index-url", "URL to fetch and index", urlField),
+        ),
+        el(
+          "div",
+          { class: "filters" },
+          labelled("index-url-store", "Fetch into", urlTarget),
+          el("span", { class: "spacer" }),
+          addButton,
+        ),
+        urlNote,
+      ),
+      el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
+      cards,
+      queueCard,
+      settingsCard,
+    ),
+  );
+}
+
+/** The repositories under a folder, as a checklist.
+ *
+ * A folder of projects is the case the folder picker handles badly: ticking
+ * twelve repositories one directory at a time is twelve walks into and back
+ * out of the same parent. This asks the daemon which of the children are
+ * repositories and offers them all at once, already ticked.
+ */
+function projectsChecklist(options) {
+  const { onChoose, onError } = options || {};
+  const card = el("div", { class: "card picker", hidden: true });
+  const ticked = new Set();
+
+  async function open(path) {
+    let data;
+    try {
+      data = await api(`/api/projects?path=${encodeURIComponent(path || "")}`);
+    } catch (e) {
+      if (onError) onError(e.message);
+      return false;
+    }
+    card.hidden = false;
+    const rows = data.projects || [];
+    // Repositories start ticked because that is what was asked for; one
+    // already indexed starts unticked but is shown, so the list says what is
+    // covered rather than quietly omitting it.
+    for (const row of rows) {
+      if (data.repositories && !row.indexed && !ticked.size) ticked.add(row.path);
+    }
+
+    const paint = () => open(data.path);
+    fill(
+      card,
+      el(
+        "div",
+        { class: "crumbs" },
+        // The same navigation the folder picker beside it has had all along.
+        // Without it this opened at the home directory and stayed there, so a
+        // monorepo anywhere else on the machine was unreachable.
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Up",
+          disabled: !data.parent,
+          onclick: () => open(data.parent),
+        }),
+        el("span", { class: "where", text: data.path }),
+        el("span", { class: "spacer" }),
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "All",
+          onclick: () => {
+            for (const row of rows) ticked.add(row.path);
+            paint();
+          },
+        }),
+        el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "None",
+          onclick: () => {
+            ticked.clear();
+            paint();
+          },
+        }),
+        el("button", {
+          class: "button small",
+          type: "button",
+          disabled: !ticked.size,
+          text: ticked.size ? `Use ${ticked.size}` : "Use",
+          onclick: () => {
+            card.hidden = true;
+            if (onChoose) onChoose([...ticked]);
+            ticked.clear();
+          },
+        }),
+        el("button", {
+          class: "button ghost small",
+          type: "button",
+          text: "Close",
+          onclick: () => {
+            card.hidden = true;
+          },
+        }),
+      ),
+      el("p", {
+        class: "subtitle",
+        text: data.repositories
+          ? "The repositories directly under this folder. One level only: a monorepo is one store, and its nested repositories are its own business."
+          : "Nothing under this folder is a repository, so these are its plain subfolders.",
+      }),
+      el(
+        "div",
+        { class: "entries" },
+        rows.length
+          ? rows.map((row) => {
+              const box = el("input", {
+                type: "checkbox",
+                class: "tick",
+                "aria-label": `Index ${row.name}`,
+                checked: ticked.has(row.path),
+                onchange: () => {
+                  if (box.checked) ticked.add(row.path);
+                  else ticked.delete(row.path);
+                  paint();
+                },
+              });
+              return el(
+                "div",
+                { class: "entry-row" },
+                box,
+                el(
+                  "button",
+                  {
+                    class: "entry",
+                    type: "button",
+                    title: `Open ${row.path}`,
+                    onclick: () => open(row.path),
+                  },
+                  icon(ICONS.folder),
+                  el("span", { class: "name", text: row.name }),
+                  row.indexed ? pill(`in ${row.indexed}`, "warn") : null,
+                ),
+              );
+            })
+          : empty("Nothing here that Semlith can index."),
+      ),
+      // Everything else under this folder, so the picker can be walked to
+      // wherever the projects actually are.
+      (data.folders || []).filter((f) => !rows.some((row) => row.path === f.path)).length
+        ? el(
+            "div",
+            { class: "entries" },
+            el("p", { class: "subtitle", text: "Or open one of these:" }),
+            (data.folders || [])
+              .filter((f) => !rows.some((row) => row.path === f.path))
+              .map((folder) =>
+                el(
+                  "div",
+                  { class: "entry-row" },
+                  el(
+                    "button",
+                    {
+                      class: "entry",
+                      type: "button",
+                      title: `Open ${folder.path}`,
+                      onclick: () => open(folder.path),
+                    },
+                    icon(ICONS.folder),
+                    el("span", { class: "name", text: folder.name }),
+                  ),
+                ),
+              ),
+          )
+        : null,
+    );
+    return true;
+  }
+
+  return {
+    node: card,
+    open,
+    close: () => {
+      card.hidden = true;
+    },
+    isOpen: () => !card.hidden,
+  };
+}
+
+// -------------------------------------------------------- install panel
+
+/* What this machine has set up, and the one thing the page can fix itself.
+ *
+ * The install commands that used to head this card belonged on a machine that
+ * does not have semlith yet — which is not the machine reading this page. What
+ * is useful here is the state of each step and a way to act on the one that is
+ * not done.
+ */
+function installPanel() {
+  const card = el("div", { class: "card pad install-panel" });
+  const title = () => el("span", { class: "card-title", text: "This machine" });
+  fill(card, title(), el("p", { class: "subtitle", text: "Checking…" }));
+
+  const stateWord = {
+    done: "done",
+    "already-done": "already done",
+    skipped: "not done",
+    failed: "failed",
+  };
+  const tone = (state) =>
+    state === "done" || state === "already-done" ? "good" : state === "failed" ? "bad" : "warn";
+
+  function paint(setup) {
+    const note = el("div", { class: "note" });
+
+    const fixPath = el("button", {
+      class: "button small",
+      type: "button",
+      text: "Add it to PATH",
+      onclick: async () => {
+        fixPath.disabled = true;
+        note.className = "note";
+        note.textContent = "Editing your shell profile…";
+        try {
+          const done = await post("/api/setup", { step: "path" });
+          note.textContent = `${done.step.detail} — open a new terminal for it to take effect.`;
+          paint(done.status);
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+          fixPath.disabled = false;
+        }
+      },
+    });
+
+    const install = el("button", {
+      class: "button small",
+      type: "button",
+      text: "Install it",
+      disabled: true,
+      onclick: async () => {
+        install.disabled = true;
+        check.disabled = true;
+        note.className = "note";
+        note.textContent = "Downloading and verifying…";
+        try {
+          const done = await post("/api/upgrade", { action: "apply" });
+          note.textContent = done.restart;
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      },
+    });
+
+    const check = el("button", {
+      class: "button secondary small",
+      type: "button",
+      text: "Check for updates",
+      onclick: async () => {
+        check.disabled = true;
+        note.className = "note";
+        note.textContent = "Asking GitHub…";
+        try {
+          const found = await post("/api/upgrade", { action: "check" });
+          note.textContent = found.available
+            ? `${found.latest} is available; you are on ${found.installed}.`
+            : `Already on the newest build, ${found.installed}.`;
+          if (found.blocked) note.textContent += ` ${found.blocked}`;
+          install.disabled = !found.available || Boolean(found.blocked);
+        } catch (e) {
+          note.className = "note bad";
+          note.textContent = e.message;
+        } finally {
+          check.disabled = false;
+        }
+      },
+    });
+
+    fill(
+      card,
+      title(),
+      el(
+        "div",
+        { class: "rows" },
+        (setup.steps || []).map((step) =>
+          el(
+            "div",
+            { class: "kv step" },
+            pill(stateWord[step.state] || step.state, tone(step.state)),
+            el("span", { class: "card-title", text: step.name }),
+            lineCell(step.detail, "meta"),
+            // The one step this page can perform, and only while there is
+            // something to do: the step's own state is the answer, not the
+            // live PATH, which a daemon started before the edit never sees.
+            // The others are an install and a model download, which belong to
+            // the command that owns them.
+            step.name === "path" && step.state !== "already-done" && step.state !== "done"
+              ? el("span", { class: "spacer" })
+              : null,
+            step.name === "path" && step.state !== "already-done" && step.state !== "done"
+              ? fixPath
+              : null,
+          ),
+        ),
+      ),
+      note,
+      el("hr", { class: "rule" }),
+      el("span", { class: "eyebrow", text: `Installed version ${setup.version}` }),
+      el("div", { class: "actions" }, check, install),
+    );
+  }
+
+  api("/api/setup")
+    .then(paint)
+    .catch((e) => fill(card, title(), error(e.message)));
+
+  return card;
+}
+
+// ---------------------------------------------------------------- agents
+
+/* ---------------------------------------------------------------- doctor */
+
+/* `semlith doctor`, as a page.
+ *
+ * The parity rule is why it exists: the command was added in 0.18.0, so its
+ * view is in the same release. It reads the same two functions the command
+ * prints — the per-client report and the four Privacy rules that are readings
+ * of this machine — so the page and the terminal cannot disagree about whether
+ * a client is registered or a rule holds.
+ *
+ * The repair buttons post to `/api/privacy/fix`, which calls what
+ * `semlith doctor --fix` calls. A second implementation in the browser would
+ * be a second answer to what "safe" means. */
+async function doctorView() {
+  let data;
+  try {
+    data = await api("/api/doctor");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Doctor"), error(e.message));
+  }
+
+  const state = (c) => {
+    if (c.note) return { text: "cannot register", kind: null };
+    if (c.registered) return { text: `registered (${c.scope || "user"})`, kind: "good" };
+    if (!c.command) return { text: "not registered", kind: "bad" };
+    if (!c.present) return { text: "not installed", kind: null };
+    if (c.scope === "project")
+      return { text: "one project only", kind: "bad" };
+    return { text: "installed, not registered", kind: "bad" };
+  };
+
+  const clients = dataTable({
+    caption: "Every documented client, whether it is on this machine, whether it is registered, and what would fix it.",
+    rows: data.clients || [],
+    perPage: 25,
+    columns: [
+      { key: "name", label: "Client", sortable: true, value: (r) => r.name },
+      {
+        key: "state",
+        label: "semlith",
+        sortable: true,
+        value: (r) => state(r).text,
+        render: (r) => {
+          const s = state(r);
+          return pill(s.text, s.kind);
+        },
+      },
+      {
+        key: "repair",
+        label: "To fix",
+        render: (r) =>
+          r.repair
+            ? copyField(r.repair)
+            : el("span", { class: "sub", text: r.note ? "nothing to run" : "—" }),
+      },
+    ],
+  });
+
+  const rulesBox = el("div", { class: "strip" });
+  const note = el("div", { class: "note" });
+
+  const paintRules = (rules) => {
+    rulesBox.textContent = "";
+    for (const rule of rules) {
+      const row = el(
+        "div",
+        { class: "stat fact" },
+        el("span", { class: "eyebrow", text: rule.id }),
+        el("span", {
+          /* Three states. A rule this platform cannot take a reading for —
+           * the two mode rules on Windows — is neither green nor red, because
+           * a tick it has not earned is worse than no tick. */
+          class:
+            rule.applicable === false
+              ? "fact-value"
+              : rule.ok
+                ? "fact-value"
+                : "fact-value bad",
+          text: rule.applicable === false ? "not applicable" : rule.ok ? "holds" : "fails",
+        }),
+        el("span", { class: "sub", text: rule.check }),
+      );
+      if (!rule.ok && rule.manual) row.appendChild(copyField(rule.manual));
+      /* A button only where a repair qualifies. A rule the daemon cannot
+       * repair — `private addresses` is set in the environment the daemon
+       * inherited, and no process can unset a variable in its parent's — gets
+       * the manual step and nothing else, rather than a button that apologises
+       * after the click. */
+      if (!rule.ok && rule.repair) {
+        const fix = el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "Fix",
+          onclick: async () => {
+            fix.disabled = true;
+            note.className = "note";
+            note.textContent = "Applying…";
+            try {
+              const out = await post("/api/privacy/fix", { rule: rule.id });
+              const applied = (out.applied || [])[0];
+              /* What it changed and what it was before, so the user can undo
+               * it by hand. The rules come back re-read, so the row redraws
+               * from a measurement rather than from the click having worked. */
+              note.textContent = applied
+                ? `${applied.path}: ${applied.now}, was ${applied.was}` +
+                  (applied.rechecked_ok ? "" : " — the rule still does not hold")
+                : "Nothing to apply.";
+              paintRules(out.rules || []);
+            } catch (e) {
+              note.className = "note bad";
+              note.textContent = e.message;
+              fix.disabled = false;
+            }
+          },
+        });
+        row.appendChild(fix);
+      }
+      rulesBox.appendChild(row);
+    }
+  };
+  paintRules(data.rules || []);
+
+  // What the table is a list of, said once above it rather than counted off
+  // the rows by the reader — the page is twenty-seven rows and two of them
+  // matter.
+  const rows = data.clients || [];
+  const registered = rows.filter((c) => c.registered).length;
+  const fixable = rows.filter((c) => !c.registered && c.repair).length;
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Doctor",
+      "Whether each agent client on this machine can reach semlith, and what to run for the ones that cannot.",
+    ),
+    el(
+      "div",
+      // `card pad`, like every other section on every other page. A bare card
+      // has no padding, so the title sat against the border and the table
+      // squared off the corner under it.
+      { class: "card pad" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Clients" }),
+        el("span", { class: "spacer" }),
+        el("span", {
+          class: "meta",
+          text: `${n(registered)} registered · ${n(fixable)} to fix · ${n(rows.length)} known`,
+        }),
+      ),
+      clients.node,
+    ),
+    // The rules are already cards — one `.stat` each — so they sit in the view
+    // beside their heading rather than inside a second card. A card of cards
+    // is a border drawn around some borders.
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "card-title", text: "Rules" }),
+      el("span", {
+        class: "meta",
+        text: "what the daemon found when it looked, not what the documentation says",
+      }),
+    ),
+    rulesBox,
+    note,
+  );
+}
+
+async function agentsView() {
+  let data;
+  try {
+    data = await api("/api/agents");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Agents"), error(e.message));
+  }
+
+  noteAgents(data);
+  const clients = data.clients || [];
+  const tools = data.tools || [];
+  const live = data.connections || [];
+  const endpoint = data.endpoint || { url: "", open: false };
+
+  // ---- the endpoint, in the page header
+  const address = el("code", { class: "text", text: endpoint.url });
+  const endpointNote = el("div", { class: "note" });
+  const toggle = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: endpoint.open ? "Stop" : "Start",
+    onclick: () => {
+      // Every other consequential action on this page confirms — delete a
+      // store, forget a file, stop a run — and this is the one that takes
+      // semlith away from every connected agent at once. Starting it back up
+      // costs nothing, so only the stop asks.
+      if (!endpoint.open) return apply();
+      ask({
+        title: "Close the MCP endpoint?",
+        body: "Every connected agent loses semlith until it is started again. The daemon, the watcher and the portal are unaffected, and Start puts it back.",
+        confirm: "Close the endpoint",
+        tone: "bad",
+        run: apply,
+      });
+    },
+  });
+
+  /** Open or close the endpoint, once whoever asked has confirmed. */
+  async function apply() {
+    toggle.disabled = true;
+    endpointNote.className = "note";
+    endpointNote.textContent = endpoint.open ? "Closing…" : "Opening…";
+    try {
+      const done = await post("/api/endpoint", { open: !endpoint.open });
+      endpoint.open = done.open;
+      toggle.textContent = done.open ? "Stop" : "Start";
+      endpointNote.textContent = done.open
+        ? "The endpoint is answering. A configured client reconnects on its next call."
+        : "The endpoint is closed. The daemon, the watcher and the portal are unaffected.";
+      fill(statePill, el("i", {}), done.open ? "answering" : "closed");
+      statePill.className = done.open ? "pill good" : "pill warn";
+    } catch (e) {
+      endpointNote.className = "note bad";
+      endpointNote.textContent = e.message;
+    } finally {
+      toggle.disabled = false;
+    }
+  }
+  const statePill = pill(endpoint.open ? "answering" : "closed", endpoint.open ? "good" : "warn");
+
+  // ---- rotation
+  const keyNote = el("div", { class: "note" });
+  const rotate = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Rotate key",
+    onclick: async () => {
+      rotate.disabled = true;
+      keyNote.className = "note";
+      keyNote.textContent = "Rotating…";
+      try {
+        const done = await post("/api/key", {});
+        // Only if the page was already showing the real one; otherwise the
+        // stanza still names the variable, which is now correct for the new
+        // key without anybody touching it.
+        if (stanzas.revealed) stanzas.key = done.key;
+        showClient(chosen);
+        const carried = done.updated || [];
+        // Said plainly, because the two halves have different consequences:
+        // what was rewritten needs nothing done to it, and what was not needs
+        // the stanza above pasted in before the old key stops working.
+        const rewrote = carried.length
+          ? `Carried the new key into ${carried.length} configuration file${
+              carried.length === 1 ? "" : "s"
+            }: ${carried.join(", ")}.`
+          : "No configuration file on this machine carried the old key.";
+        keyNote.textContent = done.previous_valid
+          ? `New key. ${rewrote} The previous one keeps working for fifteen minutes, so a session already open finishes — any client configured elsewhere needs the new stanza before then.`
+          : `New key. ${rewrote} The previous one is refused now; any client configured elsewhere needs the new stanza.`;
+      } catch (e) {
+        keyNote.className = "note bad";
+        keyNote.textContent = e.message;
+      } finally {
+        rotate.disabled = false;
+      }
+    },
+  });
+
+  // ---- the key itself, only when asked for
+  /* Masked until asked for. The route does not send a preview either: a
+   * preview of an agent key still begins `sml_`, and the point is that nothing
+   * about the credential arrives unasked. */
+  const MASKED = data.key_set ? "sml_" + "•".repeat(24) : "no key yet";
+  const keyBox = el("code", { class: "text", text: MASKED });
+  const reveal = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Reveal",
+    onclick: async () => {
+      if (stanzas.revealed) {
+        // Pressed again: put it away. A page left open on a screen should not
+        // keep showing a live credential because somebody looked at it once.
+        stanzas.revealed = false;
+        stanzas.key = "${" + KEY_ENV + "}";
+        keyBox.textContent = MASKED;
+        reveal.textContent = "Reveal";
+        showClient(chosen);
+        return;
+      }
+      reveal.disabled = true;
+      try {
+        const shown = await post("/api/agents/reveal", {});
+        stanzas.revealed = true;
+        stanzas.key = String(shown.key);
+        keyBox.textContent = stanzas.key;
+        reveal.textContent = "Hide";
+        showClient(chosen);
+      } catch (e) {
+        keyNote.className = "note bad";
+        keyNote.textContent = e.message;
+      } finally {
+        reveal.disabled = false;
+      }
+    },
+  });
+
+  // ---- connected clients
+  const connected = dataTable({
+    className: "w-agents",
+    caption: "Every documented client, whether it is on this machine, and whether it is registered.",
+    sort: "name",
+    grow: false,
+    perPage: 10,
+    rows: live,
+    columns: [
+      {
+        key: "name",
+        label: "Connected",
+        value: (c) => c.name,
+        render: (c) => el("div", { class: "who" }, el("span", { class: "dot good" }), c.name),
+      },
+      { key: "transport", label: "Transport", className: "meta", value: (c) => c.transport },
+      { key: "revision", label: "Revision", className: "meta narrow-drop", value: (c) => c.revision },
+      {
+        key: "queries",
+        label: "Queries",
+        className: "num",
+        value: (c) => c.queries,
+        render: (c) => n(c.queries),
+      },
+    ],
+  });
+
+  // ---- stanzas, grouped
+  const GROUPS = [
+    ["terminal", "Terminal"],
+    ["editor", "Editors"],
+    ["desktop", "Desktop"],
+  ];
+  /* What a stanza carries.
+   *
+   * The variable form by default: a configuration file that names
+   * `${SEMLITH_AGENT_KEY}` keeps working across every rotation, and a file that
+   * carries the key itself goes stale the moment somebody presses Rotate. The
+   * real key is fetched only when Reveal is pressed — `/api/agents` no longer
+   * returns it, so a page that is merely open never receives the credential
+   * that opens the MCP endpoint. */
+  const KEY_ENV = data.key_env || "SEMLITH_AGENT_KEY";
+  const stanzas = { key: "${" + KEY_ENV + "}", revealed: false };
+  let group = GROUPS.find(([id]) => clients.some((c) => c.group === id))[0];
+  let chosen = clients.findIndex((c) => c.group === group);
+  const tabs = el("div", { class: "tabs" });
+  const chips = el("div", { class: "filters" });
+  const body = el("div", { class: "stanza" });
+
+  /** The HTTP form, built here from the key the route just handed back. */
+  /** The placeholder the README prints where a real key goes. */
+  const KEY_SLOT = "${SEMLITH_AGENT_KEY}";
+
+  /** Whether a stanza configures the endpoint rather than a subprocess. */
+  const overHttp = (text) => text.includes("/mcp") || text.includes("--transport http");
+
+  function httpStanza() {
+    return `{\n  "mcpServers": {\n    "semlith": {\n      "url": "${endpoint.url}",\n      "headers": { "Authorization": "Bearer ${stanzas.key}" }\n    }\n  }\n}`;
+  }
+
+  function showGroup(id) {
+    group = id;
+    const first = clients.findIndex((c) => c.group === id);
+    showClient(first < 0 ? chosen : first);
+  }
+
+  function showClient(index) {
+    chosen = index;
+    const client = clients[index];
+    fill(
+      tabs,
+      GROUPS.map(([id, label]) => {
+        const count = clients.filter((c) => c.group === id).length;
+        return el(
+          "button",
+          {
+            class: "tab",
+            type: "button",
+            "aria-pressed": String(id === group),
+            onclick: () => showGroup(id),
+          },
+          label,
+          el("span", { class: "count", text: String(count) }),
+        );
+      }),
+    );
+    fill(
+      chips,
+      clients.map((c, i) =>
+        c.group === group
+          ? el("button", {
+              class: "chip",
+              type: "button",
+              "aria-pressed": String(i === chosen),
+              text: c.name,
+              onclick: () => showClient(i),
+            })
+          : null,
+      ),
+    );
+    if (!client) {
+      fill(body, empty("No client stanza is compiled into this build."));
+      return;
+    }
+    // The documented stanzas. They name ${SEMLITH_AGENT_KEY}, which is what a
+    // client should carry: it survives a rotation, and the key stays in one
+    // file with one set of permissions. Pressing Reveal substitutes the literal
+    // value for a reader who wants to paste it somewhere that cannot read an
+    // environment variable.
+    const own = (client.stanzas || []).map((s) => ({
+      format: s.format,
+      text: s.text.trimEnd().replaceAll(KEY_SLOT, stanzas.key),
+    }));
+    // A one-line command belongs in a field with a Copy beside it, not in a
+    // slab of dark code: it is a thing you paste into a shell, not a file you
+    // are going to read.
+    // Shell one-liners, labelled by what they register rather than mixed in
+    // with the block above: several clients configure the endpoint in a file
+    // but can only add a subprocess from their CLI, and an unlabelled command
+    // under an HTTP stanza reads as a second way to do the same thing.
+    const shells = own.filter((s) => s.format === "sh");
+    const wired = shells.filter((s) => overHttp(s.text));
+    const spawned = shells.filter((s) => !overHttp(s.text));
+    const blocks = own.filter((s) => s.format !== "sh");
+    const http = blocks.filter((s) => overHttp(s.text));
+    const stdio = blocks.filter((s) => !overHttp(s.text));
+    const config = http.length ? http : stdio;
+    fill(
+      body,
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: client.name }),
+        el("span", { class: "meta", text: client.note }),
+      ),
+      // A client with no HTTP stanza of its own gets the generic one, which is
+      // the shape most schemas take. A client with one gets its own: `httpUrl`
+      // for Gemini, `serverUrl` for Windsurf, TOML for Codex — a generic block
+      // beside those is a second, wrong answer.
+      // One configuration block, not two. A client that can reach the
+      // endpoint is shown the endpoint; one that cannot — Zed, Claude Desktop,
+      // Amazon Q, which have nowhere to put a header — is shown the subprocess
+      // it can run. Printing both left a reader choosing between two answers
+      // with nothing to choose on.
+      el("span", {
+        class: "eyebrow",
+        text: config.length && config === http
+          ? "Over HTTP — one endpoint, one key, no subprocess"
+          : "As a subprocess — no key needed",
+      }),
+      (config.length ? config.map((s) => s.text) : [httpStanza()]).map((text) =>
+        codeBlock(text, "Copy stanza"),
+      ),
+      wired.length ? el("span", { class: "eyebrow", text: "Or from a terminal" }) : null,
+      wired.map((s) => copyField(s.text, true)),
+      spawned.length
+        ? el("span", { class: "eyebrow", text: "Or add the subprocess from a terminal" })
+        : null,
+      spawned.map((s) => copyField(s.text, true)),
+    );
+  }
+  showClient(chosen);
+
+  /* `semlith setup --register-all`, as a control.
+   *
+   * Ten clients have no registration command of their own, so the only way
+   * semlith reaches them is by writing their configuration file — and
+   * `src/setup.rs` states the rule that bends: a tool that edits a file it does
+   * not own eventually corrupts one. It holds for every default install. This
+   * is the user overriding it for their own machine, which is why the plan is
+   * fetched and shown first and nothing is written until a second click.
+   *
+   * Each file is backed up beside itself before its first write, each merge
+   * keeps every key it did not come to change, and a file that does not parse
+   * is refused rather than replaced. */
+  const planBox = el("div", { class: "rules" });
+  const planNote = el("div", { class: "note" });
+  let planned = null;
+
+  /* The safe one is the primary. The amber button that writes into ten real
+   * configuration files across the machine used to be the primary and the dry
+   * run beside it the secondary, so the visual hierarchy was upside down
+   * against the risk and the writing button was reachable without ever having
+   * looked at the preview. */
+  const write = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Write these files",
+    hidden: true,
+    onclick: async () => {
+      write.disabled = true;
+      planNote.className = "note";
+      planNote.textContent = "Writing…";
+      try {
+        const out = await post("/api/agents/register", { confirm: true });
+        const written = out.written || [];
+        planNote.textContent = written.length
+          ? `Wrote ${written.length} file${written.length === 1 ? "" : "s"}. Each has a .semlith-backup beside it.`
+          : "Nothing needed writing.";
+        planned = out.plan || [];
+        paintPlan();
+      } catch (e) {
+        planNote.className = "note bad";
+        planNote.textContent = e.message;
+        write.disabled = false;
+      }
+    },
+  });
+
+  const paintPlan = () => {
+    planBox.textContent = "";
+    for (const item of planned || []) {
+      const what =
+        item.action === "create"
+          ? "will be created"
+          : item.action === "merge"
+            ? "will be merged into"
+            : item.action === "already-done"
+              ? "already has semlith"
+              : `will be left alone — ${item.reason}`;
+      planBox.appendChild(
+        el(
+          "div",
+          { class: "rule-row" },
+          el(
+            "div",
+            { class: "rule-head" },
+            el("span", { class: "rule-id", text: item.client }),
+          ),
+          el("code", { class: "rule-check", text: item.path }),
+          el("span", { class: "sub", text: what }),
+        ),
+      );
+    }
+    const pending = (planned || []).some(
+      (p) => p.action === "create" || p.action === "merge",
+    );
+    write.hidden = !pending;
+    write.disabled = !pending;
+  };
+
+  const preview = el("button", {
+    class: "button small",
+    type: "button",
+    text: "Show what would be written",
+    onclick: async () => {
+      preview.disabled = true;
+      planNote.className = "note";
+      planNote.textContent = "Reading…";
+      try {
+        const out = await post("/api/agents/register", {});
+        planned = out.plan || [];
+        planNote.textContent = planned.length
+          ? "Nothing has been written yet."
+          : "There is no client on this machine whose file semlith would write.";
+        paintPlan();
+      } catch (e) {
+        planNote.className = "note bad";
+        planNote.textContent = e.message;
+      } finally {
+        preview.disabled = false;
+      }
+    },
+  });
+
+  const registerAll = el(
+    "div",
+    { class: "card pad" },
+    el("span", { class: "card-title", text: "Register the clients that have no command" }),
+    // Inline code as code, not as a pair of backtick characters. Every other
+    // code reference on this page is styled; this one was printed verbatim.
+    says(
+      "Ten of the twenty-seven cannot be asked to register themselves, so semlith would write their configuration file. Every path is listed before anything is written, each file is backed up beside itself, and one that does not parse is left alone. This is the terminal's ",
+      mono("semlith setup --register-all"),
+      ".",
+    ),
+    el("div", { class: "head" }, preview, write),
+    planBox,
+    planNote,
+  );
+
+  // ---- the login service
+  /* Whether the endpoint survives a reboot.
+   *
+   * The header above says "One endpoint, every client, no per-client process",
+   * and until 0.21.0 that endpoint existed only for as long as somebody kept a
+   * terminal open for it. This card is where that sentence is either true on
+   * this machine or not, named in the mechanism the platform actually uses.
+   *
+   * There is no Install button. No route installs a login service, and a
+   * button that posts to nothing is worse than the command it would hide. */
+  const MECHANISMS = {
+    launchd: "a launchd login agent",
+    systemd: "a systemd user service",
+    schtasks: "a Windows logon task",
+  };
+
+  /** A path or a command, labelled, monospace, and copyable. */
+  const labelled = (label, value) =>
+    el(
+      "div",
+      { class: "rows tight" },
+      el("span", { class: "eyebrow", text: label }),
+      copyField(value),
+    );
+
+  const serviceCard = () => {
+    // An older daemon, or a page cached from one, sends no `service` at all.
+    // No card is better than a card reporting "not installed" because it was
+    // never told either way.
+    if (!data.service) return null;
+    const status = data.service.status || {};
+    const mechanism = MECHANISMS[status.mechanism] || "a login service";
+    // Nothing at all when the daemon has not recorded a start: "never started"
+    // under a daemon that is answering this very request is a sentence that
+    // reads as a bug in the page.
+    const started = data.service.last_started
+      ? ` Last started ${when(data.service.last_started)}.`
+      : "";
+
+    const bits = [];
+    if (status.installed) {
+      bits.push(
+        says(
+          `The daemon is installed as ${mechanism}, so the endpoint is answering again after a reboot without anybody opening a terminal for it.${started}`,
+        ),
+      );
+    } else {
+      bits.push(
+        says(
+          `The daemon is not installed as a login service, so the endpoint lives exactly as long as whatever started it: close that terminal, or reboot, and every client configured below loses semlith until somebody starts it again.${started}`,
+        ),
+        labelled("To install", "semlith start --service"),
+      );
+    }
+    if (status.definition) bits.push(labelled("Definition", status.definition));
+    if (status.log) bits.push(labelled("Log", status.log));
+    // Said rather than left implied. A logon task is restarted when it *fails*;
+    // nothing supervises one that exited cleanly. A page that prints
+    // "installed" over both platforms claims a parity the product does not
+    // have.
+    if (status.installed && status.restarts === false) {
+      bits.push(
+        el("div", {
+          class: "note",
+          text: "A logon task is restarted only when it failed. One that exited cleanly stays stopped until the next logon, so a daemon stopped on purpose is a daemon started again on purpose.",
+        }),
+      );
+    }
+
+    return el(
+      "div",
+      { class: "card pad dense" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Login service" }),
+        el("span", { class: "spacer" }),
+        pill(
+          status.installed ? "installed" : "not installed",
+          status.installed ? "good" : "warn",
+        ),
+      ),
+      bits,
+    );
+  };
+
+  // ---- the clients somebody on this machine actually has
+  /* `semlith doctor`, cut to the clients in use.
+   *
+   * All twenty-seven rows are the Doctor page's job. The question here is
+   * narrower — of the clients this machine has, is each one reaching the
+   * endpoint — so the rows are the ones `doctor` itself calls in use and
+   * nothing else. A client nobody has is not a finding.
+   *
+   * `disabled_here` is deliberately not a state on this page. "Here" for the
+   * daemon is wherever a service manager started it, usually `/`, which is
+   * nobody's working directory; a row reading "switched off here" would be
+   * answering a question about a directory the reader has never stood in.
+   * `disabled_in` is the honest form — it names directories, and the reader is
+   * the one who knows which of them they work in. */
+  const inUse = (data.doctor || []).filter((c) => c && c.in_use);
+
+  const clientState = (c) => {
+    if (c.note) return { text: "cannot register", kind: null };
+    if (c.registered) return { text: `registered (${c.scope || "user"})`, kind: "good" };
+    if (!c.command) return { text: "not registered", kind: "bad" };
+    if (!c.present) return { text: "not installed", kind: null };
+    if (c.scope === "project") return { text: "one project only", kind: "bad" };
+    return { text: "installed, not registered", kind: "bad" };
+  };
+
+  /* Why a row is not green, and what to run about it.
+   *
+   * `explain` is written for `semlith doctor` run from a directory, so it says
+   * "this directory" — true of the shell that ran the command, and not of a
+   * daemon a launch agent started from the root of the disk. Where it says
+   * that, the line is composed from `disabled_in` instead, which names the
+   * directories rather than pointing at one. */
+  const clientWhy = (c) => {
+    const lines = [];
+    if (c.note) lines.push(el("span", { class: "sub", text: c.note }));
+    if (c.explain && !/this directory/i.test(c.explain))
+      lines.push(el("span", { class: "sub", text: c.explain }));
+    const off = (c.disabled_in || []).filter(Boolean);
+    if (off.length)
+      lines.push(el("span", { class: "meta", text: `switched off for: ${off.join(", ")}` }));
+    if (c.repair) lines.push(copyField(c.repair));
+    // A row the daemon calls a fault is coloured like one, so it does not get
+    // to stay silent about why: a red pill over an em dash is an accusation
+    // with no sentence after it. There is nothing to repair for a client that
+    // is not here, so what it gets is the reading rather than a command.
+    if (!lines.length && !c.present && c.fault)
+      lines.push(
+        el("span", {
+          class: "sub",
+          text: c.command
+            ? `Nothing named ${c.command} is on this machine.`
+            : "None of this client's configuration files are on this machine.",
+        }),
+      );
+    return lines.length
+      ? el("div", { class: "rows tight" }, lines)
+      : el("span", { class: "sub", text: "—" });
+  };
+
+  const inUseTable = inUse.length
+    ? dataTable({
+        caption:
+          "Every agent client installed on this machine, whether it is registered with semlith, and what to run for the ones that are not.",
+        sort: "name",
+        grow: false,
+        perPage: 10,
+        rows: inUse,
+        columns: [
+          { key: "name", label: "Client", sortable: true, value: (c) => c.name },
+          {
+            key: "state",
+            label: "semlith",
+            sortable: true,
+            value: (c) => clientState(c).text,
+            // `fault` is the daemon's own verdict, so a row it calls a fault
+            // reads as one whatever the text works out to. A client with a
+            // note is not a fault and must not borrow the colour of one.
+            render: (c) => {
+              const s = clientState(c);
+              return pill(s.text, c.fault ? "bad" : s.kind);
+            },
+          },
+          // Not `narrow-drop`: the reason is the point of the row, so on a
+          // phone the table scrolls sideways inside its card — the Doctor
+          // page's behaviour with the same rows — rather than hiding the one
+          // column that says what to do. The page itself never scrolls.
+          { key: "why", label: "Why", className: "why", render: clientWhy },
+        ],
+      })
+    : null;
+
+  const inUseCard = data.doctor
+    ? el(
+        "div",
+        { class: "card pad" },
+        el(
+          "div",
+          { class: "head" },
+          el("span", { class: "card-title", text: "Clients in use" }),
+          el("span", { class: "spacer" }),
+          el("span", {
+            class: "meta",
+            text: `${n(inUse.length)} of ${n((data.doctor || []).length)} known`,
+          }),
+        ),
+        inUseTable
+          ? inUseTable.node
+          : empty("No documented client is installed on this machine."),
+        says("All twenty-seven, including the ones nobody here has, are on the Doctor page."),
+      )
+    : null;
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead("Agents", "One endpoint, every client, no per-client process.", {
+      pill: statePill,
+      actions: [
+        el("div", { class: "copyfield worded" }, address, copyButton(endpoint.url, "Copy", true)),
+        toggle,
+        rotate,
+      ],
+    }),
+    endpointNote,
+    serviceCard(),
+    el(
+      "div",
+      { class: "card pad dense" },
+      el("span", { class: "card-title", text: "Agent key" }),
+      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
+      says(
+        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
+        mono("semlith mcp"),
+        ", which reads the key from ",
+        mono(data.key_path || "~/.semlith/agent.key"),
+        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
+        mono("${" + KEY_ENV + "}"),
+        " yourself.",
+      ),
+    ),
+    keyNote,
+    registerAll,
+    inUseCard,
+    el(
+      "div",
+      { class: "grid scroller" },
+      el(
+        "div",
+        { class: "rows" },
+        live.length
+          ? connected.node
+          : el(
+              "div",
+              { class: "card pad dense" },
+              el("span", { class: "card-title", text: "Connected" }),
+              empty("No client is talking to this daemon right now."),
+            ),
+        el(
+          "div",
+          { class: "card pad dense tools" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Tools exposed" }),
+            el("span", {
+              class: "meta",
+              text: `${tools.length} tool${tools.length === 1 ? "" : "s"}`,
+            }),
+          ),
+          // The schema is the first thing every agent reads and the last thing
+          // anyone thinks to measure: it is paid once per session, before a
+          // single question is asked. Measured from what this daemon is
+          // serving right now rather than quoted from a release, so the number
+          // cannot go stale on the page.
+          el(
+            "div",
+            { class: "cost" },
+            el("span", { class: "card-title", text: "What the tool list costs" }),
+            el("span", {
+              class: "cost-line",
+              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · about ${n(
+                Math.ceil((data.tool_list_bytes || 0) / 4),
+              )} tokens per session`,
+            }),
+            el("span", {
+              class: "cost-note",
+              text: "read once, before the agent asks anything",
+            }),
+          ),
+          el(
+            "div",
+            { class: "tool-grid" },
+            // The name and what it is for, both read from the tool's own
+            // definition: a second copy is how a tool ends up served with one
+            // description and documented with another.
+            tools.flatMap((tool) => [
+              el("span", { class: "tool-name", text: tool.name }),
+              el("span", { class: "tool-about", text: tool.about }),
+            ]),
+          ),
+        ),
+        installPanel(),
+      ),
+      el("div", { class: "card pad stanzas" }, tabs, chips, body),
+    ),
+  );
+}
+
+// --------------------------------------------------------------- privacy
+
+async function privacyView() {
+  let data;
+  try {
+    data = await api("/api/privacy");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Privacy"), error(e.message));
+  }
+
+  // Live: a repair applied here or from `semlith doctor --fix` moves the
+  // privacy counter, so the rows say what is true now rather than what was
+  // true when the page was opened.
+  watchLive(["privacy"], repaintView);
+
+  const tokenBox = el("code", { class: "text", text: data.token_preview || "—" });
+  const rotateNote = el("div", { class: "note" });
+  const rotate = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Rotate",
+    onclick: async () => {
+      rotate.disabled = true;
+      rotateNote.className = "note";
+      rotateNote.textContent = "Rotating…";
+      try {
+        const fresh = await post("/api/rotate", {});
+        // The rotate response is the one place the whole token appears after
+        // the printed URL, and this page has to take the new one before its
+        // next request: nothing else will tell it. What is shown is still the
+        // preview — a page that prints a live credential in full is a page
+        // someone screenshots.
+        session.set(String(fresh.token));
+        tokenBox.textContent = `${String(fresh.token).slice(0, 16)}…`;
+        rotateNote.textContent =
+          "Rotated. The old token stopped working immediately. This is the portal's own session token, not the agent key: no client stanza carries it, so nothing needs reconfiguring. The agent key is rotated on the Agents page.";
+      } catch (e) {
+        rotateNote.className = "note bad";
+        rotateNote.textContent = e.message;
+      } finally {
+        rotate.disabled = false;
+      }
+    },
+  });
+
+  const fact = (key, value, why) =>
+    el(
+      "div",
+      { class: "stat fact" },
+      el("span", { class: "eyebrow", text: key }),
+      el("span", { class: "fact-value", text: value }),
+      el("span", { class: "sub", text: why }),
+    );
+
+  /* The rules, with a way to act on them. Until 0.18.0 this page reported a
+   * failing rule and left the user to work out the command; a page that tells
+   * someone their store home is world-readable and stops there has done half a
+   * job.
+   *
+   * Every failing row gets the manual step, always, because that half works
+   * everywhere — including on Windows, where the mode rules have no reading at
+   * all. A row gets a button only where the daemon can repair it safely:
+   * narrowing, idempotent, on a path semlith owns, and re-checked by the rule's
+   * own check afterwards. `private addresses` has no button, and cannot: it is
+   * set in the environment the daemon inherited, and no process can unset a
+   * variable in its parent's.
+   *
+   * The button posts to the engine `semlith doctor --fix` calls. A repair
+   * implemented in the browser would be a second answer to what "safe" means,
+   * on the page whose whole subject is that question. */
+  const rulesBox = el("div", { class: "rules" });
+  const fixNote = el("div", { class: "note" });
+
+  const paintRules = (rules) => {
+    rulesBox.textContent = "";
+    for (const rule of rules) {
+      const unmeasured = rule.applicable === false;
+      const row = el(
+        "div",
+        { class: rule.ok || unmeasured ? "rule-row" : "rule-row bad" },
+        el(
+          "div",
+          { class: "rule-head" },
+          el("span", { class: "dot " + (unmeasured ? "" : rule.ok ? "good" : "warn") }),
+          el("span", { class: "rule-id", text: rule.id }),
+        ),
+        el("p", { class: "rule-text", text: rule.rule }),
+        // The reading, under the rule rather than beside it: it is a path or a
+        // count often enough that a column would spend the whole card's width
+        // on one of them and wrap the rest.
+        el(
+          "div",
+          { class: "rule-found" },
+          el("span", { class: "eyebrow", text: "found" }),
+          el("code", { class: "rule-check", text: rule.check }),
+        ),
+      );
+      if (!rule.ok && rule.manual) {
+        row.appendChild(
+          el(
+            "div",
+            { class: "rule-found" },
+            el("span", { class: "eyebrow", text: "to fix" }),
+            copyField(rule.manual),
+          ),
+        );
+      }
+      if (!rule.ok && rule.repair) {
+        const fix = el("button", {
+          class: "button secondary small",
+          type: "button",
+          text: "Fix",
+          onclick: async () => {
+            fix.disabled = true;
+            fixNote.className = "note";
+            fixNote.textContent = "Applying…";
+            try {
+              const out = await post("/api/privacy/fix", { rule: rule.id });
+              const applied = (out.applied || [])[0];
+              fixNote.textContent = applied
+                ? `${applied.path}: ${applied.now}, was ${applied.was}` +
+                  (applied.rechecked_ok ? "" : " — the rule still does not hold")
+                : "Nothing to apply.";
+              paintRules(out.rules || []);
+            } catch (e) {
+              fixNote.className = "note bad";
+              fixNote.textContent = e.message;
+              fix.disabled = false;
+            }
+          },
+        });
+        row.appendChild(fix);
+      }
+      rulesBox.appendChild(row);
+    }
+  };
+  paintRules(data.rules || []);
+
+  /* The scan, behind a button rather than in the page's load.
+   *
+   * It reads the stored text of every file in every store, which on a large one
+   * takes long enough that loading it with the page would make the whole
+   * Privacy page wait on a measurement most visits never look at. */
+  const scanNote = el("div", { class: "note" });
+  const scanBox = el("div", { class: "rows tight" });
+
+  const scanTable = dataTable({
+    caption: "Every file a store is still holding that semlith would refuse to index today.",
+    sort: "path",
+    columns: [
+      { key: "store", label: "Store", className: "meta", sortable: true, value: (f) => f.store },
+      {
+        key: "path",
+        label: "Path",
+        sortable: true,
+        value: (f) => f.path,
+        render: (f) => pathCell(f.path),
+      },
+      /* The rule, or the kind of credential and the line it sits on — never
+       * the text that matched. The route does not return it, and a page whose
+       * subject is what stays on this machine would be a poor place to reprint
+       * a secret in order to report that one was found. */
+      {
+        key: "why",
+        label: "Why it would be refused",
+        sortable: false,
+        render: (f) => lineCell(f.why),
+      },
+      {
+        key: "forget",
+        label: "",
+        sortable: false,
+        render: (f) =>
+          el("button", {
+            class: "forget",
+            type: "button",
+            text: "Forget",
+            onclick: () =>
+              ask({
+                title: "Forget this file?",
+                body: `${f.path} — its chunks and vectors are dropped from ${f.store}. The file on disk is untouched.`,
+                confirm: "Forget it",
+                tone: "bad",
+                run: () => forgetFound([f]),
+              }),
+          }),
+      },
+    ],
+    rows: [],
+  });
+
+  async function forgetFound(findings) {
+    scanNote.className = "note";
+    scanNote.textContent = "";
+    // One call per store: a write names the store it is for, and a set that
+    // spans two of them is two writes rather than an ambiguous one.
+    const byStore = new Map();
+    for (const f of findings) {
+      if (!byStore.has(f.store)) byStore.set(f.store, []);
+      // The store's own key, not the plain path beside it. On Windows they
+      // differ — the key carries the `\\?\` prefix — and a forget is a
+      // lookup, so it has to be spelled the way the store spelled it. `path`
+      // is what the row shows a person.
+      byStore.get(f.store).push(f.key || f.path);
+    }
+    try {
+      for (const [store, paths] of byStore) await post("/api/forget", { paths, store });
+    } catch (e) {
+      scanNote.className = "note bad";
+      scanNote.textContent = e.message;
+      // Rethrown so the dialog that asked stays open and shows it too.
+      throw e;
+    }
+    // Scanned again rather than spliced: the list has to redraw from a fresh
+    // reading, not from the assumption that the write did what it was asked.
+    await runScan();
+  }
+
+  const scanButton = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Scan",
+    onclick: () => runScan(),
+  });
+
+  async function runScan() {
+    scanButton.disabled = true;
+    scanButton.textContent = "Scanning…";
+    scanNote.className = "note";
+    scanNote.textContent = "";
+    try {
+      const found = (await api("/api/privacy/scan")).findings || [];
+      scanTable.update(found);
+      const stores = [...new Set(found.map((f) => f.store))];
+      fill(
+        scanBox,
+        found.length
+          ? [
+              el(
+                "div",
+                { class: "bulk" },
+                el("span", {
+                  class: "meta",
+                  text: `${n(found.length)} file${found.length === 1 ? "" : "s"} would be refused today`,
+                }),
+                el("span", { class: "spacer" }),
+                el("button", {
+                  class: "button danger small",
+                  type: "button",
+                  text: "Forget all",
+                  onclick: () =>
+                    ask({
+                      title: `Forget ${n(found.length)} file${found.length === 1 ? "" : "s"}?`,
+                      body: `Their chunks and vectors are dropped from ${stores.join(
+                        " and ",
+                      )}. The files on disk are untouched.`,
+                      confirm: `Forget ${n(found.length)} file${found.length === 1 ? "" : "s"}`,
+                      tone: "bad",
+                      run: () => forgetFound(found),
+                    }),
+                }),
+              ),
+              scanTable.node,
+            ]
+          : empty("Nothing this store holds would be refused today."),
+      );
+    } catch (e) {
+      scanNote.className = "note bad";
+      scanNote.textContent = e.message;
+    } finally {
+      scanButton.disabled = false;
+      scanButton.textContent = "Scan again";
+    }
+  }
+
+  /* The four steps, numbered, each with its own copy button. A packet capture
+   * is the only one of them that proves anything on its own; the others are
+   * what make the first one quick to believe. */
+  const step = (number, what, command) =>
+    el(
+      "div",
+      { class: "step-row" },
+      el("span", { class: "n", text: number }),
+      el(
+        "div",
+        { class: "what" },
+        el("div", { class: "say", text: what }),
+        copyField(command),
+      ),
+    );
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Privacy",
+      "The claim is “nothing leaves this machine”. This page is how you check it yourself, in about a minute.",
+      { pill: pill(data.airgap ? "airgap mode armed" : "airgap off", data.airgap ? "good" : null) },
+    ),
+    el(
+      "div",
+      { class: "strip" },
+      fact("Bind address", data.bind, "loopback only, with no flag to change it"),
+      fact("CORS", "none", "no origin may read this server's responses"),
+      fact("Host check", "localhost only", "a foreign Host header gets 400 before anything runs"),
+      fact("Assets", "include_bytes!", "the page you are reading is inside the binary"),
+      fact("Telemetry", "none", "no analytics, and no update check Semlith makes on its own"),
+      // Said on this page, not only on the Ledger page. Somebody checking the
+      // privacy claim should find the one thing semlith writes down about
+      // them here, with how to stop it, rather than discovering it elsewhere.
+      fact(
+        "Retrieval ledger",
+        "records locally",
+        "the daemon prints this on every start; --no-ledger stops it for a session, SEMLITH_LEDGER=0 for a machine, and the rows never leave the store",
+      ),
+      fact("Model cache", data.model_cached ? "cached" : "not downloaded", data.model_cache),
+    ),
+    el(
+      "div",
+      { class: "grid scroller" },
+      el(
+        "div",
+        { class: "card pad" },
+        el("span", { class: "card-title", text: "Verify it yourself" }),
+        el(
+          "div",
+          { class: "steps-list" },
+          step(
+            "1",
+            "Ask the operating system what this process has open. Only loopback should appear.",
+            "lsof -nP -p $(pgrep -f 'semlith start') -i",
+          ),
+          step(
+            "2",
+            "Watch every interface but loopback while you search. Nothing should appear.",
+            "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
+          ),
+          step(
+            "3",
+            "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
+            "semlith start --airgap",
+          ),
+          step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
+        ),
+      ),
+      el(
+        "div",
+        { class: "rows" },
+        /* The rules this release added, each with what the daemon found when it
+         * looked. A page that states a policy is a page; a page that states a
+         * policy and the reading behind it is something a reader can disagree
+         * with, which is the only version worth putting on a Privacy page. */
+        el(
+          "div",
+          { class: "card pad" },
+          el(
+            "div",
+            { class: "head" },
+            el("span", { class: "card-title", text: "Rules" }),
+            el("span", { class: "spacer" }),
+            pill(
+              // What the badge is actually about. "All holding" read as a
+              // statement about everything semlith is storing, three lines
+              // above a scan that had found a private key in a store — the
+              // rules are forward-looking, and this now says so.
+              (data.rules || []).every((r) => r.ok)
+                ? "holding for new writes"
+                : "check the rows",
+              (data.rules || []).every((r) => r.ok) ? "good" : "warn",
+            ),
+          ),
+          el("p", {
+            class: "subtitle",
+            text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
+          }),
+          rulesBox,
+          fixNote,
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el(
+            "div",
+            { class: "head" },
+            // The heading said "Scan" and the button beside it said "Scan",
+            // which rendered as the word twice.
+            el("span", { class: "card-title", text: "What is already stored" }),
+            el("span", { class: "spacer" }),
+            scanButton,
+          ),
+          el("p", {
+            class: "subtitle",
+            text: "The rules above decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
+          }),
+          scanBox,
+          scanNote,
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
+          says(
+            "The embedding model is downloaded once, on first index, and cached. ",
+            mono("semlith upgrade"),
+            " and ",
+            mono("semlith add"),
+            " reach the network only in the second you ask them to. ",
+            mono("--airgap"),
+            " refuses all three and exits naming what it refused.",
+          ),
+          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
+          el(
+            "div",
+            { class: "chips" },
+            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
+            el("span", {
+              class: "meta",
+              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
+            }),
+          ),
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Session token" }),
+          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
+          rotateNote,
+          says(
+            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
+            mono(data.token_header),
+            " header on every ",
+            mono("/api"),
+            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
+          ),
+          el("hr", { class: "rule" }),
+          el("span", { class: "card-title", text: "Content-Security-Policy" }),
+          codeBlock(data.csp),
+          el("p", {
+            class: "subtitle",
+            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
+          }),
+        ),
+      ),
+    ),
+  );
+}
+
+// ----------------------------------------------------------------- about
+
+/* Every name `--lang` accepts, with a tick on the ones the graph is extracted
+ * from. It lives here rather than on a page of its own because it is a fact
+ * about the binary, and a page that held one table was a click between the
+ * reader and a list they wanted to scan. */
+function langCard(languages, withEdges) {
+  const edges = new Set(withEdges);
+  return el(
+    "div",
+    { class: "card pad lang-card" },
+    el(
+      "div",
+      { class: "rows tight" },
+      el("span", { class: "card-title", text: `${languages.length} languages` }),
+      el("span", {
+        class: "subtitle",
+        text:
+          edges.size === languages.length
+            ? `Search filters and the code graph read the same table, so the two cannot disagree. Every one carries graph edges.`
+            : `Search filters and the code graph read the same table, so the two cannot disagree. ${edges.size} of ${languages.length} carry graph edges.`,
+      }),
+    ),
+    el(
+      "div",
+      { class: "lang-grid" },
+      languages.map((lang) => {
+        const has = edges.has(lang.name);
+        const names = (lang.extensions || [])
+          .map((e) => `.${e}`)
+          .concat(lang.filenames || []);
+        return el(
+          "div",
+          { class: "lang-row" },
+          // Every row is ticked, because every row is true of the thing the
+          // tick says: the language is indexed and `--lang` selects it. A
+          // language that also carries graph edges says so beside its name.
+          // Since 0.17.0 that is all of them, and the mark stays rather than
+          // being dropped as redundant: if a grammar is ever refused — a
+          // copyleft licence is the case that would do it — the gap has to be
+          // visible here rather than inferred from its absence.
+          el("span", {
+            class: "tick on",
+            title: "indexed, and --lang selects it",
+            text: "✓",
+          }),
+          el("span", { class: "name", text: lang.name }),
+          has ? el("span", { class: "graph-mark", text: "graph" }) : null,
+          el("span", { class: "spacer" }),
+          el("span", { class: "exts", text: names.join(" ") }),
+        );
+      }),
+    ),
+    says(
+      `All ${languages.length} are indexed and selectable with `,
+      mono("--lang"),
+      edges.size === languages.length
+        ? ", and every one marked "
+        : `. The ${edges.size} marked `,
+      mono("graph"),
+      edges.size === languages.length
+        ? " carries symbols and edges as well, from a tree-sitter grammar. "
+        : " carry symbols and edges as well, from a tree-sitter grammar; the rest are searched as text. ",
+      mono("semlith languages"),
+      " prints the same table. Extension and filename decide the language — file contents are never read to guess it, because a store is searched far more often than it is built. Those grammars are most of what the binary weighs, and no language was dropped to hit a size.",
+    ),
+  );
+}
+
+async function aboutView() {
+  let about;
+  let models;
+  let languages;
+  try {
+    [about, models, languages] = await Promise.all([
+      api("/api/about"),
+      api("/api/models"),
+      api("/api/languages"),
+    ]);
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("About"), error(e.message));
+  }
+
+  const row = (key, value) =>
+    el(
+      "div",
+      { class: "kv pair" },
+      el("span", { class: "k", text: key }),
+      el("span", { class: "v", text: value }),
+    );
+
+  const list = (models && models.models) || [];
+  const table = dataTable({
+    className: "w-models",
+    caption: "Every embedding model a store can be built with, and which of them this machine has fetched.",
+    sort: "name",
+    perPage: 10,
+    rows: list,
+    columns: [
+      {
+        key: "name",
+        label: "Model",
+        className: "path",
+        value: (m) => m.name,
+        // The name to type beside where it comes from. The column mixed three
+        // naming schemes — fastembed's CamelCase, a HuggingFace path and
+        // semlith's own kebab-case — with nothing saying which was which; the
+        // name is what `--model` takes, and the repository is the second line.
+        render: (m) =>
+          el(
+            "div",
+            { class: "rows tight" },
+            el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
+            m.code
+              ? el("span", { class: "meta one-line", "data-tip": m.code, text: m.code })
+              : null,
+          ),
+      },
+      { key: "dim", label: "Dims", className: "num", value: (m) => m.dim, render: (m) => String(m.dim) },
+      {
+        key: "bytes",
+        label: "Size",
+        className: "num",
+        // Empty last, whichever way the column is sorted. Forty-three of the
+        // forty-eight rows have no size, so sorting ascending put every blank
+        // first and buried the only five rows with data.
+        value: (m) => m.bytes || 0,
+        empty: (m) => !m.bytes,
+        // Blank rather than guessed: a model this machine has never fetched has
+        // no size here to measure, and fastembed's catalogue does not carry one.
+        render: (m) => (m.bytes ? bytes(m.bytes) : "—"),
+      },
+      { key: "description", label: "Note", className: "meta", value: (m) => m.description },
+    ],
+  });
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead("About", "One Rust binary. The portal you are reading is compiled into it."),
+    el(
+      "div",
+      // Sized to its content rather than to the height left over, so the page
+      // scrolls as one. With `grow` the two columns were capped at the
+      // viewport and the language card — 46 rows — pushed the rest of the left
+      // column out of sight with nothing to scroll it back.
+      { class: "grid two" },
+      el(
+        "div",
+        { class: "rows" },
+        el(
+          "div",
+          { class: "card pad" },
+          row("Version", `${about.version} · store format ${about.format_version}`),
+          row("Binary", `${about.binary} · ${bytes(about.binary_bytes)} · ${about.target}`),
+          row("Bound to", about.bind),
+          row("Store home", about.store_home),
+          row("Model cache", about.model_cache),
+          row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
+        ),
+        langCard(languages.languages || [], about.graph_languages || []),
+      ),
+      list.length ? table.node : el("div", { class: "card pad" }, empty("No model is listed.")),
+    ),
+    el("p", {
+      class: "subtitle",
+      text: "The model is fixed when a store is created — vectors from two models are not comparable. To switch, delete the store and index again.",
+    }),
+  );
+}
+
+// --------------------------------------------------------------- welcome
+
+function welcomeView() {
+  const note = el("div", { class: "note" });
+  const field = el("input", { type: "text", placeholder: "~/Documents/work" });
+
+  const step = (num, title, what) =>
+    el(
+      "div",
+      { class: "step" },
+      el("span", { class: "eyebrow", text: num }),
+      el("span", { class: "card-title", text: title }),
+      el("span", { class: "what", text: what }),
+    );
+
+  return el(
+    "div",
+    { class: "welcome" },
+    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "Semlith" })),
+    el(
+      "div",
+      { class: "hero" },
+      el(
+        "div",
+        { class: "titles" },
+        el("h1", { class: "hero-title", text: "No stores yet" }),
+        el("p", {
+          class: "subtitle",
+          text: "The daemon is running and holds nothing. Point it at a folder and it indexes everything a person could read in there — code, Markdown, PDFs, Office files, notebooks, books and mail.",
+        }),
+      ),
+      el(
+        "div",
+        { class: "field tall" },
+        el("span", { class: "prefix", text: "path" }),
+        labelled("welcome-path", "Folder to index", field),
+      ),
+      note,
+      el(
+        "div",
+        { class: "actions" },
+        el("button", {
+          class: "button",
+          type: "button",
+          text: "Index this folder",
+          onclick: () => {
+            const path = field.value.trim();
+            if (!path) {
+              note.className = "note bad";
+              note.textContent = "Give a path first, or open the picker instead.";
+              field.focus();
+              return;
+            }
+            // Carried across rather than dropped: this button used to validate
+            // a path and then open the Index view with an empty field.
+            state.pendingPath = path;
+            go("index");
+          },
+        }),
+        el("button", {
+          class: "button secondary",
+          type: "button",
+          text: "Open the folder picker",
+          onclick: () => go("index"),
+        }),
+        el("button", {
+          class: "button ghost",
+          type: "button",
+          text: "Skip for now",
+          onclick: () => go("about"),
+        }),
+      ),
+      el("hr", { class: "rule" }),
+      el("span", { class: "eyebrow", text: "Or from a terminal" }),
+      copyField("semlith index ~/Documents/work"),
+      says(
+        "No ",
+        mono("--store"),
+        " flag. It lands in ",
+        mono("~/.semlith/stores/work"),
+        " and is registered against that root.",
+      ),
+    ),
+    el(
+      "div",
+      { class: "steps" },
+      step("01", "Index", "One pass over the folder. Only what changed is re-embedded on the next."),
+      step("02", "Stays current", "The daemon watches the roots and re-embeds on save."),
+      step("03", "Ask", "From here, the CLI, or any agent over MCP — the same fused search."),
+    ),
+    el("div", { class: "foot", text: "127.0.0.1 · loopback only · no external asset" }),
+  );
+}
+
+// ---------------------------------------------------------------- router
+
+const RENDER = {
+  stores: storesView,
+  files: filesView,
+  index: indexView,
+  search: searchView,
+  agents: agentsView,
+  privacy: privacyView,
+  doctor: doctorView,
+  about: aboutView,
+  graph: graphView,
+  ledger: ledgerView,
+};
+
+function go(id) {
+  // On a phone the drawer covers the page it is navigating to, so it closes on
+  // the way out. Done here rather than on each nav item because every route
+  // into a page goes through this — the rail, the drawer, the brand, the search
+  // launcher, the "Index a folder" button and the `/` shortcut.
+  if (shell.main && window.matchMedia(NARROW).matches && state.navOpen) {
+    setNav(false);
+  }
+  // Re-render even when the hash is already this page: clicking the nav item
+  // for the page you are on should still do something, and no hashchange
+  // fires for an unchanged hash.
+  if ((location.hash || "").slice(1) === id) render();
+  else location.hash = `#${id}`;
+}
+
+/** Whether dark is showing, whether by choice or by the OS. */
+function isDark() {
+  const chosen = document.documentElement.getAttribute("data-theme");
+  if (chosen) return chosen === "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+/** The mark, in whichever theme is showing. */
+function logoImage(size) {
+  return el("img", {
+    class: "logo",
+    src: isDark() ? "logo-dark.svg" : "logo.svg",
+    alt: "",
+    width: size,
+    height: size,
+  });
+}
+
+/** The three states the control offers, in the order it cycles them. */
+const THEMES = ["system", "light", "dark"];
+
+function theme(next) {
+  // "system" is the absence of a choice, which is what the stylesheet's
+  // prefers-color-scheme block reads. Before this the first click wrote a
+  // choice and there was no way back to following the OS without clearing the
+  // site's storage.
+  if (next === "system") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", next);
+  }
+  state.theme = next;
+  try {
+    if (next === "system") localStorage.removeItem("semlith-theme");
+    else localStorage.setItem("semlith-theme", next);
+  } catch (_) {
+    /* a private window refuses storage; the toggle still works for this run */
+  }
+  for (const img of document.querySelectorAll("img.logo")) {
+    img.src = isDark() ? "logo-dark.svg" : "logo.svg";
+  }
+  paintThemeButton();
+}
+
+/** The control shows where it goes, not where you are. */
+function paintThemeButton() {
+  const button = shell.themeButton;
+  if (!button) return;
+  const next = THEMES[(THEMES.indexOf(state.theme || "system") + 1) % THEMES.length];
+  const label = {
+    system: "Follow the system theme",
+    light: "Switch to light",
+    dark: "Switch to dark",
+  }[next];
+  const glyph = { system: ICONS.monitor, light: ICONS.sun, dark: ICONS.moon }[next];
+  fill(button, icon(glyph));
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+}
+
+// ----------------------------------------------------------------- shell
+
+const shell = {};
+
+function buildShell() {
+  const hamburger = el(
+    "button",
+    {
+      class: "hamburger",
+      type: "button",
+      "aria-label": "Toggle navigation",
+      "aria-expanded": String(state.navOpen),
+      onclick: () => setNav(!state.navOpen, true),
+    },
+    icon(ICONS.menu, 17),
+  );
+
+  const pageTitle = el("span", { class: "page-title" });
+
+  const themeButton = el("button", {
+    class: "icon-button",
+    type: "button",
+    // system → light → dark → system. Three states rather than two, because
+    // "follow the system" is one of them and the two-state toggle could not
+    // return to it.
+    onclick: () =>
+      theme(THEMES[(THEMES.indexOf(state.theme || "system") + 1) % THEMES.length]),
+  });
+  shell.themeButton = themeButton;
+  paintThemeButton();
+
+  const topbar = el(
+    "div",
+    { class: "topbar" },
+    hamburger,
+    el(
+      "button",
+      {
+        class: "brand",
+        type: "button",
+        "aria-label": "Semlith — go to Stores",
+        onclick: () => go("stores"),
+      },
+      logoImage(26),
+      el("span", { class: "wordmark", text: "Semlith" }),
+    ),
+    el("span", { class: "divider-v" }),
+    pageTitle,
+    // On every page, not only on Index: a run the user started and navigated
+    // away from should never be something that happened out of sight.
+    el("button", {
+      class: "pill good run-count",
+      type: "button",
+      hidden: true,
+      title: "Go to Index",
+      onclick: () => go("index"),
+    }),
+    el("span", { class: "spacer" }),
+    el(
+      "button",
+      {
+        class: "search-launcher",
+        type: "button",
+        "aria-label": "Search the index",
+        onclick: () => go("search"),
+      },
+      icon(ICONS.search, 15),
+      el("span", { class: "what", text: "Ask the index a question" }),
+      el("span", { class: "key-hint", text: "/" }),
+    ),
+    themeButton,
+  );
+
+  const groups = [];
+  for (const view of VIEWS) {
+    const last = groups[groups.length - 1];
+    if (last && last.label === view.group) last.items.push(view);
+    else groups.push({ label: view.group, items: [view] });
+  }
+
+  const rail = el(
+    "nav",
+    { class: "rail", "aria-label": "Sections" },
+    groups.map((group, i) =>
+      el(
+        "div",
+        { class: "rail-group" },
+        group.items.map((view) =>
+          el(
+            "button",
+            {
+              class: "rail-item",
+              type: "button",
+              "data-view": view.id,
+              "aria-label": view.label,
+              title: view.label,
+              onclick: () => go(view.id),
+            },
+            icon(NAV_ICONS[view.id], 17),
+          ),
+        ),
+        i < groups.length - 1 ? el("div", { class: "rail-rule" }) : null,
+      ),
+    ),
+    el("span", { class: "spacer" }),
+    el("span", { class: "live-dot", title: "semlith start" }),
+  );
+
+  const sidebar = el(
+    "nav",
+    { class: "sidebar", "aria-label": "Sections" },
+    groups.map((group) =>
+      el(
+        "div",
+        { class: "nav-group" },
+        el("div", { class: "nav-group-label", text: group.label }),
+        group.items.map((view) =>
+          el(
+            "button",
+            {
+              class: "nav-item",
+              type: "button",
+              "data-view": view.id,
+              onclick: () => go(view.id),
+            },
+            icon(NAV_ICONS[view.id], 16),
+            el("span", { text: view.label }),
+          ),
+        ),
+      ),
+    ),
+    el("span", { class: "spacer" }),
+    el(
+      "div",
+      { class: "daemon-card" },
+      el("div", { class: "who" }, el("span", { class: "live-dot" }), mono("semlith start")),
+      // The address with its port: "127.0.0.1" alone does not tell you which
+      // of two daemons this tab is looking at.
+      el("div", { class: "fact", text: `${location.host} · sole writer` }),
+      el("div", { class: "fact", id: "daemon-stores", text: "" }),
+    ),
+  );
+
+  const scrim = el("button", {
+    class: "scrim",
+    type: "button",
+    "aria-label": "Close navigation",
+    hidden: true,
+    onclick: () => setNav(false, true),
+  });
+
+  const main = el("main", {});
+  const body = el("div", { class: "body" }, rail, sidebar, scrim, main);
+
+  Object.assign(shell, { topbar, pageTitle, rail, sidebar, scrim, main, hamburger });
+  return el("div", { id: "app" }, topbar, body);
+}
+
+/** Open or close the navigation without re-rendering the view inside it. */
+function setNav(open, fromUser) {
+  const was = state.navOpen;
+  state.navOpen = open;
+  const narrow = window.matchMedia(NARROW).matches;
+  shell.hamburger.setAttribute("aria-expanded", String(open));
+  shell.sidebar.hidden = !open;
+  // The rail is the wide-screen stand-in for the closed drawer. On a narrow
+  // screen CSS hides it outright, so it is only ever a wide-screen concern.
+  shell.rail.hidden = open || narrow;
+  shell.scrim.hidden = !(open && narrow);
+
+  // Over a page, the drawer is a cover — so the keyboard goes into it when it
+  // opens and comes back to the button that opened it when it closes. Only for
+  // a deliberate toggle: stealing focus on load or on a resize would be rude.
+  if (!fromUser || !narrow || open === was) return;
+  if (open) {
+    const first = shell.sidebar.querySelector(".nav-item");
+    if (first) first.focus();
+  } else {
+    shell.hamburger.focus();
+  }
+}
+
+function markCurrent(current) {
+  for (const node of document.querySelectorAll("[data-view]")) {
+    if (node.getAttribute("data-view") === current) node.setAttribute("aria-current", "page");
+    else node.removeAttribute("aria-current");
+  }
+}
+
+let renderGeneration = 0;
+
+async function render() {
+  const current = (location.hash || "#stores").slice(1);
+  const root = document.getElementById("root");
+
+  // With no store there is nothing for the navigation to navigate, so the
+  // first-run screen is the whole page rather than a view inside the shell.
+  if (!state.stores.length && current !== "index" && current !== "about") {
+    fill(root, welcomeView());
+    shell.main = null;
+    return;
+  }
+
+  if (!shell.main || !root.contains(shell.main)) {
+    fill(root, buildShell());
+    setNav(state.navOpen);
+  }
+
+  // Every watcher belongs to the view that registered it, so they go when it
+  // does. Without this, leaving a page would leave its refetch running.
+  resetLive();
+  state.onRuns = null;
+
+  const view = VIEWS.find((v) => v.id === current) || VIEWS[0];
+  shell.pageTitle.textContent = view.title;
+  document.title = `Semlith · ${view.title}`;
+  markCurrent(view.id);
+
+  paintStoreCount();
+  paintRunCount();
+
+  const mine = ++renderGeneration;
+  fill(shell.main, el("div", { class: "view" }, el("p", { class: "subtitle", text: "Loading…" })));
+  try {
+    const node = await (RENDER[view.id] || RENDER.stores)();
+    if (mine !== renderGeneration) return;
+    fill(shell.main, node);
+  } catch (e) {
+    if (mine !== renderGeneration) return;
+    fill(shell.main, el("div", { class: "view" }, error(e.message)));
+  }
+}
+
+async function boot() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem("semlith-theme");
+  } catch (_) {
+    /* private window */
+  }
+  // Only an explicit choice stamps the attribute. Without one the stylesheet's
+  // prefers-color-scheme block decides, so a machine set to dark is not shown
+  // a white page and asked to go and find the toggle.
+  if (saved === "dark" || saved === "light") {
+    theme(saved);
+  } else {
+    state.theme = "system";
+  }
+
+  wireTips();
+
+  await refreshStores();
+  // Not awaited: the sidebar's agent count is a detail, and `claude mcp list`
+  // behind this route is slow on some machines. It fills itself in.
+  api("/api/agents").then(noteAgents).catch(() => {});
+  // Likewise the run count: a page opened while three runs are on should say
+  // so, and the number is not worth holding the first paint for.
+  refreshRuns().catch(() => {});
+  await render();
+
+  // One clock, started once, for the life of the tab. Every live view hangs
+  // off it; no view starts a timer of its own.
+  startLive();
+
+  window.addEventListener("hashchange", render);
+
+  // A width change moves the drawer between overlay and column. Without this
+  // the scrim stayed over the content after a resize until the next navigation.
+  window.matchMedia(NARROW).addEventListener("change", (e) => {
+    if (shell.main) setNav(!e.matches);
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.navOpen && window.matchMedia(NARROW).matches && shell.main) {
+      setNav(false, true);
+      return;
+    }
+    if (e.key !== "/" || e.target.matches("input, textarea, select")) return;
+    e.preventDefault();
+    if ((location.hash || "").slice(1) === "search") {
+      const box = document.querySelector(".search-field input");
+      if (box) box.focus();
+      return;
+    }
+    go("search");
+  });
+}
+
+boot();

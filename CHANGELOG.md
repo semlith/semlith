@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-19
+
+Retrieval was measured by an instrument that could not measure it. This release
+rebuilt the instrument first and only then moved the number, which is why the
+figures below are lower than the ones they replace and mean more.
+
+On thirty questions held out before any ranking work, scored once at the end:
+hit@1 **66 %**, hit@3 **76 %**, hit@8 **83 %**, against 0.21.0's 60 / 73 / 83 on
+the same corpus through the same harness. On the seventy-seven the work was
+tuned against: 71 / 81 / 87 against 48 / 56 / 65 — and the distance between those
+two gains is what tuning against a visible set is worth.
+
+**The gate this release was specified against is not met.** It asked for hit@8
+at 95 %, hit@3 at 85 % and hit@1 at 70 %. The gate moves to the next release
+rather than being restated as met, and what stands in its way is named on the
+performance page.
+
+**Every retrieval number this project published before today was wrong**, and in
+the same direction. They were taken over a corpus that moved with every commit;
+against a question set in which 47 of 92 spans no longer held the symbol they
+named; and by a harness in which a `path` question counted in the denominator
+and could never record a hit, which capped hit@8 at 87 % by construction. They
+are withdrawn rather than updated.
+
+### The measuring stick, before the ranking work
+
+- **The retrieval harness indexes a pinned corpus, not the working tree.**
+  `tests/fixtures/retrieval/corpus` is the 0.21.0 tree at `4e8df39`, less
+  `tests/drive` and less the retrieval fixtures themselves — 146 files and
+  3.1 MB, recorded in `corpus.yaml` and asserted by file count and byte total
+  on every run. Until now the harness copied `src`, `tests`, `docs` and
+  `AGENTS.md` out of whatever tree it was compiled in, so every figure it
+  printed moved with the repository as well as with the ranking. That is why
+  the README said 12/18/26 of 47 on the same day the harness said 10/14/19.
+- **The question set is 107 questions, split 77 development / 30 sealed.** The
+  57 written for 0.14.0 are re-pinned to the snapshot — 47 of their 92 spans no
+  longer held the symbol they named — and 50 new ones were written from reading
+  the snapshot, reaching into the files the old set never touched. The split is
+  seeded and stratified by shape and tool, and the sealed thirty are scored once
+  at completion, behind `SEMLITH_RETRIEVAL_SEALED`; the harness prints which set
+  it is scoring on its first line.
+- **Every figure is the median of three runs, with the spread beside it,** and a
+  run is an index and a scoring rather than a second scoring of one store. The
+  drift issue #88 records was at index time, so three scorings of one store are
+  one run reported three times. `symbol` and `neighbors` questions are scored
+  rather than skipped.
+- **A `path` question can be a hit.** It was counted in the denominator and could
+  never record one, so every path question was a permanent miss however well the
+  tool answered it — one run reported "chains found 6 of 7" and "wrong yes 0"
+  beside ten path questions missing at k=8. Ten of seventy-seven questions unable
+  to score capped hit@8 at 87 %, which is below the gate this release ships
+  against, so the gate was unreachable by construction rather than by retrieval.
+  Every retrieval figure this project has published understates itself for this
+  reason.
+
+### Retrieval
+
+- **An identifier-shaped query puts the definition first.** Typing a name you
+  already know returns the chunks that define that name above the fused order,
+  badged `definition`. Reciprocal-rank fusion is nearly flat across the first
+  ranks, so one authoritative list placing a definition first was outvoted by
+  two vague lists placing something else fourth and fifth — and five identifier
+  questions on the pinned corpus had no satisfying span in the first eight
+  results, two of them definitions that ranked first in the keyword index alone.
+
+### Fixed
+
+- **The native smoke harness no longer writes under your own home** (#106). It
+  pinned `SEMLITH_HOME` and not `HOME`, and a client configuration lives under
+  the user's home, so a run on a developer's machine rewrote that developer's
+  real Claude Code, Cursor and Codex registrations. It now redirects `HOME` too,
+  and a new check compares every client configuration path in `docs/clients.md`
+  by checksum before and after the run.
+- **The smoke harness says what supervision it found** before deciding whether
+  a login service can be tested — `launchctl managername` on macOS,
+  `systemctl --user show-environment` on Linux — so a log says why a check was
+  skipped rather than only that it was.
+
+  **#104 is not fixed**, and the attempt is recorded rather than buried. The
+  aim was to tell a host that cannot supervise from one that can, so
+  `cli/service/recovers` could skip instead of being carried as an expected
+  failure. Two probes were tried on real runners and both were wrong: the GitHub
+  macOS runner answers `launchctl print gui/<uid>` and reports an `Aqua` session,
+  and still will not bring a killed user agent back. It presents every property
+  a real login session has. The known-failures row is back, now carrying that
+  finding, and #104 stays open.
+
 ## [0.21.0] - 2026-09-18
 
 On 2026-09-17 a session opened with no semlith server. The registration was

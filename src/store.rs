@@ -263,12 +263,35 @@ impl Drop for Writing<'_> {
 /// key rather than an unknown.
 ///
 /// 1 is a single `index.tv`. 2 is a directory of shards, written by 0.7.0 and
-/// later; see [`crate::index`]. A binary understands every format up to its
-/// own, so this one reads both and creates the newer.
-pub const FORMAT_VERSION: u32 = 2;
+/// later; see [`crate::index`]. 3 is a store whose chunks are cut at the
+/// definitions tree-sitter found rather than at a fixed 800-character window,
+/// written by 0.22.0 and later. A binary understands every format up to its
+/// own, so this one reads all three and creates the newest.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// The first format that keeps its vectors in shards.
 pub const SHARDED_FORMAT: u32 = 2;
+
+/// The first format whose chunks are cut at definitions.
+///
+/// A store below this holds fixed windows and still answers: a chunk is a chunk
+/// whichever rule cut it, and nothing about the row or the vector changes. What
+/// changes is where the boundaries fall, so a store that is half one rule and
+/// half the other would rank its own files against each other unevenly — which
+/// is why the first full index pass under 0.22.0 re-chunks everything it walks
+/// rather than waiting for each file to be edited. `semlith stats` says which
+/// rule a store is on until it has.
+pub const DEFINITION_CHUNKS: u32 = 3;
+
+/// Which chunking rule this store's chunks were cut by, in the words `stats`
+/// and the portal print.
+pub fn chunking(db: &Connection) -> Result<&'static str> {
+    Ok(if format(db)? >= DEFINITION_CHUNKS {
+        "definitions"
+    } else {
+        "fixed windows"
+    })
+}
 
 /// Which layout this store's vectors are in.
 ///

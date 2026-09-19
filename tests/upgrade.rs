@@ -264,6 +264,14 @@ fn routes(release: &Release, sums: &str) -> HashMap<String, Vec<u8>> {
     ])
 }
 
+// Debug only, and not because the test is fussy: `upgrade::origin` reads
+// SEMLITH_RELEASES_ORIGIN under `cfg(debug_assertions)` and nowhere else, so a
+// release binary has one origin and no way to be told another. Every test below
+// drives the real binary against the fixture server through that variable, so in
+// a release build they point at github.com instead and assert against whatever
+// the network says. They were silently failing `cargo test --release` — six of
+// eight, at v0.21.0 as well — while `cargo test`, which is what CI runs, passed.
+#[cfg(debug_assertions)]
 #[test]
 fn a_tampered_checksum_leaves_the_original_binary_alone() {
     let work = tempfile::tempdir().unwrap();
@@ -300,6 +308,14 @@ fn a_tampered_checksum_leaves_the_original_binary_alone() {
     );
 }
 
+// Debug only, and not because the test is fussy: `upgrade::origin` reads
+// SEMLITH_RELEASES_ORIGIN under `cfg(debug_assertions)` and nowhere else, so a
+// release binary has one origin and no way to be told another. Every test below
+// drives the real binary against the fixture server through that variable, so in
+// a release build they point at github.com instead and assert against whatever
+// the network says. They were silently failing `cargo test --release` — six of
+// eight, at v0.21.0 as well — while `cargo test`, which is what CI runs, passed.
+#[cfg(debug_assertions)]
 #[test]
 fn a_matching_checksum_swaps_and_keeps_the_old_binary() {
     let work = tempfile::tempdir().unwrap();
@@ -358,6 +374,14 @@ fn airgap_refuses_before_opening_a_connection() {
 /// An archive larger than the cap is refused before the checksum, because the
 /// refusal has to happen before the bytes are in memory — a checksum computed
 /// over a gigabyte has already cost the gigabyte.
+// Debug only, and not because the test is fussy: `upgrade::origin` reads
+// SEMLITH_RELEASES_ORIGIN under `cfg(debug_assertions)` and nowhere else, so a
+// release binary has one origin and no way to be told another. Every test below
+// drives the real binary against the fixture server through that variable, so in
+// a release build they point at github.com instead and assert against whatever
+// the network says. They were silently failing `cargo test --release` — six of
+// eight, at v0.21.0 as well — while `cargo test`, which is what CI runs, passed.
+#[cfg(debug_assertions)]
 #[test]
 fn an_oversized_archive_is_refused_before_it_is_checksummed() {
     let work = tempfile::tempdir().unwrap();
@@ -434,6 +458,14 @@ fn a_malformed_tag_is_refused_before_any_request() {
 
 /// A redirect that lands somewhere that is not a version tag is a redirect
 /// choosing a path inside this command, so it is refused where it lands.
+// Debug only, and not because the test is fussy: `upgrade::origin` reads
+// SEMLITH_RELEASES_ORIGIN under `cfg(debug_assertions)` and nowhere else, so a
+// release binary has one origin and no way to be told another. Every test below
+// drives the real binary against the fixture server through that variable, so in
+// a release build they point at github.com instead and assert against whatever
+// the network says. They were silently failing `cargo test --release` — six of
+// eight, at v0.21.0 as well — while `cargo test`, which is what CI runs, passed.
+#[cfg(debug_assertions)]
 #[test]
 fn a_redirect_that_names_no_tag_is_refused() {
     let work = tempfile::tempdir().unwrap();
@@ -464,6 +496,14 @@ fn a_redirect_that_names_no_tag_is_refused() {
 /// The archive carries more than the binary from 0.14.0 — the Linux ones ship
 /// `libonnxruntime.so` beside it — so the reader extracts every file rather
 /// than picking one out.
+// Debug only, and not because the test is fussy: `upgrade::origin` reads
+// SEMLITH_RELEASES_ORIGIN under `cfg(debug_assertions)` and nowhere else, so a
+// release binary has one origin and no way to be told another. Every test below
+// drives the real binary against the fixture server through that variable, so in
+// a release build they point at github.com instead and assert against whatever
+// the network says. They were silently failing `cargo test --release` — six of
+// eight, at v0.21.0 as well — while `cargo test`, which is what CI runs, passed.
+#[cfg(debug_assertions)]
 #[test]
 fn every_file_in_the_archive_is_unpacked_beside_the_binary() {
     let work = tempfile::tempdir().unwrap();
@@ -521,6 +561,14 @@ fn every_file_in_the_archive_is_unpacked_beside_the_binary() {
 /// `--check` is what a script runs, so its exit code is the answer: 0 when
 /// current, 10 when there is something newer, and the binary untouched either
 /// way.
+// Debug only, and not because the test is fussy: `upgrade::origin` reads
+// SEMLITH_RELEASES_ORIGIN under `cfg(debug_assertions)` and nowhere else, so a
+// release binary has one origin and no way to be told another. Every test below
+// drives the real binary against the fixture server through that variable, so in
+// a release build they point at github.com instead and assert against whatever
+// the network says. They were silently failing `cargo test --release` — six of
+// eight, at v0.21.0 as well — while `cargo test`, which is what CI runs, passed.
+#[cfg(debug_assertions)]
 #[test]
 fn check_exits_ten_when_an_upgrade_exists_and_changes_nothing() {
     let work = tempfile::tempdir().unwrap();
