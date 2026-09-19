@@ -166,19 +166,25 @@ pub fn language_of(path: &Path) -> Option<&'static str> {
 /// What each grammar's `TAGS_QUERY` does not give us.
 ///
 /// Kept short on purpose: the bundled query is the source of truth for
-/// definitions, and this closes the two gaps it has — imports, which no grammar
-/// here captures, and calls, which TypeScript and C do not.
+/// definitions, and this closes the three gaps it has — imports, which no
+/// grammar here captures; calls, which TypeScript and C do not; and constants,
+/// which almost none of them do.
+///
+/// A constant is a definition an agent types by name, and without a symbol row
+/// the definition lift in `search_preferring` cannot fire for one. That is why
+/// `MAX_NODES`, `RRF_K` and `KEY_GRACE` were the identifier questions 0.22.0
+/// could not put in the top three while `edges_out` and `DEPENDENCY_KINDS` — a
+/// function and an array the Rust query does tag — sat at rank 1. Rust was the
+/// only language 0.22.0 fixed, so the same hole was open in the other
+/// forty-five; 0.23.0 closes it wherever the language has a construct for a
+/// named constant at all. Where a grammar already makes one a symbol under
+/// another name — Dart and Zig call it a variable, Kotlin and Swift a property,
+/// Python a constant already — nothing is added here, because a second capture
+/// over the same span is how one symbol ends up containing itself.
 fn supplement(lang: &str) -> &'static str {
     match lang {
         "rust" => {
             r#"
-            ; A `const` or a `static` is a definition an agent types by name,
-            ; and the bundled tags query tags neither. Without a symbol row the
-            ; definition lift in `search_preferring` cannot fire for one, which
-            ; is why `MAX_NODES`, `RRF_K` and `KEY_GRACE` were the identifier
-            ; questions 0.22.0 could not put in the top three while `edges_out`
-            ; and `DEPENDENCY_KINDS` — a function and an array the query does
-            ; tag — sat at rank 1.
             (const_item name: (identifier) @name) @definition.constant
             (static_item name: (identifier) @name) @definition.constant
             (use_declaration argument: (_) @reference.import)
@@ -232,6 +238,21 @@ fn supplement(lang: &str) -> &'static str {
             (variable_declarator
               name: (identifier) @name
               value: [(arrow_function) (function_expression)]) @definition.function
+            ; `const MAX_HOLDERS = 4`. The value is spelled out rather than
+            ; left as `(_)` so that the arrow function on the line above stays
+            ; one symbol: a `const` bound to a function is a function, and
+            ; tagging it twice would make `semlith symbol` report two
+            ; definitions of it.
+            (lexical_declaration
+              "const"
+              (variable_declarator
+                name: (identifier) @name
+                value: [
+                  (number) (string) (template_string) (true) (false) (null)
+                  (object) (array) (identifier) (member_expression)
+                  (unary_expression) (binary_expression)
+                  (call_expression) (new_expression)
+                ])) @definition.constant
             (call_expression function: (identifier) @name) @reference.call
             ; `store.search(...)`, `this.index.search(...)`: the object is the
             ; hint, reduced to its last identifier.
@@ -259,6 +280,9 @@ fn supplement(lang: &str) -> &'static str {
         }
         "go" => {
             r#"
+            ; `const MaxHolders = 4`, and every name in a parenthesised
+            ; `const (...)` block, which is one `const_spec` each.
+            (const_declaration (const_spec name: (identifier) @name)) @definition.constant
             (import_spec path: (interpreted_string_literal) @reference.import)
             ; `import fp "path/filepath"` — the alias is what the file then
             ; writes, and the path is what it stands for.
@@ -270,6 +294,13 @@ fn supplement(lang: &str) -> &'static str {
         "java" => {
             r#"
             (import_declaration (scoped_identifier) @reference.import)
+            ; `static final int MAX_HOLDERS = 4;`. Java has no `const`, so a
+            ; constant is a field that says `final`, and the modifiers are the
+            ; only place that is written.
+            ((field_declaration
+               (modifiers) @_modifiers
+               declarator: (variable_declarator name: (identifier) @name)) @definition.constant
+             (#match? @_modifiers "\\bfinal\\b"))
         "#
         }
         // C++ has C's problem and C's fix: the bundled query tags the declarator,
@@ -282,11 +313,28 @@ fn supplement(lang: &str) -> &'static str {
             (function_definition
               declarator: (function_declarator
                 declarator: (identifier) @name)) @definition.function
+            ; `#define MAX_HOLDERS 4` and `constexpr int MAX_WAITERS = 8;`.
+            ; C++ has both of C's macro and a real constant declaration, and
+            ; the qualifier is what tells the second from a plain variable —
+            ; `volatile` sits in the same node and is not one.
+            (preproc_def name: (identifier) @name) @definition.constant
+            ((declaration
+               (type_qualifier) @_qualifier
+               declarator: (init_declarator declarator: (identifier) @name)) @definition.constant
+             (#any-of? @_qualifier "const" "constexpr" "consteval" "constinit"))
         "#
         }
         "csharp" => {
             r#"
             (using_directive (identifier) @reference.import)
+            ; `const int MaxHolders = 4;`. A field is a constant only when it
+            ; says so, and `static`, `readonly` and the access modifiers all
+            ; arrive in the same node.
+            ((field_declaration
+               (modifier) @_const
+               (variable_declaration
+                 (variable_declarator name: (identifier) @name))) @definition.constant
+             (#eq? @_const "const"))
             (invocation_expression function: (identifier) @name) @reference.call
             ; `store.Search(...)`: the object is the hint.
             (invocation_expression
@@ -316,6 +364,20 @@ fn supplement(lang: &str) -> &'static str {
             (export_specifier
               name: (_) @reference.alias
               alias: (identifier) @name) @definition.alias
+            ; `const MAX_HOLDERS = 4`. The bundled query tags only the
+            ; `export module.exports = ...` form, so an ordinary top-level
+            ; constant reached the graph as nothing at all. The value is
+            ; spelled out so that `const f = () => {}` stays a function.
+            (lexical_declaration
+              "const"
+              (variable_declarator
+                name: (identifier) @name
+                value: [
+                  (number) (string) (template_string) (true) (false) (null)
+                  (object) (array) (identifier) (member_expression)
+                  (unary_expression) (binary_expression)
+                  (call_expression) (new_expression)
+                ])) @definition.constant
         "#
         }
         "php" => {
@@ -326,6 +388,11 @@ fn supplement(lang: &str) -> &'static str {
             (member_call_expression
               object: (_) @hint
               name: (name) @name) @reference.call
+            ; `const MAX_HOLDERS = 4;`, whether it stands alone or inside a
+            ; class. `define('MAX_HOLDERS', 4)` is a function call and stays
+            ; one: the name it binds is a string, not an identifier the
+            ; grammar can hand back.
+            (const_declaration (const_element (name) @name)) @definition.constant
         "#
         }
         "swift" => {
@@ -350,6 +417,50 @@ fn supplement(lang: &str) -> &'static str {
             (function_definition
               declarator: (function_declarator
                 declarator: (identifier) @name)) @definition.function
+            ; `#define MAX_HOLDERS 4`. This is C's named constant, and not a
+            ; stylistic alternative to one: a `const int` is a read-only
+            ; object rather than a constant expression, and cannot size an
+            ; array or label a case.
+            (preproc_def name: (identifier) @name) @definition.constant
+        "#
+        }
+        "ruby" => {
+            r#"
+            ; Ruby has no `const` keyword. A name that begins with a capital
+            ; is a constant, and the grammar says so by parsing it as
+            ; `constant` rather than `identifier` — which is why this needs no
+            ; predicate and no naming convention of our own.
+            (assignment left: (constant) @name) @definition.constant
+        "#
+        }
+        "elixir" => {
+            r#"
+            ; `@max_holders 4`. A module attribute is the nearest thing
+            ; Elixir has to a constant, and the grammar has no node for one:
+            ; it is `@` applied to a call with no parentheses. The attributes
+            ; the language reserves for documentation and typespecs go
+            ; through the same syntax and are not constants.
+            ((unary_operator
+               "@"
+               operand: (call target: (identifier) @name (arguments))) @definition.constant
+             (#not-any-of? @name
+               "moduledoc" "doc" "typedoc" "spec" "type" "typep" "opaque"
+               "callback" "macrocallback" "behaviour" "impl" "deprecated"
+               "derive" "enforce_keys" "compile" "dialyzer" "on_definition"
+               "before_compile" "after_compile" "external_resource"))
+        "#
+        }
+        "lua" => {
+            r#"
+            ; `local MAX_HOLDERS <const> = 4`. Lua 5.4's attribute is the only
+            ; thing in the language that makes a binding a constant; a local
+            ; without one is reassignable and is not.
+            ((variable_declaration
+               (assignment_statement
+                 (variable_list
+                   name: (identifier) @name
+                   attribute: (attribute (identifier) @_attribute)))) @definition.constant
+             (#eq? @_attribute "const"))
         "#
         }
         _ => "",
@@ -2369,7 +2480,11 @@ mod tests {
         Fixture {
             language: "rust",
             file: "rust/lock.rs",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[
                 ("acquire", "helper", "calls"),
                 ("lock", "std::fs::File", "imports"),
@@ -2378,25 +2493,38 @@ mod tests {
         Fixture {
             language: "typescript",
             file: "typescript/app.ts",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls"), ("app", "./m", "imports")],
         },
         Fixture {
             language: "python",
             file: "python/run.py",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls"), ("run", "os", "imports")],
         },
         Fixture {
             language: "go",
             file: "go/serve.go",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MaxHolders", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls"), ("serve", "fmt", "imports")],
         },
         Fixture {
             language: "java",
             file: "java/Main.java",
             symbols: &[
+                ("MAX_HOLDERS", "constant"),
                 ("Main", "class"),
                 ("helper", "method"),
                 ("acquire", "method"),
@@ -2409,25 +2537,39 @@ mod tests {
         Fixture {
             language: "c",
             file: "c/main.c",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
             language: "clojure",
             file: "clojure/lock.clj",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("max-holders", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
             language: "cpp",
             file: "cpp/lock.cpp",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("MAX_WAITERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
             language: "csharp",
             file: "csharp/Lock.cs",
             symbols: &[
+                ("MaxHolders", "constant"),
                 ("Lock", "class"),
                 ("Helper", "method"),
                 ("Acquire", "method"),
@@ -2443,7 +2585,11 @@ mod tests {
         Fixture {
             language: "dart",
             file: "dart/lock.dart",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("maxHolders", "variable"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
@@ -2459,6 +2605,7 @@ mod tests {
             language: "elixir",
             file: "elixir/lock.ex",
             symbols: &[
+                ("max_holders", "constant"),
                 ("Lock", "module"),
                 ("helper", "function"),
                 ("acquire", "function"),
@@ -2475,6 +2622,7 @@ mod tests {
             language: "erlang",
             file: "erlang/lock.erl",
             symbols: &[
+                ("MAX_HOLDERS", "constant"),
                 ("lock", "module"),
                 ("helper", "function"),
                 ("acquire", "function"),
@@ -2485,6 +2633,7 @@ mod tests {
             language: "fortran",
             file: "fortran/lock.f90",
             symbols: &[
+                ("max_holders", "constant"),
                 ("lock", "module"),
                 ("helper", "function"),
                 ("acquire", "function"),
@@ -2504,7 +2653,11 @@ mod tests {
         Fixture {
             language: "groovy",
             file: "groovy/lock.groovy",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
@@ -2525,7 +2678,11 @@ mod tests {
         Fixture {
             language: "javascript",
             file: "javascript/app.js",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls"), ("app", "./m", "imports")],
         },
         Fixture {
@@ -2538,6 +2695,7 @@ mod tests {
             language: "julia",
             file: "julia/lock.jl",
             symbols: &[
+                ("MAX_HOLDERS", "constant"),
                 ("Lock", "module"),
                 ("helper", "function"),
                 ("acquire", "function"),
@@ -2547,13 +2705,21 @@ mod tests {
         Fixture {
             language: "kotlin",
             file: "kotlin/Lock.kt",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "property"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
             language: "lua",
             file: "lua/lock.lua",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
@@ -2581,6 +2747,7 @@ mod tests {
             language: "objective-c",
             file: "objective-c/Lock.m",
             symbols: &[
+                ("MAX_HOLDERS", "constant"),
                 ("Lock", "class"),
                 ("helper", "method"),
                 ("acquire", "method"),
@@ -2596,13 +2763,21 @@ mod tests {
         Fixture {
             language: "perl",
             file: "perl/lock.pl",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
             language: "php",
             file: "php/lock.php",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
@@ -2626,13 +2801,18 @@ mod tests {
         Fixture {
             language: "ruby",
             file: "ruby/lock.rb",
-            symbols: &[("helper", "method"), ("acquire", "method")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "method"),
+                ("acquire", "method"),
+            ],
             edges: &[("lock", "helper", "defines")],
         },
         Fixture {
             language: "scala",
             file: "scala/Lock.scala",
             symbols: &[
+                ("MaxHolders", "constant"),
                 ("Lock", "object"),
                 ("helper", "function"),
                 ("acquire", "function"),
@@ -2642,7 +2822,11 @@ mod tests {
         Fixture {
             language: "shell",
             file: "shell/lock.sh",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("MAX_HOLDERS", "constant"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[
                 ("acquire", "helper", "calls"),
                 ("lock", "./config.sh", "imports"),
@@ -2663,7 +2847,11 @@ mod tests {
         Fixture {
             language: "swift",
             file: "swift/Lock.swift",
-            symbols: &[("helper", "function"), ("acquire", "function")],
+            symbols: &[
+                ("maxHolders", "property"),
+                ("helper", "function"),
+                ("acquire", "function"),
+            ],
             edges: &[("acquire", "helper", "calls")],
         },
         Fixture {
@@ -2694,6 +2882,7 @@ mod tests {
             language: "zig",
             file: "zig/lock.zig",
             symbols: &[
+                ("MAX_HOLDERS", "variable"),
                 ("helper", "function"),
                 ("acquire", "function"),
                 ("std", "variable"),
@@ -2703,6 +2892,107 @@ mod tests {
             // binding itself is the fact worth recording, and it is a symbol.
             edges: &[("acquire", "helper", "calls")],
         },
+    ];
+
+    /// Languages whose fixture declares no symbol of kind `constant`, and why.
+    ///
+    /// Two different reasons live here, and each row says which it is, because
+    /// "this language has nothing to extract" and "this language extracts it
+    /// already" are not the same fact and a reader who conflates them will
+    /// delete the wrong row.
+    ///
+    /// The first group has no construct for a named constant at all. A plain
+    /// assignment is not one: a Makefile variable can be overridden on the
+    /// command line, a CSS custom property can be redefined by a later rule,
+    /// and a shell script that says `MAX=4` can say `MAX=5` on the next line —
+    /// which is exactly why `shell` is not in this list and `readonly` is what
+    /// its query matches. The second group is languages whose grammar already
+    /// makes a constant a symbol under another kind. Nothing is added for
+    /// those: a second capture over the same span leaves two rows for one
+    /// declaration, each the other's innermost enclosing definition, and
+    /// `semlith symbol` would answer a single `const val` with two definitions.
+    const WITHOUT_CONSTANTS: &[(&str, &str)] = &[
+        (
+            "css",
+            "a custom property is a variable a later rule can redefine",
+        ),
+        (
+            "dart",
+            "already a symbol; the bundled query calls it a variable",
+        ),
+        (
+            "dockerfile",
+            "ARG and ENV are build variables, overridable at build time",
+        ),
+        (
+            "elm",
+            "every binding is immutable, so none of them is the constant",
+        ),
+        ("graphql", "a schema names types and fields, never a value"),
+        (
+            "haskell",
+            "every binding is immutable, so none of them is the constant",
+        ),
+        ("html", "markup, with no declaration of any kind"),
+        (
+            "json",
+            "data; a member is a key and a value, not a declaration",
+        ),
+        (
+            "kotlin",
+            "already a symbol; `const val` is a property to the grammar",
+        ),
+        (
+            "makefile",
+            "a variable can be overridden on the command line",
+        ),
+        ("markdown", "prose"),
+        (
+            "nix",
+            "a `let` or attribute binding is already a `binding` symbol",
+        ),
+        (
+            "ocaml",
+            "every `let` binding is immutable, so none of them is the constant",
+        ),
+        (
+            "powershell",
+            "a constant is `Set-Variable -Option Constant`, a call and not syntax",
+        ),
+        (
+            "proto",
+            "an enum value is a member of an enum, not a declared constant",
+        ),
+        (
+            "r",
+            "the language has no constant construct; `<-` binds and rebinds",
+        ),
+        (
+            "sql",
+            "there is no `CREATE CONSTANT`; a literal is written where it is used",
+        ),
+        (
+            "svelte",
+            "the grammar reads the markup and hands back the script as raw text",
+        ),
+        (
+            "swift",
+            "already a symbol; the bundled query calls `let` a property",
+        ),
+        (
+            "terraform",
+            "a local or a variable is a value HCL evaluates, not a constant",
+        ),
+        ("toml", "data; a key and a value, not a declaration"),
+        (
+            "vue",
+            "the grammar reads the template and hands back the script as raw text",
+        ),
+        ("yaml", "data; a key and a value, not a declaration"),
+        (
+            "zig",
+            "already a symbol; our own query calls `const` a variable",
+        ),
     ];
 
     fn fixture_root() -> std::path::PathBuf {
@@ -2788,6 +3078,41 @@ mod tests {
                 "{} has a grammar but no fixture asserting what it extracts",
                 entry.name
             );
+        }
+    }
+
+    /// Every language with a construct for a named constant extracts one, and
+    /// proves it from a fixture written in that language.
+    ///
+    /// Until 0.23.0 this held for Rust alone. The other forty-five advertised
+    /// a graph and then answered `semlith symbol MAX_HOLDERS` with nothing, so
+    /// the definition lift could not fire for the one kind of name an agent is
+    /// most likely to type verbatim. The escape hatch is [`WITHOUT_CONSTANTS`],
+    /// and it costs a sentence saying which language and why — "there was no
+    /// time" is not a row anybody can write here.
+    #[test]
+    fn every_language_with_a_constant_construct_extracts_one() {
+        for entry in crate::filter::LANGUAGES {
+            let fixture = FIXTURES
+                .iter()
+                .find(|f| f.language == entry.name)
+                .unwrap_or_else(|| panic!("{} has no fixture", entry.name));
+            let declares = fixture.symbols.iter().any(|(_, kind)| *kind == "constant");
+            match WITHOUT_CONSTANTS
+                .iter()
+                .find(|(name, _)| *name == entry.name)
+            {
+                Some((_, why)) => assert!(
+                    !declares,
+                    "{} is listed as extracting no constant ({why}) but its fixture declares one",
+                    entry.name
+                ),
+                None => assert!(
+                    declares,
+                    "{} has a constant construct but no fixture proves one is extracted",
+                    entry.name
+                ),
+            }
         }
     }
 
