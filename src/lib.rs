@@ -42,6 +42,7 @@ pub mod mcp;
 pub mod pattern;
 pub mod portal;
 pub mod proxy;
+pub mod rerank;
 pub mod routes;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
@@ -808,6 +809,14 @@ pub struct IndexReport {
     /// the directory that was stepped over, which is what this gives them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub generated: Vec<String>,
+    /// Whether this pass re-embedded files nothing on disk had changed,
+    /// because the store was written by a release that showed the embedding
+    /// model less than this one does.
+    ///
+    /// A user whose unchanged repository suddenly indexes from scratch is owed
+    /// the reason, and the reason is a property of the run rather than of any
+    /// one file — so it is reported here and said once, not per file.
+    pub rechunked: bool,
     /// Paths refused, each with the rule that refused it.
     ///
     /// Listed rather than counted: "three paths were refused" is not something
@@ -959,6 +968,10 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// The cross-encoder, once a query has needed it. `None` until then, and
+    /// `None` for ever on a machine whose cache does not hold it — the stage
+    /// is skipped rather than fetched from inside a query.
+    reranker: Option<fastembed::TextRerank>,
     /// The embedder's own tokenizer, for counting rather than estimating.
     tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
@@ -1052,6 +1065,7 @@ impl Semlith {
             clip: image::Clip::default(),
             generation,
             quiet: false,
+            reranker: None,
             boundary: Boundary::default(),
         })
     }
@@ -1189,6 +1203,33 @@ impl Semlith {
             self.embedder = Some(self.model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?);
         }
         Ok(self.embedder.as_mut().unwrap())
+    }
+
+    /// The cross-encoder, loaded on the first query that can use it.
+    ///
+    /// `None` rather than an error when the model is not in the cache: the
+    /// stage is an improvement on an answer semlith can already give, and a
+    /// search that failed because a reranker was missing would be a worse
+    /// product than one that ranks by fusion alone. `semlith setup` fetches
+    /// it and `semlith doctor` says whether it is there, so the silence has
+    /// somewhere to be reported.
+    fn reranker(&mut self) -> Option<&mut fastembed::TextRerank> {
+        if self.reranker.is_none() {
+            let cache = model_cache_dir().ok()?;
+            if !rerank::cached(&cache) {
+                return None;
+            }
+            match rerank::load(&cache, self.quiet) {
+                Ok(model) => self.reranker = Some(model),
+                Err(e) => {
+                    if !self.quiet {
+                        eprintln!("the rescoring model did not load, ranking by fusion alone: {e}");
+                    }
+                    return None;
+                }
+            }
+        }
+        self.reranker.as_mut()
     }
 
     /// Pay the model-load and index-warmup cost up front, so the first query
@@ -1418,15 +1459,17 @@ impl Semlith {
         let every = checkpoint_files();
         let mut since_checkpoint = 0usize;
 
-        // A store written before 0.22.0 holds fixed-window chunks, and the
-        // hash check below would leave it holding them for ever: its files have
-        // not changed, the rule for what a chunk is has. So the first pass
-        // under this release re-chunks everything it walks, and the format row
-        // moves at the end of a pass that swept the whole store — a pass over
-        // one directory leaves the rest of the store on the old rule, and
-        // saying otherwise in the meta row would be a claim about files this
-        // run never looked at.
-        let rechunk = store::format(&self.db)? < store::DEFINITION_CHUNKS;
+        // A store written before 0.25.0 holds code chunks embedded without the
+        // definition they sit inside, and before 0.22.0 fixed-window chunks as
+        // well. The hash check below would leave it holding them for ever: its
+        // files have not changed, the rule for what a chunk is and what the
+        // model is shown has. So the first pass under this release re-chunks
+        // and re-embeds everything it walks, and the format row moves at the
+        // end of a pass that swept the whole store — a pass over one directory
+        // leaves the rest of the store on the old rule, and saying otherwise in
+        // the meta row would be a claim about files this run never looked at.
+        let rechunk = store::format(&self.db)? < store::CODE_CONTEXT;
+        report.rechunked = rechunk;
 
         // Refused before anything is read. A path that names a credential or
         // sits outside this caller's boundary is reported by name with the rule
@@ -1841,7 +1884,11 @@ impl Semlith {
                 }
             };
 
-            let chunks = chunk::chunk_file(&path, &text);
+            let chunks = chunk::chunk_file(
+                &path,
+                &text,
+                extraction.as_ref().map_or(&[][..], |e| &e.symbols),
+            );
             if chunks.is_empty() {
                 let why = SkipReason::NoText;
                 skip(&mut report, &why);
@@ -1871,6 +1918,16 @@ impl Semlith {
             }
 
             let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+            // What the parser made of this file, recorded now because it
+            // cannot be told afterwards: a file whose parse expired and a file
+            // whose language has no grammar both leave no symbols behind, and
+            // only one of them is a gap in the graph's coverage.
+            let parsed = match (&extraction, graph::language_of(&path)) {
+                (Some(_), _) => "parsed",
+                (None, Some(lang)) if graph::has_graph(lang) => "timeout",
+                (None, _) => "none",
+            };
+            store::set_file_graph(&self.db, file_id, parsed)?;
             let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
             for (ord, c) in chunks.iter().enumerate() {
                 let id =
@@ -2918,6 +2975,48 @@ impl Semlith {
         }
         self.mark_freshness(&mut hits)?;
         self.name_enclosing_symbols(&mut hits)?;
+
+        // The rescoring stage: a cross-encoder reads the query and the
+        // candidate together, which nothing before this point has done.
+        //
+        // Only for a question. An identifier query is answered by its
+        // definitions, lifted above the fused maximum a few lines above, and a
+        // model asked to judge `RRF_K` against a paragraph about it has no
+        // more to go on than the keyword list already had. This is the routed
+        // cascade: each shape gets the stage that suits it.
+        //
+        // The scores are permuted rather than replaced. Each candidate in the
+        // head keeps one of the head's own fused scores and the cross-encoder
+        // decides which, so the tiebreaks below — proximity, staleness, the
+        // caller's preference — still apply to a fused-scale number, and a
+        // hit outside the head is never reordered against one inside it.
+        if shape != Shape::Identifier && rerank::enabled() && hits.len() > 1 {
+            let head = hits.len().min(rerank::RERANK_DEPTH);
+            let texts: Vec<String> = hits[..head]
+                .iter()
+                .map(|(hit, _)| format!("{}\n{}", hit.path, hit.text))
+                .collect();
+            let quiet = self.quiet;
+            if let Some(model) = self.reranker() {
+                match rerank::order(model, query, &texts) {
+                    Ok(order) if order.len() == head => {
+                        let mut scores: Vec<f32> =
+                            hits[..head].iter().map(|(hit, _)| hit.score).collect();
+                        scores.sort_by(|a, b| b.total_cmp(a));
+                        for (rank, at) in order.into_iter().enumerate() {
+                            hits[at].0.score = scores[rank];
+                            hits[at].0.lists.push("rerank");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        if !quiet {
+                            eprintln!("the rescoring pass failed, keeping the fused order: {e}");
+                        }
+                    }
+                }
+            }
+        }
 
         // The rerank, and the preference with it. Both are applied here rather
         // than inside the fusion because both are about things the fusion has

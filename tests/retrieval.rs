@@ -57,6 +57,10 @@ struct Span {
     end_line: u32,
 }
 
+/// The three question classes. A question outside them is a question no
+/// per-class figure covers.
+const SHAPES: [&str; 3] = ["identifier", "concept", "multi-hop"];
+
 #[test]
 #[ignore = "indexes the repository and downloads an embedding model on first run"]
 fn the_retrieval_metrics_are_measured() {
@@ -88,6 +92,25 @@ fn the_retrieval_metrics_are_measured() {
         "the question set has shrunk to {} questions; it is the measuring stick and \
          may not be trimmed to suit a result",
         all.len()
+    );
+
+    // Every question carries a class, and only one of the three.
+    //
+    // The per-class table below is the unit of progress in 0.25.0 — a mean is
+    // kept on the class it was meant for — and a question with a missing or
+    // misspelled shape would drop out of that table silently while still
+    // counting in the aggregate. Asserting it here costs nothing and makes the
+    // two views of the same run add up by construction.
+    let unclassed: Vec<&str> = all
+        .iter()
+        .filter(|q| !SHAPES.contains(&q.shape.as_str()))
+        .map(|q| q.id.as_str())
+        .collect();
+    assert!(
+        unclassed.is_empty(),
+        "these questions carry no class of {SHAPES:?}: {}. The per-class table is what a \
+         mean is judged on, and a question outside it is measured by nothing.",
+        unclassed.join(", ")
     );
 
     // Which half of the set this run is allowed to see.
@@ -124,6 +147,22 @@ fn the_retrieval_metrics_are_measured() {
         questions.len(),
         all.len(),
         split.seed
+    );
+    // Which stages were on. Every pair in this release is one binary run
+    // twice with one of these different, so a log that does not say which
+    // side it is cannot be read a week later.
+    println!(
+        "  stages  fusion, graph additive only, rescoring {}",
+        if semlith::rerank::enabled() {
+            let cache = semlith::model_cache_dir().unwrap_or_default();
+            if semlith::rerank::cached(&cache) {
+                format!("on ({})", semlith::rerank::RERANK_NAME)
+            } else {
+                "off — the model is not in the cache".to_string()
+            }
+        } else {
+            format!("off — {}=off", semlith::rerank::RERANK_ENV)
+        }
     );
 
     // The 0.21.0 figures on this same snapshot, so every print below is a pair
@@ -742,11 +781,15 @@ impl Summary {
                     .count()
             };
             let total = of_this_shape.len();
+            let percent = |hits: usize| hits * 100 / total.max(1);
             println!(
-                "    {shape:<11} {:>3} / {:>3} / {:>3}  of {total}",
+                "    {shape:<11} {:>3} ({:>3} %) / {:>3} ({:>3} %) / {:>3} ({:>3} %)  of {total}",
                 at(1),
+                percent(at(1)),
                 at(3),
-                at(8)
+                percent(at(3)),
+                at(8),
+                percent(at(8))
             );
         }
 
@@ -791,6 +834,51 @@ impl Summary {
     }
 }
 
+/// Where the audit's evidence goes: `SEMLITH_RETRIEVAL_DUMP=<file>`.
+///
+/// Judging a miss needs what came back, not the rank it came back at. A
+/// question whose top hit is a correct chunk nobody wrote a span for is a
+/// defect in the question file, and one whose top hit is about something else
+/// is a defect in the ranking — and the two are told apart by reading the
+/// chunk. Off unless the variable is set, so an ordinary run prints what it
+/// always printed.
+const DUMP_ENV: &str = "SEMLITH_RETRIEVAL_DUMP";
+
+fn dump(question: &Question, rank: usize, hit: &semlith::Hit, satisfies: bool) {
+    let Some(path) = std::env::var_os(DUMP_ENV) else {
+        return;
+    };
+    use std::io::Write;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    // One line per hit, tab separated, with the text on the end so a line is
+    // still readable when the text is not.
+    let text: String = hit
+        .text
+        .chars()
+        .take(400)
+        .collect::<String>()
+        .replace(['\n', '\t'], " ");
+    let _ = writeln!(
+        file,
+        "{}\t{}\t{}\t{}\t{}:{}-{}\t{}\t{}",
+        question.id,
+        question.shape,
+        question.tool,
+        rank,
+        hit.path,
+        hit.start_line,
+        hit.end_line,
+        if satisfies { "spanned" } else { "unspanned" },
+        text
+    );
+}
+
 fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report: &mut Report) {
     let k = question.k.unwrap_or(8);
     let prefer =
@@ -823,6 +911,7 @@ fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report:
     let mut first: Option<usize> = None;
     for (rank, hit) in hits.iter().enumerate() {
         let satisfies = question.spans.iter().any(|span| satisfied(root, hit, span));
+        dump(question, rank + 1, hit, satisfies);
         if satisfies && first.is_none() {
             first = Some(rank + 1);
         }

@@ -417,6 +417,16 @@ fn the_other_spelling_of_the_disabled_key_is_read_too() {
         .find(|c| c["name"] == "Claude Code")
         .expect("Claude Code is reported");
     assert_eq!(claude["disabled_here"], true);
+    // And it names the spelling that actually holds it. The first thing anyone
+    // does with this message is search their configuration for the key it
+    // names, and until 0.25.0 it named the documented spelling whichever one
+    // was really there — which sent the reader looking for a key that is not
+    // in the file.
+    let explain = claude["explain"].as_str().unwrap_or_default();
+    assert!(
+        explain.contains("disabledMcpServers") && !explain.contains("disabledMcpjsonServers"),
+        "the message names the wrong key: {explain}"
+    );
 }
 
 /// A registration written before 0.21.0 names the bare word `semlith`, and

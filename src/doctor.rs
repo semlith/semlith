@@ -183,6 +183,38 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
         applicable: true,
     });
 
+    // The rescoring model.
+    //
+    // Not a fault: search answers without it, by fusion alone. It is reported
+    // because the answers then differ from the ones this release measured, and
+    // a difference nobody can see is the failure mode this file exists for.
+    let rerank_cached = crate::rerank::cached(&cache);
+    let rerank_off = !crate::rerank::enabled();
+    out.push(Finding {
+        id: "rescoring model",
+        ok: true,
+        check: match (rerank_cached, rerank_off) {
+            (_, true) => format!(
+                "switched off for this process by {}=off; searches rank by fusion alone",
+                crate::rerank::RERANK_ENV
+            ),
+            (true, false) => format!(
+                "{} is in {}, pinned at {}",
+                crate::rerank::RERANK_NAME,
+                cache.display(),
+                &crate::rerank::RERANK_REVISION[..12]
+            ),
+            (false, false) => format!(
+                "{} is not in {}; searches rank by fusion alone until it is fetched",
+                crate::rerank::RERANK_NAME,
+                cache.display()
+            ),
+        },
+        manual: (!rerank_cached && !rerank_off).then(|| "semlith setup".to_string()),
+        repair: None,
+        applicable: true,
+    });
+
     // The home and every open store, because the rule is about all of them and
     // a row that named only the first would go green with the rest still loose.
     let home_dir = home::home_or_error();
@@ -1015,14 +1047,24 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
             // found on. Nothing else reports it: `registered` is true, the
             // entry is at user scope, the binary answers `initialize` in under
             // a second — and the session opens with no semlith and no reason.
-            let disabled_in: Vec<String> = if client.name == "Claude Code" {
+            let switched_off_here: Vec<(String, &'static str)> = if client.name == "Claude Code" {
                 switched_off.clone()
             } else {
                 Vec::new()
             };
-            let disabled_here = here
-                .as_deref()
-                .is_some_and(|cwd| disabled_in.iter().any(|dir| same_place(dir, cwd)));
+            let disabled_by = here.as_deref().and_then(|cwd| {
+                switched_off_here
+                    .iter()
+                    .find(|(dir, _)| same_place(dir, cwd))
+                    .map(|(_, key)| *key)
+            });
+            // The report keeps the directories alone: which key held the name
+            // belongs in the message, where somebody is about to grep for it.
+            let disabled_in: Vec<String> = switched_off_here
+                .iter()
+                .map(|(dir, _)| dir.clone())
+                .collect();
+            let disabled_here = disabled_by.is_some();
             let repaired = rewritten.iter().find(|r| r.client == client.name);
             // An entry still naming a bare command after the repair ran either
             // could not be written or was never offered the write. Either way
@@ -1097,10 +1139,10 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 repair,
                 note,
                 in_use,
-                explain: if disabled_here {
+                explain: if let Some(key) = disabled_by {
                     Some(format!(
                         "registered at user scope and switched off for this directory: {} has \
-                         projects[\"{}\"].{DISABLED_KEY} containing \"semlith\". \
+                         projects[\"{}\"].{key} containing \"semlith\". \
                          Every other directory sees the server; this one sees nothing, \
                          and nothing says so.",
                         claude_config_path()
@@ -1167,8 +1209,17 @@ fn claude_project_entries() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The key Claude Code switches a server off for one project with.
-const DISABLED_KEY: &str = "disabledMcpjsonServers";
+/// The keys Claude Code switches a server off for one project with, and the
+/// order they are looked for in.
+///
+/// Both are live. `disabledMcpjsonServers` is documented; `disabledMcpServers`
+/// is what the `/mcp` toggle wrote on the machine this was found on, twice.
+/// Which one holds the name is reported rather than assumed, because the first
+/// thing anybody does with this message is grep their configuration for the
+/// key it names — and a message naming the other spelling sends them looking
+/// for something that is not there, which is how the same silence survived a
+/// second release.
+const DISABLED_KEYS: [&str; 2] = ["disabledMcpjsonServers", "disabledMcpServers"];
 
 /// Claude Code projects where semlith is switched off for that project alone.
 ///
@@ -1183,7 +1234,7 @@ const DISABLED_KEY: &str = "disabledMcpjsonServers";
 /// Both spellings are read. `disabledMcpjsonServers` is the one the client
 /// writes today; `disabledMcpServers` is checked beside it so a rename does not
 /// turn this back into a silent absence.
-fn claude_disabled_entries() -> Vec<String> {
+fn claude_disabled_entries() -> Vec<(String, &'static str)> {
     let Some(config) = claude_config() else {
         return Vec::new();
     };
@@ -1192,15 +1243,15 @@ fn claude_disabled_entries() -> Vec<String> {
     };
     projects
         .iter()
-        .filter(|(_, value)| {
-            [DISABLED_KEY, "disabledMcpServers"].iter().any(|key| {
+        .filter_map(|(path, value)| {
+            let holding = DISABLED_KEYS.iter().find(|key| {
                 value
-                    .get(key)
+                    .get(**key)
                     .and_then(|d| d.as_array())
                     .is_some_and(|off| off.iter().any(|name| name.as_str() == Some("semlith")))
-            })
+            })?;
+            Some((path.clone(), *holding))
         })
-        .map(|(path, _)| path.clone())
         .collect()
 }
 

@@ -34,6 +34,31 @@ itself, so each one is verified as it is read rather than after the fact.
 | `onnx/model_quantized.onnx` | `a3fad524afc3f060216a8ddbb1ac89c9b6498fba8995b5718bde879076a2e9ba` |
 | `onnx/model_quantized.onnx_data` | `1f4cf47e4adec7f7ae09db03d071ba8667e07f9a4203142c7efa8d37fe453597` |
 
+## Rescoring: jina-reranker-v1-turbo-en
+
+A cross-encoder, 37 M parameters, int8, Apache-2.0. It reads the query and a
+candidate together and reorders the head of the fused list; it embeds nothing
+and adds no candidates, so a store's vectors do not depend on it. Searches run
+without it — by fusion alone — when it is not in the cache, and `semlith stats`
+and `semlith doctor` both say which of the two is happening.
+
+`semlith setup` fetches it beside the embedding model so that a query never
+pauses to download one. `SEMLITH_RERANK=off` switches the stage off for a
+process, which is how its contribution is measured: the same binary and the
+same store, once each way.
+
+- Repository: [`jinaai/jina-reranker-v1-turbo-en`](https://huggingface.co/jinaai/jina-reranker-v1-turbo-en)
+- Commit: [`b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2`](https://huggingface.co/jinaai/jina-reranker-v1-turbo-en/tree/b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2)
+- Recorded in `src/rerank.rs` as `RERANK_REVISION` and `RERANK_FILES`.
+
+| File | SHA-256 |
+| --- | --- |
+| `tokenizer.json` | `0046da43cc8c424b317f56b092b0512aaaa65c4f925d2f16af9d9eeb4d0ef902` |
+| `config.json` | `e050ff6a15ae9295e84882fa0e98051bd8754856cd5201395ebf00ce9f2d609b` |
+| `special_tokens_map.json` | `06e405a36dfe4b9604f484f6a1e619af1a7f7d09e34a8555eb0b77b66318067f` |
+| `tokenizer_config.json` | `d291c6652d96d56ffdbcf1ea19d9bae5ed79003f7648c627e725a619227ce8fa` |
+| `onnx/model_quantized.onnx` | `3defdef1ae34e119bd704216087743e79665934c96aebabcb6077c239dc3ae66` |
+
 ## Images: CLIP ViT-B/32
 
 Two repositories, a vision encoder and a text encoder, fixed as a pair: a query

@@ -2836,6 +2836,23 @@ impl crate::mcp::Writer for Writer {
                 count("remaining")
             ));
         }
+        // Named, one per line, with the rule that refused or failed each —
+        // the same lines `mcp::answer` writes when it performs the run
+        // itself. Without them a forwarded call answered a refused path with
+        // "0 indexed, 0 unchanged, 0 skipped, 0 removed (0 chunks)" and
+        // nothing else, so an agent held to the boundary was never told there
+        // was a boundary, and retried the same path forever. The two paths are
+        // the same call performed in two places; they may not say different
+        // things about it.
+        for (kind, lines) in [("refused", &done["refused"]), ("failed", &done["failed"])] {
+            for entry in lines.as_array().into_iter().flatten() {
+                let (Some(path), Some(why)) = (entry["path"].as_str(), entry["why"].as_str())
+                else {
+                    continue;
+                };
+                text.push_str(&format!("\n{kind}: {path} — {why}"));
+            }
+        }
         Ok(text)
     }
 

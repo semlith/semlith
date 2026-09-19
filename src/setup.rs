@@ -62,6 +62,10 @@ pub struct Status {
     pub rc_block_present: bool,
     pub model_cache: String,
     pub model_cached: bool,
+    /// Whether the cross-encoder the rescoring stage needs is in the cache.
+    /// Absent means searches rank by fusion alone, which is a different
+    /// product from the one the release measured.
+    pub rerank_cached: bool,
     /// The clients whose own configuration file names semlith, read from disk
     /// rather than by asking each client's CLI.
     pub registered_clients: Vec<String>,
@@ -114,6 +118,7 @@ pub fn status() -> Status {
     let installed = bin.is_ok() && bin_path.join(exe_name()).exists();
     let path_has_bin = bin.is_ok() && on_path(bin_path);
     let model_cached = embed::is_cached(&cache);
+    let rerank_cached = crate::rerank::cached(&cache);
 
     let steps = vec![
         Step {
@@ -154,7 +159,14 @@ pub fn status() -> Status {
             } else {
                 State::Skipped
             },
-            detail: cache.display().to_string(),
+            // Both models, because one of them being absent is the difference
+            // between the answers this machine gives and the answers the
+            // release measured.
+            detail: format!(
+                "{} — rescoring model {}",
+                cache.display(),
+                if rerank_cached { "present" } else { "absent" }
+            ),
         },
         Step {
             name: "agents",
@@ -179,6 +191,7 @@ pub fn status() -> Status {
         rc_block_present: block,
         model_cache: cache.display().to_string(),
         model_cached,
+        rerank_cached,
         registered_clients: registered,
         version: env!("CARGO_PKG_VERSION"),
         install_sh: INSTALL_SH,
@@ -642,11 +655,32 @@ fn step_model(yes: bool, airgap: bool) -> Result<Step> {
     // another account chooses.
     home::secure_dir(&cache).with_context(|| format!("creating {}", cache.display()))?;
     match embed::Model::default().load(cache.clone(), chunk::MAX_CHARS / 2, false) {
-        Ok(_) => Ok(Step {
-            name: "model",
-            state: State::Done,
-            detail: cache.display().to_string(),
-        }),
+        Ok(_) => {
+            // The rescoring model, in the same step and the same cache.
+            //
+            // It is fetched here so that it is never fetched inside a query:
+            // a search that paused to download 38 MB the first time somebody
+            // asked a question would be a worse surprise than a search that
+            // ranks by fusion alone, which is what happens when this is
+            // absent. A failure here leaves the stage off and says so; it
+            // does not fail the step, because the embedding model — the one
+            // semlith cannot work without — is already in the cache.
+            let _ = cliclack::log::step(format!(
+                "model: downloading the rescoring model ({}, ~38 MB)",
+                crate::rerank::RERANK_NAME
+            ));
+            if let Err(e) = crate::rerank::load(&cache, false) {
+                let _ = cliclack::log::warning(format!(
+                    "the rescoring model did not download: {e}. Searches rank by fusion \
+                     alone until `semlith setup` is run again."
+                ));
+            }
+            Ok(Step {
+                name: "model",
+                state: State::Done,
+                detail: cache.display().to_string(),
+            })
+        }
         Err(e) => Ok(Step {
             name: "model",
             state: State::Failed,

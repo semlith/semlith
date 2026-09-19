@@ -191,15 +191,31 @@ fn stores(state: &Arc<State>) -> Response {
                     // figure a reader cannot check is a figure they are being
                     // asked to take on trust.
                     store::ledger_savings(s.db()).ok(),
+                    // What the graph covers, per language. The Index page's
+                    // one table, and the same rows `semlith stats` prints: an
+                    // absent edge and a file the parser gave up on are
+                    // different problems and a store-wide percentage hides
+                    // both.
+                    store::coverage_by_language(s.db()).unwrap_or_default(),
                 )
             });
 
         #[allow(clippy::type_complexity)]
-        let (files, chunks, bytes, model, dim, vectors, shards, facets, written, savings) =
+        let (files, chunks, bytes, model, dim, vectors, shards, facets, written, savings, coverage) =
             match stats {
-                Some((Ok((f, c, b)), model, dim, len, shards, facets, written, savings)) => {
-                    (f, c, b, model, dim, len, shards, facets, written, savings)
-                }
+                Some((
+                    Ok((f, c, b)),
+                    model,
+                    dim,
+                    len,
+                    shards,
+                    facets,
+                    written,
+                    savings,
+                    coverage,
+                )) => (
+                    f, c, b, model, dim, len, shards, facets, written, savings, coverage,
+                ),
                 _ => (
                     0,
                     0,
@@ -211,6 +227,7 @@ fn stores(state: &Arc<State>) -> Response {
                     store::Facets::default(),
                     None,
                     None,
+                    Vec::new(),
                 ),
             };
 
@@ -257,6 +274,17 @@ fn stores(state: &Arc<State>) -> Response {
             "dim": dim,
             "vectors": vectors,
             "shards": shards.map(|(n, max)| json!({ "count": n, "resident": max })),
+            "coverage": coverage.iter().map(|row| json!({
+                "language": row.language,
+                "files": row.files,
+                "parser_failed": row.parser_failed,
+                "definitions": row.definitions,
+                "extracted": row.extracted,
+                "resolved": row.resolved,
+                "ambiguous": row.ambiguous,
+                "unresolved": row.unresolved,
+                "settled": row.settled_share(),
+            })).collect::<Vec<_>>(),
             "lines": facets.lines,
             "formats": facets.extensions.len(),
             "readers": readers.len(),

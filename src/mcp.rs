@@ -860,12 +860,38 @@ fn call_tool(
                     Ok(s) => s,
                     Err(e) => return Ok(tool_error(&format!("stats failed: {e}"))),
                 };
-                let body = format!(
+                let mut body = format!(
                     "{files} files, {chunks} chunks, {} indexed, model {} ({} dim)",
                     crate::human_bytes(bytes),
                     store.model(),
                     store.dim(),
                 );
+                // What the graph covers, per language, in the same four edge
+                // classes the CLI prints. An agent deciding whether to ask the
+                // graph a question at all is the reader here: a language with
+                // no definitions and a language whose files never parsed lead
+                // to different next moves.
+                match crate::store::coverage_by_language(store.db()) {
+                    Ok(coverage) => {
+                        for row in coverage.iter().filter(|r| r.definitions > 0) {
+                            body.push_str(&format!(
+                                "\n  {}: {} files ({} unparsed), {} definitions, call edges \
+                                 {} extracted / {} resolved / {} ambiguous / {} unresolved \
+                                 ({} % settled)",
+                                row.language,
+                                row.files,
+                                row.parser_failed,
+                                row.definitions,
+                                row.extracted,
+                                row.resolved,
+                                row.ambiguous,
+                                row.unresolved,
+                                row.settled_share(),
+                            ));
+                        }
+                    }
+                    Err(e) => return Ok(tool_error(&format!("stats failed: {e}"))),
+                }
                 // One store answers exactly as it did before stores could be
                 // combined; a name in front of it would only cost tokens.
                 lines.push(if many {
