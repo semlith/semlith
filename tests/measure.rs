@@ -666,8 +666,18 @@ fn measure_the_store_at_scale() {
     // the part that must run every time.
     if baseline.is_some() {
         let (new_idle, old_idle) = (slopes[1].1, slopes[0].1);
+        // Growth, not the signed delta. A store that shrank across the corpus
+        // grew by nothing, and both of these do: 0.21.0 falls 67 MB from its
+        // 700-chunk figure because opening a *small* store cost it 215 MB, and
+        // 0.23.0 falls 0.7 MB because opening one costs it 150 MB whatever is
+        // in it. Comparing the raw deltas read "shrank less" as "regressed" and
+        // failed the run on the binary that was better at both ends.
+        //
+        // What this still catches is the thing it was written for: a current
+        // binary that grows with the corpus where the baseline did not.
+        let growth = |kb: i64| kb.max(0);
         assert!(
-            new_idle < old_idle,
+            growth(new_idle) <= growth(old_idle),
             "an opened-but-unsearched {CURRENT} store grew by {new_idle} KB across a hundredfold \
              corpus against the {BASELINE}'s {old_idle} KB — opening is still loading vectors"
         );
