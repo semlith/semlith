@@ -80,6 +80,42 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE INDEX IF NOT EXISTS symbols_file_id ON symbols(file_id);
 CREATE INDEX IF NOT EXISTS symbols_name ON symbols(name);
 
+-- What a symbol used to be, from 0.23.0. A re-index no longer simply deletes
+-- the definitions of a file it is about to rewrite: it copies them here first,
+-- stamped with the content hash the file had while they were true, so
+-- `semlith symbol` can answer "what did this look like before".
+--
+-- A separate table rather than a validity column on `symbols`, because
+-- `symbols.file_id` cascades from `files` and a re-index deletes the file row.
+-- Making the live rows outlive their file would mean loosening that foreign
+-- key, which is the one thing keeping the graph from rotting; copying them out
+-- keeps the live table exactly as strict as it was.
+--
+-- Additive and `IF NOT EXISTS`, so `format_version` does not move, for the same
+-- reason the 0.12.0 graph tables did not move it: an older binary opens the
+-- store, never looks in here, and answers exactly as before. A store written
+-- before 0.23.0 has an empty table and starts filling it at its next index
+-- pass. See `docs/compatibility.md`.
+--
+-- Nothing prunes this. History is kept whole in 0.23.0 -- a row per changed
+-- symbol per pass -- and a retention knob is a later release's problem, when
+-- growth is something measured rather than imagined.
+CREATE TABLE IF NOT EXISTS symbols_past (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    path         TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    qualified    TEXT NOT NULL,
+    start_line   INTEGER NOT NULL,
+    end_line     INTEGER NOT NULL,
+    -- The content hash of the file version this definition belonged to. What
+    -- "invalid at" means: everything after this hash is a different file.
+    content_hash TEXT NOT NULL,
+    retired_at   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS symbols_past_name ON symbols_past(name);
+
 -- An edge is owned by the file its *source* is in: `src` is a symbol id, and
 -- the cascade above deletes an edge when its source file is re-indexed or
 -- forgotten.
@@ -559,7 +595,7 @@ pub fn file_hash(db: &Connection, path: &str) -> Result<Option<String>> {
 
 /// Drop a file and its chunks, returning the chunk ids so the caller can
 /// evict them from the vector index too.
-pub fn delete_file(db: &Connection, path: &str) -> Result<Vec<u64>> {
+pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {
     let ids: Vec<u64> = {
         let mut stmt = db.prepare(
             "SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id WHERE f.path = ?1",
@@ -570,8 +606,81 @@ pub fn delete_file(db: &Connection, path: &str) -> Result<Vec<u64>> {
             .map(|i| i as u64)
             .collect()
     };
+    retire_symbols(db, path, now)?;
     db.execute("DELETE FROM files WHERE path = ?1", params![path])?;
     Ok(ids)
+}
+
+/// Copy a file's current definitions into `symbols_past` before the file row
+/// takes them with it.
+///
+/// Stamped with the hash the file has right now, which is the hash they were
+/// extracted from: `delete_file` runs before the new version is inserted, so
+/// `files.hash` here is still the old content's.
+///
+/// A file with no symbols copies nothing, and a store opened by a binary that
+/// never wrote this table simply has none to copy.
+fn retire_symbols(db: &Connection, path: &str, now: i64) -> Result<()> {
+    db.execute(
+        "INSERT INTO symbols_past
+             (path, kind, name, qualified, start_line, end_line, content_hash, retired_at)
+         SELECT f.path, s.kind, s.name, s.qualified, s.start_line, s.end_line, f.hash, ?2
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE f.path = ?1",
+        params![path, now],
+    )?;
+    Ok(())
+}
+
+/// What a symbol used to be, newest first.
+///
+/// The live definitions are what `symbols_named` answers; these are the ones a
+/// re-index replaced, each with the content hash of the file version it was
+/// true for. An empty list means the store has never seen this name change --
+/// or has never re-indexed since 0.23.0, which is the same answer from the
+/// outside and is why `semlith stats` says whether the store keeps history.
+pub fn symbols_past_named(db: &Connection, name: &str, limit: usize) -> Result<Vec<PastSymbol>> {
+    let mut stmt = db.prepare(
+        "SELECT path, kind, name, qualified, start_line, end_line, content_hash, retired_at
+         FROM symbols_past WHERE name = ?1 ORDER BY retired_at DESC, id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![name, limit as i64], |r| {
+        Ok(PastSymbol {
+            path: r.get(0)?,
+            kind: r.get(1)?,
+            name: r.get(2)?,
+            qualified: r.get(3)?,
+            start_line: r.get(4)?,
+            end_line: r.get(5)?,
+            content_hash: r.get(6)?,
+            retired_at: r.get(7)?,
+            store: None,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// How many definitions this store has retired, over all names.
+pub fn symbols_past_count(db: &Connection) -> Result<i64> {
+    Ok(db.query_row("SELECT COUNT(*) FROM symbols_past", [], |r| r.get(0))?)
+}
+
+/// A definition a re-index replaced.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PastSymbol {
+    #[serde(serialize_with = "crate::serialize_plain")]
+    pub path: String,
+    pub kind: String,
+    pub name: String,
+    pub qualified: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    /// The content hash of the file version this definition belonged to.
+    pub content_hash: String,
+    pub retired_at: i64,
+    /// Which store this came from, set only when more than one was searched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 }
 
 pub fn insert_file(db: &Connection, path: &str, hash: &str, bytes: u64, now: i64) -> Result<i64> {
@@ -2165,7 +2274,7 @@ mod tests {
         insert_edge(&db, caller, "callee", "calls", "inferred", None, None).unwrap();
         assert_eq!(graph_stats(&db).unwrap(), (1, 1));
 
-        delete_file(&db, "a.rs").unwrap();
+        delete_file(&db, "a.rs", 0).unwrap();
         assert_eq!(
             graph_stats(&db).unwrap(),
             (0, 0),
@@ -2189,7 +2298,7 @@ mod tests {
         assert_eq!(edges_out(&db, "caller", &[]).unwrap().len(), 1);
 
         // b.rs changes: its symbols are dropped and re-extracted with new ids.
-        delete_file(&db, "b.rs").unwrap();
+        delete_file(&db, "b.rs", 0).unwrap();
         let b = insert_file(&db, "b.rs", "h2", 1, 0).unwrap();
         insert_symbol(&db, b, None, &at(sym("callee"), 9, 10)).unwrap();
 
@@ -2690,7 +2799,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        delete_file(&db, "/a/lib.rs").unwrap();
+        delete_file(&db, "/a/lib.rs", 0).unwrap();
         assert!(
             keyword_search(&db, "EMBED_BATCH", 10, &[])
                 .unwrap()

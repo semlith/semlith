@@ -586,6 +586,7 @@ fn tool_defs(open: &str) -> Value {
                 "properties": {
                     "name": { "type": "string" },
                     "k": { "type": "integer", "description": "Default 20." },
+                    "history": { "type": "boolean", "description": "What it used to be." },
                     "store": { "type": "string" }
                 },
                 "required": ["name"]
@@ -1097,24 +1098,54 @@ fn call_tool(
             };
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
             let only = strings(&args, "store");
-            match stores.evidence_in(
-                Some(&only),
-                name,
-                &crate::graph::dependency_kinds(),
-                k.clamp(1, 200),
-                false,
-            ) {
-                Ok(found) if found.definitions.is_empty() => empty_graph(stores, name),
-                // The same renderer the CLI prints, so an agent and a person
-                // are told the same thing about one symbol.
-                // `plain`, not `verbatim`. An agent given
-                // `\\?\C:\work\api\src\lock.rs` cannot open it, cannot pass it
-                // back to `semlith_read`, and cannot paste it anywhere a human
-                // will accept — which was every locator this tool returned on
-                // Windows. The store keeps the verbatim key; only the text on
-                // its way out is plain.
-                Ok(found) => found.render("", "", &crate::plain),
-                Err(e) => return Ok(tool_error(&e.to_string())),
+            if args
+                .get("history")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                match stores.past_in(Some(&only), name, k.clamp(1, 200)) {
+                    Ok(past) if past.is_empty() => format!(
+                        "No earlier definition of {name} is recorded. \
+                         A store keeps history from its first index pass under 0.23.0."
+                    ),
+                    Ok(past) => past
+                        .iter()
+                        .map(|row| {
+                            format!(
+                                "{} {} {}:{}-{} until {} hash {}",
+                                row.kind,
+                                row.qualified,
+                                crate::plain(&row.path),
+                                row.start_line,
+                                row.end_line,
+                                crate::clock::local_stamp(row.retired_at),
+                                &row.content_hash[..row.content_hash.len().min(12)],
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    Err(e) => return Ok(tool_error(&e.to_string())),
+                }
+            } else {
+                match stores.evidence_in(
+                    Some(&only),
+                    name,
+                    &crate::graph::dependency_kinds(),
+                    k.clamp(1, 200),
+                    false,
+                ) {
+                    Ok(found) if found.definitions.is_empty() => empty_graph(stores, name),
+                    // The same renderer the CLI prints, so an agent and a person
+                    // are told the same thing about one symbol.
+                    // `plain`, not `verbatim`. An agent given
+                    // `\\?\C:\work\api\src\lock.rs` cannot open it, cannot pass it
+                    // back to `semlith_read`, and cannot paste it anywhere a human
+                    // will accept — which was every locator this tool returned on
+                    // Windows. The store keeps the verbatim key; only the text on
+                    // its way out is plain.
+                    Ok(found) => found.render("", "", &crate::plain),
+                    Err(e) => return Ok(tool_error(&e.to_string())),
+                }
             }
         }
         "semlith_languages" => {
@@ -1853,10 +1884,11 @@ mod tests {
     /// test rather than a note because a one-sentence description is the kind
     /// of thing that grows back a paragraph at a time.
     ///
-    /// 0.23.0 adds `semlith_brief` and the number did move: thirteen tools
-    /// measure 4 376 bytes, about 1 094 tokens, against the twelve tools'
-    /// 3 995 and 999. The ceiling is restated at what the thirteenth actually
-    /// costs rather than at a round number chosen to fit it, and the tool was
+    /// 0.23.0 adds `semlith_brief` and a `history` argument to
+    /// `semlith_symbol`, and the number did move: thirteen tools measure
+    /// 4 441 bytes, about 1 111 tokens, against the twelve tools' 3 995 and
+    /// 999. The ceiling is restated at what they actually cost rather than at
+    /// a round number chosen to fit them, and the new tool was
     /// trimmed to the three arguments it cannot work without first -- no
     /// filter and no preference, because `semlith_search` carries both and
     /// four more schema properties are not worth what every agent pays for
@@ -1891,14 +1923,14 @@ mod tests {
                 )
             })
             .collect();
-        // 4 396, not 4 400. `tests/retrieval.rs` is the gate that decides and
-        // it fails at `bytes.div_ceil(4) >= 1_100`, which 4 397 bytes reaches —
-        // so a proxy set at 4 400 passes a list the criterion rejects, and did,
-        // eight minutes into a run that has to index a corpus before it says
-        // so. The two numbers mean the same thing.
+        // 4 476, not 4 500. `tests/retrieval.rs` is the gate that decides and
+        // it fails at `bytes.div_ceil(4) >= 1_120`, which 4 477 bytes reaches —
+        // so a proxy set at a round number passes a list the criterion rejects,
+        // and did, eight minutes into a run that has to index a corpus before
+        // it says so. The two numbers mean the same thing.
         assert!(
-            size <= 4_396,
-            "tools/list is {size} bytes, over the 4 396 the 1 100-token gate allows: {}",
+            size <= 4_476,
+            "tools/list is {size} bytes, over the 4 476 the 1 120-token gate allows: {}",
             each.join(" ")
         );
     }

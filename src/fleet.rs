@@ -460,6 +460,25 @@ impl Fleet {
         })
     }
 
+    /// What a name used to be, across the chosen stores, newest first.
+    ///
+    /// Empty from a store that has not re-indexed since it began keeping
+    /// history, which is indistinguishable from a name that never changed --
+    /// and is why `semlith stats` says whether a store keeps any at all.
+    pub fn past_in(
+        &self,
+        only: Option<&[String]>,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::store::PastSymbol>> {
+        let mut rows = self.graph_in(only, |s| {
+            crate::store::symbols_past_named(s.db(), name, limit)
+        })?;
+        rows.sort_by_key(|r| std::cmp::Reverse(r.retired_at));
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// What should count this fleet's tokens.
     ///
     /// The first store with a loaded model decides, and its tokenizer counts
@@ -742,6 +761,12 @@ pub trait Labelled {
 }
 
 impl Labelled for crate::store::SymbolRow {
+    fn label(&mut self, store: &str) {
+        self.store = Some(store.to_string());
+    }
+}
+
+impl Labelled for crate::store::PastSymbol {
     fn label(&mut self, store: &str) {
         self.store = Some(store.to_string());
     }

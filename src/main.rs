@@ -499,6 +499,14 @@ enum Command {
         #[arg(long, short, default_value_t = 20)]
         k: usize,
 
+        /// What this name used to be: the definitions a re-index replaced,
+        /// each with the content hash of the file version it was true for.
+        ///
+        /// Empty on a store that has not re-indexed since 0.23.0, which is
+        /// what `semlith stats` says.
+        #[arg(long)]
+        history: bool,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -1378,8 +1386,42 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Symbol { name, k, json } => {
+        Command::Symbol {
+            name,
+            k,
+            history,
+            json,
+        } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
+            if history {
+                let past = fleet.past_in(None, &name, k)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&past)?);
+                } else if past.is_empty() {
+                    eprintln!(
+                        "no earlier definition of {name} is recorded \
+                         (a store keeps history from its first index pass under 0.23.0)"
+                    );
+                } else {
+                    let mut out = std::io::stdout().lock();
+                    for row in &past {
+                        writeln!(
+                            out,
+                            "{}{} {}{} {}:{}-{}  until {}  hash {}",
+                            bold(),
+                            row.kind,
+                            row.qualified,
+                            reset(),
+                            display(std::path::Path::new(&row.path)),
+                            row.start_line,
+                            row.end_line,
+                            semlith::clock::local_stamp(row.retired_at),
+                            &row.content_hash[..row.content_hash.len().min(12)],
+                        )?;
+                    }
+                }
+                return Ok(());
+            }
             // One answer rather than three: the definition, who calls it, what
             // it calls, and the ring beyond that. Asking for a definition and
             // then having to ask twice more to know whether it was the right
@@ -1714,6 +1756,20 @@ fn main() -> Result<()> {
                     );
                 }
                 println!("indexed  {}", semlith::human_bytes(bytes));
+                // What rescoring costs in bytes, and whether this store has it
+                // at all. A store from before 0.23.0 says so rather than
+                // quietly ranking by codes alone.
+                match store.exact_bytes() {
+                    Some(exact) => println!(
+                        "exact    {} (full-precision rescoring)",
+                        semlith::human_bytes(exact as i64)
+                    ),
+                    None => println!("exact    none (re-index to rescore in full precision)"),
+                }
+                // Zero here reads the same as "nothing ever changed", so the
+                // line says which by naming the table rather than the number
+                // alone.
+                println!("history  {} retired definitions", store.retired_symbols()?);
                 // One line, and never a number without its denominator. A
                 // store that has recorded nothing prints nothing here rather
                 // than a zero that reads like a measurement.
