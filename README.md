@@ -245,7 +245,9 @@ semlith search "how is the store lock taken" -s ../api/.semlith -s ../cli/.semli
 
 Each flag is repeatable. **Repeats union, kinds intersect** — `--ext rs --ext
 toml` means "Rust or TOML", while `--path 'src/**' --ext md` means "Markdown,
-under `src`". The filter is applied before either half of the search picks its
+under `src`". **A leading `!` excludes**, after the inclusions of its own kind,
+so `--path 'src/**' --path '!src/vendor/**'` is everything under `src` but the
+vendored tree. The filter is applied before either half of the search picks its
 results, so asking for eight hits inside a subdirectory gets the eight best hits
 *in that subdirectory* rather than whatever survives filtering the eight best
 hits in the repository. Patterns are SQLite `GLOB`, so `*` crosses `/` and
@@ -475,8 +477,8 @@ at. Query latency does grow: the index scan is linear.
   searchable at all — but if your store fits, raising the budget is free speed.
 - The default model is English-only and is fixed when a store is created. Image
   search is not OCR, and the CLIP pair behind it is fixed.
-- Search filters are SQLite `GLOB`: no regex, and no way to express "not this
-  path". `--lang` maps a fixed table of extensions and never reads contents.
+- Search filters are SQLite `GLOB`: no regex, though a leading `!` excludes.
+  `--lang` maps a fixed table of extensions and never reads contents.
 - Results are not reranked by a cross-encoder, multi-store search is a merge
   rather than a joint ranking, and reverse reachability is not part of it.
 - Nothing goes looking for stores on the filesystem, nothing is code-signed,

@@ -219,15 +219,17 @@ enum Command {
         k: usize,
 
         /// Only search files matching this glob. Repeatable; a relative
-        /// pattern matches anywhere in the tree.
+        /// pattern matches anywhere in the tree. A leading `!` excludes:
+        /// `--path 'src/**' --path '!src/vendor/**'`.
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only search files with this extension. Repeatable.
+        /// Only search files with this extension. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
-        /// Only search files of this language. Repeatable; see `semlith languages`.
+        /// Only search files of this language. Repeatable; a leading `!`
+        /// excludes. See `semlith languages`.
         #[arg(long, short)]
         lang: Vec<String>,
 
@@ -257,15 +259,15 @@ enum Command {
         #[arg(long, short, default_value_t = semlith::brief::DEFAULT_BUDGET)]
         budget: i64,
 
-        /// Only look at files matching this glob. Repeatable.
+        /// Only look at files matching this glob. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only look at files with this extension. Repeatable.
+        /// Only look at files with this extension. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
-        /// Only look at files of this language. Repeatable.
+        /// Only look at files of this language. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         lang: Vec<String>,
 
@@ -287,7 +289,7 @@ enum Command {
         /// `path:start-end`, `path:line`, or a symbol name.
         target: String,
 
-        /// Only read files matching this glob. Repeatable.
+        /// Only read files matching this glob. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         path: Vec<String>,
 
@@ -308,7 +310,7 @@ enum Command {
         #[arg(long, short)]
         lang: String,
 
-        /// Only search files matching this glob. Repeatable.
+        /// Only search files matching this glob. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         path: Vec<String>,
 
@@ -1110,10 +1112,7 @@ fn run() -> Result<()> {
                 if json {
                     println!("[]");
                 } else {
-                    eprintln!(
-                        "no files match the filter (store has {} chunks)",
-                        fleet.chunks()
-                    );
+                    eprintln!("{}", fleet.no_match_reason(&filter));
                 }
                 return Ok(());
             }
@@ -1129,7 +1128,7 @@ fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
             } else if hits.is_empty() {
-                eprintln!("no matches (store has {} chunks)", fleet.chunks());
+                eprintln!("{}", fleet.no_match_reason(&filter));
             } else {
                 let mut out = std::io::stdout().lock();
                 for (i, h) in hits.iter().enumerate() {
@@ -2812,7 +2811,7 @@ fn brief(
     }
 
     if brief.spans.is_empty() {
-        eprintln!("no matches (store has {} chunks)", fleet.chunks());
+        eprintln!("{}", fleet.no_match_reason(&filter));
         return Ok(());
     }
 

@@ -460,7 +460,7 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "description": "Globs." },
+                    "path": { "type": "array", "description": "Globs; ! excludes (also on ext, lang)." },
                     "ext": { "type": "array" },
                     "lang": { "type": "array", "description": "See semlith_languages." },
                     "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
@@ -670,8 +670,7 @@ fn call_tool(
             };
 
             if selected == 0 {
-                "No indexed file matches that path/ext/lang filter. Try again without it."
-                    .to_string()
+                crate::fleet::FILTER_SELECTED_NOTHING.to_string()
             } else {
                 // Locate by default from 0.15.0. `format: "excerpt"` is the
                 // opt-back, and is what the CLI still does.
@@ -693,7 +692,7 @@ fn call_tool(
                 };
                 match stores.search_preferring(Some(&only), query, k.clamp(1, 50), &filter, prefer)
                 {
-                    Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
+                    Ok(hits) if hits.is_empty() => stores.no_match_reason(&filter),
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
                     }
@@ -732,9 +731,7 @@ fn call_tool(
                 &filter,
                 crate::Prefer::default(),
             ) {
-                Ok(brief) if brief.spans.is_empty() => {
-                    "No matches in the semlith store.".to_string()
-                }
+                Ok(brief) if brief.spans.is_empty() => stores.no_match_reason(&filter),
                 Ok(brief) => render_brief(&brief),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }

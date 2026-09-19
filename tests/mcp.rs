@@ -251,6 +251,84 @@ fn the_files_tool_lists_narrows_and_says_what_it_left_out() {
     );
 }
 
+/// A filter that behaves one way at the terminal and another over MCP is two
+/// products. `!` is a new spelling on both, so the two are compared over one
+/// store rather than each asserted against a hand-written expectation.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_excluded_filter_reads_the_same_at_the_cli_and_over_mcp() {
+    let corpus = corpus(
+        "rust",
+        &[
+            ("ownership.md", RUST),
+            ("borrow.rs", "fn main() { let owner = String::new(); }"),
+            ("vendor/other.rs", "fn vendored() {}"),
+        ],
+    );
+    let store = store_for(&corpus);
+
+    const QUESTION: &str = "ownership and vendored code";
+
+    let cli = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(["search", QUESTION, "-k", "8", "-s"])
+            .arg(store.path())
+            .args(args)
+            .output()
+            .expect("semlith search runs");
+        assert!(out.status.success(), "semlith search failed: {out:?}");
+        // The "nothing came back" line goes to stderr, and it is half of what
+        // this test is about, so both streams are one body here.
+        String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap()
+    };
+
+    let mut server = Server::open(&[store.path()]);
+    server.handshake();
+    let tool = |server: &mut Server, extra: Value| {
+        let mut args = json!({ "query": QUESTION, "k": 8 });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        server.tool("semlith_search", args)
+    };
+
+    // An exclusion, applied after the inclusions of its own kind.
+    let listed = cli(&["--ext", "rs", "--ext", "!md"]);
+    let tooled = tool(&mut server, json!({ "ext": ["rs", "!md"] }));
+    for body in [&listed, &tooled] {
+        assert!(body.contains("borrow.rs"), "the inclusion was lost: {body}");
+        assert!(
+            !body.contains("ownership.md"),
+            "the exclusion was not applied: {body}"
+        );
+    }
+
+    // An exclusion on its own is everything except.
+    let listed = cli(&["--path", "!**/vendor/**"]);
+    let tooled = tool(&mut server, json!({ "path": ["!**/vendor/**"] }));
+    for body in [&listed, &tooled] {
+        assert!(
+            body.contains("ownership.md") && body.contains("borrow.rs"),
+            "an exclusion alone must still select everything else: {body}"
+        );
+        assert!(
+            !body.contains("other.rs"),
+            "the excluded path came back: {body}"
+        );
+    }
+
+    // And an exclusion that empties the set says so rather than reading as a
+    // corpus that has nothing to say.
+    let listed = cli(&["--ext", "!md", "--ext", "!rs"]);
+    let tooled = tool(&mut server, json!({ "ext": ["!md", "!rs"] }));
+    for body in [&listed, &tooled] {
+        assert!(
+            body.contains("No indexed file matches that path/ext/lang filter"),
+            "an emptied filter must name itself: {body}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------- T04
 
 /// One writer per store is the product's rule. With several stores open there
@@ -579,7 +657,13 @@ fn corpus(name: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
     let inner = dir.path().join(name);
     fs::create_dir_all(&inner).unwrap();
     for (file, body) in files {
-        fs::write(inner.join(file), body).unwrap();
+        let at = inner.join(file);
+        // A file may name a subdirectory, so a corpus can hold a vendored tree
+        // to filter out as well as a flat list.
+        if let Some(parent) = at.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(at, body).unwrap();
     }
     dir
 }

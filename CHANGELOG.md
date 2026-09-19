@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Every search filter negates
+
+A leading `!` on a `--path`, `--ext` or `--lang` value — and on the `path`,
+`ext` and `lang` fields of every MCP tool that takes them — excludes instead of
+including. Exclusions apply after the inclusions of their own kind, so
+`--path 'src/**' --path '!src/vendor/**'` is everything under `src` but the
+vendored tree, and an exclusion written on its own is everything except.
+
+A filter that admits no indexed file now says so in one sentence wherever it
+happens — the terminal, `semlith_search` and `semlith_brief` — rather than in
+three wordings on the commands that had a check and silence on the ones that
+did not. The README's "no way to express not this path" limit is gone with it.
+
 ## [0.23.0] - 2026-09-19
 
 An agent asking semlith a question used to spend four round trips on it: search,

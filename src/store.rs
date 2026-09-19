@@ -458,14 +458,30 @@ fn glob_predicate(groups: &[Vec<String>]) -> (String, Vec<String>) {
     let mut binds = Vec::new();
     let mut clauses = Vec::new();
     for group in groups {
-        let ors: Vec<String> = group
-            .iter()
-            .map(|p| {
-                binds.push(p.clone());
-                format!("{GLOB_PATH} GLOB ?")
-            })
-            .collect();
-        clauses.push(format!("({})", ors.join(" OR ")));
+        // A pattern marked with a leading `!` by `filter::anchor` excludes.
+        // Exclusions apply after the inclusions of their own kind, which is
+        // what keeps them inside this group rather than becoming a group of
+        // their own: `--path 'src/**' --path '!src/vendor/**'` is one
+        // requirement, not two intersecting ones.
+        let (excluded, included): (Vec<&String>, Vec<&String>) =
+            group.iter().partition(|p| p.starts_with('!'));
+        let placeholder = format!("{GLOB_PATH} GLOB ?");
+        let ors = vec![placeholder.clone(); included.len()].join(" OR ");
+        let nots = vec![placeholder; excluded.len()].join(" OR ");
+
+        // Binds are positional, so they are pushed in the order the clause
+        // below writes their placeholders — inclusions first — rather than in
+        // the order the user typed them.
+        binds.extend(included.into_iter().cloned());
+        binds.extend(excluded.into_iter().map(|p| p[1..].to_string()));
+
+        clauses.push(match (ors.is_empty(), nots.is_empty()) {
+            (true, true) => continue,
+            (false, true) => format!("({ors})"),
+            // Exclusions with nothing beside them mean everything except.
+            (true, false) => format!("(NOT ({nots}))"),
+            (false, false) => format!("(({ors}) AND NOT ({nots}))"),
+        });
     }
     if clauses.is_empty() {
         return ("1".to_string(), binds);
@@ -2761,6 +2777,59 @@ mod tests {
     fn no_filter_counts_every_file() {
         let db = mixed();
         assert_eq!(matching_files(&db, &[]).unwrap(), 4);
+    }
+
+    /// An exclusion on its own means everything except, so it needs no
+    /// inclusion beside it to be a filter.
+    #[test]
+    fn an_exclusion_alone_means_everything_except() {
+        let db = mixed();
+        let f = filter(&["!**/vendor/**"], &[], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 3);
+    }
+
+    /// The exclusion applies after the inclusions of its own kind, so the two
+    /// intersect rather than the later one replacing the earlier.
+    #[test]
+    fn an_exclusion_narrows_the_inclusions_of_its_kind() {
+        let db = mixed();
+        let f = filter(&["proj/**", "!**/vendor/**"], &[], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 3);
+
+        let f = filter(&["proj/src/**", "!**/notes.md"], &[], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 1);
+    }
+
+    /// The bind values are positional, so an exclusion written before an
+    /// inclusion must still bind to the `?` the clause puts it against.
+    #[test]
+    fn an_exclusion_written_first_still_binds_to_its_own_placeholder() {
+        let db = mixed();
+        let written_first = filter(&["!**/vendor/**", "proj/**"], &[], &[]);
+        let written_last = filter(&["proj/**", "!**/vendor/**"], &[], &[]);
+        assert_eq!(
+            matching_files(&db, &written_first).unwrap(),
+            matching_files(&db, &written_last).unwrap(),
+        );
+        assert_eq!(matching_files(&db, &written_first).unwrap(), 3);
+    }
+
+    /// Extensions negate the way paths do, and case-insensitively: a store
+    /// holding `README.MD` loses it to `--ext '!md'`.
+    #[test]
+    fn an_excluded_extension_removes_every_spelling_of_it() {
+        let db = mixed();
+        let f = filter(&[], &["!md"], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 2);
+    }
+
+    /// A group holding only exclusions still selects from everything, and the
+    /// two kinds still intersect across groups.
+    #[test]
+    fn exclusions_of_different_kinds_intersect() {
+        let db = mixed();
+        let f = filter(&["!**/vendor/**"], &["!md"], &[]);
+        assert_eq!(matching_files(&db, &f).unwrap(), 1);
     }
 
     #[test]
