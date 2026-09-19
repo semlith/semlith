@@ -172,6 +172,71 @@ impl Shape {
     }
 }
 
+/// One list going into the fusion: its name, whether its ids are image ids,
+/// and each candidate with the weight that list gives it.
+type CandidateList = (&'static str, bool, Vec<(u64, f32)>);
+
+/// One candidate out of the fusion: which id space it belongs to, its id, and
+/// its fused score.
+type Scored = ((bool, u64), f32);
+
+/// Reciprocal-rank fusion over the candidate lists, with the derived list
+/// adding candidates and never amplifying them.
+///
+/// Lists in, one fused score and one provenance badge set per candidate out,
+/// in the order the lists were given. Pulled out of `search_preferring` so the
+/// one rule that is easy to state and easy to lose — the graph list is derived
+/// from the other two, so a chunk they already found takes nothing from it —
+/// can be asserted on three lists with a known overlap rather than inferred
+/// from a store.
+///
+/// A candidate's score is the sum of `weight / (constant + rank + 1)` over the
+/// lists that found it first-hand. `constant_of` is the shape's own curve for
+/// that list; `rank` is the position within the list.
+fn fuse(
+    lists: &[CandidateList],
+    constant_of: impl Fn(&str) -> f32,
+) -> (Vec<Scored>, Vec<Vec<&'static str>>) {
+    let mut fused: Vec<((bool, u64), f32)> = Vec::new();
+    let mut seen: std::collections::HashMap<(bool, u64), usize> = std::collections::HashMap::new();
+    let mut badges: Vec<Vec<&'static str>> = Vec::new();
+
+    for (name, is_image, ranking) in lists {
+        let constant = constant_of(name);
+        // The graph list brings candidates and never votes on them.
+        //
+        // It is derived from the other two: `graph_expansion` walks out from
+        // what the dense and keyword lists already found. So when it returns a
+        // chunk those lists also returned, its contribution is not a second
+        // opinion — it is the first opinion counted twice, and a chunk two
+        // lists ranked mediocrely beats the one an authoritative list ranked
+        // first partly on that double count.
+        //
+        // It earns its place by reaching chunks neither list found, and that
+        // half is kept: a candidate only this list holds enters with its own
+        // score, and the rescoring stage is what sorts those.
+        let derived = *name == "graph";
+        for (rank, (id, weight)) in ranking.iter().enumerate() {
+            let key = (*is_image, *id);
+            let contribution = weight / (constant + rank as f32 + 1.0);
+            match seen.get(&key) {
+                Some(&slot) => {
+                    if !derived {
+                        fused[slot].1 += contribution;
+                    }
+                    badges[slot].push(name);
+                }
+                None => {
+                    seen.insert(key, fused.len());
+                    fused.push((key, contribution));
+                    badges.push(vec![name]);
+                }
+            }
+        }
+    }
+    (fused, badges)
+}
+
 /// Whether a query is shaped like an identifier or like a question.
 ///
 /// The rule is deliberately crude and entirely inspectable: one token, made of
@@ -2758,10 +2823,6 @@ impl Semlith {
         // id. Everything else about reciprocal-rank fusion is unchanged: an
         // image is a fourth list, ranked against the other three rather than
         // appended after them.
-        let mut fused: Vec<((bool, u64), f32)> = Vec::new();
-        let mut seen: std::collections::HashMap<(bool, u64), usize> =
-            std::collections::HashMap::new();
-        let mut lists: Vec<Vec<&'static str>> = Vec::new();
         // The image list goes in first so that a tie resolves to the image.
         // A tie means the two are equally ranked, and only one of them was
         // found by a model that looked at the thing being asked about.
@@ -2787,7 +2848,7 @@ impl Semlith {
             })
             .collect();
 
-        for (name, is_image, ranking) in [
+        let candidate_lists = [
             // Weightless on purpose. A definition does not out-*score* the
             // other lists, it is lifted past them below, and a score here
             // would be a second mechanism doing the same job badly: tuned
@@ -2820,43 +2881,10 @@ impl Semlith {
                 false,
                 graph_ids.iter().map(|r| (r.id, r.weight)).collect(),
             ),
-        ] {
-            let constant = shape.list_constant(name);
-            // The graph list brings candidates and never votes on them.
-            //
-            // It is derived from the other two: `graph_expansion` walks out
-            // from what the dense and keyword lists already found. So when it
-            // returns a chunk those lists also returned, its contribution is
-            // not a second opinion — it is the first opinion counted twice,
-            // and a chunk two lists ranked mediocrely beats the one an
-            // authoritative list ranked first partly on that double count.
-            //
-            // It earns its place by reaching chunks neither list found, and
-            // that half is kept. On the pinned corpus the baseline run
-            // reported "graph-only hits 0 of 20 satisfied a span" — twenty
-            // chunks no other list found, none of them right — so the walk
-            // pays for itself only where a later reranking can sort its
-            // candidates, and it must not be allowed to reorder what the other
-            // lists were already sure about.
-            let derived = name == "graph";
-            for (rank, (id, weight)) in ranking.iter().enumerate() {
-                let key = (is_image, *id);
-                let contribution = weight / (constant + rank as f32 + 1.0);
-                match seen.get(&key) {
-                    Some(&slot) => {
-                        if !derived {
-                            fused[slot].1 += contribution;
-                        }
-                        lists[slot].push(name);
-                    }
-                    None => {
-                        seen.insert(key, fused.len());
-                        fused.push((key, contribution));
-                        lists.push(vec![name]);
-                    }
-                }
-            }
-        }
+        ];
+
+        let (mut fused, lists) = fuse(&candidate_lists, |name| shape.list_constant(name));
+
         // The lift, written as a score rather than as a second sort.
         //
         // A stable sort that moved the definitions to the front would order
@@ -2875,7 +2903,7 @@ impl Semlith {
         if !definitions.is_empty() {
             let top = fused.iter().map(|(_, score)| *score).fold(0.0f32, f32::max);
             for (at, id) in definitions.iter().enumerate() {
-                if let Some(&slot) = seen.get(&(false, *id)) {
+                if let Some(slot) = fused.iter().position(|(key, _)| *key == (false, *id)) {
                     fused[slot].1 = top + (definitions.len() - at) as f32;
                 }
             }
@@ -3806,6 +3834,54 @@ fn walk(roots: &[PathBuf]) -> Walked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The graph list adds candidates and never amplifies them.
+    ///
+    /// The structural defect 0.25.0 exists to hold still: reciprocal-rank
+    /// fusion is only justified over independent evidence, and the graph list
+    /// is walked out of the other two. A chunk both text lists found must
+    /// score exactly what those two lists gave it, whatever the graph says
+    /// about it afterwards.
+    #[test]
+    fn the_graph_list_adds_candidates_and_does_not_amplify_them() {
+        let both = 10u64;
+        let only_graph = 99u64;
+        let lists: [CandidateList; 3] = [
+            ("vector", false, vec![(both, 1.0), (11, 1.0)]),
+            ("keyword", false, vec![(both, 1.0)]),
+            ("graph", false, vec![(both, 1.0), (only_graph, 1.0)]),
+        ];
+        let text_only: [CandidateList; 2] = [lists[0].clone(), lists[1].clone()];
+
+        let (with_graph, badges) = fuse(&lists, |_| RRF_K);
+        let (without_graph, _) = fuse(&text_only, |_| RRF_K);
+
+        let score = |fused: &[Scored], id: u64| {
+            fused
+                .iter()
+                .find(|(key, _)| *key == (false, id))
+                .map(|(_, score)| *score)
+                .expect("the candidate is in the fused set")
+        };
+        assert_eq!(
+            score(&with_graph, both),
+            score(&without_graph, both),
+            "a chunk both text lists found was scored a third time by the graph"
+        );
+        // It still says where it came from, and it still reaches what the
+        // other two missed — that half is the graph's whole job.
+        let slot = with_graph
+            .iter()
+            .position(|(key, _)| *key == (false, both))
+            .unwrap();
+        assert_eq!(badges[slot], vec!["vector", "keyword", "graph"]);
+        assert!(
+            with_graph
+                .iter()
+                .any(|(key, _)| *key == (false, only_graph)),
+            "the graph list stopped adding candidates of its own"
+        );
+    }
 
     /// The rule is crude on purpose, so these are the whole of it.
     #[test]
