@@ -471,7 +471,10 @@ Check 'portal/search/empty-query' 'an empty query is handled' -When $script:hasD
 # naming both rather than guessing, which is the documented behaviour and the
 # right one.
 Check 'portal/read/span' 'read returns one span' -When $script:hasData {
-    $target = (Join-Path $repo 'src/main.rs') + ':28-40'
+    # A suffix only the snapshot's copy has, not an absolute path: the CLI side
+    # tried the absolute form and it failed on Windows, where the shell's path
+    # and the store's recorded path are different spellings of one place.
+    $target = 'retrieval/corpus/src/main.rs:28-40'
     $body = Get-Json "/api/read?target=$([uri]::EscapeDataString($target))"
     if (($body | ConvertTo-Json -Depth 6).Length -lt 10) { Fail "read returned nothing" }
 }

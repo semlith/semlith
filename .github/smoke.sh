@@ -430,16 +430,21 @@ check cli/search/no-verbatim-paths "no \\\\?\\ paths among hits"       c_search_
 
 # ----------------------------------------------------------------------- read
 
-# The absolute path, because no suffix of this file is unique any more. From
-# 0.22.0 the repository carries a pinned snapshot of itself at
+# The snapshot's own copy, named by a suffix only it has. From 0.22.0 the
+# repository carries a pinned snapshot of itself at
 # `tests/fixtures/retrieval/corpus`, so a clone holds both `<corpus>/src/main.rs`
-# and `<corpus>/tests/fixtures/retrieval/corpus/src/main.rs` — and every suffix
-# of the first is also a suffix of the second, `corpus/src/main.rs` included.
-# `read` refuses by name, "matches 2 indexed files ... Name more of the path",
-# which is the documented behaviour and the right one; the check was relying on
-# a uniqueness that was an accident of what the repository happened to contain.
-c_read_span() { semlith read "$corpus/src/main.rs:28-40" | grep -q '.'; }
-c_read_line() { semlith read "$corpus/src/main.rs:30" | grep -q '.'; }
+# and `<corpus>/tests/fixtures/retrieval/corpus/src/main.rs`. Every suffix of
+# the first is also a suffix of the second, so only the second can be named
+# unambiguously by suffix at all — `read` refuses the first by name, which is
+# the documented behaviour and the right one.
+#
+# A suffix and not the absolute path, which was tried and works on Linux and
+# macOS and not on Windows: under Git Bash `$corpus` is a POSIX path and the
+# store recorded a Windows one, so nothing matched and the check said "nothing
+# indexed at that span". A suffix is the same string on all three.
+READ_TARGET="retrieval/corpus/src/main.rs"
+c_read_span() { semlith read "$READ_TARGET:28-40" | grep -q '.'; }
+c_read_line() { semlith read "$READ_TARGET:30" | grep -q '.'; }
 c_read_symbol() { semlith read "main" | grep -q '.'; }
 
 c_read_round_trip() {
@@ -458,7 +463,7 @@ c_read_missing() {
   return 0
 }
 
-c_read_json() { semlith read "$corpus/src/main.rs:28-40" --json | jq -e '.' > /dev/null; }
+c_read_json() { semlith read "$READ_TARGET:28-40" --json | jq -e '.' > /dev/null; }
 
 check cli/read/span            "read takes path:start-end"          c_read_span
 check cli/read/line            "read takes path:line"               c_read_line
