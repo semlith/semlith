@@ -666,7 +666,10 @@ pub fn digest(bytes: &[u8]) -> String {
     // sha2 0.11 finalises to a `hybrid-array` value, which does not implement
     // `LowerHex` the way the old `GenericArray` did. Thirty-two bytes is not
     // worth a hex crate.
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Check bytes against the digest recorded for them, or say which file failed.
@@ -791,6 +794,10 @@ mod tests {
             digest("semlith".as_bytes()),
             "the same bytes hash the same way whatever produced them"
         );
-        assert_eq!(digest(b"").len(), 64, "sixty-four hex characters, never a shorter form");
+        assert_eq!(
+            digest(b"").len(),
+            64,
+            "sixty-four hex characters, never a shorter form"
+        );
     }
 }
