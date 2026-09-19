@@ -2643,6 +2643,82 @@ td.why .copyfield {
   text-overflow: ellipsis;
 }
 
+/* The Brief view: one call's answer, in the column the locate list uses.
+ *
+ * Deliberately the same type scale, the same rules and the same tags as the
+ * list beside it — it is the same store answering the same question, and a
+ * second visual language would say otherwise. */
+.brief-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-2h) var(--sp-5);
+  min-width: 0;
+}
+.brief-span,
+.brief-symbol {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--line-soft);
+  min-width: 0;
+}
+.brief-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.brief-head .path {
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.brief-head .sym {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.brief-lists {
+  display: inline-flex;
+  gap: var(--sp-1);
+  margin-left: auto;
+}
+.brief-text {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  line-height: var(--lh-code);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.brief-edge {
+  display: flex;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  min-width: 0;
+}
+.brief-edge .k {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.brief-edge .v {
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+/* What the budget dropped, said rather than left blank: a span with no text
+ * under it looks like a span with no text in it. */
+.brief-dropped {
+  font-family: var(--mono);
+  font-size: var(--t-micro-h);
+  color: var(--muted);
+  font-style: italic;
+}
+
 .locate-footer {
   display: flex;
   align-items: center;
