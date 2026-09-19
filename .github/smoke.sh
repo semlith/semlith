@@ -941,10 +941,18 @@ fi
 supervision_facility() {
   case "$platform" in
     macos)
-      if launchctl print "gui/$(id -u)" > /dev/null 2>&1; then
-        echo "launchd gui/$(id -u): present"
+      # `launchctl managername`, not `launchctl print gui/<uid>`. The GitHub
+      # macOS runner has a gui domain and answers `print` perfectly well — that
+      # was the first version of this probe and it let the recovery check run
+      # and fail there, which is the whole of #104 restated. What it does not
+      # have is an Aqua session, and `managername` is what says so: "Aqua" in a
+      # real login session, "Background" or "StandardIO" otherwise. Without one
+      # launchd loads a user agent, runs it, and never keeps it alive.
+      name=$(launchctl managername 2>/dev/null || echo unknown)
+      if [ "$name" = "Aqua" ]; then
+        echo "launchd: Aqua session, KeepAlive can work"
       else
-        echo "launchd gui/$(id -u): absent — this session is not an Aqua login session, so launchd runs a user agent once and does not keep it alive"
+        echo "launchd: session manager is \"$name\", not Aqua — launchd runs a user agent once here and does not keep it alive"
       fi
       ;;
     linux)
@@ -966,7 +974,7 @@ supervision_facility() {
 # Zero when this session can actually keep a daemon alive.
 supervision_present() {
   case "$platform" in
-    macos) launchctl print "gui/$(id -u)" > /dev/null 2>&1 ;;
+    macos) [ "$(launchctl managername 2>/dev/null)" = "Aqua" ] ;;
     linux) systemctl --user show-environment > /dev/null 2>&1 ;;
     *)     return 1 ;;
   esac
