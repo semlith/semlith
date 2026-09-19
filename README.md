@@ -343,7 +343,7 @@ command needs no licence key, now or ever.
 
 ## Using it from an agent
 
-`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same twelve
+`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same thirteen
 tools over HTTP at `/mcp`:
 
 | Tool | What it does |
@@ -434,8 +434,8 @@ of these drifts from its source:
 | edge kinds | **6** |
 | document formats with a reader | **13** |
 | image types | **5** |
-| MCP tools | **12** |
-| CLI commands | **25** |
+| MCP tools | **13** |
+| CLI commands | **26** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 
@@ -448,7 +448,7 @@ of these drifts from its source:
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one search across three stores | **1 query embed**, ~39 MB per extra store | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
-| `tools/list` | **3 995 bytes**, ~999 tokens, twelve tools | `cargo test --release --test retrieval -- --ignored` |
+| `tools/list` | **4 376 bytes**, ~1 094 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
 | retrieval, on 30 sealed questions of 107 | **hit@1 66 %, hit@3 76 %, hit@8 83 %**, wrong-yes **0** | the same |
 | the same binary, on the 77 it was tuned against | hit@1 71 %, hit@3 81 %, hit@8 87 % | the same |
 | 0.21.0, same corpus and instrument | sealed hit@1 60 %, hit@3 73 %, hit@8 83 % | the same |

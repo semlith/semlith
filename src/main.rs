@@ -241,6 +241,44 @@ enum Command {
         json: bool,
     },
 
+    /// Everything one question needs, in one call, under a token budget.
+    ///
+    /// The spans a search would find, the text of the top ones, and the
+    /// callers and callees of the symbols they sit inside, one hop each way --
+    /// what `search`, `read` and `neighbors` answer in four round trips.
+    ///
+    /// `semlith brief "how does a store decide it is stale"`
+    Brief {
+        question: String,
+
+        /// The token ceiling for the whole answer, counted with the store's
+        /// own tokenizer. Locators and edges are kept first, so a small budget
+        /// drops span text from the bottom of the ranking up and says so.
+        #[arg(long, short, default_value_t = semlith::brief::DEFAULT_BUDGET)]
+        budget: i64,
+
+        /// Only look at files matching this glob. Repeatable.
+        #[arg(long, short)]
+        path: Vec<String>,
+
+        /// Only look at files with this extension. Repeatable.
+        #[arg(long, short)]
+        ext: Vec<String>,
+
+        /// Only look at files of this language. Repeatable.
+        #[arg(long, short)]
+        lang: Vec<String>,
+
+        /// Lift the implementation (`code`), the prose about it (`docs`), or
+        /// neither (`any`, the default).
+        #[arg(long, default_value = "any")]
+        prefer: String,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print one span, or one symbol's definition, and nothing around it.
     ///
     /// The second stage after a search: `semlith read src/store.rs:1041-1080`
@@ -992,6 +1030,132 @@ fn main() -> Result<()> {
                     }
                 },
             )?;
+        }
+
+        Command::Brief {
+            question,
+            budget,
+            path,
+            ext,
+            lang,
+            prefer,
+            json,
+        } => {
+            let filter = Filter::new(&path, &ext, &lang)?;
+            let prefer = semlith::Prefer::parse(&prefer)?;
+            if budget < 1 {
+                anyhow::bail!("--budget is a number of tokens, so it has to be at least 1");
+            }
+
+            let mut fleet = read_fleet(&cli.store, &cwd, false)?;
+            fleet.quiet = json;
+
+            let started = Instant::now();
+            let brief =
+                semlith::brief::brief(&mut fleet, None, &question, budget, &filter, prefer)?;
+            let elapsed = started.elapsed();
+
+            // Built from the answer rather than from the hits, because the
+            // answer is what a brief actually hands over -- a span whose text
+            // the budget dropped cost its locator and nothing more, and a row
+            // that counted the text would overstate what was saved.
+            let rendered = serde_json::to_string(&brief)?;
+            semlith::ledger::reply(&fleet, &CLI_LEDGER, "brief", &question, &rendered, elapsed);
+
+            if json {
+                println!(
+                    "{rendered_pretty}",
+                    rendered_pretty = serde_json::to_string_pretty(&brief)?
+                );
+                return Ok(());
+            }
+
+            if brief.spans.is_empty() {
+                eprintln!("no matches (store has {} chunks)", fleet.chunks());
+                return Ok(());
+            }
+
+            let mut out = std::io::stdout().lock();
+            for (i, span) in brief.spans.iter().enumerate() {
+                let from = match &span.store {
+                    Some(label) => format!("[{label}] "),
+                    None => String::new(),
+                };
+                // The same one-letter list badges `search` prints, because it
+                // is the same hit and a reader should not have to learn the
+                // notation twice.
+                let via: String = span
+                    .lists
+                    .iter()
+                    .map(|l| match *l {
+                        "vector" => 'v',
+                        "keyword" => 'f',
+                        "image" => 'i',
+                        _ => 'g',
+                    })
+                    .collect();
+                let what = match (&span.symbol, &span.symbol_kind) {
+                    (Some(name), Some(kind)) => format!(" {kind} {name}"),
+                    (Some(name), None) => format!(" {name}"),
+                    _ => String::new(),
+                };
+                writeln!(
+                    out,
+                    "{}{}. {via:<3} {from}{}:{}-{}{what}{}",
+                    bold(),
+                    i + 1,
+                    display(std::path::Path::new(&span.path)),
+                    span.start_line,
+                    span.end_line,
+                    reset()
+                )?;
+                match &span.text {
+                    Some(text) => {
+                        for line in text.lines() {
+                            writeln!(out, "   {line}")?;
+                        }
+                    }
+                    // Said rather than left blank: a span with no text under it
+                    // looks like a span with no text in it.
+                    None => writeln!(out, "   (text left out for the budget)")?,
+                }
+                writeln!(out)?;
+            }
+
+            for symbol in &brief.symbols {
+                writeln!(out, "{}{} (graph){}", bold(), symbol.name, reset())?;
+                for (label, edges) in [("called by", &symbol.callers), ("calls", &symbol.callees)] {
+                    for edge in edges {
+                        writeln!(
+                            out,
+                            "   {label} {} {}:{}",
+                            edge.symbol.name,
+                            display(std::path::Path::new(&edge.symbol.path)),
+                            edge.symbol.start_line
+                        )?;
+                    }
+                }
+                if symbol.hidden > 0 {
+                    writeln!(out, "   and {} more edges", symbol.hidden)?;
+                }
+                writeln!(out)?;
+            }
+
+            let mut tail = format!(
+                "{} tokens of {budget}, counted with {}",
+                brief.tokens, brief.counted_with
+            );
+            if !brief.cut.is_empty() {
+                let mut dropped = Vec::new();
+                if brief.cut.span_text > 0 {
+                    dropped.push(format!("{} spans left without text", brief.cut.span_text));
+                }
+                if brief.cut.symbols > 0 {
+                    dropped.push(format!("{} symbols' edges", brief.cut.symbols));
+                }
+                tail.push_str(&format!(" -- dropped: {}", dropped.join(", ")));
+            }
+            writeln!(out, "{tail}")?;
         }
 
         Command::Search {

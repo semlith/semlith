@@ -11,3 +11,6 @@
 # Python bytecode from the browser drive.
 __pycache__/
 *.pyc
+
+# Agent worktrees, created per session and never part of the tree.
+.claude/worktrees/

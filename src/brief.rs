@@ -54,6 +54,15 @@ pub struct Brief {
     /// one way is never comparable with one counted the other, so the label
     /// travels with the number, as it does in the ledger.
     pub counted_with: &'static str,
+    /// What the best-ranked locator costs, which is the one thing a budget
+    /// cannot drop.
+    ///
+    /// An answer that says nothing about where to look is not a smaller answer,
+    /// it is no answer -- so a budget below this buys this and stops, and
+    /// `tokens` is then `floor` rather than `budget`. Reported rather than
+    /// implied, so a caller comparing `tokens` against `budget` is never left
+    /// wondering why the smaller number lost.
+    pub floor: i64,
     pub spans: Vec<Span>,
     pub symbols: Vec<Symbol>,
     pub cut: Cut,
@@ -104,6 +113,9 @@ pub struct Symbol {
 /// caller reads "nothing was dropped" without counting anything itself.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Cut {
+    /// Spans the ranking found that the budget could not even locate.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub spans: usize,
     /// Spans located whose text did not fit.
     #[serde(skip_serializing_if = "is_zero")]
     pub span_text: usize,
@@ -122,7 +134,7 @@ fn is_zero(n: &usize) -> bool {
 
 impl Cut {
     pub fn is_empty(&self) -> bool {
-        self.span_text == 0 && self.symbols == 0 && self.edges == 0
+        self.spans == 0 && self.span_text == 0 && self.symbols == 0 && self.edges == 0
     }
 }
 
@@ -130,9 +142,11 @@ impl Cut {
 ///
 /// The order the budget is spent in is the order a reader needs it:
 ///
-/// 1. Every span's locator. A `path:line` is a handful of tokens and it is the
-///    part an agent cannot act without -- so the budget is never so small that
-///    the answer says nothing about where to look.
+/// 1. The locators, best-ranked first. A `path:line` is a handful of tokens and
+///    it is the part an agent cannot act without, so the best-ranked one is a
+///    floor the budget cannot drop -- an answer that says nothing about where
+///    to look is not a smaller answer, it is no answer. Every locator after it
+///    is bought only if it fits.
 /// 2. The one-hop edges of the symbols those spans sit inside. Small, and the
 ///    reason this call exists at all: it is what the caller would otherwise
 ///    spend a second and third round trip asking for.
@@ -157,14 +171,30 @@ pub fn brief(
     let counter = fleet.counter();
     let counted_with = counter.label();
 
-    let mut spans: Vec<Span> = hits.iter().map(Span::locating).collect();
-    let mut tokens: i64 = spans.iter().map(|s| counter.count(&s.locator())).sum();
+    // 1. Locators, best-ranked first, with the first one as the floor.
+    let mut spans: Vec<Span> = Vec::new();
+    let mut kept: Vec<usize> = Vec::new();
+    let mut tokens: i64 = 0;
+    let mut floor: i64 = 0;
+    let mut cut = Cut::default();
+    for (i, hit) in hits.iter().enumerate() {
+        let span = Span::locating(hit);
+        let cost = counter.count(&span.locator());
+        if spans.is_empty() {
+            floor = cost;
+        } else if tokens + cost > budget {
+            cut.spans += 1;
+            continue;
+        }
+        tokens += cost;
+        spans.push(span);
+        kept.push(i);
+    }
 
     // 2. Edges, for each distinct enclosing symbol, in span order.
     let mut symbols: Vec<Symbol> = Vec::new();
-    let mut cut = Cut::default();
     let mut seen: Vec<String> = Vec::new();
-    for hit in &hits {
+    for hit in kept.iter().map(|&i| &hits[i]) {
         let Some(name) = hit.symbol.as_deref() else {
             continue;
         };
@@ -197,7 +227,7 @@ pub fn brief(
     }
 
     // 3. Span text, best-ranked first.
-    for (span, hit) in spans.iter_mut().zip(&hits) {
+    for (span, hit) in spans.iter_mut().zip(kept.iter().map(|&i| &hits[i])) {
         let cost = counter.count(&hit.text);
         if tokens + cost > budget {
             cut.span_text += 1;
@@ -212,6 +242,7 @@ pub fn brief(
         budget,
         tokens,
         counted_with,
+        floor,
         spans,
         symbols,
         cut,

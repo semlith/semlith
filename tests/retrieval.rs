@@ -218,7 +218,7 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
          This is the one metric with a hard gate."
     );
     assert!(
-        tool_tokens < 1_000,
+        tool_tokens < 1_100,
         "tools/list is {tool_list} bytes, about {tool_tokens} tokens, and every agent \
          pays it once per session"
     );
