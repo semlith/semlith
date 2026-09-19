@@ -219,15 +219,17 @@ enum Command {
         k: usize,
 
         /// Only search files matching this glob. Repeatable; a relative
-        /// pattern matches anywhere in the tree.
+        /// pattern matches anywhere in the tree. A leading `!` excludes:
+        /// `--path 'src/**' --path '!src/vendor/**'`.
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only search files with this extension. Repeatable.
+        /// Only search files with this extension. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
-        /// Only search files of this language. Repeatable; see `semlith languages`.
+        /// Only search files of this language. Repeatable; a leading `!`
+        /// excludes. See `semlith languages`.
         #[arg(long, short)]
         lang: Vec<String>,
 
@@ -257,15 +259,15 @@ enum Command {
         #[arg(long, short, default_value_t = semlith::brief::DEFAULT_BUDGET)]
         budget: i64,
 
-        /// Only look at files matching this glob. Repeatable.
+        /// Only look at files matching this glob. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         path: Vec<String>,
 
-        /// Only look at files with this extension. Repeatable.
+        /// Only look at files with this extension. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         ext: Vec<String>,
 
-        /// Only look at files of this language. Repeatable.
+        /// Only look at files of this language. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         lang: Vec<String>,
 
@@ -287,7 +289,7 @@ enum Command {
         /// `path:start-end`, `path:line`, or a symbol name.
         target: String,
 
-        /// Only read files matching this glob. Repeatable.
+        /// Only read files matching this glob. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         path: Vec<String>,
 
@@ -308,7 +310,7 @@ enum Command {
         #[arg(long, short)]
         lang: String,
 
-        /// Only search files matching this glob. Repeatable.
+        /// Only search files matching this glob. Repeatable; a leading `!` excludes.
         #[arg(long, short)]
         path: Vec<String>,
 
@@ -390,6 +392,30 @@ enum Command {
     /// Run as an MCP server over stdio, for agents to call as a tool.
     Mcp,
 
+    /// Answer one `PreToolUse` event, for an agent client to call before it
+    /// reads a file or greps the tree.
+    ///
+    /// Reads the event as JSON on stdin and writes the client's answer on
+    /// stdout. When a registered store holds the file, that answer is one line
+    /// naming the semlith call which would have answered the same question; for
+    /// anything else it is nothing at all. It never blocks and never fails: a
+    /// hook that errors inside a client's tool call is a broken client.
+    ///
+    /// `semlith setup` writes this into the clients that support it, so it is
+    /// rarely typed by hand.
+    Hook {
+        /// Refuse the first qualifying read of each session instead of adding a
+        /// line to it, and revert to the line for the rest of that session.
+        ///
+        /// Opt-in. The default never refuses anything.
+        #[arg(long)]
+        strict: bool,
+
+        /// The client's own name for itself, as the ledger should record it.
+        #[arg(long, default_value = "claude-code")]
+        client: String,
+    },
+
     /// Put semlith on PATH, pre-fetch the embedding model and register it
     /// with the agents you use. Every step is idempotent, so this is also the
     /// repair command.
@@ -413,11 +439,27 @@ enum Command {
         airgap: bool,
 
         /// Also write the configuration file of every client that has no
-        /// registration command of its own. Every path is listed before
-        /// anything is written, each file is backed up beside itself, and a
-        /// file that does not parse is left alone.
+        /// registration command of its own, and the rules file of every client
+        /// that documents one. Every path is listed before anything is written,
+        /// each file is backed up beside itself, and a file that does not parse
+        /// is left alone.
         #[arg(long)]
         register_all: bool,
+
+        /// Do not write the `PreToolUse` steering hook, and remove it if it is
+        /// already there.
+        ///
+        /// It is written by default: a hook nobody installs steers nobody. The
+        /// file it edits is backed up beside itself first, and removing the
+        /// hook leaves every other hook in that file exactly as it was.
+        #[arg(long)]
+        no_hooks: bool,
+
+        /// Write the hook in its refusing form: the first whole-file read of
+        /// each session is denied with the line that explains it, and every
+        /// later one in that session is only the line.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Report whether each agent client on this machine can reach semlith, and
@@ -699,6 +741,8 @@ fn run() -> Result<()> {
             airgap,
             register_all,
             no_service,
+            no_hooks,
+            strict,
         } => {
             arm_airgap(airgap);
             // The flag or the variable. The installers translate their own
@@ -708,7 +752,7 @@ fn run() -> Result<()> {
             // entry points is a knob somebody will set and watch do nothing.
             let no_service =
                 no_service || std::env::var(semlith::setup::NO_SERVICE_ENV).is_ok_and(|v| v == "1");
-            semlith::setup::run(yes, airgap, register_all, !no_service)?;
+            semlith::setup::run(yes, airgap, register_all, !no_service, !no_hooks, strict)?;
         }
 
         Command::Upgrade {
@@ -927,6 +971,22 @@ fn run() -> Result<()> {
                 } else {
                     String::new()
                 };
+                // Stepped over whole. A person hunting for a file that is not
+                // in their store needs the name of the directory that was
+                // skipped, and a corpus that quietly excluded a dependency tree
+                // without saying so is one nobody can reason about.
+                if !report.generated.is_empty() {
+                    eprintln!(
+                        "not indexed, generated or vendored: {}",
+                        report
+                            .generated
+                            .iter()
+                            .map(|p| semlith::plain(p))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    eprintln!("  `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.");
+                }
                 // Named one per line. A refusal reported as a count is one the
                 // person retries with the same arguments.
                 for (path, why) in &report.refused {
@@ -1110,10 +1170,7 @@ fn run() -> Result<()> {
                 if json {
                     println!("[]");
                 } else {
-                    eprintln!(
-                        "no files match the filter (store has {} chunks)",
-                        fleet.chunks()
-                    );
+                    eprintln!("{}", fleet.no_match_reason(&filter));
                 }
                 return Ok(());
             }
@@ -1129,7 +1186,7 @@ fn run() -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
             } else if hits.is_empty() {
-                eprintln!("no matches (store has {} chunks)", fleet.chunks());
+                eprintln!("{}", fleet.no_match_reason(&filter));
             } else {
                 let mut out = std::io::stdout().lock();
                 for (i, h) in hits.iter().enumerate() {
@@ -1244,6 +1301,11 @@ fn run() -> Result<()> {
                         }
                         None => println!("{label}: the chain is intact"),
                     }
+                    // What the chain is a chain of. A verify that says only
+                    // "intact" proves the record was not edited and says
+                    // nothing about what it records, which is the question
+                    // somebody defending a savings figure is actually asked.
+                    print_savings(store, "  ")?;
                 }
                 // Non-zero so a script can act on it. A verify that reported a
                 // broken chain and exited 0 would be worse than no verify.
@@ -1288,6 +1350,17 @@ fn run() -> Result<()> {
   the chain does not verify from row {broken} onwards: \
                          these rows have been edited or removed"
                     )?;
+                }
+            }
+            if any && !json {
+                for (label, store) in fleet.each() {
+                    if many {
+                        println!();
+                        println!("{}{label}{}", bold(), reset());
+                    } else {
+                        println!();
+                    }
+                    print_savings(store, "  ")?;
                 }
             }
             if !any && !json {
@@ -2095,6 +2168,18 @@ fn run() -> Result<()> {
             }
         }
 
+        Command::Hook { strict, client } => {
+            // Everything here is best-effort and silent. This runs inside
+            // another program's tool call, where stderr is noise in somebody's
+            // terminal and a non-zero exit is a client reporting a broken hook.
+            let mut input = String::new();
+            let _ = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input);
+            let answer = semlith::hook::run(&input, strict, &client);
+            if !answer.is_empty() {
+                println!("{answer}");
+            }
+        }
+
         Command::Mcp => {
             // Every registered store, so a client stanza is `semlith mcp` and
             // nothing else.
@@ -2673,6 +2758,97 @@ fn print_service(status: &semlith::service::Status) {
 /// installed and unregistered carries the command that fixes it, because the
 /// whole point of this command is that the next person reads the answer instead
 /// of bisecting a configuration file.
+/// What this client has beyond its registration: the skill, the hook and the
+/// rule block, in four states each.
+///
+/// `None` where a client documents none of the three, which is most of them.
+/// A row that said "skill: paste, hook: paste, rules: paste" on twenty clients
+/// would be three columns of noise hiding the one client where it matters.
+fn steering_line(client: &semlith::doctor::ClientReport) -> Option<String> {
+    use semlith::agentfiles::State;
+    let word = |state: State| match state {
+        State::Present => "linked",
+        State::Absent => "absent",
+        State::Stale => "stale",
+        State::Paste => "paste needed",
+    };
+    let mut parts = Vec::new();
+    if client.skill != State::Paste {
+        parts.push(format!("skill {}", word(client.skill)));
+    }
+    if client.hook != State::Paste {
+        parts.push(format!(
+            "hook {}",
+            match client.hook {
+                State::Present => "present",
+                State::Absent => "absent",
+                State::Stale => "stale",
+                State::Paste => "paste needed",
+            }
+        ));
+    }
+    if client.rules != State::Paste {
+        parts.push(format!(
+            "rule {}",
+            match client.rules {
+                State::Present => "present",
+                State::Absent => "absent",
+                State::Stale => "stale",
+                State::Paste => "paste needed",
+            }
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The savings block: the number, and every denominator that makes it
+/// defensible.
+///
+/// Never the number alone. Coverage says what share of retrievals it is
+/// computed over and tier says how the tokens were counted, and a figure
+/// printed without both is a figure a reader cannot check — which is how the
+/// double-counted README paragraph of 0.17.2 came to exist.
+fn print_savings(store: &semlith::Semlith, indent: &str) -> Result<()> {
+    let savings = semlith::store::ledger_savings(store.db())?;
+    let misses = semlith::store::ledger_misses(store.db())?;
+    let clients = semlith::store::ledger_clients(store.db())?;
+
+    println!(
+        "{indent}saved {} tokens over {} of {} retrievals — coverage {} %, tier {}",
+        savings.net,
+        savings.credited,
+        savings.total,
+        savings.coverage(),
+        savings.tier(),
+    );
+    println!(
+        "{indent}what reading those files whole would have cost, counted with the store's tokenizer"
+    );
+    println!(
+        "{indent}refunds {} ({}) · zero-hit {} of {}",
+        misses.refunds,
+        if misses.measured {
+            "measured: a steering hook reports the reads semlith never served"
+        } else {
+            "a floor: no steering hook has reported here, so reads semlith never \
+             served are not counted"
+        },
+        misses.zero_hit,
+        savings.total,
+    );
+    if !clients.is_empty() {
+        println!(
+            "{indent}clients: {}",
+            clients
+                .iter()
+                .map(|(name, count)| format!("{name} {count}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        );
+    }
+    Ok(())
+}
+
 fn print_doctor(
     clients: &[semlith::doctor::ClientReport],
     rules: &[semlith::doctor::Finding],
@@ -2722,6 +2898,13 @@ fn print_doctor(
         // to file "it works everywhere except one repository".
         for dir in client.disabled_in.iter().filter(|_| !client.disabled_here) {
             println!("      switched off for {dir}");
+        }
+        // Steering, beside registration. A client can be perfectly registered
+        // and still have an agent that never calls semlith, which is the whole
+        // reason these three exist — so they are read on the same row rather
+        // than on a page somebody has to go and find.
+        if let Some(steering) = steering_line(client) {
+            println!("      {steering}");
         }
         if let Some(repair) = &client.repair {
             println!("      run: {repair}");
@@ -2801,7 +2984,7 @@ fn brief(
     // the budget dropped cost its locator and nothing more, and a row
     // that counted the text would overstate what was saved.
     let rendered = serde_json::to_string(&brief)?;
-    semlith::ledger::reply(&fleet, &CLI_LEDGER, "brief", &question, &rendered, elapsed);
+    semlith::ledger::brief(&fleet, &CLI_LEDGER, &question, &brief, &rendered, elapsed);
 
     if json {
         println!(
@@ -2812,7 +2995,7 @@ fn brief(
     }
 
     if brief.spans.is_empty() {
-        eprintln!("no matches (store has {} chunks)", fleet.chunks());
+        eprintln!("{}", fleet.no_match_reason(&filter));
         return Ok(());
     }
 

@@ -153,6 +153,16 @@ impl Session {
 /// `labels` is the store list `tools/list` names, read once when the fleet was
 /// opened. It cannot change for the life of this process, and reading it per
 /// request is the one thing that would put the handshake back behind the lock.
+/// What this server is for, in the one place both handshakes read it from.
+///
+/// `server/discover` has carried it since 0.20.0 and `initialize` did not,
+/// which meant the clients still on a 2025 revision -- most of them -- were
+/// handed a tool list and no sentence saying what the tools were for.
+pub const INSTRUCTIONS: &str = "Search and maintain the local semlith stores this server was opened on. \
+     Call semlith_stats first to learn the store names the other tools accept. \
+     Prefer semlith_brief for a question about how something works: it answers in \
+     one call what search, read and neighbors answer in four.";
+
 pub fn serve(
     stores: &Mutex<Fleet>,
     labels: &str,
@@ -299,9 +309,7 @@ fn without_stores(
             json!({
                 "supportedVersions": SUPPORTED,
                 "capabilities": { "tools": {} },
-                "instructions":
-                    "Search and maintain the local semlith stores this server was opened on. \
-                     Call semlith_stats first to learn the store names the other tools accept.",
+                "instructions": INSTRUCTIONS,
             }),
             Some("public"),
         )),
@@ -334,6 +342,11 @@ fn without_stores(
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": server_info(),
+                // The same text `server/discover` sends. A client on a 2025
+                // revision never calls discover, so until 0.24.0 the sentence
+                // that says what this server is for reached only the clients
+                // that needed it least.
+                "instructions": INSTRUCTIONS,
             }))
         }
 
@@ -460,7 +473,7 @@ fn tool_defs(open: &str) -> Value {
                     "k": { "type": "integer", "description": "Default 8.", "minimum": 1, "maximum": 50 },
                     "format": { "type": "string", "enum": ["locate", "excerpt"], "description": "Default locate." },
                     "max_tokens": { "type": "integer", "description": "Default 1500.", "minimum": 200 },
-                    "path": { "type": "array", "description": "Globs." },
+                    "path": { "type": "array", "description": "Globs; ! excludes (also on ext, lang)." },
                     "ext": { "type": "array" },
                     "lang": { "type": "array", "description": "See semlith_languages." },
                     "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
@@ -670,8 +683,7 @@ fn call_tool(
             };
 
             if selected == 0 {
-                "No indexed file matches that path/ext/lang filter. Try again without it."
-                    .to_string()
+                crate::fleet::FILTER_SELECTED_NOTHING.to_string()
             } else {
                 // Locate by default from 0.15.0. `format: "excerpt"` is the
                 // opt-back, and is what the CLI still does.
@@ -693,7 +705,7 @@ fn call_tool(
                 };
                 match stores.search_preferring(Some(&only), query, k.clamp(1, 50), &filter, prefer)
                 {
-                    Ok(hits) if hits.is_empty() => "No matches in the semlith store.".to_string(),
+                    Ok(hits) if hits.is_empty() => stores.no_match_reason(&filter),
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
                     }
@@ -732,9 +744,7 @@ fn call_tool(
                 &filter,
                 crate::Prefer::default(),
             ) {
-                Ok(brief) if brief.spans.is_empty() => {
-                    "No matches in the semlith store.".to_string()
-                }
+                Ok(brief) if brief.spans.is_empty() => stores.no_match_reason(&filter),
                 Ok(brief) => render_brief(&brief),
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }

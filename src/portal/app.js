@@ -1911,7 +1911,7 @@ async function graphView() {
           let all;
           try {
             all = await api(
-              `/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`,
+              scoped(`/api/neighbors?name=${encodeURIComponent(state.graphSelected)}&all=1`),
             );
           } catch (e) {
             return fill(nested, error(e.message));
@@ -1980,7 +1980,7 @@ async function graphView() {
     fill(rail, el("div", { class: "rail-hint", text: "Loading…" }));
     let data;
     try {
-      data = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}`);
+      data = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}`));
     } catch (e) {
       return fill(rail, error(e.message));
     }
@@ -2040,7 +2040,7 @@ async function graphView() {
                 button.textContent = "Loading…";
                 let all;
                 try {
-                  all = await api(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`);
+                  all = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}&all=1`));
                 } catch (err) {
                   button.replaceWith(error(err.message));
                   return;
@@ -2080,6 +2080,17 @@ async function graphView() {
     );
   }
 
+  /* The store chips scope the canvas, and until 0.24.0 they did not scope the
+   * rail: a name defined in two open stores listed both stores' callers under
+   * a chip that named one of them. The panel then contradicted the picture
+   * beside it, which is worse than either answer on its own. */
+  function scoped(path) {
+    const query = new URLSearchParams();
+    for (const store of chosen) query.append("store", store);
+    const tail = query.toString();
+    return tail ? `${path}${path.includes("?") ? "&" : "?"}${tail}` : path;
+  }
+
   async function load(params) {
     meta.textContent = "loading…";
     const query = new URLSearchParams(params || {});
@@ -2102,6 +2113,19 @@ async function graphView() {
     }
     canvas.draw(data, kinds);
     counts();
+    /* Nodes with nothing between them is a state, not a drawing. It happens
+     * for a real reason — a language whose parser extracts definitions and no
+     * call edges, or a scope narrow enough that both ends of every edge fell
+     * outside it — and a field of unconnected boxes with no explanation reads
+     * as a broken page. Said rather than drawn silently. */
+    if (!data.edges.length) {
+      return blank(
+        "Nothing in view is connected. Either this scope holds both ends of no " +
+          "edge — widen it, or clear it — or the language here is one semlith " +
+          "parses for definitions but not yet for calls. The Index page's " +
+          "per-language table says which.",
+      );
+    }
     // A focused view arrives with its centre chosen, so the rail says something
     // before the first click rather than asking for one.
     const centre = (params && params.name) || canvas.best();
@@ -2341,10 +2365,27 @@ async function ledgerView() {
     el(
       "div",
       { class: "strip" },
+      /* Read from the route rather than derived as queries less credited.
+       * Since 0.24.0 an uncredited retrieval is one of two different things —
+       * a question semlith could not answer, and a file an agent read whole
+       * without asking — and subtracting one number from another counted them
+       * as the same thing. */
       stat(
         "Zero-hit",
-        `${data.queries ? Math.round(((data.queries - (data.credited || 0)) * 100) / data.queries) : 0}%`,
+        `${n(data.zero_hit || 0)} of ${n(data.queries)}`,
         "queries the corpus could not answer — recorded, and credited nothing",
+      ),
+      /* The figure the savings claim is defended against: what an agent read
+       * whole anyway, on a file this store holds. Measured on a client with the
+       * steering hook, a floor everywhere else — and the caption says which,
+       * because a floor presented as a count is the flattering half of a
+       * number. */
+      stat(
+        "Refunds",
+        `${n(data.refunds || 0)}${data.refunds_measured ? "" : "+"}`,
+        data.refunds_measured
+          ? "files read whole after all, seen by the steering hook — measured"
+          : "a floor: no steering hook reports here, so reads semlith never served are uncounted",
       ),
       stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
     ),
@@ -2957,6 +2998,31 @@ async function storesView() {
         className: "num narrow-drop",
         value: (s) => s.chunks,
         render: (s) => n(s.chunks),
+      },
+      {
+        /* One line per store, and never the number on its own: the tokens, the
+         * share of retrievals they are computed over, and how they were
+         * counted, in one cell. A saved-token figure without its coverage and
+         * its tier is a figure a reader is being asked to take on trust, which
+         * is what made the 0.17.2 README paragraph unshippable. No chart: a
+         * chart of one number is decoration. */
+        key: "saved",
+        label: "Saved",
+        className: "num narrow-drop",
+        value: (s) => (s.savings ? s.savings.net_tokens : -1),
+        render: (s) => {
+          if (!s.savings || !s.savings.total) {
+            return el("span", { class: "meta", text: "—" });
+          }
+          return el(
+            "span",
+            {
+              class: "meta",
+              title: `${n(s.savings.net_tokens)} tokens saved over ${n(s.savings.credited)} of ${n(s.savings.total)} retrievals, counted ${s.savings.tier}`,
+            },
+            `${n(s.savings.net_tokens)} · ${s.savings.coverage}% · ${s.savings.tier}`,
+          );
+        },
       },
       {
         key: "last_write",
@@ -5804,8 +5870,20 @@ async function doctorView() {
     return { text: "installed, not registered", kind: "bad" };
   };
 
+  /* What this client has beyond its registration, in the words the terminal
+   * uses. A client that documents none of the three says nothing rather than
+   * three columns of "paste needed" on twenty rows that never asked for one. */
+  const steering = (r) => {
+    const parts = [];
+    if (r.skill && r.skill !== "paste") parts.push(`skill ${r.skill === "present" ? "linked" : r.skill}`);
+    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}`);
+    if (r.rules && r.rules !== "paste") parts.push(`rule ${r.rules}`);
+    return parts;
+  };
+
   const clients = dataTable({
-    caption: "Every documented client, whether it is on this machine, whether it is registered, and what would fix it.",
+    caption:
+      "Every documented client, whether it is on this machine, whether it is registered, whether the skill and the steering hook are installed, and what would fix it.",
     rows: data.clients || [],
     perPage: 25,
     columns: [
@@ -5818,6 +5896,27 @@ async function doctorView() {
         render: (r) => {
           const s = state(r);
           return pill(s.text, s.kind);
+        },
+      },
+      {
+        /* Registration says the client can reach semlith. Steering says its
+         * agent will actually call it, which is a different question and the
+         * one 0.24.0 exists to answer. Same source as the terminal's own line:
+         * `semlith doctor` computes both and this renders what it computed. */
+        key: "steering",
+        label: "Skill & hook",
+        sortable: true,
+        value: (r) => steering(r).join(", "),
+        render: (r) => {
+          const parts = steering(r);
+          if (!parts.length) return el("span", { class: "sub", text: "—" });
+          return el(
+            "span",
+            { class: "pills" },
+            ...parts.map((part) =>
+              pill(part, part.endsWith("present") || part.endsWith("linked") ? "good" : "warn"),
+            ),
+          );
         },
       },
       {
@@ -6627,13 +6726,20 @@ async function agentsView() {
             el("span", { class: "card-title", text: "What the tool list costs" }),
             el("span", {
               class: "cost-line",
-              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · about ${n(
-                Math.ceil((data.tool_list_bytes || 0) / 4),
+              /* Measured, not "about". The daemon counts it with a store's own
+               * tokenizer where one is loaded and says which counter produced
+               * the figure, the same two tiers the ledger reports — because
+               * four characters to a token is an estimate and this page should
+               * not present one as a measurement. */
+              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · ${n(
+                data.tool_list_tokens || Math.ceil((data.tool_list_bytes || 0) / 4),
               )} tokens per session`,
             }),
             el("span", {
               class: "cost-note",
-              text: "read once, before the agent asks anything",
+              text: `read once, before the agent asks anything — counted ${
+                data.tool_list_tier || "chars4"
+              }`,
             }),
           ),
           el(

@@ -92,6 +92,22 @@ impl Machine {
             .expect("running semlith setup")
     }
 
+    /// `semlith doctor` on the same fixture machine, so a test can read the
+    /// report of the install it just did rather than the developer's own.
+    fn doctor(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .arg("doctor")
+            .args(args)
+            .env("HOME", &self.home)
+            .env("SHELL", "/bin/zsh")
+            .env("SEMLITH_HOME", &self.store_home)
+            .env("SEMLITH_MODEL_CACHE", &self.cache)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("running semlith doctor")
+    }
+
     /// cliclack draws on stderr, so what a user reads is both streams together.
     fn said(out: &Output) -> String {
         format!(
@@ -968,4 +984,247 @@ fn an_older_blocks_key_export_is_removed_by_a_later_setup() {
         "replacing the block ate what was around it:\n{after}"
     );
     assert!(after.contains(".semlith/bin"), "PATH was lost:\n{after}");
+}
+
+// ---------------------------------------------------------- skill, hook, rules
+
+/// The canonical copy plus a link into every documented directory, and a second
+/// run that finds them all and changes nothing.
+#[test]
+fn setup_links_the_skill_into_every_documented_directory_and_is_idempotent() {
+    let machine = Machine::new();
+    let run = machine.setup(&["--yes", "--airgap"]);
+    assert!(run.status.success(), "{}", Machine::said(&run));
+
+    let canonical = machine.store_home.join("skills/semlith/SKILL.md");
+    assert!(
+        canonical.is_file(),
+        "no canonical skill at {}",
+        canonical.display()
+    );
+
+    for dir in [
+        ".agents/skills",
+        ".claude/skills",
+        ".qwen/skills",
+        ".kiro/skills",
+    ] {
+        let at = machine.home.join(dir).join("semlith");
+        assert!(
+            at.exists(),
+            "the skill was not linked into {}",
+            at.display()
+        );
+        assert!(
+            at.join("SKILL.md").is_file(),
+            "the link at {} does not reach a skill",
+            at.display()
+        );
+    }
+
+    // Twice is once.
+    let again = machine.setup(&["--yes", "--airgap"]);
+    let said = Machine::said(&again);
+    assert!(
+        said.contains("skill") && said.contains("already done"),
+        "a second run did the skill again:\n{said}"
+    );
+}
+
+/// `doctor` has to name the one that went missing, or the repair command is a
+/// guess.
+#[test]
+fn doctor_names_a_skill_link_that_has_been_removed() {
+    let machine = Machine::new();
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+
+    let link = machine.home.join(".claude/skills/semlith");
+    std::fs::remove_file(&link).expect("removing the link");
+
+    let report = machine.doctor(&["--json"]);
+    let body: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&report.stdout)).expect("doctor JSON");
+    let claude = body["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Claude Code")
+        .expect("Claude Code is reported");
+    assert_eq!(
+        claude["skill"], "absent",
+        "doctor did not notice the removed link: {claude}"
+    );
+}
+
+/// The hook is written by default, into a file semlith does not own, with a
+/// backup beside it. This is the riskiest write in the release.
+#[test]
+fn setup_writes_the_hook_by_default_and_backs_the_file_up() {
+    let machine = Machine::new();
+    let settings = machine.home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let theirs = serde_json::json!({
+        "model": "something they chose",
+        "hooks": { "PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "/usr/local/bin/audit" }]
+        }]}
+    });
+    let before = serde_json::to_string_pretty(&theirs).unwrap() + "\n";
+    std::fs::write(&settings, &before).unwrap();
+
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+
+    let after = std::fs::read_to_string(&settings).unwrap();
+    assert!(after.contains("semlith"), "no hook was written:\n{after}");
+    assert!(
+        after.contains("/usr/local/bin/audit"),
+        "writing the hook ate another hook:\n{after}"
+    );
+    assert!(
+        after.contains("something they chose"),
+        "writing the hook ate the rest of the file:\n{after}"
+    );
+
+    let backup = machine.home.join(".claude/settings.json.semlith-backup");
+    assert_eq!(
+        std::fs::read_to_string(&backup).unwrap(),
+        before,
+        "the backup is not the file as it was"
+    );
+}
+
+/// And `--no-hooks` gives the file back. Byte for byte, because a user who
+/// opts out and finds their settings reformatted has been charged for it.
+#[test]
+fn no_hooks_removes_the_entry_and_leaves_the_rest_of_the_file_alone() {
+    let machine = Machine::new();
+    let settings = machine.home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let theirs = serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": { "PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "/usr/local/bin/audit" }]
+        }]}
+    }))
+    .unwrap()
+        + "\n";
+    std::fs::write(&settings, &theirs).unwrap();
+
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--no-hooks"])
+            .status
+            .success()
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        theirs,
+        "--no-hooks did not give the file back as it was"
+    );
+}
+
+/// `--strict` is a different command in the same entry, not a second entry.
+#[test]
+fn strict_writes_one_hook_rather_than_a_second_one() {
+    let machine = Machine::new();
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--strict"])
+            .status
+            .success()
+    );
+
+    let after = std::fs::read_to_string(machine.home.join(".claude/settings.json")).unwrap();
+    assert_eq!(
+        after.matches(" hook").count(),
+        1,
+        "strict left two semlith hooks behind:\n{after}"
+    );
+    assert!(after.contains("--strict"), "{after}");
+}
+
+/// The rule block is prose in somebody's file, so it waits to be asked for.
+#[test]
+fn the_rule_block_is_written_only_under_register_all() {
+    let machine = Machine::new();
+    let rules = machine.home.join(".config/opencode/AGENTS.md");
+    std::fs::create_dir_all(rules.parent().unwrap()).unwrap();
+    std::fs::write(&rules, "# Mine\n\nAlways use tabs.\n").unwrap();
+
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(&rules).unwrap(),
+        "# Mine\n\nAlways use tabs.\n",
+        "a plain setup wrote into a rules file"
+    );
+
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--register-all"])
+            .status
+            .success()
+    );
+    let after = std::fs::read_to_string(&rules).unwrap();
+    assert!(after.contains("Always use tabs."), "{after}");
+    assert!(
+        after.contains("semlith"),
+        "no rule block was written:\n{after}"
+    );
+    assert!(
+        machine
+            .home
+            .join(".config/opencode/AGENTS.md.semlith-backup")
+            .is_file(),
+        "the rules file was written without a backup"
+    );
+}
+
+/// Nothing in this suite may write into the developer's own client
+/// configuration. `HOME` is redirected everywhere, and this is what proves it
+/// rather than assuming it: 0.21.0's suite installed a real login service on a
+/// developer's machine by making exactly this assumption.
+#[test]
+fn the_suite_leaves_the_developers_own_client_configuration_alone() {
+    let Some(real) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    // Every file this release teaches `setup` to write, under the real home.
+    let watched = [
+        real.join(".claude/settings.json"),
+        real.join(".config/opencode/AGENTS.md"),
+        real.join(".codeium/windsurf/memories/global_rules.md"),
+    ];
+    let before: Vec<Option<String>> = watched
+        .iter()
+        .map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+
+    let machine = Machine::new();
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--register-all"])
+            .status
+            .success()
+    );
+
+    for (path, was) in watched.iter().zip(before) {
+        assert_eq!(
+            std::fs::read_to_string(path).ok(),
+            was,
+            "a setup run under a redirected HOME changed {}",
+            path.display()
+        );
+    }
+    // And the skill went nowhere near the real home either.
+    assert!(
+        !real.join(".agents/skills/semlith").is_symlink()
+            || std::fs::read_link(real.join(".agents/skills/semlith"))
+                .map(|t| !t.starts_with(&machine.store_home))
+                .unwrap_or(true),
+        "a fixture skill was linked into the developer's own skill directory"
+    );
 }

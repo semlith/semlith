@@ -2047,19 +2047,65 @@ impl Node {
 /// One candidate per store — `symbols_scoped` already orders by degree — and
 /// then the one with the most edges of the few that came back. Cheap: a
 /// handful of candidates, one edge lookup each.
+/// How many candidates the opening view considers before it picks one.
+///
+/// The first by raw degree is almost always a name like `new`, `get` or `run`:
+/// defined in forty places, called from everywhere, and connected to none of it
+/// in a way a reader can follow. Looking at a handful of candidates is what
+/// makes it possible to prefer a symbol whose edges mean something.
+const SEED_CANDIDATES: usize = 40;
+
+/// The symbol the graph opens on when nobody has asked for one.
+///
+/// Not the busiest. A corpus's busiest name is its most *reused* name, and a
+/// name defined in forty files earns its degree from forty unrelated callers
+/// that the extractor could only match by spelling — so the first thing a user
+/// saw on a freshly indexed project was a star of dashed `inferred` lines
+/// between functions that have nothing to do with each other. That is a true
+/// picture of a name collision and a useless picture of a codebase.
+///
+/// So the seed is the symbol with the most *resolved* edges — the ones where
+/// the extractor knew which definition was meant — and a name with several
+/// definitions is preferred only when nothing unambiguous has any edges at all.
+/// The busiest name is still one search away; it is just not what the page
+/// opens on.
 fn busiest(stores: &[(&str, &crate::Semlith)]) -> Result<Option<String>> {
-    let mut best: Option<(usize, String)> = None;
+    let mut best: Option<((usize, usize, usize), String)> = None;
     for (_, store) in stores {
         let db = store.db();
-        for row in crate::store::symbols_scoped(db, None, 1)? {
-            let degree = crate::store::edges_in(db, &row.name, &[])?.len()
-                + crate::store::edges_out(db, &row.name, &[])?.len();
-            if best.as_ref().is_none_or(|(most, _)| degree > *most) {
-                best = Some((degree, row.name.clone()));
+        for row in crate::store::symbols_scoped(db, None, SEED_CANDIDATES)? {
+            let ends: Vec<crate::store::EdgeEnd> = crate::store::edges_in(db, &row.name, &[])?
+                .into_iter()
+                .chain(crate::store::edges_out(db, &row.name, &[])?)
+                .collect();
+            if ends.is_empty() {
+                continue;
+            }
+            let resolved = ends
+                .iter()
+                .filter(|e| e.confidence == RESOLVED || e.confidence == EXTRACTED)
+                .count();
+            // Three keys, in this order. A name defined once in the store
+            // cannot be a collision, whatever its degree; among those, the one
+            // whose edges the extractor actually resolved; and only then raw
+            // degree. The last key is what keeps a store with nothing but
+            // inferred edges -- a dynamic language with no import graph --
+            // drawing the same thing it drew before rather than nothing at all.
+            //
+            // The ambiguity that matters is the focus symbol's own. `len` and
+            // `new` are defined in dozens of files, so every edge into them is
+            // a spelling match between functions that have nothing to do with
+            // each other -- which is exactly the star of dashed lines a user
+            // met on opening the page.
+            let unambiguous =
+                usize::from(crate::store::symbols_named(db, &row.name, 2)?.len() <= 1);
+            let score = (unambiguous, resolved, ends.len());
+            if best.as_ref().is_none_or(|(seen, _)| score > *seen) {
+                best = Some((score, row.name.clone()));
             }
         }
     }
-    Ok(best.filter(|(degree, _)| *degree > 0).map(|(_, name)| name))
+    Ok(best.map(|(_, name)| name))
 }
 
 pub fn scoped(
@@ -2098,10 +2144,21 @@ pub fn scoped(
                 // a neighbourhood. The rail lists every caller and callee
                 // either way, so nothing is hidden by this — only undrawn.
                 let mut around = crate::store::symbols_named(db, name, 4)?;
-                for end in crate::store::edges_in(db, name, &[])?
+                let mut ends: Vec<crate::store::EdgeEnd> = crate::store::edges_in(db, name, &[])?
                     .into_iter()
                     .chain(crate::store::edges_out(db, name, &[])?)
-                {
+                    .collect();
+                // The certain edges first. When the budget cuts a hub's
+                // neighbourhood -- and it always does -- what is drawn should be
+                // the calls the extractor resolved rather than whichever
+                // spelling matches happened to sort first. A canvas of dashed
+                // `inferred` lines is a picture of a name, not of a program.
+                ends.sort_by_key(|end| match end.confidence.as_str() {
+                    EXTRACTED | RESOLVED => 0,
+                    AMBIGUOUS => 1,
+                    _ => 2,
+                });
+                for end in ends {
                     if around.len() >= limit {
                         break;
                     }

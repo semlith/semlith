@@ -269,7 +269,7 @@ fn write_one(stanza: &Stanza, path: &Path) -> Result<()> {
 ///
 /// Once. A second `--register-all` would otherwise overwrite the backup with
 /// the already-registered file, which is the one state a backup is useless in.
-fn back_up(path: &Path) -> Result<()> {
+pub fn back_up(path: &Path) -> Result<()> {
     let mut backup = path.as_os_str().to_os_string();
     backup.push(BACKUP);
     let backup = PathBuf::from(backup);
@@ -339,6 +339,9 @@ mod tests {
             text: text.to_string(),
             register: false,
             unregister: false,
+            hook: false,
+            skills: false,
+            rules: false,
             path: Some(path.to_string()),
             os: None,
             scope: Scope::Global,

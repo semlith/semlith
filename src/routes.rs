@@ -101,6 +101,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/forget") => forget(state, request),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
+        (_, true, "/api/ledger/raw-read") => raw_read(state, request),
         (_, true, "/api/agents/reveal") => reveal(state),
         (_, true, "/api/rotate") => rotate(state),
         (_, true, "/api/mcp") => mcp(state, request),
@@ -185,25 +186,33 @@ fn stores(state: &Arc<State>) -> Response {
                     // The store's own last write, not this daemon's memory of
                     // one. A store written yesterday has a last write today.
                     store::last_write(s.db()).ok().flatten(),
+                    // One savings line per card, and never the number alone:
+                    // its coverage and its tier travel with it, because a
+                    // figure a reader cannot check is a figure they are being
+                    // asked to take on trust.
+                    store::ledger_savings(s.db()).ok(),
                 )
             });
 
-        let (files, chunks, bytes, model, dim, vectors, shards, facets, written) = match stats {
-            Some((Ok((f, c, b)), model, dim, len, shards, facets, written)) => {
-                (f, c, b, model, dim, len, shards, facets, written)
-            }
-            _ => (
-                0,
-                0,
-                0,
-                String::new(),
-                0,
-                0,
-                None,
-                store::Facets::default(),
-                None,
-            ),
-        };
+        #[allow(clippy::type_complexity)]
+        let (files, chunks, bytes, model, dim, vectors, shards, facets, written, savings) =
+            match stats {
+                Some((Ok((f, c, b)), model, dim, len, shards, facets, written, savings)) => {
+                    (f, c, b, model, dim, len, shards, facets, written, savings)
+                }
+                _ => (
+                    0,
+                    0,
+                    0,
+                    String::new(),
+                    0,
+                    0,
+                    None,
+                    store::Facets::default(),
+                    None,
+                    None,
+                ),
+            };
 
         // The daemon's own counter still wins when it is newer, so a re-embed
         // that has landed in this session shows immediately rather than waiting
@@ -259,6 +268,16 @@ fn stores(state: &Arc<State>) -> Response {
             // visible rather than silent.
             "pruned": handle.pruned.load(Ordering::Relaxed),
             "missing": false,
+            // Tokens saved, what they cover, and how they were counted. One
+            // line, no chart: a chart of one number is decoration, and the
+            // three qualifiers are what make the number defensible.
+            "savings": savings.map(|s| json!({
+                "net_tokens": s.net,
+                "credited": s.credited,
+                "total": s.total,
+                "coverage": s.coverage(),
+                "tier": s.tier(),
+            })),
             "events": handle.events(),
         }));
     }
@@ -517,16 +536,22 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(500, &e.to_string()),
     };
     if state.ledger {
-        // Counted from the answer, exactly as the CLI and the MCP tool count
-        // it, so the portal's rows and the agents' rows mean the same thing.
-        crate::ledger::reply(
+        // From the brief rather than from its rendering. `reply` recovers the
+        // files an answer named by reading them back out of rendered text, and
+        // what this route hands it is JSON -- so every brief from this page was
+        // recorded with no hits and no saving, exactly as every brief from the
+        // command line was. The MCP tool still goes through `reply` because
+        // what it hands over really is the rendered text `paths_in` was written
+        // for, and because a span whose text the budget dropped should be
+        // counted at its locator rather than at its file.
+        crate::ledger::brief(
             fleet,
             &crate::ledger::Who {
                 client: "portal",
                 session: "portal",
             },
-            "brief",
             question,
+            &brief,
             &body.to_string(),
             elapsed,
         );
@@ -681,6 +706,40 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
 }
 
 /// The free half of the ledger: whether it is recording, and the totals.
+/// Record one whole-file read an agent made without asking semlith.
+///
+/// The steering hook is the only caller. It runs inside a client's tool call
+/// and must not open a store itself, so it posts the fact here and the daemon —
+/// which already holds every store open — writes the row.
+///
+/// The row is written into the store whose roots cover the file, so Refunds is
+/// per store the way every other ledger figure is, and a read of a file no open
+/// store holds is recorded nowhere rather than against whichever store happened
+/// to be first.
+fn raw_read(state: &Arc<State>, request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(path) = body.get("path").and_then(Value::as_str) else {
+        return Response::error(400, "no path given");
+    };
+    let client = body
+        .get("client")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let session = body.get("session").and_then(Value::as_str).unwrap_or("");
+
+    // `--no-ledger` is a promise about this session, and it covers rows the
+    // hook asks for exactly as it covers rows a search writes.
+    if !state.ledger {
+        return Response::json(&json!({ "recorded": false, "reason": "not recording" }));
+    }
+    with_fleet(state, json!({ "recorded": false }), move |fleet| {
+        Ok(json!({ "recorded": crate::ledger::raw_read(fleet, client, session, path) }))
+    })
+}
+
 fn ledger(state: &Arc<State>) -> Response {
     let empty = json!({
         "recording": state.ledger,
@@ -725,10 +784,20 @@ fn ledger(state: &Arc<State>) -> Response {
         // owes the CLI's `semlith ledger --last 20`. Read here rather than
         // from a second route so the tiles and the rows cannot disagree.
         let mut rows: Vec<Value> = Vec::new();
+        let mut refunds = 0;
+        let mut zero_hit = 0;
+        let mut refunds_measured = false;
         for (label, store) in fleet.each() {
             let savings = store::ledger_savings(store.db())?;
             net += savings.net;
             measured = measured && savings.measured;
+            let misses = store::ledger_misses(store.db())?;
+            refunds += misses.refunds;
+            zero_hit += misses.zero_hit;
+            // One hooked store is enough to make the figure a measurement for
+            // that store, and the page says which kind it is rather than
+            // averaging two different things into one word.
+            refunds_measured = refunds_measured || misses.measured;
             credited_keys.extend(store::ledger_keys(
                 store.db(),
                 label,
@@ -781,6 +850,13 @@ fn ledger(state: &Arc<State>) -> Response {
             "credited": credited,
             "coverage": coverage,
             "tier": if measured && credited > 0 { "measured" } else { "modelled" },
+            // What semlith did not answer, in two figures rather than one.
+            // A refund is an agent that did not reach for semlith; a zero hit
+            // is semlith that did not reach the answer. They call for opposite
+            // things, so they are never added together.
+            "refunds": refunds,
+            "refunds_measured": refunds_measured,
+            "zero_hit": zero_hit,
             "by_client": by_client,
             "rows": rows,
             // Rows written before this version were one per open store, so the
@@ -1469,6 +1545,32 @@ fn reveal(state: &Arc<State>) -> Response {
     Response::json(&json!({ "key": state.server.agent_key() }))
 }
 
+/// What the tool list costs a session, in tokens, and how that was counted.
+///
+/// Once per session, before the agent has asked anything: it is the standing
+/// charge for having semlith connected at all, and a user should be able to
+/// read it rather than capture traffic to discover it.
+fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
+    let text = crate::mcp::tool_list()
+        .into_iter()
+        .map(|(name, about)| format!("{name} {about}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let guard = state.fleet.lock().ok();
+    let counter = guard
+        .as_ref()
+        .and_then(|f| f.as_ref())
+        .map(|f| f.counter())
+        .unwrap_or(crate::ledger::Counter::Chars4);
+    let count = counter.count(&text);
+    // The whole payload, not only the prose: the schemas are what an agent is
+    // sent. The prose is what a tokenizer can be run over honestly, so the
+    // count is scaled by the payload's share of it rather than estimated twice.
+    let bytes = crate::mcp::tool_list_bytes() as i64;
+    let prose = text.len().max(1) as i64;
+    (count * bytes / prose, counter.label())
+}
+
 fn agents(state: &Arc<State>) -> Response {
     let connections = state.clients();
     let key = state.server.agent_key();
@@ -1488,6 +1590,13 @@ fn agents(state: &Arc<State>) -> Response {
         // asked anything. A cost a user should be able to see rather than one
         // they would have to capture traffic to discover.
         "tool_list_bytes": crate::mcp::tool_list_bytes(),
+        // And in the unit an agent is billed in. Measured with a store's own
+        // tokenizer where one is loaded, and labelled with which counter said
+        // so -- the same two tiers the ledger uses, because a token count
+        // estimated at four characters each is not the same fact as one a
+        // tokenizer produced, and the page says which it is showing.
+        "tool_list_tokens": tool_list_tokens(state).0,
+        "tool_list_tier": tool_list_tokens(state).1,
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         // Whether semlith is there without being asked, and since when. The
