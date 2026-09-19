@@ -312,7 +312,7 @@ fn image_floor() -> f32 {
 /// reorders a candidate pool and never adds to it. The pool itself is the only
 /// thing that can, so this is the mean that was tried for recall, with the pair
 /// on either side of it recorded in the release.
-const RANK_DEPTH: usize = 8;
+const RANK_DEPTH: usize = 4;
 
 /// How many files an index run may get through without making its work
 /// durable.
@@ -2649,6 +2649,21 @@ impl Semlith {
         };
 
         let (dense_scores, dense_ids) = self.index.search(vector, depth, &allowlist)?;
+        // The graph list seeds from what the *index* found, in the order the
+        // index found it, which is not the order rescoring leaves behind.
+        //
+        // Rescoring reorders the vector list by the vectors themselves, and
+        // `graph_expansion` below takes its seeds from that same list. So
+        // feeding it the rescored order silently changed which symbols the
+        // third list expanded from, and that cost two questions at hit@8 on the
+        // sealed thirty -- 25 of 30 against 27 -- while gaining nothing at any
+        // depth. Measured by turning the pass off and on with everything else
+        // held still.
+        //
+        // The ordering a caller sees is the rescored one; the seeds stay the
+        // index's. One list's improvement has no business changing another
+        // list's input.
+        let seeds = dense_ids.clone();
         let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
 
@@ -2663,7 +2678,7 @@ impl Semlith {
         // hits, one hop out, and the chunks those neighbours live in. It costs
         // no embedding and no model call, and it is what pulls together a
         // concept spread across files that share no vocabulary.
-        let graph_ids = self.graph_expansion(&dense_ids, &keyword_ids, depth, filter)?;
+        let graph_ids = self.graph_expansion(&seeds, &keyword_ids, depth, filter)?;
 
         // Two id spaces — a chunk id and an image id both count from one — so
         // the fusion is keyed by which space an id belongs to as well as by the

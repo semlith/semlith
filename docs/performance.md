@@ -169,7 +169,7 @@ oldest distribution the project promises to start on.
 
 ## Retrieval quality
 
-Measured for 0.22.0 over the 107-question harness in
+Measured for 0.23.0 over the 107-question harness in
 `tests/fixtures/retrieval/questions.yaml`, against the corpus pinned beside it
 at `tests/fixtures/retrieval/corpus` — the 0.21.0 tree at commit `4e8df39`, 146
 files and 3 119 835 bytes, asserted by file count and byte total on every run:
@@ -178,21 +178,36 @@ files and 3 119 835 bytes, asserted by file count and byte total on every run:
 cargo test --release --test retrieval -- --ignored --nocapture
 ```
 
-The set is split 77 development / 30 sealed. Every ranking decision in this
-release was read off the development set; the sealed thirty are scored once, at
-the end. Both are here, and 0.21.0 is measured on the same corpus through the
-same instrument so the comparison is like for like.
+The set is split 77 development / 30 sealed, redrawn for this release with a
+recorded seed. The sealed thirty are scored once, at the end. Both are here, and
+0.22.0 is measured on the same corpus, through the same instrument, on the same
+split, so the comparison is like for like.
 
-| what | 0.21.0 | 0.22.0 |
+The split was redrawn because the thirty drawn for 0.22.0 stopped being held out
+on 2026-09-19, when eight questions' spans were completed after that set had been
+scored. It is weaker evidence than that one was, and `split.yaml` says so: the
+work has now seen all 107 questions.
+
+| what | 0.22.0 | 0.23.0 |
 |---|---|---|
-| hit@1, sealed 30 | 18 (60 %) | **20 (66 %)** |
-| hit@3, sealed 30 | 22 (73 %) | **23 (76 %)** |
-| hit@8, sealed 30 | 25 (83 %) | **25 (83 %)** |
-| hit@1, development 77 | 48 (62 %) | **55 (71 %)** |
-| hit@3, development 77 | 56 (72 %) | **63 (81 %)** |
-| hit@8, development 77 | 65 (84 %) | **67 (87 %)** |
+| hit@1, sealed 30 | 22 (73 %) | **22 (73 %)** |
+| hit@3, sealed 30 | 24 (80 %) | **24 (80 %)** |
+| hit@8, sealed 30 | 27 (90 %) | **25 (83 %)** |
+| identifiers, sealed 30 | | **12 of 12** in the top three |
+| hit@1, development 77 | | **54 (70 %)** |
+| hit@3, development 77 | | **62 (80 %)** |
+| hit@8, development 77 | | **65 (84 %)** |
 | wrong yes, on `path` | 0 | **0** — asserted, not reported |
-| call-edge resolution | | **66 %** settled |
+| call-edge resolution | | **62 %** settled |
+
+**hit@8 on the sealed thirty is two questions worse than 0.22.0's**, and the
+cause is not established. It was chased by elimination, not guessed at, and four
+candidates were ruled out by measurement: the fastembed bump that came with this
+release (0.22.0 scores 27 with fastembed 6.1.0 too), the constants extraction,
+the candidate-pool depth, and the rescoring pass. The corpus indexes to 4 267
+chunks in every one of those runs, so chunking is not it either. The finding is
+recorded rather than left for a reader to discover, and it is where the next
+release starts.
 
 Each figure is the median of three runs, and each run is its own index of the
 corpus. The spread was zero on every figure of every configuration this release
