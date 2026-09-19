@@ -16,10 +16,16 @@ name: native-smoke
 #          brief, and upload its report. Needs the ANTHROPIC_API_KEY secret.
 
 on:
-  # Every pull request into develop, which is where all work lands. A pull
+  # Release pull requests into develop, which is where a release lands. A pull
   # request from develop into main carries the same commits, already checked
   # here, so running again there would cost three more runners to re-answer a
   # question this job has already answered.
+  #
+  # The head branch is what narrows it: `feat/<version>` is a release, and a
+  # dependabot bump or a one-file fix is not. Three runners and eight minutes
+  # per bump bought nothing -- the installer and the shipped artifact do not
+  # change because a transitive crate did. The filter is on the `plan` job
+  # rather than here because `pull_request` can only filter the base branch.
   pull_request:
     branches: [develop]
   workflow_dispatch:
@@ -46,6 +52,9 @@ permissions:
 
 jobs:
   plan:
+    # A release pull request, or a hand-dispatched run. Everything else skips
+    # the whole workflow, `smoke` included, because it needs this job's output.
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/')
     runs-on: ubuntu-latest
     outputs:
       os: ${{ steps.pick.outputs.os }}
