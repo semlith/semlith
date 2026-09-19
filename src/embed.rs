@@ -663,7 +663,13 @@ fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
 /// The SHA-256 of some bytes, as lowercase hex.
 pub fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(bytes))
+    // sha2 0.11 finalises to a `hybrid-array` value, which does not implement
+    // `LowerHex` the way the old `GenericArray` did. Thirty-two bytes is not
+    // worth a hex crate.
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Check bytes against the digest recorded for them, or say which file failed.
@@ -766,5 +772,32 @@ mod tests {
         assert_eq!(embed_threads(), 3);
         unsafe { std::env::remove_var(THREADS_ENV) };
         assert!(embed_threads() >= 1);
+    }
+
+    /// The digest a store's content hashes and the upgrade checksum are built
+    /// from. These three strings are SHA-256's own published vectors, so they
+    /// are the same under sha2 0.10 and 0.11 -- which is the point: the 0.11
+    /// bump changed the return type, never the bytes, and no store's hashes
+    /// move under it.
+    #[test]
+    fn the_digest_is_lowercase_hex_of_the_published_vectors() {
+        assert_eq!(
+            digest(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            digest(b"semlith"),
+            digest("semlith".as_bytes()),
+            "the same bytes hash the same way whatever produced them"
+        );
+        assert_eq!(
+            digest(b"").len(),
+            64,
+            "sixty-four hex characters, never a shorter form"
+        );
     }
 }
