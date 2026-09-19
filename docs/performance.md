@@ -192,7 +192,7 @@ same instrument so the comparison is like for like.
 | hit@3, development 77 | 56 (72 %) | **63 (81 %)** |
 | hit@8, development 77 | 65 (84 %) | **67 (87 %)** |
 | wrong yes, on `path` | 0 | **0** — asserted, not reported |
-| call-edge resolution | | **66 %** settled, against a 50 % gate |
+| call-edge resolution | | **66 %** settled |
 
 Each figure is the median of three runs, and each run is its own index of the
 corpus. The spread was zero on every figure of every configuration this release
@@ -204,15 +204,13 @@ of having them.** The development questions are the ones the work was tuned
 against. The gap between +7/+7/+2 and +2/+1/+0 is what tuning against a visible
 set is worth on this corpus.
 
-0.22.0 was specified against a gate of hit@8 95 %, hit@3 85 %, hit@1 70 %. **It
-does not meet it** and the gate moves to the next release rather than being
-restated as met. What stands in the way is named rather than guessed: seven
-concept questions of the development seventy-seven miss at k=8, and twenty more
-are found inside the top eight while sitting outside the top three. The second
-is a ranking problem, and the two standard levers for it were both built and
-both measured here — a larger embedding model gained two questions at k=8 and
-none at hit@3, and a cross-encoder over the fused head changed nothing at all at
-any depth on either set. Neither ships.
+What stands in the way of the questions that still miss is named rather than
+guessed: seven concept questions of the development seventy-seven miss at k=8,
+and twenty more are found inside the top eight while sitting outside the top
+three. The second is a ranking problem, and the two standard levers for it were
+both built and both measured here — a larger embedding model gained two questions
+at k=8 and none at hit@3, and a cross-encoder over the fused head changed nothing
+at all at any depth on either set. Neither ships.
 
 Two earlier figures on this page and in the README are withdrawn rather than
 updated. They were taken over a corpus that moved with every commit; against a

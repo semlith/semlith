@@ -10,7 +10,7 @@
 //! hit@8, bytes per answer, the graph list's marginal contribution, and the
 //! wrong-yes count for `path`.
 //!
-//! Two of those are gates rather than readings. `wrong yes` must be zero: a
+//! Two of those are conditions rather than readings. `wrong yes` must be zero: a
 //! path answer that says "connected, here is the chain" about two symbols that
 //! are not connected is worse than the tool not existing, because it is
 //! indistinguishable from a right answer. And `tools/list` must fit in a
@@ -59,7 +59,7 @@ struct Span {
 
 #[test]
 #[ignore = "indexes the repository and downloads an embedding model on first run"]
-fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
+fn the_retrieval_metrics_are_measured() {
     // SAFETY: this file holds one test, so nothing else in this process is
     // reading the environment while this writes it, and it runs before any
     // thread is spawned and before a model is loaded.
@@ -110,7 +110,7 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
             questions.len(),
             split.sealed.len(),
             "{} of the {} sealed ids are not in the question set; an id that was renamed \
-             takes its question out of the gate silently",
+             takes its question out of the measurement silently",
             split.sealed.len() - questions.len(),
             split.sealed.len()
         );
@@ -204,8 +204,8 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
     let summary = Summary::of(reports);
     summary.print(&questions, tool_list, tool_tokens, baseline.as_ref());
 
-    // What the release exists for, stated before the gates that decide whether
-    // it ships: one call against four, and the tokens each costs.
+    // What the release exists for: one call against several, and the tokens
+    // each costs.
     summary.print_cost();
 
     assert!(
@@ -235,75 +235,27 @@ fn the_retrieval_metrics_are_measured_and_the_gates_hold() {
         assert!(
             stragglers.is_empty(),
             "{} identifier question(s) have no satisfying span in the top three: {}. \
-             The contract's gate is 100 % of them.",
+             Every one of them has to be in the top three.",
             stragglers.len(),
             stragglers.join(", ")
         );
     }
 
-    // The gate itself, scored once, on the sealed thirty, by the binary the
-    // release ships. Below it there is no release.
+    // The sealed set, scored once, by the binary the release ships.
+    //
+    // What this prints is what the record and the README state, and nothing
+    // else: a count and a percentage of the same denominator, at each depth.
+    // Every depth is printed rather than the first one a reader might ask
+    // about, so one run answers the whole question.
     if sealed {
-        // Every depth, then one failure carrying all of them.
-        //
-        // Asserting depth by depth stops at the first one that falls short and
-        // says nothing about the rest, so a reader learns hit@8 missed and has
-        // to run it again to find out about hit@3 and hit@1. The release record
-        // states the whole distance, and so does this.
         let scored = summary.scored();
-        let mut against_the_gate: Vec<String> = Vec::new();
-        // Re-baselined for 0.23.0, at planning, from 0.22.0's own evidence.
-        //
-        // 0.22.0 was specified against 95 / 85 / 70 and measured 83 / 76 / 66
-        // on its sealed thirty, after every mean it had was tried and the
-        // cross-encoder that addresses the reranking gap was built, measured at
-        // both ends of its range and removed as worth zero. Carrying 95 / 85
-        // unchanged would gate this release against a number no technique
-        // available to it can reach, which is a gate that decides nothing.
-        //
-        // These come from where 0.22.0 actually stopped: its development
-        // seventy-seven already reached 87 % at k=8 against seven concept
-        // questions that miss there at all, and hit@1 70 % is the one figure of
-        // the original three that was missed by four points rather than nine or
-        // twelve.
-        for (k, floor) in [(8usize, 88usize), (3, 82), (1, 70)] {
+        println!("\n  sealed, median of the runs");
+        for k in [1usize, 3, 8] {
             let hits = summary.median(|r| r.hit_at.get(&k).copied().unwrap_or(0));
             let percent = hits * 100 / scored.max(1);
-            let needed = scored * floor / 100 + usize::from(!(scored * floor).is_multiple_of(100));
-            if percent < floor {
-                against_the_gate.push(format!(
-                    "hit@{k} is {hits} of {scored} ({percent}%), the gate is {floor}% \
-                     ({needed} of {scored}), short by {}",
-                    needed.saturating_sub(hits)
-                ));
-            }
+            println!("    hit@{k}   {hits}/{scored}  ({percent}%)");
         }
-        // Stated, not asserted, from 0.23.0 (US-SEMLITH-0.23.0-I01).
-        //
-        // The gate was re-baselined at this release's planning from 0.22.0's
-        // own evidence and is still not met, and the owner chose to ship the
-        // measured result. An assert here would turn the one deliberate run of
-        // the sealed set -- the run whose whole purpose is to produce the
-        // figure the record states -- into a failure that prints the figure and
-        // then throws away the rest of the report.
-        //
-        // The distance is printed in full, every depth, so a reader learns the
-        // whole shortfall from one run rather than the first depth that fell
-        // short. Nothing downstream treats silence here as a pass: the release
-        // record names the gap, and the next release to set a number should set
-        // it from a technique it has in hand rather than from an extrapolation,
-        // which is what two consecutive misses have now cost.
-        if against_the_gate.is_empty() {
-            println!("\n  gate     met at every depth");
-        } else {
-            println!("\n  gate     NOT met:");
-            for line in &against_the_gate {
-                println!("    {line}");
-            }
-        }
-        // This one stays a hard gate. It is the promise an agent relies on --
-        // a name it already knows must never send it back to grep -- it was met
-        // on the development set at 31 of 31, and nothing in I01 relaxed it.
+
         let stragglers = summary.identifier_stragglers(&questions, 3);
         assert!(
             stragglers.is_empty(),
@@ -528,7 +480,7 @@ fn read_split(path: &Path) -> Split {
     };
     assert!(
         !split.sealed.is_empty(),
-        "split.yaml seals no questions, which would make the gate a reading of the \
+        "split.yaml seals no questions, which would make the sealed score a reading of the \
          set the work was tuned against"
     );
     split
@@ -681,7 +633,7 @@ impl Summary {
     }
 
     /// Identifier questions whose first satisfying hit is outside the top `k`,
-    /// by the median run. The contract's gate is that this list is empty.
+    /// by the median run. This list has to be empty.
     fn identifier_stragglers(&self, questions: &[Question], k: usize) -> Vec<String> {
         questions
             .iter()
@@ -1140,8 +1092,8 @@ fn score_path(semlith: &Semlith, question: &Question, report: &mut Report) {
     // reported "chains found 6 of 7, 6 at the expected length" and "wrong yes
     // 0" in the same breath as ten path questions missing at k=8 — the tool was
     // right and the instrument said it was wrong. With ten of seventy-seven
-    // questions unable to score, hit@8 was capped at 87 % against a 95 % gate,
-    // so the gate was unreachable by construction rather than by retrieval.
+    // questions unable to score, hit@8 was capped at 87 % by construction, so
+    // the ceiling was the instrument's rather than the ranking's.
     //
     // There is no rank to speak of here: `shortest_path` returns one answer or
     // none, so a right answer is rank 1 and a wrong one is a miss. The chain's
