@@ -274,9 +274,23 @@ fn entry(stanza: &Stanza, strict: bool) -> Result<serde_json::Value> {
     Ok(block)
 }
 
-/// Whether a settings file already names a semlith hook, whatever its flags.
+/// Whether a settings file already holds a semlith hook, whatever its flags.
+///
+/// Read out of the parsed `PreToolUse` array rather than by looking for two
+/// words anywhere in the file. A settings file that mentions semlith for any
+/// other reason -- a permission rule, a status line, an `additionalDirectories`
+/// entry -- and the word "hook" for any other reason was reported as carrying a
+/// stale semlith hook when it carried none at all, which sends a reader to
+/// repair something that is not there.
 fn names_our_hook(text: &str) -> bool {
-    text.contains("semlith") && text.contains("hook")
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/hooks/PreToolUse")
+                .and_then(|list| list.as_array())
+                .map(|list| list.iter().any(is_ours))
+        })
+        .unwrap_or(false)
 }
 
 /// `text` with semlith's entry present exactly once, and every other entry
@@ -515,6 +529,25 @@ mod tests {
         let without = without_entry(&with).unwrap();
         assert!(!without.contains("PreToolUse"), "{without}");
         assert!(!without.contains("hooks"), "{without}");
+    }
+
+    /// A settings file that mentions semlith and the word "hook" for unrelated
+    /// reasons carries no semlith hook, and must not be reported as carrying a
+    /// stale one: that sends a reader to repair something that is not there.
+    #[test]
+    fn a_file_that_merely_mentions_semlith_holds_no_hook() {
+        let theirs = json!({
+            "permissions": { "allow": ["Bash(semlith:*)"] },
+            "statusLine": { "command": "my-hook-script" },
+            "hooks": { "PostToolUse": [{ "matcher": "Edit", "hooks": [] }] }
+        })
+        .to_string();
+        assert!(!names_our_hook(&theirs), "{theirs}");
+
+        let with = with_entry(&theirs, &ours()).unwrap();
+        assert!(names_our_hook(&with), "{with}");
+        // And it left their PostToolUse alone on the way in.
+        assert!(with.contains("PostToolUse"), "{with}");
     }
 
     /// The rule block replaces itself rather than stacking up.
