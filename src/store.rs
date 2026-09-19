@@ -1704,41 +1704,14 @@ fn rank(candidate: &str, src_path: &str, hint: Option<&str>, imports: &[String])
 /// point: a module is a file or a directory depending on how the author felt
 /// that day, and a hint knows neither.
 fn names_file(word: &str, path: &str) -> bool {
-    let wanted = spelling(word);
-    if wanted.is_empty() {
-        return false;
-    }
     let path = std::path::Path::new(path);
-    if path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| spelling(stem) == wanted)
-    {
+    if path.file_stem().is_some_and(|stem| stem == word) {
         return true;
     }
     path.parent()
         .into_iter()
         .flat_map(|parent| parent.components())
-        .filter_map(|component| component.as_os_str().to_str())
-        .any(|component| spelling(component) == wanted)
-}
-
-/// One spelling of a name, for comparing a hint against a path.
-///
-/// A hint is written the way the calling language writes a type or a module,
-/// and a file is named the way its own language names files: `StoreLock` and
-/// `store_lock.rs` are one thing under two spellings, and so are `httpServer`
-/// and `http-server`. Comparing the two as written makes them two nodes, which
-/// is the entity-resolution failure the graph literature describes and the
-/// same shape as this project's own two-spellings-of-one-path bug.
-///
-/// Case and the separators are dropped and nothing else, so `store` still does
-/// not name `stores`.
-fn spelling(word: &str) -> String {
-    word.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+        .any(|component| component.as_os_str() == word)
 }
 
 /// Everything one file imports, as the raw strings the extractor recorded.

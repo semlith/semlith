@@ -2724,10 +2724,24 @@ impl Semlith {
         // Look deeper than `k` in each half. Fusion can only rank what it is
         // given, and a chunk that is second on one side and absent from the
         // other still deserves to be considered.
-        let depth = (k * RANK_DEPTH).max(k);
+        let mut depth = (k * RANK_DEPTH).max(k);
 
         // Which half of the fusion this query's own text says to trust.
         let shape = shape_of(query);
+        // A deeper pool for a question, when there is a stage that can sort
+        // it.
+        //
+        // The audit of 0.25.0 found four concept questions whose answer is in
+        // the corpus, is spanned, and was never returned at k=8 — the fusion
+        // had not surfaced it into the thirty-two candidates the pool held.
+        // Depth is free to the caller: everything below the cut is thrown
+        // away, and only the rescoring stage reads the extra candidates. An
+        // identifier query keeps the old pool, because its answer is its
+        // definition and a deeper list of near-spellings is not an
+        // improvement.
+        if shape != Shape::Identifier && rerank::enabled() {
+            depth = depth.max(rerank::RERANK_DEPTH);
+        }
 
         let allowlist = self.allowlist(filter)?;
         if matches!(allowlist, Allowlist::Empty) {
