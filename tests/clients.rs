@@ -610,7 +610,11 @@ fn real_model_cache() -> PathBuf {
 /// into, and a `description` an agent can decide from without opening the body.
 #[test]
 fn the_agent_skill_validates_against_the_format() {
-    let text = semlith::clients::SKILL;
+    // Normalised first. Git checks this file out with CRLF on Windows, and a
+    // frontmatter parser that assumes `\n` passes on two platforms and fails on
+    // the third -- which is the same shape as the absolute-path check that
+    // caught 0.17.1 out.
+    let text = semlith::clients::SKILL.replace("\r\n", "\n");
     let body = text
         .strip_prefix("---\n")
         .expect("a skill opens with YAML frontmatter");
@@ -661,13 +665,14 @@ fn the_agent_skill_validates_against_the_format() {
     );
 
     // And the always-on block is a block, not a second skill.
+    let rules = semlith::clients::RULES.replace("\r\n", "\n");
     assert!(
-        !semlith::clients::RULES.starts_with("---"),
+        !rules.starts_with("---"),
         "the rule block must carry no frontmatter: it is pasted into prose files"
     );
     assert!(
-        semlith::clients::RULES.lines().count() <= 12,
+        rules.lines().count() <= 12,
         "the rule block is {} lines; the ceiling is 12",
-        semlith::clients::RULES.lines().count()
+        rules.lines().count()
     );
 }
