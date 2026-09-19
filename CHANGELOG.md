@@ -80,12 +80,19 @@ are withdrawn rather than updated.
   real Claude Code, Cursor and Codex registrations. It now redirects `HOME` too,
   and a new check compares every client configuration path in `docs/clients.md`
   by checksum before and after the run.
-- **A supervision check that cannot run says so in the run's own output**
-  (#104). `cli/service/recovers` was carried in `known-failures.txt` for macOS,
-  which made a check that could not run read as a check that ran and failed as
-  expected. The harness now probes for the facility — `launchctl print
-  gui/<uid>`, `systemctl --user show-environment` — prints what it found, and
-  skips with that as the reason. `known-failures.txt` is empty.
+- **The smoke harness says what supervision it found** before deciding whether
+  a login service can be tested — `launchctl managername` on macOS,
+  `systemctl --user show-environment` on Linux — so a log says why a check was
+  skipped rather than only that it was.
+
+  **#104 is not fixed**, and the attempt is recorded rather than buried. The
+  aim was to tell a host that cannot supervise from one that can, so
+  `cli/service/recovers` could skip instead of being carried as an expected
+  failure. Two probes were tried on real runners and both were wrong: the GitHub
+  macOS runner answers `launchctl print gui/<uid>` and reports an `Aqua` session,
+  and still will not bring a killed user agent back. It presents every property
+  a real login session has. The known-failures row is back, now carrying that
+  finding, and #104 stays open.
 
 ## [0.21.0] - 2026-09-18
 
