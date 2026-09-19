@@ -58,6 +58,63 @@ fn one_query_answers_from_both_stores_and_labels_each_hit() {
     );
 }
 
+/// A definition lifted inside one store still leads the answer once several
+/// stores are merged.
+///
+/// The property `fleet::merge` has always had and that 0.22.0 could have taken
+/// away. An identifier-shaped query puts the chunks that define that name above
+/// the fused order; the first implementation did it with a stable sort and left
+/// their fused score at 0.0, which is right in one store and last in a fleet,
+/// because `merge` takes the best k across stores by score. The lift is a score
+/// for that reason, and this is the test that says so.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_definition_lifted_in_one_store_still_leads_a_fleet_answer() {
+    // The definition lives in one store. The other holds prose that mentions
+    // the same word often enough to win a vector-and-keyword contest on its
+    // own, which is exactly the shape that buried it.
+    let code = corpus(
+        "code",
+        &[(
+            "limits.rs",
+            "/// How many nodes a traversal may visit.\n\
+             pub const HYDRATION_CEILING: usize = 4000;\n",
+        )],
+    );
+    let prose = corpus(
+        "prose",
+        &[(
+            "baking.md",
+            "Hydration and the hydration ceiling are discussed here. A hydration ceiling \
+             is talked about at length, and hydration ceiling appears again below. \
+             Hydration ceiling, hydration ceiling, hydration ceiling.",
+        )],
+    );
+    let a = store_for(&code);
+    let b = store_for(&prose);
+
+    let mut fleet = open(&[a.path().to_path_buf(), b.path().to_path_buf()]);
+    let hits = fleet
+        .search_filtered("HYDRATION_CEILING", 6, &Filter::default())
+        .unwrap();
+
+    let first = hits.first().expect("the query returns something");
+    assert!(
+        first.path.ends_with("limits.rs"),
+        "the definition did not lead the merged answer; got {} with lists {:?}\nall: {:#?}",
+        first.path,
+        first.lists,
+        hits.iter()
+            .map(|h| (&h.path, &h.lists, h.score))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        first.lists.contains(&"definition"),
+        "the leading hit does not carry the definition badge: {:?}",
+        first.lists
+    );
+}
+
 /// Adding a store must not bury the store that has the answer. If it does,
 /// multi-store search is worse than asking each store separately, which is the
 /// thing it replaces.

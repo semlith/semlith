@@ -3648,6 +3648,15 @@ td.why .copyfield {
   color: var(--ink-2);
 }
 
+/* Not one of the fusion lists either, and it is the reason a hit is where it
+ * is rather than a description of how it was found: an identifier-shaped query
+ * lifts the chunks that define that name above the ranking. Filled, like the
+ * image badge, because it outranks the tinted three rather than joining them. */
+.badge.definition {
+  background: var(--blue-ink);
+  color: var(--panel);
+}
+
 .badge.vector {
   background: var(--blue-soft);
   color: var(--blue-ink);

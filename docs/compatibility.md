@@ -998,6 +998,33 @@ submitted, spans every slice, stops while the run is held, and freezes at its
 total when the run ends. Nothing about the field's name or type changes; the
 number was wrong and is not any more.
 
+## 0.22.0
+
+### Search hits can carry a fifth badge, `definition`
+
+`lists` on a hit is an array of the lists that found it, and it gains a value:
+`definition`, on a chunk that defines the exact name an identifier-shaped query
+typed. It is additive under the *Additive fields* rule — a reader that switches
+on the four it knows and passes anything else through is unaffected, and a
+reader that rejects an unknown value was already going to break the first time
+a list was added.
+
+The badge is not a fifth list in the fusion. The chunks that define the name are
+lifted above the fused order rather than scored into it, which is why it carries
+no weight and why a hit can carry `definition` alone. It appears only for a
+query `shape_of` calls an identifier; a question-shaped query never produces
+one, whatever it names.
+
+**Why.** On the pinned corpus the harness measures, five identifier questions
+had no satisfying span in the first eight results, and two of those definitions
+ranked first in the keyword index by themselves. Reciprocal-rank fusion is
+nearly flat across the first ranks — `weight / (60 + rank)` — so one
+authoritative list placing a chunk first is outvoted by two vague lists placing
+a different chunk fourth and fifth, plus the graph list derived from them. An
+agent that already knows a term and is handed eight chunks that are not its
+definition goes back to grep, which is the behaviour this release exists to
+stop.
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

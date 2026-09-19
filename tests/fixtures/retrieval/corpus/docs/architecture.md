@@ -1,0 +1,877 @@
+# Architecture
+
+How semlith is put together, and why. If you are here to change something, this
+is the context that makes the code make sense.
+
+## The shape of the problem
+
+An agent that needs to know something about a large corpus has two bad options:
+read everything (expensive, and most of it is irrelevant) or guess which file to
+open (usually wrong). What it wants is the two or three paragraphs that actually
+answer the question.
+
+That is a retrieval problem, and the useful property is that the expensive part
+— turning text into vectors — only has to happen once per chunk, at index time.
+Querying afterwards is one embedding plus a scan.
+
+So semlith optimizes for a very specific shape: **indexing can be slow, querying
+must not be.**
+
+## The two halves of a store
+
+A store holds two kinds of state, which must agree, and beside them the two
+files that say who is allowed to write and where to reach them. Under the store
+home that is:
+
+```
+~/.semlith/
+├── registry.json                 which store covers which roots, and the model each was built with
+├── agent.key                     the credential a client presents to the daemon
+└── stores/
+    └── semlith/                  one store, named for what it covers
+        ├── index/                turbovec shards — quantized vectors, keyed by chunk id
+        │   └── 0000000000000001.tvim
+        ├── images/               the same again at CLIP's 512 dimensions, only once a store has met an image
+        │   └── index/
+        │       └── 0000000000000001.tvim
+        ├── store.db              SQLite — chunk text, file paths, line spans, symbols, edges, content hashes
+        ├── index.lock            the OS advisory lock one writer holds for a whole run
+        └── daemon.json           written while a daemon holds the lock, so `semlith mcp` can forward to it
+```
+
+A store kept beside its corpus is the same directory under a different name: a
+`.semlith/` next to the files, holding `index/`, `store.db` and the rest. Only
+the location differs.
+
+The split between the two halves is the central design decision. The vector
+side holds **only** vectors and ids. It never holds text. This matters because
+the vectors are what gets scanned on every query, and their size decides how
+much of the corpus has to be resident to answer one. At 4 bits per coordinate
+and 384 dimensions, a chunk costs 192 bytes — so a million chunks is about
+190 MB of packed codes, while the text those chunks came from could be
+gigabytes sitting harmlessly in SQLite.
+
+That 190 MB is never resident at once. `index/` is a directory of fixed-size
+shards of 65536 vectors each (`src/index.rs:54`), named for the first chunk id
+they hold and zero-padded so that sorted-by-name is sorted-by-id
+(`src/index.rs:436-437`). A shard is about 12 MB of packed codes, doubled by
+turbovec's repacked search copy, and only as many are held open at once as the
+memory budget allows; the rest are read back when a query reaches them. **The
+directory listing is the manifest** — nothing else records shard boundaries, so
+nothing else can disagree with it. A store written before 0.7.0 keeps a single
+`index.tv` instead and is never migrated; `docs/compatibility.md` has the two
+formats and which binary reads which.
+
+The two halves are joined by one integer. A chunk's SQLite rowid *is* its
+turbovec external id. There is no mapping table, because there is nothing to
+map.
+
+## Indexing
+
+```
+walk paths ──▶ read bytes ──▶ hash ──▶ unchanged? ──▶ skip
+                   │
+                   ▼
+              extract text  (by extension: PDF, documents, else UTF-8)
+                   │
+                   ▼
+              chunk_text()  (line-aligned, ≤800 chars, 2 lines overlap)
+                   │
+                   ├──▶ INSERT INTO files/chunks  ──▶ chunk ids
+                   │
+                   ▼
+              batch of 32 ──▶ embed ──▶ normalize ──▶ add_with_ids
+                                                          │
+                   ┌──────────────────────────────────────┘
+                   ▼
+              prune vanished files ──▶ write dirty shards ──▶ commit hashes
+```
+
+A few things in that flow are load-bearing:
+
+**Files are hashed before anything else happens.** BLAKE3 over the file bytes,
+compared against the hash recorded last time. This is what makes re-indexing an
+unchanged corpus take milliseconds instead of hours, and it is why the embedding
+model is never even loaded on a no-op run.
+
+**Hashes are committed last, after the shards are on disk.** A file's row is
+inserted with an empty hash while its vectors are still in flight. If the
+process dies mid-run, those files still have an empty hash, do not match on the
+next run, and get re-indexed. The alternative — recording the hash up front —
+would leave chunks in SQLite that no vector points at, silently unsearchable
+forever. Being slow to recover is fine; being quietly wrong is not.
+
+**Changed files are evicted before they are re-added.** `delete_file` returns
+the old chunk ids so they can be removed from the vector index in the same
+breath as the SQL delete. SQLite reuses rowids after deletion, so skipping the
+eviction would eventually collide an old vector with a new chunk's id.
+
+**Each shard is written via a temp file and a rename**, so an interrupted save
+cannot leave a truncated shard behind (`src/index.rs:665-669`). Only the shards
+a run actually touched are rewritten; the rest are not opened.
+
+What that does *not* buy is an all-or-nothing index. A save walks the dirty
+shards one at a time, so a process killed halfway leaves some shards at the new
+vectors and some at the old, and nothing on the vector side records that this
+happened. This is why the hashes are the crash-safety story rather than the
+rename: the files whose vectors were still in flight never got a hash, so the
+next run re-indexes them and rewrites exactly those shards. A leftover `.tmp`
+from the interrupted write is removed on the next open, by a caller that holds
+the store lock and therefore knows there is no live writer it could belong to
+(`src/index.rs:679-687`, `src/index.rs:293-295`).
+
+## Extraction
+
+Everything a file has to survive before it can be chunked happens in one
+function, `chunk::extract`, and it dispatches on the extension before it looks
+at a byte. That ordering is load-bearing twice over. A `.docx`, `.pptx`,
+`.xlsx` or any OpenDocument file is a ZIP archive, so the NUL-byte check that
+rejects binaries would reject every document if it ran first; and a corpus of
+ordinary source, which has none of these extensions, pays one string comparison
+per file and never enters a parser.
+
+The readers live in `src/formats.rs`, private because what semlith extracts
+from a document is documented behaviour rather than API. Six of the nine
+formats are ZIP archives of XML, so they share one bounded archive reader and
+one tag scanner rather than carrying six parsers; a notebook is JSON, which
+serde_json already handles; HTML is a character scan that removes tags while
+keeping every newline the source had, which is what lets a hit into an HTML
+page still name the line of the file on disk.
+
+Two rules hold across all of them. A file that cannot be read — corrupt,
+truncated, encrypted, or expanding past the 32 MiB decompression cap — is
+`None`, which the indexer counts as skipped and walks past, exactly as it has
+always treated an unreadable PDF. And a panic inside any extractor is caught at
+this boundary, because these readers sit downstream of a decompressor and a
+document somebody else wrote.
+
+## Chunking
+
+Chunks are line-aligned and capped at 800 characters, with the last two lines
+repeated into the next chunk.
+
+The cap is not arbitrary. Transformer cost grows faster than linearly in
+sequence length, so halving chunk size more than halves the per-chunk embedding
+cost — measured, going from 1200 to 800 characters improved throughput by 1.58x
+per chunk and cut peak memory by 0.5 GB. Smaller chunks also retrieve more
+precisely and cost an agent fewer tokens to read. There is a floor below which a
+chunk stops carrying enough context to be meaningful; 800 characters is
+comfortably above it.
+
+Line alignment is what makes the `path:start-end` locator in the output useful.
+A chunk that started mid-line could not name where it came from.
+
+Lines longer than the whole budget — minified JavaScript, embedded base64 — are
+hard-split on a character boundary rather than emitted oversized, and all pieces
+share the one line number.
+
+## Searching
+
+```
+query ──┬─▶ prefix ──▶ embed ──▶ index.search(k*4) ──▶ chunk ids, by rank
+        │                                                      │
+        └─▶ terms ──▶ chunks_fts MATCH ──────────▶ chunk ids, by rank
+                                                               │
+                                              reciprocal rank fusion
+                                                               │
+                                                               ▼
+                                                 SELECT ... WHERE c.id = ?
+                                                               │
+                                                               ▼
+                                              Hit { score, path, lines, text }
+```
+
+Both halves of the store answer every query. The vector index knows what a
+chunk means; FTS5 knows which literal terms it contains. Neither is sufficient
+alone — an embedding of `EMBED_BATCH` sits in the same neighbourhood as every
+other constant in the corpus, and a keyword index cannot answer "how does the
+retry backoff work".
+
+Embeddings are L2-normalized on both sides, which makes turbovec's inner product
+equal to cosine similarity. That similarity is not comparable with BM25, though,
+so the two rankings are fused by position rather than by score: each half
+contributes `1 / (60 + rank)` and the sums decide the order. Reciprocal rank
+fusion needs no calibration between two score distributions that have nothing to
+do with each other, which is exactly the design problem that kept hybrid search
+out of 0.1.0.
+
+The reported score is therefore a fusion score, not a cosine. It is meaningful
+for ordering within one result set and meaningless compared across queries.
+
+Each half is searched `4 * k` deep before fusing, because a chunk ranked second
+by one half and absent from the other still deserves consideration.
+
+A query reaches FTS5 as bare terms, never as typed. FTS5's `MATCH` is a query
+language: `AND` is an operator, `*` is a prefix wildcard, and an unbalanced
+quote is a syntax error. Passing a user's words through raw would make
+`index AND search` mean something they did not type and make `call_me(` fail
+outright.
+
+BGE English models were trained asymmetrically: passages are embedded raw, but
+queries want an instruction prefix. `Model::query_text` adds it for those models
+only. Omitting it measurably costs recall, which is why it is not a detail worth
+simplifying away — and adding it for a model never trained with one, such as the
+default, would be just as wrong.
+
+If a chunk id comes back that SQLite does not know about, the hit is skipped
+rather than failing the query. That means the two halves have drifted, which
+should not happen — but returning four good results beats returning an error.
+
+### Narrowing to part of the corpus
+
+`--path`, `--ext` and `--lang` become one list of `GLOB` patterns, grouped so
+that repeats within a kind union and kinds intersect. `src/filter.rs` owns that
+translation; `store::filtered_chunk_ids` runs it as a single query against
+`files.path` and returns the chunk ids it selects.
+
+That one id set drives both halves. The vector half passes it to
+`IdMapIndex::search_with_allowlist`, so turbovec masks the scan and its top-`k`
+is computed *inside* the subset. The keyword half receives the same predicate
+inside its FTS5 statement. Deriving the two independently would let them drift,
+and fusion would then rank a chunk that one half was never allowed to return.
+
+Filtering before the top-`k` rather than after is the whole point. A
+subdirectory holding one percent of a corpus contributes roughly one percent of
+a global top-8 — usually none of it — so post-filtering a global ranking
+returns an empty result for exactly the query the filter was written for.
+
+Three details are load-bearing:
+
+- turbovec panics on an empty allowlist and on any id the index does not hold,
+  so the ids are intersected with the index and the empty case returns no hits
+  without calling it.
+- A filter that ends up selecting the entire index is passed as no filter at
+  all, which avoids building a mask the size of the index for no benefit.
+- The unfiltered FTS5 statement is kept exactly as it was, with no join to
+  `chunks` and `files`, so a query that uses no filter pays nothing for the
+  feature.
+
+Nothing is stored for any of this. `files.path` has been recorded since 0.1.0,
+which is why filtering works on an existing store with no migration and no
+re-embedding.
+
+### Several stores, one query
+
+`src/fleet.rs` opens the stores it is given and asks each of them the same
+question. It is deliberately not a joint index: nothing is merged on disk, no
+store learns about another, and every chunk id stays inside the store that
+issued it. Ids collide across stores by construction — id 42 exists in all of
+them — so an id that escaped its store would resolve to the right excerpt from
+the wrong repository, which reads as a plausible answer rather than as a bug.
+
+Three decisions carry the design.
+
+**The query is embedded once per distinct model, not once per store.** The
+embedder therefore lives in the fleet rather than in the store, and
+`Semlith::search_ranked` takes a vector that has already been computed. Three
+stores sharing a model cost one embed and one resident copy of the weights;
+measured, an MCP server that has answered a query holds 137 MB whether it was
+opened on one store or on three. A store
+whose model differs is queried with its own model, because a vector from another
+model is a point in a different space.
+
+**Results are merged, not re-ranked.** Each store's list arrives already ranked
+and that order survives the merge — a store's own answer is not up for
+re-litigation by another store's numbers. Across stores the key is the fused
+score, which is the one quantity that is the same unit everywhere: a sum of rank
+reciprocals from the same formula at the same depth, in every store, under any
+model.
+
+**Ties are decided by similarity, not by argument order.** This is the part the
+first test caught. Every store has a best hit whether or not it has an answer,
+so a store whose top result is dense-rank-1 scores exactly what another store's
+dense-rank-1 scores, and with two single-file stores the two collide exactly.
+Ranking then fell to the order the stores were named in, which handed rank 1 to
+a store that had nothing to do with the query. Ties now go to the higher
+similarity to the query vector: it is the only evidence available about which of
+two equally-ranked chunks is closer to what was asked, and it decides only
+between hits the rank evidence has already called equal. Across two models it
+compares numbers from two vector spaces, which is approximate — the worst case
+is a reordering among equals, which is why a relevance floor was rejected. A
+floor drops answers; this does not.
+
+Two consequences elsewhere. Read commands go through `Semlith::open_existing`,
+which refuses a directory that is not already a store, because `open` creates
+what it is given and a mistyped store answers every question with nothing while
+the other stores hide it. And the same store named twice is opened once,
+deduplicated by canonical path: merging a store with itself gives every one of
+its hits a twin at the same score and hands it the whole result list.
+
+Writes are untouched. `index`, `watch` and `forget` take one store, because one
+writer per store is a property of the store, not a limitation of the command.
+
+## The MCP server
+
+`semlith mcp` is newline-delimited JSON-RPC 2.0 over stdio, hand-rolled in one
+file. A tools-only MCP server needs `initialize`, `tools/list`, `tools/call` and
+`ping`; that is small enough that a dependency would cost more than it saves.
+
+Two rules govern it:
+
+- **stdout is protocol.** Nothing else may write there. This is why `Semlith`
+  has a `quiet` flag — the model-download progress bar would otherwise corrupt
+  the stream.
+- **Requests without an id are notifications** and must not be answered.
+  `notifications/initialized` arriving right after the handshake is the common
+  case.
+
+Tool failures are returned in-band as `isError` content rather than as
+protocol-level errors, so the agent sees what went wrong and can react instead
+of the call simply failing.
+
+The server calls `warm()` at startup — loading the ONNX model and preparing the
+index's lazy caches — so the first tool call is not several hundred milliseconds
+slower than the rest.
+
+`semlith_search` takes the CLI's filters as optional `path`, `ext` and `lang`
+arrays, and a bare string is accepted wherever an array is, because that is what
+an agent produces about half the time. An unknown language name and a filter
+that selects nothing are both answered in-band with text the agent can act on:
+one names `semlith languages`, the other says to try again without the filter.
+Silently returning nothing would teach an agent that the corpus is empty.
+
+From 0.15.0 it answers *where* by default. `format: locate` returns one line per
+hit — store-relative path, line span, the enclosing symbol and its kind, the
+lists that found it, provenance for a row the graph reached, whether the file has
+changed since it was indexed, and one line of the text — grouped by file and cut
+to a `max_tokens` budget that states `truncated: N of M` when it cuts. An agent
+that knows the identifier it is looking for wants the address, not the building:
+sending the excerpt back cost 20 to 60 times what the grep it replaced would
+have. `format: "excerpt"` asks for the text, and the CLI is unchanged — a person
+reading a terminal is not paying by the token.
+
+Freshness is one `stat` per distinct path, comparing the file's current size and
+mtime against what the store recorded. It is deliberately conservative — a
+`touch` with no edit reads as stale — because a false "check this" costs a reread
+and a false "this is current" costs a wrong quotation.
+
+The server serves a fleet, so one process can hold several stores. Two details
+follow from the same principle: the open store names are written into the
+`store` argument's description, because an agent cannot narrow to a name it has
+never seen, and a name that is not open comes back as an in-band error listing
+the ones that are. An empty result would be read as "the corpus does not discuss
+this", which is a different and wrong answer.
+
+## One writer per store
+
+An index run holds an OS advisory lock on `index.lock` in the store directory
+for its whole duration, including the final shard writes.
+
+The lock is the kernel's, not the file's existence. That distinction is the
+whole point: a run killed with SIGKILL, or lost with the machine, releases the
+lock when the process dies and leaves nothing to clean up. A lock file that
+meant "locked because I exist" would wedge the store until a human deleted it,
+and users would learn to delete it reflexively, which defeats the lock.
+
+A second run does not wait. It exits non-zero naming the process that holds the
+lock and when it started, because the honest options for a blocked indexer are
+"wait an unknown time" or "tell the user"; the second is more useful from a
+terminal and from a script.
+
+Reads are not locked. A search during an index run sees whatever has been
+committed so far, which is a consistent SQLite snapshot, and at worst misses
+chunks that have not landed yet.
+
+## Choosing the thread count
+
+ONNX Runtime synchronises its threads at every operator boundary, so the batch
+moves at the speed of the slowest thread. On a CPU where the cores are not
+equal, that turns extra threads into a liability: a thread scheduled onto an
+efficiency core holds up every thread on a performance core.
+
+Measured on a 4P+4E Apple M1, indexing the same corpus:
+
+| intra-op threads | chunks/sec |
+|---|---|
+| 1 | 5.1 |
+| 2 | 14.0 |
+| 4 | **16.5** |
+| 8 | 13.9 |
+
+So the default is the performance-core count on Apple silicon, and the total
+core count everywhere else, where the cores are interchangeable and the whole
+machine is the right answer. Undersubscribing costs far more than
+oversubscribing — 1 thread is three times worse than 8 — so nothing else gets a
+reduced count on a guess. `SEMLITH_EMBED_THREADS` overrides it, because this was
+measured on exactly one machine.
+
+Fanning batches across cores was measured and rejected: two workers with four
+threads each managed 7.9 chunks/sec against 16.5 for one worker, and four
+workers with one thread each managed 3.6. ONNX Runtime already owns the
+machine; a second layer of parallelism only contends with it.
+
+## Why these dependencies
+
+| Crate | Why |
+|---|---|
+| [turbovec](https://github.com/RyanCodrai/turbovec) | TurboQuant is data-oblivious: no training, no rebuilds as the corpus grows. Add vectors, they are searchable. |
+| rusqlite (bundled) | Bundled SQLite means no system dependency and one file to back up. |
+| fastembed | Runs sentence-transformer models on CPU via ONNX Runtime, with model download and tokenization handled. |
+| ignore | The `ripgrep` walker. Gets `.gitignore` semantics right, which is harder than it looks. |
+| pdf-extract | Pure Rust, no external binary. |
+| zip | Six of the document formats — `.docx`, `.pptx`, `.xlsx`, `.odt`, `.odp`, `.ods` — are ZIP archives of XML. Inflating one by hand is a decompressor, and that is not a thing to write. Taken with `default-features = false` and only `deflate-flate2`, so it is the reader and none of the compressors or ciphers. |
+| blake3 | Fast enough that hashing every file on every run is free. |
+| hf-hub | Fetches the default model's weights. fastembed uses it internally but does not expose it, and the default model is not one fastembed knows. |
+| libc | `sysctlbyname` to count performance cores on Apple silicon, and the `SIGINT`/`SIGTERM` handler that stops `watch` at a batch boundary. |
+| notify | Filesystem events per platform — FSEvents, inotify, ReadDirectoryChangesW — so `watch` costs nothing while nothing changes. Writing three backends by hand is not a thing to do for one command. |
+
+## Watching, and why a reader can trust what it reads
+
+`semlith watch` is not a second indexer. Filesystem events only produce a set of
+candidate paths; the content hash, chunk eviction, batched embedding and the
+atomic per-shard write are the same code `index` runs. Nothing is re-embedded
+because an event fired — only because the bytes changed.
+
+Two decisions carry the design.
+
+**One writer, held honestly.** `Semlith` holds its resident shards in memory
+and `save()` rewrites each one it has dirtied, whole. Two writers would
+therefore not interleave, they would overwrite: whichever saved a shard last
+would erase the other's work in it. So `watch`
+takes the store lock for its whole life and a concurrent `index` is refused by
+name. A long-held lock is the visible cost of an invariant that was already
+there.
+
+**Freshness is a counter, not a timestamp.** A reader — an MCP server an agent
+holds open for a session — must notice that the index has been replaced. The
+store counts index rewrites in its `meta` table, bumped *after* the rename, and
+a search reloads when the count has moved. mtime cannot do this job: re-embedding
+one file can leave both the file size and a second-granularity mtime unchanged,
+and the reader would go on answering from vectors that no longer exist. Bumping
+after the rename is what makes the counter safe to trust — a reader that sees
+the new generation is guaranteed to find the new index behind it.
+
+Deciding what an event means is deliberately postponed to the moment the batch
+is indexed, and answered by the filesystem rather than by the event kind: a path
+that exists is re-embedded, a path that does not is evicted. Renames and
+write-temp-then-rename saves then need no special case, and the differences
+between how FSEvents, inotify and ReadDirectoryChangesW label things stop
+mattering.
+
+## Things that were considered and left out
+
+**A daemon reachable from anywhere but this machine.** `semlith start` (0.9.0)
+is a daemon, and it listens on a port — but only on `127.0.0.1`, and there is no
+flag to change that. The property being protected was never "no port"; it was
+"nothing about semlith reaches the network, and you can check it in a minute".
+A loopback socket, a per-run token required as a `SameSite=Strict` cookie, a
+`Host` header check, a `Content-Security-Policy` allowing only `'self'`, no CORS
+header anywhere, and every byte of the portal `include_bytes!`d into the binary
+keep that property exactly as true as it was — and `--airgap` makes it
+falsifiable rather than asserted. See [#41](https://github.com/semlith/semlith/issues/41).
+
+What the daemon buys is not latency. Query latency was already a few
+milliseconds warm, and model load was already amortized by `semlith mcp`. It
+buys the end of the one-writer conflict: before it, `semlith watch` held a
+store's lock for its life, so an agent's `semlith_index` against that store was
+refused for as long as the watcher ran, and a developer had to choose between a
+current store and a writable one. One process being the writer, with everything
+else a client of it, is the only fix that does not weaken the rule that keeps
+the vector index and SQLite agreeing.
+
+**Storing embeddings in SQLite too.** Tempting for a single-file store, but then
+every query either scans blobs out of SQLite or duplicates them in memory.
+Keeping vectors in a purpose-built index is what makes the query fast.
+
+**Per-file license headers.** Apache-2.0 recommends but does not require them,
+and the Rust ecosystem convention is the `license` field in `Cargo.toml` plus a
+`LICENSE` file. Both are present.
+
+
+## The code graph (0.12.0)
+
+### Where extraction happens, and why it is not a command
+
+`Semlith::index_set` reads a file, hashes it with blake3, skips it when the hash
+is unchanged, deletes the old rows and writes new chunks. Symbol extraction is
+spliced into that sequence, after the delete and while the file id and every new
+chunk id are still in hand. Nothing else calls it.
+
+That placement is the entire freshness claim. The pass that re-embeds a file is
+the pass that re-extracts it, so the manual `index`, the watcher's
+`index_changed` and the daemon's queued `index_within_held` all inherit the
+behaviour through one code path, and there is no build artifact that can drift
+from the corpus. A `semlith graph build` would reintroduce exactly the staleness
+this design removes; the absence of that command is a feature.
+
+### The shape of the tables
+
+```
+symbols(id, file_id -> files.id CASCADE, chunk_id, kind, name, qualified, start_line, end_line)
+edges(src -> symbols.id CASCADE, dst TEXT, kind, confidence, hint TEXT)
+```
+
+An edge belongs to the file its **source** is in, and dies with it. Its **target
+is a name**, resolved through `symbols(name)` when a query runs.
+
+The asymmetry is the important part. Symbol ids are reissued every time a file is
+re-extracted, so an id in `dst` would mean that re-indexing `b.rs` silently
+deleted every edge pointing into it from `a.rs` — the graph would rot on the one
+operation this release exists to make safe. Resolving by name instead makes an
+edge exactly as current as both of its ends, and has a second benefit: an edge to
+something the corpus does not contain, such as a standard-library call, is still
+recorded and simply resolves to nothing.
+
+### What the source said, and what the query decides (0.15.0)
+
+A name is not an address. Any store of any size holds four `get`s and seven
+`index`es, and resolving `dst` by bare name returned all of them, every one
+indistinguishable from the call the source actually makes. That is how `semlith
+path` came to answer yes to questions whose honest answer is no, in output that
+looked exactly like a right answer.
+
+The fix has two halves, and they live on opposite sides of the store.
+
+**`edges.hint` is what the source said.** The module of a scoped call
+(`store::edges_out` gives a hint of `store`), the last identifier of a method
+call's receiver (`self.index.search` gives `index`), the object of a qualified
+Python or TypeScript call. It is written at extraction time by the same pass that
+writes the edge, it is nullable, and it is NULL on every row an older binary
+wrote. The column is added by an `ALTER TABLE` in `store::add_columns` that runs
+on open, which is why the store format version does not move — see
+[compatibility](compatibility.md) for the whole of that argument.
+
+One extraction change came with it: Rust's supplementary query no longer emits
+the path segment of a scoped call as a second `calls` edge. `store::edges_out()`
+is a call to `edges_out`. It is not a call to `store`, and recording it as one
+invented a call the source does not make and handed the path finder a module to
+walk through.
+
+**The ranking is what the query decides.** `store::edges_out` takes an edge's
+candidates and prefers, in order: a definition in the same file as the call; one
+whose file the hint names; one in a file the calling file imports; and failing
+all three, the case where the corpus holds only one definition of the name. One
+survivor is `resolved`. Several are `ambiguous`, and every candidate comes back
+carrying the count, so a renderer can say "4 definitions" rather than print four
+calls.
+
+So confidence is four values, and only two of them are stored. `extracted` and
+`inferred` are written into `edges.confidence` at extraction time; `resolved` and
+`ambiguous` are computed at query time and never written down. That is the point
+of computing them: re-indexing a target file changes which definitions exist, and
+a stored ranking would be wrong the moment it did. A ranking that cannot go stale
+is worth more than one that is cheaper to read.
+
+An edge the syntax tree already settled stays `extracted` and is not re-ranked. A
+fact outranks a ranking — and a call whose hint the file imports is a fact for
+the same reason a call whose name it imports is: the file said where it came
+from. Reading `use crate::store;` followed by `store::edges_out()` as a guess is
+part of why Rust sat at 2% extracted while the source was explicit.
+
+The import list is read lazily, per source file, and only for a group the first
+two tiers did not settle — a traversal should not pay a query per hop for a
+tie-break it does not need.
+
+Callers are untouched. An inbound row was found through the edge's own `src` id,
+which is an id and not a name, so there is nothing to resolve and `edges_in`
+still reports the stored value.
+
+### Where the queries come from
+
+Some grammars ship a `TAGS_QUERY` written for `tree-sitter tags`. It is a good
+source of definitions and an uneven one for references: most capture no imports,
+and several — TypeScript, C, C++, C#, JavaScript, PHP, Swift — capture no calls
+either. So a language with a bundled query pairs it with a short supplement in
+`graph.rs`, and matches are read whole rather than capture by capture: a tags
+query names its tag with `@name` and spans it separately, so Java lands
+`@reference.call` on the argument list with the method name beside it.
+
+Most grammars ship no tags query at all. Those languages get one under
+`queries/<language>/tags.scm`, written against that grammar's own node names in
+the same capture vocabulary, and `include_str!`'d in. Nothing downstream can
+tell the two families apart, which is the point: the extractor reads
+`@definition.*`, `@name`, `@hint` and `@reference.*`, and does not know or care
+which file the pattern came from.
+
+A bundled query can also be wrong about a span rather than missing a capture. C
+and C++ tag the *declarator*, so a function's range stopped at its signature and
+every call inside the body was attributed to the file instead of to the function
+making it — "where is `helper` invoked" answered `main.c`. The supplement spans
+the whole `function_definition`, which leaves two definitions of one function at
+two widths, so `extract` drops a definition that another of the same name *and
+kind* contains. Same name and same kind is the condition: a Rust `mod x` holding
+an `fn x`, or a Java class holding its own constructor, keeps both.
+
+### What a symbol is in a language that has no functions
+
+Fourteen of the forty-six are markup, data or configuration. Their structure is
+the only thing a graph can be made of, and it is a good thing: a YAML, TOML or
+JSON key, a Markdown heading, a Terraform block label, a Dockerfile stage, a
+Makefile target, a GraphQL type, a protobuf message or RPC, a SQL table or view,
+a CSS selector, an HTML element with an id. Each carries a kind that says which.
+
+Their references are to files rather than to symbols — an `include`, an
+`import`, a `source`, a `FROM`, a stylesheet or script `src`, a Makefile
+prerequisite, the table a view selects from. That is the whole claim the family
+makes: a change to a base image or a shared module has a blast radius, and
+before 0.17.0 nothing in semlith could show it.
+
+The test for whether a key is worth extracting is whether a developer would ever
+ask about it. Extractable and useful are different, and only the second one
+belongs in the store.
+
+Svelte and Vue are the honest edge of this. Their grammars parse the template
+and hand the `<script>` block back as raw text, so a component's methods are not
+symbols and nothing here pretends otherwise; what they contribute is the
+template's own structure.
+
+Queries are compiled once per process and cached. Compiling is far dearer than
+running, and indexing runs these over every file walked.
+
+### Traversal, and the memory budget
+
+There is no graph library and no in-memory graph. `neighbours`, `shortest_path`
+and `impact` walk the indexed `edges(src)` and `edges(dst)` columns one hop at a
+time, bounded by a depth limit and `graph::MAX_NODES`. A name already seen is
+never expanded twice, so a cycle terminates.
+
+That is what keeps peak RSS flat as the corpus grows, which `tests/measure.rs`
+asserts. Reverse reachability from a widely-called utility is unbounded in
+principle — it reaches everything — and stops being useful long before it stops
+growing, so a truncated answer says it was truncated rather than pretending to be
+whole.
+
+`impact` and `path` follow `calls`, `imports` and `references` only. `defines`
+and `contains` are structural and true, and useless here: every symbol is one hop
+from the file that defines it, so including them would make the blast radius of
+anything at least its whole file, and make two unrelated functions in one file
+look like a two-hop dependency.
+
+#### A path walks definitions, not names (0.15.0)
+
+Refusing ambiguous edges is not enough on its own, and the store this repository
+built of itself at 0.14.0 is the proof. Every hop of
+`call_tool -> record_retrieval` resolved to exactly one definition, and the
+chain was still false: hop 3 arrived at `search` in `lib.rs` and hop 4 left from
+`search` in `routes.rs`. Each hop true. The chain not, because a name was used
+as if it were a place.
+
+That particular pair is connected now, and honestly so — 0.15.0 is the release
+that made `call_tool` record a retrieval, so there is a real three-hop chain
+through `mcp::record` and `ledger::graph`. The defect it illustrates is not.
+`search_in -> record_retrieval` is the case that still has no chain, and still
+correctly answers that it has none.
+
+So a node in the traversal is a definition — a name, a file and a line — and a
+chain may only leave from the definition it arrived at. `graph::Step` carries
+both endpoints for that reason, and the default finder refuses to cross a name
+with several definitions at all, answering "not connected within N hops by
+resolved edges". A chain is a better answer than saying nothing, and saying
+nothing is a better answer than a chain that is wrong — because a wrong chain is
+indistinguishable from a right one, and is read as a finding.
+
+`--all-edges` (`all_edges: true` over MCP) walks the old way and labels what it
+found: both endpoints on every hop with file and line, a seam drawn wherever a
+hop leaves a different definition from the one the hop before arrived at, a
+trailer whose four confidence counts add up to the hop count and which names the
+ambiguous names crossed, and one line — "A hypothesis, not a finding." `--strict`
+/ `strict: true` states the default out loud so a script need not rely on it, and
+wins when both are given.
+
+One renderer serves the CLI and the MCP reply, because two renderers is how the
+same answer comes to be described two different ways.
+
+`semlith neighbors` collapses for the same reason. Callees to a name with several
+surviving definitions become one row carrying the count: four rows saying `get`
+read as four calls, and one row saying `get · ambiguous · 4 definitions` is what
+the store actually knows. `--all` / `all: true` expands them, and also lists the
+targets the store holds no definition for — those were silently omitted before,
+and "semlith shows no callees" and "everything this calls is outside the index"
+are different facts.
+
+### The third ranked list
+
+`graph_expansion` seeds from the top few hits of the vector and keyword lists,
+maps them to the symbols defined in those chunks, takes one hop, and returns the
+chunks those neighbours live in. Those ids join the same reciprocal-rank fusion
+at the same weight.
+
+One hop, not a ranked walk. A personalized PageRank over the graph is a real idea
+and a change to justify with a recall measurement, not to ship untested inside a
+release that is already large.
+
+The expansion resolves neighbours through `store::symbols_by_names`, which takes
+the same `Filter` predicate as the other two halves. So `filter.rs`'s
+one-id-set invariant now holds across three lists rather than two: a chunk
+outside the filter cannot arrive through the graph by the back door.
+
+## The retrieval ledger (0.12.0)
+
+`retrievals` is append-only and hash-chained: each row stores the hash of the row
+before it, and its own hash covers its fields plus that link. `store::ledger_break`
+re-walks the chain and returns the first row that does not verify, so an edited or
+deleted row is detectable rather than merely unlikely. That is the difference
+between an audit record and a log file, and it costs one blake3 of a short string
+per recorded query.
+
+Whole-file tokens are measured from the files the hits actually came from, so the
+saving has a real denominator.
+
+### One writer, four surfaces (0.15.0)
+
+Until 0.15.0 the only thing that wrote a row was the portal's own search box. A
+retrieval made over stdio, over the daemon's `/mcp` endpoint or from the command
+line was recorded as nothing at all — which is to say the ledger measured the one
+user who was not the point, and the 2026-09-14 study found the table empty on
+real installations.
+
+The write therefore moved out of `routes.rs` into `src/ledger.rs`, and all four
+surfaces call it. One place decides what a row says, so a search from the CLI and
+the same search from an agent are counted the same way rather than nearly the
+same way. A row now carries the name the client gives itself in the MCP
+`initialize` handshake — `claude-code`, `cursor`, `cli`, `portal`, not a display
+name anybody chose to look good — and the session it belonged to.
+
+Graph tools record too, against the honest denominator: the bytes of every file a
+grep for that name would have made you read. And a retrieval that found nothing
+is recorded and credited nothing, because a ledger that remembers only its
+successes is a marketing document.
+
+`retrievals` gains four nullable columns — `session`, `tool`, `stale_hits`,
+`tokenizer` — added the same additive way as `edges.hint`, so the format version
+does not move here either.
+
+That leaves the chain hash, which covers the row's fields and cannot simply grow
+a field without invalidating every row written before it. **The chain is versioned
+by the row, not by the store.** `tool` is NULL on every row written before 0.15.0
+and set on every row written since, which is the discriminator that picks the
+formula: old rows verify under the old one, new rows under the new, and a store
+holding both kinds verifies end to end. A verify that reported every 0.14.0
+ledger as broken would be worse than no verify at all.
+
+### Counting tokens with the tokenizer that is already loaded (0.15.0)
+
+Both sides of a ratio are counted with the tokenizer the store's embedding model
+already loads — the same `tokenizer.json`, out of the same cache, under the same
+pinned digest — so the figure is a count rather than a rule of thumb. Four
+characters per token remains the fallback for a session that never loaded a model:
+a graph-only session never does, and neither does an airgapped machine with
+nothing cached.
+
+The row records which of the two counted it, in `tokenizer`. That is stored per
+row rather than inferred from the row's age because the thing that must never
+happen is summing a row counted one way with a row counted the other. A ratio is
+a comparison, and a comparison is only worth something when both sides were
+measured on the same instrument.
+
+`semlith ledger --verify` re-walks the chain and exits non-zero on a break, so a
+script can act on it. `semlith stats` gains one line: tokens not read, over how
+many of how many retrievals, with the coverage and whether the figure is
+`measured` or `modelled`. It does not deduplicate files across one session's
+retrievals, so it is an upper bound, and the line says which tier it is rather
+than implying a precision it does not have.
+
+### Recording is on, and what makes that all right
+
+0.12.0 through 0.14.0 stated a principle: a local tool that starts logging
+without being told is not meaningfully different from one that phones home. That
+principle is retired here, because what it bought was a ledger nobody switched
+on — which measured nobody, gave the savings figure no denominator, and left the
+audit trail with no rows in it.
+
+The principle that actually holds is narrower, and every clause of it is
+checkable:
+
+- **The rows never leave the store they were written into.** A row is written
+  beside the chunks it describes and nothing reads it off the machine. This is
+  the same claim `--airgap` makes about everything else, and it is provable the
+  same way: a packet capture.
+- **The daemon says on every start that it is recording, and names the flag that
+  stops it.** `ledger: recording (local only; --no-ledger to stop)`, or `ledger:
+  off for this session`. There is no state to discover, because the process
+  announces it every time it comes up.
+- **Erasing every row is one `DELETE`.** Not an export request, not a setting
+  that takes effect next time — one statement against a local SQLite file you
+  already own.
+
+`semlith start --ledger` is removed rather than kept as a flag that does nothing.
+A script that passes it fails at parse time and is corrected once, which is
+better than a flag that silently means its opposite. `--no-ledger` stops a
+session; `SEMLITH_LEDGER=0` stops a machine — a shared build box, a container,
+somebody else's laptop. The two exist separately because they are different
+promises.
+
+## Ranking (0.16.0)
+
+Three things happen between the fused list and the answer, and none of them
+involves a model.
+
+**The graph list is a walk, not a hop.** 0.12.0 added a third list: the symbols
+inside the top hits, one hop out, and the chunks those neighbours live in. That
+list was a set. Everything one hop from any seed was in it, weighted only by how
+well the *edge* was supported, so a symbol reached once from a weak hit sat
+alongside one reached from three strong ones. 0.16.0 makes it a ranking: a
+personalised PageRank, seeded with each hit's own fusion contribution, damped at
+0.85, three rounds.
+
+Personalised matters more than PageRank does. A plain PageRank over a code graph
+ranks the repository's most-called utility first for every query anyone ever
+asks; the 0.15 of the mass that does not flow is what keeps the walk anchored to
+the chunks this particular query actually found.
+
+The implementation deliberately does not build a graph. `graph::expand` takes a
+closure that answers "the dependency neighbours of this one name" and calls it at
+most once per name across all three rounds, caching what comes back. So the walk
+holds its frontier and never the corpus, `MAX_NODES` still bounds it, and the
+maths is unit-testable against a literal adjacency map with no store and no
+model — which is how the "three seeds at two hops beat one seed at one hop"
+property is asserted rather than asserted about.
+
+**A query is read before it is ranked.** FTS5 is exact about an identifier and
+vague about a sentence. The embedding is the other way round. Until 0.16.0 both
+halves were scored as though equally likely to know the answer, whichever kind of
+thing had been typed. `shape_of` decides, from the query text alone: one token of
+identifier characters is an identifier and weights the keyword list twice;
+anything else is a question and leaves the two level.
+
+The rule is crude, and that is the design rather than a compromise. A rule a user
+can predict beats an accurate one they cannot, because the shape is reported in
+every answer and `prefer` is there to overrule it. There is exactly one
+classifier, in `lib.rs`, and the portal draws its hint from the server's reply
+rather than re-deriving the rule in JavaScript — a second classifier would be a
+second opinion about an answer the first one had already ranked.
+
+**The rerank is two tiebreaks.** Graph distance from the seeds, and freshness,
+applied after the rows are fetched because both need things the fusion cannot
+know. The whole span is under 1.5x, asserted in a test, so a chunk the query
+matched badly cannot climb over one it matched well.
+
+It was specified as three. The third — a lift for a chunk sitting inside a named
+definition — was built, measured and removed inside the release. The harness is
+the reason: it costs two hits at k=3. The *mechanism* is the reason it will not
+come back. In a code repository nearly every code chunk sits inside a definition
+and nearly no prose chunk does, so the factor is a second and blunter
+`prefer: code` applied to every query — including the ones that asked for
+`prefer: docs`. The release adds a way for a caller to say which side of the
+corpus they want; a constant that says it for them, always, in one direction, is
+not a tiebreak but an argument with the user.
+
+No weight here is learned. Every input is something the store already holds. The
+per-repository learned profile belongs to a later release and is not smuggled in
+as a constant.
+
+## Reading one span (0.16.0)
+
+A locate answer costs about 150 bytes a hit and tells an agent where to look.
+Before 0.16.0 the only way to act on one was to read the whole file, which is the
+cost the locate format exists to avoid — so the cheap first stage was paid for
+twice.
+
+`semlith read` is the second stage. It takes what a locate answer prints — a
+store-relative path and a line range — or a symbol name, and returns exactly
+that. Three decisions in it are worth recording:
+
+It answers from the store's chunks and never from disk. Reading the file would
+answer for content semlith was never allowed to index, which matters because an
+agent holding the agent key can call this: naming `~/.ssh/id_rsa` as a span must
+not be a way around the deny-list that governs indexing.
+
+It stitches by line number rather than concatenating. Chunks overlap by two
+lines, so concatenation would repeat the seam and every line number after it
+would be wrong — for a tool whose entire output is line numbers, that is the only
+thing that matters.
+
+It resolves a span's path by suffix against what was actually indexed, because a
+locate answer prints a store-relative path while `files.path` is absolute. Two
+indexed files matching one suffix is an error naming both rather than a guess
+between them — the same refusal the graph's `ambiguous` value exists to make.

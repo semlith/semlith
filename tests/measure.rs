@@ -806,6 +806,14 @@ fn measure_what_sharding_costs_recall() {
     // swung between 0.842 and 1.000 on unchanged code because of it. With them
     // out, the same code scores 1.000 three times over.
     fs::remove_dir_all(corpus.join("tests/fixtures/graph")).ok();
+    // And the retrieval harness's pinned corpus, which 0.22.0 checked in under
+    // `tests/fixtures/retrieval/corpus`. It is a whole second copy of `src`,
+    // `tests` and `docs` — 146 files and 3.1 MB — carrying its own nested copy
+    // of the graph fixtures the line above exists to remove. Left in, this
+    // measurement would be taken over two copies of the repository, half of
+    // them frozen at 0.21.0, and the recall figure would drift with a fixture
+    // rather than with the code.
+    fs::remove_dir_all(corpus.join("tests/fixtures/retrieval/corpus")).ok();
     for name in ["README.md", "CHANGELOG.md", "Cargo.toml"] {
         fs::copy(repo.join(name), corpus.join(name)).unwrap();
     }

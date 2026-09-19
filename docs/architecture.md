@@ -75,7 +75,8 @@ walk paths ──▶ read bytes ──▶ hash ──▶ unchanged? ──▶ sk
               extract text  (by extension: PDF, documents, else UTF-8)
                    │
                    ▼
-              chunk_text()  (line-aligned, ≤800 chars, 2 lines overlap)
+              chunk_file()  (cut at definitions and headings; ≤800 chars,
+                              2 lines overlap where there is no cut)
                    │
                    ├──▶ INSERT INTO files/chunks  ──▶ chunk ids
                    │
@@ -149,6 +150,40 @@ document somebody else wrote.
 
 Chunks are line-aligned and capped at 800 characters, with the last two lines
 repeated into the next chunk.
+
+**Where the file has structure, that is where a chunk starts.** From 0.22.0 a
+source file is cut at the definitions tree-sitter already found for the graph,
+each one extended upwards over the doc comment and attributes attached to it,
+and a Markdown file is cut at its headings. A fixed window knows nothing about
+what it is cutting, and the measurement that opened this release showed what
+that costs: `MAX_NODES` and the six lines explaining what it bounds landed in
+different chunks, so the chunk holding the constant said nothing about what it
+was for and the chunk that said it did not hold the constant. Neither answered
+a question about `MAX_NODES`.
+
+The budget still ends a chunk, so a function longer than it is split the way
+anything else is. What a cut buys is that a definition never *begins* in the
+middle of a chunk. The two-line overlap is dropped where the next chunk starts
+on a cut: two repeated lines exist so a match straddling an arbitrary boundary
+keeps some context, and a definition's own first line is not an arbitrary
+boundary — repeating the tail of the previous definition across it is exactly
+the blurring the cut removes.
+
+A Markdown chunk also carries its heading path, as `Architecture > Chunking`,
+and carries it in `Chunk::context` rather than in its text. A section three
+levels down is written as though the reader has the two above it in mind, so
+the model is shown the path in front of the chunk; the store keeps the file's
+own bytes, because `Semlith::read` maps every line of a chunk to `start_line +
+offset` and one invented line at the front would shift every span the store can
+answer with.
+
+This is a store format. A store written by an earlier release holds fixed
+windows and answers perfectly well — a chunk is a chunk whichever rule cut it —
+but its files have not changed, so nothing would ever re-chunk it. The first
+index pass under 0.22.0 that sweeps a whole store re-chunks everything it walks
+and then writes the format row; a pass over one directory leaves the rest of
+the store on the old rule and does not claim otherwise. `semlith stats` says
+which rule a store is on.
 
 The cap is not arbitrary. Transformer cost grows faster than linearly in
 sequence length, so halving chunk size more than halves the per-chunk embedding

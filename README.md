@@ -449,8 +449,10 @@ of these drifts from its source:
 | one search across three stores | **1 query embed**, ~39 MB per extra store | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
 | `tools/list` | **3 995 bytes**, ~999 tokens, twelve tools | `cargo test --release --test retrieval -- --ignored` |
-| retrieval, over a 57-question harness | **hit@1 12, hit@3 18, hit@8 26** of 47, wrong-yes **0** | the same |
-| call-edge resolution | **67 %** settled, against a 50 % gate | the same |
+| retrieval, on 30 sealed questions of 107 | **hit@1 66 %, hit@3 76 %, hit@8 83 %**, wrong-yes **0** | the same |
+| the same binary, on the 77 it was tuned against | hit@1 71 %, hit@3 81 %, hit@8 87 % | the same |
+| 0.21.0, same corpus and instrument | sealed hit@1 60 %, hit@3 73 %, hit@8 83 % | the same |
+| call-edge resolution | **66 %** settled, against a 50 % gate | the same |
 | the macOS arm64 binary | **116 679 872 bytes** (111.3 MiB) | `ls -l target/release/semlith` |
 | the Linux glibc floor | **GLIBC_2.34** | `objdump -T semlith runtime/libonnxruntime.so` |
 

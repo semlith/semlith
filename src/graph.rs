@@ -172,6 +172,15 @@ fn supplement(lang: &str) -> &'static str {
     match lang {
         "rust" => {
             r#"
+            ; A `const` or a `static` is a definition an agent types by name,
+            ; and the bundled tags query tags neither. Without a symbol row the
+            ; definition lift in `search_preferring` cannot fire for one, which
+            ; is why `MAX_NODES`, `RRF_K` and `KEY_GRACE` were the identifier
+            ; questions 0.22.0 could not put in the top three while `edges_out`
+            ; and `DEPENDENCY_KINDS` — a function and an array the query does
+            ; tag — sat at rank 1.
+            (const_item name: (identifier) @name) @definition.constant
+            (static_item name: (identifier) @name) @definition.constant
             (use_declaration argument: (_) @reference.import)
             ; `use store::Semlith as Store;` — the alias is a symbol of its own
             ; and the path it stands for is what it reaches. Without the edge a
@@ -2136,6 +2145,32 @@ mod tests {
             extract(&PathBuf::from("notes.txt"), "the lock is acquired")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A `const` and a `static` are definitions. The bundled tags query tags
+    /// neither, so without the supplement the definition lift in
+    /// `search_preferring` cannot fire for one and `semlith symbol MAX_NODES`
+    /// answers nothing.
+    #[test]
+    fn rust_constants_and_statics_are_symbols() {
+        let e = run(
+            "limits.rs",
+            "/// How many nodes a traversal may visit.\n\
+             pub const MAX_NODES: usize = 4000;\n\
+             static REGISTRY: &str = \"registry.json\";\n\
+             fn helper() {}\n",
+        );
+        let named = |n: &str| e.symbols.iter().find(|s| s.name == n);
+        let max_nodes = named("MAX_NODES")
+            .unwrap_or_else(|| panic!("MAX_NODES is not a symbol: {:?}", e.symbols));
+        assert_eq!(max_nodes.kind, "constant", "{max_nodes:?}");
+        let registry = named("REGISTRY")
+            .unwrap_or_else(|| panic!("REGISTRY is not a symbol: {:?}", e.symbols));
+        assert_eq!(registry.kind, "constant", "{registry:?}");
+        assert!(
+            named("helper").is_some(),
+            "the supplement broke the tags query"
         );
     }
 
