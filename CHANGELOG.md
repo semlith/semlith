@@ -16,7 +16,7 @@ figures below are lower than the ones they replace and mean more.
 On thirty questions held out before any ranking work, scored once at the end:
 hit@1 **66 %**, hit@3 **76 %**, hit@8 **83 %**, against 0.21.0's 60 / 73 / 83 on
 the same corpus through the same harness. On the seventy-seven the work was
-tuned against: 71 / 81 / 87 against 48 / 56 / 65 — and the distance between those
+tuned against: 71 / 81 / 87 against 62 / 72 / 84 — and the distance between those
 two gains is what tuning against a visible set is worth.
 
 **The gate this release was specified against is not met.** It asked for hit@8
