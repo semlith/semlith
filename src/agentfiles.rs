@@ -1,0 +1,543 @@
+//! The three things `semlith setup` writes for an agent beyond its MCP
+//! registration: the Agent Skill, the steering hook, and the rule block.
+//!
+//! Registering the server tells a client that semlith exists. None of these
+//! does anything a registration does — they are what makes an agent *use* it.
+//! The skill teaches; the hook catches the moment it forgets; the rule block is
+//! for clients that read prose and have no skill directory.
+//!
+//! Every path here comes from an annotated fence in `docs/clients.md`, except
+//! the cross-client skill directory below, which belongs to no client. Nothing
+//! in this file is a path retyped into Rust.
+//!
+//! # What this writes, and what it leaves alone
+//!
+//! Every file semlith does not own is backed up beside itself before its first
+//! write, and every write is reversible:
+//!
+//! * The skill is a link into a canonical copy under the store home. Removing
+//!   the canonical directory removes all of them.
+//! * The hook is one entry in a client's `PreToolUse` array. It is found again
+//!   by the command it runs, so `setup --no-hooks` takes out exactly the entry
+//!   semlith put there and leaves every other hook in place.
+//! * The rule block sits between two markers. A second run replaces what is
+//!   between them; nothing outside them is read or written.
+
+use crate::clientfile;
+use crate::clients::{self, Client, Stanza};
+use crate::home;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+/// The skill directory several clients read that belongs to none of them.
+///
+/// In code rather than in a fence because `docs/clients.md` is a file of client
+/// facts, and this is a cross-client convention: it is not Claude Code's
+/// directory or Qwen's, it is the one anybody's agent may look in.
+const SHARED_SKILLS: &str = ".agents/skills";
+
+/// The skill's name, which is its directory's name everywhere it is linked.
+pub const SKILL_NAME: &str = "semlith";
+
+/// What surrounds the rule block in a file semlith does not own.
+const RULES_BEGIN: &str = "<!-- >>> semlith >>> -->";
+const RULES_END: &str = "<!-- <<< semlith <<< -->";
+
+/// Whether a thing semlith writes is there, absent, or there but out of date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum State {
+    /// There, and saying what this version says.
+    Present,
+    /// Not there at all.
+    Absent,
+    /// There, but written by a different binary or an older block.
+    Stale,
+    /// semlith knows of no file to write for this client, so a person pastes
+    /// the block instead.
+    Paste,
+}
+
+/// The canonical copy every link points at.
+pub fn canonical_skill_dir() -> Result<PathBuf> {
+    Ok(home::home_or_error()?.join("skills").join(SKILL_NAME))
+}
+
+/// Every user-level skill directory to link into: the cross-client one, then
+/// each one a client documents.
+pub fn skill_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(home) = home::user_home() {
+        out.push(home.join(SHARED_SKILLS));
+    }
+    for client in clients::clients() {
+        for stanza in client.skill_dirs() {
+            if let Some(path) = clientfile::resolve(stanza) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Write the canonical skill and link it into every documented directory.
+///
+/// Idempotent, and it says so: the returned list holds only the directories
+/// this run actually changed, so a second run returns nothing and `semlith
+/// setup` reports it as already done rather than as work.
+pub fn install_skill() -> Result<Vec<PathBuf>> {
+    let canonical = canonical_skill_dir()?;
+    home::secure_dir(&canonical).with_context(|| format!("creating {}", canonical.display()))?;
+    let file = canonical.join("SKILL.md");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(clients::SKILL) {
+        std::fs::write(&file, clients::SKILL)
+            .with_context(|| format!("writing {}", file.display()))?;
+    }
+
+    let mut linked = Vec::new();
+    for dir in skill_dirs() {
+        let at = dir.join(SKILL_NAME);
+        if link_state(&at, &canonical) == State::Present {
+            continue;
+        }
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        // A link that points elsewhere is replaced; a real directory somebody
+        // else put there is not, because it is not semlith's to remove.
+        if at.is_symlink() {
+            let _ = std::fs::remove_file(&at);
+        }
+        if link(&canonical, &at).is_ok() {
+            linked.push(at);
+        }
+    }
+    Ok(linked)
+}
+
+/// Remove the canonical skill and every link into it.
+pub fn remove_skill() -> Result<()> {
+    let canonical = canonical_skill_dir()?;
+    for dir in skill_dirs() {
+        let at = dir.join(SKILL_NAME);
+        if at.is_symlink() {
+            let _ = std::fs::remove_file(&at);
+        } else if at.is_dir() && at != canonical {
+            // A copy, which is what Windows gets instead of a link.
+            let _ = std::fs::remove_dir_all(&at);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&canonical);
+    Ok(())
+}
+
+/// Where the skill is, per directory.
+pub fn skill_state() -> Vec<(PathBuf, State)> {
+    let canonical = match canonical_skill_dir() {
+        Ok(dir) => dir,
+        Err(_) => return Vec::new(),
+    };
+    skill_dirs()
+        .into_iter()
+        .map(|dir| {
+            let at = dir.join(SKILL_NAME);
+            (at.clone(), link_state(&at, &canonical))
+        })
+        .collect()
+}
+
+/// Whether `at` is this machine's link to `canonical`.
+fn link_state(at: &Path, canonical: &Path) -> State {
+    if at.is_symlink() {
+        return match std::fs::read_link(at) {
+            Ok(target) if target == canonical => State::Present,
+            _ => State::Stale,
+        };
+    }
+    if !at.exists() {
+        return State::Absent;
+    }
+    // A copy: Windows, where a symlink needs a privilege an installer should
+    // not ask for. It is current when its text is.
+    match std::fs::read_to_string(at.join("SKILL.md")) {
+        Ok(text) if text == clients::SKILL => State::Present,
+        _ => State::Stale,
+    }
+}
+
+/// A symlink where the platform has them, a copy where it does not.
+fn link(canonical: &Path, at: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(canonical, at)
+            .with_context(|| format!("linking {} to {}", at.display(), canonical.display()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        // A directory symlink on Windows needs SeCreateSymbolicLinkPrivilege,
+        // which a user running an installer usually does not have. A copy is
+        // the honest fallback: `doctor` reports it stale when the text moves on
+        // and `setup` rewrites it.
+        std::fs::create_dir_all(at)?;
+        std::fs::copy(canonical.join("SKILL.md"), at.join("SKILL.md"))
+            .with_context(|| format!("copying the skill to {}", at.display()))?;
+        Ok(())
+    }
+}
+
+/// Every client that documents a `PreToolUse` hook, with the file it goes in.
+pub fn hook_clients() -> Vec<(&'static Client, &'static Stanza, PathBuf)> {
+    clients::clients()
+        .iter()
+        .filter_map(|client| {
+            let stanza = client.hook_stanza()?;
+            let path = clientfile::resolve(stanza)?;
+            Some((client, stanza, path))
+        })
+        .collect()
+}
+
+/// Merge the hook into every client that documents one.
+///
+/// `strict` writes `semlith hook --strict`, which is a different command and so
+/// a different entry: a machine switching between them has one hook, not two.
+pub fn install_hooks(strict: bool) -> Result<Vec<PathBuf>> {
+    let mut written = Vec::new();
+    for (_, stanza, path) in hook_clients() {
+        let wanted = entry(stanza, strict)?;
+        let existing = std::fs::read_to_string(&path).ok();
+        let next = with_entry(existing.as_deref().unwrap_or(""), &wanted)?;
+        if existing.as_deref() == Some(next.as_str()) {
+            continue;
+        }
+        write_json(&path, &next, existing.is_some())?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// Take semlith's hook back out, leaving every other hook in the file.
+pub fn remove_hooks() -> Result<Vec<PathBuf>> {
+    let mut changed = Vec::new();
+    for (_, _, path) in hook_clients() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let next = without_entry(&text)?;
+        if next == text {
+            continue;
+        }
+        write_json(&path, &next, true)?;
+        changed.push(path);
+    }
+    Ok(changed)
+}
+
+/// Where the hook is, per client.
+pub fn hook_state(strict: bool) -> Vec<(String, PathBuf, State)> {
+    hook_clients()
+        .into_iter()
+        .map(|(client, stanza, path)| {
+            let state = match (entry(stanza, strict), std::fs::read_to_string(&path)) {
+                (Ok(wanted), Ok(text)) => match with_entry(&text, &wanted) {
+                    Ok(next) if next == text => State::Present,
+                    // Present under a different command — the other strictness,
+                    // or a path from a binary that has since moved.
+                    _ if names_our_hook(&text) => State::Stale,
+                    _ => State::Absent,
+                },
+                _ => State::Absent,
+            };
+            (client.name.clone(), path, state)
+        })
+        .collect()
+}
+
+/// The one `PreToolUse` entry semlith owns, from the documented fence.
+fn entry(stanza: &Stanza, strict: bool) -> Result<serde_json::Value> {
+    let mut block: serde_json::Value = serde_json::from_str(&stanza.text)
+        .context("the documented hook stanza is not valid JSON")?;
+    if strict {
+        // `--strict` on the command the fence already names, rather than a
+        // second command assembled here.
+        if let Some(hooks) = block
+            .pointer_mut("/hooks/PreToolUse/0/hooks/0/command")
+            .and_then(|v| v.as_str().map(str::to_string))
+        {
+            block["hooks"]["PreToolUse"][0]["hooks"][0]["command"] =
+                serde_json::Value::String(format!("{hooks} --strict"));
+        }
+    }
+    Ok(block)
+}
+
+/// Whether a settings file already names a semlith hook, whatever its flags.
+fn names_our_hook(text: &str) -> bool {
+    text.contains("semlith") && text.contains("hook")
+}
+
+/// `text` with semlith's entry present exactly once, and every other entry
+/// untouched.
+///
+/// The array is the part that matters. A plain recursive merge would replace
+/// `hooks.PreToolUse` wholesale and take somebody's other hooks with it, which
+/// is the kind of thing a person finds out about a week later.
+fn with_entry(text: &str, wanted: &serde_json::Value) -> Result<String> {
+    let mut base: serde_json::Value = if text.trim().is_empty() {
+        serde_json::Value::Object(Default::default())
+    } else {
+        serde_json::from_str(text).context("the file is not valid JSON")?
+    };
+    let ours = wanted["hooks"]["PreToolUse"][0].clone();
+
+    let list = base
+        .as_object_mut()
+        .context("the file is not a JSON object")?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .context("`hooks` is not an object")?
+        .entry("PreToolUse")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .context("`hooks.PreToolUse` is not an array")?;
+
+    list.retain(|item| !is_ours(item));
+    list.push(ours);
+    Ok(serialize(&base))
+}
+
+/// `text` with semlith's entry taken out and nothing else changed.
+fn without_entry(text: &str) -> Result<String> {
+    let mut base: serde_json::Value =
+        serde_json::from_str(text).context("the file is not valid JSON")?;
+    if let Some(list) = base
+        .pointer_mut("/hooks/PreToolUse")
+        .and_then(|v| v.as_array_mut())
+    {
+        list.retain(|item| !is_ours(item));
+        let empty = list.is_empty();
+        // An empty array semlith created is noise in somebody's settings file.
+        if empty && let Some(hooks) = base.pointer_mut("/hooks").and_then(|v| v.as_object_mut()) {
+            hooks.remove("PreToolUse");
+            if hooks.is_empty() {
+                base.as_object_mut().map(|o| o.remove("hooks"));
+            }
+        }
+    }
+    Ok(serialize(&base))
+}
+
+/// Whether one `PreToolUse` entry is the one semlith wrote.
+///
+/// By the command it runs, not by its position: a user may have reordered the
+/// array, and the entry above semlith's is not semlith's to remove.
+fn is_ours(item: &serde_json::Value) -> bool {
+    item["hooks"]
+        .as_array()
+        .map(|inner| {
+            inner.iter().any(|h| {
+                h["command"]
+                    .as_str()
+                    .map(|c| c.contains("semlith") && c.contains(" hook"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Every client whose rules file semlith knows, and every one it does not.
+///
+/// The second list is what `doctor` prints for a person to paste. A rules file
+/// is prose somebody owns, and guessing its path would write the block into a
+/// place nothing reads.
+pub fn rules_state() -> Vec<(String, Option<PathBuf>, State)> {
+    clients::clients()
+        .iter()
+        .filter_map(|client| {
+            let stanza = client.rules_file()?;
+            let path = clientfile::resolve(stanza)?;
+            let state = match std::fs::read_to_string(&path) {
+                Ok(text) if between(&text) == Some(block()) => State::Present,
+                Ok(text) if text.contains(RULES_BEGIN) => State::Stale,
+                _ => State::Absent,
+            };
+            Some((client.name.clone(), Some(path), state))
+        })
+        .collect()
+}
+
+/// The rule block as it is written into a file, markers and all.
+fn block() -> String {
+    clients::RULES.trim_end().to_string()
+}
+
+/// What sits between the markers, if both are there.
+fn between(text: &str) -> Option<String> {
+    let start = text.find(RULES_BEGIN)? + RULES_BEGIN.len();
+    let end = text[start..].find(RULES_END)? + start;
+    Some(text[start..end].trim().to_string())
+}
+
+/// Write the rule block into every rules file semlith knows a path for.
+///
+/// Only under `--register-all`: a rules file is prose a person wrote, and
+/// appending to it unasked is a different thing from merging a server into a
+/// server list.
+pub fn install_rules() -> Result<Vec<PathBuf>> {
+    let mut written = Vec::new();
+    for (_, path, state) in rules_state() {
+        let Some(path) = path else { continue };
+        if state == State::Present {
+            continue;
+        }
+        let existing = std::fs::read_to_string(&path).ok();
+        let next = with_block(existing.as_deref().unwrap_or(""));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        if existing.is_some() {
+            clientfile::back_up(&path)?;
+        }
+        std::fs::write(&path, &next).with_context(|| format!("writing {}", path.display()))?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// `text` with the block between the markers, appended if it was not there.
+fn with_block(text: &str) -> String {
+    let marked = format!("{RULES_BEGIN}\n{}\n{RULES_END}\n", block());
+    let Some(start) = text.find(RULES_BEGIN) else {
+        let separator = if text.trim().is_empty() { "" } else { "\n" };
+        return format!("{}{separator}{marked}", text.trim_end());
+    };
+    let Some(end) = text[start..]
+        .find(RULES_END)
+        .map(|i| start + i + RULES_END.len())
+    else {
+        return format!("{}\n{marked}", text.trim_end());
+    };
+    format!("{}{marked}{}", &text[..start], &text[end..].trim_start())
+}
+
+/// Pretty JSON with a trailing newline, the way every other file semlith writes
+/// is shaped.
+fn serialize(value: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_default() + "\n"
+}
+
+fn write_json(path: &Path, next: &str, existed: bool) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    if existed {
+        clientfile::back_up(path)?;
+    }
+    // Through a neighbouring temporary file: a half-written settings file is a
+    // client that will not start.
+    let temp = path.with_extension("json.semlith-tmp");
+    std::fs::write(&temp, next).with_context(|| format!("writing {}", temp.display()))?;
+    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ours() -> serde_json::Value {
+        json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Read|Grep",
+                "hooks": [{ "type": "command", "command": "/opt/semlith hook" }]
+            }]}
+        })
+    }
+
+    /// The property the whole file exists for: somebody else's hooks survive.
+    #[test]
+    fn writing_the_hook_keeps_every_other_hook_in_the_file() {
+        let theirs = json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "/usr/local/bin/audit" }]
+            }]},
+            "model": "something they chose"
+        })
+        .to_string();
+
+        let next = with_entry(&theirs, &ours()).unwrap();
+        assert!(next.contains("/usr/local/bin/audit"), "{next}");
+        assert!(next.contains("/opt/semlith hook"), "{next}");
+        assert!(next.contains("something they chose"), "{next}");
+    }
+
+    /// Twice is once. A hook that accumulates is a hook that runs four times by
+    /// Friday.
+    #[test]
+    fn writing_the_hook_twice_leaves_one_entry() {
+        let once = with_entry("{}", &ours()).unwrap();
+        let twice = with_entry(&once, &ours()).unwrap();
+        assert_eq!(once, twice, "a second write changed the file");
+        assert_eq!(twice.matches("/opt/semlith hook").count(), 1, "{twice}");
+    }
+
+    /// Removal is exact: semlith's entry goes and the rest of the file comes
+    /// back byte for byte as it was.
+    #[test]
+    fn removing_the_hook_restores_what_was_there_before() {
+        let theirs = serialize(&json!({
+            "hooks": { "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{ "type": "command", "command": "/usr/local/bin/audit" }]
+            }]}
+        }));
+        let with = with_entry(&theirs, &ours()).unwrap();
+        assert_eq!(
+            without_entry(&with).unwrap(),
+            theirs,
+            "removing semlith's hook did not restore the file"
+        );
+    }
+
+    /// A file semlith created entirely is left without the empty scaffolding it
+    /// put there.
+    #[test]
+    fn removing_the_only_hook_leaves_no_empty_array_behind() {
+        let with = with_entry("{}", &ours()).unwrap();
+        let without = without_entry(&with).unwrap();
+        assert!(!without.contains("PreToolUse"), "{without}");
+        assert!(!without.contains("hooks"), "{without}");
+    }
+
+    /// The rule block replaces itself rather than stacking up.
+    #[test]
+    fn the_rule_block_is_written_once_and_replaced_in_place() {
+        let theirs = "# My rules\n\nAlways use tabs.\n";
+        let once = with_block(theirs);
+        assert!(once.contains("Always use tabs."), "{once}");
+        assert_eq!(once.matches(RULES_BEGIN).count(), 1, "{once}");
+
+        let twice = with_block(&once);
+        assert_eq!(twice, once, "a second write changed the file");
+        assert_eq!(twice.matches(RULES_BEGIN).count(), 1, "{twice}");
+        assert!(twice.contains("Always use tabs."), "{twice}");
+    }
+
+    /// Prose after the block is prose the person wrote, and it stays.
+    #[test]
+    fn the_rule_block_keeps_what_follows_it() {
+        let text = format!("# Mine\n\n{RULES_BEGIN}\nold text\n{RULES_END}\n\nAnd mine again.\n");
+        let next = with_block(&text);
+        assert!(next.contains("And mine again."), "{next}");
+        assert!(!next.contains("old text"), "{next}");
+        assert!(next.starts_with("# Mine"), "{next}");
+    }
+}

@@ -5804,8 +5804,20 @@ async function doctorView() {
     return { text: "installed, not registered", kind: "bad" };
   };
 
+  /* What this client has beyond its registration, in the words the terminal
+   * uses. A client that documents none of the three says nothing rather than
+   * three columns of "paste needed" on twenty rows that never asked for one. */
+  const steering = (r) => {
+    const parts = [];
+    if (r.skill && r.skill !== "paste") parts.push(`skill ${r.skill === "present" ? "linked" : r.skill}`);
+    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}`);
+    if (r.rules && r.rules !== "paste") parts.push(`rule ${r.rules}`);
+    return parts;
+  };
+
   const clients = dataTable({
-    caption: "Every documented client, whether it is on this machine, whether it is registered, and what would fix it.",
+    caption:
+      "Every documented client, whether it is on this machine, whether it is registered, whether the skill and the steering hook are installed, and what would fix it.",
     rows: data.clients || [],
     perPage: 25,
     columns: [
@@ -5818,6 +5830,27 @@ async function doctorView() {
         render: (r) => {
           const s = state(r);
           return pill(s.text, s.kind);
+        },
+      },
+      {
+        /* Registration says the client can reach semlith. Steering says its
+         * agent will actually call it, which is a different question and the
+         * one 0.24.0 exists to answer. Same source as the terminal's own line:
+         * `semlith doctor` computes both and this renders what it computed. */
+        key: "steering",
+        label: "Skill & hook",
+        sortable: true,
+        value: (r) => steering(r).join(", "),
+        render: (r) => {
+          const parts = steering(r);
+          if (!parts.length) return el("span", { class: "sub", text: "—" });
+          return el(
+            "span",
+            { class: "pills" },
+            ...parts.map((part) =>
+              pill(part, part.endsWith("present") || part.endsWith("linked") ? "good" : "warn"),
+            ),
+          );
         },
       },
       {

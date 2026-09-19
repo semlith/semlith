@@ -107,6 +107,34 @@ claude mcp remove --scope user semlith
 claude mcp add --scope user semlith -- "${SEMLITH_BIN}" mcp
 ```
 
+`semlith setup` also writes a `PreToolUse` hook into `~/.claude/settings.json`,
+which fires before a whole-file read or a repository-wide grep and adds one line
+naming the semlith call that answers the same question. It never blocks; the
+entry sits alongside whatever other `PreToolUse` hooks are already there and
+`semlith setup --no-hooks` removes it again, leaving the rest of the file as it
+was. `--strict` writes `semlith hook --strict`, which refuses the first such read
+of each session and then reverts to the line.
+
+```json hook path=~/.claude/settings.json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep",
+        "hooks": [{ "type": "command", "command": "${SEMLITH_BIN} hook" }]
+      }
+    ]
+  }
+}
+```
+
+And it links the semlith Agent Skill into the directory Claude Code reads user
+skills from:
+
+```text skills path=~/.claude/skills
+semlith
+```
+
 **OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
 and the desktop app. TOML, and the table is `mcp_servers` with an underscore. A
 table with a `url` in it is a streamable-HTTP server; the header goes in an
@@ -164,6 +192,15 @@ then the user-level file below is the thing that covers every project, and
     }
   }
 }
+```
+
+OpenCode reads a user-level `AGENTS.md`, and `semlith setup --register-all`
+appends the rule block to it between markers of its own, backing the file up
+beside itself first. Nothing outside those markers is touched, and a second run
+replaces what is between them rather than appending again.
+
+```md rules path=~/.config/opencode/AGENTS.md
+${SEMLITH_RULES}
 ```
 
 Or against a daemon on another machine, over HTTP:
@@ -321,6 +358,12 @@ writes `.qwen/settings.json`
     }
   }
 }
+```
+
+The skill directory is the same shape as the settings file's:
+
+```text skills path=~/.qwen/skills
+semlith
 ```
 
 Or against a daemon on another machine, over HTTP:
@@ -711,6 +754,15 @@ restart, not on a window reload.
 }
 ```
 
+Windsurf keeps global rules in a file of their own, and
+`semlith setup --register-all` appends the rule block to it between markers,
+backing it up beside itself first. Windsurf documents no skill directory, so
+there is nothing to link there yet.
+
+```md rules path=~/.codeium/windsurf/memories/global_rules.md
+${SEMLITH_RULES}
+```
+
 Or against a daemon on another machine, over HTTP:
 
 ```json
@@ -941,6 +993,10 @@ kiro-cli mcp remove --name semlith --scope global
 
 ```sh register
 kiro-cli mcp add --name semlith --command "${SEMLITH_BIN}" --args "mcp" --scope global
+```
+
+```text skills path=~/.kiro/skills
+semlith
 ```
 
 #### Desktop apps

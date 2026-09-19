@@ -44,6 +44,20 @@ const KEY_PLACEHOLDER: &str = "${SEMLITH_AGENT_KEY}";
 /// for exactly as long as nobody edits the other.
 const BIN_PLACEHOLDER: &str = "${SEMLITH_BIN}";
 
+/// The placeholder a `rules` fence carries in place of the rule block itself.
+///
+/// The block lives in `docs/skill/RULES.md`, which is what `semlith setup`
+/// writes and what `doctor` prints for a client whose rules file semlith does
+/// not write. Repeating it per client in `docs/clients.md` would be six copies
+/// to keep in step.
+const RULES_PLACEHOLDER: &str = "${SEMLITH_RULES}";
+
+/// The always-on rule block, embedded once.
+pub const RULES: &str = include_str!("../docs/skill/RULES.md");
+
+/// The Agent Skill `semlith setup` installs, embedded once.
+pub const SKILL: &str = include_str!("../docs/skill/SKILL.md");
+
 /// One pasteable block.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Stanza {
@@ -72,6 +86,18 @@ pub struct Stanza {
     /// From `os=` in the info string, when a client's file is somewhere else on
     /// another platform. `None` means the path is the same everywhere.
     pub os: Option<String>,
+    /// From a bare `hook` on a fence: the `PreToolUse` block `semlith setup`
+    /// merges into this client's settings, and `semlith setup --no-hooks`
+    /// removes again. Its `path=` is the settings file.
+    pub hook: bool,
+    /// From a bare `skills` on a fence: its `path=` is a user-level skill
+    /// directory this client reads, which `semlith setup` links the canonical
+    /// skill into.
+    pub skills: bool,
+    /// From a bare `rules` on a fence: its `path=` is a user-level rules file,
+    /// written only under `--register-all` because it is prose a person owns
+    /// rather than a server list semlith put there.
+    pub rules: bool,
     /// From `scope=` on a `register` fence: what that command actually
     /// registers.
     ///
@@ -105,6 +131,7 @@ pub enum Scope {
 fn info(line: &str) -> Info {
     let mut format = String::new();
     let (mut register, mut unregister) = (false, false);
+    let (mut hook, mut skills, mut rules) = (false, false, false);
     let (mut path, mut os, mut scope) = (None, None, Scope::Global);
     // Hand-split rather than `split_whitespace`, because one path has a space
     // in it — Claude Desktop's on macOS — and a quoted value has to survive.
@@ -116,6 +143,9 @@ fn info(line: &str) -> Info {
             Some(("scope", _)) => scope = Scope::Global,
             _ if word == "register" => register = true,
             _ if word == "unregister" => unregister = true,
+            _ if word == "hook" => hook = true,
+            _ if word == "skills" => skills = true,
+            _ if word == "rules" => rules = true,
             _ if format.is_empty() => format = word.to_string(),
             _ => {}
         }
@@ -124,6 +154,9 @@ fn info(line: &str) -> Info {
         format,
         register,
         unregister,
+        hook,
+        skills,
+        rules,
         path,
         os,
         scope,
@@ -135,6 +168,9 @@ struct Info {
     format: String,
     register: bool,
     unregister: bool,
+    hook: bool,
+    skills: bool,
+    rules: bool,
     path: Option<String>,
     os: Option<String>,
     scope: Scope,
@@ -235,7 +271,36 @@ impl Client {
     /// for a client with no global registration CLI: a client semlith can ask
     /// to register itself is not a file semlith writes.
     pub fn config_files(&self) -> impl Iterator<Item = &Stanza> {
-        self.stanzas.iter().filter(|stanza| stanza.path.is_some())
+        self.stanzas
+            .iter()
+            .filter(|stanza| stanza.path.is_some() && !stanza.hook && !stanza.rules)
+    }
+
+    /// The `PreToolUse` block for this client, if it documents one.
+    ///
+    /// One per client: a second would be two hooks doing the same job, and the
+    /// removal path would have to guess which one semlith put there.
+    pub fn hook_stanza(&self) -> Option<&Stanza> {
+        self.stanzas
+            .iter()
+            .find(|stanza| stanza.hook && stanza.path.is_some())
+    }
+
+    /// The user-level skill directories this client reads.
+    pub fn skill_dirs(&self) -> impl Iterator<Item = &Stanza> {
+        self.stanzas
+            .iter()
+            .filter(|stanza| stanza.skills && stanza.path.is_some())
+    }
+
+    /// The user-level rules file this client reads, if semlith knows one.
+    ///
+    /// A client without one is not a client semlith writes prose into on a
+    /// guess: `doctor` prints the block for a person to paste instead.
+    pub fn rules_file(&self) -> Option<&Stanza> {
+        self.stanzas
+            .iter()
+            .find(|stanza| stanza.rules && stanza.path.is_some())
     }
 
     /// Whether `semlith setup --register-all` would write this client's file.
@@ -357,9 +422,14 @@ fn resolve_binary_path() -> String {
 fn stanza(info: Info, text: &str) -> Stanza {
     Stanza {
         format: info.format,
-        text: text.replace(BIN_PLACEHOLDER, binary_path()),
+        text: text
+            .replace(BIN_PLACEHOLDER, binary_path())
+            .replace(RULES_PLACEHOLDER, RULES.trim_end()),
         register: info.register,
         unregister: info.unregister,
+        hook: info.hook,
+        skills: info.skills,
+        rules: info.rules,
         path: info.path,
         os: info.os,
         scope: info.scope,
@@ -695,7 +765,9 @@ mod tests {
             first
                 .stanzas
                 .iter()
-                .all(|s| ["json", "sh"].contains(&s.format.as_str()))
+                .all(|s| ["json", "sh", "text"].contains(&s.format.as_str())),
+            "an unexpected fence language on Claude Code: {:?}",
+            first.stanzas.iter().map(|s| &s.format).collect::<Vec<_>>()
         );
         assert_eq!(
             first.stanzas.iter().filter(|s| s.register).count(),

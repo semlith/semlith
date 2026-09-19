@@ -130,6 +130,12 @@ fn no_stanza_carries_a_store_path() {
         if language.split_whitespace().any(|word| word == "unregister") {
             continue;
         }
+        // A skills or rules fence is a destination, not a command line, and the
+        // hook fence launches `semlith hook` rather than `semlith mcp` -- which
+        // is what the rest of this test is about.
+        if is_listing(&language) || language.split_whitespace().any(|word| word == "hook") {
+            continue;
+        }
         if !names_semlith(&body) {
             continue;
         }
@@ -470,7 +476,18 @@ fn names_semlith(body: &str) -> bool {
 fn launches(language: &str, body: &str) -> bool {
     !is_http(body)
         && !language.split_whitespace().any(|word| word == "unregister")
+        && !is_listing(language)
         && names_semlith(body)
+}
+
+/// A fence that names something other than a server to launch: a skill
+/// directory to link into, or a rules file to append prose to. Both name
+/// semlith, neither is a command line, and the checks below are about command
+/// lines.
+fn is_listing(language: &str) -> bool {
+    language
+        .split_whitespace()
+        .any(|word| word == "skills" || word == "rules")
 }
 
 /// The binary a launching block names: the last token that is the binary
@@ -576,4 +593,75 @@ fn real_model_cache() -> PathBuf {
         .join(".cache")
         .join("semlith")
         .join("models")
+}
+
+// ------------------------------------------------------------------- the skill
+
+/// The Agent Skill has to be one, not a Markdown file that looks like one.
+///
+/// Asserted against the agentskills.io format rather than read and judged:
+/// YAML frontmatter first, `name` matching the directory the skill installs
+/// into, and a `description` an agent can decide from without opening the body.
+#[test]
+fn the_agent_skill_validates_against_the_format() {
+    let text = semlith::clients::SKILL;
+    let body = text
+        .strip_prefix("---\n")
+        .expect("a skill opens with YAML frontmatter");
+    let (front, rest) = body
+        .split_once("\n---\n")
+        .expect("the frontmatter is closed by its own fence");
+
+    let field = |key: &str| {
+        front
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}: ")))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("the skill has no `{key}` in its frontmatter:\n{front}"))
+    };
+
+    assert_eq!(
+        field("name"),
+        semlith::agentfiles::SKILL_NAME,
+        "the skill's name and the directory it installs into must be the same word"
+    );
+
+    let description = field("description");
+    assert!(
+        description.len() >= 40,
+        "a description an agent cannot decide from is a skill that never triggers: {description:?}"
+    );
+    assert!(
+        description.len() <= 1024,
+        "the description is {} characters; the format allows 1024",
+        description.len()
+    );
+    assert!(
+        description.contains("semlith_brief"),
+        "the description must name the call the skill exists to promote: {description:?}"
+    );
+
+    assert!(
+        rest.trim_start().starts_with("# "),
+        "the body must open with a heading:\n{}",
+        rest.lines().take(3).collect::<Vec<_>>().join("\n")
+    );
+    // The body is instructions an agent reads on every trigger, so its size is
+    // a running cost rather than a one-off.
+    assert!(
+        rest.lines().count() <= 120,
+        "the skill body is {} lines; the ceiling is 120",
+        rest.lines().count()
+    );
+
+    // And the always-on block is a block, not a second skill.
+    assert!(
+        !semlith::clients::RULES.starts_with("---"),
+        "the rule block must carry no frontmatter: it is pasted into prose files"
+    );
+    assert!(
+        semlith::clients::RULES.lines().count() <= 12,
+        "the rule block is {} lines; the ceiling is 12",
+        semlith::clients::RULES.lines().count()
+    );
 }

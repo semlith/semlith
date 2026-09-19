@@ -153,6 +153,16 @@ impl Session {
 /// `labels` is the store list `tools/list` names, read once when the fleet was
 /// opened. It cannot change for the life of this process, and reading it per
 /// request is the one thing that would put the handshake back behind the lock.
+/// What this server is for, in the one place both handshakes read it from.
+///
+/// `server/discover` has carried it since 0.20.0 and `initialize` did not,
+/// which meant the clients still on a 2025 revision -- most of them -- were
+/// handed a tool list and no sentence saying what the tools were for.
+pub const INSTRUCTIONS: &str = "Search and maintain the local semlith stores this server was opened on. \
+     Call semlith_stats first to learn the store names the other tools accept. \
+     Prefer semlith_brief for a question about how something works: it answers in \
+     one call what search, read and neighbors answer in four.";
+
 pub fn serve(
     stores: &Mutex<Fleet>,
     labels: &str,
@@ -299,9 +309,7 @@ fn without_stores(
             json!({
                 "supportedVersions": SUPPORTED,
                 "capabilities": { "tools": {} },
-                "instructions":
-                    "Search and maintain the local semlith stores this server was opened on. \
-                     Call semlith_stats first to learn the store names the other tools accept.",
+                "instructions": INSTRUCTIONS,
             }),
             Some("public"),
         )),
@@ -334,6 +342,11 @@ fn without_stores(
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": server_info(),
+                // The same text `server/discover` sends. A client on a 2025
+                // revision never calls discover, so until 0.24.0 the sentence
+                // that says what this server is for reached only the clients
+                // that needed it least.
+                "instructions": INSTRUCTIONS,
             }))
         }
 

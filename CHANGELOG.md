@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### One skill, installed once and linked everywhere
+
+The binary carries an Agent Skill named `semlith`, in agentskills.io format, and
+`semlith setup` writes it to `~/.semlith/skills/semlith/` and links that one copy
+into every user-level skill directory a documented client reads — the
+cross-client `~/.agents/skills`, and Claude Code's, Qwen Code's and Kiro's.
+Canonical plus links rather than a copy per client: removing the canonical
+directory removes all of them, and a link that has gone stale is reported rather
+than silently left behind.
+
+`semlith setup --register-all` also writes the short always-on rule block into
+the user-level rules files semlith knows a path for, between markers of its own
+and with a backup beside each file first. Nothing outside those markers is read
+or written, and a second run replaces what is between them rather than appending
+again. For a client whose rules file semlith does not know — Cursor and Copilot
+keep theirs in their own interface — `doctor` prints the block to paste.
+
+`semlith doctor` now reports, per client, whether the skill is linked, whether
+the hook is present, and whether the rule block is there, in four states each:
+linked, absent, stale, or paste needed. The portal's Doctor page shows the same
+states from the same computation, beside the registration it already showed.
+
+The MCP `initialize` result carries the `instructions` text `server/discover`
+has sent since 0.20.0. Every client still on a 2025 revision — which is most of
+them — never calls discover, so until now the sentence saying what this server
+is for reached only the clients that needed it least.
+
+Gemini CLI is not part of this: its MCP registration is unchanged, but no skill
+link, rule block or hook is written for it, because none was ever run against a
+live Gemini CLI and a client whose hook was never exercised is not evidence.
+
 ### The agent is steered, not only taught
 
 `semlith hook` answers one `PreToolUse` event. When a registered store holds

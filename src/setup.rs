@@ -197,7 +197,14 @@ pub fn status() -> Status {
 /// form: no key lands in a file, and nothing outside the client's own registry
 /// is touched. `register_all` is the one part that does ask, and it asks with
 /// the list of files in front of the user.
-pub fn run(yes: bool, airgap: bool, register_all: bool, service: bool) -> Result<()> {
+pub fn run(
+    yes: bool,
+    airgap: bool,
+    register_all: bool,
+    service: bool,
+    hooks: bool,
+    strict: bool,
+) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
     // Reported as they run rather than replayed at the end, so the line about
@@ -207,6 +214,9 @@ pub fn run(yes: bool, airgap: bool, register_all: bool, service: bool) -> Result
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
+        announce(step_skill()?),
+        announce(step_hooks(hooks, strict)?),
+        announce(step_rules(register_all)?),
         announce(step_service(service)?),
         announce(step_verify()?),
     ];
@@ -1040,6 +1050,137 @@ pub const KEY_ENV: &str = "SEMLITH_AGENT_KEY";
 ///
 /// Points at the binary `step_binary` installed rather than the one running
 /// this code, which during an install is the downloaded installer.
+/// Install the Agent Skill and link it wherever a client reads user skills.
+///
+/// Unconditional, because it is a file under the store home and a link into a
+/// directory that client already reads: nothing is rewritten, nothing is merged
+/// into a file semlith does not own, and a client with no such directory is
+/// simply not linked.
+fn step_skill() -> Result<Step> {
+    let linked = crate::agentfiles::install_skill()?;
+    if linked.is_empty() {
+        let held = crate::agentfiles::skill_state()
+            .into_iter()
+            .filter(|(_, state)| *state == crate::agentfiles::State::Present)
+            .count();
+        return Ok(Step {
+            name: "skill",
+            state: if held > 0 {
+                State::AlreadyDone
+            } else {
+                State::Skipped
+            },
+            detail: if held > 0 {
+                format!("linked in {held} skill directories")
+            } else {
+                "no client on this machine reads a user-level skill directory".into()
+            },
+        });
+    }
+    Ok(Step {
+        name: "skill",
+        state: State::Done,
+        detail: format!(
+            "linked into {}",
+            linked
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// Write, or remove, the `PreToolUse` hook.
+///
+/// On by default. The file it edits belongs to the client, so it is backed up
+/// beside itself before the first write and `--no-hooks` takes the entry out
+/// again, leaving every other hook in place.
+fn step_hooks(wanted: bool, strict: bool) -> Result<Step> {
+    if !wanted {
+        let removed = crate::agentfiles::remove_hooks()?;
+        return Ok(Step {
+            name: "hook",
+            state: if removed.is_empty() {
+                State::AlreadyDone
+            } else {
+                State::Done
+            },
+            detail: if removed.is_empty() {
+                "no steering hook was installed".into()
+            } else {
+                format!(
+                    "removed from {}",
+                    removed
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            },
+        });
+    }
+
+    let written = crate::agentfiles::install_hooks(strict)?;
+    if written.is_empty() {
+        return Ok(Step {
+            name: "hook",
+            state: State::AlreadyDone,
+            detail: "already installed, or no client here documents one".into(),
+        });
+    }
+    Ok(Step {
+        name: "hook",
+        state: State::Done,
+        detail: format!(
+            "{} in {}",
+            if strict { "strict" } else { "nudging" },
+            written
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+/// Append the rule block to the rules files of the clients that have one.
+///
+/// Only under `--register-all`, because a rules file is prose somebody wrote
+/// and appending to it unasked is a different act from merging a server into a
+/// server list. `doctor` prints the block for every other client.
+fn step_rules(register_all: bool) -> Result<Step> {
+    if !register_all {
+        return Ok(Step {
+            name: "rules",
+            state: State::Skipped,
+            detail: "`semlith setup --register-all` writes them; `semlith doctor` prints them"
+                .into(),
+        });
+    }
+    let written = crate::agentfiles::install_rules()?;
+    Ok(Step {
+        name: "rules",
+        state: if written.is_empty() {
+            State::AlreadyDone
+        } else {
+            State::Done
+        },
+        detail: if written.is_empty() {
+            "already written, or no client here documents a rules file".into()
+        } else {
+            format!(
+                "wrote {}",
+                written
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        },
+    })
+}
+
 fn step_service(wanted: bool) -> Result<Step> {
     if !wanted {
         return Ok(Step {

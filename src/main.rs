@@ -439,11 +439,27 @@ enum Command {
         airgap: bool,
 
         /// Also write the configuration file of every client that has no
-        /// registration command of its own. Every path is listed before
-        /// anything is written, each file is backed up beside itself, and a
-        /// file that does not parse is left alone.
+        /// registration command of its own, and the rules file of every client
+        /// that documents one. Every path is listed before anything is written,
+        /// each file is backed up beside itself, and a file that does not parse
+        /// is left alone.
         #[arg(long)]
         register_all: bool,
+
+        /// Do not write the `PreToolUse` steering hook, and remove it if it is
+        /// already there.
+        ///
+        /// It is written by default: a hook nobody installs steers nobody. The
+        /// file it edits is backed up beside itself first, and removing the
+        /// hook leaves every other hook in that file exactly as it was.
+        #[arg(long)]
+        no_hooks: bool,
+
+        /// Write the hook in its refusing form: the first whole-file read of
+        /// each session is denied with the line that explains it, and every
+        /// later one in that session is only the line.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Report whether each agent client on this machine can reach semlith, and
@@ -725,6 +741,8 @@ fn run() -> Result<()> {
             airgap,
             register_all,
             no_service,
+            no_hooks,
+            strict,
         } => {
             arm_airgap(airgap);
             // The flag or the variable. The installers translate their own
@@ -734,7 +752,7 @@ fn run() -> Result<()> {
             // entry points is a knob somebody will set and watch do nothing.
             let no_service =
                 no_service || std::env::var(semlith::setup::NO_SERVICE_ENV).is_ok_and(|v| v == "1");
-            semlith::setup::run(yes, airgap, register_all, !no_service)?;
+            semlith::setup::run(yes, airgap, register_all, !no_service, !no_hooks, strict)?;
         }
 
         Command::Upgrade {
@@ -2708,6 +2726,49 @@ fn print_service(status: &semlith::service::Status) {
 /// installed and unregistered carries the command that fixes it, because the
 /// whole point of this command is that the next person reads the answer instead
 /// of bisecting a configuration file.
+/// What this client has beyond its registration: the skill, the hook and the
+/// rule block, in four states each.
+///
+/// `None` where a client documents none of the three, which is most of them.
+/// A row that said "skill: paste, hook: paste, rules: paste" on twenty clients
+/// would be three columns of noise hiding the one client where it matters.
+fn steering_line(client: &semlith::doctor::ClientReport) -> Option<String> {
+    use semlith::agentfiles::State;
+    let word = |state: State| match state {
+        State::Present => "linked",
+        State::Absent => "absent",
+        State::Stale => "stale",
+        State::Paste => "paste needed",
+    };
+    let mut parts = Vec::new();
+    if client.skill != State::Paste {
+        parts.push(format!("skill {}", word(client.skill)));
+    }
+    if client.hook != State::Paste {
+        parts.push(format!(
+            "hook {}",
+            match client.hook {
+                State::Present => "present",
+                State::Absent => "absent",
+                State::Stale => "stale",
+                State::Paste => "paste needed",
+            }
+        ));
+    }
+    if client.rules != State::Paste {
+        parts.push(format!(
+            "rule {}",
+            match client.rules {
+                State::Present => "present",
+                State::Absent => "absent",
+                State::Stale => "stale",
+                State::Paste => "paste needed",
+            }
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
 fn print_doctor(
     clients: &[semlith::doctor::ClientReport],
     rules: &[semlith::doctor::Finding],
@@ -2757,6 +2818,13 @@ fn print_doctor(
         // to file "it works everywhere except one repository".
         for dir in client.disabled_in.iter().filter(|_| !client.disabled_here) {
             println!("      switched off for {dir}");
+        }
+        // Steering, beside registration. A client can be perfectly registered
+        // and still have an agent that never calls semlith, which is the whole
+        // reason these three exist — so they are read on the same row rather
+        // than on a page somebody has to go and find.
+        if let Some(steering) = steering_line(client) {
+            println!("      {steering}");
         }
         if let Some(repair) = &client.repair {
             println!("      run: {repair}");

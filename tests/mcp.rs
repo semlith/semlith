@@ -993,3 +993,37 @@ fn a_machine_with_no_store_still_answers_the_handshake() {
         "a store-less server listed a different tool surface",
     );
 }
+
+/// A client that never calls `server/discover` — which is every client on a
+/// 2025 revision, and most of them — must still be told what this server is
+/// for. Until 0.24.0 the sentence reached only the clients that needed it
+/// least.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_handshake_carries_the_same_instructions_discover_sends() {
+    let corpus = corpus("rust", &[("ownership.md", RUST)]);
+    let store = store_for(&corpus);
+    let mut server = Server::open(&[store.path()]);
+
+    let hello = server.call(
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "capabilities": {} }),
+    );
+    let said = hello["result"]["instructions"]
+        .as_str()
+        .unwrap_or_else(|| panic!("initialize carries no instructions: {hello}"));
+
+    let found = server.call("server/discover", modern(json!({})));
+    let discovered = found["result"]["instructions"]
+        .as_str()
+        .expect("discover carries instructions");
+
+    assert_eq!(
+        said, discovered,
+        "the two handshakes describe the same server differently"
+    );
+    assert!(
+        said.contains("semlith_brief"),
+        "the instructions name no call: {said}"
+    );
+}

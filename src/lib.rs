@@ -16,6 +16,7 @@
 //! them to text with one SQLite lookup each.
 
 pub mod add;
+pub mod agentfiles;
 pub mod brief;
 pub mod chunk;
 pub mod clientfile;
