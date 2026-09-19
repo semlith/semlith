@@ -3028,10 +3028,42 @@ impl Semlith {
             if let Some(model) = self.reranker() {
                 match rerank::order(model, query, &texts) {
                     Ok(order) if order.len() == head => {
+                        // Fused with the order it is reordering, not replacing
+                        // it.
+                        //
+                        // Measured, and this is the whole reason: letting the
+                        // cross-encoder write the order outright moved sixteen
+                        // of seventy-seven questions and gained exactly
+                        // nothing — `concept-clip-text-encoder` went from
+                        // rank 7 to rank 1 while `concept-configuration-
+                        // timeout` went from 1 to 6, and the two cancelled at
+                        // every depth. A model that reads the pair is better
+                        // than fusion at some questions and worse at others,
+                        // which is an argument for two opinions rather than
+                        // for replacing one with the other. So both orders
+                        // vote, by the same reciprocal-rank rule the lists
+                        // themselves are fused with, and a candidate has to
+                        // be liked by both to reach the top.
                         let mut scores: Vec<f32> =
                             hits[..head].iter().map(|(hit, _)| hit.score).collect();
                         scores.sort_by(|a, b| b.total_cmp(a));
-                        for (rank, at) in order.into_iter().enumerate() {
+                        let mut by_fusion: Vec<usize> = (0..head).collect();
+                        by_fusion.sort_by(|a, b| hits[*b].0.score.total_cmp(&hits[*a].0.score));
+                        let mut fused_rank = vec![0usize; head];
+                        for (rank, at) in by_fusion.into_iter().enumerate() {
+                            fused_rank[at] = rank;
+                        }
+                        let mut blended: Vec<(usize, f32)> = order
+                            .into_iter()
+                            .enumerate()
+                            .map(|(rescored, at)| {
+                                let vote = 1.0 / (RRF_K + rescored as f32 + 1.0)
+                                    + 1.0 / (RRF_K + fused_rank[at] as f32 + 1.0);
+                                (at, vote)
+                            })
+                            .collect();
+                        blended.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                        for (rank, (at, _)) in blended.into_iter().enumerate() {
                             hits[at].0.score = scores[rank];
                             hits[at].0.lists.push("rerank");
                         }

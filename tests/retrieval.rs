@@ -884,6 +884,85 @@ impl Summary {
     }
 }
 
+/// Draw the sealed set from the question file and a seed.
+///
+/// One implementation, in the harness that scores it, so the file and the rule
+/// cannot drift apart: the test below redraws the split and fails if
+/// `split.yaml` is not what this function produces. A script beside the
+/// fixture would be a second implementation of the one thing the gate rests
+/// on.
+///
+/// Stratified by (shape, tool) with largest-remainder allocation, and a
+/// seeded Fisher-Yates shuffle inside each stratum, which is the method
+/// 0.22.0 and 0.23.0 drew with. The generator is written out rather than
+/// pulled in so the draw is reproducible from this file alone.
+fn draw(seed: u64, questions: &[Question], want: usize, held_out: &[&str]) -> Vec<String> {
+    let mut strata: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut pool = 0usize;
+    for question in questions {
+        if held_out.contains(&question.id.as_str()) {
+            continue;
+        }
+        pool += 1;
+        strata
+            .entry((question.shape.clone(), question.tool.clone()))
+            .or_default()
+            .push(question.id.clone());
+    }
+
+    // Largest remainder: every stratum takes its floor, and the leftover seats
+    // go to the largest fractions, ties broken by the stratum's own name so
+    // the allocation is a function of the question file and nothing else.
+    let exact: Vec<((String, String), f64)> = strata
+        .iter()
+        .map(|(key, ids)| (key.clone(), ids.len() as f64 * want as f64 / pool as f64))
+        .collect();
+    let mut alloc: BTreeMap<(String, String), usize> = exact
+        .iter()
+        .map(|(key, share)| (key.clone(), *share as usize))
+        .collect();
+    let mut short = want - alloc.values().sum::<usize>();
+    let mut by_remainder = exact.clone();
+    by_remainder.sort_by(|a, b| {
+        (b.1 - b.1.floor())
+            .partial_cmp(&(a.1 - a.1.floor()))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    for (key, _) in by_remainder {
+        if short == 0 {
+            break;
+        }
+        *alloc.get_mut(&key).expect("every stratum is allocated") += 1;
+        short -= 1;
+    }
+
+    let mut state = seed;
+    let mut next = move || {
+        // splitmix64, written out: the draw has to be the same on every
+        // machine and in every year, and a crate's default generator is
+        // neither promised to be stable nor visible here.
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+
+    let mut sealed: Vec<String> = Vec::new();
+    for (key, ids) in &strata {
+        let mut ids = ids.clone();
+        ids.sort();
+        for i in (1..ids.len()).rev() {
+            let j = (next() % (i as u64 + 1)) as usize;
+            ids.swap(i, j);
+        }
+        sealed.extend(ids.into_iter().take(alloc[key]));
+    }
+    sealed.sort();
+    sealed
+}
+
 /// Where the audit's evidence goes: `SEMLITH_RETRIEVAL_DUMP=<file>`.
 ///
 /// Judging a miss needs what came back, not the rank it came back at. A
@@ -1636,4 +1715,31 @@ fn number(value: &str, line: usize) -> u32 {
     value
         .parse()
         .unwrap_or_else(|_| panic!("line {line}: {value:?} is not a number"))
+}
+
+/// `split.yaml` is what the seed draws, and nothing else.
+///
+/// The sealed thirty decide whether this release ships. A list somebody could
+/// edit by hand — to drop the question that keeps missing — would be a gate
+/// that measures whoever last edited it, so the file is checked against the
+/// draw on every run of the suite rather than trusted.
+#[test]
+fn the_sealed_split_is_the_one_the_seed_draws() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/retrieval");
+    let all = read_questions(&fixtures.join("questions.yaml"));
+    let split = read_split(&fixtures.join("split.yaml"));
+    let held_out = [
+        "id-dependency-kinds",
+        "id-edges-out",
+        "id-max-nodes",
+        "id-rrf-k",
+    ];
+    let drawn = draw(split.seed, &all, split.sealed.len(), &held_out);
+    let mut recorded = split.sealed.clone();
+    recorded.sort();
+    assert_eq!(
+        drawn, recorded,
+        "split.yaml is not what seed {} draws from this question file",
+        split.seed
+    );
 }
