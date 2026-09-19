@@ -926,22 +926,18 @@ fn score_cost(
     };
     // A brief that did not locate the answer is not an answer, however few
     // tokens it cost.
-    if !brief
-        .spans
-        .iter()
-        .any(|span| {
-            question.spans.iter().any(|want| {
-                covers(
-                    root,
-                    &span.path,
-                    span.start_line,
-                    span.end_line,
-                    span.symbol.as_deref(),
-                    want,
-                )
-            })
+    if !brief.spans.iter().any(|span| {
+        question.spans.iter().any(|want| {
+            covers(
+                root,
+                &span.path,
+                span.start_line,
+                span.end_line,
+                span.symbol.as_deref(),
+                want,
+            )
         })
-    {
+    }) {
         return;
     }
 
