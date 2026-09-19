@@ -29,7 +29,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # Already in the tree under fastembed; named here because the agent key must
 # come from the OS random source rather than from a hash of the clock.
-getrandom = "0.3.4"
+getrandom = "0.4.3"
 # Already in the tree under fastembed, which loads this exact tokenizer to
 # embed with; named here so the ledger can count tokens with the same one
 # rather than estimating at four characters each. No features of its own, so
