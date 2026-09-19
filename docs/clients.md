@@ -297,7 +297,11 @@ copilot mcp remove semlith
 copilot mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
-**Gemini CLI** — `~/.gemini/settings.json`. The key for a streamable-HTTP
+**Gemini CLI** — `~/.gemini/settings.json`. The MCP registration below is
+written as it always was; the 0.24.0 Agent Skill, rule block and steering hook
+are not, because none of them was ever run against a live Gemini CLI and a hook
+nobody has exercised is a claim rather than a feature. They come when one can be
+measured. The key for a streamable-HTTP
 server is `httpUrl`, not `url`; a plain `url` is read as the older SSE
 transport and the connection fails. `gemini mcp add` takes `-s, --scope` and
 writes `~/.gemini/settings.json` for `user` and `.gemini/settings.json` for
