@@ -139,6 +139,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--each` gives every path its own store instead of one shared store; `--projects <FOLDER>` takes the paths from the git repositories directly under a folder, and implies `--each`. `--include-secrets` indexes what the deny-list otherwise refuses. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
 | `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it, `--prefer code\|docs\|any` to lift one side of the corpus. |
+| `semlith brief <QUESTION>` | Everything one question needs, in one call: the spans a search would find, the text of the top ones, and the callers and callees of the symbols they sit inside, one hop each way. `--budget N` is the token ceiling and defaults to 4000 — locators and edges are kept, span text is what a small budget drops, and the answer says what it dropped. |
 | `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
 | `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required; `--path` narrows it and `--offset` continues a listing the cap cut short. |
 | `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
@@ -147,7 +148,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith forget <PATH>` | Drop one file from the store. The file on disk is untouched. |
 | `semlith scan [STORE]` | List every file the store holds that semlith would refuse today — a credential the name does not admit to, a rule that has widened. Exits non-zero while any remain; `--forget` evicts them. |
 | `semlith drop <STORE>` | Delete a store outright — its vectors, chunks, graph and ledger, and the registry entry naming it. The indexed files are untouched. |
-| `semlith symbol <NAME>` | The definition, its callers and callees, and the ring two hops out, in one answer. From the parsed syntax tree rather than a grep for `fn name`. |
+| `semlith symbol <NAME>` | The definition, its callers and callees, and the ring two hops out, in one answer. From the parsed syntax tree rather than a grep for `fn name`. `--history` gives what the name used to be: the definitions a re-index replaced, each with the content hash of the file version it was true for. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
 | `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. Needs no key. |
@@ -349,6 +350,7 @@ tools over HTTP at `/mcp`:
 | Tool | What it does |
 | --- | --- |
 | `semlith_search` | Where the answer is: path, line span, enclosing symbol, how it was found and whether the file has changed since it was indexed, with the same `path`/`ext`/`lang`/`store` narrowing as the CLI. `format: "excerpt"` returns the text instead. |
+| `semlith_brief` | One call instead of four: located spans, the text of the top ones, and the one-hop callers and callees of the symbols they sit inside, every part labelled with the list or edge that found it, all of it under a `budget` in tokens that defaults to 4000. |
 | `semlith_read` | One span or one symbol and nothing around it — the second stage after a search, so an agent locates first and reads only what it needs. |
 | `semlith_pattern` | A tree-sitter structural pattern over the indexed files of one language, with the same `path` narrowing as the rest and an `offset` that continues a truncated listing. |
 | `semlith_stats` | What each open store holds, and the names the other tools accept. |
@@ -356,7 +358,7 @@ tools over HTTP at `/mcp`:
 | `semlith_index` | Index a path into an open store, so a corpus becomes searchable mid-conversation. |
 | `semlith_add` | Fetch one https URL into a store and index it. |
 | `semlith_forget` | Drop one file from a store. The file on disk is untouched. |
-| `semlith_symbol` | Where a symbol is defined, read off the parsed syntax tree rather than matched in a comment or a string. |
+| `semlith_symbol` | Where a symbol is defined, read off the parsed syntax tree rather than matched in a comment or a string. `history: true` answers what it used to be. |
 | `semlith_neighbors` | What calls a symbol and what it calls, one hop each way, each edge saying how well supported it is. |
 | `semlith_path` | The shortest chain of resolved edges between two symbols, or a refusal when it cannot get there without crossing a name it cannot pin down. |
 | `semlith_languages` | Every name `lang` accepts, and the extensions and filenames behind each. |
@@ -448,7 +450,7 @@ of these drifts from its source:
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one search across three stores | **1 query embed**, ~39 MB per extra store | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
-| `tools/list` | **4 376 bytes**, ~1 094 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
+| `tools/list` | **4 441 bytes**, ~1 111 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
 | retrieval, on 30 sealed questions of 107 | **hit@1 66 %, hit@3 76 %, hit@8 83 %**, wrong-yes **0** | the same |
 | the same binary, on the 77 it was tuned against | hit@1 71 %, hit@3 81 %, hit@8 87 % | the same |
 | 0.21.0, same corpus and instrument | sealed hit@1 60 %, hit@3 73 %, hit@8 83 % | the same |
