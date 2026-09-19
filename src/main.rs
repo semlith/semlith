@@ -1527,7 +1527,15 @@ fn main() -> Result<()> {
                 }
                 println!("model    {} ({} dim)", store.model(), store.dim());
                 println!("files    {files}");
-                println!("chunks   {chunks}");
+                // Which rule cut them, because from 0.22.0 there are two and a
+                // store keeps the one it was last swept under. A store still on
+                // fixed windows is a store whose next full index pass will
+                // re-chunk it, and that is worth knowing before wondering why a
+                // definition and its doc comment answer separately.
+                println!(
+                    "chunks   {chunks} (cut at {})",
+                    semlith::store::chunking(store.db())?
+                );
                 let images = store.image_count()?;
                 if images > 0 {
                     println!("images   {images}");

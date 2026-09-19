@@ -472,10 +472,18 @@ carries two:
 
 | Badge | What it says |
 |---|---|
+| `definition` | This chunk defines the name you typed. It is above the ranking rather than in it. |
 | `vector` | The embedding matched — this chunk means something close to what you asked. |
 | `keyword` | The terms matched — your words are literally in this text. |
 | `graph` | Reached from a neighbouring symbol — this was not itself a match; the graph walked to it from one. |
 | `image` | The picture matched the words. |
+
+`definition` is the one badge that is not a list in the fusion. When your query
+is a single identifier, the chunks that define that name are lifted to the top
+before the fusion's order is applied to everything else — so an agent that
+already knows a term never has to read past its own definition to find it. It
+appears only for an identifier-shaped query; a sentence that happens to name a
+symbol is a question, and the fusion answers questions.
 
 Only a `graph` hit also carries a **confidence** label, and that is deliberate.
 The other three lists found a chunk by comparing it against your query, and there

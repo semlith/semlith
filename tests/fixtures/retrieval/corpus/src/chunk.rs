@@ -1,0 +1,230 @@
+//! Turning a file on disk into embeddable chunks of text.
+
+use crate::formats;
+use std::path::Path;
+
+/// Soft upper bound on chunk size, in characters.
+///
+/// At roughly 3-4 characters per token this lands around 200-270 tokens, well
+/// inside the embedding model's window. Smaller chunks are not just cheaper to
+/// embed — transformer cost grows faster than linearly in sequence length —
+/// they also retrieve more precisely and cost an agent fewer tokens to read.
+pub const MAX_CHARS: usize = 800;
+
+/// Lines repeated from the previous chunk, so a match that straddles a chunk
+/// boundary still has some context on at least one side.
+pub const OVERLAP_LINES: usize = 2;
+
+/// Files above this are skipped: usually generated, vendored, or a blob that
+/// nobody wants to read the middle of anyway.
+pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chunk {
+    /// 1-based, inclusive.
+    pub start_line: u32,
+    pub end_line: u32,
+    pub text: String,
+}
+
+/// Turn already-read file contents into text. `None` means "deliberately
+/// skipped", not an error: binary, an unreadable PDF, or a document that could
+/// not be opened.
+///
+/// The extension decides, and it decides before anything looks at the bytes.
+/// That ordering is what lets a document be read at all — `.docx` and its
+/// relatives are ZIP archives, so the binary check below would reject every one
+/// of them — and it is also what keeps a corpus of ordinary source from paying
+/// for formats it does not contain.
+///
+/// `path` is only consulted for its extension; the caller has the bytes
+/// already because it needs them to hash the file anyway.
+pub fn extract(path: &Path, bytes: &[u8]) -> Result<String, crate::SkipReason> {
+    use crate::SkipReason;
+    if bytes.is_empty() {
+        return Err(SkipReason::Empty);
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    // An `Option` before 0.19.0, which is why the index loop's branch for it
+    // reported nothing: there was nothing to report. "A reader ran and got
+    // nothing out" and "these bytes are not text" are different answers and
+    // the person chasing a missing file needs to be told which.
+    match ext.as_deref() {
+        Some("pdf") => extract_pdf(bytes).ok_or(SkipReason::NoText),
+        Some(ext) if formats::handles(ext) => {
+            guard(|| formats::extract(ext, bytes)).ok_or(SkipReason::NoText)
+        }
+        _ => {
+            if is_binary(bytes) {
+                return Err(SkipReason::Binary);
+            }
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        }
+    }
+}
+
+/// Which reader turned this file into text.
+///
+/// The portal's Files view shows it, because "that .docx came out empty" and
+/// "that .docx was read as binary and skipped" look identical in a file list
+/// and are two entirely different problems. Derived from the same extension
+/// dispatch [`extract`] uses, so it cannot describe a reader that did not run.
+pub fn reader_of(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("pdf") => "pdf",
+        Some("ipynb") => "notebook",
+        Some("html" | "htm") => "html",
+        Some("docx") => "word",
+        Some("pptx") => "powerpoint",
+        Some("xlsx") => "excel",
+        Some("odt" | "odp" | "ods") => "opendocument",
+        Some("epub") => "epub",
+        Some("rtf") => "rtf",
+        Some("eml" | "mbox") => "mail",
+        // Not a reader at all in the sense the others are: an image is not
+        // turned into text, it is embedded as a picture. The Files page says
+        // `image` so that a row with no lines and no chunks reads as a
+        // deliberate kind of file rather than as one that failed to parse.
+        Some(ext) if crate::image::EXTENSIONS.contains(&ext) => "image",
+        _ => "text",
+    }
+}
+
+/// pdf-extract can panic on malformed input, and one bad PDF should not take
+/// down a whole indexing run.
+fn extract_pdf(bytes: &[u8]) -> Option<String> {
+    let text = guard(|| pdf_extract::extract_text_from_mem(bytes).ok())?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Run an extractor so that a panic inside it is a skipped file rather than a
+/// dead process.
+///
+/// The readers in [`crate::formats`] are written not to panic and are tested
+/// against malformed input for every format, but they sit downstream of a
+/// decompressor and a document somebody else wrote. A panic here would take out
+/// an indexing run that is otherwise minutes from finishing, so the cheap
+/// insurance is worth its one line.
+fn guard(extract: impl FnOnce() -> Option<String>) -> Option<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(extract)).ok()?
+}
+
+/// A NUL byte in the first 8 KiB is the same heuristic git uses.
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8192).any(|&b| b == 0)
+}
+
+/// Split text into line-aligned chunks of at most [`MAX_CHARS`] characters.
+///
+/// Lines longer than the budget on their own (minified JS, embedded base64)
+/// are hard-split on a char boundary rather than emitted oversized.
+pub fn chunk_text(text: &str) -> Vec<Chunk> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut chunks = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() {
+        let start = i;
+        let mut len = 0;
+        // The `len == 0` arm guarantees progress: a line wider than the whole
+        // budget is still taken, then hard-split below.
+        while i < lines.len() && (len == 0 || len + lines[i].len() < MAX_CHARS) {
+            len += lines[i].len() + 1;
+            i += 1;
+        }
+
+        let body = lines[start..i].join("\n");
+        if body.trim().is_empty() {
+            continue;
+        }
+
+        if body.chars().count() > MAX_CHARS {
+            // Single over-long line: slice it up, all pieces share the line span.
+            let line = start as u32 + 1;
+            for piece in split_chars(&body, MAX_CHARS) {
+                chunks.push(Chunk {
+                    start_line: line,
+                    end_line: line,
+                    text: piece,
+                });
+            }
+        } else {
+            chunks.push(Chunk {
+                start_line: start as u32 + 1,
+                end_line: i as u32,
+                text: body,
+            });
+        }
+
+        // Step back so the next chunk repeats a couple of lines of context.
+        if i < lines.len() {
+            i = i.saturating_sub(OVERLAP_LINES).max(start + 1);
+        }
+    }
+
+    chunks
+}
+
+fn split_chars(s: &str, n: usize) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    chars.chunks(n).map(|c| c.iter().collect()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunks_cover_every_line_and_stay_under_budget() {
+        let text: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        let chunks = chunk_text(&text);
+
+        assert!(chunks.len() > 1, "200 lines should not fit in one chunk");
+        for c in &chunks {
+            assert!(c.text.chars().count() <= MAX_CHARS, "chunk over budget");
+            assert!(c.start_line >= 1 && c.end_line >= c.start_line);
+        }
+        // Every source line lands in at least one chunk.
+        for i in 1..=200 {
+            let needle = format!("line {i}\n");
+            assert!(
+                chunks.iter().any(|c| c.text.contains(needle.trim_end())),
+                "line {i} missing from all chunks"
+            );
+        }
+        // Chunks advance; an off-by-one in the overlap step-back would loop forever.
+        for w in chunks.windows(2) {
+            assert!(
+                w[1].start_line > w[0].start_line,
+                "chunking did not advance"
+            );
+        }
+    }
+
+    #[test]
+    fn over_long_single_line_is_split() {
+        let text = "x".repeat(MAX_CHARS * 3);
+        let chunks = chunk_text(&text);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|c| c.text.chars().count() <= MAX_CHARS));
+    }
+
+    #[test]
+    fn blank_input_yields_nothing() {
+        assert!(chunk_text("").is_empty());
+        assert!(chunk_text("\n\n   \n").is_empty());
+    }
+
+    #[test]
+    fn binary_is_detected() {
+        assert!(is_binary(b"abc\0def"));
+        assert!(!is_binary(b"fn main() {}"));
+    }
+}

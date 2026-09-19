@@ -208,6 +208,101 @@ fn a_store_written_before_the_format_key_still_opens_and_is_not_rewritten() {
     );
 }
 
+/// A store from before definition chunking opens, answers, and is re-chunked by
+/// the next full index pass — not before, and not by opening it.
+///
+/// The migration 0.22.0 owes. A store on format 2 holds fixed windows and its
+/// files have not changed, so the hash check would leave it holding them for
+/// ever: the rule for what a chunk is changed, not the corpus. So the first
+/// pass that sweeps the whole store re-chunks everything it walks, and only
+/// then does the format row move.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_store_on_fixed_windows_is_re_chunked_by_the_next_full_pass() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // Two definitions, each with a doc comment above it, and enough prose
+    // between them that a fixed 800-character window cannot hold both.
+    write(
+        corpus.path(),
+        "limits.rs",
+        &format!(
+            "/// How many nodes a traversal may visit.\n\
+             pub const MAX_NODES: usize = 4000;\n\
+             {}\n\
+             /// How long a parse may take before it is abandoned.\n\
+             pub const PARSE_TIMEOUT: u64 = 5;\n",
+            (1..=40)
+                .map(|i| format!("// filler line {i} standing between the two definitions"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    );
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    drop(s);
+
+    // Put the store back the way 0.21.0 would have left it: the format row one
+    // behind, and the chunks cut by the fixed window.
+    let db = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    db.execute(
+        "UPDATE meta SET v = ?1 WHERE k = ?2",
+        rusqlite::params![
+            (semlith::store::DEFINITION_CHUNKS - 1).to_string(),
+            semlith::store::FORMAT_KEY
+        ],
+    )
+    .unwrap();
+    drop(db);
+
+    // It opens unchanged, and it answers.
+    let mut old = Semlith::open(store.path(), None).unwrap();
+    old.quiet = true;
+    assert_eq!(
+        semlith::store::chunking(old.db()).unwrap(),
+        "fixed windows",
+        "a store one format behind must say which rule its chunks were cut by"
+    );
+    assert_eq!(top(&mut old, "MAX_NODES"), "limits.rs");
+    assert_eq!(
+        semlith::store::format(old.db()).unwrap(),
+        semlith::store::DEFINITION_CHUNKS - 1,
+        "opening a store must not migrate it behind the user's back"
+    );
+
+    // The next full pass re-chunks it, although nothing on disk changed.
+    let report = old
+        .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert_eq!(
+        report.unchanged, 0,
+        "the pass treated the file as unchanged and left the old chunking in place"
+    );
+    assert_eq!(report.indexed, 1, "the pass did not re-index the file");
+    assert_eq!(
+        semlith::store::chunking(old.db()).unwrap(),
+        "definitions",
+        "a swept store must record the rule its chunks are now cut by"
+    );
+
+    // And the chunks are cut where the definitions are.
+    let holding: String = old
+        .db()
+        .query_row(
+            "SELECT text FROM chunks WHERE text LIKE '%MAX_NODES%' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        holding.starts_with("/// How many nodes"),
+        "the chunk holding the constant does not begin at its doc comment:\n{holding}"
+    );
+}
+
 fn write(dir: &Path, name: &str, body: &str) {
     fs::write(dir.join(name), body).unwrap();
 }

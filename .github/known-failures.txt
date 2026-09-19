@@ -11,4 +11,19 @@
 # Platform is one of: all, unix, windows, linux, macos.
 
 
-cli/service/recovers macos 104 a GitHub macOS runner has no Aqua session, so a user agent loads but is not kept alive; measured working on real hardware in ~2s
+# `cli/service/recovers macos 104` is back, and what 0.22.0 learned trying to
+# remove it is worth more than the row.
+#
+# The theory was that the check could tell a host that cannot supervise from one
+# that can, and skip rather than xfail. Two probes were tried on real runners.
+# `launchctl print gui/<uid>` answers on the GitHub macOS runner, so the check
+# ran and failed. `launchctl managername` returns "Aqua" there too, so it ran and
+# failed again. The runner presents every property a real login session has and
+# still will not bring a killed agent back.
+#
+# So there is no cheap probe, and a row here is the honest instrument until
+# someone finds the real distinguishing property or the runner changes. The
+# failure path already prints launchd's own words — see `c_service_recovers` —
+# so the log says why rather than only that.
+
+cli/service/recovers macos 104 the GitHub macOS runner reports an Aqua session and a gui domain and still does not keep a user agent alive; two probes for it were tried in 0.22.0 and both said the runner could supervise, measured working on real hardware in ~2s
