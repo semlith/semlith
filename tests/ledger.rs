@@ -440,3 +440,127 @@ fn rows_sharing_a_query_id_count_as_one_retrieval() {
         "the id is still stored and read back, it is only left out of the hash"
     );
 }
+
+/// A raw read the steering hook saw becomes an uncredited row: it lowers
+/// coverage, it is excluded from the saving, and the chain still verifies.
+///
+/// This is what turns Refunds from an estimate into a measurement. Without it
+/// the ledger counts only the questions semlith was asked, which flatters every
+/// ratio on the page by leaving out the ones it was not.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_raw_read_is_recorded_uncredited_and_does_not_break_the_chain() {
+    let (corpus, store) = corpus();
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    drop(s);
+
+    let fleet = semlith::fleet::Fleet::open(&[store.path().to_path_buf()]).unwrap();
+    let held = corpus.path().join("bread.md").display().to_string();
+    assert!(
+        semlith::ledger::raw_read(&fleet, "claude-code", "s1", &held),
+        "a read of an indexed file must be recorded"
+    );
+    // A file no store holds is recorded nowhere: Refunds counts reads semlith
+    // could have answered, and nothing else.
+    assert!(
+        !semlith::ledger::raw_read(&fleet, "claude-code", "s1", "/nowhere/x.rs"),
+        "a file no store holds must not be recorded against a store that does"
+    );
+    drop(fleet);
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let rows = semlith::store::retrievals(s.db(), 10).unwrap();
+    let raw: Vec<_> = rows.iter().filter(|r| r.query == held).collect();
+    assert_eq!(raw.len(), 1, "one raw read is one row: {rows:?}");
+    assert_eq!(raw[0].hits, 0, "a raw read retrieved nothing from semlith");
+    assert!(
+        raw[0].whole_file_tokens > 0,
+        "the row must say what reading it whole cost: {:?}",
+        raw[0]
+    );
+
+    let savings = semlith::store::ledger_savings(s.db()).unwrap();
+    assert_eq!(
+        savings.credited, 0,
+        "a raw read must never be credited with a saving"
+    );
+    assert_eq!(
+        savings.total, 1,
+        "it is still a retrieval, and a denominator"
+    );
+    assert_eq!(savings.coverage(), 0, "nothing was covered");
+    assert!(
+        semlith::store::ledger_break(s.db()).unwrap().is_none(),
+        "the new row kind broke the hash chain"
+    );
+}
+
+/// The block `semlith ledger` and `semlith ledger --verify` print: the number,
+/// and every denominator that makes it defensible.
+///
+/// Both surfaces read one computation, so what this asserts is that the text a
+/// person sees carries the figures that computation produced — never the saving
+/// on its own.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_ledger_states_its_saving_with_coverage_refunds_and_tier() {
+    let (corpus, store) = corpus();
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    drop(s);
+
+    let fleet = semlith::fleet::Fleet::open(&[store.path().to_path_buf()]).unwrap();
+    let held = corpus.path().join("bread.md").display().to_string();
+    assert!(semlith::ledger::raw_read(
+        &fleet,
+        "claude-code",
+        "s1",
+        &held
+    ));
+    drop(fleet);
+
+    let s = Semlith::open(store.path(), None).unwrap();
+    let savings = semlith::store::ledger_savings(s.db()).unwrap();
+    let misses = semlith::store::ledger_misses(s.db()).unwrap();
+    drop(s);
+
+    for args in [vec!["ledger"], vec!["ledger", "--verify"]] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
+            .args(&args)
+            .arg("-s")
+            .arg(store.path())
+            .output()
+            .expect("running semlith ledger");
+        let said = String::from_utf8_lossy(&out.stdout).to_string();
+
+        for wanted in [
+            format!("coverage {} %", savings.coverage()),
+            format!("tier {}", savings.tier()),
+            format!("refunds {}", misses.refunds),
+            format!("zero-hit {}", misses.zero_hit),
+        ] {
+            assert!(
+                said.contains(&wanted),
+                "`semlith {}` does not state {wanted:?}:\n{said}",
+                args.join(" ")
+            );
+        }
+        // The client breakdown names each client rather than counting them.
+        assert!(
+            said.contains("clients: claude-code"),
+            "`semlith {}` does not name the clients:\n{said}",
+            args.join(" ")
+        );
+        // The helper says what the denominator is, in the words the contract
+        // fixes, so the number is never a bare multiplier.
+        assert!(
+            said.contains("counted with the store's tokenizer"),
+            "the token helper is missing:\n{said}"
+        );
+    }
+}

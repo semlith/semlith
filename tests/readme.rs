@@ -234,7 +234,7 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
     );
 }
 
-/// Under 540 lines, because the document that has to convert a first-time
+/// Under 550 lines, because the document that has to convert a first-time
 /// reader was 1 816 of them and mostly a reference table.
 ///
 /// The ceiling was 500 until 0.17.3, which raised it by twenty for the `Prior
@@ -248,7 +248,11 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// what one answered question costs an agent, one call against several — is
 /// the number the front page exists to state. Two rows of the numbers table
 /// were merged first, so the five is what is left after trimming rather than
-/// instead of it.
+/// instead of it. 0.24.0 raises it by ten: `semlith hook` needs a row in the
+/// same table, the default-ignore table needs one line under Known limits
+/// because a file missing from a store must be explainable from the front
+/// page, and the savings paragraph this release exists to be able to state
+/// needs a short paragraph with its command beside it.
 ///
 /// The gate exists to keep a reference catalogue out of the front page — but
 /// the number moves in a release that decided to move it, with the reason
@@ -257,7 +261,64 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 540,
-        "the README is {lines} lines; the ceiling is 540"
+        lines < 550,
+        "the README is {lines} lines; the ceiling is 550"
     );
+}
+
+/// The savings paragraph states a number, so the number is bound to the run
+/// that produced it.
+///
+/// 0.17.2 removed the last one because nothing tied the figure in the README to
+/// anything measurable, and a claim nobody can check goes stale silently. The
+/// recorded run lives beside the release record; this fails if the README and
+/// that file ever disagree.
+#[test]
+fn the_readme_savings_paragraph_matches_the_run_that_produced_it() {
+    // A tracked fixture, not the release record: the record lives under
+    // `.ultraship/`, which this repository gitignores, so a test that read it
+    // there compiled on the machine that wrote it and nowhere else.
+    const RECORDED: &str = include_str!("fixtures/readme-savings.json");
+    let recorded: serde_json::Value = serde_json::from_str(RECORDED).expect("the recorded run");
+
+    // Spelled in the README with thin spaces between the thousands, which is
+    // how every other figure on the page is spelled.
+    let grouped = |n: i64| {
+        let digits = n.to_string();
+        let mut out = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                out.push(' ');
+            }
+            out.push(c);
+        }
+        out
+    };
+
+    for key in [
+        "excerpt_tokens_per_answered_question",
+        "whole_file_tokens_per_answered_question",
+    ] {
+        let value = recorded[key]
+            .as_i64()
+            .unwrap_or_else(|| panic!("{key} is a number"));
+        assert!(
+            README.contains(&grouped(value)),
+            "the README does not state the recorded {key} of {}",
+            grouped(value)
+        );
+    }
+
+    let questions = recorded["questions"].as_i64().unwrap();
+    assert!(
+        README.contains(&format!("{questions} questions")),
+        "the README does not say how many questions the figure is over"
+    );
+    // Never the number without its two qualifiers, on this surface either.
+    for qualifier in ["coverage", "tokenizer"] {
+        assert!(
+            README.contains(qualifier),
+            "the savings paragraph states no {qualifier}"
+        );
+    }
 }

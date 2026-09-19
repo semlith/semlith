@@ -93,6 +93,25 @@ impl Upstream {
         self.request("POST", "/api/key", Some(&body), CALL_TIMEOUT)
     }
 
+    /// Record one whole-file read the agent made without asking semlith.
+    ///
+    /// Through the daemon because it is the process holding the store open, and
+    /// on a short timeout because the caller is the steering hook, running
+    /// inside a client's own tool call. A failure here is silence: the row is
+    /// what turns Refunds from a floor into a measurement, and not having it is
+    /// a weaker figure rather than a broken read.
+    pub fn raw_read(
+        &self,
+        path: &str,
+        client: &str,
+        session: &str,
+        timeout: Duration,
+    ) -> Result<String> {
+        let body =
+            serde_json::json!({ "path": path, "client": client, "session": session }).to_string();
+        self.request("POST", "/api/ledger/raw-read", Some(&body), timeout)
+    }
+
     /// Ask the daemon to close and delete a store.
     ///
     /// Through the daemon rather than behind its back: it is the process

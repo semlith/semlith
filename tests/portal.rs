@@ -81,6 +81,11 @@ const VIEWS: &[(&str, &str)] = &[
     // `semlith doctor` is the Doctor page, which reads the same two functions
     // the command prints and posts its repairs to the same engine.
     ("doctor", "/api/doctor"),
+    // `semlith hook` is never typed by a person: a client runs it, and what a
+    // person wants to see is whether it is installed, stale or absent for each
+    // client -- which is what `doctor` reports and what the Agents page draws
+    // from the same source. The view of a hook is its state, not its output.
+    ("hook", "/api/doctor"),
 ];
 
 /// And the same for the MCP tool surface.

@@ -46,6 +46,14 @@ struct Member {
     store: Semlith,
 }
 
+/// What every surface says when the filters admit no indexed file at all.
+///
+/// One sentence in one place: the terminal, `semlith_search` and
+/// `semlith_brief` all reach an emptied selection, and three wordings for one
+/// condition is three things for a reader to learn.
+pub const FILTER_SELECTED_NOTHING: &str =
+    "No indexed file matches that path/ext/lang filter. Try again without it.";
+
 impl Fleet {
     /// A fleet with nothing in it.
     ///
@@ -193,6 +201,19 @@ impl Fleet {
             total += member.store.matching_files(filter)?;
         }
         Ok(total)
+    }
+
+    /// Why a query came back with nothing.
+    ///
+    /// A filter that admits no file at all is a different answer from a corpus
+    /// that does not discuss the question, and since `--path '!src/**'` exists
+    /// the first is now easy to write by accident. Saying which one happened is
+    /// the whole difference between "ask something else" and "drop a filter".
+    pub fn no_match_reason(&self, filter: &Filter) -> String {
+        if !filter.is_empty() && self.matching_files(filter).unwrap_or(1) == 0 {
+            return FILTER_SELECTED_NOTHING.to_string();
+        }
+        format!("no matches (store has {} chunks)", self.chunks())
     }
 
     pub fn search(&mut self, query: &str, k: usize) -> Result<Vec<Hit>> {

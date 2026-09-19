@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-09-19
+
+### The number, and the defect the number found
+
+`semlith ledger --verify` now prints what the ledger adds up to beneath the
+chain result, and the README carries a savings paragraph again — the first since
+0.17.2 removed the double-counted one, and only because it is now measured.
+Asking `semlith brief` all 107 questions of this repository's own retrieval
+harness against a store of `src/`: 3 982 tokens per answered question is what
+the agent was sent, 105 132 is what reading the 4.1 files those answers named
+would have cost whole. 26×, at 100 % coverage, counted by the store's own
+tokenizer. It is an upper bound and says so.
+
+Measuring it found the defect that made it worth measuring. `semlith brief` at a
+terminal, and the portal's Brief view, both recorded every answer as a retrieval
+that found nothing: the ledger recovers the files an answer named by reading
+them back out of the rendered reply, and both of those hand it JSON instead. The
+first run of this paragraph's own measurement read *saved 0 tokens over 0 of 107
+retrievals, coverage 0 %* — for the one command 0.23.0 exists for. A brief knows
+which files it named; it is asked now rather than parsed. Any 0.23.0 ledger
+holding CLI or portal briefs has under-counted them, and re-running the query is
+the only way to correct rows that are, by design, not rewritten.
+
+### The graph reads as a graph
+
+Three things were wrong with what a freshly indexed project drew. The page
+opened on the busiest symbol, which in any codebase is its most *reused* name —
+`new`, `len`, `get` — earning its degree from forty unrelated callers the
+extractor could only match by spelling, so the first thing anyone saw was a star
+of dashed `inferred` lines between functions with nothing to do with each other.
+The opening symbol is now the one with the most edges the extractor actually
+resolved, and a name defined once in the store beats a name defined forty times
+however busy it is. When the node budget cuts a neighbourhood — and on a hub it
+always does — the resolved edges are drawn and the spelling matches are the ones
+left out, rather than whichever sorted first.
+
+The store chips scoped the canvas and not the panel beside it, so a symbol
+defined in two open stores listed both stores' callers under a chip naming one
+of them: the rail contradicted the picture next to it. It is scoped to the same
+stores now.
+
+And a view where nothing is connected says so. It is a real state — a language
+semlith parses for definitions but not yet for calls, or a scope holding both
+ends of no edge — and a field of unconnected boxes with no explanation reads as
+a broken page.
+
+### A corpus is the project, not its dependencies
+
+The walk carries a table of generated and vendored directories of its own, for
+every language semlith supports. `.gitignore` was the only thing standing
+between a store and a dependency tree, and it is a statement about what is
+*committed*: it is absent from a folder somebody downloaded rather than cloned,
+it is absent where `npm install` ran outside a repository, and where a user
+keeps `node_modules` in their global gitignore the walk cannot see it at all. A
+Node project indexed under any of those three swallowed its whole dependency
+tree — tens of thousands of chunks nobody asked about, and as many graph nodes
+with no edge into the project's own code, which is what a field of unconnected
+dots on the Graph page actually was.
+
+A name that is never somebody's own source — `node_modules`, `__pycache__`,
+`.venv`, `.gradle`, `DerivedData`, `.dart_tool`, `_build` and the rest — is
+stepped over outright. A name that often *is* somebody's own — `target`,
+`build`, `dist`, `out`, `bin`, `obj`, `vendor`, `deps` — is stepped over only
+when the manifest that generates it is sitting beside it, so a project with a
+hand-written `build/` and no build file keeps it. `SEMLITH_DEFAULT_IGNORES=0`
+turns the table off whole.
+
+The index run names every directory it stepped over, rather than counting the
+files inside one: pruning the subtree is the point, and counting what is in it
+would undo the saving in order to report it. An existing store drops what it
+already holds on its next index pass; nothing needs migrating.
+
+### One skill, installed once and linked everywhere
+
+The binary carries an Agent Skill named `semlith`, in agentskills.io format, and
+`semlith setup` writes it to `~/.semlith/skills/semlith/` and links that one copy
+into every user-level skill directory a documented client reads — the
+cross-client `~/.agents/skills`, and Claude Code's, Qwen Code's and Kiro's.
+Canonical plus links rather than a copy per client: removing the canonical
+directory removes all of them, and a link that has gone stale is reported rather
+than silently left behind.
+
+`semlith setup --register-all` also writes the short always-on rule block into
+the user-level rules files semlith knows a path for, between markers of its own
+and with a backup beside each file first. Nothing outside those markers is read
+or written, and a second run replaces what is between them rather than appending
+again. For a client whose rules file semlith does not know — Cursor and Copilot
+keep theirs in their own interface — `doctor` prints the block to paste.
+
+`semlith doctor` now reports, per client, whether the skill is linked, whether
+the hook is present, and whether the rule block is there, in four states each:
+linked, absent, stale, or paste needed. The portal's Doctor page shows the same
+states from the same computation, beside the registration it already showed.
+
+The MCP `initialize` result carries the `instructions` text `server/discover`
+has sent since 0.20.0. Every client still on a 2025 revision — which is most of
+them — never calls discover, so until now the sentence saying what this server
+is for reached only the clients that needed it least.
+
+Gemini CLI is not part of this: its MCP registration is unchanged, but no skill
+link, rule block or hook is written for it, because none was ever run against a
+live Gemini CLI and a client whose hook was never exercised is not evidence.
+
+### The agent is steered, not only taught
+
+`semlith hook` answers one `PreToolUse` event. When a registered store holds
+the file a client is about to read whole — or the tree it is about to grep — it
+adds one line naming the `semlith_brief` or `semlith_read` call that answers the
+same question, and otherwise it says nothing at all. It decides from
+`registry.json` alone, so a file no store holds costs one path comparison, and
+it never sends a permission decision: answering `allow` would approve a read the
+user's own rules were about to be consulted about. `--strict` refuses the first
+qualifying read of a session and then reverts to the line.
+
+Each whole-file read it sees becomes one ledger row — kind `raw-read`, the path,
+what reading it whole cost, the client and the session — chained like every
+other row and uncredited, because semlith answered none of it. That is what
+makes Refunds a measurement rather than an estimate: until now the ledger
+counted only the questions semlith was asked, which leaves out every one it was
+not. The row goes through a running daemon or not at all; the hook never opens a
+store from inside a client's tool call, and `--no-ledger` and `SEMLITH_LEDGER=0`
+stop these rows exactly as they stop the rest.
+
+### Every search filter negates
+
+A leading `!` on a `--path`, `--ext` or `--lang` value — and on the `path`,
+`ext` and `lang` fields of every MCP tool that takes them — excludes instead of
+including. Exclusions apply after the inclusions of their own kind, so
+`--path 'src/**' --path '!src/vendor/**'` is everything under `src` but the
+vendored tree, and an exclusion written on its own is everything except.
+
+A filter that admits no indexed file now says so in one sentence wherever it
+happens — the terminal, `semlith_search` and `semlith_brief` — rather than in
+three wordings on the commands that had a check and silence on the ones that
+did not. The README's "no way to express not this path" limit is gone with it.
+
 ## [0.23.0] - 2026-09-19
 
 An agent asking semlith a question used to spend four round trips on it: search,
@@ -2491,7 +2627,12 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/semlith/semlith/compare/v0.23.0...v0.24.0
+[0.23.0]: https://github.com/semlith/semlith/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/semlith/semlith/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/semlith/semlith/compare/v0.20.2...v0.21.0
+[0.20.2]: https://github.com/semlith/semlith/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/semlith/semlith/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/semlith/semlith/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/semlith/semlith/compare/v0.18.0...v0.19.0

@@ -1216,6 +1216,15 @@ h2 {
   white-space: nowrap;
 }
 
+/* Two or three pills on one cell: the skill, the hook and the rule block are
+ * three answers to one question and read as a row rather than as a column
+ * each. They wrap on a phone rather than widening the table. */
+.pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
 /* A pill that reports a state carries a dot. One element, so a pill without a
  * state cannot accidentally look like one with a state. */
 .pill i,
