@@ -971,6 +971,22 @@ fn run() -> Result<()> {
                 } else {
                     String::new()
                 };
+                // Stepped over whole. A person hunting for a file that is not
+                // in their store needs the name of the directory that was
+                // skipped, and a corpus that quietly excluded a dependency tree
+                // without saying so is one nobody can reason about.
+                if !report.generated.is_empty() {
+                    eprintln!(
+                        "not indexed, generated or vendored: {}",
+                        report
+                            .generated
+                            .iter()
+                            .map(|p| semlith::plain(p))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    eprintln!("  `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.");
+                }
                 // Named one per line. A refusal reported as a count is one the
                 // person retries with the same arguments.
                 for (path, why) in &report.refused {
@@ -1285,6 +1301,11 @@ fn run() -> Result<()> {
                         }
                         None => println!("{label}: the chain is intact"),
                     }
+                    // What the chain is a chain of. A verify that says only
+                    // "intact" proves the record was not edited and says
+                    // nothing about what it records, which is the question
+                    // somebody defending a savings figure is actually asked.
+                    print_savings(store, "  ")?;
                 }
                 // Non-zero so a script can act on it. A verify that reported a
                 // broken chain and exited 0 would be worse than no verify.
@@ -1329,6 +1350,17 @@ fn run() -> Result<()> {
   the chain does not verify from row {broken} onwards: \
                          these rows have been edited or removed"
                     )?;
+                }
+            }
+            if any && !json {
+                for (label, store) in fleet.each() {
+                    if many {
+                        println!();
+                        println!("{}{label}{}", bold(), reset());
+                    } else {
+                        println!();
+                    }
+                    print_savings(store, "  ")?;
                 }
             }
             if !any && !json {
@@ -2767,6 +2799,54 @@ fn steering_line(client: &semlith::doctor::ClientReport) -> Option<String> {
         ));
     }
     (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The savings block: the number, and every denominator that makes it
+/// defensible.
+///
+/// Never the number alone. Coverage says what share of retrievals it is
+/// computed over and tier says how the tokens were counted, and a figure
+/// printed without both is a figure a reader cannot check — which is how the
+/// double-counted README paragraph of 0.17.2 came to exist.
+fn print_savings(store: &semlith::Semlith, indent: &str) -> Result<()> {
+    let savings = semlith::store::ledger_savings(store.db())?;
+    let misses = semlith::store::ledger_misses(store.db())?;
+    let clients = semlith::store::ledger_clients(store.db())?;
+
+    println!(
+        "{indent}saved {} tokens over {} of {} retrievals — coverage {} %, tier {}",
+        savings.net,
+        savings.credited,
+        savings.total,
+        savings.coverage(),
+        savings.tier(),
+    );
+    println!(
+        "{indent}what reading those files whole would have cost, counted with the store's tokenizer"
+    );
+    println!(
+        "{indent}refunds {} ({}) · zero-hit {} of {}",
+        misses.refunds,
+        if misses.measured {
+            "measured: a steering hook reports the reads semlith never served"
+        } else {
+            "a floor: no steering hook has reported here, so reads semlith never \
+             served are not counted"
+        },
+        misses.zero_hit,
+        savings.total,
+    );
+    if !clients.is_empty() {
+        println!(
+            "{indent}clients: {}",
+            clients
+                .iter()
+                .map(|(name, count)| format!("{name} {count}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        );
+    }
+    Ok(())
 }
 
 fn print_doctor(

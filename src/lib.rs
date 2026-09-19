@@ -798,6 +798,16 @@ pub struct IndexReport {
     /// hashes made it *correct* to re-walk, which is why it went unnoticed.
     #[serde(skip)]
     pub pending: Vec<PathBuf>,
+    /// Generated or vendored directories the walk stepped over — `node_modules`,
+    /// a `target` beside a `Cargo.toml`, and the rest of the default-ignore
+    /// table.
+    ///
+    /// Named rather than counted in files, because pruning the subtree is the
+    /// point and counting what is inside it would undo the saving to report it.
+    /// A person looking for a file that is not in their store needs the name of
+    /// the directory that was stepped over, which is what this gives them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub generated: Vec<String>,
     /// Paths refused, each with the rule that refused it.
     ///
     /// Listed rather than counted: "three paths were refused" is not something
@@ -1305,6 +1315,7 @@ impl Semlith {
                 files,
                 named: Vec::new(),
                 unreadable: Vec::new(),
+                generated: Vec::new(),
             },
             true,
             Some(deadline),
@@ -1341,6 +1352,7 @@ impl Semlith {
                 files: paths,
                 named: Vec::new(),
                 unreadable: Vec::new(),
+                generated: Vec::new(),
             },
             false,
             None,
@@ -1425,6 +1437,7 @@ impl Semlith {
             files: walked_paths,
             named,
             unreadable: unwalkable,
+            generated,
         } = walked;
         let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = {
             let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
@@ -1482,6 +1495,7 @@ impl Semlith {
                 Some(why),
             );
         }
+        report.generated = generated.iter().map(|p| p.display().to_string()).collect();
         // Entries the walk could not read. They used to be a line on stderr,
         // which the daemon and the portal never see, so an unreadable
         // directory looked like a tree that simply had nothing in it.
@@ -3440,6 +3454,155 @@ pub(crate) struct Walked {
     pub named: Vec<PathBuf>,
     /// Paths the walk could not read, each with what the walk said.
     pub unreadable: Vec<(PathBuf, String)>,
+    /// Generated or vendored directories the walk stepped over, in the order it
+    /// met them.
+    ///
+    /// Named rather than counted in files: pruning the subtree is the point, so
+    /// counting what is inside it would undo the saving to report it. A reader
+    /// looking for a file that is not in their store needs the directory's name,
+    /// not an integer.
+    pub generated: Vec<PathBuf>,
+}
+
+/// Directories that are generated or vendored rather than written.
+///
+/// `.gitignore` is not enough on its own, and the reason is worth stating: it
+/// is a list of what is not *committed*, it is absent from a folder somebody
+/// downloaded rather than cloned, and where a user keeps `node_modules` in
+/// their global gitignore the walk cannot see it at all. A corpus that swallows
+/// a dependency tree is the wrong corpus twice over — every one of its files
+/// becomes chunks nobody asked about, and every one of its symbols becomes a
+/// graph node with no edge into the project, which is what a user sees when the
+/// graph of their own repository is a field of unconnected dots.
+///
+/// # Two kinds of name
+///
+/// A name in [`ALWAYS`] is never a directory a person wrote. A name in
+/// [`GENERATED`] very often is — plenty of projects have a hand-written
+/// `build/` or their own `vendor/` — so it is skipped only when the manifest
+/// that generates it is sitting beside it. That keeps the table from quietly
+/// deleting somebody's source tree because it shares a name with cargo's output.
+///
+/// `SEMLITH_DEFAULT_IGNORES=0` turns the whole table off, for the person whose
+/// corpus really is a vendored tree.
+const ALWAYS: &[&str] = &[
+    // JavaScript and TypeScript
+    "node_modules",
+    "bower_components",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".parcel-cache",
+    ".yarn",
+    // Python
+    "__pycache__",
+    ".venv",
+    "site-packages",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".eggs",
+    // JVM, Android
+    ".gradle",
+    // Swift, Xcode
+    "DerivedData",
+    ".swiftpm",
+    // Dart and Flutter
+    ".dart_tool",
+    // Elixir
+    "_build",
+    // Everything
+    ".terraform",
+    ".serverless",
+    ".gradle-cache",
+];
+
+/// `(directory, the manifests that make it generated)`.
+///
+/// Skipped only when one of the manifests is a sibling of the directory, so a
+/// `build/` in a project with no build file is somebody's own code and stays.
+const GENERATED: &[(&str, &[&str])] = &[
+    ("target", &["Cargo.toml"]),
+    ("vendor", &["go.mod", "composer.json", "Gemfile"]),
+    ("deps", &["mix.exs"]),
+    (
+        "build",
+        &[
+            "build.gradle",
+            "build.gradle.kts",
+            "pom.xml",
+            "CMakeLists.txt",
+            "meson.build",
+            "package.json",
+        ],
+    ),
+    (
+        "dist",
+        &[
+            "package.json",
+            "pyproject.toml",
+            "setup.py",
+            "rollup.config.js",
+        ],
+    ),
+    ("out", &["package.json", "tsconfig.json"]),
+    ("bin", &["*.csproj", "*.sln", "*.fsproj"]),
+    ("obj", &["*.csproj", "*.sln", "*.fsproj"]),
+    ("coverage", &["package.json", "pyproject.toml"]),
+    ("Pods", &["Podfile"]),
+];
+
+/// Whether this directory is generated output rather than somebody's code.
+///
+/// Public so `semlith stats` and the index run can say how many files went
+/// unindexed for this reason: a file missing from a store should be missing for
+/// a reason a user can read, not for one they have to guess.
+pub fn is_generated_dir(path: &Path) -> bool {
+    if !default_ignores_on(std::env::var("SEMLITH_DEFAULT_IGNORES").ok().as_deref()) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if ALWAYS.contains(&name) {
+        return true;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    GENERATED
+        .iter()
+        .filter(|(dir, _)| *dir == name)
+        .any(|(_, manifests)| manifests.iter().any(|m| sibling_exists(parent, m)))
+}
+
+/// Whether the table applies, given whatever `SEMLITH_DEFAULT_IGNORES` says.
+///
+/// Split from the environment read so it can be tested without setting a
+/// process-wide variable: a test that mutates the environment races every other
+/// test in the same binary, which is how a passing suite turns into a flaky one.
+pub fn default_ignores_on(value: Option<&str>) -> bool {
+    !matches!(value, Some("0") | Some("off") | Some("false"))
+}
+
+/// Whether `parent` holds `manifest`, which may be a `*.ext` pattern for the
+/// ecosystems that name their project file after the project.
+fn sibling_exists(parent: &Path, manifest: &str) -> bool {
+    let Some(extension) = manifest.strip_prefix("*.") else {
+        return parent.join(manifest).exists();
+    };
+    std::fs::read_dir(parent)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn walk(roots: &[PathBuf]) -> Walked {
@@ -3447,6 +3610,10 @@ fn walk(roots: &[PathBuf]) -> Walked {
     let mut named = Vec::new();
     let mut unreadable = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // Written from inside `filter_entry`, which the walker may call from
+    // several threads even on the single-threaded builder it is handed here,
+    // and which must outlive the borrow the builder takes.
+    let generated: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>> = Default::default();
 
     for root in roots {
         // A root that is a file is a path the caller named, not one a walk
@@ -3470,7 +3637,23 @@ fn walk(roots: &[PathBuf]) -> Walked {
             // folder is a perfectly normal thing to index, and a `.gitignore`
             // sitting in it still means "not this".
             .require_git(false)
-            .filter_entry(|e| e.file_name() != ".semlith");
+            // `.semlith` is the store itself; the rest is generated output
+            // that `.gitignore` covers only where somebody wrote one.
+            .filter_entry({
+                let generated = generated.clone();
+                move |e| {
+                    if e.file_name() == ".semlith" {
+                        return false;
+                    }
+                    if e.file_type().is_some_and(|t| t.is_dir()) && is_generated_dir(e.path()) {
+                        if let Ok(mut seen) = generated.lock() {
+                            seen.push(e.path().to_path_buf());
+                        }
+                        return false;
+                    }
+                    true
+                }
+            });
 
         for result in builder.build() {
             // Unreadable directories should not abort the run, but silently
@@ -3510,10 +3693,14 @@ fn walk(roots: &[PathBuf]) -> Walked {
     out.sort();
     named.sort();
     unreadable.sort();
+    let mut generated = generated.lock().map(|g| g.clone()).unwrap_or_default();
+    generated.sort();
+    generated.dedup();
     Walked {
         files: out,
         named,
         unreadable,
+        generated,
     }
 }
 

@@ -186,25 +186,33 @@ fn stores(state: &Arc<State>) -> Response {
                     // The store's own last write, not this daemon's memory of
                     // one. A store written yesterday has a last write today.
                     store::last_write(s.db()).ok().flatten(),
+                    // One savings line per card, and never the number alone:
+                    // its coverage and its tier travel with it, because a
+                    // figure a reader cannot check is a figure they are being
+                    // asked to take on trust.
+                    store::ledger_savings(s.db()).ok(),
                 )
             });
 
-        let (files, chunks, bytes, model, dim, vectors, shards, facets, written) = match stats {
-            Some((Ok((f, c, b)), model, dim, len, shards, facets, written)) => {
-                (f, c, b, model, dim, len, shards, facets, written)
-            }
-            _ => (
-                0,
-                0,
-                0,
-                String::new(),
-                0,
-                0,
-                None,
-                store::Facets::default(),
-                None,
-            ),
-        };
+        #[allow(clippy::type_complexity)]
+        let (files, chunks, bytes, model, dim, vectors, shards, facets, written, savings) =
+            match stats {
+                Some((Ok((f, c, b)), model, dim, len, shards, facets, written, savings)) => {
+                    (f, c, b, model, dim, len, shards, facets, written, savings)
+                }
+                _ => (
+                    0,
+                    0,
+                    0,
+                    String::new(),
+                    0,
+                    0,
+                    None,
+                    store::Facets::default(),
+                    None,
+                    None,
+                ),
+            };
 
         // The daemon's own counter still wins when it is newer, so a re-embed
         // that has landed in this session shows immediately rather than waiting
@@ -260,6 +268,16 @@ fn stores(state: &Arc<State>) -> Response {
             // visible rather than silent.
             "pruned": handle.pruned.load(Ordering::Relaxed),
             "missing": false,
+            // Tokens saved, what they cover, and how they were counted. One
+            // line, no chart: a chart of one number is decoration, and the
+            // three qualifiers are what make the number defensible.
+            "savings": savings.map(|s| json!({
+                "net_tokens": s.net,
+                "credited": s.credited,
+                "total": s.total,
+                "coverage": s.coverage(),
+                "tier": s.tier(),
+            })),
             "events": handle.events(),
         }));
     }
@@ -760,10 +778,20 @@ fn ledger(state: &Arc<State>) -> Response {
         // owes the CLI's `semlith ledger --last 20`. Read here rather than
         // from a second route so the tiles and the rows cannot disagree.
         let mut rows: Vec<Value> = Vec::new();
+        let mut refunds = 0;
+        let mut zero_hit = 0;
+        let mut refunds_measured = false;
         for (label, store) in fleet.each() {
             let savings = store::ledger_savings(store.db())?;
             net += savings.net;
             measured = measured && savings.measured;
+            let misses = store::ledger_misses(store.db())?;
+            refunds += misses.refunds;
+            zero_hit += misses.zero_hit;
+            // One hooked store is enough to make the figure a measurement for
+            // that store, and the page says which kind it is rather than
+            // averaging two different things into one word.
+            refunds_measured = refunds_measured || misses.measured;
             credited_keys.extend(store::ledger_keys(
                 store.db(),
                 label,
@@ -816,6 +844,13 @@ fn ledger(state: &Arc<State>) -> Response {
             "credited": credited,
             "coverage": coverage,
             "tier": if measured && credited > 0 { "measured" } else { "modelled" },
+            // What semlith did not answer, in two figures rather than one.
+            // A refund is an agent that did not reach for semlith; a zero hit
+            // is semlith that did not reach the answer. They call for opposite
+            // things, so they are never added together.
+            "refunds": refunds,
+            "refunds_measured": refunds_measured,
+            "zero_hit": zero_hit,
             "by_client": by_client,
             "rows": rows,
             // Rows written before this version were one per open store, so the
@@ -1504,6 +1539,32 @@ fn reveal(state: &Arc<State>) -> Response {
     Response::json(&json!({ "key": state.server.agent_key() }))
 }
 
+/// What the tool list costs a session, in tokens, and how that was counted.
+///
+/// Once per session, before the agent has asked anything: it is the standing
+/// charge for having semlith connected at all, and a user should be able to
+/// read it rather than capture traffic to discover it.
+fn tool_list_tokens(state: &Arc<State>) -> (i64, &'static str) {
+    let text = crate::mcp::tool_list()
+        .into_iter()
+        .map(|(name, about)| format!("{name} {about}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let guard = state.fleet.lock().ok();
+    let counter = guard
+        .as_ref()
+        .and_then(|f| f.as_ref())
+        .map(|f| f.counter())
+        .unwrap_or(crate::ledger::Counter::Chars4);
+    let count = counter.count(&text);
+    // The whole payload, not only the prose: the schemas are what an agent is
+    // sent. The prose is what a tokenizer can be run over honestly, so the
+    // count is scaled by the payload's share of it rather than estimated twice.
+    let bytes = crate::mcp::tool_list_bytes() as i64;
+    let prose = text.len().max(1) as i64;
+    (count * bytes / prose, counter.label())
+}
+
 fn agents(state: &Arc<State>) -> Response {
     let connections = state.clients();
     let key = state.server.agent_key();
@@ -1523,6 +1584,13 @@ fn agents(state: &Arc<State>) -> Response {
         // asked anything. A cost a user should be able to see rather than one
         // they would have to capture traffic to discover.
         "tool_list_bytes": crate::mcp::tool_list_bytes(),
+        // And in the unit an agent is billed in. Measured with a store's own
+        // tokenizer where one is loaded, and labelled with which counter said
+        // so -- the same two tiers the ledger uses, because a token count
+        // estimated at four characters each is not the same fact as one a
+        // tokenizer produced, and the page says which it is showing.
+        "tool_list_tokens": tool_list_tokens(state).0,
+        "tool_list_tier": tool_list_tokens(state).1,
         "revisions": crate::mcp::SUPPORTED,
         "clients": crate::clients::clients(),
         // Whether semlith is there without being asked, and since when. The

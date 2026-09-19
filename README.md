@@ -478,6 +478,9 @@ at. Query latency does grow: the index scan is linear.
   searchable at all — but if your store fits, raising the budget is free speed.
 - The default model is English-only and is fixed when a store is created. Image
   search is not OCR, and the CLIP pair behind it is fixed.
+- Generated and vendored directories are not indexed: `node_modules` and its
+  kind always, `target`/`build`/`dist`/`vendor` when the manifest that makes
+  them sits beside them. `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.
 - Search filters are SQLite `GLOB`: no regex, though a leading `!` excludes.
   `--lang` maps a fixed table of extensions and never reads contents.
 - Results are not reranked by a cross-encoder, multi-store search is a merge

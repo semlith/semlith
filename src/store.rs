@@ -2073,6 +2073,47 @@ impl Savings {
     }
 }
 
+/// What the ledger says about the questions semlith did *not* answer.
+///
+/// `refunds` counts the whole-file reads the steering hook saw on a file this
+/// store holds: semlith could have answered them and was not asked. `zero_hit`
+/// counts the retrievals semlith *was* asked and found nothing for. They are
+/// separate figures because they call for opposite things — a refund means the
+/// agent is not reaching for semlith, a zero hit means semlith is not reaching
+/// the answer — and adding them together would say neither.
+///
+/// `measured` is false when no hook has ever written into this store, which is
+/// what makes `refunds` a floor rather than a count on such a machine.
+pub fn ledger_misses(db: &Connection) -> Result<Misses> {
+    let refunds: i64 = db.query_row(
+        "SELECT COUNT(*) FROM retrievals WHERE tool = ?1",
+        params![crate::ledger::RAW_READ],
+        |r| r.get(0),
+    )?;
+    let zero_hit: i64 = db.query_row(
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+         WHERE hits = 0 AND (tool IS NULL OR tool != ?1)",
+        params![crate::ledger::RAW_READ],
+        |r| r.get(0),
+    )?;
+    Ok(Misses {
+        refunds,
+        zero_hit,
+        measured: refunds > 0,
+    })
+}
+
+/// The two figures for what semlith did not answer.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct Misses {
+    /// Whole-file reads of a file this store holds, seen by the steering hook.
+    pub refunds: i64,
+    /// Retrievals semlith answered with nothing.
+    pub zero_hit: i64,
+    /// Whether a hook has ever written here. Without one, `refunds` is a floor.
+    pub measured: bool,
+}
+
 /// How many retrievals each client made, most first.
 pub fn ledger_clients(db: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(

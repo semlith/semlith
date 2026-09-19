@@ -234,7 +234,7 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
     );
 }
 
-/// Under 540 lines, because the document that has to convert a first-time
+/// Under 550 lines, because the document that has to convert a first-time
 /// reader was 1 816 of them and mostly a reference table.
 ///
 /// The ceiling was 500 until 0.17.3, which raised it by twenty for the `Prior
@@ -248,7 +248,11 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// what one answered question costs an agent, one call against several — is
 /// the number the front page exists to state. Two rows of the numbers table
 /// were merged first, so the five is what is left after trimming rather than
-/// instead of it.
+/// instead of it. 0.24.0 raises it by ten: `semlith hook` needs a row in the
+/// same table, the default-ignore table needs one line under Known limits
+/// because a file missing from a store must be explainable from the front
+/// page, and the savings paragraph this release exists to be able to state
+/// needs a short paragraph with its command beside it.
 ///
 /// The gate exists to keep a reference catalogue out of the front page — but
 /// the number moves in a release that decided to move it, with the reason
@@ -257,7 +261,7 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 540,
-        "the README is {lines} lines; the ceiling is 540"
+        lines < 550,
+        "the README is {lines} lines; the ceiling is 550"
     );
 }

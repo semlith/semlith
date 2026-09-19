@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### A corpus is the project, not its dependencies
+
+The walk carries a table of generated and vendored directories of its own, for
+every language semlith supports. `.gitignore` was the only thing standing
+between a store and a dependency tree, and it is a statement about what is
+*committed*: it is absent from a folder somebody downloaded rather than cloned,
+it is absent where `npm install` ran outside a repository, and where a user
+keeps `node_modules` in their global gitignore the walk cannot see it at all. A
+Node project indexed under any of those three swallowed its whole dependency
+tree — tens of thousands of chunks nobody asked about, and as many graph nodes
+with no edge into the project's own code, which is what a field of unconnected
+dots on the Graph page actually was.
+
+A name that is never somebody's own source — `node_modules`, `__pycache__`,
+`.venv`, `.gradle`, `DerivedData`, `.dart_tool`, `_build` and the rest — is
+stepped over outright. A name that often *is* somebody's own — `target`,
+`build`, `dist`, `out`, `bin`, `obj`, `vendor`, `deps` — is stepped over only
+when the manifest that generates it is sitting beside it, so a project with a
+hand-written `build/` and no build file keeps it. `SEMLITH_DEFAULT_IGNORES=0`
+turns the table off whole.
+
+The index run names every directory it stepped over, rather than counting the
+files inside one: pruning the subtree is the point, and counting what is in it
+would undo the saving in order to report it. An existing store drops what it
+already holds on its next index pass; nothing needs migrating.
+
 ### One skill, installed once and linked everywhere
 
 The binary carries an Agent Skill named `semlith`, in agentskills.io format, and

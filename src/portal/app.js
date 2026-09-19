@@ -2341,10 +2341,27 @@ async function ledgerView() {
     el(
       "div",
       { class: "strip" },
+      /* Read from the route rather than derived as queries less credited.
+       * Since 0.24.0 an uncredited retrieval is one of two different things —
+       * a question semlith could not answer, and a file an agent read whole
+       * without asking — and subtracting one number from another counted them
+       * as the same thing. */
       stat(
         "Zero-hit",
-        `${data.queries ? Math.round(((data.queries - (data.credited || 0)) * 100) / data.queries) : 0}%`,
+        `${n(data.zero_hit || 0)} of ${n(data.queries)}`,
         "queries the corpus could not answer — recorded, and credited nothing",
+      ),
+      /* The figure the savings claim is defended against: what an agent read
+       * whole anyway, on a file this store holds. Measured on a client with the
+       * steering hook, a floor everywhere else — and the caption says which,
+       * because a floor presented as a count is the flattering half of a
+       * number. */
+      stat(
+        "Refunds",
+        `${n(data.refunds || 0)}${data.refunds_measured ? "" : "+"}`,
+        data.refunds_measured
+          ? "files read whole after all, seen by the steering hook — measured"
+          : "a floor: no steering hook reports here, so reads semlith never served are uncounted",
       ),
       stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
     ),
@@ -2957,6 +2974,31 @@ async function storesView() {
         className: "num narrow-drop",
         value: (s) => s.chunks,
         render: (s) => n(s.chunks),
+      },
+      {
+        /* One line per store, and never the number on its own: the tokens, the
+         * share of retrievals they are computed over, and how they were
+         * counted, in one cell. A saved-token figure without its coverage and
+         * its tier is a figure a reader is being asked to take on trust, which
+         * is what made the 0.17.2 README paragraph unshippable. No chart: a
+         * chart of one number is decoration. */
+        key: "saved",
+        label: "Saved",
+        className: "num narrow-drop",
+        value: (s) => (s.savings ? s.savings.net_tokens : -1),
+        render: (s) => {
+          if (!s.savings || !s.savings.total) {
+            return el("span", { class: "meta", text: "—" });
+          }
+          return el(
+            "span",
+            {
+              class: "meta",
+              title: `${n(s.savings.net_tokens)} tokens saved over ${n(s.savings.credited)} of ${n(s.savings.total)} retrievals, counted ${s.savings.tier}`,
+            },
+            `${n(s.savings.net_tokens)} · ${s.savings.coverage}% · ${s.savings.tier}`,
+          );
+        },
       },
       {
         key: "last_write",
@@ -6660,13 +6702,20 @@ async function agentsView() {
             el("span", { class: "card-title", text: "What the tool list costs" }),
             el("span", {
               class: "cost-line",
-              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · about ${n(
-                Math.ceil((data.tool_list_bytes || 0) / 4),
+              /* Measured, not "about". The daemon counts it with a store's own
+               * tokenizer where one is loaded and says which counter produced
+               * the figure, the same two tiers the ledger reports — because
+               * four characters to a token is an estimate and this page should
+               * not present one as a measurement. */
+              text: `${tools.length} tools · ${n(data.tool_list_bytes || 0)} bytes · ${n(
+                data.tool_list_tokens || Math.ceil((data.tool_list_bytes || 0) / 4),
               )} tokens per session`,
             }),
             el("span", {
               class: "cost-note",
-              text: "read once, before the agent asks anything",
+              text: `read once, before the agent asks anything — counted ${
+                data.tool_list_tier || "chars4"
+              }`,
             }),
           ),
           el(
