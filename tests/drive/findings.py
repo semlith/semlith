@@ -2134,7 +2134,7 @@ def _(d):
     )
 
 
-@finding("3.24", "one destination has one name")
+@finding("3.24", "the search box has one name, and the rail names its own journey")
 def _(d):
     d.open_view("search")
     top_bar = d.eval(
@@ -2174,12 +2174,37 @@ def _(d):
         })()
         """
     )
-    phrases = {p for p in (top_bar, field, rail) if p}
-    if len(phrases) > 1:
+    # Read in two parts from 0.26.1, and the split is a judgement worth naming.
+    #
+    # The finding is that one destination had several names. The top bar's
+    # launcher and the Search page's field are one control's invitation seen
+    # twice, and those must still agree exactly — that is the bug, and it is
+    # asserted first.
+    #
+    # The graph rail's button is a different journey: it does not open an empty
+    # search, it runs one for the symbol you have selected. The v4 design names
+    # it for what it gives you rather than echoing the search box, and a button
+    # reading "Ask the index a question" told a reader nothing about what they
+    # would get. So the rail is held to a different rule: it must not be a
+    # third spelling of the search box's invitation. Require all three to match
+    # and the only way to pass is to call the top bar "Chunks it lives in",
+    # which is not an improvement anyone wants.
+    if top_bar and field and top_bar != field:
         fail(
-            "one destination is given %d names: %s. Whichever wording wins, the "
-            "top bar, the search field and the graph rail button should agree."
-            % (len(phrases), ", ".join(sorted(repr(p) for p in phrases)))
+            "the top bar says %r and the search field says %r; they are one "
+            "control's invitation and must read the same" % (top_bar, field)
+        )
+    if rail and rail in {top_bar, field}:
+        fail(
+            "the graph rail's button reads %r, the same words as the search "
+            "box. It is a different journey — it searches for the selected "
+            "symbol rather than opening an empty box — and naming it after the "
+            "box says nothing about what it gives you." % rail
+        )
+    if rail and not re.search(r"chunks it lives in", rail, re.I):
+        fail(
+            "the graph rail's route into Search reads %r; the v4 design names "
+            "it 'Chunks it lives in', for what the reader gets" % rail
         )
 
 

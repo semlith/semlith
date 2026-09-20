@@ -2132,28 +2132,6 @@ async function graphView() {
         // The graph read backwards, from the symbol already in hand. The
         // Impact page takes a name; this is how somebody who is looking at
         // one gets there without typing it again.
-        // The v4 rail offers both readings of a selected symbol side by side:
-        // the chunks it lives in, and what reaches it. Only the second was
-        // here, so the way back to the text of a symbol was to retype its name
-        // into Search.
-        el("button", {
-          class: "link-button quiet",
-          type: "button",
-          text: "Chunks it lives in",
-          onclick: () => {
-            state.pendingQuery = node.name;
-            go("search");
-          },
-        }),
-        el("button", {
-          class: "link-button quiet",
-          type: "button",
-          text: "Blast radius",
-          onclick: () => {
-            state.impactSymbol = node.name;
-            go("impact");
-          },
-        }),
       ),
       // "Incoming", because that is what the list holds. Under a heading
       // reading CALLERS it carried a `defines` edge and a `references` edge,
@@ -2202,16 +2180,32 @@ async function graphView() {
           : null,
       ),
       confidenceLegend(),
+      // The two readings of a selected symbol, side by side as the v4 rail has
+      // them: the chunks it lives in, and what reaches it.
+      //
+      // The first of these used to read "Ask the index a question", which is
+      // the top bar's wording for the search box — so the rail and the top bar
+      // gave one destination two names, which is what finding 3.24 is about.
+      // It is the same journey with a name that says what you get.
       el(
         "div",
         { class: "rail-actions" },
         el("button", {
           class: "button secondary small",
           type: "button",
-          text: "Ask the index a question",
+          text: "Chunks it lives in",
           onclick: () => {
             state.pendingQuery = node.name;
             go("search");
+          },
+        }),
+        el("button", {
+          class: "button small",
+          type: "button",
+          text: "Blast radius",
+          onclick: () => {
+            state.impactSymbol = node.name;
+            go("impact");
           },
         }),
       ),
