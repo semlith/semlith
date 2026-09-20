@@ -2465,6 +2465,272 @@ pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
     Ok((files, chunks, bytes))
 }
 
+/// One session's whole ledger, as the per-session table reads it.
+#[derive(Debug, Clone, Default)]
+pub struct SessionRow {
+    /// The session id the client sent at handshake. Empty for rows written
+    /// before 0.15.0, which is said rather than guessed at.
+    pub session: String,
+    pub client: String,
+    /// When the session's first and last recorded retrieval happened.
+    pub first: i64,
+    pub last: i64,
+    pub retrievals: i64,
+    /// Retrievals that found nothing. Recorded and credited nothing — a
+    /// ledger that remembers only its successes is a marketing document.
+    pub zero_hit: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+    /// Whole-file less excerpt, over the rows that found something.
+    pub net: i64,
+    /// Rows counted with the store's own tokenizer rather than by the
+    /// four-characters fallback. The tier of this row's figures.
+    pub measured: i64,
+}
+
+impl SessionRow {
+    /// `measured` when every credited row in the session was counted by a
+    /// model's own tokenizer, `modelled` otherwise. Never averaged: two rows
+    /// counted two ways are not one number.
+    pub fn tier(&self) -> &'static str {
+        if self.measured == self.retrievals && self.retrievals > 0 {
+            "measured"
+        } else {
+            "modelled"
+        }
+    }
+}
+
+/// Every session this store recorded, newest last-seen first.
+///
+/// Grouped in SQL rather than in the page, for the reason the totals are:
+/// one search over six stores writes a row in each, and a browser adding
+/// them up is a second opinion about a number the store can state.
+pub fn ledger_sessions(db: &Connection, limit: usize) -> Result<Vec<SessionRow>> {
+    let mut stmt = db.prepare(
+        "SELECT COALESCE(session, ''), client,
+                MIN(at), MAX(at), COUNT(*),
+                SUM(CASE WHEN hits = 0 THEN 1 ELSE 0 END),
+                SUM(excerpt_tokens), SUM(whole_file_tokens),
+                SUM(CASE WHEN hits > 0 THEN whole_file_tokens - excerpt_tokens ELSE 0 END),
+                SUM(CASE WHEN tokenizer IS NOT NULL AND tokenizer <> 'chars4' THEN 1 ELSE 0 END)
+         FROM retrievals
+         GROUP BY COALESCE(session, ''), client
+         ORDER BY MAX(at) DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok(SessionRow {
+            session: r.get(0)?,
+            client: r.get(1)?,
+            first: r.get(2)?,
+            last: r.get(3)?,
+            retrievals: r.get(4)?,
+            zero_hit: r.get(5)?,
+            excerpt_tokens: r.get(6)?,
+            whole_file_tokens: r.get(7)?,
+            net: r.get(8)?,
+            measured: r.get(9)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Warm query latency as the ledger recorded it: p50 and p95, in microseconds.
+///
+/// From the rows themselves rather than from a benchmark, so the figure is
+/// what this machine actually served rather than what it can serve.
+pub fn ledger_latency(db: &Connection) -> Result<(i64, i64)> {
+    let mut stmt = db.prepare("SELECT micros FROM retrievals ORDER BY micros")?;
+    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+    let all: Vec<i64> = rows.collect::<rusqlite::Result<_>>()?;
+    if all.is_empty() {
+        return Ok((0, 0));
+    }
+    let at = |q: f64| all[((all.len() as f64 - 1.0) * q).round() as usize];
+    Ok((at(0.50), at(0.95)))
+}
+
+/// The hash of the newest ledger row: what `--verify` checks the chain to.
+pub fn ledger_head(db: &Connection) -> Result<Option<String>> {
+    let hash: Option<String> = db
+        .query_row(
+            "SELECT hash FROM retrievals ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(hash)
+}
+
+/// Queries that found nothing, commonest first.
+///
+/// The gap list: a question an agent asked that this corpus could not answer
+/// is either a missing document or a name nobody uses in the words they
+/// searched with.
+pub fn ledger_zero_hit_queries(db: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0
+         GROUP BY query ORDER BY n DESC, query LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Files this store read since `since`, newest first, with when it read them.
+pub fn files_indexed_since(
+    db: &Connection,
+    since: i64,
+    limit: usize,
+) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT path, indexed_at FROM files WHERE indexed_at >= ?1
+         ORDER BY indexed_at DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map([since, limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// One settled dependency edge, by name, for the community pass.
+///
+/// Names rather than ids, because `edges.dst` is a name and the whole point
+/// of the pass is to group names. Only edges whose target the store actually
+/// defines are returned: an edge into a dependency that was never indexed
+/// cannot join two communities of this corpus.
+pub struct NamedEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// Every `calls` and `imports` edge whose target this store defines, up to
+/// `limit`, with the total so a reader is told when the list was cut.
+///
+/// This is the one whole-graph read in the crate and it is bounded for that
+/// reason. Everything else walks one hop at a time to keep peak memory flat
+/// as a corpus grows; communities are a property of the whole graph and
+/// cannot be computed a hop at a time, so the bound is the substitute — past
+/// it the panel says `Shown N of M` rather than quietly clustering a slice.
+pub fn community_edges(db: &Connection, limit: usize) -> Result<(Vec<NamedEdge>, i64)> {
+    let target = crate::graph::not_navigational("s.kind");
+    // `extracted` and `inferred` are the stored values; `resolved` and
+    // `ambiguous` are computed per query and never written, so "settled" here
+    // means an extracted edge or a bare-name match onto exactly one
+    // definition. A name with several definitions is not evidence that two
+    // subsystems are joined.
+    let sql = format!(
+        "SELECT src.name, s.name
+         FROM symbols src
+         JOIN edges e ON e.src = src.id
+         JOIN symbols s ON s.name = e.dst AND {target}
+         WHERE e.kind IN ('calls', 'imports')
+           AND src.name <> s.name
+           AND (SELECT COUNT(*) FROM symbols d WHERE d.name = e.dst AND {}) = 1
+         LIMIT ?1",
+        crate::graph::not_navigational("d.kind")
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok(NamedEdge {
+            from: r.get(0)?,
+            to: r.get(1)?,
+        })
+    })?;
+    let edges: Vec<NamedEdge> = rows.collect::<rusqlite::Result<_>>()?;
+    let total: i64 = db.query_row(
+        "SELECT COUNT(*) FROM edges WHERE kind IN ('calls', 'imports')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok((edges, total))
+}
+
+/// Where each of these names is defined, for the hub lines under a community.
+pub fn where_defined(db: &Connection, names: &[String]) -> Result<Vec<(String, String, u32)>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let holes = vec!["?"; names.len()].join(", ");
+    let sql = format!(
+        "SELECT s.name, f.path, s.start_line
+         FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.name IN ({holes})
+         ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let binds: Vec<Value> = names.iter().map(|n| Value::Text(n.clone())).collect();
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Call targets no definition in this store satisfies, commonest first.
+///
+/// The names a reader has to recognise as "outside this corpus" before they
+/// read an absent edge as a missing call. Counted rather than listed in full:
+/// on a store that indexes application code every standard-library call is
+/// one of these, and the list is long and uninteresting past the first few.
+pub fn unresolved_targets(db: &Connection, limit: usize) -> Result<(Vec<(String, i64)>, i64)> {
+    let target = crate::graph::not_navigational("d.kind");
+    let sql = format!(
+        "SELECT e.dst, COUNT(*) AS n
+         FROM edges e
+         WHERE e.kind IN ('calls', 'imports')
+           AND NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = e.dst AND {target})
+         GROUP BY e.dst
+         ORDER BY n DESC, e.dst
+         LIMIT ?1"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let top: Vec<(String, i64)> = rows.collect::<rusqlite::Result<_>>()?;
+    let distinct: i64 = db.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM (SELECT e.dst FROM edges e
+             WHERE e.kind IN ('calls', 'imports')
+               AND NOT EXISTS (SELECT 1 FROM symbols d WHERE d.name = e.dst AND {target})
+             GROUP BY e.dst)"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok((top, distinct))
+}
+
+/// How many names this store defines more than once.
+///
+/// The population of every ambiguous edge: a walk refuses to cross one of
+/// these, so the count is what a reader needs to know before reading "not
+/// connected" as "nothing calls it".
+pub fn names_with_several_definitions(db: &Connection) -> Result<i64> {
+    let target = crate::graph::not_navigational("s.kind");
+    db.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM (SELECT s.name FROM symbols s WHERE {target}
+             GROUP BY s.name HAVING COUNT(*) > 1)"
+        ),
+        [],
+        |r| r.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// Chunks by the month their file was indexed, oldest first.
+///
+/// Indexed rather than written: the store records when it read a file, not
+/// when somebody wrote it, and labelling this "chunks per month" without
+/// saying which would be a claim about a repository's history that the store
+/// cannot make.
+pub fn chunks_by_month(db: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = db.prepare(
+        "SELECT strftime('%Y-%m', f.indexed_at, 'unixepoch') AS month, COUNT(c.id)
+         FROM chunks c JOIN files f ON f.id = c.file_id
+         GROUP BY month ORDER BY month",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

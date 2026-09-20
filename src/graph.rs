@@ -1403,6 +1403,14 @@ pub struct Step {
     pub confidence: String,
     /// How many definitions of `to` the store holds.
     pub definitions: usize,
+    /// The line the call was written on, in `from_path`.
+    ///
+    /// `None` for an edge written before 0.16.0 and for one whose source file
+    /// has not been re-indexed since — the same absence `EdgeEnd::line` has,
+    /// carried through rather than guessed at, because the enclosing
+    /// definition's line is a different line and often far away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_line: Option<u32>,
 }
 
 /// A chain, with what it is worth.
@@ -1972,6 +1980,7 @@ pub fn shortest_path(
                     kind: edge.kind,
                     confidence: edge.confidence,
                     definitions: edge.definitions,
+                    call_line: edge.line,
                 },
             );
             if reached.name == to {
@@ -2252,8 +2261,718 @@ fn unwind(came_from: &std::collections::HashMap<Node, Step>, start: &str, end: &
     chain
 }
 
+/// How many reached definitions one impact answer will carry.
+///
+/// Reverse reachability fans out faster than a path does: a utility three
+/// hops below `main` reaches most of the tree, and a list that long is a
+/// scroll rather than an answer. Past this the answer says how many it left
+/// out instead of printing them.
+pub const IMPACT_LIMIT: usize = 400;
+
+/// One definition that reaches the symbol asked about.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Reached {
+    pub name: String,
+    #[serde(serialize_with = "crate::serialize_plain")]
+    pub path: String,
+    pub line: u32,
+    /// Hops from the symbol asked about. One is a direct caller.
+    pub hop: u32,
+    /// The edge that reached it, and how much that edge is worth.
+    pub kind: String,
+    pub confidence: String,
+    /// The name this one reaches, one hop nearer the centre.
+    pub via: String,
+}
+
+/// One file that reaches the symbol, and how closely.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReachedFile {
+    #[serde(serialize_with = "crate::serialize_plain")]
+    pub path: String,
+    /// Definitions in this file that reach the symbol.
+    pub symbols: usize,
+    /// The fewest hops any of them takes.
+    pub nearest: u32,
+}
+
+/// Everything that reaches one symbol, to a bounded number of hops.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Impact {
+    pub name: String,
+    pub depth: u32,
+    /// Whether ambiguous edges were walked.
+    pub all_edges: bool,
+    /// The definitions of the name itself, so a reader knows which symbol
+    /// this is about when there is more than one.
+    pub definitions: Vec<crate::store::SymbolRow>,
+    pub reached: Vec<Reached>,
+    pub files: Vec<ReachedFile>,
+    /// How many reached definitions were left out at [`IMPACT_LIMIT`].
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hidden: usize,
+    /// Counted the same way a chain's summary is counted, so the page and the
+    /// terminal cannot disagree about what the answer is made of.
+    pub extracted: usize,
+    pub resolved: usize,
+    pub inferred: usize,
+    pub ambiguous: usize,
+}
+
+/// Everything that reaches `name`, breadth first, up to `depth` hops.
+///
+/// The mirror of [`shortest_path`] and it walks the same graph under the same
+/// rule: a node is a definition, not a name, and an ambiguous edge is not
+/// crossed unless `all_edges` says to. Breadth first, so the hop recorded
+/// against a definition is the fewest hops it takes — a caller that reaches
+/// the symbol both directly and through three others is a direct caller.
+pub fn impact(
+    db: &rusqlite::Connection,
+    name: &str,
+    kinds: &[String],
+    depth: u32,
+    all_edges: bool,
+) -> Result<Impact> {
+    // Dependency edges by default, for the reason `shortest_path` walks only
+    // those: every symbol is one hop from the file that defines it, so a
+    // `defines` edge is true and says nothing about who would notice a
+    // change. A caller that names kinds explicitly gets exactly those.
+    let dependencies = dependency_kinds();
+    let kinds = if kinds.is_empty() {
+        dependencies.as_slice()
+    } else {
+        kinds
+    };
+    let definitions = crate::store::symbols_named(db, name, 16)?;
+    let mut answer = Impact {
+        name: name.to_string(),
+        depth,
+        all_edges,
+        definitions,
+        reached: Vec::new(),
+        files: Vec::new(),
+        hidden: 0,
+        extracted: 0,
+        resolved: 0,
+        inferred: 0,
+        ambiguous: 0,
+    };
+
+    // Seen by definition, so two functions sharing a name are two nodes, and
+    // the centre itself is never reported as reaching itself.
+    let mut seen: std::collections::HashSet<Node> = std::collections::HashSet::new();
+    seen.insert(Node::any(name));
+    for row in &answer.definitions {
+        seen.insert(Node {
+            name: row.name.clone(),
+            path: row.path.clone(),
+            line: row.start_line,
+        });
+    }
+
+    let mut frontier: Vec<String> = vec![name.to_string()];
+    for hop in 1..=depth {
+        let mut next: Vec<String> = Vec::new();
+        for target in &frontier {
+            for end in crate::store::edges_in(db, target, kinds)? {
+                if !all_edges && end.confidence == AMBIGUOUS {
+                    continue;
+                }
+                let node = Node {
+                    name: end.symbol.name.clone(),
+                    path: end.symbol.path.clone(),
+                    line: end.symbol.start_line,
+                };
+                if !seen.insert(node) {
+                    continue;
+                }
+                if answer.reached.len() >= IMPACT_LIMIT {
+                    answer.hidden += 1;
+                    continue;
+                }
+                match end.confidence.as_str() {
+                    EXTRACTED => answer.extracted += 1,
+                    RESOLVED => answer.resolved += 1,
+                    INFERRED => answer.inferred += 1,
+                    _ => answer.ambiguous += 1,
+                }
+                next.push(end.symbol.name.clone());
+                answer.reached.push(Reached {
+                    name: end.symbol.name,
+                    path: end.symbol.path,
+                    line: end.symbol.start_line,
+                    hop,
+                    kind: end.kind,
+                    confidence: end.confidence,
+                    via: target.clone(),
+                });
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        next.sort();
+        next.dedup();
+        frontier = next;
+    }
+
+    // Files, nearest first, then by how much of the file is involved. A file
+    // that reaches the symbol four ways at six hops is further away than one
+    // that reaches it once at one hop, and reading it in that order is how
+    // somebody decides what to open.
+    let mut by_file: std::collections::BTreeMap<String, (usize, u32)> =
+        std::collections::BTreeMap::new();
+    for row in &answer.reached {
+        let entry = by_file.entry(row.path.clone()).or_insert((0, row.hop));
+        entry.0 += 1;
+        entry.1 = entry.1.min(row.hop);
+    }
+    answer.files = by_file
+        .into_iter()
+        .map(|(path, (symbols, nearest))| ReachedFile {
+            path,
+            symbols,
+            nearest,
+        })
+        .collect();
+    answer.files.sort_by(|a, b| {
+        a.nearest
+            .cmp(&b.nearest)
+            .then(b.symbols.cmp(&a.symbols))
+            .then(a.path.cmp(&b.path))
+    });
+
+    Ok(answer)
+}
+
+impl Impact {
+    /// The whole answer as text, for the terminal and for an agent.
+    ///
+    /// One renderer, as the chain has one: the CLI and the MCP reply differ
+    /// only in whether they are allowed to use bold.
+    pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = self.headline();
+        if self.reached.is_empty() {
+            return out;
+        }
+        let mut hop = 0;
+        for row in &self.reached {
+            if row.hop != hop {
+                hop = row.hop;
+                out.push_str(&format!(
+                    "\n\n{bold}{hop} hop{}{reset}",
+                    if hop == 1 { "" } else { "s" }
+                ));
+            }
+            out.push_str(&format!(
+                "\n  {} {}:{} · {} · {} · reaches {}",
+                row.name,
+                shorten(&row.path),
+                row.line,
+                row.kind,
+                row.confidence,
+                row.via
+            ));
+        }
+        out.push_str(&format!("\n\n{bold}files{reset}"));
+        for file in &self.files {
+            out.push_str(&format!(
+                "\n  {} · {} definition{} · nearest {} hop{}",
+                shorten(&file.path),
+                file.symbols,
+                if file.symbols == 1 { "" } else { "s" },
+                file.nearest,
+                if file.nearest == 1 { "" } else { "s" }
+            ));
+        }
+        if self.hidden > 0 {
+            out.push_str(&format!(
+                "\n\n{} more left out at the limit of {IMPACT_LIMIT}",
+                self.hidden
+            ));
+        }
+        out
+    }
+
+    /// The sentence that says what the answer is, printed by every surface so
+    /// none of them writes its own."""
+    pub fn headline(&self) -> String {
+        if self.reached.is_empty() {
+            return format!(
+                "nothing in this store reaches {} within {} hop{}",
+                self.name,
+                self.depth,
+                if self.depth == 1 { "" } else { "s" }
+            );
+        }
+        let files = self.files.len();
+        format!(
+            "{} definition{} in {} file{} reach {} within {} hop{}",
+            self.reached.len(),
+            if self.reached.len() == 1 { "" } else { "s" },
+            files,
+            if files == 1 { "" } else { "s" },
+            self.name,
+            self.depth,
+            if self.depth == 1 { "" } else { "s" }
+        )
+    }
+}
+
+/// One hop's supporting line, as evidence rather than as a picture.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Support {
+    /// `from → to · kind`, the hop this line is evidence for.
+    pub hop: String,
+    /// Where the line was written: `path:line`, or empty when the store has
+    /// no call line for this edge.
+    pub at: String,
+    /// The line itself, read from the store's own chunks. Empty when the
+    /// store cannot supply it, which is said rather than filled in.
+    pub code: String,
+    /// `supporting fact` or `candidate — corroborate before use`.
+    pub mark: &'static str,
+}
+
+/// What a chain is worth, in the shape somebody can paste into a review.
+///
+/// The Trace panel and `semlith trace` are one answer: the sentence, the
+/// chain, and one line of source per hop. Nothing here re-walks the graph —
+/// it reads a [`Chain`] the finder already produced, so the two can never
+/// disagree about what the path was.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Trace {
+    pub from: String,
+    pub to: String,
+    pub depth: u32,
+    pub all_edges: bool,
+    pub answer: String,
+    pub chain: Option<Chain>,
+    pub lines: Vec<Support>,
+}
+
+/// The mark a hop's supporting line carries.
+///
+/// An inferred or ambiguous hop was matched by name and nothing more, so the
+/// line under it is a candidate for the reader to check. Anything the source
+/// or the ranking settled is a fact.
+pub fn support_mark(confidence: &str) -> &'static str {
+    match confidence {
+        EXTRACTED | RESOLVED => "supporting fact",
+        _ => "candidate — corroborate before use",
+    }
+}
+
+/// Turn a chain into evidence.
+///
+/// `line_text` reads one line of one file out of the store — passed as a
+/// closure for the reason [`expand`] takes one: the shape of the answer is
+/// testable against a literal map with no store and no model behind it.
+pub fn trace(
+    from: &str,
+    to: &str,
+    depth: u32,
+    all_edges: bool,
+    chain: Option<Chain>,
+    mut line_text: impl FnMut(&str, u32) -> Option<String>,
+    shorten: &dyn Fn(&str) -> String,
+) -> Trace {
+    let Some(chain) = chain else {
+        return Trace {
+            from: from.to_string(),
+            to: to.to_string(),
+            depth,
+            all_edges,
+            answer: not_connected(from, to, depth, all_edges),
+            chain: None,
+            lines: Vec::new(),
+        };
+    };
+
+    let s = &chain.summary;
+    let answer = if chain.steps.is_empty() {
+        format!("{from} is {to}.")
+    } else if s.hypothesis && s.seams > 0 {
+        format!(
+            "Not connected by resolved edges. The nearest chain is {} hop{} long and crosses {} ambiguous name{} — treat it as a hypothesis.",
+            s.hops,
+            if s.hops == 1 { "" } else { "s" },
+            s.seams,
+            if s.seams == 1 { "" } else { "s" }
+        )
+    } else if s.hypothesis {
+        format!(
+            "Not connected by resolved edges. The nearest chain is {} hop{} long and every hop was matched by bare name — treat it as a hypothesis.",
+            s.hops,
+            if s.hops == 1 { "" } else { "s" }
+        )
+    } else {
+        format!(
+            "Connected in {} hop{}: {} extracted, {} resolved. Every hop names its target through something the extractor read or the ranking settled.",
+            s.hops,
+            if s.hops == 1 { "" } else { "s" },
+            s.extracted,
+            s.resolved
+        )
+    };
+
+    let lines = chain
+        .steps
+        .iter()
+        .map(|step| {
+            let (at, code) = match step.call_line {
+                Some(line) if !step.from_path.is_empty() => (
+                    format!("{}:{line}", shorten(&step.from_path)),
+                    line_text(&step.from_path, line).unwrap_or_default(),
+                ),
+                _ => (String::new(), String::new()),
+            };
+            Support {
+                hop: format!("{} → {} · {}", step.from, step.to, step.kind),
+                at,
+                code,
+                mark: support_mark(&step.confidence),
+            }
+        })
+        .collect();
+
+    Trace {
+        from: from.to_string(),
+        to: to.to_string(),
+        depth,
+        all_edges,
+        answer,
+        chain: Some(chain),
+        lines,
+    }
+}
+
+impl Trace {
+    /// The whole trace as text, for the terminal and for an agent.
+    pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = format!("{bold}answer{reset}\n{}\n", self.answer);
+        let Some(chain) = &self.chain else {
+            return out;
+        };
+        if chain.steps.is_empty() {
+            return out;
+        }
+        out.push_str(&format!("\n{bold}chain{reset}\n"));
+        out.push_str(&chain.render(bold, reset, shorten));
+        out.push_str(&format!("\n{bold}supporting lines{reset}\n"));
+        for line in &self.lines {
+            if line.at.is_empty() {
+                out.push_str(&format!(
+                    "  {}  ·  no call line recorded  [{}]\n",
+                    line.hop, line.mark
+                ));
+                continue;
+            }
+            out.push_str(&format!("  {}   {}\n", line.at, line.code));
+            out.push_str(&format!("    {}  [{}]\n", line.hop, line.mark));
+        }
+        out
+    }
+
+    /// What "Copy as evidence" copies, and what `--evidence` prints.
+    ///
+    /// Plain text with no colour and no box drawing, because it is going into
+    /// a review comment or a commit message rather than onto a terminal.
+    pub fn evidence(&self, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = format!("{} → {}\nanswer: {}\n", self.from, self.to, self.answer);
+        let Some(chain) = &self.chain else {
+            return out;
+        };
+        for (i, step) in chain.steps.iter().enumerate() {
+            out.push_str(&format!(
+                "{}. {} @ {}:{} -> {} @ {}:{}  [{}]",
+                i + 1,
+                step.from,
+                shorten(&step.from_path),
+                step.from_line,
+                step.to,
+                shorten(&step.to_path),
+                step.to_line,
+                step.confidence,
+            ));
+            if let Some(next) = chain.steps.get(i + 1)
+                && (&step.to_path, step.to_line) != (&next.from_path, next.from_line)
+            {
+                out.push_str(&format!(
+                    "  seam: {}: {} definitions · continues from {} @ {}:{}",
+                    step.to,
+                    step.definitions.max(2),
+                    next.from,
+                    shorten(&next.from_path),
+                    next.from_line,
+                ));
+            }
+            out.push('\n');
+        }
+        if !self.lines.is_empty() {
+            out.push_str("\nsupporting lines\n");
+            for line in &self.lines {
+                let mark = if line.mark.starts_with("candidate") {
+                    "candidate"
+                } else {
+                    "supporting fact"
+                };
+                if line.at.is_empty() {
+                    out.push_str(&format!(
+                        "{}   no call line recorded   [{mark}]\n",
+                        line.hop
+                    ));
+                } else {
+                    out.push_str(&format!("{}   {}   [{mark}]\n", line.at, line.code));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Most edges the community pass will read out of one store.
+///
+/// The bound that stands in for the one-hop-at-a-time rule every other
+/// traversal follows. Twenty thousand edges is the whole of this repository's
+/// own graph several times over, and a corpus past it gets a panel that says
+/// how much it left out.
+pub const COMMUNITY_EDGES: usize = 20_000;
+
+/// Rounds of label propagation.
+///
+/// Label propagation converges in a handful of rounds on graphs this shape,
+/// and a fixed cap is what makes the answer the same twice — which the panel
+/// needs more than it needs the last percent of modularity.
+const LABEL_ROUNDS: usize = 8;
+
+/// How many communities the panel lists before it says `Shown N of M`.
+pub const COMMUNITIES_SHOWN: usize = 12;
+
+/// One hub of a community: a name and where it is defined.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Hub {
+    pub name: String,
+    #[serde(serialize_with = "crate::serialize_plain")]
+    pub path: String,
+    pub line: u32,
+}
+
+/// A group of names that call each other more than they call anything else.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Community {
+    /// The community's busiest member, which is what it gets called.
+    pub label: String,
+    pub size: usize,
+    /// The three busiest members, by degree inside the community.
+    pub hubs: Vec<Hub>,
+    /// The strongest edge out of this community: the other community's
+    /// label and how many settled edges run to it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross: Option<(String, usize)>,
+}
+
+/// The communities of a graph, by label propagation.
+///
+/// Deterministic on purpose: nodes are visited in name order and a tie
+/// between two labels is broken by name, so the same store gives the same
+/// communities twice. That matters more here than modularity does — a panel
+/// that regroups a codebase every time it is opened is not a map.
+///
+/// Takes edges rather than a database for the reason [`expand`] takes a
+/// closure: the maths is tested against a literal edge list with no store
+/// behind it.
+pub fn communities(edges: &[(String, String)]) -> Vec<Community> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut neighbours: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (from, to) in edges {
+        neighbours
+            .entry(from.as_str())
+            .or_default()
+            .insert(to.as_str());
+        neighbours
+            .entry(to.as_str())
+            .or_default()
+            .insert(from.as_str());
+    }
+    if neighbours.is_empty() {
+        return Vec::new();
+    }
+
+    // Everything starts in a community of its own, and takes the commonest
+    // label among its neighbours each round.
+    let mut label: BTreeMap<&str, &str> = neighbours.keys().map(|n| (*n, *n)).collect();
+    for _ in 0..LABEL_ROUNDS {
+        let mut moved = false;
+        for (node, around) in &neighbours {
+            let mut tally: BTreeMap<&str, usize> = BTreeMap::new();
+            for other in around {
+                *tally.entry(label[other]).or_default() += 1;
+            }
+            let Some(&top) = tally.values().max() else {
+                continue;
+            };
+            // A node keeps its own label when that label is among the
+            // winners, and only moves when another strictly beats it. Plain
+            // label propagation without this collapses: two clusters joined
+            // by a single edge become one community, because a tie is
+            // resolved by an arbitrary rule rather than by staying put.
+            let mine = label[node];
+            if tally.get(mine).copied().unwrap_or(0) == top {
+                continue;
+            }
+            // Among strict winners, the name that sorts first, so the result
+            // does not depend on iteration order.
+            let Some((&best, _)) = tally
+                .iter()
+                .filter(|(_, n)| **n == top)
+                .min_by_key(|(name, _)| **name)
+            else {
+                continue;
+            };
+            if mine != best {
+                label.insert(node, best);
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    let mut members: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (node, group) in &label {
+        members.entry(group).or_default().push(node);
+    }
+
+    // How many settled edges run between each pair of communities, for the
+    // "strongest cross-community edge" line.
+    let mut between: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    for (from, to) in edges {
+        let (a, b) = (label[from.as_str()], label[to.as_str()]);
+        if a != b {
+            *between.entry((a, b)).or_default() += 1;
+        }
+    }
+
+    let out: Vec<(&str, Community)> = members
+        .into_iter()
+        .map(|(group, names)| {
+            // Degree inside the community decides the hubs and the label: the
+            // name everything else in the group talks to is what the group is.
+            let inside: BTreeSet<&str> = names.iter().copied().collect();
+            let mut ranked: Vec<(usize, &str)> = names
+                .iter()
+                .map(|name| {
+                    let degree = neighbours
+                        .get(name)
+                        .map(|around| around.iter().filter(|o| inside.contains(*o)).count())
+                        .unwrap_or(0);
+                    (degree, *name)
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+            let cross = between
+                .iter()
+                .filter(|((a, _), _)| *a == group)
+                .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.1.cmp(a.0.1)))
+                .map(|((_, b), n)| ((*b).to_string(), *n));
+            (
+                group,
+                Community {
+                    label: ranked
+                        .first()
+                        .map(|(_, name)| (*name).to_string())
+                        .unwrap_or_else(|| group.to_string()),
+                    size: names.len(),
+                    hubs: ranked
+                        .iter()
+                        .take(3)
+                        .map(|(_, name)| Hub {
+                            name: (*name).to_string(),
+                            path: String::new(),
+                            line: 0,
+                        })
+                        .collect(),
+                    cross,
+                },
+            )
+        })
+        .collect();
+
+    // `cross` was computed against the group's seed name; a reader needs the
+    // other community's own label, which is its busiest member.
+    let names: std::collections::BTreeMap<&str, String> = out
+        .iter()
+        .map(|(group, community)| (*group, community.label.clone()))
+        .collect();
+    let mut out: Vec<Community> = out
+        .into_iter()
+        .map(|(_, mut community)| {
+            community.cross = community
+                .cross
+                .map(|(group, n)| (names.get(group.as_str()).cloned().unwrap_or(group), n));
+            community
+        })
+        .collect();
+    out.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.label.cmp(&b.label)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    /// Two clusters joined by one edge come back as two communities, the same
+    /// two twice. A map that regroups a codebase each time it is opened is
+    /// not a map, which is why the pass is seeded by name order and capped.
+    #[test]
+    fn communities_are_the_same_twice_and_name_what_joins_them() {
+        let edges: Vec<(String, String)> = [
+            ("store_open", "store_read"),
+            ("store_read", "store_write"),
+            ("store_write", "store_open"),
+            ("http_get", "http_parse"),
+            ("http_parse", "http_send"),
+            ("http_send", "http_get"),
+            ("http_parse", "store_read"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+
+        let first = communities(&edges);
+        let second = communities(&edges);
+        assert_eq!(first.len(), 2, "two clusters, one bridge: {first:?}");
+        for (a, b) in first.iter().zip(second.iter()) {
+            assert_eq!(a.label, b.label, "the label moved between two runs");
+            assert_eq!(a.size, b.size);
+            let names =
+                |c: &Community| -> Vec<String> { c.hubs.iter().map(|h| h.name.clone()).collect() };
+            assert_eq!(names(a), names(b), "the hubs moved between two runs");
+        }
+        for community in &first {
+            assert_eq!(community.size, 3, "{community:?}");
+            assert!(!community.hubs.is_empty(), "a community with no hub");
+        }
+        // The bridge is directed, so it is a cross edge out of one community
+        // and not out of the other. Counting it both ways would say two
+        // subsystems call each other when one of them only answers.
+        let crossings: Vec<_> = first.iter().filter_map(|c| c.cross.clone()).collect();
+        assert_eq!(crossings.len(), 1, "{first:?}");
+        assert_eq!(crossings[0].1, 1, "one edge joins them");
+        assert!(
+            first.iter().any(|c| c.label == crossings[0].0),
+            "a cross edge must name another community's label: {first:?}"
+        );
+    }
+
+    /// Nothing to group is an empty list, not a panic and not one community
+    /// holding everything.
+    #[test]
+    fn a_graph_with_no_edges_has_no_communities() {
+        assert!(communities(&[]).is_empty());
+    }
+
     use super::*;
     use std::path::PathBuf;
 
