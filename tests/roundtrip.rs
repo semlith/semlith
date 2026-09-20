@@ -211,6 +211,75 @@ fn a_store_written_before_the_format_key_still_opens_and_is_not_rewritten() {
 /// A store from before definition chunking opens, answers, and is re-chunked by
 /// the next full index pass — not before, and not by opening it.
 ///
+/// The migration 0.25.0 owes. A store 0.24.0 wrote holds code chunks the
+/// model was shown without the definition they sit inside, and nothing on disk
+/// has changed, so only the format row can ask for the work.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_store_without_code_context_is_re_embedded_by_the_next_full_pass() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "walk.rs",
+        "/// How many nodes a traversal may visit before it gives up.\n\
+         pub fn walk(graph: &Graph, max_nodes: usize) -> Vec<Node> {\n\
+             visit(graph, max_nodes)\n\
+         }\n",
+    );
+
+    let mut s = Semlith::open(store.path(), None).unwrap();
+    s.quiet = true;
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    drop(s);
+
+    // Put the store back the way 0.24.0 left it: one format behind, its code
+    // chunks embedded from their own text alone.
+    let db = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    db.execute(
+        "UPDATE meta SET v = ?1 WHERE k = ?2",
+        rusqlite::params![
+            (semlith::store::CODE_CONTEXT - 1).to_string(),
+            semlith::store::FORMAT_KEY
+        ],
+    )
+    .unwrap();
+    drop(db);
+
+    // It opens unchanged, it answers, and opening it migrated nothing.
+    let mut old = Semlith::open(store.path(), None).unwrap();
+    old.quiet = true;
+    assert_eq!(
+        semlith::store::chunking(old.db()).unwrap(),
+        "headings; code carries no definition until it is re-indexed"
+    );
+    assert_eq!(top(&mut old, "walk"), "walk.rs");
+    assert_eq!(
+        semlith::store::format(old.db()).unwrap(),
+        semlith::store::CODE_CONTEXT - 1,
+        "opening a store must not migrate it behind the user's back"
+    );
+
+    // The next full pass re-embeds it, although nothing on disk changed, and
+    // says that it did.
+    let report = old
+        .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert!(report.rechunked, "the pass did not say why it re-indexed");
+    assert_eq!(
+        report.unchanged, 0,
+        "the pass left the old embedding in place"
+    );
+    assert_eq!(report.indexed, 1, "the pass did not re-index the file");
+    assert_eq!(
+        semlith::store::format(old.db()).unwrap(),
+        semlith::store::FORMAT_VERSION,
+        "a swept store must record the format it is now on"
+    );
+    assert_eq!(top(&mut old, "walk"), "walk.rs", "and it still answers");
+}
+
 /// The migration 0.22.0 owes. A store on format 2 holds fixed windows and its
 /// files have not changed, so the hash check would leave it holding them for
 /// ever: the rule for what a chunk is changed, not the corpus. So the first
@@ -284,8 +353,13 @@ fn a_store_on_fixed_windows_is_re_chunked_by_the_next_full_pass() {
     assert_eq!(report.indexed, 1, "the pass did not re-index the file");
     assert_eq!(
         semlith::store::chunking(old.db()).unwrap(),
-        "definitions",
+        "headings, and code with its definition",
         "a swept store must record the rule its chunks are now cut by"
+    );
+    assert!(
+        report.rechunked,
+        "a pass that re-embedded an unchanged corpus must say so, or the user is left \
+         watching their whole repository index again with no reason given"
     );
 
     // And the chunks are cut where the definitions are.

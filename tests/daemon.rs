@@ -167,6 +167,59 @@ impl Daemon {
         ))
     }
 
+    /// Ask for an index run and hand back the run id the daemon answers with.
+    ///
+    /// Until 0.20.0 this route held a worker open for the whole run and
+    /// streamed it; it now queues the work and returns, because the run
+    /// belongs to the daemon rather than to the request that started it. So a
+    /// test asks for the run here and reads it back from `/api/index/log`,
+    /// which is exactly what the page does.
+    fn index_run(&self, path: &Path) -> u64 {
+        let body = format!(
+            "{{\"path\":{}}}",
+            serde_json::to_string(&path.display().to_string()).unwrap()
+        );
+        let answer = self.post("/api/index", &body);
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        let started = answer.json();
+        started["runs"][0]["run"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the route did not name the run it started: {started}"))
+    }
+
+    /// Every line one run wrote, in the order it wrote them, up to and
+    /// including its `done`.
+    ///
+    /// Read through the cursor rather than in one go, so what comes back is
+    /// what a page polling the log would have been shown as the run went —
+    /// a run that only spoke at the end would fail the `file` assertions the
+    /// callers make on it.
+    fn run_events(&self, store: &str, run: u64, limit: Duration) -> Vec<serde_json::Value> {
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut after: Option<u64> = None;
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            let mut path = format!("/api/index/log?store={store}&run={run}");
+            if let Some(seq) = after {
+                path.push_str(&format!("&after={seq}"));
+            }
+            for line in self.get(&path).json()["lines"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                after = line["seq"].as_u64().or(after);
+                let done = line["event"] == "done";
+                events.push(line);
+                if done {
+                    return events;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("the run never reported done: {events:?}");
+    }
+
     /// A POST exactly as a page on another 127.0.0.1 port would make it: the
     /// fetch metadata a browser attaches for a same-site-but-not-same-origin
     /// request, and whatever credential the attacker guessed at.
@@ -240,6 +293,12 @@ pub fn writable(&mut self, only: &[String]) -> Result<&mut Semlith> {
     todo!()
 }
 ";
+
+/// How long to give a real index run — an embedding model over a few dozen
+/// small files, on a machine that may be doing four other tests at the time.
+/// A bound rather than a guess: every wait below is a poll that returns as
+/// soon as the daemon says so.
+const SLOW: Duration = Duration::from_secs(120);
 
 /// Poll until `check` passes, so a test never depends on a fixed sleep.
 fn until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
@@ -880,45 +939,36 @@ fn the_files_route_reports_the_reader_and_honours_the_filters() {
 
 // ---------------------------------------------------------------- T07
 
-/// The index route streams, so a browser sees a run while it is running. A
-/// response that arrived whole at the end would be a progress bar that only
+/// A run is reported as it happens, so a browser sees it while it is running.
+/// A run that spoke only once it was over would be a progress bar that only
 /// ever shows 100%.
+///
+/// Until 0.20.0 this route held an HTTP worker open for the whole run and
+/// streamed it as newline-delimited JSON, so the tab that pressed the button
+/// was the only thing in the world that knew the run was happening. The run
+/// lives in the daemon now: the same closure that emitted those chunks writes
+/// every event to the run's own log, `POST /api/index` answers with the run's
+/// id at once, and `/api/index/log` is what the page draws from. What is
+/// asserted here is unchanged — the events, in order, per file — because that
+/// is the guarantee; the framing was only ever how it was delivered.
 #[test]
 #[ignore = "indexes, so it downloads an embedding model on first run"]
-fn indexing_from_the_portal_streams_progress_and_then_lists_the_files() {
+fn indexing_from_the_portal_reports_progress_and_then_lists_the_files() {
     let (dir, home, work) = sandbox("index-route");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    // Under the home rather than beside the corpus. From 0.14.0 the portal and
-    // a forwarded `semlith_index` index only under the store's registered roots
-    // or the home directory, and a sibling of the corpus is neither — which is
-    // the rule rather than an accident of this fixture, and
-    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
-    // inside the root either: the watcher would index it at startup, and these
-    // tests are about a run they ask for.
+    // Not inside the watched root: the watcher would index it at startup, and
+    // these tests are about a run they ask for. A folder the page hands to
+    // `POST /api/index` becomes one of the store's roots, which is how a
+    // folder joins an existing corpus from the page — the boundary an agent is
+    // held to is asserted by `the_index_boundary_holds_for_an_agents_index`.
     let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
 
     let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
 
-    let body = format!(
-        "{{\"path\":{}}}",
-        serde_json::to_string(&extra.display().to_string()).unwrap()
-    );
-    let answer = daemon.post("/api/index", &body);
-    assert_eq!(answer.status, 200);
-    assert!(
-        answer.headers.contains("Transfer-Encoding: chunked"),
-        "the index route did not stream:\n{}",
-        answer.headers
-    );
-
-    let events: Vec<serde_json::Value> = answer
-        .body
-        .lines()
-        .filter(|l| l.trim_start().starts_with('{'))
-        .map(|l| serde_json::from_str(l.trim()).expect("each line is one JSON object"))
-        .collect();
+    let run = daemon.index_run(&extra);
+    let events = daemon.run_events("api", run, Duration::from_secs(120));
     assert!(
         events.iter().any(|e| e["event"] == "file"),
         "no progress event arrived before the run completed: {events:?}"
@@ -929,8 +979,8 @@ fn indexing_from_the_portal_streams_progress_and_then_lists_the_files() {
         .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
     assert_eq!(done["indexed"], 1);
 
-    // The stream says something before the writer reaches the job, and then
-    // says what happened to every file rather than only to the ones it
+    // The run says something before the writer reaches the job, and then says
+    // what happened to every file rather than only to the ones it
     // embedded. A run that speaks only about its own work is silent for a
     // whole re-index of an unchanged corpus, which reads as a hang.
     assert!(
@@ -1276,18 +1326,29 @@ fn the_write_tools_work_through_the_proxy_while_the_daemon_holds_the_lock() {
     let (dir, home, work) = sandbox("proxy-writes");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
     let root = work.join("api");
-    // Under the home rather than beside the corpus. From 0.14.0 the portal and
-    // a forwarded `semlith_index` index only under the store's registered roots
-    // or the home directory, and a sibling of the corpus is neither — which is
-    // the rule rather than an accident of this fixture, and
-    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
-    // inside the root either: the watcher would index it at startup, and these
-    // tests are about a run they ask for.
-    let extra = home.join("extra");
+    // Inside the store's root, because that is what an agent may write: the
+    // boundary is the store's registered roots, and the home directory is the
+    // fallback only for a store that has none — so a folder beside the corpus
+    // or under the home is refused, which
+    // `the_index_boundary_holds_for_an_agents_index` asserts. Created before
+    // the daemon starts, so the startup catch-up indexes it and no filesystem
+    // event is in flight while the agent works: the forget below is then the
+    // only thing that can have removed it, and the index after it the only
+    // thing that can have put it back.
+    let extra = root.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("lock.rs"), "pub struct StoreLock;\n").unwrap();
 
     let daemon = Daemon::start_in(dir, home.clone(), root.clone(), &[]);
+
+    // Wait for the startup catch-up to have both files, or it lands between
+    // the forget and the index below and the agent is told "1 unchanged"
+    // about a file the watcher put back. The daemon prints its URL before the
+    // catch-up has walked the tree, so starting is not the same as caught up.
+    until("the catch-up to have indexed the corpus", SLOW, || {
+        daemon.get("/api/files").json()["total"] == serde_json::json!(2)
+    });
+
     let mut server = Proxied::open(&home, &root);
 
     let stats = server.call("tools/call", serde_json::json!({ "name": "semlith_stats" }));
@@ -1297,6 +1358,23 @@ fn the_write_tools_work_through_the_proxy_while_the_daemon_holds_the_lock() {
             .unwrap()
             .contains("chunks"),
         "{stats}"
+    );
+
+    // The write that failed for the whole of 0.8.0 while a watcher held the
+    // store. Nothing here touches the file on disk, so the watcher has no
+    // event to race the agent with.
+    let forgotten = server.call(
+        "tools/call",
+        serde_json::json!({
+            "name": "semlith_forget",
+            "arguments": { "path": extra.join("lock.rs").display().to_string() }
+        }),
+    );
+    let removed = forgotten["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(removed.starts_with("Removed"), "{forgotten}");
+    assert!(
+        !removed.contains("being indexed by") && !removed.contains("is held by"),
+        "the write tool still hit the lock: {removed}"
     );
 
     let indexed = server.call(
@@ -1314,21 +1392,6 @@ fn the_write_tools_work_through_the_proxy_while_the_daemon_holds_the_lock() {
     assert!(
         !text.contains("being indexed by") && !text.contains("is held by"),
         "the write tool still hit the lock: {text}"
-    );
-
-    let forgotten = server.call(
-        "tools/call",
-        serde_json::json!({
-            "name": "semlith_forget",
-            "arguments": { "path": extra.join("lock.rs").display().to_string() }
-        }),
-    );
-    assert!(
-        forgotten["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("Removed"),
-        "{forgotten}"
     );
 
     // And the daemon now counts the client, which is what the Agents view shows.
@@ -1469,24 +1532,6 @@ fn a_store_is_deleted_without_stopping_the_daemon() {
 
 // ---------------------------------------------------------------- T13
 
-/// One request off the `Daemon` handle, for a thread that cannot borrow it.
-fn post_to(port: u16, token: &str, path: &str, body: &str) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the daemon listens");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(120)))
-        .unwrap();
-    let request = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nSemlith-Token: {token}\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(request.as_bytes()).unwrap();
-    stream.flush().unwrap();
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).unwrap();
-    String::from_utf8_lossy(&raw).into_owned()
-}
-
 /// A run can be stopped, and stopping undoes it. A half-indexed corpus is
 /// worse than none, because nothing in the store says which half it is.
 #[test]
@@ -1496,14 +1541,9 @@ fn a_stopped_index_run_undoes_itself() {
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
 
     // Outside the watched root, so the watcher cannot index it behind the
-    // run's back and the count belongs to the run alone.
-    // Under the home rather than beside the corpus. From 0.14.0 the portal and
-    // a forwarded `semlith_index` index only under the store's registered roots
-    // or the home directory, and a sibling of the corpus is neither — which is
-    // the rule rather than an accident of this fixture, and
-    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
-    // inside the root either: the watcher would index it at startup, and these
-    // tests are about a run they ask for.
+    // run's back and the count belongs to the run alone. Not inside the root
+    // either: the watcher would index it at startup, and this test is about a
+    // run it asks for.
     let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     for i in 0..60 {
@@ -1514,44 +1554,35 @@ fn a_stopped_index_run_undoes_itself() {
     let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
     let before = daemon.get("/api/files").json()["total"].as_i64().unwrap();
 
-    let port = daemon.port;
-    let token = daemon.token.clone();
-    let path = extra.display().to_string();
-    let run = std::thread::spawn(move || {
-        let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
-        post_to(port, &token, "/api/index", &body)
-    });
+    let run = daemon.index_run(&extra);
 
     // Stop it once it has written something, so the rollback has work to do.
-    let mut moved = false;
-    for _ in 0..200 {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if daemon.get("/api/files").json()["total"].as_i64().unwrap() > before {
-            moved = true;
-            break;
-        }
-    }
-    assert!(moved, "the run never indexed anything to roll back");
+    until("the run to embed something to roll back", SLOW, || {
+        daemon.get("/api/files").json()["total"].as_i64().unwrap() > before
+    });
 
     let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");
     assert_eq!(stopped.status, 200, "{}", stopped.body);
 
-    let answer = run.join().expect("the index request");
-    assert!(
-        answer.contains("\"stopped\":true"),
-        "the run did not report itself stopped: {answer}"
+    // The run answers for itself, on its own record, rather than through the
+    // request that started it: since 0.20.0 that request was answered the
+    // moment the run was queued.
+    let events = daemon.run_events("api", run, SLOW);
+    let done = events
+        .last()
+        .filter(|e| e["event"] == "done")
+        .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
+    assert_eq!(
+        done["stopped"],
+        serde_json::json!(true),
+        "the run did not report itself stopped: {done}"
     );
 
     // Back to exactly what was there before it started.
-    for _ in 0..100 {
-        if daemon.get("/api/files").json()["total"].as_i64() == Some(before) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    panic!(
-        "the store kept what the stopped run embedded: {} files, was {before}",
-        daemon.get("/api/files").json()["total"]
+    until(
+        &format!("the store to give back what the stopped run embedded, to {before} files"),
+        SLOW,
+        || daemon.get("/api/files").json()["total"].as_i64() == Some(before),
     );
 }
 
@@ -1571,13 +1602,8 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
         let body = format!("# Note {i}\n\n{}", "Ownership and borrowing. ".repeat(200));
         std::fs::write(root.join(format!("n{i:03}.md")), body).unwrap();
     }
-    // Under the home rather than beside the corpus. From 0.14.0 the portal and
-    // a forwarded `semlith_index` index only under the store's registered roots
-    // or the home directory, and a sibling of the corpus is neither — which is
-    // the rule rather than an accident of this fixture, and
-    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
-    // inside the root either: the watcher would index it at startup, and these
-    // tests are about a run they ask for.
+    // Not inside the watched root: the watcher would index it at startup, and
+    // this test is about a run it asks for.
     let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("one.md"), "# One\n\nA single file.\n").unwrap();
@@ -1589,42 +1615,45 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
     // Two jobs, so the second is behind the first for certain rather than by
     // timing: the first holds the writer, and the second is the queued one a
     // stop has to answer without waiting for it.
-    let first = std::thread::spawn({
-        let token = daemon.token.clone();
-        let port = daemon.port;
-        let path = work.join("api").display().to_string();
-        move || {
-            let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
-            post_to(port, &token, "/api/index", &body)
-        }
-    });
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    let first = daemon.index_run(&work.join("api"));
+    let queued = daemon.index_run(&extra);
+    assert_ne!(first, queued, "one submission became one run twice over");
 
-    let port = daemon.port;
-    let token = daemon.token.clone();
-    let path = extra.display().to_string();
-    let queued = std::thread::spawn(move || {
-        let body = format!("{{\"path\":{}}}", serde_json::to_string(&path).unwrap());
-        post_to(port, &token, "/api/index", &body)
-    });
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Waiting its turn, on the store's queue or on the admission queue — which
+    // of the two it is depends on how many runs this machine admits at once,
+    // and the answer a stop owes it is the same either way.
+    let is_queued = |run: &serde_json::Value| run["id"] == queued && run["status"] == "queued";
+    until(
+        "the second run to be waiting behind the first",
+        SLOW,
+        || {
+            daemon.get("/api/index/runs").json()["runs"]
+                .as_array()
+                .is_some_and(|runs| runs.iter().any(is_queued))
+        },
+    );
 
     let asked = std::time::Instant::now();
     let stopped = daemon.post("/api/index/control", "{\"action\":\"stop\"}");
     assert_eq!(stopped.status, 200, "{}", stopped.body);
 
-    let answer = queued.join().expect("the queued index request");
-    assert!(
-        answer.contains("\"stopped\":true"),
-        "the queued run was not stopped: {answer}"
+    // Nothing of it had run, so the answer does not wait for the writer to
+    // finish the run in front of it.
+    let events = daemon.run_events("api", queued, Duration::from_secs(10));
+    let done = events
+        .last()
+        .filter(|e| e["event"] == "done")
+        .unwrap_or_else(|| panic!("the queued run never reported done: {events:?}"));
+    assert_eq!(
+        done["stopped"],
+        serde_json::json!(true),
+        "the queued run was not stopped: {done}"
     );
-    // Nothing of it had run, so the answer does not wait for the writer.
     assert!(
         asked.elapsed() < std::time::Duration::from_secs(10),
         "the queued job took {:?} to answer a stop",
         asked.elapsed()
     );
-    let _ = first.join();
 }
 
 /// A run longer than one slice finishes on its own, on one stream, and a stop
@@ -1634,13 +1663,8 @@ fn a_queued_run_starts_at_once_and_stops_at_once() {
 fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
     let (dir, home, work) = sandbox("slices");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    // Under the home rather than beside the corpus. From 0.14.0 the portal and
-    // a forwarded `semlith_index` index only under the store's registered roots
-    // or the home directory, and a sibling of the corpus is neither — which is
-    // the rule rather than an accident of this fixture, and
-    // `the_index_boundary_holds_through_the_portal` asserts the refusal. Not
-    // inside the root either: the watcher would index it at startup, and these
-    // tests are about a run they ask for.
+    // Not inside the watched root: the watcher would index it at startup, and
+    // this test is about a run it asks for.
     let extra = home.join("extra");
     std::fs::create_dir_all(&extra).unwrap();
     for i in 0..12 {
@@ -1651,24 +1675,19 @@ fn a_run_outlasts_its_slice_and_a_stop_undoes_all_of_it() {
     let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
     let before = daemon.get("/api/files").json()["total"].as_i64().unwrap();
 
-    let body = format!(
-        "{{\"path\":{}}}",
-        serde_json::to_string(&extra.display().to_string()).unwrap()
-    );
-    let answer = daemon.post("/api/index", &body);
-    assert_eq!(answer.status, 200);
+    let run = daemon.index_run(&extra);
 
-    // One request, one answer: whatever the slice budget did in between, the
-    // caller is never asked to press the button again.
-    let events: Vec<serde_json::Value> = answer
-        .body
-        .lines()
-        .filter_map(|l| serde_json::from_str(l.trim()).ok())
-        .collect();
-    let done = events
-        .iter()
-        .find(|e| e["event"] == "done")
-        .unwrap_or_else(|| panic!("the run never reported done: {events:?}"));
+    // One submission, one run: whatever the slice budget did in between, the
+    // caller is never asked to press the button again, and every slice is
+    // reported against the one run it belongs to.
+    let events = daemon.run_events("api", run, SLOW);
+    let dones: Vec<&serde_json::Value> = events.iter().filter(|e| e["event"] == "done").collect();
+    assert_eq!(
+        dones.len(),
+        1,
+        "a slice ended the run rather than continuing it: {events:?}"
+    );
+    let done = dones[0];
     assert_eq!(
         done["remaining"], 0,
         "the run handed work back to the reader: {done}"
@@ -1737,38 +1756,54 @@ fn a_session_id_is_sixteen_hex_characters_or_it_is_replaced() {
     }
 }
 
-/// The other half of the index boundary: the portal and a forwarded
-/// `semlith_index` are held to it too, not only the stdio MCP server. A path
-/// outside the store's roots and outside the home is refused by name.
+/// The other half of the index boundary: a forwarded `semlith_index` is held
+/// to it inside the daemon, not only in the stdio MCP server. A path outside
+/// the target store's roots is refused by name, with the rule that refused it.
+///
+/// The agent is the credential this boundary is for: the key lives in a config
+/// file on disk, so what it can reach is what a copied config file can reach,
+/// and `/mcp` is the only route that key opens. `POST /api/index` is not held
+/// to it — that route carries the portal's own token, and since 0.20.0 it
+/// records what it is handed as a root of the store, which is how a folder
+/// joins an existing corpus from the page. The two are asserted apart because
+/// they are two different credentials, not because the rule is soft.
 #[test]
 #[ignore = "indexes, so it downloads an embedding model on first run"]
-fn the_index_boundary_holds_through_the_portal() {
-    let (dir, home, work) = sandbox("portal-boundary");
+fn the_index_boundary_holds_for_an_agents_index() {
+    let (dir, home, work) = sandbox("agent-boundary");
     corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
-    // A sibling of the corpus: not under the store's root, not under HOME.
+    // A sibling of the corpus: not under the store's root.
     let outside = work.join("somebody-elses");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("notes.md"), "Ownership and borrowing.\n").unwrap();
 
-    let daemon = Daemon::start_in(dir, home, work.join("api"), &[]);
+    let root = work.join("api");
+    let daemon = Daemon::start_in(dir, home.clone(), root.clone(), &[]);
+    let mut server = Proxied::open(&home, &root);
 
-    let body = format!(
-        "{{\"path\":{}}}",
-        serde_json::to_string(&outside.display().to_string()).unwrap()
+    let asked = server.call(
+        "tools/call",
+        serde_json::json!({
+            "name": "semlith_index",
+            "arguments": { "path": outside.display().to_string() }
+        }),
     );
-    let answer = daemon.post("/api/index", &body);
-    assert_eq!(answer.status, 200, "the route should stream, not fail");
+    let text = asked["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the tool did not answer with text: {asked}"));
 
-    // Refused by name, with the rule, in the stream the page reads.
+    // Refused by name, with the rule, in what the agent is told.
     assert!(
-        answer.body.contains("refused") && answer.body.contains("outside"),
-        "the run did not report the refusal:\n{}",
-        answer.body
+        text.contains("refused") && text.contains("outside"),
+        "the run did not report the refusal:\n{text}"
     );
     assert!(
-        answer.body.contains("somebody-elses"),
-        "the refusal does not name the path:\n{}",
-        answer.body
+        text.contains("somebody-elses"),
+        "the refusal does not name the path:\n{text}"
+    );
+    assert!(
+        text.starts_with("0 indexed"),
+        "a refused path was indexed anyway:\n{text}"
     );
 
     // And nothing from it reached the store.

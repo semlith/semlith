@@ -7,6 +7,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-09-20
+
+### The right span, measured
+
+The sealed thirty, scored once by the release binary at completion, median of
+three runs with zero spread, beside the previous release's binary on the same
+split and the same corpus:
+
+| | 0.23.0 | 0.25.0 | 0.25.0, `SEMLITH_RERANK=on` |
+|---|---|---|---|
+| hit@8 | 28 / 30 | **29 / 30** | 29 / 30 |
+| hit@3 | 27 / 30 | **27 / 30** | 28 / 30 |
+| hit@1 | 25 / 30 | 24 / 30 | 24 / 30 |
+
+Identifiers are 12 of 12 in the top three and wrong-yes is 0, both asserted by
+the run rather than read off it. The gate this release was held to — hit@8 at
+least 27, hit@3 at least 26 — is met by the shipped default and was not
+re-baselined. The aim stated at planning was 30 of 30 at k=8; it came one
+question short, and that question is `concept-portal-parity`, whose answer is
+spanned in `AGENTS.md` and which the ranking still does not return.
+
+hit@1 is one question below the previous release. It is stated rather than
+gated because on a concept question it measures the span file: several chunks
+answer correctly and only the spanned ones score.
+
+### The audit, which is most of the number
+
+Before any ranking change, every question that missed at k=8 and every
+near-miss whose first hit was unspanned was read by hand: twenty-four in all.
+Eleven were answered correctly by a chunk no span covered — `docs/models.md`
+says "a query about a picture goes through CLIP's own text encoder" for the
+question that asks exactly that, and `src/lock.rs`'s module doc states the
+advisory lock for the question about two indexers — and thirteen spans were
+added. Nine were real ranking failures and gained nothing. Four could be read
+either way and gained nothing, because a span added to buy a hit is a hit
+bought from the measuring stick.
+
+Each decision is recorded on the question with the number of spans it added,
+and the harness fails if a question marked correct-but-unspanned gained none.
+The sealed thirty were redrawn from the audited set with a new seed, and the
+draw now lives in the harness with a test that fails if `split.yaml` is not
+what the seed produces.
+
+### Rescoring, and why it is off
+
+There is a rescoring stage now: a local 37 M-parameter cross-encoder, int8,
+Apache-2.0, pinned by digest, that reads the query and a candidate **together**
+— which fusion never does, since fusion compares positions — and whose order is
+fused with the fused one, so a candidate has to be liked by both.
+
+It is off unless `SEMLITH_RERANK=on`, and the reason is the measurement beside
+it: a search over one store takes **8.2 ms**, and **132.2 ms** with the stage
+over twelve candidates. What that buys on the development seventy-seven is two
+questions at k=1 and one at k=3. Worth having when one answer matters more than
+a tenth of a second; not worth making every agent's every search sixteen times
+slower by default. `semlith setup` fetches the model so that turning it on
+never pauses a query, and `stats` and `doctor` say which ranking answered.
+
+### What was tried, and what was kept
+
+Every mean is a pair: three runs a side, one binary, `git diff -- src/` clean
+between them. On the development seventy-seven, in the order they were tried:
+
+- **Code chunks carry their definition** — the enclosing signature and the
+  first line of its doc comment, in front of the text at embed time and nowhere
+  in the stored bytes, the way a Markdown chunk already carries its heading
+  path. 65 → 66 at k=8, 62 → 62 at k=3, 54 → 51 at k=1. **Kept.**
+- **A cross-encoder writing the order outright** — 59/67/71 → 59/67/71. It
+  moved sixteen questions and gained nothing: rank 7 to rank 1 for one, rank 1
+  to rank 6 for another. **Not kept.**
+- **The same cross-encoder fused with the fused order** — 59/67/71 →
+  **61/68/71**. **Kept, behind the switch above.**
+- **A deeper candidate pool for questions**, 32 → 50 — identical at every depth
+  on the 51 questions both runs scored, and four questions slightly worse.
+  **Not kept.**
+- **Normalising spellings before comparing a hint against a path** — five more
+  call edges of 6 930 settled, no question moved at any depth. **Not kept.**
+
+### The rest
+
+`semlith stats`, `semlith_stats` and one table on the portal's Index page state
+what the graph covers per language: files, files whose parser gave up,
+definitions, call edges by support class, and call targets no definition
+satisfies. An absent edge and an unparsed file are different problems and a
+single store-wide percentage hid both. A test reads the CLI and the tool over
+one store and fails if they disagree.
+
+`semlith brief` carries one span of text rather than three: 2 209 tokens per
+answered question against search-then-read's 724 becomes **1 112 against 725**,
+at 1.00 calls against 2.54.
+
+`semlith doctor` now names the key that actually holds a disabled server rather
+than the documented spelling of it — the defect that hid a silently absent
+server on the reference machine for a third time, because the first thing
+anybody does with that message is search their configuration for the key it
+names.
+
+The six daemon index-run tests of issue #118 pass: five asserted a streaming
+contract the daemon replaced in 0.20.0, and the sixth found a real fault — a
+forwarded `semlith_index` dropped the refusals the in-process server names, so
+an agent was held to a boundary it was never told about.
+
+### Faster, measured beside the release it replaces
+
+Both binaries on the same laptop in the same run, median of twenty searches,
+one test thread:
+
+| chunks | 0.23.0 | 0.25.0 |
+|---|---|---|
+| 700 | 20.5 ms | **16.2 ms** |
+| 7 000 | 46.9 ms | **37.9 ms** |
+| 70 000 | 362.4 ms | **159.1 ms** |
+
+The pair matters more than either number: the 6.5 / 13.7 / 129.9 ms the 0.23.0
+record states were taken on a quieter machine, and this laptop is about three
+times slower today for both binaries. Measured against each other rather than
+against a figure from another day, the release is faster at every size. Peak
+memory while indexing stays under 240 MB at every size, an idle watcher costs
+0.00 s of CPU over 60 s, and an edit on disk is searchable in about 2 s.
+
+A reader holding three stores costs **1 MB** per extra store beyond the first,
+against 123 MB before the cross-encoder was made one per process.
+
+### Upgrading
+
+A store written by an earlier release is re-chunked and re-embedded by the
+first full index pass, because what the model is shown has changed and a store
+half embedded each way ranks its own files unevenly. The run says why it is
+doing it. Nothing you indexed is touched, and the store format moves to 4; an
+older binary refuses a format-4 store by name rather than misreading it.
+
 ## [0.24.0] - 2026-09-19
 
 ### The number, and the defect the number found
@@ -2627,7 +2758,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/semlith/semlith/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/semlith/semlith/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/semlith/semlith/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/semlith/semlith/compare/v0.21.0...v0.22.0

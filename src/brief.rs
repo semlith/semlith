@@ -50,10 +50,17 @@ const EDGES_PER_SYMBOL: usize = 8;
 /// every token it is allowed is a brief that spends every token it is allowed,
 /// whatever the question needed.
 ///
-/// A budget is a ceiling, not a target. Three is what an agent reads before it
-/// decides it has the answer, and the spans past it keep their locators -- which
-/// is the part it would act on next anyway.
-const TEXT_SPANS: usize = 3;
+/// A budget is a ceiling, not a target, and one is what the measurement says
+/// the ceiling should be.
+///
+/// Three was the 0.23.0 answer and 0.24.0 measured what it cost: 1.00 calls
+/// and 2 209 tokens per answered question against search-then-read's 2.63
+/// calls and 724 tokens on the same questions. A call that saves two round
+/// trips and spends three times the tokens is not the cheap path this command
+/// exists to be — an agent that reads one span, its neighbourhood and the
+/// locators of the rest has what it needs to decide, and the second and third
+/// texts are what it was going to skim past.
+const TEXT_SPANS: usize = 1;
 
 /// What one call returns.
 #[derive(Debug, Clone, Serialize)]

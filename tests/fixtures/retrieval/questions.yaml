@@ -582,6 +582,8 @@ questions:
       and its job.
 
   - id: concept-edge-dst-is-a-name
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: why is the edge destination a symbol name rather than an id
@@ -595,6 +597,10 @@ questions:
         symbol: ~
         start_line: 442
         end_line: 458
+      - path: docs/portal.md
+        symbol: ~
+        start_line: 1103
+        end_line: 1113
     note: >-
       Seed Q3. The answer is a schema comment, not code — the sixteen lines
       above `CREATE TABLE edges` are the whole argument, and there is no symbol
@@ -642,6 +648,8 @@ questions:
       constants that answer the question together.
 
   - id: concept-ledger-chain
+    audit: unsure
+    audit_added: 0
     shape: concept
     tool: search
     query: ledger rows are hash chained so an edited row is detected
@@ -708,6 +716,8 @@ questions:
       ranked walk" reasoning lives.
 
   - id: concept-stale-index-on-save
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: what keeps a long-running reader from answering from an index that was replaced underneath it
@@ -725,6 +735,10 @@ questions:
         symbol: generation
         start_line: 3024
         end_line: 3030
+      - path: docs/architecture.md
+        symbol: ~
+        start_line: 435
+        end_line: 442
     note: >-
       Seed Q9, reworded. The seed asked "what keeps the index from going stale
       when a file is saved" and accepted a hit anywhere in `watch.rs`, `lib.rs`
@@ -739,6 +753,8 @@ questions:
       are not comparable; that is the intent.
 
   - id: concept-clip-text-encoder
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: the query for images goes through CLIP's text encoder
@@ -752,12 +768,18 @@ questions:
         symbol: ~
         start_line: 383
         end_line: 389
+      - path: docs/models.md
+        symbol: ~
+        start_line: 37
+        end_line: 42
     note: >-
       Seed Q14, measured as a hit. `Images::embed_query` is the only place a
       text query is turned into a CLIP vector; its doc comment is the sentence
       the query paraphrases, which is why this one lands.
 
   - id: concept-store-refuses-writes
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: how does the store stop a query from writing to the database
@@ -797,6 +819,8 @@ questions:
       bare, full text — appear in the function.
 
   - id: concept-two-indexers-at-once
+    audit: unspanned-correct
+    audit_added: 2
     shape: concept
     tool: search
     query: what stops two processes from indexing the same store at the same time
@@ -814,6 +838,14 @@ questions:
         symbol: ~
         start_line: 180
         end_line: 186
+      - path: src/lock.rs
+        symbol: ~
+        start_line: 1
+        end_line: 19
+      - path: docs/architecture.md
+        symbol: ~
+        start_line: 355
+        end_line: 369
     note: >-
       `lock.rs` is 200 lines and has not changed since 0.12.0, so this is a
       durable span. The file is also small enough that a hit anywhere in it is
@@ -903,6 +935,8 @@ questions:
       and that this is one of the two causes of the wrong graph-only hits.
 
   - id: concept-where-a-retrieval-is-written
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: where does a search get written down so the savings can be counted later
@@ -1192,6 +1226,8 @@ questions:
       investigated rather than assumed to be a tool bug.
 
   - id: multihop-two-symbols-share-a-name
+    audit: unsure
+    audit_added: 0
     shape: multi-hop
     tool: search
     query: what happens when two different functions in different files have the same name
@@ -1238,6 +1274,8 @@ questions:
   # ------------------------------------------------------------------
 
   - id: shape-pair-ppr-identifier
+    audit: unspanned-correct
+    audit_added: 1
     shape: identifier
     tool: search
     query: DAMPING
@@ -1247,6 +1285,10 @@ questions:
         symbol: expand
         start_line: 1165
         end_line: 1265
+      - path: src/graph.rs
+        symbol: DAMPING
+        start_line: 1149
+        end_line: 1156
     note: >-
       The identifier half of the pair. Its question-shaped twin is
       `shape-pair-ppr-question`; both ask for `graph::expand`. Written first as
@@ -1287,6 +1329,8 @@ questions:
       weighting works anywhere it works here.
 
   - id: shape-pair-prefer-question
+    audit: unsure
+    audit_added: 0
     shape: concept
     tool: search
     query: what decides whether a query is treated as a name or as a sentence
@@ -1324,6 +1368,8 @@ questions:
       measured is which side of the corpus came back, not which line.
 
   - id: prefer-docs-over-code
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: why the retrieval ledger records by default
@@ -1338,6 +1384,10 @@ questions:
         symbol: ~
         start_line: 1
         end_line: 612
+      - path: docs/compatibility.md
+        symbol: ~
+        start_line: 1
+        end_line: 1015
     note: >-
       The mirror of the question above. "Why" is a question the prose answers
       and the code cannot, so `prefer: docs` should reach the documents. Whole
@@ -1403,6 +1453,8 @@ questions:
       question tests.
 
   - id: multi-hop-alias-crossing
+    audit: wrong
+    audit_added: 0
     shape: multi-hop
     tool: path
     from: reading
@@ -1522,6 +1574,8 @@ questions:
       code shapes under another name.
 
   - id: concept-configuration-timeout
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: how long before the lock times out
@@ -1532,6 +1586,10 @@ questions:
         start_line: 4
         end_line: 4
       - path: tests/fixtures/graph/toml/lock.toml
+        symbol: timeout
+        start_line: 4
+        end_line: 4
+      - path: tests/fixtures/graph/json/lock.json
         symbol: timeout
         start_line: 4
         end_line: 4
@@ -1863,6 +1921,8 @@ questions:
       — so this question has one span and it is prose.
 
   - id: concept-private-address-fetch
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: what stops a fetched url from reaching a service only my machine can see
@@ -1914,6 +1974,8 @@ questions:
       bounded read at 298 are what actually refuses a bomb.
 
   - id: concept-model-digest-check
+    audit: unspanned-correct
+    audit_added: 2
     shape: concept
     tool: search
     query: how do I know the model weights that were downloaded are the ones semlith expects
@@ -1927,6 +1989,14 @@ questions:
         symbol: ~
         start_line: 77
         end_line: 90
+      - path: docs/models.md
+        symbol: ~
+        start_line: 7
+        end_line: 17
+      - path: docs/security.md
+        symbol: ~
+        start_line: 82
+        end_line: 86
     note: >-
       The code half is `verify`, which compares a SHA-256 against the pinned
       table and whose error text tells the reader what to do about a mismatch.
@@ -1936,6 +2006,8 @@ questions:
       the first.
 
   - id: concept-airgap
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: how do I stop it from reaching the network at all
@@ -1952,6 +2024,10 @@ questions:
         symbol: ~
         start_line: 518
         end_line: 528
+      - path: docs/portal.md
+        symbol: ~
+        start_line: 953
+        end_line: 961
     note: >-
       `airgap` is the predicate and `refuse_if_airgapped` is the refusal, and
       which one answers depends on whether the asker wants the switch or the
@@ -2013,6 +2089,8 @@ questions:
       its own question.
 
   - id: concept-unsupported-protocol-version
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: what happens when a client asks for a protocol revision this server does not implement
@@ -2021,6 +2099,10 @@ questions:
         symbol: negotiate
         start_line: 361
         end_line: 376
+      - path: tests/mcp.rs
+        symbol: an_unimplemented_revision_is_answered_with_one_we_implement
+        start_line: 84
+        end_line: 106
     note: >-
       The doc comment states the rule — a server that echoes what it was asked
       claims every revision that exists — and the body implements it by falling
@@ -2030,6 +2112,8 @@ questions:
       in the request preamble count.
 
   - id: concept-connection-cap
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: how many connections will the local server hold open at once
@@ -2046,6 +2130,8 @@ questions:
       not score.
 
   - id: concept-slow-refusal
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: why does a request with the wrong token take so long to be refused
@@ -2086,6 +2172,8 @@ questions:
       name, which is part of what makes this worth measuring.
 
   - id: concept-watcher-batch-admissible
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: how does the watcher decide which changed paths are worth re-indexing
@@ -2122,6 +2210,8 @@ questions:
       at all. Both spans are listed and the wider one carries the reasoning.
 
   - id: concept-client-stanzas-source
+    audit: unspanned-correct
+    audit_added: 1
     shape: concept
     tool: search
     query: where does the text of each client's setup snippet actually come from
@@ -2134,6 +2224,10 @@ questions:
         symbol: ~
         start_line: 552
         end_line: 560
+      - path: docs/clients.md
+        symbol: ~
+        start_line: 3
+        end_line: 16
     note: >-
       The module comment and the `include_str!` under it, which is the whole
       answer: `docs/clients.md` is the source and the Rust side parses it at
@@ -2143,6 +2237,8 @@ questions:
       comes from should be answered by the file that holds the `include_str!`.
 
   - id: concept-unregisterable-clients
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: which agent clients cannot be set up automatically and why not
@@ -2178,6 +2274,8 @@ questions:
       get summed — a second, narrower answer to the same question.
 
   - id: concept-owner-only-modes
+    audit: unsure
+    audit_added: 0
     shape: concept
     tool: search
     query: what does it check about the permissions on the files it wrote
@@ -2214,6 +2312,8 @@ questions:
       per-request path.
 
   - id: concept-portal-parity
+    audit: wrong
+    audit_added: 0
     shape: concept
     tool: search
     query: when is a new command considered finished in this project

@@ -1,78 +1,87 @@
 # Which questions the gate is scored on, and which the work may look at.
 #
-# REDRAWN for 0.23.0 on 2026-09-19, with seed 20260919, and the record says why.
+# REDRAWN for 0.25.0 on 2026-09-20, with seed 20260920, from the audited 107.
 #
-# The thirty drawn for 0.22.0 stopped being held out on 2026-09-19: eight
-# questions had a correct answer in the corpus that no span covered, and the
-# spans were completed after the set had been scored and the misses read. Each
-# edit is defensible; the timing is not, so those thirty cannot measure anything
-# again. This split draws thirty fresh ones from the same 107.
+# Why again. 0.25.0 opened with a judgment audit of every question that missed
+# at k=8 and every near-miss whose first hit was unspanned: eleven of
+# twenty-four were answered correctly by a chunk no span covered, and thirteen
+# spans were added. That changes the ground truth, so the thirty drawn for
+# 0.23.0 measure a different question set from the one they were drawn against
+# and cannot carry this release's gate.
 #
-# It is weaker evidence than 0.22.0's was, and that is stated rather than
-# implied: the work has now seen all 107 questions. What it still rules out is
-# fitting *this release's* ranking changes to the set it is scored on, because
-# the draw happens before the first of them and the seed is recorded here.
-# The figure that carries the most weight is therefore the binary-for-binary
-# comparison against 0.22.0 on this same split, where both sides saw the same
-# questions.
+# What this draw is, said plainly rather than implied:
+#
+#   * It is drawn from the audited set, with the seed above, and it is frozen
+#     before the remaining ranking work and scored once at completion.
+#   * The audit ran before it, so eight of these thirty were audited and five
+#     gained a span. Both binaries in the comparison are scored against the
+#     same spans, so the pair is like for like; what it is not is a set whose
+#     ground truth predates the release.
+#   * Two ranking changes -- the code-chunk context and the rescoring stage --
+#     were measured on the development 77 before this draw, and neither was
+#     decided by anything in this file. The property this split still buys is
+#     the one that matters: nothing in the release was fitted to the questions
+#     it is scored on.
 #
 # Stratified by (shape, tool) with largest-remainder allocation and a seeded
-# shuffle inside each stratum, so the sealed set is not accidentally all of one
-# shape -- the contract names that as a risk, and this is the mitigation.
+# shuffle inside each stratum, the same method 0.23.0's draw used, so the
+# sealed set is not accidentally all of one shape.
 #
-# Four identifier questions are held out of the sealed set deliberately, because
-# the contract names them: `id-dependency-kinds`, `id-edges-out`, `id-max-nodes`
-# and `id-rrf-k`. They are the ones that missed at k=8 on 2026-09-18 and are
-# still in the set; the fifth the 0.22.0 record named, `SEMLITH_IMAGE_FLOOR`, has
-# no question under that id here. The acceptance criterion that each must rank
-# first is written against the development set, and a question that is both the
-# named example and the sealed measurement would be neither.
+# Four identifier questions are held out of the sealed set deliberately, as in
+# 0.23.0: `id-dependency-kinds`, `id-edges-out`, `id-max-nodes` and `id-rrf-k`.
+# The acceptance criterion that each must rank first is written against the
+# development set, and a question that is both the named example and the
+# sealed measurement would be neither.
 #
 # The harness refuses to score the sealed set unless `SEMLITH_RETRIEVAL_SEALED`
 # is set, and prints which set it is scoring on its first line.
 #
+# The draw lives in the harness, in `draw`, and `the_sealed_split_is_the_one_
+# the_seed_draws` fails if this file is not what that function produces from
+# the seed. One implementation, so a hand-edited list cannot become the gate.
+#
 # Shape and tool, either side of the split:
 #
-#   concept    search     development 32   sealed 12
-#   identifier neighbors  development  3   sealed  2
-#   identifier read       development  6   sealed  2
-#   identifier search     development 16   sealed  6
-#   identifier symbol     development  6   sealed  2
-#   multi-hop  neighbors  development  2   sealed  1
-#   multi-hop  path       development 10   sealed  4
-#   multi-hop  search     development  1   sealed  0
-#   multi-hop  symbol     development  1   sealed  1
+#   concept    search     development  31   sealed  13
+#   identifier neighbors  development   3   sealed   2
+#   identifier read       development   6   sealed   2
+#   identifier search     development  13   sealed   5
+#   identifier symbol     development   6   sealed   2
+#   multi-hop  neighbors  development   2   sealed   1
+#   multi-hop  path       development  10   sealed   4
+#   multi-hop  search     development   1   sealed   0
+#   multi-hop  symbol     development   1   sealed   1
 
-seed: 20260919
+seed: 20260920
 
 sealed:
-  - concept-chunk-overlap
-  - concept-find-running-daemon
-  - concept-hidden-files-refused
-  - concept-null-chunk-id
-  - concept-shard-size
-  - concept-token-compared
+  - concept-client-stanzas-source
+  - concept-clip-text-encoder
+  - concept-connection-cap
+  - concept-home-not-set
+  - concept-model-digest-check
+  - concept-no-cookie
+  - concept-plain-http-refused
+  - concept-portal-parity
+  - concept-stale-index-on-save
   - concept-token-count-no-model
-  - concept-unsafe-table
-  - concept-vector-memory-budget
-  - concept-which-languages-have-edges
+  - concept-two-indexers-at-once
+  - concept-unsupported-protocol-version
   - concept-why-defines-excluded-from-path
-  - id-agent-key-prefix
-  - id-granite-revision
-  - id-image-floor-env
-  - id-keyword-search
-  - id-max-pixels
-  - id-min-entropy
-  - id-neighbors-record-retrieval
-  - id-neighbors-require-public
-  - id-read-glob-match
-  - identifier-powershell-function
-  - identifier-sql-table
+  - id-chain-hash
+  - id-denied-dirs
+  - id-neighbors-chain-hash
+  - id-neighbors-glob-match
+  - id-overlap-lines
+  - id-read-negotiate
+  - id-shard-vectors
+  - id-symbol-edges-out
+  - id-symbol-resident-bytes
+  - id-writing-guard
   - multihop-entry-two-definitions
-  - multihop-scan-text-callers
-  - path-call-tool-to-ledger
+  - multihop-user-home-callers
+  - path-answer-to-ledger
   - path-denied-to-glob-match
-  - path-index-paths-to-writing
-  - path-search-in-to-ledger
-  - read-one-span-by-symbol
-  - shape-pair-ppr-question
+  - path-is-image-to-ledger
+  - path-refuse-airgapped-to-airgap
+  - read-one-span-by-line

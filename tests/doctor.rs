@@ -305,8 +305,20 @@ fn json_carries_the_fields_a_script_would_read() {
     // construction have nothing a repair could apply to. Plus `semlith on
     // PATH`, which is a reading of the machine with the same shape and no home
     // on the Privacy page — that page renders the rules it names by id, so it
-    // does not show this one.
-    assert_eq!(report["rules"].as_array().unwrap().len(), 5);
+    // does not show this one. And from 0.25.0 the rescoring model, which is
+    // never a fault — search answers without it — but changes the order the
+    // answers come back in, so a machine that does not have it is owed the
+    // sentence rather than left to wonder why its ranking differs from the
+    // one the release measured.
+    assert_eq!(report["rules"].as_array().unwrap().len(), 6);
+    assert!(
+        report["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["id"] == "rescoring model"),
+        "doctor does not report the rescoring model"
+    );
 }
 
 /// Registered at user scope, switched off for one directory, and silent about
@@ -417,6 +429,16 @@ fn the_other_spelling_of_the_disabled_key_is_read_too() {
         .find(|c| c["name"] == "Claude Code")
         .expect("Claude Code is reported");
     assert_eq!(claude["disabled_here"], true);
+    // And it names the spelling that actually holds it. The first thing anyone
+    // does with this message is search their configuration for the key it
+    // names, and until 0.25.0 it named the documented spelling whichever one
+    // was really there — which sent the reader looking for a key that is not
+    // in the file.
+    let explain = claude["explain"].as_str().unwrap_or_default();
+    assert!(
+        explain.contains("disabledMcpServers") && !explain.contains("disabledMcpjsonServers"),
+        "the message names the wrong key: {explain}"
+    );
 }
 
 /// A registration written before 0.21.0 names the bare word `semlith`, and

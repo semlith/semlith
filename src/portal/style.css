@@ -2487,6 +2487,11 @@ pre.code::-webkit-scrollbar-thumb {
 .w-files {
   min-width: 680px;
 }
+/* Ten columns of counts. Below this they stack into a puzzle, so the table
+ * scrolls inside its card like the others. */
+.w-coverage {
+  min-width: 760px;
+}
 .w-models {
   min-width: 480px;
 }
@@ -3846,7 +3851,8 @@ td.why .copyfield {
   .w-stores,
   .w-files,
   .w-models,
-  .w-agents {
+  .w-agents,
+  .w-coverage {
     min-width: 0;
   }
   /* A truncating cell still asks for the width of its longest path unless it

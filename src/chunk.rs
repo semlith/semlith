@@ -1,6 +1,7 @@
 //! Turning a file on disk into embeddable chunks of text.
 
 use crate::formats;
+use crate::graph::Symbol;
 use std::path::Path;
 
 /// Soft upper bound on chunk size, in characters.
@@ -253,7 +254,7 @@ pub fn chunk_at(text: &str, cuts: &[u32]) -> Vec<Chunk> {
 /// loses identifier questions — `id-dependency-kinds` 1 to 3, `id-token-header`
 /// 1 to 3, `id-key-grace` 3 to 6. They were one scope item and they pull in
 /// opposite directions, so only the half that wins is here.
-pub fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
+pub fn chunk_file(path: &Path, text: &str, symbols: &[Symbol]) -> Vec<Chunk> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -269,8 +270,106 @@ pub fn chunk_file(path: &Path, text: &str) -> Vec<Chunk> {
         }
         return chunks;
     }
-    chunk_text(text)
+    let mut chunks = chunk_text(text);
+    if !symbols.is_empty() {
+        let lines: Vec<&str> = text.lines().collect();
+        for chunk in &mut chunks {
+            chunk.context = code_context(&lines, symbols, chunk.start_line);
+        }
+    }
+    chunks
 }
+
+/// What a code chunk is shown in front of its text: the definition it sits
+/// inside, and the first line of that definition's doc comment.
+///
+/// The same argument as the Markdown heading path, and the same restraint. A
+/// window cut out of the middle of a function says what it does and never says
+/// whose body it is — "the receiver of a qualified call" is a line about
+/// `Edge::hint` that never names `Edge` or `hint`, so a question phrased the
+/// way a person asks it reaches nothing. The signature and the doc line say
+/// both, they are already in the file, and they go in front of the embedded
+/// text only: `Semlith::read` maps every line of a chunk to `start_line +
+/// offset`, so an invented line inside `text` would shift every span the store
+/// can answer with.
+///
+/// Innermost wins. A method inside an `impl` inside a module is described by
+/// the method, because that is the smallest true statement about the lines in
+/// hand.
+fn code_context(lines: &[&str], symbols: &[Symbol], start_line: u32) -> String {
+    let Some(symbol) = symbols
+        .iter()
+        .filter(|s| s.start_line <= start_line && start_line <= s.end_line)
+        .max_by_key(|s| s.start_line)
+    else {
+        return String::new();
+    };
+
+    let at = symbol.start_line.saturating_sub(1) as usize;
+    let Some(signature) = lines.get(at) else {
+        return String::new();
+    };
+    let signature = signature.trim();
+    if signature.is_empty() {
+        return String::new();
+    }
+
+    // The doc comment above the signature, if the file has one: the first line
+    // of the contiguous comment block, which is the line that says what the
+    // definition is for. The rest of the block is detail the body usually
+    // repeats.
+    let mut doc = None;
+    let mut above = at;
+    while above > 0 {
+        above -= 1;
+        let line = lines[above].trim();
+        if let Some(said) = comment_body(line) {
+            if !said.is_empty() {
+                doc = Some(said.to_string());
+            }
+            continue;
+        }
+        break;
+    }
+
+    let signature = truncate_chars(signature, CONTEXT_CHARS);
+    match doc {
+        Some(doc) => format!("{signature}\n{}", truncate_chars(&doc, CONTEXT_CHARS)),
+        None => signature.to_string(),
+    }
+}
+
+/// What a comment line says, or `None` when the line is not a comment.
+///
+/// Every marker the indexed languages write a doc comment with, and nothing
+/// clever: a line that is not a comment ends the block, which is what stops
+/// this walking out of one definition and into the code above it.
+fn comment_body(line: &str) -> Option<&str> {
+    for marker in [
+        "///", "//!", "//", "#!", "#", "--", "*/", "/**", "/*", "*", ";;", "%",
+    ] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// Cut to a character budget on a character boundary, so one enormous
+/// generated signature cannot become most of what the model reads.
+fn truncate_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => text[..at].to_string(),
+        None => text.to_string(),
+    }
+}
+
+/// The budget for each half of a code chunk's context.
+///
+/// A signature and a doc line are short by nature; the cap is for generated
+/// code, where one definition can be a kilobyte of type parameters and would
+/// otherwise crowd out the chunk it is meant to describe.
+const CONTEXT_CHARS: usize = 200;
 
 /// The lines Markdown headings start on.
 ///
@@ -429,7 +528,7 @@ More prose.
 
 The part a reader needs the two headings above to understand.
 ";
-        let chunks = chunk_file(Path::new("docs/architecture.md"), text);
+        let chunks = chunk_file(Path::new("docs/architecture.md"), text, &[]);
         let deepest = chunks
             .iter()
             .find(|c| c.text.contains("the two headings above"))
@@ -479,8 +578,62 @@ Text after the fence.
     }
 
     #[test]
+    fn a_code_chunk_carries_the_definition_it_sits_inside() {
+        let mut text = String::from(
+            "/// How many nodes a traversal may visit before it gives up.\n\
+             /// Four thousand, measured on the pinned corpus.\n\
+             pub fn walk(graph: &Graph, max_nodes: usize) -> Vec<Node> {\n",
+        );
+        // Long enough that the chunk is a window out of the middle of the
+        // body, which is the case the context exists for.
+        for i in 1..=60 {
+            text.push_str(&format!("    let step_{i} = visit(graph, {i});\n"));
+        }
+        text.push_str("}\n");
+
+        let symbols = crate::graph::extract(Path::new("walk.rs"), &text)
+            .expect("the file parses")
+            .expect("Rust has a grammar")
+            .symbols;
+        let chunks = chunk_file(Path::new("walk.rs"), &text, &symbols);
+        let inside = chunks
+            .iter()
+            .find(|c| c.text.contains("let step_40"))
+            .expect("the body is chunked");
+
+        assert_eq!(
+            inside.context,
+            format!(
+                "{}\n{}",
+                "pub fn walk(graph: &Graph, max_nodes: usize) -> Vec<Node> {",
+                "How many nodes a traversal may visit before it gives up."
+            ),
+            "a window out of a function body must say whose body it is"
+        );
+        assert!(
+            inside.embedded().starts_with("pub fn walk("),
+            "the model is shown the definition first"
+        );
+        assert!(
+            !inside.text.contains("pub fn walk("),
+            "the stored bytes are the file's own: an invented line would shift every span"
+        );
+        assert_eq!(
+            chunk_file(Path::new("walk.rs"), &text, &[])
+                .iter()
+                .map(|c| c.text.clone())
+                .collect::<Vec<_>>(),
+            chunks.iter().map(|c| c.text.clone()).collect::<Vec<_>>(),
+            "the context changes what is embedded and nothing about where the cuts fall"
+        );
+    }
+
+    #[test]
     fn text_with_no_structure_keeps_the_fixed_window() {
         let text: String = (1..=200).map(|i| format!("line {i}\n")).collect();
-        assert_eq!(chunk_file(Path::new("notes.txt"), &text), chunk_text(&text));
+        assert_eq!(
+            chunk_file(Path::new("notes.txt"), &text, &[]),
+            chunk_text(&text)
+        );
     }
 }

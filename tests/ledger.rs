@@ -155,11 +155,18 @@ fn an_older_store_gains_an_empty_ledger_and_keeps_its_format() {
             .unwrap();
     }
 
-    // What an older binary leaves behind: the tables this release adds, gone.
+    // What an older binary leaves behind: the tables this release adds, gone,
+    // and the format row where that binary left it.
+    let older = semlith::store::SHARDED_FORMAT;
     {
         let db = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
         db.execute_batch("DROP TABLE retrievals; DROP TABLE edges; DROP TABLE symbols;")
             .unwrap();
+        db.execute(
+            "UPDATE meta SET v = ?1 WHERE k = ?2",
+            rusqlite::params![older.to_string(), semlith::store::FORMAT_KEY],
+        )
+        .unwrap();
     }
 
     let mut s = Semlith::open(store.path(), None).unwrap();
@@ -167,7 +174,7 @@ fn an_older_store_gains_an_empty_ledger_and_keeps_its_format() {
     assert_eq!(rows(s.db()), 0, "the ledger came back empty");
     assert_eq!(
         semlith::store::format(s.db()).unwrap(),
-        2,
+        older,
         "opening a store must not move its format version"
     );
     assert!(

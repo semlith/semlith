@@ -1037,6 +1037,14 @@ fn run() -> Result<()> {
                 } else {
                     format!(", {} failed", report.failed.len())
                 };
+                if report.rechunked {
+                    eprintln!(
+                        "re-indexed every file: this release shows the embedding model a code \
+                         chunk's own definition — its signature and the first line of its doc \
+                         comment — so every chunk was cut and embedded again. The files \
+                         themselves were not touched."
+                    );
+                }
                 eprintln!(
                     "indexed {} files ({} chunks{images}) in {:.1}s — {} already indexed, {} skipped{by_reason}, {} removed{failed}",
                     report.indexed,
@@ -1718,6 +1726,24 @@ fn run() -> Result<()> {
                     );
                 }
                 println!("model    {} ({} dim)", store.model(), store.dim());
+                // Which order the answers came in. A store searched without
+                // the cross-encoder ranks by fusion alone, and that is a
+                // different answer from the one the release measured.
+                let cache = semlith::model_cache_dir().unwrap_or_default();
+                println!(
+                    "ranking  {}",
+                    if !semlith::rerank::enabled() {
+                        format!(
+                            "fusion alone — {}=on adds {}, at about 124 ms a search",
+                            semlith::rerank::RERANK_ENV,
+                            semlith::rerank::RERANK_NAME
+                        )
+                    } else if semlith::rerank::cached(&cache) {
+                        format!("fusion, then {}", semlith::rerank::RERANK_NAME)
+                    } else {
+                        "fusion alone — run `semlith setup` to add the rescoring model".to_string()
+                    }
+                );
                 println!("files    {files}");
                 // Which rule cut them, because from 0.22.0 there are two and a
                 // store keeps the one it was last swept under. A store still on
@@ -1756,6 +1782,32 @@ fn run() -> Result<()> {
                 // line says which by naming the table rather than the number
                 // alone.
                 println!("history  {} retired definitions", store.retired_symbols()?);
+                // What the graph covers, per language, from the rows
+                // themselves. An absent edge and an unparsed file look
+                // identical in a single store-wide percentage, and the
+                // README's resolution figure was reproducible from nothing a
+                // user could run until this table existed.
+                let coverage = semlith::store::coverage_by_language(store.db())?;
+                if !coverage.is_empty() {
+                    println!(
+                        "graph    language      files  unparsed  defs  extracted  resolved  \
+                         ambiguous  unresolved  settled"
+                    );
+                    for row in &coverage {
+                        println!(
+                            "         {:<12} {:>5} {:>9} {:>5} {:>10} {:>9} {:>10} {:>11} {:>7} %",
+                            row.language,
+                            row.files,
+                            row.parser_failed,
+                            row.definitions,
+                            row.extracted,
+                            row.resolved,
+                            row.ambiguous,
+                            row.unresolved,
+                            row.settled_share(),
+                        );
+                    }
+                }
                 // One line, and never a number without its denominator. A
                 // store that has recorded nothing prints nothing here rather
                 // than a zero that reads like a measurement.

@@ -1027,3 +1027,93 @@ fn the_handshake_carries_the_same_instructions_discover_sends() {
         "the instructions name no call: {said}"
     );
 }
+
+/// The per-language coverage table, on both surfaces, over one store.
+///
+/// The README quotes a resolution figure, and until 0.25.0 nothing a user
+/// could run reproduced it. Two surfaces print it now, so the test that
+/// matters is that they agree: a CLI table and an MCP line computed two
+/// different ways would leave a reader to pick one.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_coverage_table_agrees_between_the_command_line_and_the_tool() {
+    let home = tempfile::tempdir().unwrap();
+    let work = home.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(
+        work.join("walk.rs"),
+        "/// Walk the graph.\npub fn walk(n: usize) -> usize {\n    visit(n)\n}\n\
+         pub fn visit(n: usize) -> usize {\n    n\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        work.join("tidy.py"),
+        "def tidy(rows):\n    return sorted(rows)\n\ndef run(rows):\n    return tidy(rows)\n",
+    )
+    .unwrap();
+
+    let store = home.path().join("store");
+    let seeded = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", work.to_str().unwrap(), "--quiet"])
+        .arg("--store")
+        .arg(&store)
+        .env("HOME", home.path())
+        .env("SEMLITH_HOME", home.path().join("semlith-home"))
+        .env("SEMLITH_MODEL_CACHE", model_cache())
+        .output()
+        .expect("seeding the store");
+    assert!(
+        seeded.status.success(),
+        "seeding failed:\n{}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+
+    let stats = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .arg("--store")
+        .arg(&store)
+        .arg("stats")
+        .env("HOME", home.path())
+        .env("SEMLITH_HOME", home.path().join("semlith-home"))
+        .env("SEMLITH_MODEL_CACHE", model_cache())
+        .output()
+        .expect("stats runs");
+    let printed = String::from_utf8_lossy(&stats.stdout).to_string();
+    assert!(
+        printed.contains("graph    language"),
+        "stats prints no per-language table:\n{printed}"
+    );
+
+    // The figures the command line printed for Rust, read off its own row.
+    let row: Vec<String> = printed
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .filter(|word| *word != "graph")
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .find(|words| words.first().map(String::as_str) == Some("rust"))
+        .unwrap_or_else(|| panic!("no rust row in:\n{printed}"));
+
+    let mut server = Server::open(&[&store]);
+    server.handshake();
+    let said = server.tool("semlith_stats", json!({}));
+    let line = said
+        .lines()
+        .find(|line| line.trim_start().starts_with("rust:"))
+        .unwrap_or_else(|| panic!("the tool states no rust coverage:\n{said}"));
+
+    // Files, unparsed, definitions and each edge class, figure for figure.
+    for (at, what) in [(1usize, "files"), (2, "unparsed"), (3, "definitions")] {
+        assert!(
+            line.contains(&row[at]),
+            "the tool and the command line disagree on {what}: CLI said {}, tool said:\n{line}",
+            row[at]
+        );
+    }
+    assert!(
+        line.contains(&format!("{} % settled", row[8])),
+        "the settled share differs: CLI said {} %, tool said:\n{line}",
+        row[8]
+    );
+}
