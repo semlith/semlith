@@ -5085,12 +5085,12 @@ td.row-end {
 }
 .cloud-foot {
   display: flex;
-  align-items: center;
-  gap: var(--sp-3h);
+  align-items: baseline;
+  gap: var(--sp-1);
   flex-wrap: wrap;
   margin-top: var(--sp-4);
   font-size: var(--t-body-sm);
-  font-weight: 500;
+  color: var(--muted);
 }
 .cloud-block {
   margin-bottom: var(--sp-3);

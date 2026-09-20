@@ -809,6 +809,33 @@ mod tests {
     }
 
     #[test]
+    fn a_model_is_priced_however_its_name_is_punctuated() {
+        // The portal, the CLI and the tool each spell these differently —
+        // `Opus 5`, `opus-5`, `opus_5`. Matching on the display name alone
+        // meant the other two fell through to the first price and the report
+        // then said "at Sonnet 5" over an Opus figure.
+        for spelling in ["Opus 5", "opus 5", "opus-5", "opus_5", "OPUS5"] {
+            let (name, per_million) = price_of(spelling);
+            assert_eq!(name, "Opus 5", "{spelling} priced as {name}");
+            assert_eq!(per_million, 15.0);
+        }
+    }
+
+    #[test]
+    fn a_model_nobody_prices_is_refused_rather_than_defaulted() {
+        // The figure is money. A name this binary does not price must not come
+        // back as Sonnet 5's number under Sonnet 5's name, because the caller
+        // asked for something else and nothing would tell them.
+        assert!(price_named("gpt-9").is_none());
+        assert!(price_named("").is_none());
+        assert_eq!(price_named("haiku 4.5").map(|(n, _)| n), Some("Haiku 4.5"));
+        let names = price_names();
+        for wanted in ["Sonnet 5", "Opus 5", "Haiku 4.5"] {
+            assert!(names.contains(wanted), "{names} does not name {wanted}");
+        }
+    }
+
+    #[test]
     fn the_html_is_escaped_and_printable() {
         let mut report = sample();
         report.blocks.push(Block::Text {

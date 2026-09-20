@@ -637,6 +637,12 @@ mod tests {
     /// failure — `semlith start --no-service` has to be safe to run twice.
     #[test]
     fn removing_a_service_that_is_not_installed_is_not_an_error() {
+        // This reads `HOME` twice, through `status` and through `remove`, and
+        // another test repointing it between the two is what made this fail in
+        // a full run and pass on its own.
+        let _guard = crate::home::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if status().installed {
             // The developer's own machine has one installed; removing it here
             // would be this test deciding something it was not asked to.

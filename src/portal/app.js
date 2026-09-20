@@ -3050,8 +3050,11 @@ function agentsCard() {
     el("span", { class: "card-title", text: "Agents connected" }),
     body,
     el("span", { class: "spacer" }),
+    // A link rather than a button box: in the design this is a line of text
+    // at the foot of the card, and as a ghost button stretched by the flex
+    // column it read as a centred banner across the bottom of the card.
     el("button", {
-      class: "button ghost small",
+      class: "link-button",
       type: "button",
       text: "Copy config for another client",
       onclick: () => go("agents"),
@@ -8894,8 +8897,9 @@ async function reportsView() {
     try {
       data = await api(`/api/report?${new URLSearchParams({ kind, format, model: model[0] })}`);
     } catch (e) {
+      // The failure goes beside the controls that caused it, not into the
+      // preview: the preview is the file, and an error is not one.
       previewMeta.textContent = "";
-      fill(previewBody, "");
       previewBody.textContent = "";
       fill(builderProblem, error(e.message));
       return;
@@ -9094,17 +9098,18 @@ async function cloudView() {
         class: "note",
         text: "This build has no cloud command and opens no connection to any host. The Privacy page's own reading is where to check that rather than take it from here.",
       }),
-      // The design's footer row. An external link, and the only one on the
-      // page: everything else here is text to copy into a terminal.
+      // The v4 design closes this page with a link to semlith.com/data. It is
+      // named rather than linked, and that is deliberate: this page is served
+      // from a binary that opens no socket, `nothing_in_the_portal_points_at_
+      // another_origin` is the test that keeps it that way, and a link the
+      // reader cannot follow with the cable out is worse than an address they
+      // can type when they have a network.
       el(
         "div",
         { class: "cloud-foot" },
-        el("a", {
-          href: "https://semlith.com/data",
-          rel: "noreferrer noopener",
-          target: "_blank",
-          text: "What the cloud stores and deletes",
-        }),
+        el("span", { text: "What the cloud stores and deletes is written up at " }),
+        mono("semlith.com/data"),
+        el("span", { text: "." }),
       ),
     ),
   );
