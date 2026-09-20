@@ -92,7 +92,23 @@ opens no connection to any host.
 ### Numbers
 
 Nothing in this release touches the retrieval path, so the 0.25.0 figures were
-re-measured on this binary rather than restated. RETRIEVAL_TABLE_PLACEHOLDER
+re-measured on this binary rather than restated. Three runs on the
+sealed thirty, median of three, spread zero:
+
+| | 0.25.0 | 0.26.0 |
+|---|---|---|
+| hit@8 | 29 / 30 | **29 / 30** (96 %) |
+| hit@3 | 27 / 30 | **27 / 30** (90 %) |
+| hit@1 | 24 / 30 | **24 / 30** (80 %) |
+
+Every identifier question in the split is in the top three — 11 of 11, which
+is how many the sealed thirty holds; the 0.25.0 record said 12 of 12 and no
+question file has changed since, so that figure was wrong rather than this
+one. Wrong-yes is 0. By class at k=1 / k=3 / k=8: concept 7 / 10 / 12 of 13,
+identifier 11 / 11 / 11 of 11, multi-hop 6 / 6 / 6 of 6.
+
+`tools/list` is 5 840 bytes, about 1 460 tokens, for sixteen tools — against
+4 473 bytes and about 1 119 for thirteen.
 
 The tool list an agent pays for once per session grows with the three new
 tools, and the gate on it moved from 1 120 tokens to 1 600. The Agents page

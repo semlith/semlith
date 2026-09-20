@@ -464,8 +464,8 @@ of these drifts from its source:
 | edit on disk to searchable | **under 5 s** | the same |
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
-| `tools/list` | **4 473 bytes**, ~1 119 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
-| retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 27/30, hit@8 29/30** against the previous release's 25/27/28 on the same split, identifiers **12 of 12** in the top three, wrong-yes **0** | the same |
+| `tools/list` | **5 840 bytes**, ~1 460 tokens, sixteen tools | `cargo test --release --test retrieval -- --ignored` |
+| retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 27/30, hit@8 29/30**, median of three with zero spread, identifiers **11 of 11** in the top three, wrong-yes **0** | the same |
 | one search, rescoring off / on | **8.2 ms** / 132.2 ms on a 300-file store | the same |
 | one answered question, `brief` against search-then-read | **1.00 calls vs 2.54**, 1 112 tokens vs 725 | the same |
 | call-edge resolution | **62 %** settled | the same |
