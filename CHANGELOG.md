@@ -26,6 +26,15 @@ actually bound, because "loopback only" is a claim the reader cannot check
 without the port. "Skip for now" lands on Stores, which is the page it is
 skipping ahead to, rather than on About.
 
+**The menu is four groups again.** v3 grouped the pages Workspace, Explore,
+Operate and Account; v4 flattened that to two groups of six and seven, which
+is one long list with two headings in it rather than a menu. The thirteen
+pages are unchanged and so is their order within each group — what came back
+is the grouping, with *Explore* holding the three pages you ask questions of
+and *Machine* holding the two that describe what you are running, in place of
+v3's *Account* and the licence page a free binary does not have. The Impact
+and Retrieval ledger marks are v3's too.
+
 **The routes the design draws between pages are there.** "See what is actually
 inside the index", at the foot of the Stores table, which is the question that
 table raises and never answered. "Build a report", in the Retrieval ledger's

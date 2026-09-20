@@ -631,7 +631,8 @@ main {
   transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  /* 10px, which is the v3 design's own gap between a nav mark and its word. */
+  gap: var(--sp-2h);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-2);
   font-weight: 500;

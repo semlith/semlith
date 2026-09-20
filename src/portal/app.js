@@ -260,7 +260,9 @@ const NAV_ICONS = {
   index: "M4 6h16|M4 12h10|M4 18h13",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
-  ledger: "M5 4h11l3 3v13H5z|M9 9h6|M9 13h6|M9 17h4",
+  // v3's mark: a plain ruled page. The folded corner it grew in v4 reads as a
+  // document you were handed rather than as a record this machine keeps.
+  ledger: "M5 4h14v16H5z|M8 9h8|M8 13h8|M8 17h5",
   agents: "M9 3h6v5H9z|M12 8v3|M5 11h14v9H5z|M9 15h.01|M15 15h.01",
   privacy: "M12 3l7 3v6c0 4.3-3 7.3-7 9-4-1.7-7-4.7-7-9V6z",
   // A trace with a beat in it: this page is a reading of the machine, and the
@@ -268,8 +270,8 @@ const NAV_ICONS = {
   // with no way to tell what it was.
   doctor: "M3 12h3l2-5 3 10 2.5-7 1.5 2h6",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
-  // Three sources arriving at one symbol: the page reads the graph backwards.
-  impact: "M16 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0|M3 6l13 5|M3 12h13|M3 18l13-5",
+  // v3's mark, back: a line climbing to a point, with the axis it climbs to.
+  impact: "M4 18l5-6 4 3 7-9|M20 6h-4|M20 6v4",
   reports: "M6 3h8l4 4v14H6z|M14 3v4h4|M9 17v-3|M12 17v-6|M15 17v-4",
   cloud: "M7.5 18a4 4 0 0 1 .3-8A5 5 0 0 1 17 9.6 3.6 3.6 0 0 1 16.5 18z",
 };
@@ -1029,20 +1031,33 @@ const state = {
  * Doctor is the thirteenth and is not in the design's list. It is a surface
  * this binary already ships, and dropping it would leave `semlith doctor` the
  * one command with no page — the parity rule cuts both ways. */
+/* The sidebar, in four groups.
+ *
+ * The v3 design grouped the pages as Workspace, Explore, Operate and Account,
+ * and v4 flattened that to two: six pages under Workspace and seven under
+ * Operate. Two groups of six and seven is a list with two headings in it —
+ * long enough to scan rather than read — so this takes v3's shape back.
+ * `Account` held License and About; the binary is free and there is no
+ * licence page, so the last group is the two pages that describe the machine
+ * this is running on.
+ *
+ * Every page is in exactly one group, and the thirteen are the thirteen v4
+ * draws: the grouping changed, not what there is.
+ */
 const VIEWS = [
   { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
-  { group: "Workspace", id: "search", label: "Search", title: "Search" },
-  { group: "Workspace", id: "graph", label: "Graph", title: "Graph" },
-  { group: "Workspace", id: "impact", label: "Impact", title: "Impact" },
   { group: "Workspace", id: "index", label: "Inside the index", title: "Inside the index" },
+  { group: "Explore", id: "search", label: "Search", title: "Search" },
+  { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
+  { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
   { group: "Operate", id: "ledger", label: "Retrieval ledger", title: "Retrieval ledger" },
   { group: "Operate", id: "reports", label: "Reports", title: "Reports" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
   { group: "Operate", id: "cloud", label: "Cloud", title: "Cloud" },
   { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
-  { group: "Operate", id: "doctor", label: "Doctor", title: "Doctor" },
-  { group: "Operate", id: "about", label: "About", title: "About" },
+  { group: "Machine", id: "doctor", label: "Doctor", title: "Doctor" },
+  { group: "Machine", id: "about", label: "About", title: "About" },
 ];
 
 /** The sidebar's count, kept with the data it describes rather than with the

@@ -86,8 +86,13 @@ same order:
 
 | Group | Pages |
 |---|---|
-| Workspace | [Stores](#stores), [Files](#files), [Search](#search), [Graph](#graph), [Impact](#impact), [Inside the index](#inside-the-index) |
-| Operate | [Retrieval ledger](#retrieval-ledger), [Reports](#reports), [Agents](#agents), [Cloud](#cloud), [Privacy](#privacy), [Doctor](#doctor), [About](#about) |
+| Workspace | [Stores](#stores), [Files](#files), [Inside the index](#inside-the-index) |
+| Explore | [Search](#search), [Graph](#graph), [Impact](#impact) |
+| Operate | [Retrieval ledger](#retrieval-ledger), [Reports](#reports), [Agents](#agents), [Cloud](#cloud), [Privacy](#privacy) |
+| Machine | [Doctor](#doctor), [About](#about) |
+
+Four groups rather than one long list: what you have indexed, what you can ask
+of it, what the daemon is doing, and what this machine is running.
 
 The address bar carries the page as a fragment — `#search`, `#graph` — so a
 particular page can be bookmarked or reloaded. On a narrow screen the navigation

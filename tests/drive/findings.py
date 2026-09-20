@@ -2819,17 +2819,26 @@ def _(d):
 # leaves a screenshot behind, which is what the release record carries.
 
 
-@finding("5.1", "the sidebar is the thirteen entries of the v4 design, in order")
+@finding("5.1", "the sidebar is the thirteen pages, in four groups, in order")
 def _(d):
+    """Updated for 0.26.1, which took the v3 design's four groups back.
+
+    The thirteen entries are unchanged and this still asserts every one of
+    them: what moved is the grouping. v4 flattened v3's Workspace / Explore /
+    Operate / Account into two groups of six and seven, which is a list with
+    two headings in it rather than a menu. `Account` held License and About;
+    the binary is free and has no licence page, so the fourth group is the two
+    pages that describe this machine.
+    """
     d.open_view("stores")
     labels = [t for t in texts_of(d, ".sidebar .nav-item") if t]
     expected = [
         "Stores",
         "Files",
+        "Inside the index",
         "Search",
         "Graph",
         "Impact",
-        "Inside the index",
         "Retrieval ledger",
         "Reports",
         "Agents",
@@ -2843,7 +2852,7 @@ def _(d):
     # them that way. The design's names are what is being asserted, not the
     # typography.
     groups = [t.title() for t in texts_of(d, ".sidebar .nav-group-label") if t]
-    want("the sidebar's groups", groups, ["Workspace", "Operate"])
+    want("the sidebar's groups", groups, ["Workspace", "Explore", "Operate", "Machine"])
 
 
 @finding("5.2", "Impact answers for a symbol, by hop, with a support class on every row")
