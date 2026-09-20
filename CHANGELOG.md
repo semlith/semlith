@@ -110,6 +110,20 @@ identifier 11 / 11 / 11 of 11, multi-hop 6 / 6 / 6 of 6.
 `tools/list` is 5 840 bytes, about 1 460 tokens, for sixteen tools — against
 4 473 bytes and about 1 119 for thirteen.
 
+Performance, measured on the reference laptop with the scale test run on its
+own: warm query p50 **13.6 / 13.3 / 141.4 ms** at 700 / 7 000 / 70 000 chunks,
+peak resident memory while indexing 246 MB, idle resident memory 151 MB at
+700 chunks and 150 MB at 70 000 — flat across a hundredfold corpus, which is
+the promise that opening a store loads no vectors. Searching grows instead,
+by 241 bytes per chunk. The idle watcher costs 0.01 s of CPU over 60 s and an
+edit becomes searchable in 1.29 s.
+
+Run the measure suite the way `cargo test` runs it by default and three heavy
+tests share one process: the same 7 000-chunk query reads 13.3 ms alone and
+47.2 ms beside the others, and two resident-memory assertions fail on the
+contention rather than on the code. Every figure above was taken with
+`--test-threads=1`.
+
 The tool list an agent pays for once per session grows with the three new
 tools, and the gate on it moved from 1 120 tokens to 1 600. The Agents page
 states what this binary's own list measures rather than a number written down
