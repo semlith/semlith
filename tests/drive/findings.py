@@ -3286,3 +3286,51 @@ def _(d):
             bad.append("%s: %s" % (view, line))
     if bad:
         fail("the console carried errors: %s" % "; ".join(bad[:8]))
+
+
+@finding("6.10", "an index run outlives the page that started it")
+def _(d):
+    """A run lives in the daemon, not in the tab.
+
+    The Index page says so in as many words — "leaving, refreshing or closing
+    the tab changes nothing, and a run ends only on its Stop". It was true
+    when 0.24.0 moved the run out of the streaming response that used to *be*
+    it, and nothing since should have moved it back. This is the check that
+    says so, because the failure mode is invisible until someone reloads
+    mid-run and watches their work disappear.
+    """
+    path = d.fixtures.bulk()
+    started = d.api("/api/index", method="POST", body={"path": [path]})
+    runs = started.get("runs") or []
+    if not runs:
+        skip("the daemon queued no run for the bulk fixture")
+    store = runs[0].get("store")
+
+    d.open_view("index", fresh=True)
+    before = d.eval(
+        "document.querySelectorAll('.run-card').length"
+    )
+    if not before:
+        fail("the Index page drew no run card for a run the daemon had just accepted")
+
+    # A full document load, which is what a reload and a reopened tab both are.
+    d.navigate("%s/#index" % d.portal_url)
+    d.wait_for(
+        "!!document.querySelector('.run-card')",
+        what="the run card to come back after a reload; a run that vanishes with "
+        "the page is a run bound to the request that started it, which is the "
+        "defect 0.24.0 fixed",
+    )
+    after = d.eval(
+        "[...document.querySelectorAll('.run-card .card-title')].map(n => n.textContent)"
+    )
+    if store not in after:
+        fail(
+            "after reloading, the Index page lists %r and not the running store %r"
+            % (after, store)
+        )
+
+    # And the daemon still owns it, which is the half a screenshot cannot show.
+    live = d.api("/api/index/runs")
+    if not any(r.get("store") == store for r in (live.get("runs") or [])):
+        fail("the daemon dropped the run for %s when the page reloaded" % store)
