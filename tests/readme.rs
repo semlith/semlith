@@ -257,12 +257,17 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// The gate exists to keep a reference catalogue out of the front page — but
 /// the number moves in a release that decided to move it, with the reason
 /// recorded, and not in whatever edit next runs out of room.
+///
+/// Moved from 550 to 560 in 0.26.0, which put three tools and three commands
+/// on the front page — `impact`, `trace` and `report`. Three table rows and
+/// the sentence that they are free is what the ten bought; prose was reflowed
+/// rather than cut to pay for the rest.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 550,
-        "the README is {lines} lines; the ceiling is 550"
+        lines < 560,
+        "the README is {lines} lines; the ceiling is 560"
     );
 }
 

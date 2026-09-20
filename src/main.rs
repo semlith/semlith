@@ -580,6 +580,97 @@ enum Command {
         json: bool,
     },
 
+    /// List everything that reaches a symbol, and the files it lives in.
+    ///
+    /// The graph read backwards: who would notice if this changed. Breadth
+    /// first, so the hop against a caller is the fewest hops it takes.
+    Impact {
+        /// The symbol's name, matched exactly.
+        name: String,
+
+        /// Only follow edges of this kind. Repeatable; one of defines, calls,
+        /// imports, references, contains. Every kind by default.
+        #[arg(long, short)]
+        kind: Vec<String>,
+
+        /// Most hops to walk back before stopping.
+        #[arg(long, short, default_value_t = 3)]
+        depth: u32,
+
+        /// Walk names with several definitions too, and label what that found.
+        ///
+        /// Off by default, for the reason `semlith path` refuses them: a name
+        /// like `record` or `index` can be several unrelated functions, and
+        /// crossing one puts somebody else's callers in this answer.
+        #[arg(long)]
+        all_edges: bool,
+
+        /// Refuse to cross a name with several definitions. On by default.
+        ///
+        /// Here so a script can state the default rather than rely on it.
+        /// When both this and --all-edges are given, this one wins.
+        #[arg(long)]
+        strict: bool,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Turn the chain between two symbols into evidence.
+    ///
+    /// The answer sentence, the chain, and one supporting line of source per
+    /// hop, each marked a supporting fact or a candidate to corroborate.
+    Trace {
+        /// The symbol the chain starts at.
+        from: String,
+
+        /// The symbol the chain ends at.
+        to: String,
+
+        /// Most hops to search before giving up.
+        #[arg(long, short, default_value_t = 6)]
+        depth: u32,
+
+        /// Walk names with several definitions too, and label what that found.
+        #[arg(long)]
+        all_edges: bool,
+
+        /// Refuse to cross a name with several definitions. On by default.
+        #[arg(long)]
+        strict: bool,
+
+        /// Print the plain-text block the portal's "Copy as evidence" copies.
+        #[arg(long)]
+        evidence: bool,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate one of the five reports from this machine's own data.
+    ///
+    /// Nothing reaches the network and nothing is a model's opinion: the
+    /// ledger, the index and the graph are the only sources.
+    Report {
+        /// Which report: savings, access, change, health or gaps.
+        kind: String,
+
+        /// markdown, csv, json or html. PDF is the browser's print of the
+        /// HTML, which is why no PDF writer is in this binary.
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Which model's prices the savings report costs tokens at.
+        #[arg(long, default_value = "Sonnet 5")]
+        model: String,
+
+        /// Write to this file instead of standard output.
+        #[arg(long, short)]
+        out: Option<std::path::PathBuf>,
+    },
+
     /// Show the shortest chain of edges between two symbols.
     Path {
         /// The symbol the chain starts at.
@@ -1631,6 +1722,100 @@ fn run() -> Result<()> {
             }
         }
 
+        Command::Impact {
+            name,
+            kind,
+            depth,
+            all_edges,
+            strict,
+            json,
+        } => {
+            for k in &kind {
+                if !semlith::graph::KINDS.contains(&k.as_str()) {
+                    anyhow::bail!(
+                        "unknown edge kind {k:?}; the kinds are {}",
+                        semlith::graph::KINDS.join(", ")
+                    );
+                }
+            }
+            let all_edges = all_edges && !strict;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let started = Instant::now();
+            let impact = fleet.impact_in(None, &name, &kind, depth, all_edges)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "impact",
+                &name,
+                "",
+                !impact.reached.is_empty(),
+                started.elapsed(),
+            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&impact)?);
+            } else {
+                println!(
+                    "{}",
+                    impact.render(bold(), reset(), &|p| display(std::path::Path::new(p)))
+                );
+            }
+        }
+
+        Command::Trace {
+            from,
+            to,
+            depth,
+            all_edges,
+            strict,
+            evidence,
+            json,
+        } => {
+            let all_edges = all_edges && !strict;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let started = Instant::now();
+            let shorten = |p: &str| display(std::path::Path::new(p));
+            let trace = fleet.trace_in(None, &from, &to, depth, all_edges, &shorten)?;
+            semlith::ledger::graph(
+                &fleet,
+                &CLI_LEDGER,
+                "trace",
+                &from,
+                &to,
+                trace.chain.is_some(),
+                started.elapsed(),
+            );
+            if json {
+                println!("{}", serde_json::to_string_pretty(&trace)?);
+            } else if evidence {
+                print!("{}", trace.evidence(&shorten));
+            } else {
+                print!("{}", trace.render(bold(), reset(), &shorten));
+            }
+        }
+
+        Command::Report {
+            kind,
+            format,
+            model,
+            out,
+        } => {
+            // Both names checked before a store is opened: a typo in either
+            // is a question about the argument, not about the directory the
+            // command happened to run in.
+            semlith::report::kind_of(&kind)?;
+            semlith::report::check_format(&format)?;
+            let fleet = read_fleet(&cli.store, &cwd, false)?;
+            let report = semlith::report::generate(&fleet, &kind, &model)?;
+            let text = report.render(&format)?;
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text.as_bytes())?;
+                    println!("{} written to {}", report.title, display(&path));
+                }
+                None => print!("{text}"),
+            }
+        }
+
         Command::Path {
             from,
             to,
@@ -1807,6 +1992,27 @@ fn run() -> Result<()> {
                             row.settled_share(),
                         );
                     }
+                    // The two figures the per-language table cannot hold,
+                    // because neither belongs to a language: what the graph
+                    // points at and cannot find, and how many names it could
+                    // not tell apart. The portal's Graph health card reads
+                    // exactly these, so the page and this table agree.
+                    let (top, distinct) = semlith::store::unresolved_targets(store.db(), 5)?;
+                    let several = semlith::store::names_with_several_definitions(store.db())?;
+                    let named = top
+                        .iter()
+                        .map(|(name, n)| format!("{name} ({n})"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "graph    {distinct} call targets with no definition here{}",
+                        if named.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — commonest {named}")
+                        }
+                    );
+                    println!("graph    {several} names with several definitions");
                 }
                 // One line, and never a number without its denominator. A
                 // store that has recorded nothing prints nothing here rather

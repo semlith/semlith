@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-20
+
+### The whole portal, free, in the binary
+
+Thirteen pages, no plan, no key, no lock and no price. Everything the v4 design
+draws now renders from your own store, and everything under it answers from the
+terminal and over MCP as well — three new commands, three new tools, and a page
+for each.
+
+**Impact.** The graph read backwards: from a symbol, every caller and every
+file that reaches it, breadth first to a hop limit, each edge carrying the
+support class the store already recorded. `semlith impact`, `semlith_impact`
+and a page of its own. This left the free product in 0.13.0 to be sold and
+never was; the monetization hold of 2026-09-15 made the binary free whole, so
+it is back with no key of any kind.
+
+**Trace.** A chain turned into evidence: the answer sentence, the hops, and one
+supporting source line per hop, each marked a supporting fact or a candidate to
+corroborate, with a control that copies the block for a review. `semlith trace`,
+`semlith_trace`, and the panel. Nothing re-walks the graph — it reads the chain
+`semlith path` produced, so the two cannot describe one path differently.
+
+**The path finder, drawn.** `semlith path` has answered from a terminal since
+0.14.0 and had no page. It has one now, with the seams, the `Prefer verified
+edges` and `Strict` toggles, the refusal that names the rule, and the
+hypothesis line on a chain that is one.
+
+**Map.** The store's subsystems as a list: label, member count, three hubs with
+file and line, and the strongest edge out of each. Label propagation over the
+settled `calls` and `imports` edges, seeded by name order and capped, so the
+same store gives the same communities twice. No new dependency, no model, no
+second picture beside the canvas.
+
+**Inside the index.** The Index page is now what the design calls it, and
+carries the language mix, chunks by month indexed, and Graph health: call edges
+by support class as one bar, the top unresolved call targets, how many names
+carry several definitions, and how many languages carry edges — read from the
+counts `semlith stats` reports rather than recomputed, so the page and the
+terminal cannot disagree.
+
+**The ledger, session by session.** A table of every agent session: when it was
+last seen, who it was, how many reads, net tokens after refunds, what that
+would cost at a model you pick, and the tier of the figure. Filters by client
+and tier, sort, pagination, and export as Markdown, CSV or JSON of exactly the
+rows on screen.
+
+**Session replay.** What the agent did after each answer — read the whole file,
+grepped anyway, or edited — read from this machine's Claude Code transcripts.
+Off until the Privacy page turns it on, because those files belong to another
+program, and nothing it reads leaves the machine.
+
+**Reports.** Five, generated here: retrieval savings, AI access audit, change
+brief, index health and knowledge gaps, each as Markdown, CSV, JSON or
+print-styled HTML. `semlith report` and `semlith_report` write the same bytes
+the page exports. PDF is your browser's own print of the HTML; no PDF writer
+ships in the binary.
+
+**Cloud.** One page describing an optional hosted service, in its
+not-connected state and nothing else. This binary has no cloud command and
+opens no connection to any host.
+
+### Four defects, all of them older than this release
+
+- **#122**, and this one had survived a whole retrieval release: a query
+  describing a picture ranked a source file above the picture. The image list
+  was fused on the flat curve while a question's vector list is steep, so a
+  confident CLIP match could not reach a passing text chunk's score however
+  well it matched — measured at 0.049180 against 0.093317 on the four-shape
+  fixture. The image list is now steep for every shape and the confidence rides
+  in the weight, which leaves an unconfident image scoring what it always did.
+- **#120**: `POST /api/index` recorded whatever path it was handed as a root of
+  the store *before* the run applied the boundary, so the refusal that
+  `docs/security.md` has promised since 0.20.0 could never happen. The boundary
+  is read first now, and a request naming no store indexes the path into the
+  store `home::resolve` picks for it rather than into whichever store happened
+  to be writable.
+- **#121**: a forwarded `semlith_index` reported a skipped count with no
+  reasons while the same call answered in process named every one. One call in
+  two places may not say two different things about it.
+- **#124**: a repair note printed its backticks as characters. Fixed where the
+  string is written, so the terminal stops printing them too.
+
+### Numbers
+
+Nothing in this release touches the retrieval path, so the 0.25.0 figures were
+re-measured on this binary rather than restated. Three runs on the
+sealed thirty, median of three, spread zero:
+
+| | 0.25.0 | 0.26.0 |
+|---|---|---|
+| hit@8 | 29 / 30 | **29 / 30** (96 %) |
+| hit@3 | 27 / 30 | **27 / 30** (90 %) |
+| hit@1 | 24 / 30 | **24 / 30** (80 %) |
+
+Every identifier question in the split is in the top three — 11 of 11, which
+is how many the sealed thirty holds; the 0.25.0 record said 12 of 12 and no
+question file has changed since, so that figure was wrong rather than this
+one. Wrong-yes is 0. By class at k=1 / k=3 / k=8: concept 7 / 10 / 12 of 13,
+identifier 11 / 11 / 11 of 11, multi-hop 6 / 6 / 6 of 6.
+
+`tools/list` is 5 840 bytes, about 1 460 tokens, for sixteen tools — against
+4 473 bytes and about 1 119 for thirteen.
+
+Performance, measured on the reference laptop with the scale test run on its
+own: warm query p50 **13.6 / 13.3 / 141.4 ms** at 700 / 7 000 / 70 000 chunks,
+peak resident memory while indexing 246 MB, idle resident memory 151 MB at
+700 chunks and 150 MB at 70 000 — flat across a hundredfold corpus, which is
+the promise that opening a store loads no vectors. Searching grows instead,
+by 241 bytes per chunk. The idle watcher costs 0.01 s of CPU over 60 s and an
+edit becomes searchable in 1.29 s.
+
+Run the measure suite the way `cargo test` runs it by default and three heavy
+tests share one process: the same 7 000-chunk query reads 13.3 ms alone and
+47.2 ms beside the others, and two resident-memory assertions fail on the
+contention rather than on the code. Every figure above was taken with
+`--test-threads=1`.
+
+The tool list an agent pays for once per session grows with the three new
+tools, and the gate on it moved from 1 120 tokens to 1 600. The Agents page
+states what this binary's own list measures rather than a number written down
+when it was last checked.
+
 ## [0.25.0] - 2026-09-20
 
 ### The right span, measured
@@ -2758,7 +2880,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/semlith/semlith/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/semlith/semlith/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/semlith/semlith/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/semlith/semlith/compare/v0.22.0...v0.23.0

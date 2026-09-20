@@ -143,7 +143,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
         // next.
         manual: allow_private.then(|| {
             format!(
-                "unset {} and restart `semlith start`",
+                "unset {} and restart semlith start",
                 crate::add::ALLOW_PRIVATE_ENV
             )
         }),
@@ -211,7 +211,7 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
                 cache.display()
             ),
             (false, false) => format!(
-                "{}=on but {} is not in {}; searches rank by fusion alone until `semlith setup` fetches it",
+                "{}=on but {} is not in {}; searches rank by fusion alone until semlith setup fetches it",
                 crate::rerank::RERANK_ENV,
                 crate::rerank::RERANK_NAME,
                 cache.display()
@@ -345,7 +345,7 @@ fn on_path_finding() -> Finding {
             [] => "no semlith on PATH".to_string(),
             [only] => spelled(only),
             [first, shadowed @ ..] => format!(
-                "{} is what a bare `semlith` reaches; also {}",
+                "{} is what a bare semlith reaches; also {}",
                 spelled(first),
                 shadowed.iter().map(spelled).collect::<Vec<_>>().join(", ")
             ),
@@ -1119,7 +1119,7 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 // configuration file, which the plain `semlith setup` of the
                 // row above it does not do.
                 Some(format!(
-                    "semlith setup --register-all  # {} is registered by writing its config file, which `semlith setup` alone does not do",
+                    "semlith setup --register-all  # {} is registered by writing its config file, which plain semlith setup does not do",
                     client.name
                 ))
             } else if !registered && present {
@@ -1162,8 +1162,8 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                     // theirs was changed without being asked. The old one is
                     // what they would put back if they disagreed.
                     Some(format!(
-                        "repaired {}: the semlith entry named `{}`, which launches only from a \
-                         PATH that carries it, and now names `{}`. The file it replaced is \
+                        "repaired {}: the semlith entry named {}, which launches only from a \
+                         PATH that carries it, and now names {}. The file it replaced is \
                          beside it as {}{}.",
                         r.path.display(),
                         r.was,
@@ -1173,9 +1173,9 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                     ))
                 } else if let Some((_, _, path, was, now)) = bare {
                     Some(format!(
-                        "{} names the semlith entry as `{was}`, which launches only from a PATH \
+                        "{} names the semlith entry as {was}, which launches only from a PATH \
                          that carries it — and the process that reads this file is very often \
-                         not a login shell. It has not been rewritten to `{now}`.",
+                         not a login shell. It has not been rewritten to {now}.",
                         path.display(),
                     ))
                 } else {
@@ -1490,7 +1490,7 @@ pub fn proof() -> Proof {
 
     let failed = if !launched {
         Some(format!(
-            "`{command}` is what a client would run, and it does not launch from a plain PATH. Show it with: env -i PATH=/usr/bin:/bin:/usr/local/bin HOME=\"$HOME\" sh -c '{command} mcp'. Repair it with: semlith setup"
+            "{command} is what a client would run, and it does not launch from a plain PATH. Show it with: env -i PATH=/usr/bin:/bin:/usr/local/bin HOME=\"$HOME\" sh -c '{command} mcp'. Repair it with: semlith setup"
         ))
     } else if tools.is_none_or(|n| n == 0) {
         Some(format!(
