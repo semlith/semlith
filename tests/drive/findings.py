@@ -3301,16 +3301,51 @@ def _(d):
 @finding("6.9", "no page writes an error to the browser console")
 def _(d):
     """A console error is a defect a screenshot cannot show. 0.26.0 was never
-    read for them, so this reads every page for them once."""
-    bad = []
+    read for them, so this reads every page for them once.
+
+    The console is read only once a page has stopped fetching. Navigating
+    away from a page with a request still in flight cancels it, and Chrome
+    logs the cancellation against whichever page it lands on — on Windows
+    that showed up as `ERR_CONNECTION_RESET` on `/api/privacy`, whose socket
+    scan is the slowest read in the portal. Waiting is the honest fix: a load
+    failure that survives a quiet network is a real one, and is still failed
+    on. Suppressing the message by name would have hidden the real thing too.
+    """
+
+    def settle(limit=15.0):
+        """Block until the page stops making requests, or `limit` passes."""
+        deadline = time.time() + limit
+        last, stable = -1, 0
+        while time.time() < deadline:
+            count = d.eval("performance.getEntriesByType('resource').length")
+            stable = stable + 1 if count == last else 0
+            last = count
+            # Three readings the same, a beat apart: enough for a page whose
+            # panels fetch one after another rather than all at once.
+            if stable >= 3:
+                return True
+        # Said rather than silently tolerated: a page still fetching after
+        # fifteen seconds is worth knowing about even if nothing errored.
+        return False
+
+    bad, restless = [], []
     for view in cdp.Drive.VIEW_TITLES:
-        d.clear_console()
         d.open_view(view, fresh=True)
-        time.sleep(0.6)
+        if not settle():
+            restless.append(view)
+        # Cleared after the page is quiet, so anything read below was written
+        # by this page rather than by the navigation that reached it.
+        d.clear_console()
+        time.sleep(0.5)
         for line in d.console_errors():
             bad.append("%s: %s" % (view, line))
     if bad:
         fail("the console carried errors: %s" % "; ".join(bad[:8]))
+    if restless:
+        fail(
+            "these pages were still fetching after 15s, so their console was "
+            "never read against a settled page: %s" % ", ".join(restless)
+        )
 
 
 @finding("6.10", "an index run outlives the page that started it")
