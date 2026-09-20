@@ -8077,6 +8077,19 @@ function welcomeView() {
   const note = el("div", { class: "note" });
   const field = el("input", { type: "text", placeholder: "~/Documents/work" });
 
+  /* The version beside the mark, as the v4 lockup has it. The stylesheet has
+   * carried `.lockup .ver` since the design was ported; nothing rendered into
+   * it, so the first screen never said which build was running. */
+  const version = el("span", { class: "ver" });
+  (async () => {
+    try {
+      const about = await api("/api/about");
+      version.textContent = `v${about.version}`;
+    } catch (_) {
+      // The lockup reads fine without it; a failed probe is not worth a row.
+    }
+  })();
+
   const step = (num, title, what) =>
     el(
       "div",
@@ -8089,7 +8102,7 @@ function welcomeView() {
   return el(
     "div",
     { class: "welcome" },
-    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "Semlith" })),
+    el("div", { class: "lockup" }, logoImage(38), el("span", { class: "name", text: "Semlith" }), version),
     el(
       "div",
       { class: "hero" },
@@ -8136,11 +8149,22 @@ function welcomeView() {
           text: "Open the folder picker",
           onclick: () => go("index"),
         }),
+        // The v4 welcome offers this beside indexing, and the portal has had
+        // the feature on Stores all along — it was simply unreachable from the
+        // one screen that exists to get a first store open.
+        el("button", {
+          class: "button secondary",
+          type: "button",
+          text: "Adopt an existing .semlith",
+          onclick: () => go("stores"),
+        }),
         el("button", {
           class: "button ghost",
           type: "button",
           text: "Skip for now",
-          onclick: () => go("about"),
+          // Stores, not About: skipping the first run means going to the page
+          // this screen is standing in front of.
+          onclick: () => go("stores"),
         }),
       ),
       el("hr", { class: "rule" }),
@@ -8153,15 +8177,25 @@ function welcomeView() {
         mono("~/.semlith/stores/work"),
         " and is registered against that root.",
       ),
+      // The ledger is on by default, so the screen that introduces the product
+      // is where it has to be said — the v4 welcome says it here too.
+      says(
+        "Queries are recorded to a local file in that store and never leave this machine. Start with ",
+        mono("semlith start --no-ledger"),
+        " to skip recording.",
+      ),
     ),
     el(
       "div",
       { class: "steps" },
-      step("01", "Index", "One pass over the folder. Only what changed is re-embedded on the next."),
-      step("02", "Stays current", "The daemon watches the roots and re-embeds on save."),
-      step("03", "Ask", "From here, the CLI, or any agent over MCP — the same fused search."),
+      step("01", "It reads the folder", "Code, Markdown, PDF, Office, notebooks, HTML — chunked and embedded locally."),
+      step("02", "It stays current", "The watcher re-embeds and re-extracts edges on every save."),
+      step("03", "Your agents connect", "One HTTP endpoint for Claude Code, Codex, Cursor, Zed and the rest."),
+      step("04", "It keeps a local record", "Records what agents retrieve, locally; --no-ledger to skip."),
     ),
-    el("div", { class: "foot", text: "127.0.0.1 · loopback only · no external asset" }),
+    // The port is half the sentence: "loopback only" means nothing without the
+    // address the reader can go and check.
+    el("div", { class: "foot", text: `${location.host} · loopback only · no external asset` }),
   );
 }
 
