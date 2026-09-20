@@ -109,6 +109,27 @@ contract the daemon replaced in 0.20.0, and the sixth found a real fault — a
 forwarded `semlith_index` dropped the refusals the in-process server names, so
 an agent was held to a boundary it was never told about.
 
+### Faster, measured beside the release it replaces
+
+Both binaries on the same laptop in the same run, median of twenty searches,
+one test thread:
+
+| chunks | 0.23.0 | 0.25.0 |
+|---|---|---|
+| 700 | 20.5 ms | **16.2 ms** |
+| 7 000 | 46.9 ms | **37.9 ms** |
+| 70 000 | 362.4 ms | **159.1 ms** |
+
+The pair matters more than either number: the 6.5 / 13.7 / 129.9 ms the 0.23.0
+record states were taken on a quieter machine, and this laptop is about three
+times slower today for both binaries. Measured against each other rather than
+against a figure from another day, the release is faster at every size. Peak
+memory while indexing stays under 240 MB at every size, an idle watcher costs
+0.00 s of CPU over 60 s, and an edit on disk is searchable in about 2 s.
+
+A reader holding three stores costs **1 MB** per extra store beyond the first,
+against 123 MB before the cross-encoder was made one per process.
+
 ### Upgrading
 
 A store written by an earlier release is re-chunked and re-embedded by the
