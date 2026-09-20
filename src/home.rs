@@ -174,6 +174,11 @@ pub struct Settings {
     pub runs_at_once: Option<usize>,
     pub embed_threads: Option<usize>,
     pub index_memory_mb: Option<usize>,
+    /// Whether the ledger's Session replay tab may read this machine's agent
+    /// transcripts. Absent means off: the files belong to another program,
+    /// so nothing reads them until somebody says so on the Privacy page.
+    #[serde(default)]
+    pub session_replay: Option<bool>,
 }
 
 impl Settings {

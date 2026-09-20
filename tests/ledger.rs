@@ -571,3 +571,150 @@ fn the_ledger_states_its_saving_with_coverage_refunds_and_tier() {
         );
     }
 }
+
+/// A session is one row, whatever it asked, and its tier is the honest one.
+///
+/// Two clients, two sessions, and a session counted by the four-character
+/// fallback is `modelled` rather than averaged in with a measured one.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_ledger_groups_retrievals_into_sessions() {
+    let (corpus, store) = corpus();
+    {
+        let mut s = Semlith::open(store.path(), None).unwrap();
+        s.quiet = true;
+        s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+            .unwrap();
+    }
+    let s = Semlith::open(store.path(), None).unwrap();
+    let write = |client: &str, session: &str, query: &str, hits: i64, excerpt, whole| {
+        let mut r = row(client, query, excerpt, whole);
+        r.session = session;
+        r.hits = hits;
+        semlith::store::record_retrieval(s.db(), &r).unwrap();
+    };
+    write("claude-code", "s1", "how does the lock work", 3, 100, 4_000);
+    write("claude-code", "s1", "who calls acquire", 2, 150, 2_000);
+    // A read that found nothing is recorded and credited nothing.
+    write("claude-code", "s1", "nothing at all", 0, 40, 900);
+    write("cursor", "s2", "where is the parser", 1, 90, 1_200);
+
+    let sessions = semlith::store::ledger_sessions(s.db(), 50).unwrap();
+    assert_eq!(sessions.len(), 2, "two sessions: {sessions:?}");
+
+    let one = sessions
+        .iter()
+        .find(|row| row.session == "s1")
+        .expect("the claude-code session");
+    assert_eq!(one.client, "claude-code");
+    assert_eq!(one.retrievals, 3);
+    assert_eq!(one.zero_hit, 1, "a zero-hit read is recorded, not dropped");
+    // Net is whole less excerpt over the reads that found something: the
+    // zero-hit row contributes nothing rather than a negative credit.
+    assert_eq!(one.net, (4_000 - 100) + (2_000 - 150));
+    assert_eq!(
+        one.tier(),
+        "modelled",
+        "rows counted by the four-character fallback are modelled"
+    );
+
+    let two = sessions
+        .iter()
+        .find(|row| row.session == "s2")
+        .expect("the cursor session");
+    assert_eq!(two.retrievals, 1);
+    assert_eq!(two.net, 1_200 - 90);
+}
+
+/// The sessions table's controls exist on the page, and its export writes
+/// the columns the page shows.
+#[test]
+fn the_ledger_page_can_filter_sort_page_and_export_its_sessions() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    for wanted in [
+        "function ledgerSessions(",
+        "Filter by client",
+        "Filter by tier",
+        "cost at ",
+        "w-sessions",
+        "semlith-sessions",
+    ] {
+        assert!(
+            APP_JS.contains(wanted),
+            "the sessions table is missing {wanted:?}"
+        );
+    }
+    // Sort and pagination come from `dataTable`, which every other table on
+    // the portal uses — a second implementation for this one table would be
+    // a second set of bugs.
+    let block = APP_JS
+        .split("function ledgerSessions(")
+        .nth(1)
+        .expect("ledgerSessions exists");
+    assert!(
+        block.contains("dataTable({"),
+        "the table is not a dataTable"
+    );
+    assert!(block.contains("perPage:"), "the table does not page");
+    assert!(block.contains("sort:"), "the table does not sort");
+    // Export writes what is on screen: the same filter, the same rows.
+    assert!(
+        block.contains("exportRows(") && block.contains("shown()"),
+        "export must write the filtered rows, not every row"
+    );
+    for format in ["Markdown", "CSV", "JSON"] {
+        assert!(block.contains(format), "no {format} export");
+    }
+}
+
+/// Session replay reads nothing until it is turned on, and says so.
+#[test]
+fn session_replay_is_off_until_the_privacy_page_turns_it_on() {
+    // The setting's absence is off, not a default that happens to be false
+    // somewhere else: what it reads belongs to another program.
+    let fresh = semlith::home::Settings::default();
+    assert_eq!(fresh.session_replay, None);
+    assert!(!fresh.session_replay.unwrap_or(false));
+
+    // And the reader, pointed at a directory with no transcripts, answers
+    // with an empty reading rather than an error.
+    let empty = tempfile::tempdir().unwrap();
+    let found = semlith::replay::read(empty.path(), 10).unwrap();
+    assert!(found.sessions.is_empty());
+    assert_eq!(found.client, "claude-code");
+}
+
+/// A transcript with a semlith call in it is read, and what followed decides.
+#[test]
+fn a_transcript_marks_each_answer_with_what_the_agent_did_next() {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join("-Users-someone-work");
+    std::fs::create_dir_all(&project).unwrap();
+    let line = |name: &str| {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{name}"}}]}}}}"#
+        )
+    };
+    let transcript = [
+        line("mcp__semlith__semlith_search"),
+        line("Read"),
+        line("mcp__semlith__semlith_impact"),
+        line("Edit"),
+        line("mcp__semlith__semlith_search"),
+        line("Grep"),
+        // Not a tool_use at all, and not a panic either.
+        r#"{"type":"user","message":{"content":"plain text"}}"#.to_string(),
+    ]
+    .join("\n");
+    std::fs::write(project.join("abc123.jsonl"), transcript).unwrap();
+
+    let found = semlith::replay::read(home.path(), 10).unwrap();
+    assert_eq!(found.sessions.len(), 1, "{found:?}");
+    let session = &found.sessions[0];
+    assert_eq!(session.id, "abc123");
+    assert_eq!(session.answers, 3);
+    assert_eq!(session.refund, 1, "a whole-file read after an answer");
+    assert_eq!(session.sufficed, 1, "an edit after an answer");
+    assert_eq!(session.miss, 1, "a grep after an answer");
+    assert_eq!(session.unknown, 0);
+}

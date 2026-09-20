@@ -2820,8 +2820,34 @@ impl crate::mcp::Writer for Writer {
         }
         let done = last.ok_or_else(|| "the writer stopped before answering".to_string())?;
         let count = |key: &str| done[key].as_u64().unwrap_or(0);
+        // How the skipped divide up, in the same parenthesis and the same
+        // order the in-process server writes (#121). Without it a forwarded
+        // call answered "1 847 skipped" and nothing about why, while the same
+        // call performed in process named every reason — the two paths are
+        // one call in two places and may not say different things about it.
+        let by_reason = {
+            let mut parts: Vec<(u64, String)> = done["skipped_reasons"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(kind, n)| (n.as_u64().unwrap_or(0), kind.clone()))
+                .collect();
+            parts.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({})",
+                    parts
+                        .iter()
+                        .map(|(n, kind)| format!("{n} {kind}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        };
         let mut text = format!(
-            "{} indexed, {} unchanged, {} skipped, {} removed ({} chunks)",
+            "{} indexed, {} unchanged, {} skipped{by_reason}, {} removed ({} chunks)",
             count("indexed"),
             count("unchanged"),
             count("skipped"),

@@ -313,8 +313,13 @@ fn the_retrieval_metrics_are_measured() {
         "a path question returned a chain between symbols that are not connected. \
          This is the one metric with a hard gate."
     );
+    // 0.26.0 raised this from 1 120: sixteen tools rather than thirteen,
+    // because reverse reachability, trace and reports became things an agent
+    // can call. The gate is still a gate — it is what the list costs plus
+    // headroom, and `mcp::tests::the_tool_list_stays_small` is the same
+    // number as bytes so a list that fails here fails in seconds there.
     assert!(
-        tool_tokens < 1_120,
+        tool_tokens < 1_600,
         "tools/list is {tool_list} bytes, about {tool_tokens} tokens, and every agent \
          pays it once per session"
     );

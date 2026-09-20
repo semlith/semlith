@@ -471,8 +471,11 @@ fn a_bare_command_is_rewritten_in_place_and_the_second_run_has_nothing_to_do() {
         said.contains(&cursor.display().to_string()),
         "the repair did not name the file it rewrote:\n{said}"
     );
+    // Without the backticks since 0.26.0: the note is rendered verbatim by
+    // the portal as well as by the terminal, and neither renders markdown
+    // (#124).
     assert!(
-        said.contains("`semlith`"),
+        said.contains("the semlith entry named semlith,"),
         "the repair did not print the command it replaced:\n{said}"
     );
 
@@ -717,5 +720,34 @@ fn the_proof_launches_the_command_a_client_would_run() {
     assert!(
         !run.status.success(),
         "doctor exited zero with a registration that cannot launch"
+    );
+}
+
+/// No string a surface renders carries a markdown backtick.
+///
+/// Issue #124: the Agents page printed the backticks in a repair note as
+/// characters, because the note is shown verbatim by both the terminal and
+/// the portal and neither renders markdown. Fixed where the string is
+/// written rather than by stripping them on the way out, so the terminal
+/// stops printing them too.
+#[test]
+fn no_repair_note_carries_a_markdown_backtick() {
+    const DOCTOR: &str = include_str!("../src/doctor.rs");
+    let mut offenders = Vec::new();
+    for (i, line) in DOCTOR.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") || code.starts_with("///") || code.starts_with('*') {
+            continue;
+        }
+        // A backtick inside a string literal on a line of code is a markdown
+        // reference in something a person will read as text.
+        if line.contains('`') && line.contains('"') {
+            offenders.push(format!("{}: {}", i + 1, line.trim()));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these strings would print their backticks:\n  {}",
+        offenders.join("\n  ")
     );
 }

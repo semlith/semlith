@@ -40,8 +40,11 @@ makes. It runs a fixed set of 107 questions with ground-truth spans from
 multi-hop — and prints hit@1, hit@3, hit@8, bytes per answer, the graph list's
 marginal contribution, and from 0.23.0 calls and tokens per answered question for
 `brief` against the search-then-read path. It asserts two things: the wrong-yes
-count for `path` is zero, and `tools/list` costs under 1 120 tokens — thirteen
-tools measure 4 441 bytes, about 1 111.
+count for `path` is zero, and `tools/list` costs under 1 600 tokens — sixteen
+tools from 0.26.0, where thirteen measured 4 441 bytes and about 1 111. The
+byte proxy in `mcp::tests::the_tool_list_stays_small` is the same number said
+in bytes, so a list that would fail the criterion fails in seconds rather than
+eight minutes into an indexing run.
 
 The questions are split development/sealed by a recorded seed in
 `tests/fixtures/retrieval/split.yaml`, and the sealed set is scored only when
@@ -120,6 +123,8 @@ Module responsibilities:
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
 | `src/pattern.rs` | `semlith pattern`: one tree-sitter query over the indexed files of one language |
 | `src/ledger.rs` | The one place a retrieval is recorded, whichever surface answered it |
+| `src/report.rs` | The five reports: one structure of blocks, four renderers over it, so Markdown, CSV, JSON and HTML cannot disagree. No engine of its own |
+| `src/replay.rs` | What an agent did after an answer, read from this machine's Claude Code transcripts and only when the Privacy page's toggle is on |
 | `src/image.rs` | Image support: the five extensions, and the CLIP pair that makes a picture comparable with a sentence |
 | `src/lock.rs` | One writer per store, OS advisory lock (not file existence) |
 | `src/watch.rs` | Event source in front of the same indexer `index` runs |
@@ -424,13 +429,18 @@ Module responsibilities:
   `fresh`, from one `stat` per distinct path against the recorded size and mtime —
   conservative on purpose, so a `touch` reads as stale, because a false "check
   this" costs a reread and a false "this is current" costs a wrong quotation.
-- **Reverse reachability left the free product in 0.13.0.** `semlith impact`,
-  `semlith_impact` and `/api/impact` are gone, with no shim: an agent carrying
-  `semlith_impact` in a saved prompt or a committed `.mcp.json` breaks on
-  upgrade, deliberately, because a stub answering a graph question wrongly is
-  worse than a tool that is not there. The `edges_dst` index stays — it is what
-  `graph::neighbours` reads to answer the callers half — and the traversal
-  returns in 0.14.0 as a paid surface. Do not reintroduce it here.
+- **Reverse reachability is back, free, from 0.26.0.** `semlith impact`,
+  `semlith_impact` and `/api/impact` left in 0.13.0 to be sold, and never were:
+  the monetization hold of 2026-09-15 made the whole binary free, so the thing
+  that was held back is now shipped with a page of its own. `graph::impact` is
+  breadth first over `store::edges_in` — the same `edges_dst` index
+  `graph::neighbours` reads — under the same two rules the path finder walks by:
+  a node is a definition rather than a name, and an ambiguous edge is not
+  crossed unless `all_edges` says to. Because it is breadth first, the hop
+  recorded against a caller is the fewest hops it takes, and `IMPACT_LIMIT`
+  bounds the answer with a count of what it left out rather than a truncated
+  list that reads as complete. One renderer, `Impact::render`, serves the CLI
+  and the MCP reply, as the chain's does.
 - **An image is embedded in the same `index_set` pass that embeds text**, inside
   the same held lock, on the same changed-file path. There is no image build
   step and there must not be one, for the reason there is no `graph build`: the

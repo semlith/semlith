@@ -318,3 +318,32 @@ fn an_image_whose_header_claims_too_many_pixels_is_refused_before_it_is_decoded(
         .unwrap();
     assert_eq!(semlith::image::too_large(&small), None);
 }
+
+/// The measurement behind #122: what each hit scored and which lists found it.
+///
+/// Kept rather than deleted after the fix, because the fix is a ranking
+/// change and the only way to tell whether a later one moved it is to print
+/// the same three numbers again.
+///
+/// ```sh
+/// cargo test --test image -- --ignored what_an_image_query_scores --nocapture
+/// ```
+#[test]
+#[ignore = "downloads CLIP and an embedding model on first run"]
+fn what_an_image_query_scores() {
+    let corpus = corpus();
+    let store = tempfile::tempdir().unwrap();
+    let mut s = open(store.path());
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    for query in ["a red circle", "a blue square", "a green triangle"] {
+        println!("\n{query}");
+        for hit in s.search(query, 5).unwrap() {
+            let name = std::path::Path::new(&hit.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            println!("  {:<24} {:.6}  {}", name, hit.score, hit.lists.join("+"));
+        }
+    }
+}

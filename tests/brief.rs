@@ -245,9 +245,12 @@ fn the_tool_list_advertises_brief() {
         names.iter().any(|n| n == "semlith_brief"),
         "semlith_brief is not advertised: {names:?}"
     );
+    // Sixteen from 0.26.0: impact, trace and report joined the thirteen.
+    // The number is here so a tool cannot be added without the token gate in
+    // `tests/retrieval.rs` and its byte proxy in `mcp.rs` being moved too.
     assert_eq!(
         names.len(),
-        13,
+        16,
         "the tool count moved without the gate moving with it: {names:?}"
     );
 }

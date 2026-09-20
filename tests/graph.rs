@@ -360,18 +360,105 @@ fn the_three_commands_answer_and_neighbours_agrees_with_a_sweep() {
 /// `semlith impact` is gone from the free product, and says so rather than
 /// doing something else. Removed in 0.13.0; reverse reachability returns in
 /// 0.14.0 as a paid surface.
+/// Reverse reachability came back in 0.26.0, free, with a page and a tool.
+///
+/// It was removed in 0.13.0 to be sold and never was: the monetization hold
+/// of 2026-09-15 made the whole binary free, so the thing this test used to
+/// assert — that the command is gone — is now the defect.
 #[test]
-fn the_impact_command_no_longer_exists() {
+fn the_impact_command_answers() {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_semlith"))
-        .args(["impact", "anything"])
+        .args(["impact", "--help"])
         .output()
         .expect("the binary runs");
-    assert!(!out.status.success(), "`semlith impact` still succeeds");
-    let said = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
-        said.contains("unrecognized subcommand") || said.contains("unrecognised subcommand"),
-        "an unknown command must say so: {said}"
+        out.status.success(),
+        "`semlith impact` must be a command: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in ["--depth", "--all-edges", "--strict", "--json"] {
+        assert!(help.contains(flag), "`semlith impact` is missing {flag}");
+    }
+}
+
+/// Who reaches `finish`, and how far away each of them is.
+///
+/// `start` calls `middle`, `middle` calls `finish`, and `aside` calls
+/// `finish` directly. Breadth first, so `aside` is one hop even though it is
+/// written last, and `start` is two.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn impact_lists_every_caller_by_the_fewest_hops_it_takes() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    // File stems that do not repeat a function name: a file called
+    // `middle.rs` is itself a `middle` module symbol, which makes every call
+    // to `middle` ambiguous and is a fact about the fixture rather than
+    // about the traversal.
+    write(corpus.path(), "a.rs", "fn start() { middle(); }\n");
+    write(corpus.path(), "b.rs", "fn middle() { finish(); }\n");
+    write(corpus.path(), "c.rs", "fn aside() { finish(); }\n");
+    write(corpus.path(), "d.rs", "fn finish() {}\n");
+    index(store.path(), corpus.path());
+
+    let out = cli(store.path(), &["impact", "finish"]);
+    assert!(
+        out.contains("middle"),
+        "the direct caller is missing: {out}"
+    );
+    assert!(
+        out.contains("aside"),
+        "the other direct caller is missing: {out}"
+    );
+    assert!(
+        out.contains("start"),
+        "the two-hop caller is missing: {out}"
+    );
+    assert!(out.contains("1 hop"), "hops are not grouped: {out}");
+    assert!(out.contains("2 hops"), "hops are not grouped: {out}");
+    assert!(out.contains("files"), "the files block is missing: {out}");
+
+    // A hop limit is a limit. At one hop `start` is out of reach, and saying
+    // otherwise would make the control decoration.
+    let one = cli(store.path(), &["impact", "finish", "--depth", "1"]);
+    assert!(one.contains("middle"), "{one}");
+    assert!(one.contains("aside"), "{one}");
+    assert!(!one.contains("start"), "--depth 1 reached two hops: {one}");
+
+    // Nothing reaches a leaf, and that is a sentence rather than an error.
+    let none = cli(store.path(), &["impact", "start"]);
+    assert!(
+        none.contains("nothing in this store reaches start"),
+        "{none}"
+    );
+}
+
+/// Every row carries the support class of the edge that reached it. A hop
+/// with no class is a hop a reader will assume was verified.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn every_impact_row_states_what_its_edge_is_worth() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "a.rs", "fn start() { middle(); }\n");
+    write(corpus.path(), "b.rs", "fn middle() { finish(); }\n");
+    write(corpus.path(), "c.rs", "fn finish() {}\n");
+    index(store.path(), corpus.path());
+
+    let raw = cli(store.path(), &["impact", "finish", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("--json is json");
+    let reached = parsed["reached"].as_array().expect("reached is a list");
+    assert!(!reached.is_empty(), "{raw}");
+    for row in reached {
+        let confidence = row["confidence"].as_str().unwrap_or("");
+        assert!(
+            ["extracted", "resolved", "inferred", "ambiguous"].contains(&confidence),
+            "a row reached with no support class: {row}"
+        );
+        assert!(row["hop"].as_u64().unwrap_or(0) >= 1, "{row}");
+        assert!(!row["via"].as_str().unwrap_or("").is_empty(), "{row}");
+    }
 }
 
 /// The shape the release exists for, end to end through the binary: `start`
@@ -810,4 +897,109 @@ fn a_pattern_finds_the_shape_and_says_which_files_it_parsed() {
 
     let nolang = cli(store.path(), &["pattern", "--lang", "cobol", "(x) @y"]);
     assert!(nolang.contains("no grammar for"), "{nolang}");
+}
+
+/// Trace is the chain plus its evidence, and the two marks are not
+/// interchangeable: a hop the source settled is a fact, a hop matched by bare
+/// name is a candidate somebody has to check.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn trace_states_the_answer_the_chain_and_one_line_per_hop() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(corpus.path(), "a.rs", "fn start() { middle(); }\n");
+    write(corpus.path(), "b.rs", "fn middle() { finish(); }\n");
+    write(corpus.path(), "c.rs", "fn finish() {}\n");
+    index(store.path(), corpus.path());
+
+    let out = cli(store.path(), &["trace", "start", "finish"]);
+    assert!(out.contains("answer"), "{out}");
+    assert!(out.contains("chain"), "{out}");
+    assert!(out.contains("supporting lines"), "{out}");
+    assert!(
+        out.contains("supporting fact") || out.contains("candidate"),
+        "every hop carries a mark: {out}"
+    );
+
+    let raw = cli(store.path(), &["trace", "start", "finish", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("--json is json");
+    let lines = parsed["lines"].as_array().expect("lines is a list");
+    let hops = parsed["chain"]["steps"].as_array().expect("steps").len();
+    assert_eq!(lines.len(), hops, "one supporting line per hop");
+    for line in lines {
+        let mark = line["mark"].as_str().unwrap_or("");
+        assert!(
+            mark == "supporting fact" || mark == "candidate — corroborate before use",
+            "unexpected mark {mark:?}"
+        );
+    }
+
+    // The block the portal's "Copy as evidence" copies is the same answer in
+    // plain text, so a reviewer pasting it and a reader reading the page are
+    // looking at one thing.
+    let evidence = cli(store.path(), &["trace", "start", "finish", "--evidence"]);
+    assert!(evidence.contains("start → finish"), "{evidence}");
+    assert!(evidence.starts_with("start → finish"), "{evidence}");
+    assert!(evidence.contains("answer:"), "{evidence}");
+    assert!(evidence.contains("supporting lines"), "{evidence}");
+
+    // Two symbols with nothing between them are a sentence, not an error.
+    let none = cli(store.path(), &["trace", "finish", "start"]);
+    assert!(none.contains("not connected"), "{none}");
+}
+
+/// Graph health on Inside the index is the same reading `semlith stats`
+/// prints, from the same rows, and the page adds nothing of its own.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn graph_health_says_what_stats_says() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "a.rs",
+        "fn start() { middle(); outside(); }\n",
+    );
+    write(corpus.path(), "b.rs", "fn middle() { finish(); }\n");
+    write(corpus.path(), "c.rs", "fn finish() {}\nfn twice() {}\n");
+    write(corpus.path(), "d.rs", "fn twice() {}\n");
+    index(store.path(), corpus.path());
+
+    let stats = cli(store.path(), &["stats"]);
+    assert!(
+        stats.contains("call targets with no definition here"),
+        "stats does not report unresolved targets: {stats}"
+    );
+    assert!(
+        stats.contains("names with several definitions"),
+        "stats does not report ambiguous names: {stats}"
+    );
+
+    // The same two figures, read the way the route reads them. Equal because
+    // they are one query, not two implementations that happen to agree.
+    let db = rusqlite::Connection::open(store.path().join("store.db")).unwrap();
+    let (top, distinct) = semlith::store::unresolved_targets(&db, 5).unwrap();
+    let several = semlith::store::names_with_several_definitions(&db).unwrap();
+    assert!(
+        stats.contains(&format!("{distinct} call targets with no definition here")),
+        "stats prints a different unresolved count than the store reports ({distinct}): {stats}"
+    );
+    assert!(
+        stats.contains(&format!("{several} names with several definitions")),
+        "stats prints a different ambiguous-name count than the store reports ({several}): {stats}"
+    );
+    assert!(several >= 1, "`twice` is defined in two files: {several}");
+    assert!(
+        top.iter().any(|(name, _)| name == "outside"),
+        "a call into nothing this store defines is an unresolved target: {top:?}"
+    );
+
+    // Chunks are dated by when the store read the file, and every chunk is
+    // in exactly one month's bucket.
+    let months = semlith::store::chunks_by_month(&db).unwrap();
+    let counted: i64 = months.iter().map(|(_, n)| n).sum();
+    let chunks: i64 = db
+        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(counted, chunks, "a chunk fell out of the month buckets");
 }

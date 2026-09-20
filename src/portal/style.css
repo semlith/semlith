@@ -4273,3 +4273,582 @@ td.row-end {
 .log .line.failed {
   opacity: 1;
 }
+
+/* Impact — the graph read backwards.
+ *
+ * A list rather than a picture: the question is "who would notice", and an
+ * answer to that is read top to bottom by hop, not laid out in space. The
+ * row shape is the locate row's, because both are "a name, where it is, and
+ * what it is worth" and two shapes for that would read as two kinds of fact. */
+.impact-band {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-bottom: var(--sp-4);
+}
+.impact-band input[type="search"] {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+.hops-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--t-body-sm);
+  color: var(--muted);
+}
+.hops-label .hops {
+  width: 4.5rem;
+}
+.impact-block {
+  margin-bottom: var(--sp-5);
+}
+.impact-hop {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: var(--sp-2);
+}
+.impact-hop h2 {
+  font-size: var(--t-body);
+  margin: 0;
+}
+/* One grid for the header and the rows, so a column heading sits over the
+ * column it names. As two flex rows they drifted apart the moment a symbol
+ * was longer than its heading. */
+.impact-row,
+.impact-head-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.6fr) minmax(0, 1.6fr) 3rem;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.impact-row {
+  padding: var(--sp-1) 0;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+}
+/* The support badge rides with the edge it describes rather than taking a
+ * column of its own: it is a property of the via, not a fourth fact. */
+.impact-row .via {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.impact-row .sym {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.impact-row .where,
+.impact-row .kind,
+.impact-row .via {
+  color: var(--ink-2);
+}
+.impact-row .via {
+  color: var(--muted);
+}
+.headline {
+  font-size: var(--t-body);
+  color: var(--ink);
+  margin-bottom: var(--sp-3);
+}
+/* Said once, above the list, rather than on every ambiguous row: the warning
+ * is about the walk, not about any one edge — each row still carries its own
+ * badge. */
+.note.hypothesis {
+  color: var(--amber-ink, var(--ink-2));
+  margin-bottom: var(--sp-3);
+}
+
+/* The subject line and the three counts above the Impact table. */
+.impact-subject-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: var(--sp-4);
+}
+.impact-subject {
+  font-family: var(--mono);
+  font-size: var(--t-body);
+  color: var(--ink);
+}
+.impact-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-6);
+  margin-bottom: var(--sp-4);
+}
+.impact-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.impact-stat .n {
+  font-family: var(--mono);
+  font-size: 22px;
+  color: var(--ink);
+}
+/* The column names, once, above the per-hop blocks rather than repeated in
+ * each of them: the blocks are one table split by hop, not five tables. */
+.impact-head-row {
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: var(--sp-2);
+}
+.impact-row .hops-n {
+  text-align: right;
+  color: var(--muted);
+}
+
+/* The path finder and Trace, two cards under the reach list. */
+.card.pad.path-card,
+.card.pad.trace-card {
+  margin-top: var(--sp-6);
+}
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.card-head h2 {
+  font-size: var(--t-body);
+  margin: 0;
+}
+.mono-chip {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+.path-band {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin-bottom: var(--sp-3);
+}
+.path-band input {
+  flex: 1 1 10rem;
+  min-width: 0;
+}
+/* On and off, as the design draws them: the on state is ink on panel
+ * reversed, so which way a toggle is set is legible without reading it. */
+.chip-toggle {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.chip-toggle.on {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--panel);
+}
+.hop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+}
+.hop .n {
+  color: var(--muted);
+  min-width: 1.2em;
+}
+.hop .end {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.hop .arrow,
+.hop .kind {
+  color: var(--ink-2);
+}
+/* The weld, drawn between the two hops it joins rather than as a hop of its
+ * own: a seam that counted as a hop would inflate the hop count and hide the
+ * join, which is the thing worth seeing. */
+.seam {
+  margin: 0 0 var(--sp-1) var(--sp-5);
+  padding-left: var(--sp-2);
+  border-left: 1.4px dashed var(--accent);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--amber-ink);
+}
+.trailer {
+  margin-top: var(--sp-2);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+.refusal {
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  padding: var(--sp-3);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+.refusal .mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  margin: 0;
+}
+.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.answer {
+  margin: var(--sp-1) 0 var(--sp-4);
+  line-height: var(--lh-prose);
+}
+.support {
+  margin-bottom: var(--sp-3);
+}
+.support code {
+  display: block;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  background: var(--shade, var(--line-soft));
+  border-radius: var(--r-2, 4px);
+  padding: var(--sp-2);
+  overflow-x: auto;
+  white-space: pre;
+}
+.support-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: baseline;
+  margin-top: var(--sp-1);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+}
+.support-foot .hop-of {
+  color: var(--muted);
+}
+/* Two marks, and the difference between them is the whole point: one is a
+ * fact the source states, the other is a name match somebody has to check. */
+.mark.fact {
+  color: var(--blue-ink, var(--accent));
+}
+.mark.candidate {
+  color: var(--amber-ink);
+}
+
+/* The right column of the Graph page: the selection rail, and the Map under
+ * it. Two panels rather than one, because selecting a node replaces the rail
+ * and must not take the map of the store with it. */
+.graph-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--line);
+}
+.graph-side .graph-rail {
+  border-left: 0;
+  overflow-y: visible;
+}
+.map-panel {
+  padding: var(--sp-4h);
+  border-top: 1px solid var(--line);
+}
+.map-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.map-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: var(--sp-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--panel);
+  cursor: pointer;
+  min-width: 0;
+}
+.map-row:hover {
+  border-color: var(--blue-ink);
+}
+.map-row .line {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.map-row .line.one {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  font-size: var(--t-small);
+  color: var(--ink);
+}
+.map-row .size {
+  color: var(--muted);
+}
+.map-shown {
+  margin-top: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+@media (max-width: 899px) {
+  .graph-side {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    overflow: visible;
+  }
+}
+
+/* Inside the index: the language mix, chunks by month, and graph health.
+ *
+ * Three cards of counted things, drawn as bars rather than as numbers alone
+ * because the question each answers is a proportion — how much of the corpus
+ * is this language, how much of the graph is settled. */
+.health {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.health-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  min-width: 0;
+}
+.mix {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.mix-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+}
+.mix-row .k {
+  flex: 0 0 7rem;
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+.mix-row .meter {
+  flex: 1 1 auto;
+  height: 6px;
+  background: var(--line-soft);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.mix-row .meter span {
+  display: block;
+  height: 100%;
+  background: var(--blue-ink);
+}
+.mix-row .v {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.months {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-1);
+  height: 96px;
+}
+.month {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  /* Capped, so one month reads as a column rather than as a slab filling
+   * the card. A store indexed in a single pass is the common case. */
+  flex: 0 1 44px;
+  min-width: 0;
+  height: 100%;
+  justify-content: flex-end;
+}
+.months {
+  justify-content: flex-start;
+}
+.month .col {
+  display: flex;
+  align-items: flex-end;
+  width: 100%;
+  flex: 1 1 auto;
+}
+.month .col span {
+  display: block;
+  width: 100%;
+  background: var(--blue-ink);
+  border-radius: 2px 2px 0 0;
+}
+.month .m,
+.month .c {
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+}
+/* The four support classes as one bar, in the order they are worth trusting.
+ * A single "resolution %" hid the difference between an edge the source
+ * named and one nothing could place. */
+.support-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--line-soft);
+}
+.support-bar .seg.extracted {
+  background: var(--blue-ink);
+}
+.support-bar .seg.resolved {
+  background: var(--accent);
+}
+.support-bar .seg.ambiguous {
+  background: var(--amber-ink);
+}
+.support-bar .seg.unresolved {
+  background: var(--line);
+}
+.health-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+}
+.health-facts .fact {
+  display: flex;
+  flex-direction: column;
+}
+.health-facts .v {
+  font-family: var(--mono);
+  font-size: var(--t-body);
+  color: var(--ink);
+}
+.health-facts .k {
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+
+/* The sessions table's columns. Same shape as the rows table beside it, one
+ * column wider, so the two read as one page rather than as two designs. */
+.w-sessions {
+  table-layout: fixed;
+  width: 100%;
+}
+.w-sessions th:nth-child(1),
+.w-sessions td:nth-child(1) {
+  width: 16%;
+}
+.w-sessions th:nth-child(2),
+.w-sessions td:nth-child(2) {
+  width: 14%;
+}
+.w-sessions th:nth-child(5),
+.w-sessions td:nth-child(5),
+.w-sessions th:nth-child(6),
+.w-sessions td:nth-child(6),
+.w-sessions th:nth-child(7),
+.w-sessions td:nth-child(7) {
+  width: 11%;
+}
+
+/* Session replay: one row per transcript, and the outcomes under it. */
+.replay-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.replay-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.replay-row .line.one {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+}
+.replay-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+}
+/* The three outcomes are different facts and are never summed: a refund is
+ * an agent that did not ask, a miss is an answer that was not good enough,
+ * an edit is the answer having been enough. */
+.replay-count.refund {
+  color: var(--amber-ink);
+}
+.replay-count.miss {
+  color: var(--red-ink, var(--amber-ink));
+}
+.replay-count.sufficed {
+  color: var(--blue-ink);
+}
+.replay-count.unknown {
+  color: var(--muted);
+}
+
+/* Reports: five cards and one preview under them. */
+.report-card .filters {
+  gap: var(--sp-1);
+}
+.report-preview {
+  min-height: 4rem;
+}
+.report-text {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  max-height: 32rem;
+  overflow-y: auto;
+}
+
+/* The Cloud page's three rows and its two command blocks. */
+.cloud-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+.cloud-row {
+  margin: 0;
+  line-height: var(--lh-prose);
+}
+.cloud-block {
+  margin-bottom: var(--sp-3);
+}

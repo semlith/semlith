@@ -175,10 +175,43 @@ impl Daemon {
     /// test asks for the run here and reads it back from `/api/index/log`,
     /// which is exactly what the page does.
     fn index_run(&self, path: &Path) -> u64 {
-        let body = format!(
-            "{{\"path\":{}}}",
+        self.index_run_into("api", path)
+    }
+
+    /// Index a path into a named store.
+    ///
+    /// The store is named because from 0.26.0 a request that names none puts
+    /// the path in the store `home::resolve` picks for it, which for a folder
+    /// outside every existing root is a new store of its own (#120). These
+    /// tests are about a run inside one store, so they say which.
+    fn index_run_into(&self, store: &str, path: &Path) -> u64 {
+        // A folder outside the store's roots joins it by being made one,
+        // which is the documented way and the one the boundary allows
+        // (#120). Before 0.26.0 the index route did this silently for
+        // whatever it was handed, which is what made the boundary check
+        // unable to refuse anything.
+        let adopt = format!(
+            "{{\"store\":{},\"root\":{}}}",
+            serde_json::to_string(store).unwrap(),
             serde_json::to_string(&path.display().to_string()).unwrap()
         );
+        // The store may not exist yet — this is often the call that makes
+        // it. When the adopt cannot land, the path is posted with no store
+        // named and `home::resolve` gives it one, which for `work/api` is
+        // the `api` this helper's callers then read runs from.
+        let adopted = self.post("/api/root", &adopt).status == 200;
+        let body = if adopted {
+            format!(
+                "{{\"store\":{},\"path\":{}}}",
+                serde_json::to_string(store).unwrap(),
+                serde_json::to_string(&path.display().to_string()).unwrap()
+            )
+        } else {
+            format!(
+                "{{\"path\":{}}}",
+                serde_json::to_string(&path.display().to_string()).unwrap()
+            )
+        };
         let answer = self.post("/api/index", &body);
         assert_eq!(answer.status, 200, "{}", answer.body);
         let started = answer.json();
@@ -1762,11 +1795,12 @@ fn a_session_id_is_sixteen_hex_characters_or_it_is_replaced() {
 ///
 /// The agent is the credential this boundary is for: the key lives in a config
 /// file on disk, so what it can reach is what a copied config file can reach,
-/// and `/mcp` is the only route that key opens. `POST /api/index` is not held
-/// to it — that route carries the portal's own token, and since 0.20.0 it
-/// records what it is handed as a root of the store, which is how a folder
-/// joins an existing corpus from the page. The two are asserted apart because
-/// they are two different credentials, not because the rule is soft.
+/// and `/mcp` is the only route that key opens. From 0.26.0 `POST /api/index`
+/// is held to the same boundary whenever it names a store (#120); what it may
+/// still do, and an agent may not, is index a folder that names no store at
+/// all, which becomes its own corpus through `home::resolve` rather than
+/// joining somebody else's. The two are asserted apart because they are two
+/// different credentials, not because the rule is soft.
 #[test]
 #[ignore = "indexes, so it downloads an embedding model on first run"]
 fn the_index_boundary_holds_for_an_agents_index() {
@@ -1906,5 +1940,129 @@ fn a_store_another_process_is_writing_is_listed_rather_than_opened() {
     assert!(
         !reopened.contains("unopened"),
         "the store should have opened once the lock was released:\n{reopened}"
+    );
+}
+
+/// The index route refuses a path outside the store's boundary, and refusing
+/// it leaves the store's roots as they were.
+///
+/// Issue #120: the route recorded whatever was posted as a root *before* the
+/// run applied the boundary, so the check could never refuse anything and the
+/// promise in `docs/security.md` was not kept from 0.20.0 to 0.26.0.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn the_index_route_refuses_a_path_outside_the_boundary_and_keeps_the_roots() {
+    let (dir, home, work) = sandbox("boundary");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    // A sibling of the indexed corpus, outside the store's roots and outside
+    // the sandbox home — the exact shape the issue describes.
+    let outside = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.rs"), RUST).unwrap();
+
+    let registry = home.join(".semlith").join("registry.json");
+    let before = std::fs::read_to_string(&registry).unwrap_or_default();
+
+    let daemon = Daemon::start_in(dir, home.clone(), work.join("api"), &[]);
+    // Naming the store is the case the promise is about: this path is to go
+    // into *that* corpus, and it is not under any of that corpus's roots.
+    // Naming no store is the other half of the fix — the path picks its own
+    // store through `home::resolve`, as `semlith index` does, and is asserted
+    // below.
+    let body = format!(
+        "{{\"store\":\"api\",\"path\":{}}}",
+        serde_json::to_string(&outside.display().to_string()).unwrap()
+    );
+    let answer = daemon.post("/api/index", &body);
+    assert_eq!(
+        answer.status, 403,
+        "a path outside the boundary was accepted: {}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("outside the boundary"),
+        "the refusal does not name the rule: {}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("elsewhere"),
+        "the refusal does not name the path: {}",
+        answer.body
+    );
+
+    let after = std::fs::read_to_string(&registry).unwrap_or_default();
+    assert_eq!(
+        before, after,
+        "a refused path was recorded as a root anyway"
+    );
+    assert!(
+        !after.contains("elsewhere"),
+        "the refused path is in the registry: {after}"
+    );
+
+    // With no store named the same path is accepted, because it becomes its
+    // own corpus rather than joining somebody else's. That is where `semlith
+    // index <path>` would have put it, and it is why refusing the named case
+    // costs the page nothing.
+    let own = format!(
+        "{{\"path\":{}}}",
+        serde_json::to_string(&outside.display().to_string()).unwrap()
+    );
+    let accepted = daemon.post("/api/index", &own);
+    assert_eq!(
+        accepted.status, 200,
+        "a folder with no store named must become its own store: {}",
+        accepted.body
+    );
+    let started = accepted.json();
+    let store = started["runs"][0]["store"].as_str().unwrap_or_default();
+    assert_ne!(
+        store, "api",
+        "the folder joined an unrelated store: {started}"
+    );
+}
+
+/// A forwarded `semlith_index` says how the skipped divide up, exactly as the
+/// in-process server does.
+///
+/// Issue #121: the daemon's summary was built from counts alone, so an agent
+/// whose call was forwarded was told "1 847 skipped" and nothing about why,
+/// while the same call answered in process named every reason. One call in
+/// two places may not say two different things about it.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn a_forwarded_index_names_the_reasons_it_skipped() {
+    let (dir, home, work) = sandbox("skipped-reasons");
+    let root = work.join("api");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("fleet.rs"), RUST).unwrap();
+    // Bytes no reader claims: skipped, with a reason.
+    std::fs::write(root.join("blob.bin"), [0u8, 159, 146, 150, 0, 1, 2, 3]).unwrap();
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+
+    let daemon = Daemon::start_in(dir, home.clone(), root.clone(), &[]);
+    let _ = &daemon;
+    let mut server = Proxied::open(&home, &root);
+    let asked = server.call(
+        "tools/call",
+        serde_json::json!({
+            "name": "semlith_index",
+            "arguments": { "path": root.display().to_string() }
+        }),
+    );
+    let text = asked["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the tool did not answer with text: {asked}"));
+
+    assert!(text.contains("skipped"), "{text}");
+    assert!(
+        text.contains("binary"),
+        "the forwarded summary gives a skipped count with no reason:\n{text}"
+    );
+    // The shape the in-process server writes: the reasons in a parenthesis
+    // directly after the count.
+    assert!(
+        text.contains("skipped (") || text.contains("skipped ("),
+        "the reasons are not where the in-process summary puts them:\n{text}"
     );
 }

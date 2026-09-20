@@ -543,6 +543,154 @@ impl Fleet {
         Ok(best)
     }
 
+    /// Everything that reaches `name`, merged across the chosen stores.
+    ///
+    /// Unlike a path, reverse reachability does join across stores cleanly:
+    /// each store answers about its own corpus and the answers are separate
+    /// facts about separate trees, so concatenating them says "these are the
+    /// places that reach this name", which is the question asked. Hops are
+    /// per store and are not compared between them.
+    pub fn impact_in(
+        &self,
+        only: Option<&[String]>,
+        name: &str,
+        kinds: &[String],
+        depth: u32,
+        all_edges: bool,
+    ) -> Result<crate::graph::Impact> {
+        let parts = self.graph_each(only, |s| {
+            crate::graph::impact(s.db(), name, kinds, depth, all_edges)
+        })?;
+        let mut merged = crate::graph::Impact {
+            name: name.to_string(),
+            depth,
+            all_edges,
+            definitions: Vec::new(),
+            reached: Vec::new(),
+            files: Vec::new(),
+            hidden: 0,
+            extracted: 0,
+            resolved: 0,
+            inferred: 0,
+            ambiguous: 0,
+        };
+        for part in parts {
+            merged.definitions.extend(part.definitions);
+            merged.reached.extend(part.reached);
+            merged.files.extend(part.files);
+            merged.hidden += part.hidden;
+            merged.extracted += part.extracted;
+            merged.resolved += part.resolved;
+            merged.inferred += part.inferred;
+            merged.ambiguous += part.ambiguous;
+        }
+        merged.reached.sort_by(|a, b| {
+            a.hop
+                .cmp(&b.hop)
+                .then(
+                    crate::graph::confidence_rank(&a.confidence)
+                        .cmp(&crate::graph::confidence_rank(&b.confidence)),
+                )
+                .then(a.path.cmp(&b.path))
+                .then(a.line.cmp(&b.line))
+        });
+        merged.files.sort_by(|a, b| {
+            a.nearest
+                .cmp(&b.nearest)
+                .then(b.symbols.cmp(&a.symbols))
+                .then(a.path.cmp(&b.path))
+        });
+        Ok(merged)
+    }
+
+    /// A chain turned into evidence: the sentence, the hops, and one line of
+    /// source per hop.
+    ///
+    /// The path is found once, by [`Fleet::path_in`], and read back here —
+    /// there is no second traversal, so the Trace panel and `semlith path`
+    /// cannot describe one chain differently.
+    pub fn trace_in(
+        &self,
+        only: Option<&[String]>,
+        from: &str,
+        to: &str,
+        depth: u32,
+        all_edges: bool,
+        shorten: &dyn Fn(&str) -> String,
+    ) -> Result<crate::graph::Trace> {
+        let chain = self.path_in(only, from, to, depth, all_edges)?;
+        let filter = crate::filter::Filter::default();
+        let mut read_line = |path: &str, line: u32| -> Option<String> {
+            let target = crate::Target::Span {
+                path: path.to_string(),
+                start: line,
+                end: line,
+            };
+            match self.read_in(only, &target, &filter) {
+                Ok(Some(crate::Read::One(span))) => Some(span.text.trim_end().to_string()),
+                // Several files end with that suffix, or the store cannot
+                // answer for it. A renderer says nothing rather than quoting
+                // a line it is not sure about.
+                _ => None,
+            }
+        };
+        Ok(crate::graph::trace(
+            from,
+            to,
+            depth,
+            all_edges,
+            chain,
+            &mut read_line,
+            shorten,
+        ))
+    }
+
+    /// The communities of the chosen stores, with their hubs located.
+    ///
+    /// One store at a time, because a community spanning two unrelated
+    /// corpora is not a fact about anybody's code — the same reason
+    /// [`Fleet::path_in`] asks each store separately.
+    pub fn communities_in(
+        &self,
+        only: Option<&[String]>,
+        shown: usize,
+    ) -> Result<(Vec<crate::graph::Community>, usize, i64)> {
+        let mut all: Vec<crate::graph::Community> = Vec::new();
+        let mut edges_read = 0usize;
+        let mut edges_total = 0i64;
+        for i in self.chosen(only)? {
+            let db = self.members[i].store.db();
+            let (edges, total) = crate::store::community_edges(db, crate::graph::COMMUNITY_EDGES)?;
+            edges_read += edges.len();
+            edges_total += total;
+            let pairs: Vec<(String, String)> = edges.into_iter().map(|e| (e.from, e.to)).collect();
+            let mut found = crate::graph::communities(&pairs);
+            // Locate only the hubs that will be drawn: a definition lookup
+            // per member of every community would read the whole symbol
+            // table to fill in rows nobody sees.
+            let wanted: Vec<String> = found
+                .iter()
+                .take(shown)
+                .flat_map(|c| c.hubs.iter().map(|h| h.name.clone()))
+                .collect();
+            let located = crate::store::where_defined(db, &wanted)?;
+            for community in found.iter_mut().take(shown) {
+                for hub in &mut community.hubs {
+                    if let Some((_, path, line)) = located.iter().find(|(n, _, _)| *n == hub.name) {
+                        hub.path = path.clone();
+                        hub.line = *line;
+                    }
+                }
+            }
+            all.extend(found);
+        }
+        all.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.label.cmp(&b.label)));
+        let total = all.len();
+        all.truncate(shown);
+        let _ = edges_read;
+        Ok((all, total, edges_total))
+    }
+
     /// Run a read over the chosen stores and concatenate what comes back,
     /// labelling each row with its store when more than one is open.
     /// One answer per chosen store, unlabelled.
