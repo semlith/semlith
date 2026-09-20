@@ -70,8 +70,9 @@ header is emitted anywhere.
 
 A daemon started on a machine with nothing indexed has no navigation to show, so
 it shows a single screen instead: **No stores yet**. It takes a folder path, or
-opens a directory picker, and the button carries what you typed into the Index
-page rather than dropping it. There is a third button that skips to About, and a
+opens a directory picker, and the button carries what you typed into the Inside
+the index page rather than dropping it. There is a third button that skips to
+About, and a
 copyable `semlith index ~/Documents/work` for doing the same thing from a
 terminal.
 
@@ -80,21 +81,25 @@ shown again.
 
 ### The navigation
 
-Ten pages in three groups, plus About:
+Thirteen pages in two groups, in this order, and every section below is in the
+same order:
 
 | Group | Pages |
 |---|---|
-| Workspace | Stores, Files, Index |
-| Explore | Search, Graph |
-| Operate | Agents, Ledger, Privacy, Doctor |
-| About | About |
+| Workspace | [Stores](#stores), [Files](#files), [Inside the index](#inside-the-index) |
+| Explore | [Search](#search), [Graph](#graph), [Impact](#impact) |
+| Operate | [Retrieval ledger](#retrieval-ledger), [Reports](#reports), [Agents](#agents), [Cloud](#cloud), [Privacy](#privacy) |
+| Machine | [Doctor](#doctor), [About](#about) |
+
+Four groups rather than one long list: what you have indexed, what you can ask
+of it, what the daemon is doing, and what this machine is running.
 
 The address bar carries the page as a fragment — `#search`, `#graph` — so a
 particular page can be bookmarked or reloaded. On a narrow screen the navigation
 is a drawer that closes when it takes you somewhere.
 
 Under the pages is a count — `2 indexing`, or `2 indexing · 3 queued` — on every
-page rather than on the Index page alone, because a run that is only visible from
+page rather than on Inside the index alone, because a run that is only visible from
 the page that started it is a run that happens out of sight. It is hidden when
 nothing is running.
 
@@ -107,9 +112,10 @@ rather than a stream because a stream would hold one of the daemon's eight HTTP
 workers for as long as the tab is open, and eight tabs would then be a portal
 that cannot answer. A tab in the background stops asking, and catches up in one
 pass when it comes back. Which pages read live is said on each of them below;
-Search, Read and Graph deliberately do not, because each is the answer to a
-question somebody asked and redrawing it under them would be answering a
-different one.
+Search, Read, Graph, Impact and Reports deliberately do not, because each is the
+answer to a question somebody asked and redrawing it under them would be
+answering a different one. Cloud has no route behind it and so has nothing to
+follow.
 
 ## Stores
 
@@ -225,220 +231,6 @@ bulk forget; the header tick selects every row on the current page rather than
 every row behind the filter, because ten thousand files behind one tick is a
 mistake nobody meant to make. A selection made across two stores becomes two
 writes, because a write names the store it is for.
-
-## Index
-
-**What it is for.** Reading folders, or one fetched URL, into stores, and
-watching every run the daemon is carrying.
-
-The daemon is the writer for every store it opened. This page does not index
-anything itself, and it no longer holds a run either: it asks the daemon to queue
-one and then reads it back, the same way it reads anything else. That is the
-difference worth knowing about. The page used to *be* the run — it held a
-streaming response open and the run existed only as the events travelling down
-it — so the tab that pressed the button was the only thing that knew the run was
-happening, and leaving the page threw that away. The work carried on, because the
-work is the store's, but nothing on screen could find it again.
-
-A run lives in the daemon now: its id, its paths, its status, its counters, its
-clock, the last 500 lines of its log and, when it ends, its summary. The same
-`say` closure that emits every event writes that record, so the card and the log
-cannot disagree about what happened. Navigating to Search and back, refreshing,
-or closing the tab for the length of a run changes nothing — every run is on its
-card where it actually is, with its log carrying on from the last line this page
-saw. A run is only ever cut short in two ways: its own **Stop**, or
-`semlith start` ending.
-
-**Controls.**
-
-- **paths** — one path per line, so several folders can be started without
-  opening a picker at all. The first-run screen carries a path into this field.
-- **Choose folders…** — a directory picker rooted at your home, which can tick
-  more than one folder in a visit.
-- **Projects under a folder…** — the repository checklist below.
-- **Add from a URL** — one https request for exactly that URL, a page, a PDF or a
-  file. Nothing is crawled, no credential is sent, and what lands is written
-  inside the store's own `downloads/` directory rather than into your working
-  tree. It then goes through the same queue and becomes a card like any other, so
-  there is no second progress mechanism to learn. The fetch itself is the one
-  synchronous part, because its refusals — the URL was `http`, the body was too
-  large, nothing here reads that content type — are what the card has to show.
-- **the target** — where the paths go. Three answers, below.
-- **Start indexing** — queues the runs and answers at once with how many were
-  queued. The cards are what happens next; the button does not become a control
-  for them, because there is more than one run.
-
-The three pickers are mutually exclusive: two of them open at once is two answers
-to one question.
-
-**Where the paths go.** The selector offers `each folder becomes its own store`
-and an `add to <name>` per open store, and the route behind it takes a third
-answer a script can use:
-
-| Target | What happens |
-|---|---|
-| `each` | One store per path, each resolved exactly as `semlith index <path>` resolves it — same name, same directory under the store home, same registry entry, including the numeric suffix when a second folder is also called `api`. It is the same function, not a second copy of its rules, which is what stops indexing a folder here and again from a terminal producing two stores. |
-| a named store | Every path goes into that one store, and each becomes one of its roots so the watcher keeps it current. |
-| nothing named | `each` for more than one path, and the single-store behaviour for one. Three folders are three corpora, and putting them in one store is a choice nobody made. |
-
-A path that could not be queued is named with its reason and the ones beside it
-still start: a typo in the third folder should not take the two that were with
-it.
-
-**Projects under a folder** is the case the directory picker handles badly —
-ticking twelve repositories one directory at a time is twelve walks into and back
-out of the same parent. It asks the daemon which children of a folder are git
-repositories and offers them all at once, already ticked. A `.git` file counts as
-much as a `.git` directory, so a worktree and a submodule are on the list. One
-level only: a monorepo is one store, and its nested repositories are its own
-business. Where none of the children is a repository the plain subfolders are
-offered instead and the card says so, because a folder of folders is still what
-you were pointing at. A child an existing store already covers is listed with
-`in <store>` and starts unticked — shown rather than omitted, because "nothing
-here" and "all of it is already done" are different answers. **All**, **None** and
-**Use N** fill the paths field and set the target to `each`.
-
-**One card per store**, and the card is the run — the one that is going, or the
-last one that finished, kept afterwards so a page opened later says what it did
-rather than showing nothing. Each card carries its store's name, a status pill, a
-percentage and bar, files scanned over files found, chunks written, a
-chunks-per-second rate, the elapsed clock, the paths, and the log.
-
-**This page reads live**, on the runs and stores domains, and it is the one page
-that paints in place rather than redrawing itself: a card holds a log and a
-scroll position of its own, and redrawing would throw both away. A store whose
-run the daemon has forgotten — it was deleted, or the daemon restarted — loses
-its card rather than keeping a stale one.
-
-| Status | What it means |
-|---|---|
-| `queued` | Submitted and not yet under way. The pill carries its place in line when it is waiting on the daemon-wide queue below; without a place it is waiting on its own store's writer, which is the watcher being mid-file — one writer per store is the rule that stops two passes corrupting each other. |
-| `running` | A writer has it. |
-| `paused` | Held between files by this card's **Pause**. |
-| `stopping` | A stop was asked for and what the run embedded is being undone. Told apart from `stopped` because on a large corpus the undoing takes as long as the embedding did, and a card that jumped straight to `stopped` would be claiming the store was already back to what it was. |
-| `done` | Finished. |
-| `stopped` | Stopped, and undone. The bar returns to 0% rather than filling, because a full bar would say the opposite of what happened. |
-| `failed` | Ended on an error that was not a file's — the model, or the store. |
-
-**The log** under each card prints one line per file with the outcome that file
-got — `indexed`, `unchanged`, `skipped`, `removed`, `refused`, `failed` —
-coloured so that a re-index of an unchanged corpus reads as a wall of background
-with the handful of real writes standing out of it. The run ends with a counted
-line: indexed, unchanged, skipped, removed, failed where there were any, chunks,
-and the total elapsed.
-
-The card reads its log by a cursor rather than by how much it has drawn, so two
-tabs open on the same run each see every line exactly once and neither is
-affected by what the other has read. The daemon keeps the last 500 lines; a tab
-away for longer than that restarts from the oldest line still held rather than
-showing a gap as though it were continuity.
-
-**Three of those outcomes owe an explanation, and the line gives it.** A
-`skipped`, `refused` or `failed` line carries the reason beside the path, because
-a log that says "skipped" against two thousand files and nothing else is a log
-nobody can act on. A refusal names the rule that refused it — the credential
-deny-list, or the kind of credential the content scan found and the line it sat
-on, never the text that matched. A skip names one of a closed set: `empty`, `over
-8 MiB`, `not a regular file`, `unreadable` with the operating system's own words,
-`binary`, `no text in this document`, `not a decodable image`. And the final
-counted line is followed by what the skipped count was made of, kind by kind, so
-that a large number is a fact rather than an invitation to assume something was
-lost.
-
-**`failed` is the outcome that used to be the end of the run.** Before 0.19.0 a
-file that could not be read — a truncated image a decoder rejected, a source file
-tree-sitter could not parse — ended the whole pass, so a tree of ten thousand
-files stopped at the first bad one. It is now one line with the decoder's or the
-parser's own message on it, and the run carries on to the next file. A refusal is
-a decision semlith made; a failure is one it could not avoid, and the two are
-coloured and counted apart for that reason. Every failed path is named again on
-the closing line rather than only counted, because a run that ends with "eleven
-failed" and no names is a run whose eleven files nobody goes and looks at.
-
-**The elapsed clock** sits beside the counts, because files, chunks, rate and
-elapsed are one reading of one run. It starts when the run is submitted rather
-than when a writer picks it up: the wait for a writer is time you are waiting.
-The daemon measures it, the card ticks between polls so the seconds move, and
-every poll corrects to the daemon's figure — which only ever goes forward, so a
-correction never makes the reading jump backwards. It is the run's time and not
-the tab's, which matters because a browser throttles a background tab's timers to
-about once a minute. It stops while a run is held, because held time is not time
-anything is happening, and it freezes on `done`, `stopped` or `failed`, holding
-the total.
-
-It also spans the whole run rather than the slice. A run hands the writer back to
-the watcher every 45 seconds and returns as a fresh job, so a clock measured
-around that work restarted from zero every 45 seconds and the page faithfully
-redrew a run that had just begun. The clock belongs to the run now.
-
-**What Stop does that Pause does not, and what Remove does that neither does.**
-
-**Pause** holds the run between files. The writer is still this run's — the lock
-is not handed back, the store is left mid-corpus, and **Resume** carries on from
-where it stopped. Nothing that has been embedded is touched.
-
-**Stop** undoes the run. Everything it embedded is rolled back, so the store is
-left exactly as it was before the run started, the bar returns to 0% rather than
-filling, and indexing the same folder again begins from the beginning. The
-confirmation says so before it happens. Pause is "wait"; Stop is "as though it
-never ran".
-
-**Remove** is what the button says on a run that is still `queued`, and it takes
-that run out of the line. It answers at once and confirms nothing, because there
-is nothing to undo: a queued run has embedded no file and holds no writer. That
-is the whole difference between removing a folder from the queue and stopping one
-that is going.
-
-One more event can appear in the log: `slice`, saying the writer has handed
-itself back to the watcher and put the rest of this run back on the queue. It is
-one run and one log, and there is nothing for you to do about it.
-
-**Waiting** appears under the cards when more than the machine can carry has been
-asked for, listing the queued runs in the order they will start, each with its
-store, its paths and a **Remove**. A store's writer used to take the next job on
-its own queue with nothing above it, so eleven open stores meant eleven runs at
-once whatever the machine had; there is one daemon-wide queue now, ordered by
-submission, and a run is admitted only while fewer than *runs at once* are
-running. Anything submitted while the queue exists joins its end. The head is
-admitted the moment a run finishes, stops or fails — with this page open or not,
-which is the point of the run living in the daemon. The watcher's own re-embeds
-do not pass through the queue: they are small, they already interleave with runs,
-and holding a file save behind eleven queued repositories would make the watcher
-useless exactly when the machine is busy.
-
-**How hard this machine may work** is the last card: three numbers, each with the
-machine reading behind it and the sentence that derived it. The daemon reads
-logical cores, total memory and memory free *now* on every request, so the figure
-in front of you is about this machine at this moment rather than at startup.
-
-| Setting | Derived from |
-|---|---|
-| runs at once | Memory free less a 2 GiB reserve, divided by what one run peaks at, and no more than the cores allow with one kept free so the portal still answers while every writer is busy. Floor 1, and 1 outright when the memory reading failed — a failed reading is not a machine with no memory. |
-| threads each | The embedder's own thread count divided between the runs, clamped so runs × threads never exceeds the cores. Floor 1. |
-| MiB per store | 512 MiB of vectors, doubled once past 16 GiB free beyond the reserve and again past 64 GiB. Two steps rather than a curve, because a figure you recognise is worth more here than a fitted one. |
-
-Each is yours to change, and a value above what the machine derived is used as
-you set it — with the derivation in front of you rather than instead of it, which
-is why the field says what it was going to do. Changing *runs at once* takes
-effect on the next admission: raising it admits the head immediately, lowering it
-stops nothing already going, because a run holds a writer and undoing it would
-cost the work it has done. The other two apply to the next run queued.
-
-A value the environment sets — `SEMLITH_INDEX_PARALLEL`, `SEMLITH_EMBED_THREADS`
-or `SEMLITH_INDEX_MEMORY` — is shown, disabled, and says so. An explicit variable
-is an instruction from whoever started the process, and a page in a browser may
-not overrule it. What is not from the environment is saved in
-`~/.semlith/settings.json`, written the first time a field is moved and not
-before, so a home without that file is a home deriving all three.
-
-**What survives what.** Navigating away, coming back, refreshing and closing the
-tab change nothing about any run: the daemon holds them, and this page redraws
-what it finds. A daemon restart is the one thing that does not survive. A run that
-was going when the process ended is not resumed — the files it had committed are
-in the store and indexing again reports them as `unchanged` — and a run that was
-still queued never started at all, which would otherwise leave no trace anywhere.
-The next `semlith start` says both on the store's own event feed, once, on the
-Stores page.
 
 ## Search
 
@@ -821,88 +613,410 @@ that gets read as decoration.
 
 **Chunks it lives in** takes the symbol's name to the Search page as a query.
 
-## Agents
+## Impact
 
-**What it is for.** Connecting an agent to this daemon, and seeing which ones are
-connected.
+**What it is for.** Reading the code graph backwards from one name. You type a
+symbol and the page lists everything that reaches it — so *what would notice if
+I changed this* is a question answered before the edit rather than by the test
+run after it. The heading carries the chip `semlith_impact`, the name of the
+tool an agent calls for the same answer, and its subtitle says the same thing:
+*Reverse reachability. What breaks if this changes — before the edit, not after
+the test run.*
 
-**The endpoint** is in the page heading, with a copy button, a state pill reading
-`answering` or `closed`, and a **Start** / **Stop** control. Stopping it drops the
-`/mcp` route and nothing else: the stores stay open, the watcher keeps running,
-and the portal keeps working. A closed endpoint answers 404 rather than 401, so a
-client that has been told to stop learns the same thing whether or not it still
-holds a key.
+The Graph page draws a neighbourhood and this page answers a question. The
+difference is what the answer is made of: a hundred callers is a hairball on a
+canvas and a hundred rows on a page, so this one is rows.
 
-**Login service.** Whether the daemon is installed as one — a launchd user
-agent, a systemd user unit, a Windows logon task — and when it last started. The
-page has always said "one endpoint, every client"; until 0.21.0 that endpoint
-existed only as long as somebody held a terminal open for it. The card names the
-mechanism, the definition it wrote and the log to read when it misbehaves. On
-Windows it also says that a logon task restarts a task that failed and does not
-supervise one that exited cleanly, because the three mechanisms are not equally
-strong and a page that implied they were would be wrong on one of them. When no
-service is installed, the card carries the command — `semlith start --service` —
-rather than a button: installing a background process on a machine is not
-something a web page should do on a click.
+**Controls.** Four of them, in one band across the top.
 
-**Clients** is the same four-step report `semlith doctor` prints, from the same
-function, so the page and the terminal cannot disagree about which client can
-reach semlith. One row per client that is actually on this machine; the three
-semlith cannot register carry their reason and are not faults.
+- **the name field** — one symbol, matched exactly, as the placeholder says: *A
+  symbol's name, matched exactly*. Enter runs it; so does **Reach** beside it.
+- **hops** — how far back to walk, 1 to 10, 3 to begin with. A value outside
+  that is clamped into it and the field is corrected to what was actually used,
+  rather than the page walking one depth and displaying another.
+- **Prefer verified edges** — on. It is the same refusal `semlith path` makes,
+  pointed backwards: with it on, a name several definitions answer to is not
+  crossed. Turning it off re-runs the question at once, so the two answers are
+  one press apart rather than one reload.
+- **Reach** — asks `/api/impact`, which is the same function `semlith impact`
+  calls from a terminal.
 
-A client with semlith registered at user scope and switched off for one
-directory is shown with the directories that override names — not as a state of
-this page. "Here" for the daemon is wherever a service manager started it, which
-is nobody's working directory; the reader is the one who knows which of those
-directories they work in. Run `semlith doctor` in the directory itself for the
-verdict that applies to it.
+Under the band a row states what the answer is about: **Changing**, then the
+symbol, then a pill reading `depth 3 · reverse` for whatever depth was used.
+Before anything is typed the page says *Name a symbol to read the graph
+backwards from it.* rather than showing an empty table.
 
-**Agent key.** The credential a client carries. It is shown masked — `sml_`
-followed by dots — and the route does not send a preview either, because a preview
-of an agent key still begins `sml_` and the point is that nothing about the
-credential arrives unasked. **Reveal** fetches the real value; pressing it again
-puts it away, so a page left open on a screen does not keep showing a live
-credential because somebody looked at it once.
+**The answer opens with a sentence**, not a number: `N definitions in N files
+reach <name> within N hops`. The sentence is composed by the same function that
+prints it in the terminal, so the page and `semlith impact` cannot describe one
+walk two ways. Three counts sit under it — **Reached**, the definitions that get
+there; **Files**, the files they are written in; and **Unsettled**, how many of
+those rows were reached across an edge marked `inferred` or `ambiguous`. That
+third figure is the one worth reading first: it is the part of the answer that
+has not been settled, stated beside the part that has, rather than left for a
+reader to count off the badges.
 
-**Rotate key** mints a new one. What it reports afterwards has two halves with
-different consequences, and it says both: which configuration files on this
-machine carried the old key and were rewritten with the new one, and that anything
-configured elsewhere needs the new stanza. See
-[The two credentials](#the-two-credentials) for what rotation does to a client
-that is mid-session.
+**The rows are grouped by hop**, nearest first, each group headed `1 hop`,
+`2 hops` and so on with the number of definitions in it. The walk is breadth
+first, so the hop against a definition is the *fewest* hops it takes: something
+that reaches the symbol directly and again through three others is a direct
+caller and is listed once.
 
-**Connected** lists the clients talking to this daemon right now: the client's
-own name from the MCP handshake, its transport, which protocol revision it
-negotiated, and how many queries it has run.
+| Column | What it means |
+|---|---|
+| Reached symbol | The definition that gets there. |
+| Where | Its file and the line it is defined at. |
+| Via | The name one hop nearer the centre, and the kind of edge that reached it, followed by that edge's support badge. |
+| Hops | How many edges away it is. |
 
-**Tools exposed** lists every tool the endpoint serves, each with the description
-from its own definition rather than a second copy written here. Above the list is
-the thing agents pay for and nobody thinks to measure: the size of the tool list
-itself, in tools, bytes and approximate tokens, read once per session before the
-agent has asked anything. It is measured from what this daemon is serving right
-now, so it cannot go stale on the page.
+Under the hop groups is a **Files** block: one row per file, the file's path,
+how many of its definitions reach the symbol, and `nearest N hops` — the closest
+any of them gets. It is the same answer aggregated to the unit a person opens.
+A file carries no support badge, because a file is not an edge and nothing
+settled or failed to settle it.
 
-**The stanzas** are grouped by Terminal, Editors and Desktop, with a chip per
-client. Each client gets one configuration block, not two: a client that can reach
-the HTTP endpoint is shown the endpoint, and one that has nowhere to put a header
-is shown the subprocess form it can run instead. Printing both would leave a
-reader choosing between two answers with nothing to choose on.
+The walk follows dependency edges — `calls`, `imports`, `references`,
+`aliases` — and not the structural ones, for the reason a path does not: every
+symbol is one hop from the file that defines it, so a `defines` edge is true and
+says nothing about who would notice a change.
 
-By default every stanza names `${SEMLITH_AGENT_KEY}` rather than the key itself.
-That is what a client should carry: it survives a rotation with no file rewritten,
-and the key stays in one file with one set of permissions. Pressing Reveal
-substitutes the literal value, for pasting somewhere that cannot read an
-environment variable.
+The answer is capped. When the cap cut it, a line under the rows reads `N more
+left out at the limit of N`, with the limit the daemon is enforcing rather than
+a number written here.
 
-These are the same stanzas the README documents — they are parsed out of it and
-executed by a test, so the portal shows text that is known to work rather than
-text somebody typed twice.
+**When nothing reaches it**, the page distinguishes two cases, because they call
+for different things. *The symbol is indexed; nothing in an open store calls it.*
+means the walk ran and found nothing. *No definition of that name is in an open
+store. Check the spelling, or index the repository that holds it.* means there
+was nothing to walk from.
 
-**This page reads live.** The clients domain moves when one connects,
-disconnects or runs a query, so **Connected** and its query counts follow an
-agent working in another window without a reload.
+### The support classes
 
-## Ledger
+Every reached row carries one of the four values the Graph page's
+[Confidence](#confidence) section defines, and they mean exactly the same thing
+here, because they are the same edges read in the other direction.
+
+| Badge | What it claims |
+|---|---|
+| `extracted` | The source named the target — the file imports it, or the syntax tree already settled it. |
+| `resolved` | Several definitions answered to the name and the ranking left exactly one standing. |
+| `inferred` | Matched by bare name alone, with nothing corroborating it. |
+| `ambiguous` | Several definitions carry this name and nothing chose between them. |
+
+Hovering a badge gives the one-line version — `the import names the target`,
+`name and module hint agree on one definition`, `matched by bare name`, `several
+definitions, none chosen` — so a reader who has not met the words is not left to
+guess.
+
+With **Prefer verified edges** on, no `ambiguous` name is crossed and nothing
+behind one appears in the list at all. With it off, they are, and the page says
+so above the rows rather than under them: *Walked names with several
+definitions. Rows badged ambiguous are a hypothesis, not a finding.* That is the
+whole of the difference. An ambiguous edge is not a weak claim about this code;
+it is the store saying it does not know which of several definitions the
+reference meant, and a caller list that crossed one silently would be somebody
+else's callers mixed into yours.
+
+### Path finder
+
+The card under the results answers the forward question: is there a chain from
+one symbol to another, and what is it made of. Until this release it answered
+only from a terminal.
+
+**Controls.** A **from** field, a **to** field, two chips and **Walk**. The
+chips are **Prefer verified edges**, on, and **Strict**, off. They are one
+control with two faces: pressing **Strict** turns **Prefer verified edges** on
+with it, and turning **Prefer verified edges** off clears **Strict**, so the
+pair cannot be left saying two things. Names with several definitions are
+walked only when neither is on. `Strict` wins over asking for everything, for
+the same reason it does on the command line: asking for both is asking for the
+refusal you named explicitly. The depth is fixed at six hops, and the chip in
+the card's heading says so — `max 6 hops`, which becomes `<from> → <to> · max 6
+hops` once a walk has run.
+
+**When there is no chain** the card says which question was refused rather than
+printing nothing: *Not connected within 6 hops by resolved edges* when ambiguous
+names were not crossed, *Not connected within 6 hops by any edge in the store*
+when they were. The first carries a **Show inferred chain** link that turns both
+chips off and walks again, so the weaker answer is available without being the
+default.
+
+**A chain** is one row per hop, numbered: the hop's start as `name @ path:line`,
+an arrow, its end the same way, the kind of edge, and that edge's support badge.
+Where a hop arrives at one definition and the next leaves from another, a
+**seam** row is drawn between them reading `seam · <name>: N definitions ·
+continues from <name> @ path:line`. That is the failure the Graph section
+describes — every hop true and the chain false — shown where it happens rather
+than summarised afterwards.
+
+Under the hops is a counted line: `N hops · N extracted · N resolved · N
+inferred · N ambiguous`, and where the chain crossed a seam, `· N through
+ambiguous names` with each of those names and how many definitions it has. A
+chain made of guesses also carries the sentence *A hypothesis, not a finding.
+Read the seam before you rely on it.*
+
+### Trace
+
+The last card is the same chain written as something a person can paste into a
+review. Its heading carries the chip `evidence view` and, on the right, **Copy
+as evidence**.
+
+**Controls.** **from**, **to**, and **Trace**. There is deliberately no depth
+and no edge toggle here: this card does not walk the graph a second time.
+`/api/trace` reads the chain the finder would produce and then fetches one line
+of source per hop, and it fetches that line *from the store* rather than from
+the file on disk — the same rule `semlith read` follows, so the quotation is
+what semlith actually read.
+
+**Answer** is one sentence naming what the chain is worth: *Connected in N hops:
+N extracted, N resolved. Every hop names its target through something the
+extractor read or the ranking settled.* when every hop was settled, and a
+sentence beginning *Not connected by resolved edges* when the nearest chain is a
+hypothesis — saying whether it got there by crossing ambiguous names or by
+matching bare names, and ending *treat it as a hypothesis*.
+
+**Chain** is the same rows and the same seams the path finder draws, from the
+same renderer.
+
+**Supporting lines** is one block per hop: the line of source the edge was
+written on, as `path:line` and the code, or *no call line recorded* where the
+store holds no call site for that edge. Under it is the hop it belongs to and a
+mark — `supporting fact` for a hop that was `extracted` or `resolved`, and
+`candidate — corroborate before use` for one that was not. A wrong call site is
+worse than no call site, which is why the second case is stated rather than
+filled in with the enclosing definition's line.
+
+**What "Copy as evidence" puts on the clipboard** is plain text, no markup, and
+byte for byte what `semlith trace --evidence` prints — the same function
+produces both. It is: a first line reading `<from> → <to>`; a second reading
+`answer: <the sentence above>`; then one numbered line per hop, `N. <from> @
+<path>:<line> -> <to> @ <path>:<line>  [<support class>]`, with `seam: <name>: N
+definitions · continues from <name> @ <path>:<line>` appended to the hop it
+follows; then, where there are any, a blank line, the word `supporting lines`,
+and one line per hop reading `<path>:<line>   <the code>   [supporting fact]` or
+`[candidate]`. Nothing else — no scores, no prose, and no text the store does
+not hold.
+
+**This page does not read live.** Impact, a path and a trace are each the answer
+to a question somebody asked, and the rule the rest of the portal follows
+applies here too: redrawing an answer under its reader would be answering a
+different question.
+
+## Inside the index
+
+**What it is for.** Reading folders, or one fetched URL, into stores, and
+watching every run the daemon is carrying.
+
+The daemon is the writer for every store it opened. This page does not index
+anything itself, and it no longer holds a run either: it asks the daemon to queue
+one and then reads it back, the same way it reads anything else. That is the
+difference worth knowing about. The page used to *be* the run — it held a
+streaming response open and the run existed only as the events travelling down
+it — so the tab that pressed the button was the only thing that knew the run was
+happening, and leaving the page threw that away. The work carried on, because the
+work is the store's, but nothing on screen could find it again.
+
+A run lives in the daemon now: its id, its paths, its status, its counters, its
+clock, the last 500 lines of its log and, when it ends, its summary. The same
+`say` closure that emits every event writes that record, so the card and the log
+cannot disagree about what happened. Navigating to Search and back, refreshing,
+or closing the tab for the length of a run changes nothing — every run is on its
+card where it actually is, with its log carrying on from the last line this page
+saw. A run is only ever cut short in two ways: its own **Stop**, or
+`semlith start` ending.
+
+**Controls.**
+
+- **paths** — one path per line, so several folders can be started without
+  opening a picker at all. The first-run screen carries a path into this field.
+- **Choose folders…** — a directory picker rooted at your home, which can tick
+  more than one folder in a visit.
+- **Projects under a folder…** — the repository checklist below.
+- **Add from a URL** — one https request for exactly that URL, a page, a PDF or a
+  file. Nothing is crawled, no credential is sent, and what lands is written
+  inside the store's own `downloads/` directory rather than into your working
+  tree. It then goes through the same queue and becomes a card like any other, so
+  there is no second progress mechanism to learn. The fetch itself is the one
+  synchronous part, because its refusals — the URL was `http`, the body was too
+  large, nothing here reads that content type — are what the card has to show.
+- **the target** — where the paths go. Three answers, below.
+- **Start indexing** — queues the runs and answers at once with how many were
+  queued. The cards are what happens next; the button does not become a control
+  for them, because there is more than one run.
+
+The three pickers are mutually exclusive: two of them open at once is two answers
+to one question.
+
+**Where the paths go.** The selector offers `each folder becomes its own store`
+and an `add to <name>` per open store, and the route behind it takes a third
+answer a script can use:
+
+| Target | What happens |
+|---|---|
+| `each` | One store per path, each resolved exactly as `semlith index <path>` resolves it — same name, same directory under the store home, same registry entry, including the numeric suffix when a second folder is also called `api`. It is the same function, not a second copy of its rules, which is what stops indexing a folder here and again from a terminal producing two stores. |
+| a named store | Every path goes into that one store, and each becomes one of its roots so the watcher keeps it current. |
+| nothing named | `each` for more than one path, and the single-store behaviour for one. Three folders are three corpora, and putting them in one store is a choice nobody made. |
+
+A path that could not be queued is named with its reason and the ones beside it
+still start: a typo in the third folder should not take the two that were with
+it.
+
+**Projects under a folder** is the case the directory picker handles badly —
+ticking twelve repositories one directory at a time is twelve walks into and back
+out of the same parent. It asks the daemon which children of a folder are git
+repositories and offers them all at once, already ticked. A `.git` file counts as
+much as a `.git` directory, so a worktree and a submodule are on the list. One
+level only: a monorepo is one store, and its nested repositories are its own
+business. Where none of the children is a repository the plain subfolders are
+offered instead and the card says so, because a folder of folders is still what
+you were pointing at. A child an existing store already covers is listed with
+`in <store>` and starts unticked — shown rather than omitted, because "nothing
+here" and "all of it is already done" are different answers. **All**, **None** and
+**Use N** fill the paths field and set the target to `each`.
+
+**One card per store**, and the card is the run — the one that is going, or the
+last one that finished, kept afterwards so a page opened later says what it did
+rather than showing nothing. Each card carries its store's name, a status pill, a
+percentage and bar, files scanned over files found, chunks written, a
+chunks-per-second rate, the elapsed clock, the paths, and the log.
+
+**This page reads live**, on the runs and stores domains, and it is the one page
+that paints in place rather than redrawing itself: a card holds a log and a
+scroll position of its own, and redrawing would throw both away. A store whose
+run the daemon has forgotten — it was deleted, or the daemon restarted — loses
+its card rather than keeping a stale one.
+
+| Status | What it means |
+|---|---|
+| `queued` | Submitted and not yet under way. The pill carries its place in line when it is waiting on the daemon-wide queue below; without a place it is waiting on its own store's writer, which is the watcher being mid-file — one writer per store is the rule that stops two passes corrupting each other. |
+| `running` | A writer has it. |
+| `paused` | Held between files by this card's **Pause**. |
+| `stopping` | A stop was asked for and what the run embedded is being undone. Told apart from `stopped` because on a large corpus the undoing takes as long as the embedding did, and a card that jumped straight to `stopped` would be claiming the store was already back to what it was. |
+| `done` | Finished. |
+| `stopped` | Stopped, and undone. The bar returns to 0% rather than filling, because a full bar would say the opposite of what happened. |
+| `failed` | Ended on an error that was not a file's — the model, or the store. |
+
+**The log** under each card prints one line per file with the outcome that file
+got — `indexed`, `unchanged`, `skipped`, `removed`, `refused`, `failed` —
+coloured so that a re-index of an unchanged corpus reads as a wall of background
+with the handful of real writes standing out of it. The run ends with a counted
+line: indexed, unchanged, skipped, removed, failed where there were any, chunks,
+and the total elapsed.
+
+The card reads its log by a cursor rather than by how much it has drawn, so two
+tabs open on the same run each see every line exactly once and neither is
+affected by what the other has read. The daemon keeps the last 500 lines; a tab
+away for longer than that restarts from the oldest line still held rather than
+showing a gap as though it were continuity.
+
+**Three of those outcomes owe an explanation, and the line gives it.** A
+`skipped`, `refused` or `failed` line carries the reason beside the path, because
+a log that says "skipped" against two thousand files and nothing else is a log
+nobody can act on. A refusal names the rule that refused it — the credential
+deny-list, or the kind of credential the content scan found and the line it sat
+on, never the text that matched. A skip names one of a closed set: `empty`, `over
+8 MiB`, `not a regular file`, `unreadable` with the operating system's own words,
+`binary`, `no text in this document`, `not a decodable image`. And the final
+counted line is followed by what the skipped count was made of, kind by kind, so
+that a large number is a fact rather than an invitation to assume something was
+lost.
+
+**`failed` is the outcome that used to be the end of the run.** Before 0.19.0 a
+file that could not be read — a truncated image a decoder rejected, a source file
+tree-sitter could not parse — ended the whole pass, so a tree of ten thousand
+files stopped at the first bad one. It is now one line with the decoder's or the
+parser's own message on it, and the run carries on to the next file. A refusal is
+a decision semlith made; a failure is one it could not avoid, and the two are
+coloured and counted apart for that reason. Every failed path is named again on
+the closing line rather than only counted, because a run that ends with "eleven
+failed" and no names is a run whose eleven files nobody goes and looks at.
+
+**The elapsed clock** sits beside the counts, because files, chunks, rate and
+elapsed are one reading of one run. It starts when the run is submitted rather
+than when a writer picks it up: the wait for a writer is time you are waiting.
+The daemon measures it, the card ticks between polls so the seconds move, and
+every poll corrects to the daemon's figure — which only ever goes forward, so a
+correction never makes the reading jump backwards. It is the run's time and not
+the tab's, which matters because a browser throttles a background tab's timers to
+about once a minute. It stops while a run is held, because held time is not time
+anything is happening, and it freezes on `done`, `stopped` or `failed`, holding
+the total.
+
+It also spans the whole run rather than the slice. A run hands the writer back to
+the watcher every 45 seconds and returns as a fresh job, so a clock measured
+around that work restarted from zero every 45 seconds and the page faithfully
+redrew a run that had just begun. The clock belongs to the run now.
+
+**What Stop does that Pause does not, and what Remove does that neither does.**
+
+**Pause** holds the run between files. The writer is still this run's — the lock
+is not handed back, the store is left mid-corpus, and **Resume** carries on from
+where it stopped. Nothing that has been embedded is touched.
+
+**Stop** undoes the run. Everything it embedded is rolled back, so the store is
+left exactly as it was before the run started, the bar returns to 0% rather than
+filling, and indexing the same folder again begins from the beginning. The
+confirmation says so before it happens. Pause is "wait"; Stop is "as though it
+never ran".
+
+**Remove** is what the button says on a run that is still `queued`, and it takes
+that run out of the line. It answers at once and confirms nothing, because there
+is nothing to undo: a queued run has embedded no file and holds no writer. That
+is the whole difference between removing a folder from the queue and stopping one
+that is going.
+
+One more event can appear in the log: `slice`, saying the writer has handed
+itself back to the watcher and put the rest of this run back on the queue. It is
+one run and one log, and there is nothing for you to do about it.
+
+**Waiting** appears under the cards when more than the machine can carry has been
+asked for, listing the queued runs in the order they will start, each with its
+store, its paths and a **Remove**. A store's writer used to take the next job on
+its own queue with nothing above it, so eleven open stores meant eleven runs at
+once whatever the machine had; there is one daemon-wide queue now, ordered by
+submission, and a run is admitted only while fewer than *runs at once* are
+running. Anything submitted while the queue exists joins its end. The head is
+admitted the moment a run finishes, stops or fails — with this page open or not,
+which is the point of the run living in the daemon. The watcher's own re-embeds
+do not pass through the queue: they are small, they already interleave with runs,
+and holding a file save behind eleven queued repositories would make the watcher
+useless exactly when the machine is busy.
+
+**How hard this machine may work** is the last card: three numbers, each with the
+machine reading behind it and the sentence that derived it. The daemon reads
+logical cores, total memory and memory free *now* on every request, so the figure
+in front of you is about this machine at this moment rather than at startup.
+
+| Setting | Derived from |
+|---|---|
+| runs at once | Memory free less a 2 GiB reserve, divided by what one run peaks at, and no more than the cores allow with one kept free so the portal still answers while every writer is busy. Floor 1, and 1 outright when the memory reading failed — a failed reading is not a machine with no memory. |
+| threads each | The embedder's own thread count divided between the runs, clamped so runs × threads never exceeds the cores. Floor 1. |
+| MiB per store | 512 MiB of vectors, doubled once past 16 GiB free beyond the reserve and again past 64 GiB. Two steps rather than a curve, because a figure you recognise is worth more here than a fitted one. |
+
+Each is yours to change, and a value above what the machine derived is used as
+you set it — with the derivation in front of you rather than instead of it, which
+is why the field says what it was going to do. Changing *runs at once* takes
+effect on the next admission: raising it admits the head immediately, lowering it
+stops nothing already going, because a run holds a writer and undoing it would
+cost the work it has done. The other two apply to the next run queued.
+
+A value the environment sets — `SEMLITH_INDEX_PARALLEL`, `SEMLITH_EMBED_THREADS`
+or `SEMLITH_INDEX_MEMORY` — is shown, disabled, and says so. An explicit variable
+is an instruction from whoever started the process, and a page in a browser may
+not overrule it. What is not from the environment is saved in
+`~/.semlith/settings.json`, written the first time a field is moved and not
+before, so a home without that file is a home deriving all three.
+
+**What survives what.** Navigating away, coming back, refreshing and closing the
+tab change nothing about any run: the daemon holds them, and this page redraws
+what it finds. A daemon restart is the one thing that does not survive. A run that
+was going when the process ended is not resumed — the files it had committed are
+in the store and indexing again reports them as `unchanged` — and a run that was
+still queued never started at all, which would otherwise leave no trace anywhere.
+The next `semlith start` says both on the store's own event feed, once, on the
+Stores page.
+
+## Retrieval ledger
 
 **What it is for.** What your agents actually retrieved, recorded locally, so the
 saving semlith claims has a denominator under it.
@@ -993,6 +1107,227 @@ MCP handshake rather than guessed at here.
 **This page reads live.** Every surface that records a retrieval writes through
 one function, and that is where the ledger domain is bumped, so a row lands here
 as an agent retrieves it — whichever window the agent is working in.
+
+## Reports
+
+**What it is for.** Turning what this machine already holds — the ledger, the
+index and the graph — into a file somebody who will never open the portal can
+read. The subtitle states the two things that matter about it: *Generated
+locally, exported as a file you own.* The heading carries the chip
+`semlith_report`.
+
+Nothing in a report is a model's opinion and nothing reaches the network. The
+three sources are the retrieval ledger, the index and the code graph, and the
+same generator answers `semlith report` in a terminal, so a file saved from this
+page and one written from the command line are the same bytes rather than two
+renderers that will eventually disagree.
+
+The page is three things down the screen: a picker of five reports, a builder
+for the one you picked, and the preview it produced.
+
+### The five reports
+
+The picker is a grid of five cards and exactly one is chosen. Each card carries
+the report's name, what it is, and who reads it — the third line being the part
+usually left out, on the grounds that a report nobody can name a reader for is a
+report nobody asks for.
+
+| Report | What it is | Reader |
+|---|---|---|
+| Retrieval savings | Tokens the agents did not read, counted from the ledger instead of claimed. | for whoever approves the spend |
+| AI access audit | Which agent read which file, when, in a hash-chained record nothing can quietly edit. | for security review and AI-use policy |
+| Change brief | Blast radius for what this machine re-read, written as a note you paste into the pull request. | for the reviewer, before the merge |
+| Index health | Stale files, roots never indexed, formats skipped, and how much of the tree the graph covers. | for the person who owns the store |
+| Knowledge gaps | Questions the agents asked that your corpus could not answer well — a to-do list for documentation. | for whoever writes the docs |
+
+Choosing one generates it immediately. There is no Generate button, because the
+selection is the request: the page used to be five cards each with its own
+Generate and its own row of four format buttons, which is twenty-five controls
+for five reports and a preview at the bottom that could have been about any of
+them.
+
+### The builder
+
+The card on the left is about the chosen report and nothing else. At the top,
+its name and the sentence saying what it answers once it exists — *What
+retrieval actually saved, per client, with the arithmetic shown.* for Retrieval
+savings, and one of its own for each of the other four. Under that, labelled
+**Reader**, the same line the picker card carried, so the builder does not make
+you remember which one you pressed.
+
+**Format** is a row of four chips: **Markdown**, **CSV**, **JSON** and **HTML**.
+Pressing one re-generates at once, because the format is part of the request
+rather than something applied to the text afterwards — the server renders each
+one, and the preview is what the file will contain.
+
+**Price tokens at** is a row of model chips: **Sonnet 5**, **Opus 5** and
+**Haiku 4.5**. It sets which model's input price the savings arithmetic is
+costed at. The prices are written into the binary rather than fetched, for the
+same reason the rest of the page is: a report has to generate on a machine with
+no network, and a price whose source a reader cannot see is worse than one they
+can argue with.
+
+Under the chips is the sentence that stops a reader looking for a fifth format:
+*HTML prints to PDF from your browser. No PDF writer ships in the binary, so
+none is claimed.* HTML is the print-to-PDF path and it is the whole of it.
+
+At the bottom of the card is the equivalent command, copyable —
+`semlith report <kind> --format <format> --model <model>` — so the same file can
+be produced from a script or a scheduled job without this page.
+
+**There is no window, scope or redaction control**, and that is deliberate
+rather than unfinished: `/api/report` takes a kind, a format and a model and
+nothing else, and a control that cannot change the file it claims to change is
+worse than no control at all.
+
+### The preview
+
+The card on the right is the report itself. Its bar carries the file name it
+would be saved as — `reports/semlith-<kind>.<extension>` — and two controls.
+**Copy** puts the generated text on the clipboard. **Export** hands the same
+text to the browser as a download named `semlith-<kind>.<extension>`, with the
+content type of the format it is in. Both use the text of the one request that
+produced the preview, so the thing on screen, the thing copied and the thing
+saved cannot be three different reports.
+
+Under the text is a footer stating its size in KB, its format, and the sentence
+that is the point of the page: *generated here, written only where you save
+it.* The report is built on this machine, handed to the browser and not to any
+server, and until **Export** is pressed it exists nowhere on disk.
+
+**This page does not read live.** A report is a reading of a moment, and one
+that redrew itself under a reader would be a different document from the one
+they were quoting.
+
+## Agents
+
+**What it is for.** Connecting an agent to this daemon, and seeing which ones are
+connected.
+
+**The endpoint** is in the page heading, with a copy button, a state pill reading
+`answering` or `closed`, and a **Start** / **Stop** control. Stopping it drops the
+`/mcp` route and nothing else: the stores stay open, the watcher keeps running,
+and the portal keeps working. A closed endpoint answers 404 rather than 401, so a
+client that has been told to stop learns the same thing whether or not it still
+holds a key.
+
+**Login service.** Whether the daemon is installed as one — a launchd user
+agent, a systemd user unit, a Windows logon task — and when it last started. The
+page has always said "one endpoint, every client"; until 0.21.0 that endpoint
+existed only as long as somebody held a terminal open for it. The card names the
+mechanism, the definition it wrote and the log to read when it misbehaves. On
+Windows it also says that a logon task restarts a task that failed and does not
+supervise one that exited cleanly, because the three mechanisms are not equally
+strong and a page that implied they were would be wrong on one of them. When no
+service is installed, the card carries the command — `semlith start --service` —
+rather than a button: installing a background process on a machine is not
+something a web page should do on a click.
+
+**Clients** is the same four-step report `semlith doctor` prints, from the same
+function, so the page and the terminal cannot disagree about which client can
+reach semlith. One row per client that is actually on this machine; the three
+semlith cannot register carry their reason and are not faults.
+
+A client with semlith registered at user scope and switched off for one
+directory is shown with the directories that override names — not as a state of
+this page. "Here" for the daemon is wherever a service manager started it, which
+is nobody's working directory; the reader is the one who knows which of those
+directories they work in. Run `semlith doctor` in the directory itself for the
+verdict that applies to it.
+
+**Agent key.** The credential a client carries. It is shown masked — `sml_`
+followed by dots — and the route does not send a preview either, because a preview
+of an agent key still begins `sml_` and the point is that nothing about the
+credential arrives unasked. **Reveal** fetches the real value; pressing it again
+puts it away, so a page left open on a screen does not keep showing a live
+credential because somebody looked at it once.
+
+**Rotate key** mints a new one. What it reports afterwards has two halves with
+different consequences, and it says both: which configuration files on this
+machine carried the old key and were rewritten with the new one, and that anything
+configured elsewhere needs the new stanza. See
+[The two credentials](#the-two-credentials) for what rotation does to a client
+that is mid-session.
+
+**Connected** lists the clients talking to this daemon right now: the client's
+own name from the MCP handshake, its transport, which protocol revision it
+negotiated, and how many queries it has run.
+
+**Tools exposed** lists every tool the endpoint serves, each with the description
+from its own definition rather than a second copy written here. Above the list is
+the thing agents pay for and nobody thinks to measure: the size of the tool list
+itself, in tools, bytes and approximate tokens, read once per session before the
+agent has asked anything. It is measured from what this daemon is serving right
+now, so it cannot go stale on the page.
+
+**The stanzas** are grouped by Terminal, Editors and Desktop, with a chip per
+client. Each client gets one configuration block, not two: a client that can reach
+the HTTP endpoint is shown the endpoint, and one that has nowhere to put a header
+is shown the subprocess form it can run instead. Printing both would leave a
+reader choosing between two answers with nothing to choose on.
+
+By default every stanza names `${SEMLITH_AGENT_KEY}` rather than the key itself.
+That is what a client should carry: it survives a rotation with no file rewritten,
+and the key stays in one file with one set of permissions. Pressing Reveal
+substitutes the literal value, for pasting somewhere that cannot read an
+environment variable.
+
+These are the same stanzas the README documents — they are parsed out of it and
+executed by a test, so the portal shows text that is known to work rather than
+text somebody typed twice.
+
+**This page reads live.** The clients domain moves when one connects,
+disconnects or runs a query, so **Connected** and its query counts follow an
+agent working in another window without a reload.
+
+## Cloud
+
+**What it is for.** Saying what the hosted option is, without leaving the
+portal to find out. It describes a service; it is not a client for one.
+
+**This page contacts nothing.** The pill beside the heading reads `not
+connected`, and that is not a state this build can leave: there is no
+`semlith cloud` command in this release, no token store, and no code path that
+opens a socket to any host. The page is three reasons, two command blocks and a
+link.
+
+The paragraph under the heading states what the service is: *Semlith Cloud is
+one hosted store for a whole organisation: every connected repository a root of
+it, indexed on push, served over MCP to any agent, with a pull-request impact
+check and a team ledger. This binary works without it. Nothing here contacts a
+server.*
+
+**The three reasons**, each a line and its explanation:
+
+| Reason | What it means |
+|---|---|
+| One URL for cloud agents | Claude Code cloud sessions, routines and CI cannot reach a laptop; they can reach an org store. |
+| The whole organisation in one index | Cross-repository paths, and documents beside code. |
+| A pull-request check that states what the graph proves | With no model and no guess. |
+
+**The two commands are text to copy and nothing more.** Neither exists in this
+release, and each says what it will do when it does, rather than being shown as
+though it worked:
+
+- `semlith cloud login` — *Not in this release. When it arrives it will store an
+  org token under `~/.semlith/` and send it to that host and no other.*
+- `semlith cloud connect acme` — *Will add the org's store to this machine's
+  registry as a remote store, listed beside the local ones with a remote badge.*
+
+Under them the page says it again, because a page of commands is read as a page
+of things that run: *This build has no cloud command and opens no connection to
+any host. The Privacy page's own reading is where to check that rather than take
+it from here.* That is the deliberate omission worth naming — the claim is
+checkable on [Privacy](#privacy), which reads this machine, and not here, which
+only states it.
+
+At the foot is one link, **What the cloud stores and deletes**, to
+`semlith.com/data`. It is the only external link on the page, and following it
+is the only thing on this page that reaches a network — your browser doing it,
+not the daemon.
+
+**This page reads nothing.** It has no route behind it, so there is no live
+domain for it to follow and nothing on it can go stale.
 
 ## Privacy
 

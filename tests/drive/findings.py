@@ -2134,7 +2134,7 @@ def _(d):
     )
 
 
-@finding("3.24", "one destination has one name")
+@finding("3.24", "the search box has one name, and the rail names its own journey")
 def _(d):
     d.open_view("search")
     top_bar = d.eval(
@@ -2174,12 +2174,37 @@ def _(d):
         })()
         """
     )
-    phrases = {p for p in (top_bar, field, rail) if p}
-    if len(phrases) > 1:
+    # Read in two parts from 0.26.1, and the split is a judgement worth naming.
+    #
+    # The finding is that one destination had several names. The top bar's
+    # launcher and the Search page's field are one control's invitation seen
+    # twice, and those must still agree exactly — that is the bug, and it is
+    # asserted first.
+    #
+    # The graph rail's button is a different journey: it does not open an empty
+    # search, it runs one for the symbol you have selected. The v4 design names
+    # it for what it gives you rather than echoing the search box, and a button
+    # reading "Ask the index a question" told a reader nothing about what they
+    # would get. So the rail is held to a different rule: it must not be a
+    # third spelling of the search box's invitation. Require all three to match
+    # and the only way to pass is to call the top bar "Chunks it lives in",
+    # which is not an improvement anyone wants.
+    if top_bar and field and top_bar != field:
         fail(
-            "one destination is given %d names: %s. Whichever wording wins, the "
-            "top bar, the search field and the graph rail button should agree."
-            % (len(phrases), ", ".join(sorted(repr(p) for p in phrases)))
+            "the top bar says %r and the search field says %r; they are one "
+            "control's invitation and must read the same" % (top_bar, field)
+        )
+    if rail and rail in {top_bar, field}:
+        fail(
+            "the graph rail's button reads %r, the same words as the search "
+            "box. It is a different journey — it searches for the selected "
+            "symbol rather than opening an empty box — and naming it after the "
+            "box says nothing about what it gives you." % rail
+        )
+    if rail and not re.search(r"chunks it lives in", rail, re.I):
+        fail(
+            "the graph rail's route into Search reads %r; the v4 design names "
+            "it 'Chunks it lives in', for what the reader gets" % rail
         )
 
 
@@ -2819,17 +2844,26 @@ def _(d):
 # leaves a screenshot behind, which is what the release record carries.
 
 
-@finding("5.1", "the sidebar is the thirteen entries of the v4 design, in order")
+@finding("5.1", "the sidebar is the thirteen pages, in four groups, in order")
 def _(d):
+    """Updated for 0.26.1, which took the v3 design's four groups back.
+
+    The thirteen entries are unchanged and this still asserts every one of
+    them: what moved is the grouping. v4 flattened v3's Workspace / Explore /
+    Operate / Account into two groups of six and seven, which is a list with
+    two headings in it rather than a menu. `Account` held License and About;
+    the binary is free and has no licence page, so the fourth group is the two
+    pages that describe this machine.
+    """
     d.open_view("stores")
     labels = [t for t in texts_of(d, ".sidebar .nav-item") if t]
     expected = [
         "Stores",
         "Files",
+        "Inside the index",
         "Search",
         "Graph",
         "Impact",
-        "Inside the index",
         "Retrieval ledger",
         "Reports",
         "Agents",
@@ -2843,7 +2877,7 @@ def _(d):
     # them that way. The design's names are what is being asserted, not the
     # typography.
     groups = [t.title() for t in texts_of(d, ".sidebar .nav-group-label") if t]
-    want("the sidebar's groups", groups, ["Workspace", "Operate"])
+    want("the sidebar's groups", groups, ["Workspace", "Explore", "Operate", "Machine"])
 
 
 @finding("5.2", "Impact answers for a symbol, by hop, with a support class on every row")
@@ -3084,3 +3118,279 @@ def _(d):
                 fail("%s did not render in the %s theme" % (title, theme))
             d.shot("5.11-%s-%s" % (theme, view))
     d.eval("document.documentElement.removeAttribute('data-theme')")
+
+
+# ---------------------------------------------------------------- 0.26.1
+#
+# The 6.x block is the 2026-09-21 design-parity drive: the portal opened page
+# by page beside `Semlith Portal v4.dc.html` and driven at seven widths. Where
+# the 5.x checks assert that a page exists, these assert that it says what the
+# design says and that nothing on it is out of reach.
+
+
+def open_welcome(d):
+    """The first-run screen, which is not a view and has no sidebar.
+
+    `open_view` waits for a heading inside the shell; this screen replaces the
+    shell entirely, so it is navigated to and awaited by its own heading.
+    """
+    d.navigate("%s/?token=%s#welcome" % (d.portal_url, d.token))
+    d.wait_for(
+        "(() => { const h = document.querySelector('#root h1');"
+        " return !!h && (h.textContent || '').trim() === 'No stores yet'; })()",
+        what="the first-run screen's heading",
+    )
+    d.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
+
+
+@finding("6.1", "the first-run screen carries everything the v4 lockup and card carry")
+def _(d):
+    """0.26.0 shipped this screen with the version, one step, the ledger
+    sentence and the route into adopting a store all missing, and with a
+    footer that named the address without the port it was serving on."""
+    open_welcome(d)
+    body = view_text(d)
+    about = d.api("/api/about")
+
+    version = text_of(d, ".welcome .lockup .ver", "the version beside the mark")
+    want("the version beside the mark", version, "v" + about["version"])
+
+    steps = d.eval("document.querySelectorAll('.welcome .step').length")
+    if steps != 4:
+        fail("the first-run screen draws %d steps, and the v4 design draws 4" % steps)
+
+    if "--no-ledger" not in body:
+        fail(
+            "the first-run screen does not say the ledger records locally. It is on by "
+            "default, so the screen that introduces the product is where that is said."
+        )
+    if "Adopt an existing .semlith" not in body:
+        fail(
+            "the first-run screen offers no way to adopt a store that already exists, "
+            "so the one screen whose job is to open a first store offers only one way"
+        )
+
+    host = d.eval("location.host")
+    foot = text_of(d, ".welcome .foot", "the first-run footer")
+    if host not in foot:
+        fail(
+            "the footer reads %r and does not name %s. 'loopback only' is a claim the "
+            "reader cannot check without the port." % (foot, host)
+        )
+
+
+@finding("6.2", "Skip for now lands on Stores")
+def _(d):
+    """It went to About, which is the page about the binary rather than the
+    page the reader was skipping ahead to."""
+    open_welcome(d)
+    d.click_text(".welcome button", "Skip for now")
+    d.wait_for(
+        "(location.hash || '') === '#stores'",
+        what="Skip for now to land on Stores",
+    )
+
+
+@finding("6.3", "the Stores table offers the way into what the index holds")
+def _(d):
+    d.open_view("stores")
+    label = "See what is actually inside the index"
+    if label not in view_text(d):
+        fail("the Stores table has no route into Inside the index")
+    d.click_text(".table-follow", label)
+    d.wait_for("(location.hash || '') === '#index'", what="the route into Inside the index")
+
+
+@finding("6.4", "the Retrieval ledger offers the way into Reports")
+def _(d):
+    d.open_view("ledger")
+    if "Build a report" not in view_text(d):
+        fail("the Retrieval ledger header has no route into Reports")
+    d.click_text(".page-head button", "Build a report")
+    d.wait_for("(location.hash || '') === '#reports'", what="the route into Reports")
+
+
+@finding("6.5", "About states the MCP revisions and the licence")
+def _(d):
+    d.open_view("about")
+    body = view_text(d)
+    about = d.api("/api/about")
+    for revision in about.get("revisions") or []:
+        if revision not in body:
+            fail(
+                "the About page does not state MCP revision %s, which this binary "
+                "negotiates" % revision
+            )
+    if about["license"] not in body:
+        fail("the About page does not state the licence the binary ships under")
+
+
+@finding("6.6", "the sidebar states whether the ledger is recording, and offers the first run again")
+def _(d):
+    d.open_view("stores")
+    card = text_of(d, "#daemon-stores", "the daemon card's second line")
+    recording = (d.api("/api/about")).get("ledger") is not False
+    want("the daemon card's ledger state", "ledger on" in card, recording)
+    if "Replay first-run screen" not in view_text(d):
+        fail(
+            "the sidebar offers no way back to the first-run screen, so once a store "
+            "exists the page that explains the product is unreachable"
+        )
+
+
+@finding("6.7", "Reports previews the one report that is selected")
+def _(d):
+    """The page used to be five cards each with its own Generate button and one
+    preview under them all, so the preview could be showing any of the five."""
+    d.open_view("reports")
+    types = d.eval("document.querySelectorAll('.report-type').length")
+    if types != 5:
+        fail("the Reports picker offers %d report types, expected 5" % types)
+    d.wait_for(
+        "((document.querySelector('.report-text') || {}).textContent || '').length > 40",
+        what="the selected report to generate",
+    )
+    first = d.eval("document.querySelector('.report-text').textContent")
+    # The card's own text is its name, its blurb and its reader run together,
+    # so the name is what is matched; the click bubbles to the card.
+    d.click_text(".report-type .name", "Index health")
+    d.wait_for(
+        "((document.querySelector('.report-text') || {}).textContent || '')"
+        " !== %s" % json.dumps(first),
+        what="the preview to follow the selected report",
+    )
+    name = text_of(d, ".report-preview-card .report-bar .name", "the preview's file name")
+    if not name.endswith(".md"):
+        fail("the preview names %r, which is not the chosen Markdown format" % name)
+    d.click_text(".report-builder .chip", "CSV")
+    d.wait_for(
+        "(document.querySelector('.report-preview-card .report-bar .name').textContent || '')"
+        ".endsWith('.csv')",
+        what="the format chip to change the file written",
+    )
+
+
+@finding("6.8", "no page scrolls sideways, at any width the design supports")
+def _(d):
+    """A control pushed off the right edge is a control nobody can reach, and
+    the page scrollbar that comes with it makes every page feel broken. Seven
+    widths, because 0.26.0 was verified at one."""
+    widths = [390, 430, 820, 1024, 1280, 1440, 1920]
+    views = list(cdp.Drive.VIEW_TITLES)
+    bad = []
+    try:
+        for width in widths:
+            d.set_viewport(width, 844 if width < 600 else 900, mobile=width < 600)
+            for view in views:
+                d.open_view(view, fresh=True)
+                time.sleep(0.4)
+                seen = d.eval(
+                    "({page: document.documentElement.scrollWidth,"
+                    " vw: document.documentElement.clientWidth})"
+                )
+                # One pixel of slack: a fractional layout width rounds up and
+                # is not a horizontal scrollbar.
+                if seen["page"] > seen["vw"] + 1:
+                    bad.append("%s at %dpx scrolls to %dpx" % (view, width, seen["page"]))
+    finally:
+        d.reset_viewport()
+    if bad:
+        fail("pages scroll sideways: %s" % "; ".join(bad))
+
+
+@finding("6.9", "no page writes an error to the browser console")
+def _(d):
+    """A console error is a defect a screenshot cannot show. 0.26.0 was never
+    read for them, so this reads every page for them once.
+
+    The console is read only once a page has stopped fetching. Navigating
+    away from a page with a request still in flight cancels it, and Chrome
+    logs the cancellation against whichever page it lands on — on Windows
+    that showed up as `ERR_CONNECTION_RESET` on `/api/privacy`, whose socket
+    scan is the slowest read in the portal. Waiting is the honest fix: a load
+    failure that survives a quiet network is a real one, and is still failed
+    on. Suppressing the message by name would have hidden the real thing too.
+    """
+
+    def settle(limit=15.0):
+        """Block until the page stops making requests, or `limit` passes."""
+        deadline = time.time() + limit
+        last, stable = -1, 0
+        while time.time() < deadline:
+            count = d.eval("performance.getEntriesByType('resource').length")
+            stable = stable + 1 if count == last else 0
+            last = count
+            # Three readings the same, a beat apart: enough for a page whose
+            # panels fetch one after another rather than all at once.
+            if stable >= 3:
+                return True
+        # Said rather than silently tolerated: a page still fetching after
+        # fifteen seconds is worth knowing about even if nothing errored.
+        return False
+
+    bad, restless = [], []
+    for view in cdp.Drive.VIEW_TITLES:
+        d.open_view(view, fresh=True)
+        if not settle():
+            restless.append(view)
+        # Cleared after the page is quiet, so anything read below was written
+        # by this page rather than by the navigation that reached it.
+        d.clear_console()
+        time.sleep(0.5)
+        for line in d.console_errors():
+            bad.append("%s: %s" % (view, line))
+    if bad:
+        fail("the console carried errors: %s" % "; ".join(bad[:8]))
+    if restless:
+        fail(
+            "these pages were still fetching after 15s, so their console was "
+            "never read against a settled page: %s" % ", ".join(restless)
+        )
+
+
+@finding("6.10", "an index run outlives the page that started it")
+def _(d):
+    """A run lives in the daemon, not in the tab.
+
+    The Index page says so in as many words — "leaving, refreshing or closing
+    the tab changes nothing, and a run ends only on its Stop". It was true
+    when 0.24.0 moved the run out of the streaming response that used to *be*
+    it, and nothing since should have moved it back. This is the check that
+    says so, because the failure mode is invisible until someone reloads
+    mid-run and watches their work disappear.
+    """
+    path = d.fixtures.bulk()
+    started = d.api("/api/index", method="POST", body={"path": [path]})
+    runs = started.get("runs") or []
+    if not runs:
+        skip("the daemon queued no run for the bulk fixture")
+    store = runs[0].get("store")
+
+    d.open_view("index", fresh=True)
+    before = d.eval(
+        "document.querySelectorAll('.run-card').length"
+    )
+    if not before:
+        fail("the Index page drew no run card for a run the daemon had just accepted")
+
+    # A full document load, which is what a reload and a reopened tab both are.
+    d.navigate("%s/#index" % d.portal_url)
+    d.wait_for(
+        "!!document.querySelector('.run-card')",
+        what="the run card to come back after a reload; a run that vanishes with "
+        "the page is a run bound to the request that started it, which is the "
+        "defect 0.24.0 fixed",
+    )
+    after = d.eval(
+        "[...document.querySelectorAll('.run-card .card-title')].map(n => n.textContent)"
+    )
+    if store not in after:
+        fail(
+            "after reloading, the Index page lists %r and not the running store %r"
+            % (after, store)
+        )
+
+    # And the daemon still owns it, which is the half a screenshot cannot show.
+    live = d.api("/api/index/runs")
+    if not any(r.get("store") == store for r in (live.get("runs") or [])):
+        fail("the daemon dropped the run for %s when the page reloaded" % store)

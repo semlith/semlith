@@ -986,8 +986,14 @@ fn the_agents_route_reports_the_service_and_every_client() {
     }
 }
 
-/// The sidebar the v4 design specifies: two groups, thirteen entries, in this
-/// order.
+/// The sidebar: thirteen entries in four groups, in this order.
+///
+/// The entries are the v4 design's thirteen. The grouping is the v3 design's,
+/// taken back in 0.26.1: v4 flattened v3's four groups into two of six and
+/// seven, which reads as one long list with two headings in it. v3's fourth
+/// group was `Account`, holding License and About; the binary is free and
+/// there is no licence page, so the last group is the two pages that describe
+/// the machine this is running on.
 ///
 /// Doctor is the thirteenth and is deliberately not in the design's twelve.
 /// It is a page this binary already serves, and `semlith doctor` would
@@ -996,17 +1002,17 @@ fn the_agents_route_reports_the_service_and_every_client() {
 const SIDEBAR: &[(&str, &str)] = &[
     ("Workspace", "Stores"),
     ("Workspace", "Files"),
-    ("Workspace", "Search"),
-    ("Workspace", "Graph"),
-    ("Workspace", "Impact"),
     ("Workspace", "Inside the index"),
+    ("Explore", "Search"),
+    ("Explore", "Graph"),
+    ("Explore", "Impact"),
     ("Operate", "Retrieval ledger"),
     ("Operate", "Reports"),
     ("Operate", "Agents"),
     ("Operate", "Cloud"),
     ("Operate", "Privacy"),
-    ("Operate", "Doctor"),
-    ("Operate", "About"),
+    ("Machine", "Doctor"),
+    ("Machine", "About"),
 ];
 
 /// The `{ group: …, id: …, label: … }` rows of `VIEWS`, in source order.
@@ -1032,7 +1038,7 @@ fn sidebar_rows(source: &str) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn the_sidebar_is_the_thirteen_entries_of_the_v4_design_in_order() {
+fn the_sidebar_is_the_thirteen_pages_in_four_groups_in_order() {
     const APP_JS: &str = include_str!("../src/portal/app.js");
     let rows = sidebar_rows(APP_JS);
     let got: Vec<(&str, &str)> = rows
@@ -1042,10 +1048,10 @@ fn the_sidebar_is_the_thirteen_entries_of_the_v4_design_in_order() {
     assert_eq!(
         got,
         SIDEBAR.to_vec(),
-        "the sidebar's groups, labels or order have moved away from the v4 design"
+        "the sidebar's groups, labels or order have moved"
     );
-    // Two groups, and each one contiguous: the rail draws a rule between
-    // groups, so an entry in the wrong place splits a group into two.
+    // Each group contiguous: the rail draws a rule between groups, so an entry
+    // in the wrong place splits a group into two.
     let mut groups: Vec<&str> = Vec::new();
     for (group, _) in &got {
         if groups.last() != Some(group) {
@@ -1056,7 +1062,7 @@ fn the_sidebar_is_the_thirteen_entries_of_the_v4_design_in_order() {
             groups.push(group);
         }
     }
-    assert_eq!(groups, vec!["Workspace", "Operate"]);
+    assert_eq!(groups, vec!["Workspace", "Explore", "Operate", "Machine"]);
 }
 
 #[test]
