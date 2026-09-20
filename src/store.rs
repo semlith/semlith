@@ -299,16 +299,28 @@ impl Drop for Writing<'_> {
 /// key rather than an unknown.
 ///
 /// 1 is a single `index.tv`. 2 is a directory of shards, written by 0.7.0 and
-/// later; see [`crate::index`]. 3 is a store whose chunks are cut at the
-/// definitions tree-sitter found rather than at a fixed 800-character window,
-/// written by 0.22.0 and later. A binary understands every format up to its
-/// own, so this one reads all three and creates the newest.
-pub const FORMAT_VERSION: u32 = 3;
+/// later; see [`crate::index`]. 3 is a store written by 0.22.0 and later,
+/// whose Markdown chunks are cut at their headings and carry the heading path
+/// as embedding context. 4 is a store written by 0.25.0 and later, whose code
+/// chunks carry the definition they sit inside — its signature and the first
+/// line of its doc comment — as embedding context. A binary understands every
+/// format up to its own, so this one reads all four and creates the newest.
+pub const FORMAT_VERSION: u32 = 4;
 
 /// The first format that keeps its vectors in shards.
 pub const SHARDED_FORMAT: u32 = 2;
 
-/// The first format whose chunks are cut at definitions.
+/// The first format whose code chunks embed the definition they sit inside.
+///
+/// A store below this holds code chunks embedded from their own text alone.
+/// They still answer — the row, the span and the bytes are identical, and only
+/// what the model was shown differs — but a store half embedded one way and
+/// half the other ranks its own files against each other unevenly, so the
+/// first full index pass under 0.25.0 re-embeds everything it walks. `semlith
+/// stats` says which rule a store is on until it has.
+pub const CODE_CONTEXT: u32 = 4;
+
+/// The first format whose Markdown chunks are cut at their headings.
 ///
 /// A store below this holds fixed windows and still answers: a chunk is a chunk
 /// whichever rule cut it, and nothing about the row or the vector changes. What
@@ -322,10 +334,12 @@ pub const DEFINITION_CHUNKS: u32 = 3;
 /// Which chunking rule this store's chunks were cut by, in the words `stats`
 /// and the portal print.
 pub fn chunking(db: &Connection) -> Result<&'static str> {
-    Ok(if format(db)? >= DEFINITION_CHUNKS {
-        "definitions"
-    } else {
-        "fixed windows"
+    Ok(match format(db)? {
+        v if v >= CODE_CONTEXT => "headings, and code with its definition",
+        v if v >= DEFINITION_CHUNKS => {
+            "headings; code carries no definition until it is re-indexed"
+        }
+        _ => "fixed windows",
     })
 }
 
@@ -392,7 +406,7 @@ const FTS_BUILT: &str = "fts_built";
 /// never sees them. That is the whole reason `format_version` does not move —
 /// the same reasoning `docs/compatibility.md` records for the graph tables.
 fn add_columns(db: &Connection) -> Result<()> {
-    const ADDITIONS: [(&str, &str, &str); 7] = [
+    const ADDITIONS: [(&str, &str, &str); 8] = [
         ("edges", "hint", "TEXT"),
         // 0.16.0: the line the reference was written on.
         ("edges", "line", "INTEGER"),
@@ -413,6 +427,12 @@ fn add_columns(db: &Connection) -> Result<()> {
         // token counts its own — and this is what makes them one retrieval
         // again when they are counted.
         ("retrievals", "query_id", "TEXT"),
+        // 0.25.0: what the parser made of this file — "parsed", "timeout" or
+        // "none" for a language that carries no grammar. Without it a file
+        // with no definitions and a file the parser gave up on look the same
+        // in the per-language coverage table, which is the one question that
+        // table exists to answer.
+        ("files", "graph", "TEXT"),
     ];
     for (table, column, kind) in ADDITIONS {
         if has_column(db, table, column)? {
@@ -705,6 +725,140 @@ pub fn insert_file(db: &Connection, path: &str, hash: &str, bytes: u64, now: i64
         params![path, hash, bytes as i64, now],
     )?;
     Ok(db.last_insert_rowid())
+}
+
+/// Record what the parser made of a file: `parsed`, `timeout`, or `none` for
+/// a language semlith carries no grammar for.
+///
+/// Written beside the file row rather than derived later, because the two
+/// failures it separates are invisible afterwards: a file whose parse expired
+/// and a file whose language has no grammar both arrive at the store with no
+/// symbols at all.
+pub fn set_file_graph(db: &Connection, file_id: i64, state: &str) -> Result<()> {
+    db.execute(
+        "UPDATE files SET graph = ?1 WHERE id = ?2",
+        params![state, file_id],
+    )?;
+    Ok(())
+}
+
+/// What the graph covers, per language, read from the rows themselves.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LanguageCoverage {
+    pub language: String,
+    /// Files of this language the store holds.
+    pub files: usize,
+    /// Files whose parse expired, so the store holds their text and none of
+    /// their structure.
+    pub parser_failed: usize,
+    pub definitions: usize,
+    /// Call edges whose target was found in the file that made the call.
+    pub extracted: usize,
+    /// Call edges whose target name has exactly one definition in the store.
+    pub resolved: usize,
+    /// Call edges whose target name has several, and nothing here says which.
+    pub ambiguous: usize,
+    /// Call edges naming something no definition in this store satisfies —
+    /// the standard library, a dependency nobody indexed, a typo.
+    pub unresolved: usize,
+}
+
+impl LanguageCoverage {
+    /// The share of this language's answerable call edges that settled on one
+    /// definition, which is the figure the README quotes for the whole store.
+    #[must_use]
+    pub fn settled_share(&self) -> usize {
+        let answerable = self.extracted + self.resolved + self.ambiguous;
+        if answerable == 0 {
+            return 0;
+        }
+        (self.extracted + self.resolved) * 100 / answerable
+    }
+}
+
+/// Per-language coverage for every language the store holds.
+///
+/// Sorted by files descending then by name, so the language that dominates a
+/// corpus is the first line a reader sees and two runs over one store print
+/// the same table.
+///
+/// The edge classes are the same four the resolver reports, decided the same
+/// way: `extracted` is stored on the edge, and an `inferred` edge is resolved,
+/// ambiguous or unresolved according to how many definitions of its target
+/// name this store holds. A second rule here would be a second answer to "what
+/// share resolves", and the README quotes this one.
+pub fn coverage_by_language(db: &Connection) -> Result<Vec<LanguageCoverage>> {
+    use std::collections::BTreeMap;
+    let mut by_language: BTreeMap<String, LanguageCoverage> = BTreeMap::new();
+    let language = |path: &str| -> String {
+        crate::graph::language_of(std::path::Path::new(path))
+            .unwrap_or("other")
+            .to_string()
+    };
+
+    let mut stmt = db.prepare("SELECT path, graph FROM files")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+    for row in rows {
+        let (path, graph) = row?;
+        let entry = by_language.entry(language(&path)).or_default();
+        entry.files += 1;
+        if graph.as_deref() == Some("timeout") {
+            entry.parser_failed += 1;
+        }
+    }
+
+    let mut stmt = db.prepare(
+        "SELECT f.path, COUNT(*) FROM symbols s JOIN files f ON f.id = s.file_id GROUP BY f.path",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    for row in rows {
+        let (path, count) = row?;
+        by_language.entry(language(&path)).or_default().definitions +=
+            usize::try_from(count).unwrap_or(0);
+    }
+
+    // One row per edge, and the definition count of its target beside it.
+    let mut stmt = db.prepare(
+        "SELECT f.path, e.confidence, (SELECT COUNT(*) FROM symbols d WHERE d.name = e.dst) \
+         FROM edges e JOIN symbols s ON s.id = e.src JOIN files f ON f.id = s.file_id \
+         WHERE e.kind = 'calls'",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, i64>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (path, confidence, definitions) = row?;
+        let entry = by_language.entry(language(&path)).or_default();
+        if confidence == crate::graph::EXTRACTED {
+            entry.extracted += 1;
+        } else {
+            match definitions {
+                0 => entry.unresolved += 1,
+                1 => entry.resolved += 1,
+                _ => entry.ambiguous += 1,
+            }
+        }
+    }
+
+    let mut coverage: Vec<LanguageCoverage> = by_language
+        .into_iter()
+        .map(|(language, mut row)| {
+            row.language = language;
+            row
+        })
+        .collect();
+    coverage.sort_by(|a, b| {
+        b.files
+            .cmp(&a.files)
+            .then_with(|| a.language.cmp(&b.language))
+    });
+    Ok(coverage)
 }
 
 pub fn insert_chunk(

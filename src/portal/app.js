@@ -4635,6 +4635,92 @@ function egoGraph(name, data) {
 
 // ----------------------------------------------------------------- index
 
+/** What the graph covers, per language, for the stores this machine holds.
+ *
+ * One table, and the same rows `semlith stats` prints. A single store-wide
+ * "66 % of call edges resolve" cannot say whether a language is missing edges
+ * because its files never parsed or because its calls go somewhere the store
+ * does not hold, and those are different problems with different fixes.
+ */
+function coveragePanel() {
+  const node = el("div", { class: "rows" });
+  // Its own fetch, and only this page makes it: the figures are a scan of
+  // every call edge, so the shared poll must not carry them to every page
+  // that happens to want a store count.
+  let rows = [];
+  async function refresh() {
+    try {
+      const data = await api("/api/stores?coverage=1");
+      rows = data.stores || [];
+    } catch {
+      rows = [];
+    }
+    paint();
+  }
+  function paint() {
+    const coverage = [];
+    for (const store of rows) {
+      for (const row of store.coverage || []) {
+        if (!row.definitions && !row.files) continue;
+        coverage.push({ store: store.name, ...row });
+      }
+    }
+    fill(
+      node,
+      coverage.length
+        ? dataTable({
+            className: "w-coverage",
+            caption:
+              "What the graph covers, per language: files indexed, files the parser gave up on, definitions, and call edges by how firmly each one landed.",
+            sort: "files",
+            dir: "desc",
+            perPage: 10,
+            rows: coverage,
+            columns: [
+              { key: "store", label: "Store", className: "meta narrow-drop", value: (r) => r.store, render: (r) => r.store },
+              { key: "language", label: "Language", value: (r) => r.language, render: (r) => r.language },
+              { key: "files", label: "Files", className: "num", value: (r) => r.files, render: (r) => String(r.files) },
+              {
+                key: "parser_failed",
+                label: "Unparsed",
+                className: "num",
+                value: (r) => r.parser_failed,
+                render: (r) =>
+                  el("span", {
+                    class: r.parser_failed ? "bad" : "meta",
+                    title: "Files whose parse expired, so the store holds their text and none of their structure.",
+                    text: String(r.parser_failed),
+                  }),
+              },
+              { key: "definitions", label: "Definitions", className: "num", value: (r) => r.definitions, render: (r) => String(r.definitions) },
+              { key: "extracted", label: "Extracted", className: "num", value: (r) => r.extracted, render: (r) => String(r.extracted) },
+              { key: "resolved", label: "Resolved", className: "num", value: (r) => r.resolved, render: (r) => String(r.resolved) },
+              { key: "ambiguous", label: "Ambiguous", className: "num", value: (r) => r.ambiguous, render: (r) => String(r.ambiguous) },
+              {
+                key: "unresolved",
+                label: "Unresolved",
+                className: "num",
+                value: (r) => r.unresolved,
+                title: "Call targets no definition in this store satisfies.",
+                render: (r) => String(r.unresolved),
+              },
+              {
+                key: "settled",
+                label: "Settled",
+                className: "num",
+                value: (r) => r.settled,
+                render: (r) => `${r.settled} %`,
+              },
+            ],
+          }).node
+        : empty("No language holds a definition yet. Index a folder of code and the graph fills in."),
+    );
+  }
+  paint();
+  refresh();
+  return { node, paint: refresh };
+}
+
 /* The Index page.
  *
  * Until 0.20.0 this page *was* the run: it held the streaming response open,
@@ -5469,9 +5555,16 @@ async function indexView() {
   });
 
   paint(first);
+  const coverage = coveragePanel();
   // The page's only subscription. The shared poll decides when; this decides
   // what with. No timer of this page's own.
-  state.onRuns = paint;
+  // The poll hands this the runs it just read, and `paint` reads them off it.
+  // Calling it with nothing — which an added second painter made easy to do —
+  // redraws the page as though every run had ended.
+  state.onRuns = (data) => {
+    paint(data);
+    coverage.paint();
+  };
   watchLive(["runs", "stores"], refreshRuns);
 
   return el(
@@ -5528,6 +5621,8 @@ async function indexView() {
         urlNote,
       ),
       el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
+      el("span", { class: "eyebrow", text: "What the graph covers" }),
+      coverage.node,
       cards,
       queueCard,
       settingsCard,

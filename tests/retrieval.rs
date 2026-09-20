@@ -30,6 +30,17 @@ use std::path::{Path, PathBuf};
 struct Question {
     id: String,
     shape: String,
+    /// What the 0.25.0 judgment audit decided about this question's miss:
+    /// `wrong` when the ranking returned the wrong chunks, `unspanned-correct`
+    /// when a returned chunk answered the question and no span covered it,
+    /// `unsure` when it could be read either way. Empty for a question the
+    /// audit never had to look at.
+    audit: String,
+    /// How many spans that decision added. The number is here so the decision
+    /// can be checked rather than believed: a question recorded as
+    /// unspanned-correct that gained nothing is a decision that was not acted
+    /// on, and a hit bought that way would be bought from the span file.
+    audit_added: usize,
     tool: String,
     query: String,
     name: String,
@@ -56,6 +67,10 @@ struct Span {
     start_line: u32,
     end_line: u32,
 }
+
+/// The three question classes. A question outside them is a question no
+/// per-class figure covers.
+const SHAPES: [&str; 3] = ["identifier", "concept", "multi-hop"];
 
 #[test]
 #[ignore = "indexes the repository and downloads an embedding model on first run"]
@@ -88,6 +103,64 @@ fn the_retrieval_metrics_are_measured() {
         "the question set has shrunk to {} questions; it is the measuring stick and \
          may not be trimmed to suit a result",
         all.len()
+    );
+
+    // Every audit decision is one of the three words, and an
+    // unspanned-correct decision added at least one span.
+    //
+    // The audit is the one part of this release that changes the measuring
+    // stick, so it is the part that has to be checkable from outside. A
+    // question marked unspanned-correct with nothing added would be a hit
+    // bought by relabelling rather than by finding anything.
+    for question in &all {
+        if question.audit.is_empty() {
+            continue;
+        }
+        assert!(
+            ["wrong", "unspanned-correct", "unsure"].contains(&question.audit.as_str()),
+            "{} carries an audit decision of {:?}, which is not one of the three",
+            question.id,
+            question.audit
+        );
+        if question.audit == "unspanned-correct" {
+            assert!(
+                question.audit_added > 0,
+                "{} was judged correct-but-unspanned and gained no span",
+                question.id
+            );
+            assert!(
+                question.spans.len() > question.audit_added,
+                "{} claims to have gained {} spans and holds only {}",
+                question.id,
+                question.audit_added,
+                question.spans.len()
+            );
+        } else {
+            assert_eq!(
+                question.audit_added, 0,
+                "{} was not judged correct-but-unspanned and yet added spans",
+                question.id
+            );
+        }
+    }
+
+    // Every question carries a class, and only one of the three.
+    //
+    // The per-class table below is the unit of progress in 0.25.0 — a mean is
+    // kept on the class it was meant for — and a question with a missing or
+    // misspelled shape would drop out of that table silently while still
+    // counting in the aggregate. Asserting it here costs nothing and makes the
+    // two views of the same run add up by construction.
+    let unclassed: Vec<&str> = all
+        .iter()
+        .filter(|q| !SHAPES.contains(&q.shape.as_str()))
+        .map(|q| q.id.as_str())
+        .collect();
+    assert!(
+        unclassed.is_empty(),
+        "these questions carry no class of {SHAPES:?}: {}. The per-class table is what a \
+         mean is judged on, and a question outside it is measured by nothing.",
+        unclassed.join(", ")
     );
 
     // Which half of the set this run is allowed to see.
@@ -124,6 +197,25 @@ fn the_retrieval_metrics_are_measured() {
         questions.len(),
         all.len(),
         split.seed
+    );
+    // Which stages were on. Every pair in this release is one binary run
+    // twice with one of these different, so a log that does not say which
+    // side it is cannot be read a week later.
+    println!(
+        "  stages  fusion, graph additive only, rescoring {}",
+        if semlith::rerank::enabled() {
+            let cache = semlith::model_cache_dir().unwrap_or_default();
+            if semlith::rerank::cached(&cache) {
+                format!("on ({})", semlith::rerank::RERANK_NAME)
+            } else {
+                "off — the model is not in the cache".to_string()
+            }
+        } else {
+            format!(
+                "off, which is the default — {}=on turns it on",
+                semlith::rerank::RERANK_ENV
+            )
+        }
     );
 
     // The 0.21.0 figures on this same snapshot, so every print below is a pair
@@ -742,11 +834,15 @@ impl Summary {
                     .count()
             };
             let total = of_this_shape.len();
+            let percent = |hits: usize| hits * 100 / total.max(1);
             println!(
-                "    {shape:<11} {:>3} / {:>3} / {:>3}  of {total}",
+                "    {shape:<11} {:>3} ({:>3} %) / {:>3} ({:>3} %) / {:>3} ({:>3} %)  of {total}",
                 at(1),
+                percent(at(1)),
                 at(3),
-                at(8)
+                percent(at(3)),
+                at(8),
+                percent(at(8))
             );
         }
 
@@ -791,6 +887,130 @@ impl Summary {
     }
 }
 
+/// Draw the sealed set from the question file and a seed.
+///
+/// One implementation, in the harness that scores it, so the file and the rule
+/// cannot drift apart: the test below redraws the split and fails if
+/// `split.yaml` is not what this function produces. A script beside the
+/// fixture would be a second implementation of the one thing the gate rests
+/// on.
+///
+/// Stratified by (shape, tool) with largest-remainder allocation, and a
+/// seeded Fisher-Yates shuffle inside each stratum, which is the method
+/// 0.22.0 and 0.23.0 drew with. The generator is written out rather than
+/// pulled in so the draw is reproducible from this file alone.
+fn draw(seed: u64, questions: &[Question], want: usize, held_out: &[&str]) -> Vec<String> {
+    let mut strata: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut pool = 0usize;
+    for question in questions {
+        if held_out.contains(&question.id.as_str()) {
+            continue;
+        }
+        pool += 1;
+        strata
+            .entry((question.shape.clone(), question.tool.clone()))
+            .or_default()
+            .push(question.id.clone());
+    }
+
+    // Largest remainder: every stratum takes its floor, and the leftover seats
+    // go to the largest fractions, ties broken by the stratum's own name so
+    // the allocation is a function of the question file and nothing else.
+    let exact: Vec<((String, String), f64)> = strata
+        .iter()
+        .map(|(key, ids)| (key.clone(), ids.len() as f64 * want as f64 / pool as f64))
+        .collect();
+    let mut alloc: BTreeMap<(String, String), usize> = exact
+        .iter()
+        .map(|(key, share)| (key.clone(), *share as usize))
+        .collect();
+    let mut short = want - alloc.values().sum::<usize>();
+    let mut by_remainder = exact.clone();
+    by_remainder.sort_by(|a, b| {
+        (b.1 - b.1.floor())
+            .partial_cmp(&(a.1 - a.1.floor()))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    for (key, _) in by_remainder {
+        if short == 0 {
+            break;
+        }
+        *alloc.get_mut(&key).expect("every stratum is allocated") += 1;
+        short -= 1;
+    }
+
+    let mut state = seed;
+    let mut next = move || {
+        // splitmix64, written out: the draw has to be the same on every
+        // machine and in every year, and a crate's default generator is
+        // neither promised to be stable nor visible here.
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+
+    let mut sealed: Vec<String> = Vec::new();
+    for (key, ids) in &strata {
+        let mut ids = ids.clone();
+        ids.sort();
+        for i in (1..ids.len()).rev() {
+            let j = (next() % (i as u64 + 1)) as usize;
+            ids.swap(i, j);
+        }
+        sealed.extend(ids.into_iter().take(alloc[key]));
+    }
+    sealed.sort();
+    sealed
+}
+
+/// Where the audit's evidence goes: `SEMLITH_RETRIEVAL_DUMP=<file>`.
+///
+/// Judging a miss needs what came back, not the rank it came back at. A
+/// question whose top hit is a correct chunk nobody wrote a span for is a
+/// defect in the question file, and one whose top hit is about something else
+/// is a defect in the ranking — and the two are told apart by reading the
+/// chunk. Off unless the variable is set, so an ordinary run prints what it
+/// always printed.
+const DUMP_ENV: &str = "SEMLITH_RETRIEVAL_DUMP";
+
+fn dump(question: &Question, rank: usize, hit: &semlith::Hit, satisfies: bool) {
+    let Some(path) = std::env::var_os(DUMP_ENV) else {
+        return;
+    };
+    use std::io::Write;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    // One line per hit, tab separated, with the text on the end so a line is
+    // still readable when the text is not.
+    let text: String = hit
+        .text
+        .chars()
+        .take(400)
+        .collect::<String>()
+        .replace(['\n', '\t'], " ");
+    let _ = writeln!(
+        file,
+        "{}\t{}\t{}\t{}\t{}:{}-{}\t{}\t{}",
+        question.id,
+        question.shape,
+        question.tool,
+        rank,
+        hit.path,
+        hit.start_line,
+        hit.end_line,
+        if satisfies { "spanned" } else { "unspanned" },
+        text
+    );
+}
+
 fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report: &mut Report) {
     let k = question.k.unwrap_or(8);
     let prefer =
@@ -823,6 +1043,7 @@ fn score_search(semlith: &mut Semlith, root: &Path, question: &Question, report:
     let mut first: Option<usize> = None;
     for (rank, hit) in hits.iter().enumerate() {
         let satisfies = question.spans.iter().any(|span| satisfied(root, hit, span));
+        dump(question, rank + 1, hit, satisfies);
         if satisfies && first.is_none() {
             first = Some(rank + 1);
         }
@@ -1466,6 +1687,8 @@ fn assign(
     match key {
         "id" => question.id = value.to_string(),
         "shape" => question.shape = value.to_string(),
+        "audit" => question.audit = value.to_string(),
+        "audit_added" => question.audit_added = value.parse().unwrap_or(0),
         "tool" => question.tool = value.to_string(),
         "query" => question.query = value.to_string(),
         "name" => question.name = value.to_string(),
@@ -1495,4 +1718,31 @@ fn number(value: &str, line: usize) -> u32 {
     value
         .parse()
         .unwrap_or_else(|_| panic!("line {line}: {value:?} is not a number"))
+}
+
+/// `split.yaml` is what the seed draws, and nothing else.
+///
+/// The sealed thirty decide whether this release ships. A list somebody could
+/// edit by hand — to drop the question that keeps missing — would be a gate
+/// that measures whoever last edited it, so the file is checked against the
+/// draw on every run of the suite rather than trusted.
+#[test]
+fn the_sealed_split_is_the_one_the_seed_draws() {
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/retrieval");
+    let all = read_questions(&fixtures.join("questions.yaml"));
+    let split = read_split(&fixtures.join("split.yaml"));
+    let held_out = [
+        "id-dependency-kinds",
+        "id-edges-out",
+        "id-max-nodes",
+        "id-rrf-k",
+    ];
+    let drawn = draw(split.seed, &all, split.sealed.len(), &held_out);
+    let mut recorded = split.sealed.clone();
+    recorded.sort();
+    assert_eq!(
+        drawn, recorded,
+        "split.yaml is not what seed {} draws from this question file",
+        split.seed
+    );
 }
