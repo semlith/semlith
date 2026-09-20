@@ -5544,8 +5544,11 @@ async function indexView() {
   const coverage = coveragePanel();
   // The page's only subscription. The shared poll decides when; this decides
   // what with. No timer of this page's own.
-  state.onRuns = () => {
-    paint();
+  // The poll hands this the runs it just read, and `paint` reads them off it.
+  // Calling it with nothing — which an added second painter made easy to do —
+  // redraws the page as though every run had ended.
+  state.onRuns = (data) => {
+    paint(data);
     coverage.paint();
   };
   watchLive(["runs", "stores"], refreshRuns);
