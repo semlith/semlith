@@ -2491,6 +2491,32 @@ pre.code::-webkit-scrollbar-thumb {
   transform: none;
 }
 
+/* A bar, a chart column or a bar segment that carries its own reading says so
+ * on approach. Without a cursor change a tooltip on a 6px band is a thing
+ * nobody discovers, and every one of these is the only place the number
+ * behind the proportion is written down. */
+.support-bar .seg[data-tip],
+.mix-row[data-tip],
+.month[data-tip],
+.bar[data-tip] {
+  cursor: help;
+}
+.mix-row[data-tip]:hover,
+.month[data-tip]:hover {
+  background: var(--soft);
+  border-radius: var(--r-2);
+}
+/* Keyboard parity: these are focusable so the tip is reachable without a
+ * pointer, and a focus ring is what says they are. */
+.support-bar .seg:focus-visible,
+.mix-row:focus-visible,
+.month:focus-visible,
+.bar:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: var(--r-1);
+}
+
 /* The Graph card: a coloured dot and a title, then label/value rows. */
 .tip .tip-head {
   display: flex;

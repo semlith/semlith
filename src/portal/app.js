@@ -166,6 +166,16 @@ function post(path, body) {
 const NUM = new Intl.NumberFormat();
 const n = (value) => NUM.format(value || 0);
 
+/** `part` as a percentage of `whole`, for a bar's own reading of itself.
+ *
+ * One decimal under 10%, none above: `0.4%` and `62%` are both the precision
+ * a reader can use, and `0%` beside a visible sliver reads as a bug. */
+function share(part, whole) {
+  if (!whole) return "0%";
+  const pct = (part / whole) * 100;
+  return `${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`;
+}
+
 function bytes(value) {
   const units = ["B", "KB", "MB", "GB", "TB"];
   let size = Number(value) || 0;
@@ -5170,8 +5180,17 @@ function healthPanel() {
     return el(
       "div",
       { class: "support-bar", role: "img", "aria-label": counts.map(([k, n]) => `${k} ${n}`).join(", ") },
-      counts.map(([kind, n]) =>
-        n ? sized("width", n / total, { class: `seg ${kind}`, title: `${kind} ${n}` }) : null,
+      // Each segment carries its own reading. The bar says the proportion at a
+      // glance; the number behind a proportion is the thing a reader asks for
+      // next, and reading it off a 6px band is not something anyone can do.
+      counts.map(([kind, count]) =>
+        count
+          ? sized("width", count / total, {
+              class: `seg ${kind}`,
+              tabindex: "0",
+              "data-tip": `${kind} · ${n(count)} edge${count === 1 ? "" : "s"} · ${share(count, total)} of ${n(total)}`,
+            })
+          : null,
       ),
     );
   }
@@ -5209,7 +5228,8 @@ function healthPanel() {
     const byFiles = [...languages].sort((a, b) => b.files - a.files).slice(0, 8);
     const filesTotal = languages.reduce((sum, row) => sum + row.files, 0) || 1;
     const monthRows = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-12);
-    const peak = Math.max(1, ...monthRows.map(([, n]) => n));
+    const peak = Math.max(1, ...monthRows.map(([, count]) => count));
+    const monthTotal = monthRows.reduce((sum, [, count]) => sum + count, 0);
 
     fill(
       node,
@@ -5224,7 +5244,11 @@ function healthPanel() {
               byFiles.map((row) =>
                 el(
                   "div",
-                  { class: "mix-row" },
+                  {
+                    class: "mix-row",
+                    tabindex: "0",
+                    "data-tip": `${row.language} · ${n(row.files)} file${row.files === 1 ? "" : "s"} · ${share(row.files, filesTotal)} of ${n(filesTotal)} indexed · store ${row.store}`,
+                  },
                   el("span", { class: "k", text: row.language }),
                   el("span", { class: "meter" }, sized("width", row.files / filesTotal)),
                   el("span", { class: "v", text: `${n(row.files)} file${row.files === 1 ? "" : "s"}` }),
@@ -5244,7 +5268,17 @@ function healthPanel() {
               monthRows.map(([month, count]) =>
                 el(
                   "div",
-                  { class: "month" },
+                  {
+                    class: "month",
+                    tabindex: "0",
+                    // The column's own label is the month abbreviated to fit
+                    // under a 44px bar; the tip is where the whole month, the
+                    // count and its share of the year go.
+                    "data-tip": `${month} · ${n(count)} chunk${count === 1 ? "" : "s"} · ${share(
+                      count,
+                      monthTotal,
+                    )} of the ${n(monthTotal)} in this window · ${share(count, peak)} of the busiest month`,
+                  },
                   el("span", { class: "col" }, sized("height", count / peak)),
                   el("span", { class: "m", text: month.slice(2) }),
                   el("span", { class: "c", text: n(count) }),
@@ -5280,7 +5314,11 @@ function healthPanel() {
               top.slice(0, 5).map((one) =>
                 el(
                   "div",
-                  { class: "mix-row" },
+                  {
+                    class: "mix-row",
+                    tabindex: "0",
+                    "data-tip": `${one.name} · ${n(one.edges)} call${one.edges === 1 ? "" : "s"} reach a name this store holds no definition for`,
+                  },
                   el("span", { class: "k", text: one.name }),
                   el("span", { class: "v", text: `${n(one.edges)} edge${one.edges === 1 ? "" : "s"}` }),
                 ),
@@ -5421,6 +5459,7 @@ const RUN_WORD = {
 /** One store's run: its bar, its counts, its log, and its own two controls. */
 function runCard(run, controls) {
   const bar = el("span", {});
+  const track = el("div", { class: "bar", tabindex: "0" }, bar);
   const pct = el("span", { class: "pct" });
   const status = el("span", { class: "meta" });
   const elapsed = el("span", { class: "meta" });
@@ -5470,13 +5509,26 @@ function runCard(run, controls) {
     ticking = !!next.ticking;
     paintClock();
 
-    const share = next.total ? Math.min(100, (next.scanned / next.total) * 100) : 0;
+    // Not `share`: that is the helper every bar's tooltip uses to say what
+    // fraction of a whole it is, and a local of the same name would shadow it
+    // inside this function only, which is the kind of bug that survives review.
+    const scanned = next.total ? Math.min(100, (next.scanned / next.total) * 100) : 0;
     const finished = next.status === "done";
     // A stopped run undid everything it embedded, so a full bar would say the
     // opposite of what happened.
-    const width = finished ? 100 : next.status === "stopped" ? 0 : share;
+    const width = finished ? 100 : next.status === "stopped" ? 0 : scanned;
     bar.style.width = `${width.toFixed(1)}%`;
     pct.textContent = `${Math.round(width)}%`;
+    // What the bar is a bar of. The card states files and chunks elsewhere;
+    // the bar itself said only a percentage of something unnamed.
+    track.setAttribute(
+      "data-tip",
+      next.status === "stopped"
+        ? "stopped · everything this run embedded was undone"
+        : `${n(next.scanned || 0)} of ${n(next.total || 0)} file${next.total === 1 ? "" : "s"} scanned · ${n(
+            next.chunks || 0,
+          )} chunk${next.chunks === 1 ? "" : "s"} written · ${Math.round(width)}%`,
+    );
 
     // Rebuilt rather than assigned: a pill carries its own dot, and setting
     // the text alone would take the dot away with it.
@@ -5567,7 +5619,7 @@ function runCard(run, controls) {
       el("span", { class: "spacer" }),
       pct,
     ),
-    el("div", { class: "bar" }, bar),
+    track,
     el(
       "div",
       { class: "filters" },
