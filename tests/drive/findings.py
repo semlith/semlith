@@ -2839,7 +2839,10 @@ def _(d):
         "About",
     ]
     want("the sidebar's entries", labels, expected)
-    groups = [t for t in texts_of(d, ".sidebar .nav-group-label") if t]
+    # The group labels are uppercased by the stylesheet, so innerText reads
+    # them that way. The design's names are what is being asserted, not the
+    # typography.
+    groups = [t.title() for t in texts_of(d, ".sidebar .nav-group-label") if t]
     want("the sidebar's groups", groups, ["Workspace", "Operate"])
 
 
@@ -2847,43 +2850,64 @@ def _(d):
 def _(d):
     path = d.fixtures.small()
     indexed_fixture(d, path)
+
+    # The busiest symbol in the store, which is how the Graph page picks the
+    # neighbourhood it lands on. A hand-picked name would be a check of the
+    # fixture rather than of the page.
+    overview = d.api("/api/graph?limit=1")
+    nodes = overview.get("nodes") or []
+    if not nodes:
+        skip("the store's graph holds no symbol to read backwards from")
+    symbol = nodes[0].get("name")
+
     d.open_view("impact")
     body = view_text(d)
     if "Reverse reachability" not in body:
         fail("the Impact page did not render its lead copy: %s" % body[:200])
 
-    # A name the small fixture defines. The page takes a symbol and reads the
-    # graph backwards from it.
-    symbol = None
-    for row in d.api("/api/stores").get("stores") or []:
-        found = d.api("/api/symbol?name=main")
-        if found.get("definitions"):
-            symbol = "main"
-        break
-    if symbol is None:
-        skip("the fixture store holds no symbol to read backwards from")
-
     d.eval(
-        "(() => { const box = document.querySelector('.impact-band input');"
+        "(() => { const box = document.querySelector('.impact-band input[type=search]');"
         " box.value = %s;"
         " box.dispatchEvent(new Event('input', {bubbles: true}));"
-        " document.querySelectorAll('.impact-band button')[1].click(); })()"
+        " [...document.querySelectorAll('.impact-band button')]"
+        "   .find(b => b.textContent.trim() === 'Reach').click(); })()"
         % json.dumps(symbol)
     )
-    time.sleep(2)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if "Reading" not in view_text(d):
+            break
+        time.sleep(0.5)
+
     body = view_text(d)
-    if "reach" not in body and "nothing in this store reaches" not in body:
+    if "reach" not in body.lower():
         fail("Impact said nothing about %s: %s" % (symbol, body[:300]))
-    # Every rendered row carries one of the four support classes. A hop with
-    # no badge is a hop a reader will assume was verified.
+    subject = text_of(d, ".impact-subject", "the symbol Impact is about")
+    want("the subject line", subject, symbol)
+
     rows = d.eval(
-        "[...document.querySelectorAll('.impact-row')].filter("
-        "  el => el.querySelector('.sym') && !el.querySelector('.conf')"
-        ").length"
+        "document.querySelectorAll('.impact-block:not(.impact-files) .impact-row').length"
     )
-    reached = d.eval("document.querySelectorAll('.impact-block .impact-row').length")
-    if reached and rows and rows > d.eval("document.querySelectorAll('.impact-row .where').length") / 2:
-        fail("%d reached rows carry no support class" % rows)
+    if not rows:
+        # Nothing reaching the busiest symbol is a legitimate answer, and the
+        # page has to say so rather than render an empty list.
+        if "nothing in this store reaches" not in body.lower():
+            fail("no rows and no sentence saying why: %s" % body[:300])
+        return
+
+    # Every reached row carries one of the four support classes. A hop with
+    # no badge is a hop a reader will assume was verified.
+    unbadged = d.eval(
+        "[...document.querySelectorAll('.impact-block:not(.impact-files) .impact-row')]"
+        ".filter(el => !el.querySelector('.conf')).length"
+    )
+    if unbadged:
+        fail("%d of %d reached rows carry no support class" % (unbadged, rows))
+    # And the hop groups are in order, nearest first.
+    hops = [t for t in texts_of(d, ".impact-block:not(.impact-files) .impact-hop h2") if t and t[0].isdigit()]
+    numbers = [int(t.split()[0]) for t in hops]
+    if numbers != sorted(numbers):
+        fail("the hop groups are out of order: %s" % numbers)
 
 
 @finding("5.3", "the path finder and Trace render on the Impact page")
@@ -2910,13 +2934,44 @@ def _(d):
 @finding("5.5", "Inside the index states what the graph covers")
 def _(d):
     d.open_view("index")
-    time.sleep(2)
-    body = view_text(d)
-    for wanted in ["Language mix", "Chunks by month indexed", "Graph health"]:
+    # The three cards are a scan of every call edge away, so this waits for
+    # them rather than sleeping a fixed time and calling a slow store a bug.
+    # The three cards are a scan of every call edge away, so this waits for
+    # them rather than sleeping a fixed time and calling a slow store a bug.
+    # Compared case-blind: the card titles are uppercased by the stylesheet,
+    # and innerText reads what is rendered.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if "language mix" in view_text(d).lower():
+            break
+        time.sleep(0.5)
+    body = view_text(d).lower()
+    for wanted in ["language mix", "chunks by month indexed", "graph health"]:
         if wanted not in body:
             fail("Inside the index is missing the %r card" % wanted)
     if "call targets with no definition here" not in body:
         fail("Graph health does not state its unresolved targets: %s" % body[:400])
+    # Every bar is sized through the CSSOM, because the portal is served
+    # under `style-src 'self'` and a width written into the markup is
+    # blocked — silently, leaving every bar full width.
+    #
+    # Asserted as what is on screen rather than as what is in the markup: a
+    # width assigned through the CSSOM and one written into the attribute
+    # look identical in `outerHTML`, and only one of them is applied. A bar
+    # whose share is under 100% and whose rendered width equals its track's
+    # is a bar the policy dropped.
+    narrower = d.eval(
+        "[...document.querySelectorAll('.mix-row .meter')].some(track => {"
+        "  const fill = track.firstElementChild; if (!fill) return false;"
+        "  const w = fill.getBoundingClientRect().width;"
+        "  const t = track.getBoundingClientRect().width;"
+        "  return t > 0 && w > 0 && w < t - 1; })"
+    )
+    if not narrower:
+        fail(
+            "every language-mix bar fills its whole track, so the width was "
+            "written into the markup and `style-src 'self'` dropped it"
+        )
 
 
 @finding("5.6", "the ledger lists sessions, filters them, and exports what it shows")

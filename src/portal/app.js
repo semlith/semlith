@@ -2791,6 +2791,7 @@ function ledgerSessions(data) {
   const clientPick = el(
     "select",
     {
+      class: "chip",
       "aria-label": "Filter by client",
       onchange: (e) => {
         client = e.currentTarget.value;
@@ -2803,6 +2804,7 @@ function ledgerSessions(data) {
   const tierPick = el(
     "select",
     {
+      class: "chip",
       "aria-label": "Filter by tier",
       onchange: (e) => {
         tier = e.currentTarget.value;
@@ -2816,6 +2818,7 @@ function ledgerSessions(data) {
   const modelPick = el(
     "select",
     {
+      class: "chip",
       "aria-label": "Cost at",
       onchange: (e) => {
         price = MODEL_PRICES[Number(e.currentTarget.value)] || MODEL_PRICES[0];
@@ -5054,8 +5057,29 @@ function egoGraph(name, data) {
  * rows `semlith stats` prints — so the page and the terminal cannot disagree
  * about what the graph covers. Nothing here recomputes a count at page load.
  */
+/** A span sized as a share of its track, set through the CSSOM.
+ *
+ * Never a `style` attribute: the portal is served under `style-src 'self'`
+ * with no `unsafe-inline`, so a width written into the markup is blocked and
+ * the bar silently renders at its default size — which is exactly what the
+ * first draft of these three bars did, and what the browser drive caught.
+ * Assigning the property is not inline style for CSP's purposes, which is
+ * why the tooltip has positioned itself this way since 0.11.0. */
+function sized(property, share, attrs) {
+  const node = el("span", attrs || {});
+  node.style[property] = `${Math.max(0, Math.min(100, share * 100))}%`;
+  return node;
+}
+
 function healthPanel() {
-  const node = el("div", { class: "health" });
+  // A placeholder rather than an empty element: the read is a scan of every
+  // call edge, so on a large store the three cards are a second or two away,
+  // and a gap where a card will be reads as a page that has finished.
+  const node = el(
+    "div",
+    { class: "health" },
+    el("section", { class: "health-card" }, el("div", { class: "rail-hint", text: "Reading the graph…" })),
+  );
   let rows = [];
 
   async function refresh() {
@@ -5075,13 +5099,7 @@ function healthPanel() {
       "div",
       { class: "support-bar", role: "img", "aria-label": counts.map(([k, n]) => `${k} ${n}`).join(", ") },
       counts.map(([kind, n]) =>
-        n
-          ? el("span", {
-              class: `seg ${kind}`,
-              style: `width:${(n / total) * 100}%`,
-              title: `${kind} ${n}`,
-            })
-          : null,
+        n ? sized("width", n / total, { class: `seg ${kind}`, title: `${kind} ${n}` }) : null,
       ),
     );
   }
@@ -5136,7 +5154,7 @@ function healthPanel() {
                   "div",
                   { class: "mix-row" },
                   el("span", { class: "k", text: row.language }),
-                  el("span", { class: "meter" }, el("span", { style: `width:${(row.files / filesTotal) * 100}%` })),
+                  el("span", { class: "meter" }, sized("width", row.files / filesTotal)),
                   el("span", { class: "v", text: `${n(row.files)} file${row.files === 1 ? "" : "s"}` }),
                 ),
               ),
@@ -5155,7 +5173,7 @@ function healthPanel() {
                 el(
                   "div",
                   { class: "month" },
-                  el("span", { class: "col" }, el("span", { style: `height:${(count / peak) * 100}%` })),
+                  el("span", { class: "col" }, sized("height", count / peak)),
                   el("span", { class: "m", text: month.slice(2) }),
                   el("span", { class: "c", text: n(count) }),
                 ),
@@ -8282,17 +8300,11 @@ async function impactView() {
   });
 
   let allEdges = false;
-  const verified = el("button", {
-    class: "button secondary small on",
-    type: "button",
-    text: "Prefer verified edges",
-    "aria-pressed": "true",
-    onclick: (e) => {
-      allEdges = !allEdges;
-      e.currentTarget.classList.toggle("on", !allEdges);
-      e.currentTarget.setAttribute("aria-pressed", String(!allEdges));
-      if (nameInput.value.trim()) run();
-    },
+  // The same control the path finder below carries, drawn the same way: two
+  // looks for one named toggle on one page reads as two different things.
+  const verified = chipToggle("Prefer verified edges", true, (on) => {
+    allEdges = !on;
+    if (nameInput.value.trim()) run();
   });
 
   const go = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
@@ -8303,8 +8315,12 @@ async function impactView() {
       { class: "impact-row" },
       el("span", { class: "sym", text: row.name }),
       el("span", { class: "where", text: `${shortPath(row.path)}:${row.line}` }),
-      el("span", { class: "via", text: `${row.via} · ${row.kind}` }),
-      confidenceBadge(row.confidence),
+      el(
+        "span",
+        { class: "via" },
+        el("span", { class: "one-line", text: `${row.via} · ${row.kind}` }),
+        confidenceBadge(row.confidence),
+      ),
       el("span", { class: "hops-n", text: String(row.hop) }),
     );
   }
@@ -8392,7 +8408,10 @@ async function impactView() {
       ),
       el(
         "section",
-        { class: "impact-block" },
+        // Its own class: a file is not an edge and carries no support class,
+        // so a check counting unbadged hops must be able to tell the two
+        // blocks apart.
+        { class: "impact-block impact-files" },
         el("div", { class: "impact-hop" }, el("h2", { text: "Files" })),
         impact.files.map((file) =>
           el(
@@ -8726,6 +8745,7 @@ async function reportsView() {
   const modelPick = el(
     "select",
     {
+      class: "chip",
       "aria-label": "Price tokens at",
       onchange: (e) => {
         model = MODEL_PRICES[Number(e.currentTarget.value)] || MODEL_PRICES[0];

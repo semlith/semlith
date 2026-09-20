@@ -4316,14 +4316,28 @@ td.row-end {
   font-size: var(--t-body);
   margin: 0;
 }
-.impact-row {
-  display: flex;
-  flex-wrap: wrap;
+/* One grid for the header and the rows, so a column heading sits over the
+ * column it names. As two flex rows they drifted apart the moment a symbol
+ * was longer than its heading. */
+.impact-row,
+.impact-head-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1.6fr) minmax(0, 1.6fr) 3rem;
   align-items: baseline;
   gap: var(--sp-2);
+}
+.impact-row {
   padding: var(--sp-1) 0;
   font-family: var(--mono);
   font-size: var(--t-small);
+}
+/* The support badge rides with the edge it describes rather than taking a
+ * column of its own: it is a property of the via, not a fourth fact. */
+.impact-row .via {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
 }
 .impact-row .sym {
   color: var(--ink);
@@ -4383,20 +4397,12 @@ td.row-end {
 /* The column names, once, above the per-hop blocks rather than repeated in
  * each of them: the blocks are one table split by hop, not five tables. */
 .impact-head-row {
-  display: flex;
-  gap: var(--sp-2);
   padding-bottom: var(--sp-1);
   border-bottom: 1px solid var(--line);
   margin-bottom: var(--sp-2);
 }
-.impact-head-row .eyebrow:first-child {
-  flex: 2 1 0;
-}
-.impact-head-row .eyebrow {
-  flex: 1 1 0;
-}
 .impact-row .hops-n {
-  margin-left: auto;
+  text-align: right;
   color: var(--muted);
 }
 
@@ -4680,10 +4686,15 @@ td.row-end {
   flex-direction: column;
   align-items: center;
   gap: 2px;
-  flex: 1 1 0;
+  /* Capped, so one month reads as a column rather than as a slab filling
+   * the card. A store indexed in a single pass is the common case. */
+  flex: 0 1 44px;
   min-width: 0;
   height: 100%;
   justify-content: flex-end;
+}
+.months {
+  justify-content: flex-start;
 }
 .month .col {
   display: flex;

@@ -1212,3 +1212,31 @@ fn the_cloud_page_is_the_not_connected_state_and_has_no_client() {
         "`semlith cloud` exists, which this release says it does not"
     );
 }
+
+/// No bar is sized by a `style` attribute written into the markup.
+///
+/// The portal is served under `style-src 'self'` with no `unsafe-inline`, so
+/// a width written that way is blocked and the bar renders at its default
+/// size — silently, which is how three bars shipped at full width in
+/// development before the browser drive caught them. Dynamic sizes go
+/// through the CSSOM, as the tooltip's position has since 0.11.0.
+#[test]
+fn nothing_the_portal_builds_carries_an_inline_style_attribute() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    let mut offenders = Vec::new();
+    for (i, line) in APP_JS.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") || trimmed.starts_with('*') {
+            continue;
+        }
+        // `el(…, { style: … })` and `"style":` both set the attribute.
+        if trimmed.contains("style:") || trimmed.contains("\"style\"") {
+            offenders.push(format!("{}: {}", i + 1, trimmed));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these would be dropped by the portal's own content-security policy:\n  {}",
+        offenders.join("\n  ")
+    );
+}
