@@ -5087,7 +5087,10 @@ function healthPanel() {
   }
 
   function paint() {
-    const counts = { extracted: 0, resolved: 0, inferred: 0, ambiguous: 0 };
+    // The four support classes a coverage row carries. `unresolved` is an
+    // edge whose target this store holds no definition for — the fourth
+    // segment of the bar, and a different thing from an ambiguous one.
+    const counts = { extracted: 0, resolved: 0, ambiguous: 0, unresolved: 0 };
     const languages = [];
     let unresolvedNames = 0;
     let several = 0;
@@ -5099,9 +5102,7 @@ function healthPanel() {
         counts.extracted += row.extracted || 0;
         counts.resolved += row.resolved || 0;
         counts.ambiguous += row.ambiguous || 0;
-        // `unresolved` on a coverage row is the fourth class: an edge whose
-        // target this store holds no definition for.
-        counts.inferred += row.unresolved || 0;
+        counts.unresolved += row.unresolved || 0;
         languages.push({ store: store.name, ...row });
       }
       const health = store.health;
@@ -5173,7 +5174,7 @@ function healthPanel() {
           ["extracted", counts.extracted],
           ["resolved", counts.resolved],
           ["ambiguous", counts.ambiguous],
-          ["unresolved", counts.inferred],
+          ["unresolved", counts.unresolved],
         ]),
         el(
           "div",

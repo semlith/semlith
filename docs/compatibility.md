@@ -156,6 +156,49 @@ advertised tool count drops from ten to nine.
   answers whether one symbol reaches another. Both are unchanged, as are
   `semlith symbol` and the three MCP tools that carry them.
 
+### 0.26.0 adds three commands and three tools, and none of them costs anything
+
+**Additive, and the only change to the covered surface in this release.**
+`semlith impact`, `semlith trace` and `semlith report` join the command line;
+`semlith_impact`, `semlith_trace` and `semlith_report` join the tool list, which
+goes from thirteen to sixteen; `GET /api/impact`, `/api/trace`, `/api/map`,
+`/api/report` and `/api/ledger/replay` join the daemon's routes.
+
+- **What this restores.** `semlith impact` and `semlith_impact` were removed in
+  0.13.0 to be sold, and never were. The monetization hold of 2026-09-15 made
+  the binary free whole, so they come back with a page of their own and no key
+  of any kind. An agent that carried `semlith_impact` in a saved prompt from
+  0.12.0 works again; one written against the 0.12.0 answer shape does not, and
+  the shape here is the current one.
+- **What it costs.** The tool list a client pays for once per session grows with
+  it, and the gate on that figure moved from 1 120 tokens to 1 600. The Agents
+  page states what this binary's own list measures rather than a number written
+  down when it was last checked.
+- **What did not change.** Nothing in the retrieval path. The 0.25.0 figures are
+  re-measured on this release's binary and reproduce; a moved number would have
+  been a defect in this release rather than a new measurement.
+
+### 0.26.0 holds the portal's index route to the boundary it documents
+
+**This is a break in behaviour, and is recorded as one.** `POST /api/index` now
+refuses a path outside the target store's boundary when the request names a
+store, and a request that names no store indexes the path into the store
+`home::resolve` picks for it rather than into whichever store happened to be
+writable.
+
+- **What breaks.** A script that posted a path and a `store` name that did not
+  contain it now gets 403 with the rule that refused it. A script that posted
+  one path with no `store` now gets a run in that path's own store, which may
+  be a new one, rather than a run in an unrelated store.
+- **Why.** `docs/security.md` and this document have said since 0.20.0 that the
+  route refuses a path outside the store's registered roots. It did not: the
+  route recorded whatever it was handed as a root *before* the run applied the
+  boundary, so the check could never refuse anything (issue #120). One of the
+  two was wrong, and it was the code.
+- **What to do instead.** Post no `store` and let the path choose its own, which
+  is what `semlith index <path>` does, or add the folder to the store's roots
+  first with `/api/root`.
+
 ### 0.14.0 narrows four things it used to do
 
 **Four breaks in the covered surface, all in the same direction.** The 0.13.0

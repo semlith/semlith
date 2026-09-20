@@ -2999,3 +2999,33 @@ def _(d):
     tools = listed.get("tools") or []
     if len(tools) != 16:
         fail("the Agents page lists %d tools, expected 16" % len(tools))
+
+
+@finding("5.11", "every new page renders in both themes")
+def _(d):
+    """The record's evidence, taken by the gate rather than by hand.
+
+    One screenshot per new surface in light and again in dark. The check
+    fails only if a page does not render at all — the pictures are what a
+    person reads, and they are what the release record carries.
+    """
+    pages = [
+        ("impact", "Impact"),
+        ("graph", "Graph"),
+        ("index", "Inside the index"),
+        ("ledger", "Retrieval ledger"),
+        ("reports", "Reports"),
+        ("cloud", "Cloud"),
+        ("agents", "Agents"),
+        ("privacy", "Privacy"),
+    ]
+    for theme in ("light", "dark"):
+        d.eval("document.documentElement.setAttribute('data-theme', %s)" % json.dumps(theme))
+        for view, title in pages:
+            d.open_view(view)
+            time.sleep(1.5)
+            body = view_text(d)
+            if title not in body:
+                fail("%s did not render in the %s theme" % (title, theme))
+            d.shot("5.11-%s-%s" % (theme, view))
+    d.eval("document.documentElement.removeAttribute('data-theme')")

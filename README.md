@@ -355,7 +355,7 @@ would have served both. The command reproduces it against any store you have.
 
 ## Using it from an agent
 
-`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same thirteen
+`semlith mcp` speaks MCP over stdio, and `semlith start` answers the same sixteen
 tools over HTTP at `/mcp`:
 
 | Tool | What it does |
@@ -372,17 +372,19 @@ tools over HTTP at `/mcp`:
 | `semlith_symbol` | Where a symbol is defined, read off the parsed syntax tree rather than matched in a comment or a string. `history: true` answers what it used to be. |
 | `semlith_neighbors` | What calls a symbol and what it calls, one hop each way, each edge saying how well supported it is. |
 | `semlith_path` | The shortest chain of resolved edges between two symbols, or a refusal when it cannot get there without crossing a name it cannot pin down. |
+| `semlith_impact` | Everything that reaches a symbol, breadth first to a hop limit, with the files it lives in — who would notice if it changed. |
+| `semlith_trace` | A chain between two symbols as evidence: the answer sentence, the hops, and one supporting source line per hop, each marked a supporting fact or a candidate to corroborate. |
+| `semlith_report` | One of five reports — savings, access, change, health, gaps — from this machine's ledger, index and graph, as Markdown, CSV, JSON or print-styled HTML. |
 | `semlith_languages` | Every name `lang` accepts, and the extensions and filenames behind each. |
 
 The write tools take the store's lock for the call and give it back; a store
 another process is writing comes back as a tool error naming the holder rather
 than a corrupted index. Indexing a large tree takes longer than a client will
 wait, so `semlith_index` works to a time budget and continues where it left off.
-A bare `semlith mcp` opens every store in the registry, so an agent working
-across repositories asks one question instead of one per repository, and
-indexing a second repository needs no edit to any client's configuration.
-semlith implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and
-`2024-11-05`, each with a session in `tests/mcp.rs` proving it.
+A bare `semlith mcp` opens every store in the registry, so an agent asks one
+question across repositories and indexing a second needs no config edit. semlith
+implements MCP `2026-07-28`, `2025-11-25`, `2025-06-18` and `2024-11-05`, each
+with a session in `tests/mcp.rs` proving it.
 
 **`semlith setup` registers semlith in every client that has a registration
 command, at the scope that means every project**; `semlith doctor` says which it
@@ -449,8 +451,8 @@ of these drifts from its source:
 | edge kinds | **6** |
 | document formats with a reader | **13** |
 | image types | **5** |
-| MCP tools | **13** |
-| CLI commands | **27** |
+| MCP tools | **16** |
+| CLI commands | **30** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

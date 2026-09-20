@@ -910,3 +910,64 @@ It resolves a span's path by suffix against what was actually indexed, because a
 locate answer prints a store-relative path while `files.path` is absolute. Two
 indexed files matching one suffix is an error naming both rather than a guess
 between them — the same refusal the graph's `ambiguous` value exists to make.
+
+## Reverse reachability, trace and the map (0.26.0)
+
+Three questions over the graph that was already there, and one of them is the
+one this project removed in 0.13.0 to sell and never did.
+
+`graph::impact` is `shortest_path` read backwards: breadth first over
+`store::edges_in` under the same two rules the finder walks by — a node is a
+definition rather than a name, and an ambiguous edge is not crossed unless
+`all_edges` says to. Breadth first is not an implementation detail: it is what
+makes the hop recorded against a caller the *fewest* hops it takes, so a
+function that reaches the symbol both directly and through three others is
+reported as the direct caller it is. `IMPACT_LIMIT` bounds the answer and the
+count of what it left out is reported, because reverse reachability fans out
+faster than a path does — a utility three hops below `main` reaches most of a
+tree, and a list that long is a scroll rather than an answer.
+
+`graph::trace` adds nothing to the walk. It takes a `Chain` the finder already
+produced and reads one line of source per hop out of the store's own chunks,
+through the closure the caller passes it, so the Trace panel and `semlith path`
+cannot describe one chain differently. Each hop's supporting line is marked a
+supporting fact or a candidate from that hop's support class and nothing else:
+`extracted` and `resolved` are answers, `inferred` and `ambiguous` are things
+to check, and that distinction is the whole value of the panel.
+
+`graph::communities` is the exception to the rule that every traversal here
+reads one hop at a time. Communities are a property of the whole graph and
+cannot be computed a hop at a time, so `store::community_edges` reads the
+settled `calls` and `imports` edges in one query, bounded at
+`COMMUNITY_EDGES`, and the panel says `Shown N of M` rather than quietly
+clustering a slice. The clustering is label propagation with three properties
+that matter more here than modularity does: nodes are visited in name order,
+a node keeps its own label when that label is among the winners, and the
+iteration count is fixed. Without the second, two clusters joined by a single
+edge collapse into one community — which is what the first implementation did,
+and what its unit test now asserts against. A map that regroups a codebase
+every time it is opened is not a map.
+
+## The reports, and what the ledger cannot see (0.26.0)
+
+`src/report.rs` is one structure and four renderers rather than four writers:
+a report is a title and a list of blocks — a sentence, a row of counted facts,
+or a named table — and Markdown, CSV, JSON and print-styled HTML are four
+readings of it. That is why `semlith report` and the portal's export produce
+the same bytes: the portal is not a second renderer. PDF is the reader's own
+browser printing the HTML, which is why no PDF writer is in the binary.
+
+The savings report never sums its three counterfactual lines. Whole files not
+read, excerpts read instead and refunds answer three different questions, and
+adding them would count one saved read up to three times. Every figure carries
+the denominator it is over, and the tier says whether the store's own tokenizer
+counted it or the four-character fallback did.
+
+What the ledger cannot see is whether an answer was enough. That is in the
+agent's own transcript, in what it reached for next, which is what
+`src/replay.rs` reads: a whole-file read after a retrieval is a refund, a grep
+is a miss, an edit is the answer having sufficed. It reads files semlith does
+not own, so it is off unless the Privacy page turns it on, it reads Claude
+Code's transcripts and no others — the format on the reference machine, because
+a parser nobody here can run is not evidence — and nothing it reads is sent
+anywhere.
