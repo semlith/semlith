@@ -1804,6 +1804,15 @@ fn run() -> Result<()> {
             // command happened to run in.
             semlith::report::kind_of(&kind)?;
             semlith::report::check_format(&format)?;
+            // The third of the three, for the same reason: `--model opus_5`
+            // used to be accepted and priced at Sonnet 5, so the report said
+            // Sonnet 5 and the reader had asked for Opus.
+            if semlith::report::price_named(&model).is_none() {
+                anyhow::bail!(
+                    "no prices for model {model:?} — this binary prices {}",
+                    semlith::report::price_names()
+                );
+            }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
             let report = semlith::report::generate(&fleet, &kind, &model)?;
             let text = report.render(&format)?;

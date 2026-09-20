@@ -35,6 +35,42 @@ pub const HOME_ENV: &str = "SEMLITH_HOME";
 /// [`user_home`], and `tests/home.rs` asserts exactly that.
 pub const HOME_VAR: &str = "HOME";
 
+/// One lock for every test that touches a home directory variable.
+///
+/// `HOME` and `SEMLITH_HOME` are process-wide, and `cargo test` runs the whole
+/// crate's tests on one thread pool, so a test that repoints either of them
+/// repoints it for every other test running at that moment. Living in a
+/// separate module does not serialise anything — `setup.rs` carried a comment
+/// saying it did, and the test it guarded was repointing the real `HOME` out
+/// from under `service::remove`, which resolves the login service's path
+/// through it. That is how `removing_a_service_that_is_not_installed_is_not_
+/// an_error` failed in a full run and passed on its own.
+///
+/// Every test that *sets* one of these takes this lock, and every test that
+/// *reads* one and would be confused by a different answer takes it too.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `body` with one environment variable set, and put it back afterwards.
+///
+/// Holds [`ENV_LOCK`] for the whole of it. The guard is taken with
+/// `unwrap_or_else(into_inner)` so one panicking test does not poison every
+/// later one into failing for a reason that is not theirs.
+#[cfg(test)]
+pub(crate) fn with_env_var<T>(name: &str, value: &std::ffi::OsStr, body: impl FnOnce() -> T) -> T {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let was = std::env::var_os(name);
+    // SAFETY: the lock above makes this the only thread touching the
+    // variable, and every test that reads it holds the same lock.
+    unsafe { std::env::set_var(name, value) };
+    let out = body();
+    match was {
+        Some(previous) => unsafe { std::env::set_var(name, previous) },
+        None => unsafe { std::env::remove_var(name) },
+    }
+    out
+}
+
 /// The user's home directory, per platform. The only place in `src/` that
 /// reads `HOME`.
 ///
@@ -1288,17 +1324,12 @@ mod agent_key_tests {
     }
 
     /// `SEMLITH_HOME` is process-wide, so these run one at a time.
+    ///
+    /// The lock is [`super::ENV_LOCK`] rather than one of this module's own:
+    /// `HOME` and `SEMLITH_HOME` both decide where a store home is, so two
+    /// locks would let a test holding one repoint a directory a test holding
+    /// the other was reading.
     fn temp_env(home: &Path, body: impl FnOnce()) {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let was = std::env::var_os(HOME_ENV);
-        // SAFETY: the lock above makes this the only thread touching the
-        // variable, and the tests that read it hold the same lock.
-        unsafe { std::env::set_var(HOME_ENV, home) };
-        body();
-        match was {
-            Some(value) => unsafe { std::env::set_var(HOME_ENV, value) },
-            None => unsafe { std::env::remove_var(HOME_ENV) },
-        }
+        super::with_env_var(HOME_ENV, home.as_os_str(), body);
     }
 }

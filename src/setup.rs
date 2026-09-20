@@ -1497,15 +1497,12 @@ mod rotation_tests {
         std::fs::write(&untouched, "{\"mcpServers\":{\"other\":{}}}").unwrap();
         let before = std::fs::read_to_string(&untouched).unwrap();
 
-        // `HOME` is process-wide, so this test is serialised with the others
-        // that set it by living in its own module and setting it back.
-        let was = std::env::var_os(home::HOME_VAR);
-        unsafe { std::env::set_var(home::HOME_VAR, &home_dir) };
-        let changed = recarry_key(&previous, &fresh);
-        match was {
-            Some(v) => unsafe { std::env::set_var(home::HOME_VAR, v) },
-            None => unsafe { std::env::remove_var(home::HOME_VAR) },
-        }
+        // `HOME` is process-wide. Living in its own module serialises nothing —
+        // `cargo test` runs the whole crate on one thread pool — so this takes
+        // the lock every other test that reads a home directory takes.
+        let changed = home::with_env_var(home::HOME_VAR, home_dir.as_os_str(), || {
+            recarry_key(&previous, &fresh)
+        });
 
         assert_eq!(changed, vec![carries.clone()], "{changed:?}");
         let text = std::fs::read_to_string(&carries).unwrap();

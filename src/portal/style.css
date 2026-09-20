@@ -298,6 +298,15 @@ body {
   margin: 0;
 }
 
+/* Every block of text in this page is spaced by the gap of the flex or grid
+ * it sits in. The browser's own paragraph margin is a second, invisible
+ * source of spacing on top of that, and it applied only where a block
+ * happened to be written as a `<p>` — so the same note had 13px of extra air
+ * on one card and none on the next. Classes that want a margin state one. */
+p {
+  margin: 0;
+}
+
 body {
   font-family: var(--sans);
   font-size: var(--t-body);
@@ -622,7 +631,8 @@ main {
   transition: background var(--d-fade) var(--e-in-out), color var(--d-fade) var(--e-in-out);
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
+  /* 10px, which is the v3 design's own gap between a nav mark and its word. */
+  gap: var(--sp-2h);
   padding: var(--sp-2) var(--sp-3);
   border-radius: var(--r-2);
   font-weight: 500;
@@ -667,6 +677,16 @@ main {
   font-family: var(--mono);
   font-size: var(--t-tiny);
   color: var(--muted);
+}
+
+/* Under the daemon card, indented to the card's own text: the design puts the
+ * way back to the first-run screen here and nowhere else. */
+.replay-welcome {
+  font-size: var(--t-small);
+  padding: 0 var(--sp-1);
+}
+.replay-welcome:hover {
+  color: var(--ink);
 }
 
 .scrim {
@@ -948,6 +968,13 @@ h2 {
 .grid.two {
   grid-template-columns: minmax(320px, 1fr) minmax(0, 1.1fr);
   align-items: stretch;
+}
+
+/* The language table spans both columns and comes last, as the v4 About page
+ * lays it out. Its 46 rows were what stretched the row it used to sit in and
+ * cut the model table beside it off mid-row. */
+.about-grid > .lang-card {
+  grid-column: 1 / -1;
 }
 
 /* Three equal columns that collapse together rather than one at a time: the
@@ -1581,6 +1608,11 @@ select.field:focus-visible {
   line-height: var(--lh-prose);
   color: var(--muted);
   min-height: 18px;
+  /* A note is written as a `<p>` in some places and a `<div>` in others, and
+   * the browser's own paragraph margin only applied to the first — so the
+   * same note carried 13px of extra air above and below it on one card and
+   * none on the next, on top of whatever gap the card already set. */
+  margin: 0;
 }
 .note:empty {
   display: none;
@@ -1812,6 +1844,32 @@ td.meta {
   align-items: center;
   gap: var(--sp-3);
   flex-wrap: wrap;
+}
+
+/* The design's last row of a table card: a link onward, inside the same
+ * border as the table it follows, reading as the card's own closing line
+ * rather than as a control someone dropped underneath it. */
+.table-follow {
+  flex-shrink: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--blue);
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--sp-3) var(--sp-3h);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.table-follow:hover {
+  color: var(--ink);
+  background: var(--soft);
+}
+.table-follow svg {
+  flex-shrink: 0;
 }
 
 /* A pager is a row of controls, not a row of tags: the page sizes and the
@@ -2285,6 +2343,142 @@ pre.code::-webkit-scrollbar-thumb {
   overflow-wrap: anywhere;
 }
 
+/* ------------------------------------------------------------- loading */
+
+/* The wait, as the mark assembling itself.
+ *
+ * Every page here opens on a request, so this is the first thing a reader
+ * sees on all thirteen of them, and it used to be the word "Loading…" at the
+ * top left of an empty page. Sixteen cells in the mark's own four-by-four
+ * grid, five of them the mark's amber, lighting along the diagonal.
+ *
+ * Nothing is fetched and nothing is scripted: one keyframe and a nth-child
+ * delay. The resting state of that keyframe is every cell at full opacity,
+ * which is what a reader with `prefers-reduced-motion` sees, because the
+ * reset above collapses the duration rather than removing the animation. */
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  flex-grow: 1;
+  min-height: 60vh;
+}
+
+.loading .mark {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  width: 64px;
+  height: 64px;
+}
+
+.loading .cell {
+  border-radius: 3px;
+  background: var(--blue);
+  opacity: 0.18;
+  animation: semlithAssemble 1.6s var(--e-in-out) infinite;
+}
+.loading .cell.hot {
+  background: var(--accent);
+}
+
+/* Along the diagonal: the delay is the row plus the column, so the wave
+ * crosses the mark corner to corner rather than sweeping line by line. */
+.loading .cell[data-i="0"] { animation-delay: 0ms; }
+.loading .cell[data-i="1"], .loading .cell[data-i="4"] { animation-delay: 90ms; }
+.loading .cell[data-i="2"], .loading .cell[data-i="5"], .loading .cell[data-i="8"] { animation-delay: 180ms; }
+.loading .cell[data-i="3"], .loading .cell[data-i="6"], .loading .cell[data-i="9"],
+.loading .cell[data-i="12"] { animation-delay: 270ms; }
+.loading .cell[data-i="7"], .loading .cell[data-i="10"], .loading .cell[data-i="13"] { animation-delay: 360ms; }
+.loading .cell[data-i="11"], .loading .cell[data-i="14"] { animation-delay: 450ms; }
+.loading .cell[data-i="15"] { animation-delay: 540ms; }
+
+@keyframes semlithAssemble {
+  0%,
+  70% {
+    opacity: 0.18;
+    transform: scale(0.82);
+  }
+  25% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.loading .what {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+/* An indeterminate bar, because the page cannot know how long a store takes
+ * to answer and a progress bar that invents a number is a lie. */
+.loading .track {
+  width: 160px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--line);
+  overflow: hidden;
+}
+.loading .track .run {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--blue);
+  animation: semlithSlide 1.4s var(--e-in-out) infinite;
+}
+
+@keyframes semlithSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+/* The second stage: the shape of what is coming, where it is coming.
+ *
+ * A sheen crossing a block rather than a block that blinks — a pulse reads
+ * as something wrong, a sheen reads as something on its way. Under
+ * `prefers-reduced-motion` the reset above collapses the duration and what
+ * is left is a plain grey block, which is exactly the right resting state. */
+.skel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2h);
+  width: 100%;
+  min-width: 0;
+}
+.skel .line {
+  height: 11px;
+  border-radius: var(--r-1);
+  background: linear-gradient(
+    90deg,
+    var(--chip) 0%,
+    var(--line-soft) 40%,
+    var(--chip) 80%
+  );
+  background-size: 300% 100%;
+  animation: semlithSheen 1.5s var(--e-linear) infinite;
+}
+
+@keyframes semlithSheen {
+  0% {
+    background-position: 140% 0;
+  }
+  100% {
+    background-position: -40% 0;
+  }
+}
+
 /* -------------------------------------------------------------- welcome */
 
 .welcome {
@@ -2347,15 +2541,20 @@ pre.code::-webkit-scrollbar-thumb {
   gap: 18px;
 }
 
+/* Two by two, not three and a stray.
+ *
+ * The design's four steps are laid out `flex: 1 1 180px` in a 640px column,
+ * which packs three onto the first row and leaves the fourth running the
+ * whole width underneath — a row of cards and then a banner. A grid of two
+ * makes the four read as four. */
 .welcome .steps {
   width: 100%;
   max-width: 640px;
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sp-3);
 }
 .welcome .step {
-  flex: 1 1 180px;
   min-width: 0;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -2426,6 +2625,32 @@ pre.code::-webkit-scrollbar-thumb {
 .tip[data-open="true"] {
   opacity: 1;
   transform: none;
+}
+
+/* A bar, a chart column or a bar segment that carries its own reading says so
+ * on approach. Without a cursor change a tooltip on a 6px band is a thing
+ * nobody discovers, and every one of these is the only place the number
+ * behind the proportion is written down. */
+.support-bar .seg[data-tip],
+.mix-row[data-tip],
+.month[data-tip],
+.bar[data-tip] {
+  cursor: help;
+}
+.mix-row[data-tip]:hover,
+.month[data-tip]:hover {
+  background: var(--soft);
+  border-radius: var(--r-2);
+}
+/* Keyboard parity: these are focusable so the tip is reachable without a
+ * pointer, and a focus ring is what says they are. */
+.support-bar .seg:focus-visible,
+.mix-row:focus-visible,
+.month:focus-visible,
+.bar:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: var(--r-1);
 }
 
 /* The Graph card: a coloured dot and a title, then label/value rows. */
@@ -4005,6 +4230,36 @@ td.why .copyfield {
     --t-body: 13px;
   }
 
+  /* One column on a phone: two 180px cards side by side at 390px leaves a
+   * four-word title on three lines. */
+  .welcome .steps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The actions come after the sentence that says what the page is, not
+   * between it and the title. On a phone the header row wraps, so `Adopt
+   * existing .semlith` and `Index a folder` landed above the subtitle and the
+   * page read title, two buttons, then an explanation of what they were for.
+   *
+   * `display: contents` lifts the title row's children into the header's own
+   * column so they can be ordered against the subtitle, which is their
+   * sibling rather than their cousin. */
+  .page-head .line {
+    display: contents;
+  }
+  .page-head > .subtitle {
+    order: 1;
+  }
+  .page-head .line > .actions {
+    order: 2;
+    margin-top: var(--sp-2);
+  }
+  /* The spacer exists to push the actions to the far end of a row that no
+   * longer exists here, and an empty flex child in a column is a blank line. */
+  .page-head .line > .spacer {
+    display: none;
+  }
+
   .graph-frame {
     height: 280px;
   }
@@ -4373,6 +4628,18 @@ td.row-end {
   border-bottom: 1px solid var(--line-soft);
   margin-bottom: var(--sp-4);
 }
+
+/* The answer beside the two questions that follow from it, as the v4 page
+ * lays it out. `auto-fit` rather than a breakpoint, so the columns collapse
+ * on the width of this block and not on the width of the window — which
+ * carries a sidebar whose width is itself a state. */
+.impact-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: var(--sp-4);
+  align-items: start;
+  min-width: 0;
+}
 .impact-subject {
   font-family: var(--mono);
   font-size: var(--t-body);
@@ -4563,11 +4830,20 @@ td.row-end {
   overflow-y: auto;
   border-left: 1px solid var(--line);
 }
+/* Both panels keep their own height and the column scrolls past them.
+ *
+ * Without this the Map's own height — one row per community, and a large
+ * store has dozens — shrank the selection rail above it to a few pixels in
+ * the flex column. The rail overflows visibly by design, so what it drew was
+ * the selected symbol, its callers and its callees painted straight over the
+ * map underneath, with the rail's own buttons at the bottom of the page. */
 .graph-side .graph-rail {
+  flex-shrink: 0;
   border-left: 0;
   overflow-y: visible;
 }
 .map-panel {
+  flex-shrink: 0;
   padding: var(--sp-4h);
   border-top: 1px solid var(--line);
 }
@@ -4631,6 +4907,10 @@ td.row-end {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: var(--sp-3);
   margin-bottom: var(--sp-4);
+  /* Each card is as tall as what it holds, the way the design's panel cluster
+   * is. Stretched to the tallest, the language mix and the month chart ran a
+   * third of their height as empty card. */
+  align-items: start;
 }
 .health-card {
   display: flex;
@@ -4821,33 +5101,159 @@ td.row-end {
   color: var(--muted);
 }
 
-/* Reports: five cards and one preview under them. */
-.report-card .filters {
-  gap: var(--sp-1);
+/* Reports: a row of types to choose from, then the builder and the preview
+ * side by side. The type cards are the selection, so the selected one carries
+ * the ink border the design gives a chosen card rather than a tick. */
+.report-types {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(264px, 1fr));
+  gap: var(--sp-3);
 }
-.report-preview {
-  min-height: 4rem;
-}
-.report-text {
-  font-family: var(--mono);
-  font-size: var(--t-small);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 0;
-  max-height: 32rem;
-  overflow-y: auto;
-}
-
-/* The Cloud page's three rows and its two command blocks. */
-.cloud-rows {
+.report-type {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
+  text-align: left;
+  padding: var(--sp-3h) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-4);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  min-width: 0;
+  transition: border-color var(--d-fade) var(--e-in-out), background var(--d-fade) var(--e-in-out);
+}
+.report-type:hover {
+  border-color: var(--blue);
+}
+.report-type.on {
+  border-color: var(--ink);
+  background: var(--blue-soft);
+}
+.report-type .name {
+  font-weight: 600;
+  font-size: var(--t-body);
+}
+.report-type .what {
+  color: var(--muted);
+  font-size: var(--t-small-h);
+  text-wrap: pretty;
+}
+.report-type .for-whom {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--ink-2);
+}
+
+.report-builder {
+  gap: var(--sp-3);
+}
+.report-builder .titles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.report-builder .eyebrow {
+  margin-top: var(--sp-1);
+}
+
+/* The preview is a document in a frame: a bar naming the file, the text, and
+ * a line saying how big it is. No padding on the card itself, because each of
+ * the three has its own. */
+.report-preview-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+/* Both bars hold their height. In a flex column with a tall `<pre>` between
+ * them the default `flex-shrink: 1` squeezed the top bar to a few pixels and
+ * clipped the file name and both controls out of the card. */
+.report-preview-card .report-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding: var(--sp-3) var(--sp-3h);
+  border-bottom: 1px solid var(--line);
+}
+.report-preview-card .report-bar .name {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+/* The copy control on this bar is the only way to take the text, so it is not
+ * one of the ones that appears on hover, and it carries the word rather than
+ * the icon because it sits beside Export and the two are a pair. */
+.report-preview-card .report-bar .copy {
+  opacity: 1;
+  width: auto;
+  height: 28px;
+  padding: 0 var(--sp-3);
+}
+.report-preview-card .foot {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  background: var(--soft);
+  padding: var(--sp-2h) var(--sp-3h);
+}
+.report-text {
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  line-height: var(--lh-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: var(--sp-4);
+  background: var(--bg);
+  max-height: 22rem;
+  overflow: auto;
+  min-height: 4rem;
+}
+
+/* The Cloud page's three rows and its two command blocks. */
+/* The design holds this page to 780px: it is prose and two commands, and a
+ * sentence that runs the width of a 1 440px display is not read, it is
+ * skimmed. The head is capped with the card so the two edges line up. */
+.cloud-page > .page-head,
+.cloud-page > .subtitle,
+.cloud-page > .card {
+  max-width: 780px;
+}
+
+.cloud-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3h);
   margin-bottom: var(--sp-4);
 }
 .cloud-row {
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
   line-height: var(--lh-prose);
+}
+.cloud-row .lead {
+  font-weight: 600;
+  font-size: var(--t-body-sm);
+}
+.cloud-row .what {
+  color: var(--muted);
+  font-size: var(--t-body-sm);
+  text-wrap: pretty;
+}
+.cloud-foot {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  margin-top: var(--sp-4);
+  font-size: var(--t-body-sm);
+  color: var(--muted);
 }
 .cloud-block {
   margin-bottom: var(--sp-3);
