@@ -175,10 +175,43 @@ impl Daemon {
     /// test asks for the run here and reads it back from `/api/index/log`,
     /// which is exactly what the page does.
     fn index_run(&self, path: &Path) -> u64 {
-        let body = format!(
-            "{{\"path\":{}}}",
+        self.index_run_into("api", path)
+    }
+
+    /// Index a path into a named store.
+    ///
+    /// The store is named because from 0.26.0 a request that names none puts
+    /// the path in the store `home::resolve` picks for it, which for a folder
+    /// outside every existing root is a new store of its own (#120). These
+    /// tests are about a run inside one store, so they say which.
+    fn index_run_into(&self, store: &str, path: &Path) -> u64 {
+        // A folder outside the store's roots joins it by being made one,
+        // which is the documented way and the one the boundary allows
+        // (#120). Before 0.26.0 the index route did this silently for
+        // whatever it was handed, which is what made the boundary check
+        // unable to refuse anything.
+        let adopt = format!(
+            "{{\"store\":{},\"root\":{}}}",
+            serde_json::to_string(store).unwrap(),
             serde_json::to_string(&path.display().to_string()).unwrap()
         );
+        // The store may not exist yet — this is often the call that makes
+        // it. When the adopt cannot land, the path is posted with no store
+        // named and `home::resolve` gives it one, which for `work/api` is
+        // the `api` this helper's callers then read runs from.
+        let adopted = self.post("/api/root", &adopt).status == 200;
+        let body = if adopted {
+            format!(
+                "{{\"store\":{},\"path\":{}}}",
+                serde_json::to_string(store).unwrap(),
+                serde_json::to_string(&path.display().to_string()).unwrap()
+            )
+        } else {
+            format!(
+                "{{\"path\":{}}}",
+                serde_json::to_string(&path.display().to_string()).unwrap()
+            )
+        };
         let answer = self.post("/api/index", &body);
         assert_eq!(answer.status, 200, "{}", answer.body);
         let started = answer.json();

@@ -2305,8 +2305,10 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(
             403,
             &format!(
-                "outside the boundary for store {}: {}. A path must be under one of the store's \
-                 registered roots, under the store's own directory, or under your home directory.",
+                "outside the boundary for store {}: {}. A path must be under one of that \
+                 store's registered roots, or under the store's own directory when it is a \
+                 `.semlith` beside its corpus. Add it as a root first, or post no store and \
+                 let the path have one of its own.",
                 store.name,
                 outside.join(", ")
             ),
