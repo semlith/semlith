@@ -3226,7 +3226,9 @@ def _(d):
         what="the selected report to generate",
     )
     first = d.eval("document.querySelector('.report-text').textContent")
-    d.click_text(".report-type", "Index health")
+    # The card's own text is its name, its blurb and its reader run together,
+    # so the name is what is matched; the click bubbles to the card.
+    d.click_text(".report-type .name", "Index health")
     d.wait_for(
         "((document.querySelector('.report-text') || {}).textContent || '')"
         " !== %s" % json.dumps(first),

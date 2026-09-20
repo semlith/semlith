@@ -9081,7 +9081,10 @@ async function reportsView() {
     { class: "view" },
     pageHead(
       "Reports",
-      "Turn the ledger, the index and the graph into a file someone else can read. Generated locally, exported as a file you own.",
+      // The v4 sub-line, with the claim 0.26.0's wording made and the design's
+      // does not. A report is built from the ledger, and a page that offers to
+      // export one has to say where it goes.
+      "Turn the ledger, the index and the graph into a file someone else can read. Generated locally and exported as a file you own. Nothing leaves the machine.",
       { pill: el("span", { class: "mono-chip", text: "semlith_report" }) },
     ),
     picker,
