@@ -343,12 +343,7 @@ fn what_an_image_query_scores() {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            println!(
-                "  {:<24} {:.6}  {}",
-                name,
-                hit.score,
-                hit.lists.join("+")
-            );
+            println!("  {:<24} {:.6}  {}", name, hit.score, hit.lists.join("+"));
         }
     }
 }

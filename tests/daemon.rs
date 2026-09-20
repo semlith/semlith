@@ -1983,7 +1983,10 @@ fn the_index_route_refuses_a_path_outside_the_boundary_and_keeps_the_roots() {
     );
     let started = accepted.json();
     let store = started["runs"][0]["store"].as_str().unwrap_or_default();
-    assert_ne!(store, "api", "the folder joined an unrelated store: {started}");
+    assert_ne!(
+        store, "api",
+        "the folder joined an unrelated store: {started}"
+    );
 }
 
 /// A forwarded `semlith_index` says how the skipped divide up, exactly as the
