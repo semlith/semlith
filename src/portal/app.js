@@ -38,6 +38,64 @@ function appended(node, ...kids) {
   return node;
 }
 
+/* What a page shows while its first request is in flight.
+ *
+ * The mark is a four-by-four grid of cells, five of them amber, so the wait
+ * is the mark assembling itself rather than the word "Loading…" on an empty
+ * page. Sixteen spans and one keyframe: no image to fetch, nothing to
+ * animate in JavaScript, and it inherits the theme because the cells are
+ * painted with the same two tokens everything else uses.
+ *
+ * The cells are indexed so the stylesheet can stagger them along the
+ * diagonal, and the five the real mark paints amber carry `hot`, so what
+ * assembles is this product's mark and not a generic spinner.
+ */
+const LOADER_HOT = new Set([1, 6, 7, 9, 14]);
+
+function loadingView(what) {
+  const cells = [];
+  for (let i = 0; i < 16; i++) {
+    cells.push(el("span", { class: LOADER_HOT.has(i) ? "cell hot" : "cell", "data-i": String(i) }));
+  }
+  return el(
+    "div",
+    { class: "view loading", role: "status", "aria-live": "polite" },
+    el("div", { class: "mark", "aria-hidden": "true" }, cells),
+    el("span", { class: "what", text: what ? `Reading ${what.toLowerCase()}…` : "Reading…" }),
+    el("span", { class: "track" }, el("span", { class: "run" })),
+  );
+}
+
+/* The second stage of a wait: the shape of what is coming.
+ *
+ * The page-wide loader covers the view's own request. A panel that fetches
+ * after the page has drawn — the graph's health cards, the map, the agents
+ * list — is a second wait, and it used to be a line of grey text where a
+ * card was about to be. A skeleton says how much is coming and stops the
+ * layout jumping when it lands.
+ *
+ * `widths` are percentages, one per line, so a skeleton of a list of names
+ * does not look like a skeleton of a paragraph.
+ */
+function skeleton(...widths) {
+  return el(
+    "div",
+    { class: "skel", "aria-hidden": "true" },
+    widths.map((width) => {
+      const line = el("span", { class: "line" });
+      line.style.width = `${width}%`;
+      return line;
+    }),
+  );
+}
+
+/** `rows` skeleton lines of alternating length, for a list of unknown size. */
+function skeletonRows(rows) {
+  const widths = [];
+  for (let i = 0; i < rows; i++) widths.push([92, 78, 85, 64][i % 4]);
+  return skeleton(...widths);
+}
+
 /** Replace an element's children. */
 function fill(node, ...kids) {
   node.replaceChildren();
@@ -1962,7 +2020,7 @@ async function graphView() {
           open = !open;
           toggle.setAttribute("aria-expanded", String(open));
           if (!open) return fill(nested);
-          fill(nested, el("div", { class: "rail-hint", text: "Loading…" }));
+          fill(nested, skeletonRows(2));
           let all;
           try {
             all = await api(
@@ -2032,7 +2090,7 @@ async function graphView() {
   }
 
   async function select(node) {
-    fill(rail, el("div", { class: "rail-hint", text: "Loading…" }));
+    fill(rail, skeletonRows(6));
     let data;
     try {
       data = await api(scoped(`/api/neighbors?name=${encodeURIComponent(node.name)}`));
@@ -3085,7 +3143,7 @@ function agentsCard() {
       onclick: () => go("agents"),
     }),
   );
-  fill(body, el("div", { class: "rail-hint", text: "Asking the daemon…" }));
+  fill(body, skeletonRows(3));
 
   api("/api/agents")
     .then((data) => {
@@ -5160,7 +5218,11 @@ function healthPanel() {
   const node = el(
     "div",
     { class: "health" },
-    el("section", { class: "health-card" }, el("div", { class: "rail-hint", text: "Reading the graph…" })),
+    // Three cards are coming, so three cards of skeleton: the read is a
+    // scan of every call edge and on a large store it is a second or two.
+    el("section", { class: "health-card" }, skeletonRows(5)),
+    el("section", { class: "health-card" }, skeletonRows(4)),
+    el("section", { class: "health-card" }, skeletonRows(6)),
   );
   let rows = [];
 
@@ -5223,10 +5285,42 @@ function healthPanel() {
         months.set(one.month, (months.get(one.month) || 0) + one.chunks);
       }
     }
-    top.sort((a, b) => b.edges - a.edges);
-    const carrying = languages.filter((row) => row.extracted || row.resolved || row.ambiguous);
-    const byFiles = [...languages].sort((a, b) => b.files - a.files).slice(0, 8);
-    const filesTotal = languages.reduce((sum, row) => sum + row.files, 0) || 1;
+    /* Across the corpus, not per store.
+     *
+     * The coverage rows arrive one per store per language, and drawn straight
+     * they made a list that read `rust · rust · markdown · markdown · rust`,
+     * with the same name three times and no way to tell the rows apart. The
+     * page is about what this machine holds, so the languages are summed the
+     * way the design sums them, and each row names the stores behind it. The
+     * same applies to the unresolved names: one call target reached from two
+     * stores is one name, not two rows. */
+    const merge = (into, key, row, fields) => {
+      const at = into.get(key) || { ...row, stores: new Set() };
+      if (into.has(key)) for (const field of fields) at[field] = (at[field] || 0) + (row[field] || 0);
+      at.stores.add(row.store);
+      into.set(key, at);
+      return at;
+    };
+    const perLanguage = new Map();
+    for (const row of languages) {
+      merge(perLanguage, row.language, row, [
+        "files",
+        "definitions",
+        "extracted",
+        "resolved",
+        "ambiguous",
+        "unresolved",
+        "unparsed",
+      ]);
+    }
+    const merged = [...perLanguage.values()];
+    const perName = new Map();
+    for (const one of top) merge(perName, one.name, { ...one, store: one.store || "" }, ["edges"]);
+    const topNames = [...perName.values()].sort((a, b) => b.edges - a.edges);
+
+    const carrying = merged.filter((row) => row.extracted || row.resolved || row.ambiguous);
+    const byFiles = [...merged].sort((a, b) => b.files - a.files).slice(0, 8);
+    const filesTotal = merged.reduce((sum, row) => sum + row.files, 0) || 1;
     const monthRows = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-12);
     const peak = Math.max(1, ...monthRows.map(([, count]) => count));
     const monthTotal = monthRows.reduce((sum, [, count]) => sum + count, 0);
@@ -5247,7 +5341,10 @@ function healthPanel() {
                   {
                     class: "mix-row",
                     tabindex: "0",
-                    "data-tip": `${row.language} · ${n(row.files)} file${row.files === 1 ? "" : "s"} · ${share(row.files, filesTotal)} of ${n(filesTotal)} indexed · store ${row.store}`,
+                    "data-tip": `${row.language} · ${n(row.files)} file${row.files === 1 ? "" : "s"} · ${share(
+                      row.files,
+                      filesTotal,
+                    )} of ${n(filesTotal)} indexed · ${[...row.stores].sort().join(", ")}`,
                   },
                   el("span", { class: "k", text: row.language }),
                   el("span", { class: "meter" }, sized("width", row.files / filesTotal)),
@@ -5307,17 +5404,22 @@ function healthPanel() {
           el("div", { class: "fact" }, el("span", { class: "v", text: n(several) }), el("span", { class: "k", text: "names with several definitions" })),
           el("div", { class: "fact" }, el("span", { class: "v", text: `${carrying.length} of ${languages.length}` }), el("span", { class: "k", text: "languages carrying edges" })),
         ),
-        top.length
+        topNames.length
           ? el(
               "div",
               { class: "mix" },
-              top.slice(0, 5).map((one) =>
+              topNames.slice(0, 5).map((one) =>
                 el(
                   "div",
                   {
                     class: "mix-row",
                     tabindex: "0",
-                    "data-tip": `${one.name} · ${n(one.edges)} call${one.edges === 1 ? "" : "s"} reach a name this store holds no definition for`,
+                    "data-tip": `${one.name} · ${n(one.edges)} call${
+                      one.edges === 1 ? "" : "s"
+                    } reach a name no store here holds a definition for · ${[...one.stores]
+                      .filter(Boolean)
+                      .sort()
+                      .join(", ") || "this store"}`,
                   },
                   el("span", { class: "k", text: one.name }),
                   el("span", { class: "v", text: `${n(one.edges)} edge${one.edges === 1 ? "" : "s"}` }),
@@ -8354,7 +8456,7 @@ function welcomeView() {
  * because the rail is about whichever node is selected and this is about the
  * store, so selecting a node must not wipe it. */
 function mapPanel() {
-  const body = el("div", { class: "map-body" }, el("div", { class: "rail-hint", text: "Grouping…" }));
+  const body = el("div", { class: "map-body" }, skeletonRows(4));
   const shown = el("div", { class: "map-shown" });
 
   (async () => {
@@ -9509,7 +9611,7 @@ async function render() {
   paintRunCount();
 
   const mine = ++renderGeneration;
-  fill(shell.main, el("div", { class: "view" }, el("p", { class: "subtitle", text: "Loading…" })));
+  fill(shell.main, loadingView(view.title));
   try {
     const node = await (RENDER[view.id] || RENDER.stores)();
     if (mine !== renderGeneration) return;

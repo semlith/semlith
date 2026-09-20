@@ -2343,6 +2343,142 @@ pre.code::-webkit-scrollbar-thumb {
   overflow-wrap: anywhere;
 }
 
+/* ------------------------------------------------------------- loading */
+
+/* The wait, as the mark assembling itself.
+ *
+ * Every page here opens on a request, so this is the first thing a reader
+ * sees on all thirteen of them, and it used to be the word "Loading…" at the
+ * top left of an empty page. Sixteen cells in the mark's own four-by-four
+ * grid, five of them the mark's amber, lighting along the diagonal.
+ *
+ * Nothing is fetched and nothing is scripted: one keyframe and a nth-child
+ * delay. The resting state of that keyframe is every cell at full opacity,
+ * which is what a reader with `prefers-reduced-motion` sees, because the
+ * reset above collapses the duration rather than removing the animation. */
+.loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  flex-grow: 1;
+  min-height: 60vh;
+}
+
+.loading .mark {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  width: 64px;
+  height: 64px;
+}
+
+.loading .cell {
+  border-radius: 3px;
+  background: var(--blue);
+  opacity: 0.18;
+  animation: semlithAssemble 1.6s var(--e-in-out) infinite;
+}
+.loading .cell.hot {
+  background: var(--accent);
+}
+
+/* Along the diagonal: the delay is the row plus the column, so the wave
+ * crosses the mark corner to corner rather than sweeping line by line. */
+.loading .cell[data-i="0"] { animation-delay: 0ms; }
+.loading .cell[data-i="1"], .loading .cell[data-i="4"] { animation-delay: 90ms; }
+.loading .cell[data-i="2"], .loading .cell[data-i="5"], .loading .cell[data-i="8"] { animation-delay: 180ms; }
+.loading .cell[data-i="3"], .loading .cell[data-i="6"], .loading .cell[data-i="9"],
+.loading .cell[data-i="12"] { animation-delay: 270ms; }
+.loading .cell[data-i="7"], .loading .cell[data-i="10"], .loading .cell[data-i="13"] { animation-delay: 360ms; }
+.loading .cell[data-i="11"], .loading .cell[data-i="14"] { animation-delay: 450ms; }
+.loading .cell[data-i="15"] { animation-delay: 540ms; }
+
+@keyframes semlithAssemble {
+  0%,
+  70% {
+    opacity: 0.18;
+    transform: scale(0.82);
+  }
+  25% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.loading .what {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+/* An indeterminate bar, because the page cannot know how long a store takes
+ * to answer and a progress bar that invents a number is a lie. */
+.loading .track {
+  width: 160px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--line);
+  overflow: hidden;
+}
+.loading .track .run {
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: 1px;
+  background: var(--blue);
+  animation: semlithSlide 1.4s var(--e-in-out) infinite;
+}
+
+@keyframes semlithSlide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+/* The second stage: the shape of what is coming, where it is coming.
+ *
+ * A sheen crossing a block rather than a block that blinks — a pulse reads
+ * as something wrong, a sheen reads as something on its way. Under
+ * `prefers-reduced-motion` the reset above collapses the duration and what
+ * is left is a plain grey block, which is exactly the right resting state. */
+.skel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2h);
+  width: 100%;
+  min-width: 0;
+}
+.skel .line {
+  height: 11px;
+  border-radius: var(--r-1);
+  background: linear-gradient(
+    90deg,
+    var(--chip) 0%,
+    var(--line-soft) 40%,
+    var(--chip) 80%
+  );
+  background-size: 300% 100%;
+  animation: semlithSheen 1.5s var(--e-linear) infinite;
+}
+
+@keyframes semlithSheen {
+  0% {
+    background-position: 140% 0;
+  }
+  100% {
+    background-position: -40% 0;
+  }
+}
+
 /* -------------------------------------------------------------- welcome */
 
 .welcome {
