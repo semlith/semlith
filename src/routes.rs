@@ -1627,6 +1627,13 @@ fn about(state: &Arc<State>) -> Response {
         "target": format!("{} · {}", std::env::consts::ARCH, std::env::consts::OS),
         "bind": format!("127.0.0.1:{}", state.server.port()),
         "revisions": crate::mcp::SUPPORTED,
+        // From the manifest rather than a string in this file, so the page and
+        // the crates.io listing cannot come to disagree about the licence.
+        "license": env!("CARGO_PKG_LICENSE"),
+        // Whether this daemon is recording retrievals. The sidebar states it on
+        // every page, the way the design's daemon card does, and asking
+        // `/api/ledger` for one boolean would carry the whole ledger with it.
+        "ledger": state.ledger,
         "port": state.server.port(),
         "pid": std::process::id(),
         "uptime": daemon::uptime(state),
@@ -2131,6 +2138,18 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
     let kind = kind.to_string();
     let format = request.query("format").unwrap_or("markdown").to_string();
     let model = request.query("model").unwrap_or("Sonnet 5").to_string();
+    // Refused rather than defaulted. The savings report is a figure in money,
+    // and a model nobody prices used to come back priced at Sonnet 5 under
+    // Sonnet 5's name, so the caller could not tell it had been ignored.
+    if crate::report::price_named(&model).is_none() {
+        return Response::error(
+            400,
+            &format!(
+                "no prices for model {model:?} — this binary prices {}",
+                crate::report::price_names()
+            ),
+        );
+    }
     let only = request.query_all("store");
     // The body is text of whichever format was asked for, wrapped in JSON so
     // one route answers every format and the page can show a report before

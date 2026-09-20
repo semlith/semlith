@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-09-21
+
+### The portal, opened beside the design it was built from
+
+0.26.0 shipped the v4 design's structure — its tokens, its thirteen pages, its
+two nav groups — but the result was never driven end to end in a browser
+against the reference file. This release is that pass. Every page was opened in
+a real browser at seven widths in both themes, every control on every page was
+clicked, and what follows is what that found.
+
+**The first-run screen is complete.** It now carries the version beside the
+mark, all four of the design's steps rather than three, the sentence that says
+queries are recorded to a local file in that store and never leave the machine,
+and a way to adopt a store that already exists — on the one screen whose whole
+job is getting a first store open. Its footer names the address *and the port*
+actually bound, because "loopback only" is a claim the reader cannot check
+without the port. "Skip for now" lands on Stores, which is the page it is
+skipping ahead to, rather than on About.
+
+**The routes the design draws between pages are there.** "See what is actually
+inside the index", at the foot of the Stores table, which is the question that
+table raises and never answered. "Build a report", in the Retrieval ledger's
+header. "Chunks it lives in", beside "Blast radius" on the Graph rail, so
+reading the text of a selected symbol no longer means retyping its name into
+Search. And "Replay first-run screen" under the daemon card: without it, that
+screen was reachable only by emptying the registry.
+
+**The Graph page's right column was painting over itself.** The Map's own
+height — one row per community — shrank the selection rail above it to a few
+pixels in the flex column, and the rail overflows visibly by design, so a
+selected symbol, its callers and its callees rendered straight over the map
+underneath, with the rail's buttons stranded at the bottom of the page.
+
+**Reports is the page the design draws.** One picker of five reports, a builder
+for the one chosen, and the preview it produced, with Copy and Export on the
+preview's own bar. It was five cards each carrying its own Generate and its own
+row of four format buttons — twenty-five controls for five reports, above a
+preview that could have been about any of them.
+
+**`--model opus_5` priced at Sonnet 5 and said so.** The report generator
+matched a model by its display name only and fell back to the first price on no
+match, so a slug was accepted, ignored, and the resulting figure in money was
+labelled with the wrong model. Model names now resolve however they are
+punctuated, and a name this binary does not price is refused by `semlith report`
+and by `/api/report` with the three that would have worked.
+
+**The browser's own paragraph margin was a second spacing system.** Blocks
+written as a `<p>` carried 13px above and below on top of whatever gap their
+card already set, and blocks written as a `<div>` carried none — so the same
+note sat differently on two cards for no reason anybody had chosen.
+
+Also: the About page states which MCP revisions this binary speaks and the
+licence it ships under, and its 46-language table is full width under the two
+columns rather than inside one, which was cutting the model table beside it off
+mid-row; the daemon card says whether the ledger is recording; Impact lays its
+answer beside the path finder and Trace rather than stacked a metre wide; the
+Cloud page is held to the design's measure and its reasons are a title over an
+explanation; Privacy carries the fifth verification step, the one that reads the
+ledger as what it is — a table in a file on this disk; the cards on Inside the
+index are as tall as what they hold; a store's roots on a phone are truncated
+from the front rather than broken into eight-character pieces down the cell; a
+page header on a phone puts its buttons after the sentence that says what the
+page is, not between it and the title; and the Stores strip says "read by 1
+reader".
+
+### Documented
+
+`docs/portal.md` gains the three pages 0.26.0 added and never documented —
+Impact, Reports and Cloud — and its page order, its navigation table and two
+headings now match what the sidebar says.
+
+### Gated
+
+`tests/drive` gains a `6.x` block: the first-run screen's contents, each of the
+three new routes, the About facts, the daemon card, the Reports picker and
+preview, and two sweeps that had no gate before — every page at seven widths
+with no horizontal scroll, and every page read for console errors.
+
+Nothing in the retrieval path, the index writer or the graph extractor changed,
+and the 0.25.0 figures reproduce.
+
 ## [0.26.0] - 2026-09-20
 
 ### The whole portal, free, in the binary
@@ -2880,7 +2961,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.26.1...HEAD
+[0.26.1]: https://github.com/semlith/semlith/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/semlith/semlith/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/semlith/semlith/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/semlith/semlith/compare/v0.23.0...v0.24.0

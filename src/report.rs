@@ -68,13 +68,43 @@ pub const FORMATS: [&str; 4] = ["markdown", "csv", "json", "html"];
 /// than one they can argue with.
 pub const PRICES: [(&str, f64); 3] = [("Sonnet 5", 3.0), ("Opus 5", 15.0), ("Haiku 4.5", 1.0)];
 
-/// The price of a model by name, or the first one.
-pub fn price_of(model: &str) -> (&'static str, f64) {
+/// A model name reduced to what is worth comparing: letters and digits only,
+/// folded to lower case. `Opus 5`, `opus-5` and `opus_5` are one model, and a
+/// caller that has the slug should not price at the wrong one for punctuation.
+fn key_of(model: &str) -> String {
+    model
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The price of a model by name, if it is one this binary prices.
+///
+/// Separate from [`price_of`] because a caller taking the name from a user has
+/// to be able to refuse an unknown one: this is a cost in money, and a
+/// spelling nobody prices must not quietly come back as the default's figure
+/// under the default's name.
+pub fn price_named(model: &str) -> Option<(&'static str, f64)> {
+    let wanted = key_of(model);
     PRICES
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(model))
+        .find(|(name, _)| key_of(name) == wanted)
         .copied()
-        .unwrap_or(PRICES[0])
+}
+
+/// The price of a model by name, or the first one.
+pub fn price_of(model: &str) -> (&'static str, f64) {
+    price_named(model).unwrap_or(PRICES[0])
+}
+
+/// The three names, for an error message that says what would have worked.
+pub fn price_names() -> String {
+    PRICES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Seconds since the epoch, for the one stamp a report carries.

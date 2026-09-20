@@ -3084,3 +3084,194 @@ def _(d):
                 fail("%s did not render in the %s theme" % (title, theme))
             d.shot("5.11-%s-%s" % (theme, view))
     d.eval("document.documentElement.removeAttribute('data-theme')")
+
+
+# ---------------------------------------------------------------- 0.26.1
+#
+# The 6.x block is the 2026-09-21 design-parity drive: the portal opened page
+# by page beside `Semlith Portal v4.dc.html` and driven at seven widths. Where
+# the 5.x checks assert that a page exists, these assert that it says what the
+# design says and that nothing on it is out of reach.
+
+
+def open_welcome(d):
+    """The first-run screen, which is not a view and has no sidebar.
+
+    `open_view` waits for a heading inside the shell; this screen replaces the
+    shell entirely, so it is navigated to and awaited by its own heading.
+    """
+    d.navigate("%s/?token=%s#welcome" % (d.portal_url, d.token))
+    d.wait_for(
+        "(() => { const h = document.querySelector('#root h1');"
+        " return !!h && (h.textContent || '').trim() === 'No stores yet'; })()",
+        what="the first-run screen's heading",
+    )
+    d.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
+
+
+@finding("6.1", "the first-run screen carries everything the v4 lockup and card carry")
+def _(d):
+    """0.26.0 shipped this screen with the version, one step, the ledger
+    sentence and the route into adopting a store all missing, and with a
+    footer that named the address without the port it was serving on."""
+    open_welcome(d)
+    body = view_text(d)
+    about = d.api("/api/about")
+
+    version = text_of(d, ".welcome .lockup .ver", "the version beside the mark")
+    want("the version beside the mark", version, "v" + about["version"])
+
+    steps = d.eval("document.querySelectorAll('.welcome .step').length")
+    if steps != 4:
+        fail("the first-run screen draws %d steps, and the v4 design draws 4" % steps)
+
+    if "--no-ledger" not in body:
+        fail(
+            "the first-run screen does not say the ledger records locally. It is on by "
+            "default, so the screen that introduces the product is where that is said."
+        )
+    if "Adopt an existing .semlith" not in body:
+        fail(
+            "the first-run screen offers no way to adopt a store that already exists, "
+            "so the one screen whose job is to open a first store offers only one way"
+        )
+
+    host = d.eval("location.host")
+    foot = text_of(d, ".welcome .foot", "the first-run footer")
+    if host not in foot:
+        fail(
+            "the footer reads %r and does not name %s. 'loopback only' is a claim the "
+            "reader cannot check without the port." % (foot, host)
+        )
+
+
+@finding("6.2", "Skip for now lands on Stores")
+def _(d):
+    """It went to About, which is the page about the binary rather than the
+    page the reader was skipping ahead to."""
+    open_welcome(d)
+    d.click_text(".welcome button", "Skip for now")
+    d.wait_for(
+        "(location.hash || '') === '#stores'",
+        what="Skip for now to land on Stores",
+    )
+
+
+@finding("6.3", "the Stores table offers the way into what the index holds")
+def _(d):
+    d.open_view("stores")
+    label = "See what is actually inside the index"
+    if label not in view_text(d):
+        fail("the Stores table has no route into Inside the index")
+    d.click_text(".table-follow", label)
+    d.wait_for("(location.hash || '') === '#index'", what="the route into Inside the index")
+
+
+@finding("6.4", "the Retrieval ledger offers the way into Reports")
+def _(d):
+    d.open_view("ledger")
+    if "Build a report" not in view_text(d):
+        fail("the Retrieval ledger header has no route into Reports")
+    d.click_text(".page-head button", "Build a report")
+    d.wait_for("(location.hash || '') === '#reports'", what="the route into Reports")
+
+
+@finding("6.5", "About states the MCP revisions and the licence")
+def _(d):
+    d.open_view("about")
+    body = view_text(d)
+    about = d.api("/api/about")
+    for revision in about.get("revisions") or []:
+        if revision not in body:
+            fail(
+                "the About page does not state MCP revision %s, which this binary "
+                "negotiates" % revision
+            )
+    if about["license"] not in body:
+        fail("the About page does not state the licence the binary ships under")
+
+
+@finding("6.6", "the sidebar states whether the ledger is recording, and offers the first run again")
+def _(d):
+    d.open_view("stores")
+    card = text_of(d, "#daemon-stores", "the daemon card's second line")
+    recording = (d.api("/api/about")).get("ledger") is not False
+    want("the daemon card's ledger state", "ledger on" in card, recording)
+    if "Replay first-run screen" not in view_text(d):
+        fail(
+            "the sidebar offers no way back to the first-run screen, so once a store "
+            "exists the page that explains the product is unreachable"
+        )
+
+
+@finding("6.7", "Reports previews the one report that is selected")
+def _(d):
+    """The page used to be five cards each with its own Generate button and one
+    preview under them all, so the preview could be showing any of the five."""
+    d.open_view("reports")
+    types = d.eval("document.querySelectorAll('.report-type').length")
+    if types != 5:
+        fail("the Reports picker offers %d report types, expected 5" % types)
+    d.wait_for(
+        "((document.querySelector('.report-text') || {}).textContent || '').length > 40",
+        what="the selected report to generate",
+    )
+    first = d.eval("document.querySelector('.report-text').textContent")
+    d.click_text(".report-type", "Index health")
+    d.wait_for(
+        "((document.querySelector('.report-text') || {}).textContent || '')"
+        " !== %s" % json.dumps(first),
+        what="the preview to follow the selected report",
+    )
+    name = text_of(d, ".report-preview-card .report-bar .name", "the preview's file name")
+    if not name.endswith(".md"):
+        fail("the preview names %r, which is not the chosen Markdown format" % name)
+    d.click_text(".report-builder .chip", "CSV")
+    d.wait_for(
+        "(document.querySelector('.report-preview-card .report-bar .name').textContent || '')"
+        ".endsWith('.csv')",
+        what="the format chip to change the file written",
+    )
+
+
+@finding("6.8", "no page scrolls sideways, at any width the design supports")
+def _(d):
+    """A control pushed off the right edge is a control nobody can reach, and
+    the page scrollbar that comes with it makes every page feel broken. Seven
+    widths, because 0.26.0 was verified at one."""
+    widths = [390, 430, 820, 1024, 1280, 1440, 1920]
+    views = list(cdp.Drive.VIEW_TITLES)
+    bad = []
+    try:
+        for width in widths:
+            d.set_viewport(width, 844 if width < 600 else 900, mobile=width < 600)
+            for view in views:
+                d.open_view(view, fresh=True)
+                time.sleep(0.4)
+                seen = d.eval(
+                    "({page: document.documentElement.scrollWidth,"
+                    " vw: document.documentElement.clientWidth})"
+                )
+                # One pixel of slack: a fractional layout width rounds up and
+                # is not a horizontal scrollbar.
+                if seen["page"] > seen["vw"] + 1:
+                    bad.append("%s at %dpx scrolls to %dpx" % (view, width, seen["page"]))
+    finally:
+        d.reset_viewport()
+    if bad:
+        fail("pages scroll sideways: %s" % "; ".join(bad))
+
+
+@finding("6.9", "no page writes an error to the browser console")
+def _(d):
+    """A console error is a defect a screenshot cannot show. 0.26.0 was never
+    read for them, so this reads every page for them once."""
+    bad = []
+    for view in cdp.Drive.VIEW_TITLES:
+        d.clear_console()
+        d.open_view(view, fresh=True)
+        time.sleep(0.6)
+        for line in d.console_errors():
+            bad.append("%s: %s" % (view, line))
+    if bad:
+        fail("the console carried errors: %s" % "; ".join(bad[:8]))
