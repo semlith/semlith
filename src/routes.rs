@@ -70,7 +70,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         #[cfg(debug_assertions)]
         (true, _, "/api/panic") => panic!("the route that exists to panic, panicking"),
 
-        (true, _, "/api/stores") => stores(state),
+        (true, _, "/api/stores") => stores(state, request),
         (true, _, "/api/files") => files(state, request),
         (true, _, "/api/search") => search(state, request),
         (true, _, "/api/brief") => brief(state, request),
@@ -147,7 +147,13 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
 // ---------------------------------------------------------------- reads
 
 /// Every open store, what it holds, and whether it is being kept current.
-fn stores(state: &Arc<State>) -> Response {
+fn stores(state: &Arc<State>, request: &Request) -> Response {
+    // Per-language coverage is a scan of every call edge with a lookup per
+    // edge, and this route is polled by every page that shows a store count.
+    // Only the page that draws the table asks for it: with it on every poll
+    // the Stores page fell far enough behind that the browser drive caught a
+    // row still describing a store whose directory had already gone.
+    let want_coverage = request.query("coverage") == Some("1");
     // Before the fleet, because it may add to what the fleet has to cover. A
     // store the CLI wrote while this daemon was running is registered and not
     // open, and this is the read that notices — which is what makes `semlith
@@ -196,7 +202,11 @@ fn stores(state: &Arc<State>) -> Response {
                     // absent edge and a file the parser gave up on are
                     // different problems and a store-wide percentage hides
                     // both.
-                    store::coverage_by_language(s.db()).unwrap_or_default(),
+                    if want_coverage {
+                        store::coverage_by_language(s.db()).unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    },
                 )
             });
 

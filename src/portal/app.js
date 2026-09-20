@@ -4644,17 +4644,30 @@ function egoGraph(name, data) {
  */
 function coveragePanel() {
   const node = el("div", { class: "rows" });
+  // Its own fetch, and only this page makes it: the figures are a scan of
+  // every call edge, so the shared poll must not carry them to every page
+  // that happens to want a store count.
+  let rows = [];
+  async function refresh() {
+    try {
+      const data = await api("/api/stores?coverage=1");
+      rows = data.stores || [];
+    } catch {
+      rows = [];
+    }
+    paint();
+  }
   function paint() {
-    const rows = [];
-    for (const store of state.stores || []) {
+    const coverage = [];
+    for (const store of rows) {
       for (const row of store.coverage || []) {
         if (!row.definitions && !row.files) continue;
-        rows.push({ store: store.name, ...row });
+        coverage.push({ store: store.name, ...row });
       }
     }
     fill(
       node,
-      rows.length
+      coverage.length
         ? dataTable({
             className: "w-coverage",
             caption:
@@ -4662,7 +4675,7 @@ function coveragePanel() {
             sort: "files",
             dir: "desc",
             perPage: 10,
-            rows,
+            rows: coverage,
             columns: [
               { key: "store", label: "Store", className: "meta narrow-drop", value: (r) => r.store, render: (r) => r.store },
               { key: "language", label: "Language", value: (r) => r.language, render: (r) => r.language },
@@ -4704,7 +4717,8 @@ function coveragePanel() {
     );
   }
   paint();
-  return { node, paint };
+  refresh();
+  return { node, paint: refresh };
 }
 
 /* The Index page.
