@@ -254,15 +254,15 @@ results, so asking for eight hits inside a subdirectory gets the eight best hits
 hits in the repository. Patterns are SQLite `GLOB`, so `*` crosses `/` and
 matching ignores case, and a filter that selects no indexed file says so rather
 than reporting that nothing in the corpus matched. Naming several stores
-searches all of them at once: every hit says which store it came from, `-k` is
-global rather than per store, and merging happens on rank rather than on
-distance, so nothing compares two models' numbers.
+searches all at once: every hit says which store it came from, `-k` is global,
+and merging happens on rank, so nothing compares two models' numbers.
 
 semlith reads the shape of what you typed before it ranks anything. One token of
-identifier characters weights the keyword half twice; anything else is read as a
-question and leaves the two level, and every answer says which it decided.
-`--prefer code` lifts implementation over the prose about it — a bias, not a
-filter.
+identifier characters weights the keyword half twice; anything else is a
+question, and a question is rescored — a local 38 MB cross-encoder reads query
+and candidate **together**, which fusion never does, and its order is fused
+with the fused one. `stats` says which ranking answered, `SEMLITH_RERANK=off`
+turns it off, and `--prefer code` lifts implementation over prose about it.
 
 ## The code graph
 
@@ -412,7 +412,9 @@ all, since it is a ZIP archive the binary check would reject.
 Thirteen formats have a reader of their own, and where one has divisions a line
 number cannot express, a marker line names the slide, sheet or cell. Everything
 else is read as UTF-8, in line-aligned chunks of up to 800 characters with two
-lines of overlap.
+lines of overlap. What the model is *shown* is more — a Markdown chunk carries
+its heading path, a code chunk the definition it sits inside — while the stored
+bytes stay the file's; an upgrade that changes that re-embeds the store once.
 
 ## How it works
 
@@ -461,11 +463,9 @@ of these drifts from its source:
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one search across three stores | **1 query embed**, ~39 MB per extra store | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
-| `tools/list` | **4 441 bytes**, ~1 111 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
-| retrieval, on 30 sealed questions of 107 | **hit@1 73 %, hit@3 80 %, hit@8 83 %**, identifiers **12 of 12** in the top three, wrong-yes **0** | the same |
-| the same binary, on the 77 it was tuned against | hit@1 70 %, hit@3 80 %, hit@8 84 % | the same |
-| 0.22.0, same corpus, instrument and split | sealed hit@1 73 %, hit@3 80 %, hit@8 90 % | the same |
-| one answered question, `brief` against search-then-read | **1.00 calls vs 2.61**, 1 934 tokens vs 696 | the same |
+| `tools/list` | **4 473 bytes**, ~1 119 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
+| retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 28/30, hit@8 29/30** against the previous release's 25/27/28 on the same split, identifiers **12 of 12** in the top three, wrong-yes **0** | the same |
+| one answered question, `brief` against search-then-read | **1.00 calls vs 2.54**, 1 112 tokens vs 725 | the same |
 | call-edge resolution | **62 %** settled | the same |
 | the macOS arm64 binary | **116 679 872 bytes** (111.3 MiB) | `ls -l target/release/semlith` |
 | the Linux glibc floor | **GLIBC_2.34** | `objdump -T semlith runtime/libonnxruntime.so` |
@@ -491,8 +491,8 @@ at. Query latency does grow: the index scan is linear.
   `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.
 - Search filters are SQLite `GLOB`: no regex, though a leading `!` excludes.
   `--lang` maps a fixed table of extensions and never reads contents.
-- Results are not reranked by a cross-encoder, multi-store search is a merge
-  rather than a joint ranking, and reverse reachability is not part of it.
+- Rescoring reads one store's own list, so multi-store search is still a merge
+  rather than a joint ranking, and a machine with no rescoring model says so.
 - Nothing goes looking for stores on the filesystem, nothing is code-signed,
   there is no ARM64 Windows or Intel macOS build, and `semlith upgrade` only
   replaces a binary in `~/.semlith/bin`.
