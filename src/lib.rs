@@ -1033,10 +1033,6 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
-    /// The cross-encoder, once a query has needed it. `None` until then, and
-    /// `None` for ever on a machine whose cache does not hold it — the stage
-    /// is skipped rather than fetched from inside a query.
-    reranker: Option<fastembed::TextRerank>,
     /// The embedder's own tokenizer, for counting rather than estimating.
     tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
@@ -1130,7 +1126,6 @@ impl Semlith {
             clip: image::Clip::default(),
             generation,
             quiet: false,
-            reranker: None,
             boundary: Boundary::default(),
         })
     }
@@ -1268,33 +1263,6 @@ impl Semlith {
             self.embedder = Some(self.model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?);
         }
         Ok(self.embedder.as_mut().unwrap())
-    }
-
-    /// The cross-encoder, loaded on the first query that can use it.
-    ///
-    /// `None` rather than an error when the model is not in the cache: the
-    /// stage is an improvement on an answer semlith can already give, and a
-    /// search that failed because a reranker was missing would be a worse
-    /// product than one that ranks by fusion alone. `semlith setup` fetches
-    /// it and `semlith doctor` says whether it is there, so the silence has
-    /// somewhere to be reported.
-    fn reranker(&mut self) -> Option<&mut fastembed::TextRerank> {
-        if self.reranker.is_none() {
-            let cache = model_cache_dir().ok()?;
-            if !rerank::cached(&cache) {
-                return None;
-            }
-            match rerank::load(&cache, self.quiet) {
-                Ok(model) => self.reranker = Some(model),
-                Err(e) => {
-                    if !self.quiet {
-                        eprintln!("the rescoring model did not load, ranking by fusion alone: {e}");
-                    }
-                    return None;
-                }
-            }
-        }
-        self.reranker.as_mut()
     }
 
     /// Pay the model-load and index-warmup cost up front, so the first query
@@ -3022,11 +2990,18 @@ impl Semlith {
             let head = hits.len().min(rerank::RERANK_DEPTH);
             let texts: Vec<String> = hits[..head]
                 .iter()
-                .map(|(hit, _)| format!("{}\n{}", hit.path, hit.text))
+                .map(|(hit, _)| {
+                    let text: String = hit.text.chars().take(rerank::RERANK_CHARS).collect();
+                    format!("{}\n{text}", hit.path)
+                })
                 .collect();
             let quiet = self.quiet;
-            if let Some(model) = self.reranker() {
-                match rerank::order(model, query, &texts) {
+            let cache = model_cache_dir().unwrap_or_default();
+            let order = rerank::with(&cache, quiet, |model| {
+                model.map(|model| rerank::order(model, query, &texts))
+            });
+            if let Some(order) = order {
+                match order {
                     Ok(order) if order.len() == head => {
                         // Fused with the order it is reordering, not replacing
                         // it.

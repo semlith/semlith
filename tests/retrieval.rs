@@ -211,7 +211,10 @@ fn the_retrieval_metrics_are_measured() {
                 "off — the model is not in the cache".to_string()
             }
         } else {
-            format!("off — {}=off", semlith::rerank::RERANK_ENV)
+            format!(
+                "off, which is the default — {}=on turns it on",
+                semlith::rerank::RERANK_ENV
+            )
         }
     );
 

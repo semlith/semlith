@@ -68,26 +68,77 @@ pub const RERANK_FILES: &[(&str, &str)] = &[
 
 /// How many candidates the cross-encoder reads.
 ///
-/// The stage is quadratic in nothing and linear in this, and the population it
-/// exists for — a satisfying span at rank four to eight — is inside the first
-/// handful. Fifty is deep enough to hold every one of them and shallow enough
-/// to stay inside the latency budget on the reference laptop.
-pub const RERANK_DEPTH: usize = 50;
+/// Linear in this, and measured: the stage costs about 8 ms a candidate on the
+/// reference laptop, so a window of fifty is a quarter-second added to every
+/// search — twenty times what the search itself costs. The population it
+/// exists for is a satisfying span at rank four to eight, which is inside the
+/// first dozen, so the window is the smallest one that holds it.
+pub const RERANK_DEPTH: usize = 12;
 
-/// Turn the stage off for a run: `SEMLITH_RERANK=off`.
+/// How much of a candidate the model reads.
 ///
-/// An ablation switch, not a preference. What the stage bought is measured by
-/// running the same questions with it on and off, and a stage that can only be
-/// measured by rebuilding the binary is a stage nobody measures.
+/// A transformer's cost grows faster than linearly in sequence length, and a
+/// chunk is at most 800 characters of which the first few hundred carry the
+/// subject. Truncating is what keeps the stage's cost a function of the window
+/// rather than of whichever chunk happened to be longest.
+pub const RERANK_CHARS: usize = 320;
+
+/// Turn the stage on for a run: `SEMLITH_RERANK=on`.
+///
+/// Off by default, and this is a measurement rather than caution. On the
+/// reference laptop a search over one store takes 8.2 ms; with this stage over
+/// twelve candidates it takes 132.2 ms. What that buys, on the development
+/// seventy-seven, is two questions at k=1 and one at k=3 — worth having when
+/// an answer matters more than a tenth of a second, and not worth making every
+/// agent's every search sixteen times slower by default.
+///
+/// So it is a switch a person turns on knowingly, and the numbers on both
+/// sides are in the release notes rather than in a footnote. It is also the
+/// ablation switch: what the stage buys is measured by running the same
+/// questions with it on and off.
 pub const RERANK_ENV: &str = "SEMLITH_RERANK";
 
 /// Whether the stage is on for this process.
 #[must_use]
 pub fn enabled() -> bool {
-    !matches!(
+    matches!(
         std::env::var(RERANK_ENV).ok().as_deref(),
-        Some("off" | "0" | "false")
+        Some("on" | "1" | "true")
     )
+}
+
+/// The one cross-encoder this process has.
+///
+/// Held here rather than on `Semlith`, and this is a measurement rather than a
+/// preference: a reader with three stores open built three of them and cost
+/// 123 MB per extra store, which `measure_multi_store_search` catches by
+/// asserting that an extra store cannot cost what a second copy of a model
+/// would. The model has nothing to do with a store — it reads a query and a
+/// string — so one per process is what it should always have been.
+static SHARED: std::sync::OnceLock<std::sync::Mutex<Option<TextRerank>>> =
+    std::sync::OnceLock::new();
+
+/// Run `f` against the shared cross-encoder, loading it on first use.
+///
+/// `None` is passed when the model is not in the cache or would not load: the
+/// stage is an improvement on an answer semlith can already give, so a search
+/// ranks by fusion alone rather than failing. The lock serialises rescoring
+/// across threads, which is correct for one ONNX session and is why the window
+/// is small.
+pub fn with<T>(cache: &Path, quiet: bool, f: impl FnOnce(Option<&mut TextRerank>) -> T) -> T {
+    let cell = SHARED.get_or_init(|| std::sync::Mutex::new(None));
+    let mut held = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if held.is_none() && cached(cache) {
+        match load(cache, quiet) {
+            Ok(model) => *held = Some(model),
+            Err(e) => {
+                if !quiet {
+                    eprintln!("the rescoring model did not load, ranking by fusion alone: {e}");
+                }
+            }
+        }
+    }
+    f(held.as_mut())
 }
 
 /// Load the cross-encoder from the model cache, fetching it if it is absent.

@@ -61,14 +61,14 @@ fn the_stage_switches_off_to_the_fused_order() {
         .index_paths(&[work.path().to_path_buf()], |_, _| {})
         .unwrap();
 
-    // SAFETY: one test process, one variable, read inside this call only.
-    unsafe { std::env::set_var(semlith::rerank::RERANK_ENV, "off") };
+    // Off is the default, so this is the shipped path.
     assert!(!semlith::rerank::enabled());
     let off = order_of(&mut semlith, "how does the client wait between attempts");
     let again = order_of(&mut semlith, "how does the client wait between attempts");
     assert_eq!(off, again, "the fused order is not deterministic");
 
-    unsafe { std::env::remove_var(semlith::rerank::RERANK_ENV) };
+    // SAFETY: one test process, one variable, read inside these calls only.
+    unsafe { std::env::set_var(semlith::rerank::RERANK_ENV, "on") };
     assert!(semlith::rerank::enabled());
     let on = order_of(&mut semlith, "how does the client wait between attempts");
     let on_again = order_of(&mut semlith, "how does the client wait between attempts");

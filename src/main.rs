@@ -1734,8 +1734,9 @@ fn run() -> Result<()> {
                     "ranking  {}",
                     if !semlith::rerank::enabled() {
                         format!(
-                            "fusion alone — rescoring switched off by {}=off",
-                            semlith::rerank::RERANK_ENV
+                            "fusion alone — {}=on adds {}, at about 124 ms a search",
+                            semlith::rerank::RERANK_ENV,
+                            semlith::rerank::RERANK_NAME
                         )
                     } else if semlith::rerank::cached(&cache) {
                         format!("fusion, then {}", semlith::rerank::RERANK_NAME)

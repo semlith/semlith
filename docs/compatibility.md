@@ -355,10 +355,12 @@ The store's `meta` table carries a `format_version` key, written by 0.6.0 and
 later. A store without the key is format 1 — every store written before 0.6.0,
 read as-is, with no migration and nothing rewritten.
 
-| Format | Vectors live in | Written by |
+| Format | What it says about the store | Written by |
 |---|---|---|
-| 1 | one `index.tv` | 0.1.0 through 0.6.0 |
-| 2 | an `index/` directory of fixed-size shards | 0.7.0 and later |
+| 1 | vectors in one `index.tv` | 0.1.0 through 0.6.0 |
+| 2 | vectors in an `index/` directory of fixed-size shards | 0.7.0 through 0.21.0 |
+| 3 | Markdown chunks cut at their headings, embedded with the heading path in front | 0.22.0 through 0.24.0 |
+| 4 | code chunks embedded with the definition they sit inside | 0.25.0 and later |
 
 A binary that opens a store whose `format_version` is higher than the format it
 knows refuses it, naming both numbers, rather than reading it as best it can.
@@ -414,6 +416,34 @@ because symbols cannot be recovered from chunk text alone. A store written by
 0.12.0 opens under 0.11.0 and searches exactly as it did before; the extra
 tables sit there unread. Both directions were run against the released 0.11.0
 binary rather than asserted here.
+
+### 0.25.0 moves the number, and re-embeds once
+
+Format 4 says what the embedding model was *shown*, which is the other thing a
+format number is for: a store whose code chunks were embedded without their
+enclosing definition and one whose chunks were embedded with it hold vectors
+that mean slightly different things, and nothing about the rows says which.
+Half a store each way ranks its own files against each other unevenly, and that
+is silent — the same failure mode the shard layout has, arriving through the
+vectors rather than through the file layout.
+
+So the first full index pass under 0.25.0 re-chunks and re-embeds everything it
+walks, whether or not the files changed, and moves the format row at the end of
+a pass that swept the whole store. A pass over one directory leaves the rest on
+the old rule and the row stays where it was, because moving it would be a claim
+about files the run never looked at. The run says on its first line that it is
+re-indexing and why. Nothing a store indexed is touched.
+
+**Forwards:** a store written by 0.22.0 through 0.24.0 opens under 0.25.0,
+searches, and answers exactly as it did until that pass; it is not migrated on
+open. **Backwards:** 0.24.0 and earlier refuse a format-4 store by name, which
+is the break this number exists to make. Rolling back therefore means
+re-indexing under the older binary, and the release notes say so.
+
+The rescoring model is not part of any of this. It is read at query time from
+the model cache and never written into a store, so a store searched with it and
+a store searched without it are the same store, and `semlith stats` says which
+ranking answered.
 
 ### 0.13.0 adds an images table and a second vector directory
 

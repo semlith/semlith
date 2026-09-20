@@ -38,14 +38,18 @@ itself, so each one is verified as it is read rather than after the fact.
 
 A cross-encoder, 37 M parameters, int8, Apache-2.0. It reads the query and a
 candidate together and reorders the head of the fused list; it embeds nothing
-and adds no candidates, so a store's vectors do not depend on it. Searches run
-without it — by fusion alone — when it is not in the cache, and `semlith stats`
-and `semlith doctor` both say which of the two is happening.
+and adds no candidates, so a store's vectors do not depend on it.
 
-`semlith setup` fetches it beside the embedding model so that a query never
-pauses to download one. `SEMLITH_RERANK=off` switches the stage off for a
-process, which is how its contribution is measured: the same binary and the
-same store, once each way.
+**It is off unless you turn it on**, with `SEMLITH_RERANK=on`, and the reason
+is measured: a search over one store takes 8.2 ms, and 132.2 ms with this stage
+over twelve candidates. What that buys is two questions at k=1 and one at k=3
+of seventy-seven. Worth it when an answer matters more than a tenth of a
+second; not worth making every agent's every search sixteen times slower by
+default.
+
+`semlith setup` fetches it beside the embedding model so that turning it on
+never pauses a query to download one, and `semlith stats` and `semlith doctor`
+both say which ranking a search used.
 
 - Repository: [`jinaai/jina-reranker-v1-turbo-en`](https://huggingface.co/jinaai/jina-reranker-v1-turbo-en)
 - Commit: [`b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2`](https://huggingface.co/jinaai/jina-reranker-v1-turbo-en/tree/b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2)

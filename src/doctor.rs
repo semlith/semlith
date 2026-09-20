@@ -194,18 +194,25 @@ pub fn privacy_findings(stores: &[(String, PathBuf)]) -> Vec<Finding> {
         id: "rescoring model",
         ok: true,
         check: match (rerank_cached, rerank_off) {
-            (_, true) => format!(
-                "switched off for this process by {}=off; searches rank by fusion alone",
+            (true, true) => format!(
+                "{} is in {} and off; {}=on rescores, at about 124 ms a search",
+                crate::rerank::RERANK_NAME,
+                cache.display(),
                 crate::rerank::RERANK_ENV
             ),
             (true, false) => format!(
-                "{} is in {}, pinned at {}",
+                "{} is on, pinned at {}",
                 crate::rerank::RERANK_NAME,
-                cache.display(),
                 &crate::rerank::RERANK_REVISION[..12]
             ),
+            (false, true) => format!(
+                "{} is not in {} and the stage is off, which is the default",
+                crate::rerank::RERANK_NAME,
+                cache.display()
+            ),
             (false, false) => format!(
-                "{} is not in {}; searches rank by fusion alone until it is fetched",
+                "{}=on but {} is not in {}; searches rank by fusion alone until `semlith setup` fetches it",
+                crate::rerank::RERANK_ENV,
                 crate::rerank::RERANK_NAME,
                 cache.display()
             ),

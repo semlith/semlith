@@ -15,18 +15,18 @@ The sealed thirty, scored once by the release binary at completion, median of
 three runs with zero spread, beside the previous release's binary on the same
 split and the same corpus:
 
-| | 0.23.0 | 0.25.0 |
-|---|---|---|
-| hit@8 | 28 / 30 | **29 / 30** |
-| hit@3 | 27 / 30 | **28 / 30** |
-| hit@1 | 25 / 30 | 24 / 30 |
+| | 0.23.0 | 0.25.0 | 0.25.0, `SEMLITH_RERANK=on` |
+|---|---|---|---|
+| hit@8 | 28 / 30 | **29 / 30** | 29 / 30 |
+| hit@3 | 27 / 30 | **27 / 30** | 28 / 30 |
+| hit@1 | 25 / 30 | 24 / 30 | 24 / 30 |
 
 Identifiers are 12 of 12 in the top three and wrong-yes is 0, both asserted by
 the run rather than read off it. The gate this release was held to — hit@8 at
-least 27, hit@3 at least 26 — is met and was not re-baselined. The aim stated
-at planning was 30 of 30 at k=8; it came one question short, and that question
-is `concept-portal-parity`, whose answer is spanned in `AGENTS.md` and which
-the ranking still does not return.
+least 27, hit@3 at least 26 — is met by the shipped default and was not
+re-baselined. The aim stated at planning was 30 of 30 at k=8; it came one
+question short, and that question is `concept-portal-parity`, whose answer is
+spanned in `AGENTS.md` and which the ranking still does not return.
 
 hit@1 is one question below the previous release. It is stated rather than
 gated because on a concept question it measures the span file: several chunks
@@ -50,6 +50,21 @@ The sealed thirty were redrawn from the audited set with a new seed, and the
 draw now lives in the harness with a test that fails if `split.yaml` is not
 what the seed produces.
 
+### Rescoring, and why it is off
+
+There is a rescoring stage now: a local 37 M-parameter cross-encoder, int8,
+Apache-2.0, pinned by digest, that reads the query and a candidate **together**
+— which fusion never does, since fusion compares positions — and whose order is
+fused with the fused one, so a candidate has to be liked by both.
+
+It is off unless `SEMLITH_RERANK=on`, and the reason is the measurement beside
+it: a search over one store takes **8.2 ms**, and **132.2 ms** with the stage
+over twelve candidates. What that buys on the development seventy-seven is two
+questions at k=1 and one at k=3. Worth having when one answer matters more than
+a tenth of a second; not worth making every agent's every search sixteen times
+slower by default. `semlith setup` fetches the model so that turning it on
+never pauses a query, and `stats` and `doctor` say which ranking answered.
+
 ### What was tried, and what was kept
 
 Every mean is a pair: three runs a side, one binary, `git diff -- src/` clean
@@ -62,9 +77,8 @@ between them. On the development seventy-seven, in the order they were tried:
 - **A cross-encoder writing the order outright** — 59/67/71 → 59/67/71. It
   moved sixteen questions and gained nothing: rank 7 to rank 1 for one, rank 1
   to rank 6 for another. **Not kept.**
-- **The same cross-encoder fused with the fused order**, by the reciprocal-rank
-  rule the lists themselves use, so a candidate has to be liked by both —
-  59/67/71 → **61/68/71**. **Kept.**
+- **The same cross-encoder fused with the fused order** — 59/67/71 →
+  **61/68/71**. **Kept, behind the switch above.**
 - **A deeper candidate pool for questions**, 32 → 50 — identical at every depth
   on the 51 questions both runs scored, and four questions slightly worse.
   **Not kept.**
@@ -102,10 +116,6 @@ first full index pass, because what the model is shown has changed and a store
 half embedded each way ranks its own files unevenly. The run says why it is
 doing it. Nothing you indexed is touched, and the store format moves to 4; an
 older binary refuses a format-4 store by name rather than misreading it.
-
-`semlith setup` fetches the rescoring model, 38 MB, pinned by digest, from the
-same cache as the embedding model. A machine that does not have it ranks by
-fusion alone and says so on `stats` and `doctor`.
 
 ## [0.24.0] - 2026-09-19
 

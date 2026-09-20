@@ -259,10 +259,10 @@ and merging happens on rank, so nothing compares two models' numbers.
 
 semlith reads the shape of what you typed before it ranks anything. One token of
 identifier characters weights the keyword half twice; anything else is a
-question, and a question is rescored — a local 38 MB cross-encoder reads query
-and candidate **together**, which fusion never does, and its order is fused
-with the fused one. `stats` says which ranking answered, `SEMLITH_RERANK=off`
-turns it off, and `--prefer code` lifts implementation over prose about it.
+question, and `SEMLITH_RERANK=on` gives a question a second opinion — a local
+38 MB cross-encoder reads query and candidate **together**, which fusion never
+does. Two more questions of 77 at k=1, and 8.2 ms becomes 132 ms a search, so
+it is off by default. `--prefer code` lifts implementation over prose.
 
 ## The code graph
 
@@ -461,10 +461,10 @@ of these drifts from its source:
 | peak RSS, at 1 229 / 9 893 / 104 816 chunks | **600 / 637 / 595 MB** | `cargo test --release --test measure -- --ignored --nocapture` |
 | edit on disk to searchable | **under 5 s** | the same |
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
-| one search across three stores | **1 query embed**, ~39 MB per extra store | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
 | `tools/list` | **4 473 bytes**, ~1 119 tokens, thirteen tools | `cargo test --release --test retrieval -- --ignored` |
-| retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 28/30, hit@8 29/30** against the previous release's 25/27/28 on the same split, identifiers **12 of 12** in the top three, wrong-yes **0** | the same |
+| retrieval, on 30 sealed questions of 107 | **hit@1 24/30, hit@3 27/30, hit@8 29/30** against the previous release's 25/27/28 on the same split, identifiers **12 of 12** in the top three, wrong-yes **0** | the same |
+| one search over one store, rescoring off / on | **8.2 ms** / 132.2 ms | `cargo test --release --test measure -- --ignored` |
 | one answered question, `brief` against search-then-read | **1.00 calls vs 2.54**, 1 112 tokens vs 725 | the same |
 | call-edge resolution | **62 %** settled | the same |
 | the macOS arm64 binary | **116 679 872 bytes** (111.3 MiB) | `ls -l target/release/semlith` |
@@ -491,8 +491,8 @@ at. Query latency does grow: the index scan is linear.
   `SEMLITH_DEFAULT_IGNORES=0` indexes them anyway.
 - Search filters are SQLite `GLOB`: no regex, though a leading `!` excludes.
   `--lang` maps a fixed table of extensions and never reads contents.
-- Rescoring reads one store's own list, so multi-store search is still a merge
-  rather than a joint ranking, and a machine with no rescoring model says so.
+- Rescoring is off by default and reads one store's own list, so multi-store
+  search is still a merge rather than a joint ranking.
 - Nothing goes looking for stores on the filesystem, nothing is code-signed,
   there is no ARM64 Windows or Intel macOS build, and `semlith upgrade` only
   replaces a binary in `~/.semlith/bin`.
