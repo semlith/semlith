@@ -42,6 +42,8 @@ pub mod mcp;
 pub mod pattern;
 pub mod portal;
 pub mod proxy;
+pub mod replay;
+pub mod report;
 pub mod rerank;
 pub mod routes;
 /// The daemon as a login service, so a client never finds nothing.
@@ -167,6 +169,17 @@ impl Shape {
         match (self, list) {
             (Self::Identifier, "keyword") => STEEP,
             (Self::Question, "vector") => STEEP,
+            // The image list is steep for the same reason, and its absence
+            // here was the whole of #122. CLIP is exact about a query that
+            // describes a picture and vague about anything else, which is the
+            // shape this curve is for — and the floor above is what decides
+            // which of the two a given match is. Measured on the four-shape
+            // fixture before the change: "a red circle" scored parse.rs at
+            // 0.093317 (vector at the steep 12 plus keyword at 60) and
+            // red-circle.png at 0.049180 (3 / 61), so the image could not
+            // reach a passing text chunk however confident CLIP was. The
+            // weight below carries the confidence; this carries the curve.
+            (_, "image") => STEEP,
             _ => RRF_K,
         }
     }
@@ -347,6 +360,13 @@ type Candidate = (((bool, u64), f32), Vec<&'static str>);
 /// graph. An image can be found by one, which is what
 /// [`Semlith::search_ranked`] weighs a confident image match against.
 const TEXT_LISTS: f32 = 3.0;
+
+/// What an image below [`IMAGE_FLOOR`] is worth in the fusion.
+///
+/// Small enough that a weak image scores about what it did before the list
+/// was given the steep curve, so #122's fix moved the confident case and
+/// nothing else.
+const WEAK_IMAGE: f32 = 0.25;
 
 /// The CLIP cosine above which an image match is treated as a confident one.
 ///
@@ -2797,20 +2817,24 @@ impl Semlith {
         let image_list: Vec<(u64, f32)> = images
             .iter()
             .map(|(id, similarity)| {
-                // A confident image match stands in for the three lists a
-                // chunk can appear in: an image can only ever be found by this
-                // one, and the graph list is derived from the other two, so a
-                // chunk collects three contributions for what is really one
-                // match. Without this weight a picture could never place above
-                // a passing text match however well CLIP matched it.
+                // A confident image match stands in for the lists a chunk
+                // can appear in: an image can only ever be found by this one,
+                // and a chunk collects a contribution from each of the
+                // others. Without this weight a picture could never place
+                // above a passing text match however well CLIP matched it.
                 //
                 // Below the floor the image is a weak candidate rather than a
-                // wrong one, so it keeps a single list's weight and sits where
-                // that puts it instead of being dropped.
+                // wrong one, so it sits where that puts it instead of being
+                // dropped — and because the list's curve is now steep for
+                // every shape (#122), the weak weight is a fraction rather
+                // than 1.0, so an unconfident image scores what it scored
+                // before: 0.25 / 13 = 0.019 at rank one, against 1 / 61 =
+                // 0.016 under the old flat curve. The order among the
+                // also-rans is unchanged; only the confident case moved.
                 let weight = if *similarity >= image_floor() {
                     TEXT_LISTS
                 } else {
-                    1.0
+                    WEAK_IMAGE
                 };
                 (*id, weight)
             })

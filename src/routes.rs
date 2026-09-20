@@ -38,6 +38,13 @@ const DERIVED_SORT_MAX: i64 = 20_000;
 /// portal-parity rule asks for: the page shows the rows the CLI prints.
 const LEDGER_ROWS: usize = 200;
 
+/// How many sessions the ledger page's table reads at once.
+///
+/// It pages in the browser over what this returns rather than re-querying
+/// per page: a session row is a few numbers, and a round trip per page of a
+/// local table is a round trip for nothing.
+const LEDGER_SESSIONS: usize = 500;
+
 /// How deep the Files route will page.
 ///
 /// The cost of an offset is paid before the page is cut: every open store is
@@ -86,6 +93,13 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/symbol") => symbol(state, request),
         (true, _, "/api/neighbors") => neighbors(state, request),
         (true, _, "/api/path") => shortest_path(state, request),
+        (true, _, "/api/impact") => impact(state, request),
+        (true, _, "/api/trace") => trace(state, request),
+        (true, _, "/api/map") => map(state, request),
+        (true, _, "/api/report") => report(state, request),
+        // Both verbs: a GET reports whether the toggle is on and, when it
+        // is, what the transcripts say; a POST is the toggle itself.
+        (_, _, "/api/ledger/replay") if get || post => replay(request),
         (true, _, "/api/graph") => graph(state, request),
         (true, _, "/api/ledger") => ledger(state),
         (true, _, "/api/image") => image_file(state, request),
@@ -207,39 +221,79 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
                     } else {
                         Vec::new()
                     },
+                    // The two graph-health figures that belong to no
+                    // language: what the graph points at and cannot find,
+                    // and how many names it cannot tell apart. Same reads
+                    // `semlith stats` prints under its coverage table, so
+                    // the page and the terminal cannot disagree.
+                    if want_coverage {
+                        let (top, distinct) =
+                            store::unresolved_targets(s.db(), 5).unwrap_or_default();
+                        let several =
+                            store::names_with_several_definitions(s.db()).unwrap_or_default();
+                        let months = store::chunks_by_month(s.db()).unwrap_or_default();
+                        Some(json!({
+                            "unresolved_top": top
+                                .iter()
+                                .map(|(name, n)| json!({ "name": name, "edges": n }))
+                                .collect::<Vec<_>>(),
+                            "unresolved_names": distinct,
+                            "several_definitions": several,
+                            "months": months
+                                .iter()
+                                .map(|(month, n)| json!({ "month": month, "chunks": n }))
+                                .collect::<Vec<_>>(),
+                        }))
+                    } else {
+                        None
+                    },
                 )
             });
 
         #[allow(clippy::type_complexity)]
-        let (files, chunks, bytes, model, dim, vectors, shards, facets, written, savings, coverage) =
-            match stats {
-                Some((
-                    Ok((f, c, b)),
-                    model,
-                    dim,
-                    len,
-                    shards,
-                    facets,
-                    written,
-                    savings,
-                    coverage,
-                )) => (
-                    f, c, b, model, dim, len, shards, facets, written, savings, coverage,
-                ),
-                _ => (
-                    0,
-                    0,
-                    0,
-                    String::new(),
-                    0,
-                    0,
-                    None,
-                    store::Facets::default(),
-                    None,
-                    None,
-                    Vec::new(),
-                ),
-            };
+        let (
+            files,
+            chunks,
+            bytes,
+            model,
+            dim,
+            vectors,
+            shards,
+            facets,
+            written,
+            savings,
+            coverage,
+            health,
+        ) = match stats {
+            Some((
+                Ok((f, c, b)),
+                model,
+                dim,
+                len,
+                shards,
+                facets,
+                written,
+                savings,
+                coverage,
+                health,
+            )) => (
+                f, c, b, model, dim, len, shards, facets, written, savings, coverage, health,
+            ),
+            _ => (
+                0,
+                0,
+                0,
+                String::new(),
+                0,
+                0,
+                None,
+                store::Facets::default(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            ),
+        };
 
         // The daemon's own counter still wins when it is newer, so a re-embed
         // that has landed in this session shows immediately rather than waiting
@@ -295,6 +349,7 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
                 "unresolved": row.unresolved,
                 "settled": row.settled_share(),
             })).collect::<Vec<_>>(),
+            "health": health,
             "lines": facets.lines,
             "formats": facets.extensions.len(),
             "readers": readers.len(),
@@ -822,6 +877,7 @@ fn ledger(state: &Arc<State>) -> Response {
         // owes the CLI's `semlith ledger --last 20`. Read here rather than
         // from a second route so the tiles and the rows cannot disagree.
         let mut rows: Vec<Value> = Vec::new();
+        let mut sessions: Vec<Value> = Vec::new();
         let mut refunds = 0;
         let mut zero_hit = 0;
         let mut refunds_measured = false;
@@ -849,6 +905,25 @@ fn ledger(state: &Arc<State>) -> Response {
             for (client, count) in store::ledger_clients(store.db())? {
                 *by_client.entry(client).or_default() += count;
             }
+            // One row per session per store, grouped by SQL rather than by
+            // the browser: a page adding up six stores' rows is a second
+            // opinion about a number the store can state.
+            for session in store::ledger_sessions(store.db(), LEDGER_SESSIONS)? {
+                sessions.push(json!({
+                    "session": session.session,
+                    "client": session.client,
+                    "store": label,
+                    "first": session.first,
+                    "last": session.last,
+                    "when": crate::clock::local_stamp(session.last),
+                    "retrievals": session.retrievals,
+                    "zero_hit": session.zero_hit,
+                    "excerpt_tokens": session.excerpt_tokens,
+                    "whole_file_tokens": session.whole_file_tokens,
+                    "net_tokens": session.net,
+                    "tier": session.tier(),
+                }));
+            }
             for row in store::retrievals(store.db(), LEDGER_ROWS)? {
                 rows.push(json!({
                     "at": row.at,
@@ -868,6 +943,8 @@ fn ledger(state: &Arc<State>) -> Response {
         }
         rows.sort_by_key(|row| std::cmp::Reverse(row["at"].as_i64().unwrap_or(0)));
         rows.truncate(LEDGER_ROWS);
+        sessions.sort_by_key(|row| std::cmp::Reverse(row["last"].as_i64().unwrap_or(0)));
+        sessions.truncate(LEDGER_SESSIONS);
         let credited = credited_keys.len() as i64;
         let measured = measured && estimated_keys.is_empty();
         let coverage = if queries == 0 {
@@ -897,6 +974,7 @@ fn ledger(state: &Arc<State>) -> Response {
             "zero_hit": zero_hit,
             "by_client": by_client,
             "rows": rows,
+            "sessions": sessions,
             // Rows written before this version were one per open store, so the
             // figures they contribute to may be over-counted. Said on the page
             // rather than corrected in place: the chain is not rewritten.
@@ -1906,6 +1984,171 @@ fn shortest_path(state: &Arc<State>, request: &Request) -> Response {
     })
 }
 
+/// Everything that reaches one symbol, for the Impact page.
+///
+/// The mirror of `/api/path`, and it takes the same two controls for the same
+/// reason: a caller that crosses a name with several definitions is a guess,
+/// so the default refuses and the page says so when it asks anyway.
+fn impact(state: &Arc<State>, request: &Request) -> Response {
+    let Some(name) = request.query("name") else {
+        return Response::error(400, "missing name");
+    };
+    let name = name.to_string();
+    let kinds = request.query_all("kind");
+    let depth = request
+        .query("depth")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(3)
+        .clamp(1, 10);
+    let only = request.query_all("store");
+    let all_edges = request
+        .query("all_edges")
+        .is_some_and(|v| v == "1" || v == "true");
+    with_fleet(state, json!({ "impact": null }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let impact = fleet.impact_in(only.as_deref(), &name, &kinds, depth, all_edges)?;
+        Ok(json!({
+            "impact": impact,
+            "headline": impact.headline(),
+            "limit": crate::graph::IMPACT_LIMIT,
+        }))
+    })
+}
+
+/// A chain as evidence, for the Trace panel.
+///
+/// Reads the chain `/api/path` would return and the source line behind each
+/// hop, so the panel quotes the store rather than the file on disk — the same
+/// rule `semlith read` follows and for the same reason.
+fn trace(state: &Arc<State>, request: &Request) -> Response {
+    let (Some(from), Some(to)) = (request.query("from"), request.query("to")) else {
+        return Response::error(400, "missing from or to");
+    };
+    let (from, to) = (from.to_string(), to.to_string());
+    let depth = request
+        .query("depth")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(6)
+        .clamp(1, 20);
+    let only = request.query_all("store");
+    let all_edges = request
+        .query("all_edges")
+        .is_some_and(|v| v == "1" || v == "true");
+    with_fleet(state, json!({ "trace": null }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let trace = fleet.trace_in(only.as_deref(), &from, &to, depth, all_edges, &crate::plain)?;
+        Ok(json!({
+            "trace": trace,
+            "evidence": trace.evidence(&crate::plain),
+        }))
+    })
+}
+
+/// The communities the Graph page's Map panel lists.
+///
+/// A list, never a picture: a force layout over a whole corpus is a hairball,
+/// and what a reader wants from it is which subsystems exist and what joins
+/// them, which reads better as rows.
+fn map(state: &Arc<State>, request: &Request) -> Response {
+    let only = request.query_all("store");
+    let shown = request
+        .query("shown")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(crate::graph::COMMUNITIES_SHOWN)
+        .clamp(1, 50);
+    with_fleet(state, json!({ "communities": [] }), move |fleet| {
+        let only = (!only.is_empty()).then_some(only);
+        let (communities, total, edges) = fleet.communities_in(only.as_deref(), shown)?;
+        Ok(json!({
+            "communities": communities,
+            "shown": communities.len(),
+            "total": total,
+            "edges": edges,
+        }))
+    })
+}
+
+/// What the agent did after each answer, from this machine's own transcripts.
+///
+/// Reads nothing unless the Privacy page's toggle is on. A GET reports the
+/// state and, when it is on, the counts; a POST with `{"on": true|false}`
+/// sets it. The refusal is the answer rather than an error: a page asking
+/// "is this on" must be able to hear "no" without a red box.
+fn replay(request: &Request) -> Response {
+    if request.method == "POST" {
+        let body = match request.json() {
+            Ok(b) => b,
+            Err(e) => return Response::error(400, &e.to_string()),
+        };
+        let Some(on) = body.get("on").and_then(Value::as_bool) else {
+            return Response::error(400, "missing on");
+        };
+        let mut saved = home::Settings::load();
+        saved.session_replay = Some(on);
+        if let Err(e) = saved.save() {
+            return Response::error(500, &e.to_string());
+        }
+        return Response::json(&json!({ "enabled": on }));
+    }
+
+    let enabled = home::Settings::load().session_replay.unwrap_or(false);
+    let dir = crate::replay::transcripts_dir().ok();
+    if !enabled {
+        return Response::json(&json!({
+            "enabled": false,
+            "client": crate::replay::CLIENT,
+            "from": dir.map(|d| crate::plain(&d.display().to_string())),
+            "sessions": [],
+        }));
+    }
+    let Some(dir) = dir else {
+        return Response::error(
+            500,
+            "this machine has no home directory to read transcripts from",
+        );
+    };
+    match crate::replay::read(&dir, crate::replay::FILES) {
+        Ok(found) => Response::json(&json!({
+            "enabled": true,
+            "client": found.client,
+            "from": found.from,
+            "skipped": found.skipped,
+            "sessions": found.sessions,
+        })),
+        Err(e) => Response::error(500, &e.to_string()),
+    }
+}
+
+/// One of the five reports, in one of the four formats.
+///
+/// The same bytes `semlith report` writes, from the same generator: the
+/// portal's export is not a second renderer, so a file downloaded from the
+/// page and one written in a terminal are the same file.
+fn report(state: &Arc<State>, request: &Request) -> Response {
+    let Some(kind) = request.query("kind") else {
+        return Response::error(400, "missing kind");
+    };
+    let kind = kind.to_string();
+    let format = request.query("format").unwrap_or("markdown").to_string();
+    let model = request.query("model").unwrap_or("Sonnet 5").to_string();
+    let only = request.query_all("store");
+    // The body is text of whichever format was asked for, wrapped in JSON so
+    // one route answers every format and the page can show a report before
+    // deciding to save it.
+    with_fleet(state, json!({ "report": null }), move |fleet| {
+        let _ = &only;
+        let report = crate::report::generate(fleet, &kind, &model)?;
+        Ok(json!({
+            "kind": report.kind,
+            "title": report.title,
+            "generated": report.generated,
+            "format": format,
+            "text": report.render(&format)?,
+            "report": report,
+        }))
+    })
+}
+
 /// The nodes and edges the Graph page draws.
 ///
 /// Scoped to a store, to a directory, or to one symbol and its neighbourhood —
@@ -1988,10 +2231,14 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     let each = match asked {
         Some("each") => true,
         Some(_) => false,
-        // Several paths and no store named is the case this release exists
-        // for: three folders are three corpora, and putting them in one store
-        // is a choice nobody made.
-        None => paths.len() > 1,
+        // No store named means the path picks its own, through `home::resolve`
+        // — exactly where `semlith index <path>` would have put it. One folder
+        // used to go into whichever store happened to be writable, which is
+        // both a choice nobody made and half of #120: a path landing in an
+        // unrelated store is a path outside that store's roots, and the route
+        // then recorded it as a root to make it fit. Several folders were
+        // already three corpora for the same reason.
+        None => true,
     };
 
     if each {
@@ -2041,10 +2288,36 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(409, &e.to_string()),
     };
 
-    // A folder added to an existing store becomes one of its roots, so the
-    // watcher keeps it current and the boundary lets an agent index into it.
-    // Without this the folder is indexed once and then silently stops being
-    // watched, which is the shape of a bug nobody reports for a month.
+    // The boundary is read *before* the paths are adopted, which is the whole
+    // of #120: adopting first made every posted path a root of the store, so
+    // the check the run then applied could never refuse anything, and the
+    // promise in docs/security.md and docs/compatibility.md was not kept
+    // between 0.20.0 and 0.26.0. A path outside the store's roots, outside
+    // the store's own directory and outside the home directory is refused
+    // here, by name, with the rule that refused it.
+    let roots = home::index_roots(&store.dir);
+    let outside: Vec<String> = paths
+        .iter()
+        .filter(|path| !crate::filter::within_boundary(path, &roots))
+        .map(|path| crate::plain(&path.display().to_string()))
+        .collect();
+    if !outside.is_empty() {
+        return Response::error(
+            403,
+            &format!(
+                "outside the boundary for store {}: {}. A path must be under one of the store's \
+                 registered roots, under the store's own directory, or under your home directory.",
+                store.name,
+                outside.join(", ")
+            ),
+        );
+    }
+
+    // Only now. A folder inside the boundary that is added to an existing
+    // store becomes one of its roots, so the watcher keeps it current and a
+    // later index into it is allowed. Without this the folder is indexed once
+    // and then silently stops being watched, which is the shape of a bug
+    // nobody reports for a month.
     adopt_roots(&store, &paths);
 
     match state.index(&store, paths) {

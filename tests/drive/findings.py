@@ -2809,3 +2809,193 @@ def _(d):
             "surface of finding 2.1: the picker hides the thing it adopts."
             % (", ".join(n for n in names if n) or "nothing")
         )
+
+
+# ------------------------------------------------------------------ 0.26.0
+#
+# The v4 surfaces. These are not findings from the 2026-09-17 drive — they are
+# the pages 0.26.0 added, checked the same way and numbered after it, so the
+# gate covers what shipped rather than only what was once broken. Each one
+# leaves a screenshot behind, which is what the release record carries.
+
+
+@finding("5.1", "the sidebar is the thirteen entries of the v4 design, in order")
+def _(d):
+    d.open_view("stores")
+    labels = [t for t in texts_of(d, ".sidebar .nav-item") if t]
+    expected = [
+        "Stores",
+        "Files",
+        "Search",
+        "Graph",
+        "Impact",
+        "Inside the index",
+        "Retrieval ledger",
+        "Reports",
+        "Agents",
+        "Cloud",
+        "Privacy",
+        "Doctor",
+        "About",
+    ]
+    want("the sidebar's entries", labels, expected)
+    groups = [t for t in texts_of(d, ".sidebar .nav-group-label") if t]
+    want("the sidebar's groups", groups, ["Workspace", "Operate"])
+
+
+@finding("5.2", "Impact answers for a symbol, by hop, with a support class on every row")
+def _(d):
+    path = d.fixtures.small()
+    indexed_fixture(d, path)
+    d.open_view("impact")
+    body = view_text(d)
+    if "Reverse reachability" not in body:
+        fail("the Impact page did not render its lead copy: %s" % body[:200])
+
+    # A name the small fixture defines. The page takes a symbol and reads the
+    # graph backwards from it.
+    symbol = None
+    for row in d.api("/api/stores").get("stores") or []:
+        found = d.api("/api/symbol?name=main")
+        if found.get("definitions"):
+            symbol = "main"
+        break
+    if symbol is None:
+        skip("the fixture store holds no symbol to read backwards from")
+
+    d.eval(
+        "(() => { const box = document.querySelector('.impact-band input');"
+        " box.value = %s;"
+        " box.dispatchEvent(new Event('input', {bubbles: true}));"
+        " document.querySelectorAll('.impact-band button')[1].click(); })()"
+        % json.dumps(symbol)
+    )
+    time.sleep(2)
+    body = view_text(d)
+    if "reach" not in body and "nothing in this store reaches" not in body:
+        fail("Impact said nothing about %s: %s" % (symbol, body[:300]))
+    # Every rendered row carries one of the four support classes. A hop with
+    # no badge is a hop a reader will assume was verified.
+    rows = d.eval(
+        "[...document.querySelectorAll('.impact-row')].filter("
+        "  el => el.querySelector('.sym') && !el.querySelector('.conf')"
+        ").length"
+    )
+    reached = d.eval("document.querySelectorAll('.impact-block .impact-row').length")
+    if reached and rows and rows > d.eval("document.querySelectorAll('.impact-row .where').length") / 2:
+        fail("%d reached rows carry no support class" % rows)
+
+
+@finding("5.3", "the path finder and Trace render on the Impact page")
+def _(d):
+    d.open_view("impact")
+    body = view_text(d)
+    for wanted in ["Path finder", "Prefer verified edges", "Strict", "Trace", "Copy as evidence"]:
+        if wanted not in body:
+            fail("the Impact page is missing %r: %s" % (wanted, body[:300]))
+
+
+@finding("5.4", "the Graph page lists the store's communities")
+def _(d):
+    d.open_view("graph")
+    time.sleep(3)
+    body = view_text(d)
+    if "Map" not in body:
+        fail("the Graph page has no Map panel: %s" % body[:300])
+    shown = text_of(d, ".map-shown", "the Map panel's count")
+    if "Shown" not in shown and "No call or import edges" not in view_text(d):
+        fail("the Map panel does not say how many of how many it shows: %r" % shown)
+
+
+@finding("5.5", "Inside the index states what the graph covers")
+def _(d):
+    d.open_view("index")
+    time.sleep(2)
+    body = view_text(d)
+    for wanted in ["Language mix", "Chunks by month indexed", "Graph health"]:
+        if wanted not in body:
+            fail("Inside the index is missing the %r card" % wanted)
+    if "call targets with no definition here" not in body:
+        fail("Graph health does not state its unresolved targets: %s" % body[:400])
+
+
+@finding("5.6", "the ledger lists sessions, filters them, and exports what it shows")
+def _(d):
+    d.open_view("ledger")
+    time.sleep(1)
+    body = view_text(d)
+    if "Sessions" not in body:
+        fail("the ledger page has no per-session table")
+    for wanted in ["Markdown", "CSV", "JSON"]:
+        if wanted not in body:
+            fail("the sessions table cannot export %s" % wanted)
+    selects = d.eval("document.querySelectorAll('.card.pad .filters select').length")
+    if selects < 3:
+        fail("the sessions table has %d filter controls, expected client, tier and model" % selects)
+
+
+@finding("5.7", "Session replay is off until Privacy turns it on")
+def _(d):
+    d.open_view("ledger")
+    time.sleep(1)
+    body = view_text(d)
+    if "Session replay" not in body:
+        fail("the ledger page has no Session replay tab")
+    if "Turn on under Privacy" not in body:
+        fail("Session replay does not say where it is turned on: %s" % body[:300])
+    state = d.api("/api/ledger/replay")
+    if state.get("enabled"):
+        skip("session replay is already on on this machine, so its off state cannot be checked")
+    if state.get("sessions"):
+        fail("session replay is off and returned sessions anyway: %s" % state)
+
+
+@finding("5.8", "Reports generates all five, locally")
+def _(d):
+    d.open_view("reports")
+    body = view_text(d)
+    for wanted in [
+        "Retrieval savings",
+        "AI access audit",
+        "Change brief",
+        "Index health",
+        "Knowledge gaps",
+    ]:
+        if wanted not in body:
+            fail("the Reports page is missing %r" % wanted)
+    if "Nothing leaves the machine" not in body:
+        fail("the Reports page does not say where the data came from")
+    for kind in ["savings", "access", "change", "health", "gaps"]:
+        answer = d.api("/api/report?kind=%s&format=markdown" % kind)
+        text = answer.get("text") or ""
+        if not text.strip():
+            fail("the %s report generated nothing" % kind)
+        if "Generated" not in text:
+            fail("the %s report does not say when it was generated" % kind)
+
+
+@finding("5.9", "the Cloud page describes the service and contacts nothing")
+def _(d):
+    d.open_view("cloud")
+    body = view_text(d)
+    if "Semlith Cloud is one hosted store" not in body:
+        fail("the Cloud page did not render: %s" % body[:300])
+    if "not connected" not in body:
+        fail("the Cloud page does not say it is not connected")
+    for word in ["Disconnect", "token prefix", "acme/api"]:
+        if word in body:
+            fail("the Cloud page drew its connected state, which this release has no client for")
+
+
+@finding("5.10", "the Agents page measures what its tool list costs")
+def _(d):
+    d.open_view("agents")
+    body = view_text(d)
+    if "What the tool list costs" not in body:
+        fail("the Agents page does not state what the tool list costs")
+    if "paid" in body:
+        fail("a tool on the Agents page is marked paid")
+    listed = d.api("/api/agents")
+    tools = listed.get("tools") or []
+    if len(tools) != 16:
+        fail("the Agents page lists %d tools, expected 16" % len(tools))

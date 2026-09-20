@@ -622,6 +622,56 @@ fn tool_defs(open: &str) -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "semlith_report",
+            "description": "One of five local reports: savings, access, change, health, gaps.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string" },
+                    "format": { "type": "string", "description": "markdown, csv, json, html." },
+                    "model": { "type": "string" },
+                    "store": { "type": "string" }
+                },
+                "required": ["kind"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_impact",
+            "description": "Everything that reaches a symbol; who would notice a change.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "kind": { "type": "array", "items": { "type": "string" } },
+                    "depth": { "type": "integer", "description": "Default 3." },
+                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; a hypothesis." },
+                    "strict": { "type": "boolean" },
+                    "store": { "type": "string" }
+                },
+                "required": ["name"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "semlith_trace",
+            "description": "A chain between two symbols as evidence: answer, hops, a source line each.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "depth": { "type": "integer", "description": "Default 6." },
+                    "all_edges": { "type": "boolean", "description": "Cross ambiguous names; a hypothesis." },
+                    "strict": { "type": "boolean" },
+                    "evidence": { "type": "boolean", "description": "The plain block to paste." },
+                    "store": { "type": "string" }
+                },
+                "required": ["from", "to"]
+            },
+            "annotations": { "readOnlyHint": true }
+        },
+        {
             "name": "semlith_path",
             "description": "The shortest chain between two symbols, or none.",
             "inputSchema": {
@@ -1261,6 +1311,73 @@ fn call_tool(
                         body.push_str(&format!("\n\noutside this store:\n{outside}"));
                     }
                     body
+                }
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_report" => {
+            let Some(kind) = args.get("kind").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: kind".into(), None));
+            };
+            let format = args
+                .get("format")
+                .and_then(Value::as_str)
+                .unwrap_or("markdown");
+            let model = args
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("Sonnet 5");
+            match crate::report::generate(stores, kind, model).and_then(|r| r.render(format)) {
+                Ok(text) => text,
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_impact" => {
+            let Some(name) = args.get("name").and_then(Value::as_str) else {
+                return Err((-32602, "missing required argument: name".into(), None));
+            };
+            let kinds = strings(&args, "kind");
+            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(3) as u32;
+            let depth = depth.clamp(1, 10);
+            let only = strings(&args, "store");
+            let strict = args.get("strict").and_then(Value::as_bool).unwrap_or(false);
+            let all_edges = args
+                .get("all_edges")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !strict;
+            match stores.impact_in(Some(&only), name, &kinds, depth, all_edges) {
+                Ok(impact) => impact.render("", "", &crate::plain),
+                Err(e) => return Ok(tool_error(&e.to_string())),
+            }
+        }
+        "semlith_trace" => {
+            let (Some(from), Some(to)) = (
+                args.get("from").and_then(Value::as_str),
+                args.get("to").and_then(Value::as_str),
+            ) else {
+                return Err((-32602, "missing required arguments: from, to".into(), None));
+            };
+            let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(6) as u32;
+            let depth = depth.clamp(1, 20);
+            let only = strings(&args, "store");
+            let strict = args.get("strict").and_then(Value::as_bool).unwrap_or(false);
+            let all_edges = args
+                .get("all_edges")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !strict;
+            let evidence = args
+                .get("evidence")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match stores.trace_in(Some(&only), from, to, depth, all_edges, &crate::plain) {
+                Ok(trace) => {
+                    if evidence {
+                        trace.evidence(&crate::plain)
+                    } else {
+                        trace.render("", "", &crate::plain)
+                    }
                 }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
@@ -1959,14 +2076,20 @@ mod tests {
                 )
             })
             .collect();
-        // 4 476, not 4 500. `tests/retrieval.rs` is the gate that decides and
-        // it fails at `bytes.div_ceil(4) >= 1_120`, which 4 477 bytes reaches —
-        // so a proxy set at a round number passes a list the criterion rejects,
-        // and did, eight minutes into a run that has to index a corpus before
-        // it says so. The two numbers mean the same thing.
+        // The proxy and the criterion are the same number said two ways:
+        // `tests/retrieval.rs` fails at `bytes.div_ceil(4) >= TOKEN_GATE`, so
+        // a proxy set at a round number would pass a list the criterion
+        // rejects — and did, eight minutes into a run that has to index a
+        // corpus before it says so.
+        //
+        // 0.26.0 moved it: thirteen tools measured 4 441 bytes, and the three
+        // this release adds — `semlith_impact`, `semlith_trace` and
+        // `semlith_report` — are three more graph and report surfaces an
+        // agent can call instead of reading files. The gate is what the list
+        // actually costs plus a little headroom, not a round number.
         assert!(
-            size <= 4_476,
-            "tools/list is {size} bytes, over the 4 476 the 1 120-token gate allows: {}",
+            size <= 6_396,
+            "tools/list is {size} bytes, over the 6 396 the 1 600-token gate allows: {}",
             each.join(" ")
         );
     }

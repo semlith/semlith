@@ -69,6 +69,9 @@ const VIEWS: &[(&str, &str)] = &[
     ("symbol", "/api/symbol"),
     ("neighbors", "/api/neighbors"),
     ("path", "/api/path"),
+    ("impact", "/api/impact"),
+    ("trace", "/api/trace"),
+    ("report", "/api/report"),
     ("ledger", "/api/ledger"),
     // `semlith key` is the Agents page's Rotate button, which posts here.
     ("key", "/api/key"),
@@ -111,6 +114,9 @@ const TOOL_VIEWS: &[(&str, &str)] = &[
     ("semlith_symbol", "/api/symbol"),
     ("semlith_neighbors", "/api/neighbors"),
     ("semlith_path", "/api/path"),
+    ("semlith_impact", "/api/impact"),
+    ("semlith_trace", "/api/trace"),
+    ("semlith_report", "/api/report"),
 ];
 
 /// Which verb a route answers on.
@@ -978,4 +984,231 @@ fn the_agents_route_reports_the_service_and_every_client() {
             }
         }
     }
+}
+
+/// The sidebar the v4 design specifies: two groups, thirteen entries, in this
+/// order.
+///
+/// Doctor is the thirteenth and is deliberately not in the design's twelve.
+/// It is a page this binary already serves, and `semlith doctor` would
+/// otherwise be the one command with no view — which the parity test above
+/// would fail anyway, from the other direction.
+const SIDEBAR: &[(&str, &str)] = &[
+    ("Workspace", "Stores"),
+    ("Workspace", "Files"),
+    ("Workspace", "Search"),
+    ("Workspace", "Graph"),
+    ("Workspace", "Impact"),
+    ("Workspace", "Inside the index"),
+    ("Operate", "Retrieval ledger"),
+    ("Operate", "Reports"),
+    ("Operate", "Agents"),
+    ("Operate", "Cloud"),
+    ("Operate", "Privacy"),
+    ("Operate", "Doctor"),
+    ("Operate", "About"),
+];
+
+/// The `{ group: …, id: …, label: … }` rows of `VIEWS`, in source order.
+fn sidebar_rows(source: &str) -> Vec<(String, String, String)> {
+    let start = source
+        .find("const VIEWS = [")
+        .expect("app.js defines VIEWS");
+    let body = &source[start..];
+    let end = body.find("\n];").expect("VIEWS is closed");
+    let mut rows = Vec::new();
+    for line in body[..end].lines() {
+        let field = |name: &str| -> Option<String> {
+            let at = line.find(&format!("{name}: \""))?;
+            let rest = &line[at + name.len() + 3..];
+            Some(rest[..rest.find('"')?].to_string())
+        };
+        if let (Some(group), Some(id), Some(label)) = (field("group"), field("id"), field("label"))
+        {
+            rows.push((group, id, label));
+        }
+    }
+    rows
+}
+
+#[test]
+fn the_sidebar_is_the_thirteen_entries_of_the_v4_design_in_order() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    let rows = sidebar_rows(APP_JS);
+    let got: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(group, _, label)| (group.as_str(), label.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        SIDEBAR.to_vec(),
+        "the sidebar's groups, labels or order have moved away from the v4 design"
+    );
+    // Two groups, and each one contiguous: the rail draws a rule between
+    // groups, so an entry in the wrong place splits a group into two.
+    let mut groups: Vec<&str> = Vec::new();
+    for (group, _) in &got {
+        if groups.last() != Some(group) {
+            assert!(
+                !groups.contains(group),
+                "{group} appears twice, so the rail would draw it as two groups"
+            );
+            groups.push(group);
+        }
+    }
+    assert_eq!(groups, vec!["Workspace", "Operate"]);
+}
+
+#[test]
+fn every_sidebar_entry_has_a_mark_and_something_to_render() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    for (_, id, label) in sidebar_rows(APP_JS) {
+        assert!(
+            APP_JS.contains(&format!("\n  {id}: \"M")),
+            "{label} has no entry in NAV_ICONS, so the rail would draw a gap"
+        );
+        assert!(
+            APP_JS.contains(&format!("\n  {id}: ")) && APP_JS.contains(&format!("{id}View")),
+            "{label} has no view function, so the entry navigates to nothing"
+        );
+    }
+}
+
+/// The governing rule of the v4 design: the binary is free and complete, so
+/// no paid surface survives anywhere in the portal.
+///
+/// Checked over what the page can render rather than over the source, because
+/// a comment recording why a lock was removed is not a lock. The one word
+/// allowed through is "key", and only as the agent key.
+#[test]
+fn nothing_the_portal_renders_offers_to_sell_anything() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    const STYLE: &str = include_str!("../src/portal/style.css");
+    const FORBIDDEN: [&str; 8] = [
+        "Pro",
+        "Team",
+        "Enterprise",
+        "licence",
+        "license",
+        "unlock",
+        "upgrade",
+        "trial",
+    ];
+    for literal in user_visible_strings(APP_JS) {
+        let lower = literal.to_lowercase();
+        for word in FORBIDDEN {
+            let needle = word.to_lowercase();
+            if !lower.contains(&needle) {
+                continue;
+            }
+            // `upgrade` is also what `semlith upgrade` does to the binary,
+            // which is a command this portal has a page for and not an offer
+            // to sell anything.
+            // `upgrade` is also what `semlith upgrade` does to the binary,
+            // and the route behind that page. Neither is an offer to sell.
+            if needle == "upgrade"
+                && (lower.contains("semlith upgrade")
+                    || lower.contains("upgrading")
+                    || lower.contains("up to date")
+                    || lower.starts_with("/api/upgrade")
+                    || lower.contains("this version")
+                    || lower.contains("newer version")
+                    || lower.contains("install"))
+            {
+                continue;
+            }
+            // "team" inside an ordinary word is not the word — and "a team
+            // ledger" on the Cloud page is a description of the hosted
+            // service, not a tier of this binary. The design's own copy says
+            // it, and it is the one place allowed.
+            if needle == "team"
+                && (!lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w == "team")
+                    || lower.contains("team ledger"))
+            {
+                continue;
+            }
+            if needle == "pro"
+                && !lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w == "pro")
+            {
+                continue;
+            }
+            panic!("the portal renders {word:?} in {literal:?}");
+        }
+    }
+    // The stylesheet cannot render words, but a class named for a lock is a
+    // lock somebody is about to draw.
+    for name in [".plan-", ".locked", ".pro-", ".paywall"] {
+        assert!(!STYLE.contains(name), "the stylesheet still has {name}");
+    }
+    // And the one word the design lets through: `key`, as the agent key.
+    //
+    // Checked as the phrases that would mean a licence rather than by
+    // allow-listing every sentence that mentions the credential — the portal
+    // has a page about the agent key and most of its copy says "key".
+    for literal in user_visible_strings(APP_JS) {
+        let lower = literal.to_lowercase();
+        for phrase in [
+            "licence key",
+            "license key",
+            "product key",
+            "activation key",
+            "key activate",
+            "activate your key",
+            "enter your key",
+            "buy a key",
+            "purchase a key",
+            "key required",
+        ] {
+            assert!(
+                !lower.contains(phrase),
+                "the portal renders a licence key: {literal:?}"
+            );
+        }
+    }
+}
+
+/// Every tool the server advertises is on the Agents page with no marker
+/// saying it costs anything, and the cost row is measured rather than stated.
+#[test]
+fn the_agents_page_marks_no_tool_as_paid_and_measures_the_list() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    assert!(
+        !APP_JS.contains("· paid") && !APP_JS.contains("\"paid\""),
+        "a tool is marked paid"
+    );
+    // The row states what this binary's own list costs, from the route,
+    // rather than a number written down when it was last measured.
+    assert!(
+        APP_JS.contains("tool_list_bytes") && APP_JS.contains("What the tool list costs"),
+        "the cost row is not read from the server"
+    );
+}
+
+/// The Cloud page describes the service and contacts nothing.
+#[test]
+fn the_cloud_page_is_the_not_connected_state_and_has_no_client() {
+    const APP_JS: &str = include_str!("../src/portal/app.js");
+    assert!(
+        APP_JS.contains("async function cloudView()"),
+        "no Cloud page"
+    );
+    assert!(
+        APP_JS.contains("Semlith Cloud is one hosted store"),
+        "the Cloud page lost its lead copy"
+    );
+    // No connected state in this release: `cloudConnected` would be the flag
+    // that draws one, and there is none.
+    assert!(
+        !APP_JS.contains("cloudConnected"),
+        "a connected state exists"
+    );
+    // And no command behind it. The blocks on the page are text to copy.
+    assert!(
+        !subcommands().iter().any(|name| name == "cloud"),
+        "`semlith cloud` exists, which this release says it does not"
+    );
 }

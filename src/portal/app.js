@@ -259,6 +259,10 @@ const NAV_ICONS = {
   // with no way to tell what it was.
   doctor: "M3 12h3l2-5 3 10 2.5-7 1.5 2h6",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16z|M12 11v5|M12 8h.01",
+  // Three sources arriving at one symbol: the page reads the graph backwards.
+  impact: "M16 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0|M3 6l13 5|M3 12h13|M3 18l13-5",
+  reports: "M6 3h8l4 4v14H6z|M14 3v4h4|M9 17v-3|M12 17v-6|M15 17v-4",
+  cloud: "M7.5 18a4 4 0 0 1 .3-8A5 5 0 0 1 17 9.6 3.6 3.6 0 0 1 16.5 18z",
 };
 
 /** A button that copies text and says so for a moment.
@@ -988,6 +992,9 @@ const state = {
   pendingPath: "",
   /** Carried from a search hit into the Graph page, or into Search. */
   pendingSymbol: "",
+  /** The symbol the Impact page is about, so the Graph page's "Blast radius"
+   * link has somewhere to put it and coming back does not clear the answer. */
+  impactSymbol: "",
   pendingQuery: "",
   /** The last search, kept so leaving the page and coming back does not throw
    * the question away along with its answers. */
@@ -1006,17 +1013,25 @@ const state = {
  * release — Inside the index, Reports, License — are deliberately absent
  * rather than stubbed: a nav item that leads nowhere is worse than one that
  * does not exist yet. Everything listed here is free on every tier. */
+/* The v4 sidebar: two groups, thirteen entries, in this order.
+ *
+ * Doctor is the thirteenth and is not in the design's list. It is a surface
+ * this binary already ships, and dropping it would leave `semlith doctor` the
+ * one command with no page — the parity rule cuts both ways. */
 const VIEWS = [
   { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
-  { group: "Workspace", id: "index", label: "Index", title: "Index" },
-  { group: "Explore", id: "search", label: "Search", title: "Search" },
-  { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
+  { group: "Workspace", id: "search", label: "Search", title: "Search" },
+  { group: "Workspace", id: "graph", label: "Graph", title: "Graph" },
+  { group: "Workspace", id: "impact", label: "Impact", title: "Impact" },
+  { group: "Workspace", id: "index", label: "Inside the index", title: "Inside the index" },
+  { group: "Operate", id: "ledger", label: "Retrieval ledger", title: "Retrieval ledger" },
+  { group: "Operate", id: "reports", label: "Reports", title: "Reports" },
   { group: "Operate", id: "agents", label: "Agents", title: "Agents" },
-  { group: "Operate", id: "ledger", label: "Ledger", title: "Retrieval ledger" },
+  { group: "Operate", id: "cloud", label: "Cloud", title: "Cloud" },
   { group: "Operate", id: "privacy", label: "Privacy", title: "Privacy" },
   { group: "Operate", id: "doctor", label: "Doctor", title: "Doctor" },
-  { group: "About", id: "about", label: "About", title: "About" },
+  { group: "Operate", id: "about", label: "About", title: "About" },
 ];
 
 /** The sidebar's count, kept with the data it describes rather than with the
@@ -2016,6 +2031,18 @@ async function graphView() {
             text: `${Math.max(node.end_line - node.start_line + 1, 1)} lines`,
           }),
         ),
+        // The graph read backwards, from the symbol already in hand. The
+        // Impact page takes a name; this is how somebody who is looking at
+        // one gets there without typing it again.
+        el("button", {
+          class: "link-button quiet",
+          type: "button",
+          text: "Blast radius",
+          onclick: () => {
+            state.impactSymbol = node.name;
+            go("impact");
+          },
+        }),
       ),
       // "Incoming", because that is what the list holds. Under a heading
       // reading CALLERS it carried a `defines` edge and a `references` edge,
@@ -2245,7 +2272,7 @@ async function graphView() {
         ),
         meta,
       ),
-      rail,
+      el("div", { class: "graph-side" }, rail, mapPanel()),
     ),
   );
 
@@ -2394,6 +2421,8 @@ async function ledgerView() {
     // audit record and had no table on it at all — three snippets telling the
     // reader to go and run `semlith ledger` in a terminal instead, which is
     // also the portal-parity rule broken: the CLI prints rows, so this does.
+    ledgerSessions(data),
+    sessionReplay(),
     ledgerRows(data),
     el(
       "div",
@@ -2407,7 +2436,7 @@ async function ledgerView() {
           copyField("semlith ledger --last 20"),
           el("p", {
             class: "subtitle",
-            text: "Prints the ledger on the command line. Nothing here needs a key.",
+            text: "Prints the ledger on the command line. The same rows this page shows.",
           }),
         ),
         el(
@@ -2466,6 +2495,383 @@ async function ledgerView() {
   );
 }
 
+/* The one switch on the Privacy page.
+ *
+ * Off unless turned on, because what it reads belongs to another program.
+ * The row says what would be read and from where before anything is, so the
+ * answer to "what does this turn on" is on the page rather than in a doc. */
+function sessionReplayToggle() {
+  const state_ = { enabled: false, from: "", client: "" };
+  const note = el("p", { class: "note" });
+  const button = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Loading…",
+    disabled: true,
+  });
+
+  function paint() {
+    button.disabled = false;
+    button.textContent = state_.enabled ? "Turn off" : "Turn on";
+    button.classList.toggle("on", state_.enabled);
+    note.textContent = state_.enabled
+      ? `On. The Retrieval ledger's Session replay tab reads ${state_.client} transcripts under ${state_.from} to mark what happened after each answer. Nothing is sent anywhere.`
+      : `Off. Nothing reads ${state_.from || "this machine's agent transcripts"}. Turning this on lets the ledger's Session replay tab mark each answer as a refund, a miss or an edit — locally, and still sent nowhere.`;
+  }
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      const answer = await api("/api/ledger/replay", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ on: !state_.enabled }),
+      });
+      state_.enabled = !!answer.enabled;
+    } catch (e) {
+      note.textContent = e.message;
+      button.disabled = false;
+      return;
+    }
+    paint();
+  });
+
+  (async () => {
+    try {
+      const data = await api("/api/ledger/replay");
+      state_.enabled = !!data.enabled;
+      state_.from = data.from || "";
+      state_.client = data.client || "";
+    } catch (_) {
+      /* the row still renders, saying it is off */
+    }
+    paint();
+  })();
+
+  return el(
+    "div",
+    { class: "card pad" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Session replay" }),
+      el("span", { class: "spacer" }),
+      button,
+    ),
+    note,
+  );
+}
+
+/* Session replay: what the agent did after each answer.
+ *
+ * Reads this machine's Claude Code transcripts, and only when the Privacy
+ * page's toggle is on. Nothing read here is sent anywhere — the files belong
+ * to another program, which is exactly why the toggle exists and why the tab
+ * says where it read from. */
+function sessionReplay() {
+  const body = el("div", { class: "replay-body" });
+
+  function counts(session) {
+    const rows = [
+      ["read the whole file", session.refund, "refund"],
+      ["grepped anyway", session.miss, "miss"],
+      ["edited", session.sufficed, "sufficed"],
+      ["nothing recorded", session.unknown, "unknown"],
+    ];
+    return el(
+      "span",
+      { class: "replay-counts" },
+      rows.map(([label, count, kind]) =>
+        count
+          ? el("span", { class: `replay-count ${kind}`, text: `${count} ${label}` })
+          : null,
+      ),
+    );
+  }
+
+  async function load() {
+    let data;
+    try {
+      data = await api("/api/ledger/replay");
+    } catch (e) {
+      fill(body, error(e.message));
+      return;
+    }
+    if (!data.enabled) {
+      fill(
+        body,
+        el("p", {
+          class: "subtitle",
+          text: "Off. Turn it on under Privacy and this reads this machine's agent transcripts to mark what happened after each answer. Nothing is sent anywhere.",
+        }),
+      );
+      return;
+    }
+    if (!data.sessions.length) {
+      fill(
+        body,
+        el("p", {
+          class: "subtitle",
+          text: `On, and no transcript under ${data.from || "this machine"} holds a semlith call yet.`,
+        }),
+      );
+      return;
+    }
+    fill(
+      body,
+      el("p", {
+        class: "note",
+        text: `Read from ${data.client} transcripts under ${data.from}${data.skipped ? `, ${data.skipped} older transcript${data.skipped === 1 ? "" : "s"} not read` : ""}.`,
+      }),
+      data.sessions.map((session) =>
+        el(
+          "div",
+          { class: "replay-row" },
+          el(
+            "span",
+            { class: "line one" },
+            el("span", { class: "id", text: session.id.slice(0, 12) }),
+            el("span", { class: "muted", text: session.project }),
+            el("span", { class: "spacer" }),
+            el("span", {
+              class: "muted",
+              text: `${session.answers} answer${session.answers === 1 ? "" : "s"}`,
+            }),
+          ),
+          counts(session),
+        ),
+      ),
+    );
+  }
+
+  load();
+  return el(
+    "div",
+    { class: "card pad" },
+    el("span", { class: "card-title", text: "Session replay" }),
+    el("p", {
+      class: "subtitle",
+      text: "Read from this machine's agent session logs, never sent anywhere. Turn on under Privacy.",
+    }),
+    body,
+  );
+}
+
+/* Cost per million tokens, for the one place the ledger turns tokens into
+ * money. Input pricing, because a retrieval is what an agent reads.
+ *
+ * Listed here rather than fetched: the page must work with no network, and a
+ * price nobody can see the source of is worse than one written down. */
+const MODEL_PRICES = [
+  ["Sonnet 5", 3, "sonnet_5"],
+  ["Opus 5", 15, "opus_5"],
+  ["Haiku 4.5", 1, "haiku_4_5"],
+];
+
+/** Hand the viewer a file the page built, without a server round trip. */
+function offerDownload(name, text, type) {
+  const blob = new Blob([text], { type: `${type};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = el("a", { href: url, download: name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoked on the next turn of the loop: revoking synchronously races the
+  // click in some browsers and the file arrives empty.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+/** The rows shown, as Markdown, CSV or JSON — the same rows, three ways. */
+function exportRows(columns, rows, format, name) {
+  const cells = (row) => columns.map(([, read]) => String(read(row) ?? ""));
+  const heads = columns.map(([head]) => head);
+  if (format === "json") {
+    const out = rows.map((row) => {
+      const one = {};
+      columns.forEach(([head, read]) => {
+        one[head] = read(row);
+      });
+      return one;
+    });
+    offerDownload(`${name}.json`, JSON.stringify(out, null, 2), "application/json");
+    return;
+  }
+  if (format === "csv") {
+    const quote = (v) =>
+      v.includes('"') || v.includes(",") || v.includes("\n")
+        ? `"${v.split('"').join('""')}"`
+        : v;
+    const lines = [heads.map(quote).join(","), ...rows.map((row) => cells(row).map(quote).join(","))];
+    offerDownload(`${name}.csv`, `${lines.join("\n")}\n`, "text/csv");
+    return;
+  }
+  const lines = [
+    `| ${heads.join(" | ")} |`,
+    `| ${heads.map(() => "---").join(" | ")} |`,
+    ...rows.map((row) => `| ${cells(row).join(" | ")} |`),
+  ];
+  offerDownload(`${name}.md`, `${lines.join("\n")}\n`, "text/markdown");
+}
+
+/* One row per session: who asked, how much they read, and what that would
+ * have cost at a price the reader picks.
+ *
+ * Never a saved figure without its coverage and its tier — a session counted
+ * by the four-character fallback is `modelled` and says so in its own row,
+ * because averaging it with a measured one would make two different things
+ * into one number. */
+function ledgerSessions(data) {
+  const all = data.sessions || [];
+  let client = "";
+  let tier = "";
+  let price = MODEL_PRICES[0];
+
+  const table = dataTable({
+    className: "w-sessions",
+    sort: "last",
+    dir: "desc",
+    perPage: 12,
+    rows: [],
+    caption: "Every agent session this machine recorded, newest first.",
+    columns: [
+      {
+        key: "last",
+        label: "Last seen",
+        className: "meta",
+        value: (r) => r.last,
+        render: (r) => el("span", { class: "one-line", title: r.when, text: r.when }),
+      },
+      {
+        key: "session",
+        label: "Session",
+        className: "meta",
+        render: (r) =>
+          el("span", {
+            class: "one-line",
+            title: r.session || "recorded before sessions were",
+            text: r.session ? r.session.slice(0, 12) : "—",
+          }),
+      },
+      { key: "client", label: "Agent", className: "meta", render: (r) => r.client },
+      { key: "store", label: "Store", className: "meta narrow-drop", render: (r) => r.store },
+      { key: "retrievals", label: "Reads", className: "num", value: (r) => r.retrievals, render: (r) => n(r.retrievals) },
+      {
+        key: "net_tokens",
+        label: "Net tokens",
+        className: "num",
+        value: (r) => r.net_tokens,
+        render: (r) => n(r.net_tokens),
+      },
+      {
+        key: "cost",
+        label: "Cost",
+        className: "num",
+        value: (r) => r.net_tokens,
+        render: (r) => `$${((r.net_tokens / 1e6) * price[1]).toFixed(2)}`,
+      },
+      { key: "tier", label: "Tier", className: "meta", render: (r) => r.tier },
+    ],
+  });
+
+  function shown() {
+    return all.filter(
+      (row) => (!client || row.client === client) && (!tier || row.tier === tier),
+    );
+  }
+
+  function repaint() {
+    const rows = shown();
+    table.update(rows, rows.length);
+    count.textContent = `${rows.length} of ${all.length} session${all.length === 1 ? "" : "s"}`;
+  }
+
+  const count = el("span", { class: "muted" });
+
+  const clients = [...new Set(all.map((row) => row.client))].sort();
+  const clientPick = el(
+    "select",
+    {
+      "aria-label": "Filter by client",
+      onchange: (e) => {
+        client = e.currentTarget.value;
+        repaint();
+      },
+    },
+    el("option", { value: "", text: "every client" }),
+    clients.map((one) => el("option", { value: one, text: one })),
+  );
+  const tierPick = el(
+    "select",
+    {
+      "aria-label": "Filter by tier",
+      onchange: (e) => {
+        tier = e.currentTarget.value;
+        repaint();
+      },
+    },
+    el("option", { value: "", text: "every tier" }),
+    el("option", { value: "measured", text: "measured" }),
+    el("option", { value: "modelled", text: "modelled" }),
+  );
+  const modelPick = el(
+    "select",
+    {
+      "aria-label": "Cost at",
+      onchange: (e) => {
+        price = MODEL_PRICES[Number(e.currentTarget.value)] || MODEL_PRICES[0];
+        repaint();
+      },
+    },
+    MODEL_PRICES.map(([name], i) =>
+      el("option", { value: String(i), text: `cost at ${name}` }),
+    ),
+  );
+
+  // The columns the export writes are the columns on screen, read through the
+  // same functions, so a file and the page can never disagree about a row.
+  const columns = () => [
+    ["when", (r) => r.when],
+    ["session", (r) => r.session],
+    ["agent", (r) => r.client],
+    ["store", (r) => r.store],
+    ["reads", (r) => r.retrievals],
+    ["zero_hit", (r) => r.zero_hit],
+    ["net_tokens", (r) => r.net_tokens],
+    [`cost_usd_at_${price[2]}`, (r) => ((r.net_tokens / 1e6) * price[1]).toFixed(2)],
+    ["tier", (r) => r.tier],
+  ];
+
+  const exports = ["Markdown", "CSV", "JSON"].map((label) =>
+    el("button", {
+      class: "button secondary small",
+      type: "button",
+      text: label,
+      onclick: () =>
+        exportRows(
+          columns(),
+          shown(),
+          label === "Markdown" ? "md" : label.toLowerCase(),
+          "semlith-sessions",
+        ),
+    }),
+  );
+
+  repaint();
+  return el(
+    "div",
+    { class: "card pad" },
+    el("span", { class: "card-title", text: "Sessions" }),
+    el("div", { class: "filters" }, clientPick, tierPick, modelPick, count, el("span", { class: "spacer" }), exports),
+    all.length
+      ? table.node
+      : empty("No session has recorded a retrieval yet."),
+    el("p", {
+      class: "subtitle",
+      text: "Net tokens are whole-file less excerpt, over the reads that found something. A session counted by the four-character fallback is modelled, not measured, and says so in its own row.",
+    }),
+  );
+}
+
 /** The ledger's rows: the same ones `semlith ledger --last 200` prints. */
 function ledgerRows(data) {
   const rows = data.rows || [];
@@ -2521,7 +2927,7 @@ function ledgerRows(data) {
   );
 }
 
-/* Who the ledger recorded, and how often./* Who the ledger recorded, and how often.
+/* Who the ledger recorded, and how often.
  *
  * The row that says the ledger works. Before 0.15.0 it could only ever read
  * `portal 31`, because the portal's own search box was the only thing that
@@ -4642,6 +5048,162 @@ function egoGraph(name, data) {
  * because its files never parsed or because its calls go somewhere the store
  * does not hold, and those are different problems with different fixes.
  */
+/* Graph health, the language mix and chunks by month.
+ *
+ * All three read the rows `/api/stores?coverage=1` returns, which are the
+ * rows `semlith stats` prints — so the page and the terminal cannot disagree
+ * about what the graph covers. Nothing here recomputes a count at page load.
+ */
+function healthPanel() {
+  const node = el("div", { class: "health" });
+  let rows = [];
+
+  async function refresh() {
+    try {
+      const data = await api("/api/stores?coverage=1");
+      rows = data.stores || [];
+    } catch {
+      rows = [];
+    }
+    paint();
+  }
+
+  function bar(counts) {
+    const total = counts.reduce((sum, [, n]) => sum + n, 0);
+    if (!total) return el("div", { class: "rail-hint", text: "No call edges yet." });
+    return el(
+      "div",
+      { class: "support-bar", role: "img", "aria-label": counts.map(([k, n]) => `${k} ${n}`).join(", ") },
+      counts.map(([kind, n]) =>
+        n
+          ? el("span", {
+              class: `seg ${kind}`,
+              style: `width:${(n / total) * 100}%`,
+              title: `${kind} ${n}`,
+            })
+          : null,
+      ),
+    );
+  }
+
+  function paint() {
+    const counts = { extracted: 0, resolved: 0, inferred: 0, ambiguous: 0 };
+    const languages = [];
+    let unresolvedNames = 0;
+    let several = 0;
+    const top = [];
+    const months = new Map();
+    for (const store of rows) {
+      for (const row of store.coverage || []) {
+        if (!row.definitions && !row.files) continue;
+        counts.extracted += row.extracted || 0;
+        counts.resolved += row.resolved || 0;
+        counts.ambiguous += row.ambiguous || 0;
+        // `unresolved` on a coverage row is the fourth class: an edge whose
+        // target this store holds no definition for.
+        counts.inferred += row.unresolved || 0;
+        languages.push({ store: store.name, ...row });
+      }
+      const health = store.health;
+      if (!health) continue;
+      unresolvedNames += health.unresolved_names || 0;
+      several += health.several_definitions || 0;
+      for (const one of health.unresolved_top || []) top.push(one);
+      for (const one of health.months || []) {
+        months.set(one.month, (months.get(one.month) || 0) + one.chunks);
+      }
+    }
+    top.sort((a, b) => b.edges - a.edges);
+    const carrying = languages.filter((row) => row.extracted || row.resolved || row.ambiguous);
+    const byFiles = [...languages].sort((a, b) => b.files - a.files).slice(0, 8);
+    const filesTotal = languages.reduce((sum, row) => sum + row.files, 0) || 1;
+    const monthRows = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0])).slice(-12);
+    const peak = Math.max(1, ...monthRows.map(([, n]) => n));
+
+    fill(
+      node,
+      el(
+        "section",
+        { class: "health-card" },
+        el("span", { class: "eyebrow", text: "Language mix" }),
+        byFiles.length
+          ? el(
+              "div",
+              { class: "mix" },
+              byFiles.map((row) =>
+                el(
+                  "div",
+                  { class: "mix-row" },
+                  el("span", { class: "k", text: row.language }),
+                  el("span", { class: "meter" }, el("span", { style: `width:${(row.files / filesTotal) * 100}%` })),
+                  el("span", { class: "v", text: `${n(row.files)} file${row.files === 1 ? "" : "s"}` }),
+                ),
+              ),
+            )
+          : el("div", { class: "rail-hint", text: "Nothing indexed yet." }),
+      ),
+      el(
+        "section",
+        { class: "health-card" },
+        el("span", { class: "eyebrow", text: "Chunks by month indexed" }),
+        monthRows.length
+          ? el(
+              "div",
+              { class: "months" },
+              monthRows.map(([month, count]) =>
+                el(
+                  "div",
+                  { class: "month" },
+                  el("span", { class: "col" }, el("span", { style: `height:${(count / peak) * 100}%` })),
+                  el("span", { class: "m", text: month.slice(2) }),
+                  el("span", { class: "c", text: n(count) }),
+                ),
+              ),
+            )
+          : el("div", { class: "rail-hint", text: "No files indexed yet." }),
+        // Said rather than implied: the store records when it read a file,
+        // not when anybody wrote it.
+        el("p", { class: "note", text: "When semlith read the file, not when it was written." }),
+      ),
+      el(
+        "section",
+        { class: "health-card" },
+        el("span", { class: "eyebrow", text: "Graph health" }),
+        bar([
+          ["extracted", counts.extracted],
+          ["resolved", counts.resolved],
+          ["ambiguous", counts.ambiguous],
+          ["unresolved", counts.inferred],
+        ]),
+        el(
+          "div",
+          { class: "health-facts" },
+          el("div", { class: "fact" }, el("span", { class: "v", text: n(unresolvedNames) }), el("span", { class: "k", text: "call targets with no definition here" })),
+          el("div", { class: "fact" }, el("span", { class: "v", text: n(several) }), el("span", { class: "k", text: "names with several definitions" })),
+          el("div", { class: "fact" }, el("span", { class: "v", text: `${carrying.length} of ${languages.length}` }), el("span", { class: "k", text: "languages carrying edges" })),
+        ),
+        top.length
+          ? el(
+              "div",
+              { class: "mix" },
+              top.slice(0, 5).map((one) =>
+                el(
+                  "div",
+                  { class: "mix-row" },
+                  el("span", { class: "k", text: one.name }),
+                  el("span", { class: "v", text: `${n(one.edges)} edge${one.edges === 1 ? "" : "s"}` }),
+                ),
+              ),
+            )
+          : null,
+      ),
+    );
+  }
+
+  refresh();
+  return { node, paint: refresh };
+}
+
 function coveragePanel() {
   const node = el("div", { class: "rows" });
   // Its own fetch, and only this page makes it: the figures are a scan of
@@ -5556,6 +6118,7 @@ async function indexView() {
 
   paint(first);
   const coverage = coveragePanel();
+  const health = healthPanel();
   // The page's only subscription. The shared poll decides when; this decides
   // what with. No timer of this page's own.
   // The poll hands this the runs it just read, and `paint` reads them off it.
@@ -5564,13 +6127,17 @@ async function indexView() {
   state.onRuns = (data) => {
     paint(data);
     coverage.paint();
+    health.paint();
   };
   watchLive(["runs", "stores"], refreshRuns);
 
   return el(
     "div",
     { class: "view" },
-    pageHead("Index"),
+    pageHead(
+      "Inside the index",
+      "What this machine has read, what the graph made of it, and what is being kept current.",
+    ),
     says(
       "Each folder becomes its own store, indexed by its own writer. A run lives in the daemon, not in this page — leaving, refreshing or closing the tab changes nothing, and a run ends only on its Stop or when ",
       mono("semlith start"),
@@ -5621,6 +6188,7 @@ async function indexView() {
         urlNote,
       ),
       el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
+      health.node,
       el("span", { class: "eyebrow", text: "What the graph covers" }),
       coverage.node,
       cards,
@@ -7172,7 +7740,17 @@ async function privacyView() {
         "the daemon prints this on every start; --no-ledger stops it for a session, SEMLITH_LEDGER=0 for a machine, and the rows never leave the store",
       ),
       fact("Model cache", data.model_cached ? "cached" : "not downloaded", data.model_cache),
+      // Said here because this is where somebody comes to find out what
+      // semlith reads. The binary contacts cloud.semlith.com only after a
+      // `semlith cloud login`, which this release does not have — so the
+      // honest reading is that nothing does.
+      fact(
+        "Cloud",
+        "not connected",
+        "this binary has no cloud command and opens no connection to any host; the Cloud page describes an optional service and contacts nothing",
+      ),
     ),
+    sessionReplayToggle(),
     el(
       "div",
       { class: "grid scroller" },
@@ -7570,6 +8148,703 @@ function welcomeView() {
 
 // ---------------------------------------------------------------- router
 
+/* Filled by the release's own tasks: Impact (T02), Reports (T08) and Cloud
+ * (T10). They exist from the shell task so the sidebar never holds an entry
+ * that navigates to nothing. */
+
+/* Map: the subsystems, as a list.
+ *
+ * Communities over the settled `calls` and `imports` edges — no prose, no
+ * model, and no second picture beside the canvas. It sits outside the rail
+ * because the rail is about whichever node is selected and this is about the
+ * store, so selecting a node must not wipe it. */
+function mapPanel() {
+  const body = el("div", { class: "map-body" }, el("div", { class: "rail-hint", text: "Grouping…" }));
+  const shown = el("div", { class: "map-shown" });
+
+  (async () => {
+    let data;
+    try {
+      data = await api("/api/map");
+    } catch (e) {
+      fill(body, error(e.message));
+      return;
+    }
+    const list = data.communities || [];
+    if (!list.length) {
+      fill(body, el("div", { class: "rail-hint", text: "No call or import edges to group yet." }));
+      return;
+    }
+    fill(
+      body,
+      list.map((community) =>
+        el(
+          "button",
+          {
+            class: "map-row",
+            type: "button",
+            // The busiest member is the handle on a community, so the row
+            // goes where a reader would go next: that name, in Search.
+            onclick: () => {
+              state.pendingQuery = community.label;
+              go("search");
+            },
+          },
+          el(
+            "span",
+            { class: "line one" },
+            el("span", { class: "label", text: community.label }),
+            el("span", { class: "size", text: `${community.size} symbol${community.size === 1 ? "" : "s"}` }),
+          ),
+          el("span", {
+            class: "line hubs",
+            text: `hubs: ${community.hubs
+              .map((hub) => (hub.path ? `${hub.name} · ${shortPath(hub.path)}:${hub.line}` : hub.name))
+              .join(" · ")}`,
+          }),
+          el("span", {
+            class: "line cross",
+            text: community.cross
+              ? `${community.label} → ${community.cross[0]} · ${community.cross[1]} settled edge${community.cross[1] === 1 ? "" : "s"}`
+              : "nothing leaves this group",
+          }),
+        ),
+      ),
+    );
+    fill(
+      shown,
+      el("span", {
+        text: `Shown ${data.shown} of ${data.total} · communities over settled calls and imports edges`,
+      }),
+    );
+  })();
+
+  return el(
+    "section",
+    { class: "map-panel" },
+    el("div", { class: "card-head" }, el("h2", { text: "Map" }), el("span", { class: "mono-chip", text: "subsystems" })),
+    body,
+    shown,
+  );
+}
+
+/* Impact: the graph read backwards.
+ *
+ * The Graph page answers "what is around this"; this one answers "who would
+ * notice if it changed", which is a different question with a different
+ * shape — a list by hop rather than a picture. Under it sit the path finder
+ * and Trace, because all three read the same edges and a reader who has just
+ * seen who reaches a symbol is one question away from asking how.
+ *
+ * Two deviations from the v4 design, both because the design is a mock over
+ * fixed sample data and this is a page over a store: there is a symbol box
+ * and a real hop control (the mock's subject arrives only from a Graph-page
+ * link and its `depth 4 · reverse` pill is decoration), and every reached row
+ * carries its file and line, which the mock drops. */
+
+/** The uppercase mono label the v4 cards put above a value.
+ *
+ * `.eyebrow` already is that label — a second class for one would be two
+ * spellings of one thing in a stylesheet shared with semlith-cloud. */
+function capLabel(text) {
+  return el("span", { class: "eyebrow", text });
+}
+
+function statCell(label, value) {
+  return el("div", { class: "impact-stat" }, capLabel(label), el("span", { class: "n", text: String(value) }));
+}
+
+async function impactView() {
+  await refreshStores();
+
+  const results = el("div", { class: "impact-results" });
+  const subject = el("span", { class: "impact-subject", text: "—" });
+  const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
+
+  const nameInput = el("input", {
+    type: "search",
+    placeholder: "A symbol's name, matched exactly",
+    "aria-label": "Symbol",
+    onkeydown: (e) => {
+      if (e.key === "Enter") run();
+    },
+  });
+  if (state.impactSymbol) nameInput.value = state.impactSymbol;
+
+  const depthInput = el("input", {
+    type: "number",
+    min: "1",
+    max: "10",
+    value: "3",
+    "aria-label": "Hops",
+    class: "hops",
+  });
+
+  let allEdges = false;
+  const verified = el("button", {
+    class: "button secondary small on",
+    type: "button",
+    text: "Prefer verified edges",
+    "aria-pressed": "true",
+    onclick: (e) => {
+      allEdges = !allEdges;
+      e.currentTarget.classList.toggle("on", !allEdges);
+      e.currentTarget.setAttribute("aria-pressed", String(!allEdges));
+      if (nameInput.value.trim()) run();
+    },
+  });
+
+  const go = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
+
+  function reachedRow(row) {
+    return el(
+      "div",
+      { class: "impact-row" },
+      el("span", { class: "sym", text: row.name }),
+      el("span", { class: "where", text: `${shortPath(row.path)}:${row.line}` }),
+      el("span", { class: "via", text: `${row.via} · ${row.kind}` }),
+      confidenceBadge(row.confidence),
+      el("span", { class: "hops-n", text: String(row.hop) }),
+    );
+  }
+
+  async function run() {
+    const name = nameInput.value.trim();
+    state.impactSymbol = name;
+    if (!name) {
+      subject.textContent = "—";
+      fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
+      return;
+    }
+    const depth = Math.min(10, Math.max(1, Number(depthInput.value) || 3));
+    depthInput.value = String(depth);
+    subject.textContent = name;
+    depthPill.textContent = `depth ${depth} · reverse`;
+    fill(results, el("p", { class: "subtitle", text: "Reading…" }));
+    let data;
+    try {
+      const query = new URLSearchParams({ name, depth: String(depth) });
+      if (allEdges) query.set("all_edges", "1");
+      data = await api(`/api/impact?${query}`);
+    } catch (e) {
+      fill(results, error(e.message));
+      return;
+    }
+    const impact = data.impact;
+    if (!impact || !impact.reached.length) {
+      fill(
+        results,
+        el("p", { class: "headline", text: data.headline || "nothing reaches that name" }),
+        impact && impact.definitions.length
+          ? el("p", { class: "note", text: "The symbol is indexed; nothing in an open store calls it." })
+          : el("p", {
+              class: "note",
+              text: "No definition of that name is in an open store. Check the spelling, or index the repository that holds it.",
+            }),
+      );
+      return;
+    }
+
+    const inferred = impact.reached.filter((r) => r.confidence === "inferred" || r.confidence === "ambiguous").length;
+    const byHop = new Map();
+    for (const row of impact.reached) {
+      if (!byHop.has(row.hop)) byHop.set(row.hop, []);
+      byHop.get(row.hop).push(row);
+    }
+
+    fill(
+      results,
+      el("p", { class: "headline", text: data.headline }),
+      el(
+        "div",
+        { class: "impact-stats" },
+        statCell("Reached", impact.reached.length),
+        statCell("Files", impact.files.length),
+        statCell("Unsettled", inferred),
+      ),
+      allEdges
+        ? el("p", {
+            class: "note hypothesis",
+            text: "Walked names with several definitions. Rows badged ambiguous are a hypothesis, not a finding.",
+          })
+        : null,
+      el(
+        "div",
+        { class: "impact-head-row" },
+        capLabel("Reached symbol"),
+        capLabel("Where"),
+        capLabel("Via"),
+        capLabel("Hops"),
+      ),
+      [...byHop.entries()].map(([hop, rows]) =>
+        el(
+          "section",
+          { class: "impact-block" },
+          el(
+            "div",
+            { class: "impact-hop" },
+            el("h2", { text: `${hop} hop${hop === 1 ? "" : "s"}` }),
+            el("span", { class: "muted", text: `${rows.length} definition${rows.length === 1 ? "" : "s"}` }),
+          ),
+          rows.map(reachedRow),
+        ),
+      ),
+      el(
+        "section",
+        { class: "impact-block" },
+        el("div", { class: "impact-hop" }, el("h2", { text: "Files" })),
+        impact.files.map((file) =>
+          el(
+            "div",
+            { class: "impact-row" },
+            el("span", { class: "sym", text: shortPath(file.path) }),
+            el("span", { class: "where", text: `${file.symbols} definition${file.symbols === 1 ? "" : "s"}` }),
+            el("span", { class: "via", text: `nearest ${file.nearest} hop${file.nearest === 1 ? "" : "s"}` }),
+          ),
+        ),
+      ),
+      impact.hidden
+        ? el("p", { class: "note", text: `${impact.hidden} more left out at the limit of ${data.limit}.` })
+        : null,
+    );
+  }
+
+  fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
+  if (state.impactSymbol) run();
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
+      pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
+    }),
+    el(
+      "div",
+      { class: "impact-band" },
+      nameInput,
+      el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
+      verified,
+      go,
+    ),
+    el("div", { class: "impact-subject-row" }, capLabel("Changing"), subject, el("span", { class: "spacer" }), depthPill),
+    results,
+    pathFinderCard(),
+    traceCard(),
+  );
+}
+
+/* The path finder, which until now answered only from the terminal.
+ *
+ * `Prefer verified edges` is the default and `Strict` says it out loud — the
+ * same pair the CLI takes, and `Strict` wins over the other for the same
+ * reason it does there. */
+function pathFinderCard() {
+  const from = el("input", { type: "text", placeholder: "from", "aria-label": "Path from" });
+  const to = el("input", { type: "text", placeholder: "to", "aria-label": "Path to" });
+  const body = el("div", { class: "path-body" });
+  const query = el("span", { class: "mono-chip", text: "max 6 hops" });
+
+  let preferVerified = true;
+  let strict = false;
+
+  const verifiedChip = chipToggle("Prefer verified edges", true, (on) => {
+    preferVerified = on;
+    if (!on) strict = false;
+    strictChip.classList.toggle("on", strict);
+    strictChip.setAttribute("aria-pressed", String(strict));
+    run();
+  });
+  const strictChip = chipToggle("Strict", false, (on) => {
+    strict = on;
+    if (on) {
+      preferVerified = true;
+      verifiedChip.classList.add("on");
+      verifiedChip.setAttribute("aria-pressed", "true");
+    }
+    run();
+  });
+
+  async function run() {
+    const a = from.value.trim();
+    const b = to.value.trim();
+    if (!a || !b) {
+      fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+      return;
+    }
+    // `--strict` wins over `--all-edges`, exactly as it does on the command
+    // line: asking for both is asking for the refusal you named explicitly.
+    const allEdges = !preferVerified && !strict;
+    query.textContent = `${a} → ${b} · max 6 hops`;
+    fill(body, el("p", { class: "subtitle", text: "Walking…" }));
+    let data;
+    try {
+      const q = new URLSearchParams({ from: a, to: b, depth: "6" });
+      if (allEdges) q.set("all_edges", "1");
+      data = await api(`/api/path?${q}`);
+    } catch (e) {
+      fill(body, error(e.message));
+      return;
+    }
+    if (!data.path) {
+      fill(
+        body,
+        el(
+          "div",
+          { class: "refusal" },
+          el("p", {
+            class: "mono",
+            text: allEdges
+              ? "Not connected within 6 hops by any edge in the store"
+              : "Not connected within 6 hops by resolved edges",
+          }),
+          allEdges
+            ? null
+            : el("button", {
+                class: "link",
+                type: "button",
+                text: "Show inferred chain",
+                onclick: () => {
+                  preferVerified = false;
+                  strict = false;
+                  verifiedChip.classList.remove("on");
+                  verifiedChip.setAttribute("aria-pressed", "false");
+                  strictChip.classList.remove("on");
+                  strictChip.setAttribute("aria-pressed", "false");
+                  run();
+                },
+              }),
+        ),
+      );
+      return;
+    }
+    fill(body, chainBlock(data.path, data.summary));
+  }
+
+  fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+
+  return el(
+    "section",
+    { class: "card pad path-card" },
+    el("div", { class: "card-head" }, el("h2", { text: "Path finder" }), query),
+    el("div", { class: "path-band" }, from, to, verifiedChip, strictChip, el("button", { class: "button small", type: "button", text: "Walk", onclick: () => run() })),
+    body,
+  );
+}
+
+/** A pill that is on or off, in the two states the v4 design draws. */
+function chipToggle(label, on, onchange) {
+  const node = el("button", {
+    class: `chip-toggle${on ? " on" : ""}`,
+    type: "button",
+    text: label,
+    "aria-pressed": String(on),
+    onclick: () => {
+      const next = !node.classList.contains("on");
+      node.classList.toggle("on", next);
+      node.setAttribute("aria-pressed", String(next));
+      onchange(next);
+    },
+  });
+  return node;
+}
+
+/** The hops of a chain, with the seam drawn where the chain changed subject. */
+function chainBlock(steps, summary) {
+  const rows = [];
+  steps.forEach((step, i) => {
+    rows.push(
+      el(
+        "div",
+        { class: "hop" },
+        el("span", { class: "n", text: String(i + 1) }),
+        el("span", { class: "end", text: `${step.from} @ ${shortPath(step.from_path)}:${step.from_line}` }),
+        el("span", { class: "arrow", "aria-hidden": "true", text: "→" }),
+        el("span", { class: "end", text: `${step.to} @ ${shortPath(step.to_path)}:${step.to_line}` }),
+        el("span", { class: "kind", text: step.kind }),
+        confidenceBadge(step.confidence),
+      ),
+    );
+    const next = steps[i + 1];
+    if (next && (next.from_path !== step.to_path || next.from_line !== step.to_line)) {
+      rows.push(
+        el("div", { class: "seam" }, `seam · ${step.to}: ${Math.max(2, step.definitions)} definitions · continues from ${next.from} @ ${shortPath(next.from_path)}:${next.from_line}`),
+      );
+    }
+  });
+  const s = summary || {};
+  let trailer = `${s.hops} hop${s.hops === 1 ? "" : "s"} · ${s.extracted} extracted · ${s.resolved} resolved · ${s.inferred} inferred · ${s.ambiguous} ambiguous`;
+  if (s.seams) {
+    const names = (s.ambiguous_names || []).map(([name, count]) => `${name}: ${count} definitions`).join(", ");
+    trailer += ` · ${s.seams} through ambiguous names (${names})`;
+  }
+  return [
+    ...rows,
+    el("p", { class: "trailer mono", text: trailer }),
+    s.hypothesis
+      ? el("p", {
+          class: "note hypothesis",
+          text: "A hypothesis, not a finding. Read the seam before you rely on it.",
+        })
+      : null,
+  ];
+}
+
+/* Trace: the same chain, as something a reader can paste into a review.
+ *
+ * The sentence, the hops, and one line of source per hop — each marked a
+ * supporting fact or a candidate, from the hop's own support class. Nothing
+ * here re-walks the graph: `/api/trace` reads the chain the finder produced. */
+function traceCard() {
+  const from = el("input", { type: "text", placeholder: "from", "aria-label": "Trace from" });
+  const to = el("input", { type: "text", placeholder: "to", "aria-label": "Trace to" });
+  const body = el("div", { class: "trace-body" });
+  let evidenceText = "";
+
+  const copy = copyButton(() => evidenceText, "Copy as evidence", true);
+
+  async function run() {
+    const a = from.value.trim();
+    const b = to.value.trim();
+    if (!a || !b) {
+      fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+      return;
+    }
+    fill(body, el("p", { class: "subtitle", text: "Reading…" }));
+    let data;
+    try {
+      data = await api(`/api/trace?${new URLSearchParams({ from: a, to: b, depth: "6" })}`);
+    } catch (e) {
+      fill(body, error(e.message));
+      return;
+    }
+    const trace = data.trace;
+    evidenceText = data.evidence || "";
+    const parts = [capLabel("Answer"), el("p", { class: "answer", text: trace.answer })];
+    if (trace.chain && trace.chain.steps.length) {
+      parts.push(capLabel("Chain"));
+      parts.push(...chainBlock(trace.chain.steps, trace.chain.summary));
+      parts.push(capLabel("Supporting lines"));
+      for (const line of trace.lines) {
+        parts.push(
+          el(
+            "div",
+            { class: "support" },
+            el("code", { text: line.at ? `${line.at}   ${line.code}` : "no call line recorded" }),
+            el(
+              "div",
+              { class: "support-foot" },
+              el("span", { class: "hop-of", text: line.hop }),
+              el("span", {
+                class: `mark ${line.mark.startsWith("candidate") ? "candidate" : "fact"}`,
+                text: line.mark,
+              }),
+            ),
+          ),
+        );
+      }
+    }
+    fill(body, ...parts);
+  }
+
+  fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+
+  return el(
+    "section",
+    { class: "card pad trace-card" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Trace" }),
+      el("span", { class: "mono-chip", text: "evidence view" }),
+      el("span", { class: "spacer" }),
+      copy,
+    ),
+    el("div", { class: "path-band" }, from, to, el("button", { class: "button small", type: "button", text: "Trace", onclick: () => run() })),
+    body,
+  );
+}
+
+/* Reports: five, generated here, exported in four formats.
+ *
+ * The page asks `/api/report` for the text and hands it to the viewer — the
+ * export is not a second renderer, so a file saved from here and one written
+ * by `semlith report` are the same bytes. */
+const REPORTS = [
+  [
+    "savings",
+    "Retrieval savings",
+    "What was not read, what that would have cost, and how much of the ledger the figure covers.",
+  ],
+  ["access", "AI access audit", "Which agents read this corpus, how often, and what they missed."],
+  ["change", "Change brief", "What this machine re-read in the last seven days."],
+  ["health", "Index health", "What the index holds and what the graph made of it."],
+  ["gaps", "Knowledge gaps", "Asked and not answered, called and not found, and the names that mislead."],
+];
+
+const REPORT_FORMATS = [
+  ["markdown", "Markdown", "md", "text/markdown"],
+  ["csv", "CSV", "csv", "text/csv"],
+  ["json", "JSON", "json", "application/json"],
+  ["html", "HTML", "html", "text/html"],
+];
+
+async function reportsView() {
+  await refreshStores();
+  let model = MODEL_PRICES[0];
+  const preview = el("div", { class: "report-preview" });
+  const previewHead = el("div", { class: "card-head" });
+
+  async function show(kind, title) {
+    fill(previewHead, el("h2", { text: title }), el("span", { class: "mono-chip", text: "generated here" }));
+    fill(preview, el("p", { class: "subtitle", text: "Generating…" }));
+    let data;
+    try {
+      data = await api(
+        `/api/report?${new URLSearchParams({ kind, format: "markdown", model: model[0] })}`,
+      );
+    } catch (e) {
+      fill(preview, error(e.message));
+      return;
+    }
+    fill(preview, el("pre", { class: "report-text", text: data.text }));
+  }
+
+  async function save(kind, format) {
+    const [name, , extension, type] = REPORT_FORMATS.find(([id]) => id === format);
+    let data;
+    try {
+      data = await api(`/api/report?${new URLSearchParams({ kind, format, model: model[0] })}`);
+    } catch (e) {
+      fill(preview, error(e.message));
+      return;
+    }
+    offerDownload(`semlith-${kind}.${extension}`, data.text, type);
+    void name;
+  }
+
+  const modelPick = el(
+    "select",
+    {
+      "aria-label": "Price tokens at",
+      onchange: (e) => {
+        model = MODEL_PRICES[Number(e.currentTarget.value)] || MODEL_PRICES[0];
+      },
+    },
+    MODEL_PRICES.map(([name], i) =>
+      el("option", { value: String(i), text: `prices at ${name}` }),
+    ),
+  );
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Reports",
+      "Generated from this machine's ledger, index and graph. Nothing leaves the machine.",
+      { pill: el("span", { class: "mono-chip", text: "semlith_report" }) },
+    ),
+    el("div", { class: "filters" }, modelPick, el("span", {
+      class: "muted",
+      text: "PDF is your browser's print of the HTML — no PDF writer ships in the binary.",
+    })),
+    el(
+      "div",
+      { class: "grid two" },
+      REPORTS.map(([kind, title, what]) =>
+        el(
+          "section",
+          { class: "card pad report-card" },
+          el("span", { class: "card-title", text: title }),
+          el("p", { class: "subtitle", text: what }),
+          el(
+            "div",
+            { class: "filters" },
+            el("button", {
+              class: "button small",
+              type: "button",
+              text: "Generate",
+              onclick: () => show(kind, title),
+            }),
+            REPORT_FORMATS.map(([id, label]) =>
+              el("button", {
+                class: "button secondary small",
+                type: "button",
+                text: label,
+                onclick: () => save(kind, id),
+              }),
+            ),
+          ),
+          copyField(`semlith report ${kind} --format markdown`),
+        ),
+      ),
+    ),
+    el("section", { class: "card pad" }, previewHead, preview),
+  );
+}
+
+/* Cloud: a page about a service this binary does not talk to.
+ *
+ * It is here because the portal is the whole product and a reader should be
+ * able to find out what the hosted option is without leaving it — and it is
+ * only the not-connected state, because this release ships no cloud client.
+ * There is no `semlith cloud` command, no token store and no code path that
+ * opens a socket: the command blocks below are text to copy, and what they
+ * will do arrives in a later release. */
+const CLOUD_ROWS = [
+  [
+    "One URL for cloud agents.",
+    "Claude Code cloud sessions, routines and CI cannot reach a laptop; they can reach an org store.",
+  ],
+  [
+    "The whole organisation in one index.",
+    "Cross-repository paths, and documents beside code.",
+  ],
+  [
+    "A pull-request check that states what the graph proves,",
+    "with no model and no guess.",
+  ],
+];
+
+async function cloudView() {
+  return el(
+    "div",
+    { class: "view" },
+    pageHead("Cloud", null, { pill: pill("not connected", null) }),
+    el("p", {
+      class: "subtitle",
+      text: "Semlith Cloud is one hosted store for a whole organisation: every connected repository a root of it, indexed on push, served over MCP to any agent, with a pull-request impact check and a team ledger. This binary works without it. Nothing here contacts a server.",
+    }),
+    el(
+      "div",
+      { class: "card pad" },
+      el(
+        "div",
+        { class: "cloud-rows" },
+        CLOUD_ROWS.map(([lead, rest]) =>
+          el(
+            "p",
+            { class: "cloud-row" },
+            el("b", { text: lead }),
+            el("span", { text: ` ${rest}` }),
+          ),
+        ),
+      ),
+      el("div", { class: "cloud-block" }, copyField("semlith cloud login"), el("p", {
+        class: "subtitle",
+        text: "Not in this release. When it arrives it will store an org token under ~/.semlith/ and send it to that host and no other.",
+      })),
+      el("div", { class: "cloud-block" }, copyField("semlith cloud connect acme"), el("p", {
+        class: "subtitle",
+        text: "Will add the org's store to this machine's registry as a remote store, listed beside the local ones with a remote badge.",
+      })),
+      el("p", {
+        class: "note",
+        text: "This build has no cloud command and opens no connection to any host. The Privacy page's own reading is where to check that rather than take it from here.",
+      }),
+    ),
+  );
+}
+
 const RENDER = {
   stores: storesView,
   files: filesView,
@@ -7581,6 +8856,9 @@ const RENDER = {
   about: aboutView,
   graph: graphView,
   ledger: ledgerView,
+  impact: impactView,
+  reports: reportsView,
+  cloud: cloudView,
 };
 
 function go(id) {
