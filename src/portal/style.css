@@ -335,11 +335,29 @@ a:hover {
   color: var(--ink);
 }
 
+/* `textarea` belongs here and was missing, which is the whole of why the Index
+ * page's path box wrote in black on a dark background: a textarea does not
+ * inherit colour from its ancestors the way the others do, so it fell back to
+ * the user agent's own black on a panel that is nearly black in dark mode. */
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: inherit;
+}
+
+/* One size for every placeholder in the portal.
+ *
+ * A placeholder is a hint, and it was being set at the field's own size — 13px
+ * mono, or 16px on a phone where the size exists only to stop iOS zooming the
+ * page. Beside the text a person types it read as content rather than as the
+ * absence of it. Muted and a step down says what it is. */
+::placeholder {
+  font-size: var(--t-small);
+  font-family: var(--mono);
+  color: var(--muted);
+  opacity: 1;
 }
 
 table {
@@ -3383,7 +3401,10 @@ td.why .copyfield {
   align-items: center;
   gap: 6px;
   height: var(--h-dial);
-  padding: 0 var(--sp-2) 0 11px;
+  /* Equal on both sides. It was 11px before the label and 8px after the last
+   * pill, so the pill sat nearer its border than the label sat to its own and
+   * the control looked as though it had been nudged. */
+  padding: 0 11px;
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
   background: var(--panel);
@@ -3392,6 +3413,41 @@ td.why .copyfield {
 }
 .dial:focus-within {
   border-color: var(--blue);
+}
+
+/* A dropdown, shaped like every other control here.
+ *
+ * `.select` carried no rules at all, so it rendered as the operating system's
+ * own control: a different height, a different radius, a different font, and
+ * in dark mode a light box in a dark card. It is the same field shape as an
+ * input, with room on the right for the arrow the browser draws. */
+.select {
+  height: 34px;
+  padding: 0 var(--sp-6) 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: var(--t-body-sm);
+  cursor: pointer;
+  min-width: 0;
+  max-width: 16rem;
+  /* The arrow, drawn here rather than left to the platform, so the control
+   * looks the same on all three. */
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentcolor 50%),
+    linear-gradient(135deg, currentcolor 50%, transparent 50%);
+  background-position: calc(100% - 15px) 15px, calc(100% - 10px) 15px;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: border-color var(--d-fade) var(--e-in-out);
+}
+.select:hover {
+  border-color: var(--blue);
+}
+.select:focus {
+  outline: none;
+  border-color: var(--accent-edge);
 }
 .dial-label {
   font-family: var(--mono);
@@ -3521,7 +3577,9 @@ td.why .copyfield {
   gap: var(--sp-2);
   flex: 1 1 220px;
   min-width: 0;
-  padding: 0 var(--sp-3);
+  /* Less on the right than the left, because the right holds a button and the
+   * left holds text. Equal padding put the button hard against the border. */
+  padding: 0 var(--sp-1) 0 var(--sp-3);
   height: 36px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -3532,6 +3590,14 @@ td.why .copyfield {
 
 .graph-scope:focus-within {
   border-color: var(--accent-edge);
+}
+
+/* A control that sits inside a field's border. Shorter than the field it is in
+ * by the padding around it, so the field's edge and the button's edge are not
+ * the same line. */
+.button.in-field {
+  height: 28px;
+  flex-shrink: 0;
 }
 
 .graph-scope input {
@@ -4669,13 +4735,41 @@ td.row-end {
  * answer to that is read top to bottom by hop, not laid out in space. The
  * row shape is the locate row's, because both are "a name, where it is, and
  * what it is worth" and two shapes for that would read as two kinds of fact. */
+/* Every control on this page is a control shaped like the rest of the portal.
+ *
+ * The inputs here were bare `<input>` elements — no border token, no radius,
+ * no height, the browser's own box — sitting in a row with 34px buttons and
+ * pill chips. It was the one page where the shapes did not agree with any
+ * other, which is what "not proper" was pointing at. */
 .impact-band {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-2);
+  gap: var(--sp-2h);
   align-items: center;
   margin-bottom: var(--sp-4);
 }
+
+.impact-band input[type="search"],
+.impact-band .hops,
+.path-band input {
+  height: 34px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: var(--t-field);
+  outline: none;
+  transition: border-color var(--d-fade) var(--e-in-out);
+}
+
+.impact-band input[type="search"]:focus,
+.impact-band .hops:focus,
+.path-band input:focus {
+  border-color: var(--accent-edge);
+}
+
 .impact-band input[type="search"] {
   flex: 1 1 18rem;
   min-width: 0;
@@ -4683,9 +4777,12 @@ td.row-end {
 .hops-label {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
-  font-size: var(--t-body-sm);
+  gap: var(--sp-2);
+  font-size: var(--t-small-h);
   color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--mono);
 }
 .hops-label .hops {
   width: 4.5rem;
@@ -4790,7 +4887,10 @@ td.row-end {
  * the window. `overflow: hidden` keeps the rings inside the radius. */
 .impact-canvas-card {
   position: relative;
-  height: 320px;
+  /* The design's 320px is drawn against its own five-node mock. A real store
+   * answers with dozens, and the rings need the room to keep their labels
+   * apart — so this is the design's height as a floor rather than as a cap. */
+  height: clamp(320px, 42vh, 460px);
   overflow: hidden;
   padding: 0;
 }
@@ -4875,12 +4975,12 @@ td.row-end {
 .path-band {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-2);
+  gap: var(--sp-2h);
   align-items: center;
-  margin-bottom: var(--sp-3);
+  margin-bottom: var(--sp-4);
 }
 .path-band input {
-  flex: 1 1 10rem;
+  flex: 1 1 9rem;
   min-width: 0;
 }
 /* `.chip-toggle` stood here: 11px mono, 3px of vertical padding, about 17px
@@ -5076,25 +5176,37 @@ td.row-end {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: var(--sp-3);
   margin-bottom: var(--sp-4);
-  /* Each card is as tall as what it holds, the way the design's panel cluster
-   * is. Stretched to the tallest, the language mix and the month chart ran a
-   * third of their height as empty card. */
-  align-items: start;
+  /* One height for the three, which is what a row of cards has to have to read
+   * as a row. They were `align-items: start` so each was as tall as its own
+   * content, and three cards of three different heights side by side read as a
+   * layout that had gone wrong rather than as three answers. The empty band
+   * that used to leave is handled in the cards themselves: the month chart
+   * grows its bars into the space and the other two push their footnote to the
+   * bottom. */
+  align-items: stretch;
 }
 .health-card {
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
+  /* The last child takes the slack, so a card shorter than its neighbours
+   * pads at the bottom rather than stretching its rows apart. */
+  justify-content: flex-start;
   padding: var(--sp-3);
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--r-4);
   min-width: 0;
 }
+/* The rows spread through the card rather than bunching at its top. Eight
+ * languages in a card sized by its tallest neighbour is otherwise a list with
+ * a hand's width of empty panel under it. */
 .mix {
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+  flex: 1 1 auto;
+  justify-content: space-evenly;
 }
 .mix-row {
   display: flex;
@@ -5124,11 +5236,15 @@ td.row-end {
   color: var(--muted);
   white-space: nowrap;
 }
+/* Grows into whatever height the row has. The three cards are one height now,
+ * and a 96px chart in a 260px card left two thirds of it empty — a bar chart
+ * is the one thing here with an obvious use for vertical space. */
 .months {
   display: flex;
   align-items: flex-end;
   gap: var(--sp-1);
-  height: 96px;
+  min-height: 96px;
+  flex: 1 1 auto;
 }
 .month {
   display: flex;
@@ -5912,4 +6028,35 @@ pre.report-cli {
 }
 .unreadable > pre.code {
   margin-left: var(--sp-4);
+}
+
+/* What a tab row reveals. The gap is the tab's own underline plus air, so the
+ * content does not sit on the line that selects it. */
+.tab-panel {
+  margin-top: var(--sp-4);
+  min-width: 0;
+}
+
+/* The Agents page's own cards, in pairs rather than as a column of full-width
+ * bands. Equal height, because two cards side by side at two different heights
+ * read as a layout that failed rather than as two things. */
+.agent-extras {
+  align-items: stretch;
+}
+.agent-extras > * {
+  min-width: 0;
+}
+
+/* A card that takes the whole grid row rather than one auto-fit track. */
+.span-row {
+  grid-column: 1 / -1;
+}
+
+/* The Privacy page's rule list, two abreast once there is room. Eight rules of
+ * prose in a single narrow column is a page that scrolls for one card. */
+.rules-card .rules {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--sp-4) var(--sp-5);
+  align-items: start;
 }

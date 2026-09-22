@@ -2368,7 +2368,7 @@ async function graphView() {
     },
   });
   const scopeButton = el("button", {
-    class: "button secondary small",
+    class: "button secondary small in-field",
     type: "button",
     text: "Scope",
     onclick: () => applyScope(),
@@ -2428,12 +2428,12 @@ async function graphView() {
           { class: "graph-scope" },
           icon(ICONS.search, 16),
           labelled("graph-scope", "Scope the graph", scopeInput),
+          // `Enter applies it` stood after this button, which put a sentence
+          // inside the field's own border and pushed the control off its end.
+          // Enter still applies it; the button says the same thing by being a
+          // button, and `aria-describedby` on the input carries it for anyone
+          // who is not looking at it.
           scopeButton,
-          el("span", {
-            class: "meta",
-            id: "graph-scope-hint",
-            text: "Enter applies it",
-          }),
         ),
         storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
       ),
@@ -2609,10 +2609,13 @@ async function ledgerView() {
        * a question semlith could not answer, and a file an agent read whole
        * without asking — and subtracting one number from another counted them
        * as the same thing. */
+      /* A share, as the v4 design draws it. `0 of 4` is two numbers a reader
+       * has to divide; the percentage is the thing they were dividing for, and
+       * the count is kept in the caption so the denominator is never lost. */
       stat(
         "Zero-hit",
-        `${n(data.zero_hit || 0)} of ${n(data.queries)}`,
-        "queries the corpus could not answer — recorded, and credited nothing",
+        `${share(data.zero_hit || 0, data.queries || 0)}`,
+        `${n(data.zero_hit || 0)} of ${n(data.queries)} queries the corpus could not answer — recorded, and credited nothing`,
       ),
       /* The figure the savings claim is defended against: what an agent read
        * whole anyway, on a file this store holds. Measured on a client with the
@@ -2676,9 +2679,14 @@ async function ledgerView() {
           }),
         ),
     ),
+    /* Two tabs rather than three stacked cards, as the v4 design has it.
+     *
+     * The rows and the replay are two readings of the same ledger, and stacked
+     * they made a long page where the second one was found by scrolling past
+     * the first. A tab says they are alternatives. The sessions table keeps its
+     * own card above them, because it is the summary both tabs are of. */
     ledgerSessions(data),
-    ledgerRows(data),
-    sessionReplay(),
+    ledgerTabs(data),
     says(
       "Stored in ",
       mono("~/.semlith/stores/<name>/store.db"),
@@ -2772,6 +2780,32 @@ function sessionReplayToggle() {
  * page's toggle is on. Nothing read here is sent anywhere — the files belong
  * to another program, which is exactly why the toggle exists and why the tab
  * says where it read from. */
+/** The rows and the replay, as two tabs over one ledger. */
+function ledgerTabs(data) {
+  const panel = el("div", { class: "tab-panel" });
+  const views = [
+    ["Retrievals", () => ledgerRows(data)],
+    ["Session replay", () => sessionReplay()],
+  ];
+  const buttons = views.map(([label], i) =>
+    el("button", {
+      class: "tab",
+      type: "button",
+      text: label,
+      "aria-pressed": String(i === 0),
+      onclick: () => show(i),
+    }),
+  );
+
+  function show(index) {
+    buttons.forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
+    fill(panel, views[index][1]());
+  }
+
+  show(0);
+  return el("div", { class: "rows tight" }, el("div", { class: "tabs" }, buttons), panel);
+}
+
 function sessionReplay() {
   const body = el("div", { class: "replay-body" });
 
@@ -5910,50 +5944,68 @@ function logText(event) {
 }
 
 /** One of the three settings, with what the machine derived and why. */
+/** Why a given setting stops where it does, in the machine's own terms. */
+function capped(limit) {
+  return limit.ceiling === limit.derived
+    ? "It is already what this machine derives."
+    : "Past it the machine would be promising work it cannot carry.";
+}
+
 function settingField(key, label, limit, onSave) {
   const fixed = limit.source === "environment";
   const input = el("input", {
     type: "number",
     min: "1",
+    // The field will not go above what the machine will accept, and the route
+    // clamps it as well — a `max` on an input is a courtesy, not a control.
+    max: String(limit.ceiling),
     value: String(limit.value),
     disabled: fixed,
     "aria-label": label,
   });
   const why = el("div", { class: "note" });
 
+  /* What the field says under itself.
+   *
+   * None of this is a warning any more. Changing these is the ordinary thing
+   * to do with them — a laptop doing nothing else can index harder than the
+   * default — and the panel used to answer every such change in red, which
+   * reads as "you have broken something" rather than "here is what that
+   * means". The only genuinely constrained case is the ceiling, and the field
+   * will not go past it, so there is nothing left to warn about.
+   */
   function explain() {
     const asked = Number(input.value);
-    // A value above what the machine can carry is the user's to make, and it
-    // is made with the derivation in front of them rather than instead of it.
-    if (!fixed && asked > limit.derived) {
-      why.className = "note bad";
-      // Where it came from, on this branch too. A saved value above the
-      // derived one takes this branch every time, so saying only "derived"
-      // here is saying it in exactly the case where a user is trying to work
-      // out whether their setting took effect — and the daemon's own line
-      // calls the same value saved.
-      const held = limit.source === "saved" ? `${limit.value} saved. ` : "";
-      why.textContent = `${held}Above the ${limit.derived} this machine derived — ${limit.reason}. It will be used as you set it.`;
+    if (fixed) {
+      why.className = "note";
+      why.textContent = `Set in this daemon's environment, so the page leaves it alone. This machine would derive ${limit.derived} — ${limit.reason}`;
+      return;
+    }
+    if (asked >= limit.ceiling) {
+      // Not red either. It is the top of the range, which is a fact about the
+      // machine rather than a mistake by the person.
+      why.className = "note";
+      why.textContent = `${limit.ceiling} is as high as this machine goes. ${capped(limit)}`;
+      return;
+    }
+    if (asked > limit.derived) {
+      why.className = "note";
+      why.textContent = `Above the ${limit.derived} this machine would pick on its own, and under the ${limit.ceiling} it will allow — ${limit.reason} Yours to set; it applies to the next run.`;
       return;
     }
     why.className = "note";
-    // Where the value in force came from, in the daemon's own words. The panel
-    // used to call every value "derived", including one the user had saved, so
-    // the two disagreed exactly when someone was trying to work out whether
-    // their setting had taken effect.
     const from =
       limit.source === "saved"
-        ? `${limit.value} saved; ${limit.derived} is what this machine derives`
-        : `${limit.derived} derived`;
-    why.textContent = fixed
-      ? `Set by the environment, so the page cannot change it. Derived here: ${limit.derived} — ${limit.reason}`
-      : `${from} — ${limit.reason}`;
+        ? `${limit.value} saved, and this machine derives ${limit.derived}`
+        : `${limit.derived}, derived`;
+    why.textContent = `${from} — ${limit.reason} Room up to ${limit.ceiling}.`;
   }
 
   input.addEventListener("input", explain);
   input.addEventListener("change", () => {
-    const asked = Math.max(1, Number(input.value) || 1);
+    const asked = Math.min(limit.ceiling, Math.max(1, Number(input.value) || 1));
     input.value = String(asked);
+    explain();
     onSave(key, asked);
   });
   explain();
@@ -6174,6 +6226,13 @@ async function indexView() {
     // Redrawn only when a value or its reason actually changed: the memory
     // figure moves every second, and a field that rebuilds under the cursor
     // cannot be typed into.
+    // Every field of every limit, not just the three values.
+    //
+    // `embed_threads` is derived from the runs actually in force, so changing
+    // `runs at once` changes the *sentence* under `threads each` while leaving
+    // its number alone. Keying the redraw on the numbers alone meant the panel
+    // skipped exactly the repaint that would have shown one field answering
+    // another, which is the whole of why these three live in one card.
     const signature = JSON.stringify([
       limits.runs_at_once,
       limits.embed_threads,
@@ -6191,7 +6250,7 @@ async function indexView() {
           machine.total_memory_mb,
         )} MiB of memory, ${n(
           machine.available_memory_mb,
-        )} MiB free now. Each value below is derived from that, and each is yours to change.`,
+        )} MiB free now. Each value below starts from that and is yours to change — they answer each other, so raising one moves what the others suggest. Each stops where this machine does.`,
       }),
       el(
         "div",
@@ -6373,7 +6432,10 @@ async function indexView() {
 
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
   const addButton = el("button", {
-    class: "button secondary",
+    // The accent shape, like `Start indexing` beside it. Both of them begin
+    // work on the machine, and one of the two reading as a quiet secondary
+    // made the URL card look like a thing that had not been finished.
+    class: "button",
     type: "button",
     text: "Fetch and index",
   });
@@ -6511,13 +6573,16 @@ async function indexView() {
        * above two of this project's own, which was neither page's order:
        * the whole point of the index half is watching a run, and it was
        * the fifth thing on the page. */
+      /* Every panel the button band opens, in one slot directly under it.
+       *
+       * They were in four places: the folder picker here, the repository
+       * checklist and the URL card below the corpus cards, and the queue and
+       * the machine limits at the very foot of the page. Pressing `Choose
+       * folders…` opened something you were looking at; pressing any of the
+       * other three opened something a screen and a half away, with nothing
+       * saying it had happened. One slot, so a button and what it opens are
+       * always in the same relationship. */
       picker.node,
-      cards,
-      health.node,
-      el("span", { class: "eyebrow", text: "What the graph covers" }),
-      coverage.node,
-      /* And this project's own, after them: the repository picker, the
-       * URL fetcher, the done-filter, the write queue and the settings. */
       projects.node,
       fill(
         urlCard,
@@ -6541,9 +6606,14 @@ async function indexView() {
         ),
         urlNote,
       ),
-      el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
       queueCard,
       settingsCard,
+      /* Then the run, and then what the store already holds. */
+      cards,
+      el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
+      health.node,
+      el("span", { class: "eyebrow", text: "What the graph covers" }),
+      coverage.node,
     ),
   );
 }
@@ -7021,6 +7091,26 @@ async function doctorView() {
       "Doctor",
       "Whether each agent client on this machine can reach semlith, and what to run for the ones that cannot.",
     ),
+    /* The rules first, then the table.
+     *
+     * The clients table is twenty-seven rows and pages ten at a time, so the
+     * rules underneath it were below a screenful of table on every visit —
+     * and they are the part that answers "is this machine set up correctly",
+     * which is the question the page is for. The table is the detail.
+     *
+     * The rules are already cards — one `.stat` each — so they sit in the view
+     * beside their heading rather than inside a second card. A card of cards
+     * is a border drawn around some borders. */
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "card-title", text: "Rules" }),
+      el("span", {
+        class: "meta",
+        text: "what the daemon found when it looked, not what the documentation says",
+      }),
+    ),
+    rulesBox,
     el(
       "div",
       // `card pad`, like every other section on every other page. A bare card
@@ -7039,19 +7129,6 @@ async function doctorView() {
       ),
       clients.node,
     ),
-    // The rules are already cards — one `.stat` each — so they sit in the view
-    // beside their heading rather than inside a second card. A card of cards
-    // is a border drawn around some borders.
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "card-title", text: "Rules" }),
-      el("span", {
-        class: "meta",
-        text: "what the daemon found when it looked, not what the documentation says",
-      }),
-    ),
-    rulesBox,
     note,
   );
 }
@@ -7757,8 +7834,16 @@ async function agentsView() {
      * and `Connected`, and the installer sat inside the design's own grid
      * between `Tools exposed` and the stanzas — so a reader following the
      * design's argument met four unrelated cards in the middle of it. */
-    serviceCard(),
+    /* Two columns, equal height. These were five full-width cards down a page
+     * that is mostly narrow text, so the page scrolled for a screenful of
+     * content and every card was the width of the window for no reason. The
+     * service card and the key are a pair — what runs the daemon and what an
+     * agent authenticates with — and the two registration cards are another. */
     el(
+      "div",
+      { class: "grid two agent-extras" },
+      serviceCard(),
+      el(
       "div",
       { class: "card pad dense" },
       el("span", { class: "card-title", text: "Agent key" }),
@@ -7773,10 +7858,10 @@ async function agentsView() {
         " yourself.",
       ),
     ),
+    ),
     keyNote,
-    registerAll,
+    el("div", { class: "grid two agent-extras" }, registerAll, installPanel()),
     inUseCard,
-    installPanel(),
   );
 }
 
@@ -8205,9 +8290,13 @@ async function privacyView() {
          * what we promise, here is how you check it, here is the single
          * connection that exists — met two pages of rules in the middle
          * of it. */
+        /* Full width across the grid. In one auto-fit column this card is a
+         * narrow strip holding eight rules of prose, so it ran several screens
+         * tall on its own and the page scrolled almost entirely because of it.
+         * Across the whole row its rules sit two abreast and the page ends. */
         el(
           "div",
-          { class: "card pad" },
+          { class: "card pad span-row rules-card" },
           el(
             "div",
             { class: "head" },
@@ -8656,8 +8745,15 @@ function impactRings() {
   /* How many labels one ring can carry before they overlap. The circumference
    * grows with the radius, so the ring further out holds more — which is also
    * the ring with more on it, and is why this is computed rather than fixed. */
+  /* How many labels fit around a ring without touching.
+   *
+   * 74px of arc each was the width of a short name, not of a label: a label is
+   * capped at 150px and most are near it, so a ring "fitting" twelve of them
+   * drew twelve overlapping boxes. The real spacing is the widest label plus a
+   * gap, and a ring that cannot hold four is not drawn as a ring at all — its
+   * symbols are counted instead. */
   function capacity(radius) {
-    return Math.max(4, Math.floor((2 * Math.PI * radius) / 74));
+    return Math.max(3, Math.floor((2 * Math.PI * radius) / 165));
   }
 
   function draw() {
@@ -8712,13 +8808,28 @@ function impactRings() {
     });
 
     // Spokes first, so a label always sits on top of the line that reaches it.
+    // Drawn inward — from the caller to what it reaches — because that is the
+    // direction the question is asked in, and an undirected line on a page
+    // about reachability says half of what it could.
     ctx.strokeStyle = ink.edge;
     ctx.lineWidth = 1;
     for (const node of placed) {
       const inner = placed.find((p) => p.row.name === node.row.via && p.row.hop < node.row.hop);
+      const tx = inner ? inner.x : cx;
+      const ty = inner ? inner.y : cy;
       ctx.beginPath();
-      ctx.moveTo(inner ? inner.x : cx, inner ? inner.y : cy);
-      ctx.lineTo(node.x, node.y);
+      ctx.moveTo(node.x, node.y);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+      // The head sits short of the target's own label rather than under it.
+      const angle = Math.atan2(ty - node.y, tx - node.x);
+      const hx = tx - Math.cos(angle) * 22;
+      const hy = ty - Math.sin(angle) * 14;
+      ctx.beginPath();
+      ctx.moveTo(hx, hy);
+      ctx.lineTo(hx - Math.cos(angle - 0.4) * 6, hy - Math.sin(angle - 0.4) * 6);
+      ctx.moveTo(hx, hy);
+      ctx.lineTo(hx - Math.cos(angle + 0.4) * 6, hy - Math.sin(angle + 0.4) * 6);
       ctx.stroke();
     }
 
@@ -10645,15 +10756,6 @@ function buildShell() {
       el("div", { class: "fact", text: `${location.host} · sole writer` }),
       el("div", { class: "fact", id: "daemon-stores", text: "" }),
     ),
-    // The design keeps a way back to the first-run screen. Without it that
-    // screen is reachable only by emptying the registry, so nobody who has a
-    // store can ever read the page that explains the product.
-    el("button", {
-      class: "chip sm",
-      type: "button",
-      text: "Replay first-run screen",
-      onclick: () => go("welcome"),
-    }),
   );
 
   const scrim = el("button", {

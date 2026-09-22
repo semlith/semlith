@@ -1319,17 +1319,38 @@ pub struct Limit {
     pub source: Source,
     pub derived: usize,
     pub reason: String,
+    /// The most this machine will accept for this setting.
+    ///
+    /// Distinct from `derived`, and the distinction is the point. `derived` is
+    /// what this machine would choose left alone, and going above it is an
+    /// ordinary thing to want — a laptop that is doing nothing else can index
+    /// harder than the default. `ceiling` is where the answer stops being a
+    /// choice and starts being a machine that swaps or thrashes, and a page
+    /// that let somebody past it would be offering a setting that makes the
+    /// product worse with no way to tell.
+    ///
+    /// Enforced in the route as well as drawn on the page: a cap only the page
+    /// knows about is not a cap.
+    pub ceiling: usize,
 }
 
 impl Limit {
-    fn new(derived: crate::system::Derivation, saved: Option<usize>, variable: &str) -> Self {
+    fn new(
+        derived: crate::system::Derivation,
+        saved: Option<usize>,
+        variable: &str,
+        ceiling: usize,
+    ) -> Self {
         let from_env = std::env::var(variable)
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
             .filter(|n| *n > 0);
         let (value, source) = match (from_env, saved.filter(|n| *n > 0)) {
+            // The environment is the machine's owner speaking directly and is
+            // not clamped: somebody who exported a variable has said what they
+            // mean more deliberately than somebody typing in a box.
             (Some(n), _) => (n, Source::Environment),
-            (None, Some(n)) => (n, Source::Saved),
+            (None, Some(n)) => (n.min(ceiling), Source::Saved),
             (None, None) => (derived.value, Source::Derived),
         };
         Self {
@@ -1337,6 +1358,7 @@ impl Limit {
             source,
             derived: derived.value,
             reason: derived.reason,
+            ceiling: ceiling.max(derived.value),
         }
     }
 }
@@ -1367,7 +1389,21 @@ impl Limits {
         let machine = crate::system::read();
         let derived = crate::system::derive(&machine, crate::system::PER_RUN_PEAK_MB);
         let saved = home::Settings::load();
-        let runs_at_once = Limit::new(derived.runs_at_once, saved.runs_at_once, PARALLEL_ENV);
+        // The ceilings. Every logical core may carry a run, and every logical
+        // core may carry an embedding thread, but nothing may ask for more
+        // parallelism than the machine has hardware for. Memory stops at what
+        // is free now less the reserve, because a store budget larger than
+        // that is a promise the machine cannot keep.
+        let cores = machine.logical_cores.max(1);
+        let memory_ceiling = machine
+            .available_memory_mb
+            .saturating_sub(crate::system::RESERVE_MB) as usize;
+        let runs_at_once = Limit::new(
+            derived.runs_at_once,
+            saved.runs_at_once,
+            PARALLEL_ENV,
+            cores,
+        );
         // Derived from the runs actually in force, not from the runs this
         // machine would have chosen. The two differ exactly when someone has
         // changed the setting, which is the moment the sentence under the
@@ -1379,11 +1415,13 @@ impl Limits {
                 threads_derived,
                 saved.embed_threads,
                 crate::embed::THREADS_ENV,
+                cores,
             ),
             index_memory_mb: Limit::new(
                 derived.index_memory_mb,
                 saved.index_memory_mb,
                 crate::index::INDEX_MEMORY_ENV,
+                memory_ceiling,
             ),
             machine: serde_json::json!({
                 "logical_cores": machine.logical_cores,

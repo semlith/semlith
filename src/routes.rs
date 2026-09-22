@@ -2770,13 +2770,16 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     };
     let mut saved = home::Settings::load();
     let limits = daemon::Limits::in_force();
-    let read = |key: &str| {
+    // Clamped here and not only on the page. A cap the page knows about and
+    // the route does not is a cap that any other caller walks past, and what
+    // it guards is a machine that swaps rather than a preference.
+    let read = |key: &str, ceiling: usize| {
         body.get(key)
             .and_then(Value::as_u64)
-            .map(|n| n.max(1) as usize)
+            .map(|n| (n.max(1) as usize).min(ceiling.max(1)))
     };
 
-    if let Some(n) = read("runs_at_once") {
+    if let Some(n) = read("runs_at_once", limits.runs_at_once.ceiling) {
         if limits.runs_at_once.source == daemon::Source::Environment {
             return Response::error(
                 409,
@@ -2788,7 +2791,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.runs_at_once = Some(n);
     }
-    if let Some(n) = read("embed_threads") {
+    if let Some(n) = read("embed_threads", limits.embed_threads.ceiling) {
         if limits.embed_threads.source == daemon::Source::Environment {
             return Response::error(
                 409,
@@ -2800,7 +2803,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.embed_threads = Some(n);
     }
-    if let Some(n) = read("index_memory_mb") {
+    if let Some(n) = read("index_memory_mb", limits.index_memory_mb.ceiling) {
         if limits.index_memory_mb.source == daemon::Source::Environment {
             return Response::error(
                 409,
