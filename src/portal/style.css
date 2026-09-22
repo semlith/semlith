@@ -347,6 +347,19 @@ textarea {
   color: inherit;
 }
 
+/* A field that follows a paragraph gets room to be a separate thing.
+ *
+ * A card sets one gap for all its children, and the gap that reads well
+ * between two paragraphs is too tight between a sentence explaining a control
+ * and the control itself — the helper text looked attached to the box rather
+ * than about it. */
+.card p + .field,
+.card .subtitle + .field,
+.card p + .copyfield,
+.card .subtitle + .copyfield {
+  margin-top: var(--sp-2);
+}
+
 /* One size for every placeholder in the portal.
  *
  * A placeholder is a hint, and it was being set at the field's own size — 13px
@@ -2213,7 +2226,10 @@ pre.code::-webkit-scrollbar-thumb {
    crumbs bar and the entries each bring theirs — so without this it alone sat
    against the border. */
 .picker > .subtitle {
-  padding: var(--sp-3) var(--sp-3h) 0;
+  /* Equal above and below. It was `var(--sp-3) var(--sp-3h) 0` — twelve pixels
+   * of air above the sentence and none under it, so the line sat on top of the
+   * first row of entries. */
+  padding: var(--sp-3) var(--sp-3h);
 }
 .picker .entries {
   max-height: 320px;
@@ -6045,6 +6061,18 @@ pre.report-cli {
 }
 .agent-extras > * {
   min-width: 0;
+}
+
+/* The command block fills the card rather than leaving a hand's width of empty
+ * panel under it. The CLI card sits beside the schedules card, which is much
+ * taller, and a stretched card with a short block in it read as unfinished. */
+.report-cli-card .report-cli {
+  flex: 1 1 auto;
+}
+.report-cli-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
 }
 
 /* A card that takes the whole grid row rather than one auto-fit track. */

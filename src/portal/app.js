@@ -10332,13 +10332,24 @@ async function reportsView() {
     if (windowed()) flags.push(`--window ${span}`);
     for (const name of scope) flags.push(`--scope ${name}`);
     if (kind === "savings") flags.push(`--model "${model[0]}"`);
-    const one = `semlith report ${kind} ${flags.join(" ")} --out ${home ? `${home}/reports/` : "."}`;
+    const out = home ? `${home}/reports/` : ".";
+    // What the Copy button puts on the clipboard: one line, runnable as it is.
+    const one = `semlith report ${kind} ${flags.join(" ")} --out ${out}`;
+    /* What the card shows: the same command wrapped the way the design wraps
+     * it, with a continuation at each break. A single line of eight flags ran
+     * off the right edge of a half-width card and the reader saw `semlith
+     * report savings --format mark…` — the flags are the part worth reading.
+     * Backslashes rather than a soft wrap, so what is on screen is still
+     * something that runs if it is selected by hand. */
+    const wrapped = [`semlith report ${kind} \\`, ...flags.map((f) => `  ${f} \\`), `  --out ${out}`];
     const block = [
-      one,
+      ...wrapped,
       "",
       // The design's comment, and true of this build: the list is a file.
       "# the schedule list is a file — add, edit or delete by hand:",
-      `semlith schedule add ${kind} --every ${cadence} --to ${destination || reportDir} --format ${format}`,
+      `semlith schedule add ${kind} \\`,
+      `  --every ${cadence} --to ${destination || reportDir} \\`,
+      `  --format ${format}`,
       "semlith schedule list   ·   semlith schedule remove 2",
     ].join("\n");
     fill(
