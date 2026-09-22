@@ -1,0 +1,138 @@
+# The image class, written against the corpus in `corpus/`.
+#
+# Why this file exists, and why it is not eight more rows in the set next door:
+# #122 was a real ranking defect — "a red circle" put a source file above
+# `red-circle.png` — and it survived 0.25.0, a whole retrieval release, because
+# nothing the release measured could see it. The pinned text corpus holds no
+# images, so none of its questions exercises the image list at all.
+#
+# The obvious fix is to put images in that corpus. It is the wrong one: its hash
+# is asserted on every run and every published figure is read against it, so
+# adding a file rebaselines hit@1, hit@3, hit@8, bytes per answer and the census
+# in one move, and the release that did it could no longer say its predecessor's
+# numbers reproduced. This corpus is small, separate, and has a hash of its own.
+#
+# Every question here is `shape: image` and `tool: search`, and every expected
+# span is a whole picture: an image hit carries `start_line: 0, end_line: 0`
+# where a chunk carries a line range, so the span is the file and nothing finer.
+#
+# The corpus deliberately holds three text files that use the same words
+# (`shapes.md`, `render.rs`, `palette.py`). A picture that wins against nothing
+# proves nothing — the defect being gated here was a *text* file outranking a
+# picture, and it can only reappear where there is text to outrank.
+
+questions:
+  - id: img-red-circle
+    shape: image
+    tool: search
+    query: a red circle
+    spans:
+      - path: red-circle.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+    note: >-
+      The question from #122, verbatim. `shapes.md` and `render.rs` both use the
+      words, and `render.rs` defines `in_circle` with `RED` above it, so the
+      keyword list has a genuine candidate to put first. This is the one row
+      that would have failed before the fix.
+
+  - id: img-blue-square
+    shape: image
+    tool: search
+    query: a blue square
+    spans:
+      - path: blue-square.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+    note: >-
+      `render.rs` defines `in_square` and `BLUE`; `palette.py` associates blue
+      with a square by name. Both are answers to the words and neither is a
+      picture.
+
+  - id: img-green-triangle
+    shape: image
+    tool: search
+    query: a green triangle
+    spans:
+      - path: green-triangle.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+
+  - id: img-checkerboard
+    shape: image
+    tool: search
+    query: a black and white checkerboard pattern
+    spans:
+      - path: black-white-checkerboard.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+    note: >-
+      No colour word that names a single hue, so the colour association in
+      `palette.py` cannot carry this one. What it tests is whether CLIP reaches
+      a texture rather than an object.
+
+  - id: img-yellow-stripes
+    shape: image
+    tool: search
+    query: yellow horizontal stripes
+    spans:
+      - path: yellow-horizontal-stripes.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+
+  - id: img-purple-diagonal
+    shape: image
+    tool: search
+    query: a purple diagonal line
+    spans:
+      - path: purple-diagonal-line.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+    note: >-
+      `render.rs` has `on_diagonal` and `PURPLE` within a few lines of each
+      other, which is the strongest single text candidate in the corpus.
+
+  - id: img-orange-ring
+    shape: image
+    tool: search
+    query: an orange ring, like a donut
+    spans:
+      - path: orange-ring.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+    note: >-
+      Two words for one shape, only one of which appears in the filename. A
+      keyword list can reach `ring`; only an image model reaches `donut` as the
+      same picture.
+
+  - id: img-grey-gradient
+    shape: image
+    tool: search
+    query: a grey gradient fading from dark to light
+    spans:
+      - path: grey-gradient.png
+        symbol: ~
+        start_line: 0
+        end_line: 0
+    note: >-
+      The longest query here, and the one where the text files are strongest:
+      `gradient_at` in `render.rs` and the grey line in `palette.py` are both
+      about exactly this. It is the pair that says whether a long natural
+      sentence still reaches the picture.
+
+      It does not, and this is the one question of the eight that misses. 0.27.0
+      measured the other seven at rank 1 and this one nowhere in the top eight —
+      the #122 shape exactly, a text file outranking the picture a query is
+      about. It is left failing and named in the harness output rather than
+      softened, because a question rewritten until it passes measures the
+      rewriting. A grey gradient is close to the hardest thing to ask CLIP for:
+      it has no object in it, so almost all of what the query says is carried by
+      words that two text files also say. Whatever release raises the floor
+      above seven is the release that has something to say about this.

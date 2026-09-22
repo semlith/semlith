@@ -1478,6 +1478,12 @@ pub struct State {
     /// retrievals it did record was the portal's own search box, which is not
     /// who the product is for.
     pub ledger: bool,
+    /// The schedules timer's handle.
+    ///
+    /// Here rather than in a global so a route can reach it: a surface that has
+    /// changed `schedules.json` calls `state.schedules.wake()` and the timer
+    /// re-reads it at once instead of waiting out its sleep.
+    pub schedules: Arc<crate::schedule::Runner>,
 }
 
 /// How recently a proxy must have called to count as connected.
@@ -1959,6 +1965,16 @@ impl State {
         Ok(())
     }
 
+    /// Put a line on the daemon's own log.
+    ///
+    /// The `report` closure is private because nothing outside this module
+    /// should be choosing what a daemon says; the schedules timer is a thread
+    /// this daemon owns and has failures only its log can carry, so it gets a
+    /// way to say them rather than a way to hold the closure.
+    pub fn say(&self, text: &str) {
+        (self.report)(text);
+    }
+
     pub fn refuse(&self, class: Refusal) {
         *self
             .refusals
@@ -2005,6 +2021,46 @@ pub fn stores_to_open(flags: &[PathBuf], paths: &[PathBuf], cwd: &Path) -> Resul
         }
     }
     Ok(out)
+}
+
+/// Split `dirs` into the ones a live daemon already holds and the ones free to
+/// open, pairing each held store with the daemon that holds it.
+///
+/// A store counts as held only when both halves agree. The write lock has to
+/// refuse — so something really is the writer — *and* the discovery file beside
+/// it has to name a daemon that will answer. Either alone is a guess: a lock
+/// with no discovery is an `index` or `watch` run, and a discovery file with no
+/// lock is what a SIGKILLed daemon left behind.
+///
+/// The live half is `Discovery::read` rather than `lock::daemon_holds`, which
+/// answers from the file existing. The criterion here is a daemon that is
+/// *answering*, and `read` is the only predicate that checks all of it: the
+/// registry trusts the store, the file is this user's and 0600, the token is a
+/// token, and the pid is alive. A stale file passes `daemon_holds` and would
+/// turn a genuine conflict into a cheerful "already running" pointing at a URL
+/// nothing listens on.
+///
+/// The probe takes each free store's lock and drops it again. The window
+/// between that and `run`'s own acquire is harmless both ways: a daemon that
+/// exits inside it hands `run` the lock, and one that starts inside it hands
+/// `run` the refusal a genuine conflict deserves.
+pub fn held_by_daemon(dirs: &[PathBuf]) -> (Vec<(PathBuf, Discovery)>, Vec<PathBuf>) {
+    let mut held = Vec::new();
+    let mut free = Vec::new();
+    for dir in dirs {
+        match StoreLock::acquire(dir) {
+            Ok(_) => free.push(dir.clone()),
+            Err(_) => match Discovery::read(dir) {
+                Some(found) => held.push((dir.clone(), found)),
+                // Refused by something that is not a daemon we can reach. Left
+                // in `free` on purpose: `run` acquires it again and fails with
+                // the error a real conflict has always produced, rather than
+                // this function inventing a second wording for it.
+                None => free.push(dir.clone()),
+            },
+        }
+    }
+    (held, free)
 }
 
 /// What a store watches, and what it should be watching but cannot find.
@@ -2191,7 +2247,22 @@ pub fn run(
         clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
         ledger,
+        schedules: crate::schedule::Runner::new(),
     });
+
+    // The timer, over whatever `~/.semlith/schedules.json` holds. A home with
+    // no such file is the normal state: nothing is created, nothing is said,
+    // and the thread sleeps until somebody adds one and wakes it.
+    match crate::schedule::Schedules::load() {
+        Ok(file) if !file.schedules.is_empty() => {
+            report_line(&format!("schedules: {} registered", file.schedules.len()))
+        }
+        Ok(_) => {}
+        // Never fatal. A schedules file this binary cannot read is a report
+        // that will not be written, not a reason to refuse to serve a corpus.
+        Err(e) => report_line(&format!("schedules: {e:#}")),
+    }
+    crate::schedule::Runner::spawn(Arc::clone(&state));
 
     // Installed before the first thread starts: the signal is how this process
     // ends, so the ordinary exit has to be the safe one.
@@ -2262,6 +2333,10 @@ pub fn run(
         // going: what this records is which folders the next start owes the
         // user an explanation for.
         remember_dropped_queue(&state.stores(), &state.admission.waiting());
+        // Nothing waits on the timer — it holds no lock and owns no store —
+        // but a thread asleep for an hour should not be what keeps a process
+        // alive, so it is told to go.
+        state.schedules.stop();
         // Each watcher waits on its own store's flag now, so that a single
         // store can be closed and deleted without stopping the daemon. A
         // shutdown is every store at once.
@@ -3382,6 +3457,7 @@ mod tests {
             clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
             ledger: false,
+            schedules: crate::schedule::Runner::new(),
         };
 
         // An `Arc` because the reconciliation a miss triggers opens stores,

@@ -2577,6 +2577,47 @@ pub fn ledger_zero_hit_queries(db: &Connection, limit: usize) -> Result<Vec<(Str
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// One recorded retrieval, as the access report attaches them.
+#[derive(Debug, Clone)]
+pub struct RetrievalRow {
+    pub at: i64,
+    pub client: String,
+    pub tool: String,
+    pub query: String,
+    pub hits: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+}
+
+/// Every retrieval since `since`, newest first.
+///
+/// `ledger_sessions` above aggregates these into one row per session, which is
+/// what the access report shows by default. This is the same rows unrolled, for
+/// the report's `Attach retrieved excerpts` toggle: a session line says an agent
+/// asked forty times, and an auditor's question is which forty.
+///
+/// `tool` is NULL on every row written before 0.15.0 and is reported as `—`
+/// rather than guessed — those rows are real retrievals and dropping them would
+/// make the attachment disagree with the session counts above it.
+pub fn ledger_retrievals(db: &Connection, since: i64, limit: usize) -> Result<Vec<RetrievalRow>> {
+    let mut stmt = db.prepare(
+        "SELECT at, client, COALESCE(tool, ''), query, hits, excerpt_tokens, whole_file_tokens
+         FROM retrievals WHERE at >= ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
+        Ok(RetrievalRow {
+            at: r.get(0)?,
+            client: r.get(1)?,
+            tool: r.get(2)?,
+            query: r.get(3)?,
+            hits: r.get(4)?,
+            excerpt_tokens: r.get(5)?,
+            whole_file_tokens: r.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Files this store read since `since`, newest first, with when it read them.
 pub fn files_indexed_since(
     db: &Connection,

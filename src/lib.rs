@@ -46,6 +46,7 @@ pub mod replay;
 pub mod report;
 pub mod rerank;
 pub mod routes;
+pub mod schedule;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
 pub mod setup;

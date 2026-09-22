@@ -690,7 +690,7 @@ function dataTable(spec) {
       foot,
       el("span", { class: "meta", text: `${n(from)}–${n(to)} of ${n(total)}` }),
       el("span", { class: "divider-v" }),
-      el("span", { class: "eyebrow", text: "per page" }),
+      el("span", { class: "eyebrow sm", text: "per page" }),
       el(
         "span",
         { class: "chips" },
@@ -710,7 +710,7 @@ function dataTable(spec) {
       ),
       el("span", { class: "spacer" }),
       el("button", {
-        class: "button ghost small",
+        class: "button secondary small",
         type: "button",
         text: "Prev",
         disabled: view.page <= 1,
@@ -721,7 +721,7 @@ function dataTable(spec) {
       }),
       el("span", { class: "meta", text: `Page ${n(view.page)} / ${n(pages())}` }),
       el("button", {
-        class: "button ghost small",
+        class: "button secondary small",
         type: "button",
         text: "Next",
         disabled: view.page >= pages(),
@@ -828,7 +828,7 @@ function folderPicker(options) {
               },
             }),
         el("button", {
-          class: "button ghost small",
+          class: "button secondary small",
           type: "button",
           text: "Close",
           onclick: () => {
@@ -1283,10 +1283,23 @@ const TICKING = new Set(["queued", "running", "paused", "stopping"]);
  * of their own, so it paints in place. */
 async function repaintView() {
   if (!shell.main) return;
-  const at = shell.main.querySelector(".scroller")?.scrollTop ?? 0;
+  const at = scrollHolder()?.scrollTop ?? 0;
   await render();
-  const scroller = shell.main?.querySelector(".scroller");
-  if (scroller) scroller.scrollTop = at;
+  const holder = scrollHolder();
+  if (holder) holder.scrollTop = at;
+}
+
+/* The element that actually scrolls on the page that is open.
+ *
+ * This used to read `.scroller`, which never scrolled: `.view` carries
+ * `overflow-y: auto` and is the scroll container, and `.scroller` is a stack
+ * inside it that takes the leftover height. So a live repaint of the ledger or
+ * the Stores table read 0 and wrote 0 back, and a reader watching rows arrive
+ * was returned to the top every time one did. `.view` first, and `.scroller`
+ * kept after it for any page that grows its own inner scroller later. */
+function scrollHolder() {
+  if (!shell.main) return null;
+  return shell.main.querySelector(".view") || shell.main.querySelector(".scroller");
 }
 
 
@@ -1315,6 +1328,62 @@ function graphInk() {
     selText: read("--accent-ink", "#1e2a35"),
     muted: read("--muted", "#64778a"),
   };
+}
+
+/* Stores that could not be read, over a page drawn from the ones that could.
+ *
+ * Issue #129: one store whose database cannot be opened used to make every
+ * route that reads across stores answer `500 disk I/O error`, so the Graph page
+ * drew nothing and the message named neither the store nor the fact that the
+ * others were fine. The routes answer partially now, and this is the other half
+ * — a page that quietly returned four stores' results where a reader expected
+ * five would be the same defect wearing a 200.
+ *
+ * Derived from the response every time, never accumulated: a store that comes
+ * back — a drive plugged in again — is simply absent from the next `failed`, and
+ * a notice that had remembered it would outlive the problem.
+ *
+ * No button. The remedy is `semlith drop`, and a one-click drop beside what may
+ * be an unplugged volume is how somebody loses a store they could have had back
+ * by plugging it in. The command is text they run themselves.
+ */
+function unreadableNotice(failed) {
+  if (!failed || !failed.length) return null;
+  const many = failed.length > 1;
+  return el(
+    "div",
+    { class: "notice bad" },
+    el("div", {
+      class: "what",
+      // The consequence first, because it is what changes how the page under
+      // this is read: these results are short by a store.
+      text: `${failed.length} store${many ? "s" : ""} could not be read, so ${
+        many ? "they are" : "it is"
+      } not in these results.`,
+    }),
+    el(
+      "div",
+      { class: "rows tight" },
+      failed.map((store) =>
+        el(
+          "details",
+          { class: "unreadable" },
+          el(
+            "summary",
+            {},
+            el("span", { class: "name", text: store.store }),
+            el("span", { class: "meta one-line", "data-tip": store.path, text: store.path }),
+          ),
+          el("p", { class: "subtitle", text: store.remedy }),
+          // The whole chain, behind the disclosure. It is the evidence, not
+          // the message: `database disk image is malformed: Error code 11: …`
+          // is what a reader pastes into an issue, not what tells them what
+          // happened.
+          el("pre", { class: "code", text: store.error }),
+        ),
+      ),
+    ),
+  );
 }
 
 /** The last two segments of a path: enough to recognise, short enough to read. */
@@ -1905,6 +1974,7 @@ async function graphView() {
   const chosen = new Set();
   const meta = el("span", { class: "graph-count" });
   const rail = el("div", { class: "graph-rail" });
+  const unreadable = el("div", { class: "unreadable-slot" });
 
   const canvas = graphCanvas({
     onPick: (node) => select(node),
@@ -1958,7 +2028,7 @@ async function graphView() {
     onclick: () => canvas.fit(),
   });
   const reset = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     text: "Reset",
     onclick: () => load({}),
@@ -2148,7 +2218,10 @@ async function graphView() {
         // index" are different facts.
         data.hidden
           ? el("button", {
-              class: "link-button quiet",
+              // A chip, not muted text. At 11px in `--muted` this read as a
+              // caption about the list rather than as the control that opens
+              // the rest of it, which is the whole of why it was missed.
+              class: "chip sm",
               type: "button",
               text: `Show ${data.hidden} unresolved`,
               onclick: async (e) => {
@@ -2234,6 +2307,11 @@ async function graphView() {
       meta.textContent = "";
       return fill(rail, error(e.message));
     }
+    // Stores that did not answer, over the graph the rest of them drew. This
+    // page was the whole of issue #129: one unreadable store used to make it
+    // draw nothing at all, with a message naming neither the store nor the
+    // fact that the others were fine.
+    fill(unreadable, unreadableNotice(data.failed));
     if (!data.nodes.length) {
       meta.textContent = "0 symbols";
       canvas.draw({ nodes: [], edges: [] }, kinds);
@@ -2333,6 +2411,7 @@ async function graphView() {
   const page = el(
     "div",
     { class: "graph-page" },
+    unreadable,
     el(
       "div",
       { class: "graph-band" },
@@ -2465,6 +2544,23 @@ async function ledgerView() {
         ],
       },
     ),
+    // Directly under the head, where the design puts it. It was second from
+    // the bottom of the page, so a ledger that had recorded nothing said so
+    // after everything it had failed to record.
+    on
+      ? null
+      : el(
+          "div",
+          { class: "notice" },
+          el("div", { class: "what", text: "Recording is off" }),
+          el(
+            "div",
+            {},
+            "The daemon was started with ",
+            mono("--no-ledger"),
+            ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+          ),
+        ),
     // Six across, then two wide, then who asked — the order the design puts
     // them in, and the order they are read in: what was asked, what it cost,
     // what it saved, and how much of the ledger that figure covers.
@@ -2533,19 +2629,19 @@ async function ledgerView() {
       stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
     ),
     clientBreakdown(data.by_client),
-    // The rows themselves. The page called itself a debugging trail and an
-    // audit record and had no table on it at all — three snippets telling the
-    // reader to go and run `semlith ledger` in a terminal instead, which is
-    // also the portal-parity rule broken: the CLI prints rows, so this does.
-    ledgerSessions(data),
-    sessionReplay(),
-    ledgerRows(data),
+    /* From here the page is the design's order, which it was not.
+     *
+     * The three command cards were at the foot, under everything, where the
+     * design puts them sixth — directly after the by-client line and before
+     * the tabs. Session replay sat between the session list and the rows
+     * table; the design has it last of the cards, after the rows it annotates,
+     * which is also the only order in which it means anything. And the
+     * recording-off notice was second from the bottom, so a page that was
+     * recording nothing said so after everything it had failed to record; it
+     * is now directly under the page head. */
     el(
       "div",
-      { class: "scroller" },
-      el(
-        "div",
-        { class: "grid three" },
+      { class: "grid three" },
         el(
           "div",
           { class: "card pad dense" },
@@ -2579,34 +2675,22 @@ async function ledgerView() {
             text: "Run the daemon without recording, for this session only. SEMLITH_LEDGER=0 does the same for a machine.",
           }),
         ),
-      ),
-      on
-        ? null
-        : el(
-            "div",
-            { class: "notice" },
-            el("div", { class: "what", text: "Recording is off" }),
-            el(
-              "div",
-              {},
-              "The daemon was started with ",
-              mono("--no-ledger"),
-              ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
-            ),
-          ),
-      says(
-        "Stored in ",
-        mono("~/.semlith/stores/<name>/store.db"),
-        ", table ",
-        mono("retrievals"),
-        ". On by default; ",
-        mono("--no-ledger"),
-        " or ",
-        mono("SEMLITH_LEDGER=0"),
-        " turns it off, and deleting the rows is one ",
-        mono("DELETE"),
-        ".",
-      ),
+    ),
+    ledgerSessions(data),
+    ledgerRows(data),
+    sessionReplay(),
+    says(
+      "Stored in ",
+      mono("~/.semlith/stores/<name>/store.db"),
+      ", table ",
+      mono("retrievals"),
+      ". On by default; ",
+      mono("--no-ledger"),
+      " or ",
+      mono("SEMLITH_LEDGER=0"),
+      " turns it off, and deleting the rows is one ",
+      mono("DELETE"),
+      ".",
     ),
   );
 }
@@ -2629,7 +2713,11 @@ function sessionReplayToggle() {
   function paint() {
     button.disabled = false;
     button.textContent = state_.enabled ? "Turn off" : "Turn on";
-    button.classList.toggle("on", state_.enabled);
+    // `classList.toggle("on", ...)` stood here and painted nothing: there has
+    // never been a `.button.on` rule. The label is the state, and now that the
+    // button carries the secondary shape rather than the ghost one it is a
+    // control at rest as well.
+    button.setAttribute("aria-pressed", String(state_.enabled));
     note.textContent = state_.enabled
       ? `On. The Retrieval ledger's Session replay tab reads ${state_.client} transcripts under ${state_.from} to mark what happened after each answer. Nothing is sent anywhere.`
       : `Off. Nothing reads ${state_.from || "this machine's agent transcripts"}. Turning this on lets the ledger's Session replay tab mark each answer as a refund, a miss or an edit — locally, and still sent nowhere.`;
@@ -3062,7 +3150,7 @@ function clientBreakdown(byClient) {
     // reads as a caption for the cards rather than as its own fact. The line
     // after it is the fact: these are the client's own names, from the MCP
     // handshake, not a guess made here.
-    el("span", { class: "eyebrow", text: "by client" }),
+    el("span", { class: "eyebrow sm", text: "by client" }),
     entries.map(([client, count], i) =>
       el(
         "span",
@@ -3098,11 +3186,14 @@ function liveStores() {
   });
 }
 
-/** Read the store list into `state`, so every view agrees on how many exist. *//** Read the store list into `state`, so every view agrees on how many exist. */
+/** Read the store list into `state`, so every view agrees on how many exist. */
 async function refreshStores() {
   try {
     const data = await api("/api/stores");
     state.stores = data.stores || [];
+    // Kept on the state rather than drawn here, because this runs before every
+    // view and the view decides where a notice belongs on its own page.
+    state.failed = data.failed || [];
     paintStoreCount();
   } catch (_) {
     // A failed refresh must not empty the list: `state.stores.length` decides
@@ -3627,11 +3718,6 @@ async function storesView() {
     "div",
     { class: "view" },
     head,
-    picker.node,
-    adoptNote,
-    rootPicker.node,
-    rootNote,
-    el("div", { class: "note page-note" }),
     el(
       "div",
       { class: "strip" },
@@ -3694,6 +3780,18 @@ async function storesView() {
         agentsCard(),
       ),
     ),
+    /* The four ways into this page, after the table they act on.
+     *
+     * They stood between the page head and the stat strip, which put four
+     * stacked blocks of picker between a reader and the thing they came for.
+     * The design has the two affordances they cover — `Adopt existing
+     * .semlith` and `Index a folder` — as two buttons in the header row, and
+     * those are still there; these are the panels they open. */
+    picker.node,
+    adoptNote,
+    rootPicker.node,
+    rootNote,
+    el("div", { class: "note page-note" }),
   );
 }
 
@@ -3714,6 +3812,7 @@ async function filesView() {
   const chosenExt = new Set();
   const summary = el("span", { class: "pill" });
   const holder = el("div", {});
+  const unreadable = el("div", { class: "unreadable-slot" });
   /* Announced rather than only drawn: a Forget made the row disappear and said
    * nothing anywhere a screen reader would hear it. */
   const announcer = el("div", { class: "sr-only", role: "status", "aria-live": "polite" });
@@ -3796,7 +3895,7 @@ async function filesView() {
       matches > many
         ? matches <= FILES_SELECTABLE
           ? el("button", {
-              class: "button ghost small",
+              class: "button secondary small",
               type: "button",
               text: `Select all ${n(matches)} matches`,
               onclick: () => selectEveryMatch(),
@@ -3810,7 +3909,7 @@ async function filesView() {
         : null,
       el("span", { class: "spacer" }),
       el("button", {
-        class: "button ghost small",
+        class: "button secondary small",
         type: "button",
         text: "Clear",
         onclick: () => {
@@ -4023,6 +4122,7 @@ async function filesView() {
       return;
     }
     if (mine !== generation) return;
+    fill(unreadable, unreadableNotice(data.failed));
 
     summary.textContent = `${n(data.total)} files · ${n(data.formats)} format${
       data.formats === 1 ? "" : "s"
@@ -4109,6 +4209,7 @@ async function filesView() {
   return el(
     "div",
     { class: "view" },
+    unreadable,
     pageHead(
       "Files",
       "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
@@ -5564,9 +5665,9 @@ function runCard(run, controls) {
   const where = el("span", { class: "meta" });
 
   const pause = el("button", { class: "button secondary small", type: "button" });
-  const stop = el("button", { class: "button ghost small", type: "button" });
+  const stop = el("button", { class: "button secondary small", type: "button" });
   const remove = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     text: "Remove",
     title: "Dismiss this card. The store is not touched.",
@@ -5575,7 +5676,7 @@ function runCard(run, controls) {
    * finished runs used to be four full cards with their whole logs, and the
    * live one was appended below them, off the bottom of the screen. */
   const expand = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     "aria-expanded": "false",
   });
@@ -5886,7 +5987,7 @@ async function indexView() {
    * one, and the private-address refusal was unreachable from this page. */
   const urlTarget = el("select", { class: "select" });
   const clearDone = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     text: "Remove all finished",
     hidden: true,
@@ -6041,7 +6142,7 @@ async function indexView() {
               pathCell((row.paths || []).join(", ")),
               el("span", { class: "spacer" }),
               el("button", {
-                class: "button ghost small",
+                class: "button secondary small",
                 type: "button",
                 text: "Take out of the queue",
                 // Nothing of it was embedded, so there is nothing to undo and
@@ -6402,7 +6503,21 @@ async function indexView() {
     el(
       "div",
       { class: "scroller" },
+      /* The design's order, which this page did not have.
+       *
+       * `indexView` is the two design pages merged — `INDEX`, which is the
+       * picked files and the run, and `CORPUS`, which is what the store
+       * already holds. The run cards sat *below* three corpus cards and
+       * above two of this project's own, which was neither page's order:
+       * the whole point of the index half is watching a run, and it was
+       * the fifth thing on the page. */
       picker.node,
+      cards,
+      health.node,
+      el("span", { class: "eyebrow", text: "What the graph covers" }),
+      coverage.node,
+      /* And this project's own, after them: the repository picker, the
+       * URL fetcher, the done-filter, the write queue and the settings. */
       projects.node,
       fill(
         urlCard,
@@ -6427,10 +6542,6 @@ async function indexView() {
         urlNote,
       ),
       el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
-      health.node,
-      el("span", { class: "eyebrow", text: "What the graph covers" }),
-      coverage.node,
-      cards,
       queueCard,
       settingsCard,
     ),
@@ -6476,7 +6587,7 @@ function projectsChecklist(options) {
         // Without it this opened at the home directory and stayed there, so a
         // monorepo anywhere else on the machine was unreachable.
         el("button", {
-          class: "button ghost small",
+          class: "button secondary small",
           type: "button",
           text: "Up",
           disabled: !data.parent,
@@ -6514,7 +6625,7 @@ function projectsChecklist(options) {
           },
         }),
         el("button", {
-          class: "button ghost small",
+          class: "button secondary small",
           type: "button",
           text: "Close",
           onclick: () => {
@@ -7572,25 +7683,6 @@ async function agentsView() {
       ],
     }),
     endpointNote,
-    serviceCard(),
-    el(
-      "div",
-      { class: "card pad dense" },
-      el("span", { class: "card-title", text: "Agent key" }),
-      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
-      says(
-        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
-        mono("semlith mcp"),
-        ", which reads the key from ",
-        mono(data.key_path || "~/.semlith/agent.key"),
-        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
-        mono("${" + KEY_ENV + "}"),
-        " yourself.",
-      ),
-    ),
-    keyNote,
-    registerAll,
-    inUseCard,
     el(
       "div",
       { class: "grid scroller" },
@@ -7656,10 +7748,35 @@ async function agentsView() {
             ]),
           ),
         ),
-        installPanel(),
       ),
       el("div", { class: "card pad stanzas" }, tabs, chips, body),
     ),
+    /* Everything below is this project's own, after the four panels the v4
+     * design draws. They were interleaved with them — the service card, the
+     * agent key and the two registration cards sat between the endpoint note
+     * and `Connected`, and the installer sat inside the design's own grid
+     * between `Tools exposed` and the stanzas — so a reader following the
+     * design's argument met four unrelated cards in the middle of it. */
+    serviceCard(),
+    el(
+      "div",
+      { class: "card pad dense" },
+      el("span", { class: "card-title", text: "Agent key" }),
+      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
+      says(
+        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
+        mono("semlith mcp"),
+        ", which reads the key from ",
+        mono(data.key_path || "~/.semlith/agent.key"),
+        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
+        mono("${" + KEY_ENV + "}"),
+        " yourself.",
+      ),
+    ),
+    keyNote,
+    registerAll,
+    inUseCard,
+    installPanel(),
   );
 }
 
@@ -7989,7 +8106,6 @@ async function privacyView() {
         "this binary has no cloud command and opens no connection to any host; the Cloud page describes an optional service and contacts nothing",
       ),
     ),
-    sessionReplayToggle(),
     el(
       "div",
       { class: "grid scroller" },
@@ -8036,6 +8152,62 @@ async function privacyView() {
         el(
           "div",
           { class: "card pad" },
+          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
+          says(
+            "The embedding model is downloaded once, on first index, and cached. ",
+            mono("semlith upgrade"),
+            " and ",
+            mono("semlith add"),
+            " reach the network only in the second you ask them to. ",
+            mono("--airgap"),
+            " refuses all three and exits naming what it refused.",
+          ),
+          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
+          el(
+            "div",
+            { class: "chips" },
+            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
+            el("span", {
+              class: "meta",
+              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
+            }),
+          ),
+        ),
+        /* Fifth, between the outbound card and the session token, which is
+         * where the design has it. It stood outside this grid entirely, so
+         * the one switch on the page sat above the cards that explain what
+         * the page promises rather than among them. */
+        sessionReplayToggle(),
+        el(
+          "div",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Session token" }),
+          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
+          rotateNote,
+          says(
+            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
+            mono(data.token_header),
+            " header on every ",
+            mono("/api"),
+            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
+          ),
+          el("hr", { class: "rule" }),
+          el("span", { class: "card-title", text: "Content-Security-Policy" }),
+          codeBlock(data.csp),
+          el("p", {
+            class: "subtitle",
+            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
+          }),
+        ),
+        /* The two cards this project added, after the five the design
+         * draws. They sat between `Verify it yourself` and the outbound
+         * card, so a reader walking the design's own argument — here is
+         * what we promise, here is how you check it, here is the single
+         * connection that exists — met two pages of rules in the middle
+         * of it. */
+        el(
+          "div",
+          { class: "card pad" },
           el(
             "div",
             { class: "head" },
@@ -8077,51 +8249,6 @@ async function privacyView() {
           }),
           scanBox,
           scanNote,
-        ),
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "The one outbound connection that exists" }),
-          says(
-            "The embedding model is downloaded once, on first index, and cached. ",
-            mono("semlith upgrade"),
-            " and ",
-            mono("semlith add"),
-            " reach the network only in the second you ask them to. ",
-            mono("--airgap"),
-            " refuses all three and exits naming what it refused.",
-          ),
-          copyField("SEMLITH_MODEL_CACHE=/media/usb/models semlith index ."),
-          el(
-            "div",
-            { class: "chips" },
-            pill(data.model_cached ? "model cached" : "model not downloaded", data.model_cached ? "good" : "warn"),
-            el("span", {
-              class: "meta",
-              text: "granite-embedding-small-english-r2 · int8 · Apache-2.0",
-            }),
-          ),
-        ),
-        el(
-          "div",
-          { class: "card pad" },
-          el("span", { class: "card-title", text: "Session token" }),
-          el("div", { class: "copyfield" }, tokenBox, el("div", { class: "actions" }, rotate)),
-          rotateNote,
-          says(
-            "Generated at start, handed to this page once by the printed URL, and sent back as a ",
-            mono(data.token_header),
-            " header on every ",
-            mono("/api"),
-            " route. It is in no cookie: every port on localhost is the same site, so a cookie would travel to a page served by anything else on this machine, and a header will not. Shown truncated — no response carries it in full except the one that rotates it.",
-          ),
-          el("hr", { class: "rule" }),
-          el("span", { class: "card-title", text: "Content-Security-Policy" }),
-          codeBlock(data.csp),
-          el("p", {
-            class: "subtitle",
-            text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
-          }),
         ),
       ),
     ),
@@ -8199,14 +8326,9 @@ function langCard(languages, withEdges) {
 
 async function aboutView() {
   let about;
-  let models;
   let languages;
   try {
-    [about, models, languages] = await Promise.all([
-      api("/api/about"),
-      api("/api/models"),
-      api("/api/languages"),
-    ]);
+    [about, languages] = await Promise.all([api("/api/about"), api("/api/languages")]);
   } catch (e) {
     return el("div", { class: "view" }, pageHead("About"), error(e.message));
   }
@@ -8218,51 +8340,6 @@ async function aboutView() {
       el("span", { class: "k", text: key }),
       el("span", { class: "v", text: value }),
     );
-
-  const list = (models && models.models) || [];
-  const table = dataTable({
-    className: "w-models",
-    caption: "Every embedding model a store can be built with, and which of them this machine has fetched.",
-    sort: "name",
-    perPage: 10,
-    rows: list,
-    columns: [
-      {
-        key: "name",
-        label: "Model",
-        className: "path",
-        value: (m) => m.name,
-        // The name to type beside where it comes from. The column mixed three
-        // naming schemes — fastembed's CamelCase, a HuggingFace path and
-        // semlith's own kebab-case — with nothing saying which was which; the
-        // name is what `--model` takes, and the repository is the second line.
-        render: (m) =>
-          el(
-            "div",
-            { class: "rows tight" },
-            el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
-            m.code
-              ? el("span", { class: "meta one-line", "data-tip": m.code, text: m.code })
-              : null,
-          ),
-      },
-      { key: "dim", label: "Dims", className: "num", value: (m) => m.dim, render: (m) => String(m.dim) },
-      {
-        key: "bytes",
-        label: "Size",
-        className: "num",
-        // Empty last, whichever way the column is sorted. Forty-three of the
-        // forty-eight rows have no size, so sorting ascending put every blank
-        // first and buried the only five rows with data.
-        value: (m) => m.bytes || 0,
-        empty: (m) => !m.bytes,
-        // Blank rather than guessed: a model this machine has never fetched has
-        // no size here to measure, and fastembed's catalogue does not carry one.
-        render: (m) => (m.bytes ? bytes(m.bytes) : "—"),
-      },
-      { key: "description", label: "Note", className: "meta", value: (m) => m.description },
-    ],
-  });
 
   return el(
     "div",
@@ -8291,15 +8368,21 @@ async function aboutView() {
           row("Bound to", about.bind),
           row("Store home", about.store_home),
           row("Model cache", about.model_cache),
-          // Which protocol revisions a client can negotiate, and under what
-          // terms the binary ships. Both are facts the binary already knows and
-          // the v4 About page states; neither reached the page before.
-          row("MCP revisions", (about.revisions || []).join(" · ")),
+          // `MCP revisions` stood here. The v4 design's About page has seven
+          // facts and this is not one of them, and what it showed -- which
+          // protocol revisions a client may negotiate -- is a thing an agent
+          // settles in its handshake and a person never acts on. The route
+          // still answers `revisions` for anything else that reads it.
           row("Source", `${about.license} · free and complete`),
           row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
         ),
       ),
-      list.length ? table.node : el("div", { class: "card pad" }, empty("No model is listed.")),
+      // The models table stood between these two. Forty-eight rows of a
+      // catalogue, of which this machine has fetched one -- the design has no
+      // place for it, and `semlith models` prints the same list for anyone who
+      // wants it. `/api/models` is left answering and is now the one route with
+      // no portal view; that exception is argued in `tests/portal.rs` and
+      // recorded in `docs/compatibility.md` rather than assumed.
       langCard(languages.languages || [], about.graph_languages || []),
     ),
     el("p", {
@@ -8397,7 +8480,7 @@ function welcomeView() {
           onclick: () => go("stores"),
         }),
         el("button", {
-          class: "button ghost",
+          class: "button secondary",
           type: "button",
           text: "Skip for now",
           // Stores, not About: skipping the first run means going to the page
@@ -8545,12 +8628,224 @@ function statCell(label, value) {
   return el("div", { class: "impact-stat" }, capLabel(label), el("span", { class: "n", text: String(value) }));
 }
 
+/* Reverse reachability, drawn as rings by hop.
+ *
+ * The design captions this canvas `reverse reachability, rings by hop` and then
+ * paints it with the same force simulation the Graph page uses, which has no
+ * hop input at all: one ring of everything, immediately scattered. The caption
+ * is the specification and the painter was not, so this is the caption.
+ *
+ * Deliberately not a simulation. Hop distance is the whole content of this
+ * picture, and a spring layout is a machine for destroying it — a node three
+ * hops out ends up wherever repulsion puts it. Concentric rings say the one
+ * thing the page is about, and they say it the same way twice in a row, which a
+ * settling graph does not. There is nothing to animate, so there is nothing for
+ * `prefers-reduced-motion` to turn off.
+ *
+ * ponytail: labels are not de-collided. A ring holds what fits at this radius
+ * and the rest are counted in the `+N` at its edge; if that count is routinely
+ * large, the fix is a bigger canvas or a hop filter, not a label solver.
+ */
+function impactRings() {
+  const canvas = el("canvas", { class: "impact-canvas" });
+  const caption = el("span", { class: "canvas-caption", text: "reverse reachability, rings by hop" });
+  const wrap = el("div", { class: "card impact-canvas-card" }, canvas, caption);
+  let subject = "";
+  let rows = [];
+
+  /* How many labels one ring can carry before they overlap. The circumference
+   * grows with the radius, so the ring further out holds more — which is also
+   * the ring with more on it, and is why this is computed rather than fixed. */
+  function capacity(radius) {
+    return Math.max(4, Math.floor((2 * Math.PI * radius) / 74));
+  }
+
+  function draw() {
+    const ratio = window.devicePixelRatio || 1;
+    const box = wrap.getBoundingClientRect();
+    const w = Math.max(box.width, 240);
+    const h = Math.max(box.height, 200);
+    canvas.width = Math.round(w * ratio);
+    canvas.height = Math.round(h * ratio);
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (!subject) return;
+
+    const ink = graphInk();
+    const cx = w / 2;
+    const cy = h / 2 + 8;
+    const hops = [...new Set(rows.map((r) => r.hop))].sort((a, b) => a - b);
+    const outer = Math.min(w, h) / 2 - 26;
+    const step = hops.length ? outer / hops.length : outer;
+
+    // The rings themselves, under everything: a hop is a distance here, so the
+    // distance is drawn rather than left to be inferred from where things sat.
+    ctx.save();
+    ctx.strokeStyle = ink.edge;
+    ctx.setLineDash([3, 5]);
+    ctx.lineWidth = 1;
+    for (let i = 1; i <= hops.length; i += 1) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, step * i, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    const placed = [];
+    hops.forEach((hop, ring) => {
+      const radius = step * (ring + 1);
+      const onRing = rows.filter((r) => r.hop === hop);
+      const room = capacity(radius);
+      const shown = onRing.slice(0, room);
+      shown.forEach((row, i) => {
+        // Every ring starts at the same angle and steps evenly. Offsetting
+        // alternate rings would read as meaning, and it does not mean anything.
+        const angle = (i / shown.length) * Math.PI * 2 - Math.PI / 2;
+        placed.push({
+          row,
+          x: cx + Math.cos(angle) * radius,
+          y: cy + Math.sin(angle) * radius,
+          hidden: i === shown.length - 1 ? onRing.length - shown.length : 0,
+        });
+      });
+    });
+
+    // Spokes first, so a label always sits on top of the line that reaches it.
+    ctx.strokeStyle = ink.edge;
+    ctx.lineWidth = 1;
+    for (const node of placed) {
+      const inner = placed.find((p) => p.row.name === node.row.via && p.row.hop < node.row.hop);
+      ctx.beginPath();
+      ctx.moveTo(inner ? inner.x : cx, inner ? inner.y : cy);
+      ctx.lineTo(node.x, node.y);
+      ctx.stroke();
+    }
+
+    const label = (x, y, name, fill, line, colour, weight) => {
+      let text = name;
+      ctx.font = `${weight} 11px "IBM Plex Mono", Menlo, monospace`;
+      // Capped, and said to be capped. A symbol in this repository is called
+      // `a_nudge_decides_nothing_and_a_refusal_only_denies`; drawn whole it is
+      // wider than the ring it sits on and covers its neighbours. Clipped with
+      // no mark it read as a rendering fault rather than as a name that
+      // continues, so what is drawn ends in an ellipsis and the whole name is
+      // in the table beside the canvas.
+      const cap = 150;
+      if (ctx.measureText(text).width + 16 > cap) {
+        while (text.length > 1 && ctx.measureText(`${text}…`).width + 16 > cap) {
+          text = text.slice(0, -1);
+        }
+        text = `${text}…`;
+      }
+      const width = Math.min(ctx.measureText(text).width + 16, cap);
+      // Kept inside the frame. A label is drawn centred on its node, and a node
+      // on the outer ring sits close enough to the edge that a long name ran
+      // off the card — `a_nudge_decides_nothing_and_a_refusal_only_denies` is a
+      // real symbol in this repository and it left the canvas mid-word. Nudged
+      // rather than shortened: the whole name is worth more than the exact
+      // position, and the ring it belongs to is still legible.
+      const left = Math.max(4, Math.min(x - width / 2, w - width - 4));
+      const top = y - 11;
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = line;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      // `roundRect` is the one canvas call here a browser might not have. A
+      // square label is a worse label; a thrown TypeError is a blank canvas
+      // and a console error, and "no new console error on any page" is a
+      // criterion this release is measured against.
+      if (ctx.roundRect) ctx.roundRect(left, top, width, 22, 7);
+      else ctx.rect(left, top, width, 22);
+      ctx.fill();
+      ctx.stroke();
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(left, top, width, 22);
+      ctx.clip();
+      ctx.fillStyle = colour;
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, left + 8, y + 1);
+      ctx.restore();
+    };
+
+    for (const node of placed) {
+      // An unsettled edge is amber here exactly as its badge is in the table
+      // beside it, because a reader who has learned one has learned both.
+      const unsure = node.row.confidence === "inferred" || node.row.confidence === "ambiguous";
+      label(
+        node.x,
+        node.y,
+        node.row.name,
+        unsure ? ink.nearFill : ink.node,
+        unsure ? ink.warn : ink.nodeLine,
+        unsure ? ink.warn : ink.text,
+        "500",
+      );
+      if (node.hidden > 0) {
+        ctx.fillStyle = ink.muted;
+        ctx.font = '400 10px "IBM Plex Mono", Menlo, monospace';
+        ctx.fillText(`+${node.hidden}`, node.x + 14, node.y + 18);
+      }
+    }
+
+    // The subject last and at the centre, because it is the one node every
+    // other node is measured from.
+    label(cx, cy, subject, ink.sel, ink.selLine, ink.selText, "600");
+  }
+
+  // The card's own size, not the window's, as the graph canvas does it: the
+  // column this sits in collapses at a width the window never reports.
+  new ResizeObserver(() => draw()).observe(wrap);
+
+  /* Redrawn on a theme switch, for the reason `graphInk` is re-read on every
+   * paint: a canvas holds pixels, not custom properties, so nothing about one
+   * re-themes by itself. The force canvases get this for free by repainting
+   * every frame; this one draws once and has to be told.
+   *
+   * It disconnects itself once the card has left the document. A view here is
+   * replaced rather than torn down, so an observer on `documentElement` would
+   * outlive every page the reader walks through. */
+  const theme = new MutationObserver(() => {
+    if (!wrap.isConnected) {
+      theme.disconnect();
+      return;
+    }
+    draw();
+  });
+  theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+  return {
+    node: wrap,
+    show(name, reached) {
+      subject = name || "";
+      rows = reached || [];
+      draw();
+    },
+    clear() {
+      subject = "";
+      rows = [];
+      draw();
+    },
+  };
+}
+
 async function impactView() {
   await refreshStores();
 
   const results = el("div", { class: "impact-results" });
   const subject = el("span", { class: "impact-subject", text: "—" });
   const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
+  const rings = impactRings();
+  const reached = statCell("Reached", 0);
+  const files = statCell("Files", 0);
+  const inferredCell = statCell("Inferred", 0);
+  const stats = el("div", { class: "impact-stats" }, reached, files, inferredCell);
+  const setStats = (a, b, c) => {
+    reached.querySelector(".n").textContent = String(a);
+    files.querySelector(".n").textContent = String(b);
+    inferredCell.querySelector(".n").textContent = String(c);
+  };
 
   const nameInput = el("input", {
     type: "search",
@@ -8602,6 +8897,8 @@ async function impactView() {
     state.impactSymbol = name;
     if (!name) {
       subject.textContent = "—";
+      setStats(0, 0, 0);
+      rings.clear();
       fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
       return;
     }
@@ -8616,11 +8913,17 @@ async function impactView() {
       if (allEdges) query.set("all_edges", "1");
       data = await api(`/api/impact?${query}`);
     } catch (e) {
+      rings.clear();
+      setStats(0, 0, 0);
       fill(results, error(e.message));
       return;
     }
     const impact = data.impact;
     if (!impact || !impact.reached.length) {
+      // A canvas still showing the last symbol's rings under a headline about
+      // this one is the worst thing this page could draw.
+      rings.clear();
+      setStats(0, impact ? impact.files.length : 0, 0);
       fill(
         results,
         el("p", { class: "headline", text: data.headline || "nothing reaches that name" }),
@@ -8641,16 +8944,16 @@ async function impactView() {
       byHop.get(row.hop).push(row);
     }
 
+    // The three figures belong to the `Changing` card in the left column, where
+    // the design puts them, not to the table below. `Inferred` is the design's
+    // own word for this cell; it read `Unsettled` here, which is the word this
+    // project uses for the pair of confidences and not the word on the page.
+    setStats(impact.reached.length, impact.files.length, inferred);
+    rings.show(name, impact.reached);
+
     fill(
       results,
       el("p", { class: "headline", text: data.headline }),
-      el(
-        "div",
-        { class: "impact-stats" },
-        statCell("Reached", impact.reached.length),
-        statCell("Files", impact.files.length),
-        statCell("Unsettled", inferred),
-      ),
       allEdges
         ? el("p", {
             class: "note hypothesis",
@@ -8710,27 +9013,64 @@ async function impactView() {
     pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
       pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
     }),
-    el(
-      "div",
-      { class: "impact-band" },
-      nameInput,
-      el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
-      verified,
-      go,
-    ),
-    el("div", { class: "impact-subject-row" }, capLabel("Changing"), subject, el("span", { class: "spacer" }), depthPill),
-    // Two columns, as the v4 page is laid out: the answer on the left, the
-    // two questions that follow from it on the right. Stacked full width, the
-    // Path finder's two fields ran a metre wide on a large display and the
-    // answer scrolled off the top before the reader reached them.
+    /* Two columns, as the design lays the page out: the answer on the left,
+     * the two questions that follow from it on the right, and the canvas at
+     * the top of the right column rather than spanning.
+     *
+     * The `Changing` row and the three figures were two unboxed page-wide
+     * bands across the top; they are one card at the head of the left column,
+     * which is where the design has them and is why the right column used to
+     * read as a large empty area beside them.
+     *
+     * The search band is this project's own addition -- the design is a
+     * prototype with one fixed subject and no way to ask about another -- and
+     * it sits at the head of that same card rather than after it. Against a
+     * real store there is nothing on this page until a name is typed, so a
+     * control placed below the answer it produces would be a control nobody
+     * finds. Recorded as a deliberate departure. */
     el(
       "div",
       { class: "impact-columns" },
-      results,
-      el("div", { class: "rows" }, pathFinderCard(), traceCard()),
+      el(
+        "div",
+        { class: "impact-col" },
+        el(
+          "div",
+          { class: "card pad impact-subject-card" },
+          el(
+            "div",
+            { class: "impact-band" },
+            nameInput,
+            el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
+            verified,
+            go,
+          ),
+          el(
+            "div",
+            { class: "impact-subject-row" },
+            capLabel("Changing"),
+            subject,
+            el("span", { class: "spacer" }),
+            depthPill,
+          ),
+          stats,
+        ),
+        results,
+      ),
+      el("div", { class: "impact-col" }, rings.node, pathFinderCard(), traceCard()),
     ),
   );
 }
+
+/* What each of these two cards says before it has been asked anything.
+ *
+ * Both said `Name both ends of the chain.` -- the same sentence at four sites,
+ * two of which sit one above the other on screen, which reads as a page that
+ * has failed rather than as two cards waiting for a question. Each says what
+ * it will do with the two names instead, and the two differ because the cards
+ * do: one finds a chain, the other writes the chain out with its evidence. */
+const PATH_EMPTY = "Two names, and this walks the edges between them.";
+const TRACE_EMPTY = "Two names, and this writes the chain out with the lines that support it.";
 
 /* The path finder, which until now answered only from the terminal.
  *
@@ -8749,7 +9089,6 @@ function pathFinderCard() {
   const verifiedChip = chipToggle("Prefer verified edges", true, (on) => {
     preferVerified = on;
     if (!on) strict = false;
-    strictChip.classList.toggle("on", strict);
     strictChip.setAttribute("aria-pressed", String(strict));
     run();
   });
@@ -8757,7 +9096,6 @@ function pathFinderCard() {
     strict = on;
     if (on) {
       preferVerified = true;
-      verifiedChip.classList.add("on");
       verifiedChip.setAttribute("aria-pressed", "true");
     }
     run();
@@ -8767,7 +9105,7 @@ function pathFinderCard() {
     const a = from.value.trim();
     const b = to.value.trim();
     if (!a || !b) {
-      fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+      fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
       return;
     }
     // `--strict` wins over `--all-edges`, exactly as it does on the command
@@ -8805,9 +9143,7 @@ function pathFinderCard() {
                 onclick: () => {
                   preferVerified = false;
                   strict = false;
-                  verifiedChip.classList.remove("on");
                   verifiedChip.setAttribute("aria-pressed", "false");
-                  strictChip.classList.remove("on");
                   strictChip.setAttribute("aria-pressed", "false");
                   run();
                 },
@@ -8819,7 +9155,7 @@ function pathFinderCard() {
     fill(body, chainBlock(data.path, data.summary));
   }
 
-  fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+  fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
 
   return el(
     "section",
@@ -8833,13 +9169,16 @@ function pathFinderCard() {
 /** A pill that is on or off, in the two states the v4 design draws. */
 function chipToggle(label, on, onchange) {
   const node = el("button", {
-    class: `chip-toggle${on ? " on" : ""}`,
+    // A chip, at the smaller of the design's two chip sizes. The pressed look
+    // comes from `aria-pressed` through `.chip`, so a toggle and a filter chip
+    // cannot drift apart -- and the state a screen reader is told is the same
+    // attribute the stylesheet paints from, rather than a class beside it.
+    class: "chip sm",
     type: "button",
     text: label,
     "aria-pressed": String(on),
     onclick: () => {
-      const next = !node.classList.contains("on");
-      node.classList.toggle("on", next);
+      const next = node.getAttribute("aria-pressed") !== "true";
       node.setAttribute("aria-pressed", String(next));
       onchange(next);
     },
@@ -8905,7 +9244,7 @@ function traceCard() {
     const a = from.value.trim();
     const b = to.value.trim();
     if (!a || !b) {
-      fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+      fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
       return;
     }
     fill(body, el("p", { class: "subtitle", text: "Reading…" }));
@@ -8945,7 +9284,7 @@ function traceCard() {
     fill(body, ...parts);
   }
 
-  fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+  fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
 
   return el(
     "section",
@@ -9014,7 +9353,78 @@ const REPORT_FORMATS = [
   ["csv", "CSV", "csv", "text/csv"],
   ["json", "JSON", "json", "application/json"],
   ["html", "HTML", "html", "text/html"],
+  /* The fifth format is bytes, not text. `/api/report?format=pdf` answers
+   * `application/pdf` outside the JSON envelope the other four ride in, so it
+   * is fetched as a blob and named in the preview rather than painted into it:
+   * a PDF rendered as characters is a screenful of noise with a filename. */
+  ["pdf", "PDF", "pdf", "application/pdf"],
 ];
+
+/* The design's four window chips, and the name `/api/report` takes for each.
+ *
+ * `report::WINDOWS` also has `all`, and naming no window at all is a fifth
+ * behaviour again — but the design draws neither, and a chip this page invents
+ * is a chip the design cannot be checked against. Leaving a store's whole
+ * history unreachable from here costs nothing a reader can see, because the
+ * three reports that count over it ignore the window anyway. */
+const REPORT_WINDOWS = [
+  ["day", "24 hours"],
+  ["week", "7 days"],
+  ["month", "30 days"],
+  ["quarter", "This quarter"],
+];
+
+/* The two reports that carry a date to narrow by.
+ *
+ * `report::generate_over` windows `access` and `change` and nothing else; the
+ * other three are lifetime aggregates over what is on disk now, and
+ * `Window::note` makes each of them say so in its own heading. The chips
+ * follow that rather than offering a dial that moves no figure — a control
+ * that cannot change the file it claims to change is worse than no control. */
+const WINDOWED_KINDS = ["access", "change"];
+
+/* The design's cadence chips, as the interval `schedule::Schedule` holds.
+ *
+ * The record's field is `every_seconds` and these are shortcuts over it, not a
+ * smaller vocabulary: a cadence no chip spells is still a cadence, and
+ * `semlith schedule add --every` can still say it. The design's fourth chip,
+ * `On git commit`, is not here — nothing in this binary hooks a commit, and a
+ * chip for it would be the one kind of lie this page exists to refuse. */
+const REPORT_CADENCES = [
+  ["Daily", 86400],
+  ["Weekly", 604800],
+  ["Monthly", 2592000],
+];
+
+/** An interval in seconds, as the design's cadence blocks read it. */
+/* A chip is one line and cannot hold an absolute path. The design's chip reads
+ * `~/.semlith/reports/`; a real store home is longer than that, so the tail is
+ * what the chip shows and the whole path travels in its title and in the spec
+ * line under the button. */
+function tailPath(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}/` : `${path}/`;
+}
+
+function everyWords(seconds) {
+  const hit = REPORT_CADENCES.find(([, every]) => every === seconds);
+  if (hit) return hit[0].toLowerCase();
+  const plural = (count, unit) => `every ${count} ${unit}${count === 1 ? "" : "s"}`;
+  if (seconds % 86400 === 0) return plural(seconds / 86400, "day");
+  if (seconds % 3600 === 0) return plural(seconds / 3600, "hour");
+  return plural(Math.max(1, Math.round(seconds / 60)), "minute");
+}
+
+/** How long until a unix second, in words. `when()` only looks backwards. */
+function until(unix) {
+  if (!unix) return "not scheduled";
+  const seconds = unix - Math.floor(Date.now() / 1000);
+  if (seconds <= 0) return "due now";
+  if (seconds < 60) return `in ${seconds}s`;
+  if (seconds < 3600) return `in ${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `in ${Math.round(seconds / 3600)}h`;
+  return `in ${Math.round(seconds / 86400)}d`;
+}
 
 /* Reports, in the v4 shape: pick a type, set it up, read the result.
  *
@@ -9024,124 +9434,236 @@ const REPORT_FORMATS = [
  * shape is one selection and one builder: the picker says which report, the
  * builder says how, and the preview is the one it is about.
  *
- * The design's Window, Scope and redaction controls are not here. `/api/report`
- * takes a kind, a format and a model and nothing else, and a control that
- * cannot change the file it claims to change is worse than no control. They
- * arrive with the route that serves them. */
+ * Window and Scope are here now because `/api/report` takes them, and so are
+ * two of the design's three toggles: `Hash the query text` replaces every query
+ * with a digest of it wherever one reaches the page, and `Attach retrieved
+ * excerpts` unrolls the access report's session lines into the retrievals
+ * behind them. The third, `Sign the report`, is drawn disabled and says what it
+ * is waiting for — see the comment beside it. */
 async function reportsView() {
   await refreshStores();
+
+  /* The real store home, so the paths this page prints are the daemon's own
+   * rather than `~/.semlith/` assumed. A home the page cannot read leaves the
+   * paths out rather than guessing at them. */
+  let home = "";
+  try {
+    home = (await api("/api/about")).store_home || "";
+  } catch (_) {
+    /* The page still works; only the paths in two footers go unnamed. */
+  }
+  const reportDir = home ? `${home}/reports/` : "the store home's reports/ directory";
+  const schedulesFile = home ? `${home}/schedules.json` : "schedules.json in the store home";
 
   let kind = REPORTS[0][0];
   let format = REPORT_FORMATS[0][0];
   let model = MODEL_PRICES[0];
+  let span = "month";
+  /* Empty is every open store, which is exactly what `/api/report` means by no
+   * `scope` — so "all stores" is the absence of a narrowing, not a value. */
+  let scope = [];
+  // The two content toggles, off to begin with, which is the request 0.26.x
+  // made and the file it produced.
+  let redact = false;
+  let excerpts = false;
   let body = "";
+  let file = null;
+  let report = null;
+  /* What this page actually wrote, this session. Not the daemon's directory —
+   * see the Written reports card for why that list cannot be read from here. */
+  let written = [];
+
+  const def = () => REPORTS.find(([id]) => id === kind);
+  const fmt = () => REPORT_FORMATS.find(([id]) => id === format);
+  const ext = () => fmt()[2];
+  const windowed = () => WINDOWED_KINDS.includes(kind);
+  const spanName = () => (REPORT_WINDOWS.find(([id]) => id === span) || REPORT_WINDOWS[2])[1];
+  const scopeWords = () => (scope.length ? scope.join(", ") : "all stores");
+  /* The date in the filename is the one inside the file, taken off the report
+   * the daemon generated, so the two cannot disagree. */
+  const stamp = () => (report && report.generated ? report.generated.slice(0, 10) : "");
+  const baseName = () => `${kind}${stamp() ? `-${stamp()}` : ""}.${ext()}`;
 
   const picker = el("div", { class: "report-types" });
   const builder = el("div", { class: "card pad report-builder" });
-  const previewName = el("span", { class: "name" });
+  const builderProblem = el("div", { class: "note bad" });
+  // Plain, not bold: in the design this is a label on the previewed file, at
+  // the body's own weight and 12px mono. See `.name.plain`.
+  const previewName = el("span", { class: "name plain" });
   const previewBody = el("pre", { class: "report-text" });
   const previewMeta = el("span", { class: "meta" });
+  const savingsCard = el("section", { class: "card pad savings-card" });
+  const gapsCard = el("section", { class: "card pad gaps-card" });
+  const writtenCard = el("section", { class: "card written-card" });
+  const scheduleCard = el("section", { class: "card pad schedules-card" });
+  const cliCard = el("section", { class: "card pad report-cli-card" });
 
-  const def = () => REPORTS.find(([id]) => id === kind);
-  const ext = () => REPORT_FORMATS.find(([id]) => id === format)[2];
-
-  function fileName() {
-    return `reports/semlith-${kind}.${ext()}`;
+  /* A labelled row of chips, the shape all five chip groups on this page take.
+   * `inline` is the design's 10.5px eyebrow, for the two groups that sit beside
+   * a heading rather than above a column of controls. */
+  function chipGroup(label, chips, options) {
+    const { inline, note, group } = options || {};
+    return el(
+      "div",
+      {
+        class: inline ? "chip-group inline" : "chip-group",
+        // A name a test can hold on to. The eyebrow is the label a reader
+        // sees and is free to be reworded; this is not.
+        "data-group": group || label.toLowerCase(),
+      },
+      el("span", { class: inline ? "eyebrow sm" : "eyebrow", text: label }),
+      el("div", { class: "filters" }, chips),
+      note ? el("p", { class: "subtitle", text: note }) : null,
+    );
   }
 
-  /** Generate the chosen report and show it. One request, whose text is then
-   * what Copy copies and what Export writes — so the three cannot disagree. */
+  function chip(label, on, onclick, why) {
+    return el("button", {
+      class: "chip",
+      type: "button",
+      text: label,
+      "aria-pressed": String(on),
+      disabled: !onclick,
+      title: why || null,
+      onclick: onclick || null,
+    });
+  }
+
+  // ------------------------------------------------------------- the report
+
+  /** Generate the chosen report and show it. One request, whose bytes are then
+   * what Copy copies, what Export writes and what Save to disk saves — so the
+   * four cannot disagree, and none of them is a second renderer. */
   async function generate() {
-    previewName.textContent = fileName();
+    previewName.textContent = `reports/${baseName()}`;
     previewMeta.textContent = "Generating…";
     fill(previewBody, "");
     body = "";
-    let data;
+    file = null;
+    report = null;
+    const query = new URLSearchParams({ kind, format, model: model[0] });
+    // Omitted rather than sent and ignored: a report that cannot honour a
+    // window should not have one in the URL that produced it.
+    if (windowed()) query.set("window", span);
+    for (const name of scope) query.append("scope", name);
+    // Sent only when on, so the URL that produced a plain report is the URL
+    // 0.26.x would have produced.
+    if (excerpts) query.set("excerpts", "1");
+    if (redact) query.set("redact", "1");
     try {
-      data = await api(`/api/report?${new URLSearchParams({ kind, format, model: model[0] })}`);
+      if (format === "pdf") {
+        // The one format outside the JSON envelope: bytes, fetched as bytes.
+        const response = await fetch(`/api/report?${query}`, {
+          credentials: "omit",
+          headers: authed(),
+        });
+        if (!response.ok) throw new Error(response.statusText || "request failed");
+        file = await response.blob();
+      } else {
+        const data = await api(`/api/report?${query}`);
+        body = data.text;
+        report = data.report;
+        file = new Blob([body], { type: `${fmt()[3]};charset=utf-8` });
+      }
     } catch (e) {
       // The failure goes beside the controls that caused it, not into the
       // preview: the preview is the file, and an error is not one.
       previewMeta.textContent = "";
       previewBody.textContent = "";
       fill(builderProblem, error(e.message));
+      paintAll();
       return;
     }
     fill(builderProblem);
-    body = data.text;
-    previewBody.textContent = body;
-    const kb = (body.length / 1024).toFixed(1);
-    previewMeta.textContent = `${kb} KB · ${ext()} · generated here, written only where you save it`;
+    previewName.textContent = `reports/${baseName()}`;
+    if (format === "pdf") {
+      previewBody.textContent =
+        `${bytes(file.size)} of PDF. A page cannot show it as text; ` +
+        `Export and Save to disk write these exact bytes.`;
+    } else {
+      previewBody.textContent = body;
+    }
+    paintMeta();
+    paintAll();
   }
 
-  const builderProblem = el("div", { class: "note" });
+  /* The four things the footer states, each read off the file that exists
+   * rather than estimated from the preview:
+   *   rows shown  — every `Table` block's row count in the generated report,
+   *                 which is the rows in the document, not the rows on screen;
+   *   full file   — `Blob.size`, the byte length Export hands the browser;
+   *   format      — the format the request asked for and the envelope echoed;
+   *   signature   — nothing in this binary signs a report, so `unsigned` is
+   *                 the only honest word for it. `report::Report` has no
+   *                 signature field and no route offers one.
+   * The trailing clause is the design's and is true of all four: every byte
+   * above was produced on this machine. */
+  function paintMeta() {
+    const rows = ((report && report.blocks) || [])
+      .filter((block) => block.block === "table")
+      .reduce((total, block) => total + block.rows.length, 0);
+    const size = file ? bytes(file.size) : "—";
+    const parts = [
+      format === "pdf" ? "rows not counted in a PDF" : `${rows} rows shown`,
+      `full file ${size}`,
+      format,
+      "unsigned",
+      "written to disk, never uploaded",
+    ];
+    previewMeta.textContent = parts.join(" · ");
+  }
 
   const copy = copyButton(() => body, "Copy", true);
 
   const exportButton = el("button", {
-    class: "button secondary small",
+    // The design's 26px ink shape: the smallest solid control on the page, and
+    // the toolbar's own action rather than the page's primary one.
+    class: "button tiny ink",
     type: "button",
     text: "Export",
     onclick: () => {
-      if (!body) return;
-      const [, , extension, type] = REPORT_FORMATS.find(([id]) => id === format);
-      offerDownload(`semlith-${kind}.${extension}`, body, type);
+      if (!file) return;
+      offerDownload(baseName(), file, fmt()[3]);
     },
   });
 
-  function paintBuilder() {
-    const [, title, , who, answers] = def();
-    fill(
-      builder,
-      el("div", { class: "titles" }, el("span", { class: "card-title", text: title }), el("p", { class: "subtitle", text: answers })),
-      el("span", { class: "eyebrow", text: "Reader" }),
-      el("span", { class: "meta", text: who }),
-      el("span", { class: "eyebrow", text: "Format" }),
-      el(
-        "div",
-        { class: "filters" },
-        REPORT_FORMATS.map(([id, label]) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            text: label,
-            "aria-pressed": String(id === format),
-            onclick: () => {
-              format = id;
-              paintBuilder();
-              generate();
-            },
-          }),
-        ),
-      ),
-      el("span", { class: "eyebrow", text: "Price tokens at" }),
-      el(
-        "div",
-        { class: "filters" },
-        MODEL_PRICES.map((price) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            text: price[0],
-            "aria-pressed": String(price[0] === model[0]),
-            onclick: () => {
-              model = price;
-              paintBuilder();
-              generate();
-            },
-          }),
-        ),
-      ),
-      el("p", {
-        class: "subtitle",
-        text: "HTML prints to PDF from your browser. No PDF writer ships in the binary, so none is claimed.",
-      }),
-      builderProblem,
-      // The name the page shows, quoted, rather than the slug: what you copy
-      // should be what you read, and the two words need the quotes.
-      copyField(`semlith report ${kind} --format ${format} --model "${model[0]}"`),
-    );
+  /* The design's accent action. It saves the file and logs it; `Export` beside
+   * the filename above saves it and says nothing, which is the split the design
+   * draws — its own Save to disk writes no file at all and only prepends a row.
+   *
+   * It is the browser's save, not the daemon's: no route on this machine writes
+   * a report into `reports/`, so a button claiming to fill that directory would
+   * be claiming something no request from this page can do. The picker API was
+   * tried here and taken out again — `showSaveFilePicker` exists in a headless
+   * browser and its promise then never settles, which is a button that silently
+   * does nothing for ever. */
+  const saveButton = el("button", {
+    class: "button",
+    type: "button",
+    text: "Save to disk",
+    title: "Saves through the browser and lists it below",
+    onclick: () => {
+      if (!file) return;
+      offerDownload(baseName(), file, fmt()[3]);
+      record(baseName(), file.size);
+    },
+  });
+
+  /** Remember a file this page really wrote, for the Written reports table. */
+  function record(name, size) {
+    written.unshift({
+      name,
+      title: def()[1],
+      span: report ? report.window : "",
+      size,
+      at: Math.floor(Date.now() / 1000),
+    });
+    // The design caps its log at six rows once anything is saved.
+    written = written.slice(0, 6);
+    paintWritten();
   }
+
+  // ------------------------------------------------------------- the builder
 
   function paintPicker() {
     fill(
@@ -9156,7 +9678,6 @@ async function reportsView() {
             onclick: () => {
               kind = id;
               paintPicker();
-              paintBuilder();
               generate();
             },
           },
@@ -9168,33 +9689,640 @@ async function reportsView() {
     );
   }
 
+  function paintBuilder() {
+    const [, title, , , answers] = def();
+    /* Under the title, the report's own sentence about the span it was taken
+     * over — `Window::note`, which for savings, health and gaps says outright
+     * that it counts over a store's whole history and has no date to narrow
+     * by. That is the page's one statement about the window, and it comes from
+     * the file rather than from the chip that is pressed. */
+    const spanLine = report ? report.window : answers;
+    fill(
+      builder,
+      el(
+        "div",
+        { class: "titles" },
+        el("span", { class: "card-title", text: title }),
+        el("p", { class: "subtitle", text: answers }),
+        el("p", { class: "subtitle span-note", text: spanLine }),
+      ),
+      chipGroup(
+        "Window",
+        REPORT_WINDOWS.map(([id, label]) =>
+          chip(
+            label,
+            windowed() && id === span,
+            windowed()
+              ? () => {
+                  span = id;
+                  generate();
+                }
+              : null,
+            windowed() ? null : `${title} has no date to narrow by`,
+          ),
+        ),
+      ),
+      chipGroup("Scope", [
+        chip("all stores", scope.length === 0, () => {
+          scope = [];
+          generate();
+        }),
+        ...state.stores.map((store) =>
+          chip(store.name, scope.includes(store.name), () => {
+            scope = scope.includes(store.name)
+              ? scope.filter((name) => name !== store.name)
+              : scope.concat(store.name);
+            generate();
+          }),
+        ),
+      ]),
+      chipGroup(
+        "Format",
+        REPORT_FORMATS.map(([id, label]) =>
+          chip(label, id === format, () => {
+            format = id;
+            generate();
+          }),
+        ),
+      ),
+      el(
+        "div",
+        { class: "report-toggles" },
+        [
+          [
+            "Hash the query text",
+            "Keeps the who, when and which-file; drops what was asked.",
+            () => redact,
+            (on) => {
+              redact = on;
+            },
+          ],
+          [
+            "Attach retrieved excerpts",
+            "The exact lines each agent was shown. Larger file.",
+            () => excerpts,
+            (on) => {
+              excerpts = on;
+            },
+          ],
+        ].map(([label, note, get, set]) => {
+          const node = el(
+            "button",
+            { class: "report-toggle", type: "button", "aria-pressed": String(get()) },
+            el("span", { class: "knob" }),
+            el(
+              "span",
+              { class: "stack" },
+              el("span", { class: "label", text: label }),
+              el("span", { class: "why", text: note }),
+            ),
+          );
+          node.onclick = () => {
+            const next = node.getAttribute("aria-pressed") !== "true";
+            node.setAttribute("aria-pressed", String(next));
+            set(next);
+            generate();
+          };
+          return node;
+        }),
+        /* The third toggle the design draws, and the one thing on this page
+         * that is not offered.
+         *
+         * Signing needs a key, and a key needs somewhere to live, how it is
+         * rotated, and what a reader checks it against — none of which this
+         * product has decided. A switch drawn as though it worked would put a
+         * promise on the page that the file it produces does not keep, and one
+         * quietly left out would hide a gap the design says should be visible.
+         * So it is drawn, disabled, and says what it is waiting for. */
+        el(
+          "button",
+          {
+            class: "report-toggle",
+            type: "button",
+            disabled: true,
+            "aria-pressed": "false",
+            title: "No signing key exists yet",
+          },
+          el("span", { class: "knob" }),
+          el(
+            "span",
+            { class: "stack" },
+            el("span", { class: "label", text: "Sign the report" }),
+            el("span", {
+              class: "why",
+              text: "Detached ed25519 signature, so the reader can verify it offline. Waiting on a signing key: semlith has no key to sign with and nowhere decided to keep one.",
+            }),
+          ),
+        ),
+      ),
+      builderProblem,
+    );
+  }
+
+  // ------------------------------------------------- the savings breakdown
+
+  /** One fact out of the generated report, by the label `report.rs` gives it. */
+  function fact(label) {
+    for (const block of (report && report.blocks) || []) {
+      if (block.block !== "facts") continue;
+      const hit = block.facts.find(([name]) => name === label);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  function factValue(label, fallback) {
+    const hit = fact(label);
+    return hit ? hit[1] : fallback || "—";
+  }
+
+  function tableStarting(prefix) {
+    return ((report && report.blocks) || []).find(
+      (block) => block.block === "table" && block.title.startsWith(prefix),
+    );
+  }
+
+  function trustBadge(text, tone) {
+    return el("span", { class: `trust ${tone}`, text });
+  }
+
+  function paintSavings() {
+    const table = tableStarting("What was not read");
+    if (!table) {
+      fill(savingsCard, el("span", { class: "card-title", text: "Retrieval savings" }), empty("Nothing generated yet."));
+      return;
+    }
+    const chain = fact("Ledger chain");
+    fill(
+      savingsCard,
+      el(
+        "div",
+        { class: "savings-head" },
+        el("span", { class: "card-title", text: "Retrieval savings" }),
+        el("span", { class: "spacer" }),
+        /* The design puts the model chips here, in this card's header, rather
+         * than in the builder — they price one report, not all five. */
+        chipGroup(
+          "Model",
+          MODEL_PRICES.map((price) =>
+            chip(price[0], price[0] === model[0], () => {
+              model = price;
+              generate();
+            }),
+          ),
+          { inline: true },
+        ),
+        /* The design prints `prices as of 2026-09-01`. This binary's prices
+         * are `report::PRICES`, written into the source with no date on them,
+         * so what is stated here is the rate itself — a number the reader can
+         * check against the arithmetic above it. */
+        el("span", { class: "mono-chip", text: `$${model[1].toFixed(2)} per Mtok, input` }),
+        el("span", { class: "rule" }),
+        chipGroup(
+          "Cycle",
+          REPORT_WINDOWS.slice(1).map(([, label]) => chip(label, false, null, "This report has no date to narrow by")),
+          { inline: true },
+        ),
+      ),
+      el(
+        "div",
+        { class: "savings-lines" },
+        table.rows.map(([name, tokens, cost, rule]) =>
+          el(
+            "div",
+            { class: "savings-line" },
+            el(
+              "div",
+              { class: "row" },
+              el("span", { class: "name", text: name }),
+              el("span", { class: "spacer" }),
+              el("span", { class: "tok", text: tokens }),
+              el("span", { class: "amount", text: cost || "—" }),
+            ),
+            el("p", { class: "subtitle", text: rule }),
+          ),
+        ),
+      ),
+      el(
+        "div",
+        { class: "savings-net" },
+        el("span", { class: "name", text: "Net" }),
+        el("span", { class: "spacer" }),
+        el("span", { class: "tok", text: factValue("Net") }),
+        el("span", { class: "amount", text: factValue("Net cost avoided") }),
+      ),
+      el(
+        "div",
+        { class: "trust-strip" },
+        trustBadge(`coverage ${factValue("Coverage")}`, "blue"),
+        trustBadge(`zero-hit ${factValue("Zero-hit")}`, "plain"),
+        trustBadge(`refunds ${factValue("Refund rate")}`, "plain"),
+        trustBadge(`p50 ${factValue("p50")} · p95 ${factValue("p95")}`, "plain"),
+        trustBadge(`tier ${factValue("Tier")}`, "blue"),
+        trustBadge(
+          `ledger ${chain ? chain[2] : "no rows yet"} · ${factValue("Ledger chain", "unknown")}`,
+          chain && chain[1] === "verifies" ? "green" : "amber",
+        ),
+      ),
+      /* The design's footnote says the baseline is priced at the cache-write
+       * rate and that a reconciliation states a drift against Claude's own
+       * counter. Neither is true of this binary: `report::PRICES` is input
+       * pricing, said so in its own doc comment, and nothing reconciles
+       * anything. What is written here is what the numbers above actually are. */
+      el("p", {
+        class: "subtitle",
+        text:
+          "Priced at input rates, because a retrieval is something an agent reads. " +
+          "Token counts are this store's own tokenizer; a model's counter will differ, " +
+          "and nothing here reconciles the two.",
+      }),
+    );
+  }
+
+  // ------------------------------------------------------------ the gaps card
+
+  function paintGaps() {
+    const several = fact("Names that mislead");
+    fill(
+      gapsCard,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: "Names that mislead" }),
+        el("span", { class: "mono-chip", text: several ? `${several[1]} names` : "—" }),
+      ),
+      several ? el("p", { class: "subtitle", text: several[2] }) : null,
+      /* The design lists each name with its definition count and how many
+       * hypothesis chains it sits on. `store::names_with_several_definitions`
+       * returns a count and nothing else, and no route breaks it down, so the
+       * rows are absent rather than invented. */
+      empty(
+        "Which names, and how many chains each sits on, is not in the gaps report — " +
+          "the store counts them without listing them.",
+      ),
+    );
+  }
+
+  // -------------------------------------------------------- written reports
+
+  function paintWritten() {
+    const head = (text, right) =>
+      el("th", { class: right ? "right" : null, scope: "col", text });
+    fill(
+      writtenCard,
+      el(
+        "div",
+        { class: "written-head" },
+        el("span", { class: "card-title", text: "Written reports" }),
+        el("span", { class: "mono-chip", text: reportDir }),
+      ),
+      el(
+        "div",
+        { class: "scroll-x" },
+        el(
+          "table",
+          { class: "written-table" },
+          el(
+            "thead",
+            null,
+            el("tr", null, head("Written"), head("Report"), head("Window"), head("Size", true), head("When", true)),
+          ),
+          el(
+            "tbody",
+            null,
+            written.map((row) =>
+              el(
+                "tr",
+                null,
+                el("td", { class: "file", text: row.name }),
+                el("td", { class: "type", text: row.title }),
+                el("td", { class: "window", text: row.span }),
+                el("td", { class: "size right", text: bytes(row.size) }),
+                el("td", { class: "when right", text: when(row.at) }),
+              ),
+            ),
+          ),
+        ),
+      ),
+      /* Not the daemon's directory. Nothing serves a listing of it — there is
+       * no route that reads `reports/`, and `/api/dirs` answers names without
+       * a size or a time, which is three of these five columns empty. What is
+       * listed is what this page wrote, which it knows exactly. */
+      written.length
+        ? null
+        : empty(
+            `Nothing written from this page yet. What the daemon has already put in ${reportDir} ` +
+              "is not listed here: no route reads that directory.",
+          ),
+    );
+  }
+
+  // ---------------------------------------------------------- the schedules
+
+  let schedules = [];
+  let scheduleProblem = "";
+  /* A refused write, kept apart from a missing route: the list is reloaded
+   * after every write, so a refusal folded into the same slot would be wiped
+   * by the very read that followed it and the button would look inert. */
+  let scheduleRefused = "";
+  let cadence = REPORT_CADENCES[2][1];
+  const destinations = [[tailPath(`${home}/reports`), home ? `${home}/reports` : ""]].concat(
+    state.stores.map((store) => [`${store.name} root`, store.dir]),
+  );
+  let destination = destinations[0][1];
+
+  async function loadSchedules() {
+    try {
+      const data = await api("/api/schedules");
+      schedules = Object.entries(data.schedules || {}).map(([id, one]) => ({ id, ...one }));
+      scheduleProblem = "";
+    } catch (e) {
+      schedules = [];
+      scheduleProblem = e.message;
+    }
+    paintSchedules();
+  }
+
+  /* Every change is a POST to the one route, naming the verb `semlith
+   * schedule` names. The page holds no schedule state of its own: the daemon
+   * owns the file, and a card that remembered what it asked for would be a
+   * second copy of what a schedule is. */
+  async function writeSchedule(sent) {
+    scheduleRefused = "";
+    try {
+      await post("/api/schedules", sent);
+    } catch (e) {
+      // The daemon names what would have worked -- a destination that is not a
+      // directory, a kind this binary does not have. Printed as it was said.
+      scheduleRefused = e.message;
+    }
+    // Reloaded rather than patched in place: the card states what the daemon
+    // holds, and the daemon is the only thing that knows what it now holds.
+    loadSchedules();
+  }
+
+  function scheduleRow(one) {
+    const title = (REPORTS.find(([id]) => id === one.kind) || [, one.kind])[1];
+    const where = String(one.dir || "");
+    const spec = [
+      everyWords(one.every_seconds),
+      one.format,
+      one.stores && one.stores.length ? one.stores.join(", ") : "all stores",
+    ].join("  ·  ");
+    return el(
+      "div",
+      { class: "schedule-row" },
+      el("button", {
+        class: `schedule-knob${one.enabled ? " on" : ""}`,
+        type: "button",
+        disabled: Boolean(scheduleProblem),
+        title: one.enabled ? "Pause this schedule" : "Resume this schedule",
+        "aria-pressed": String(Boolean(one.enabled)),
+        onclick: () => writeSchedule({ action: "set", id: one.id, enabled: !one.enabled }),
+      }),
+      el(
+        "div",
+        { class: "stack" },
+        el("span", { class: "name", text: `${title} → ${where.split("/").filter(Boolean).pop() || where}` }),
+        el("span", { class: "spec", text: `${spec}  →  ${where}` }),
+        el("span", {
+          class: "next",
+          text: one.enabled ? `next run ${until(one.next_run)}` : "paused",
+        }),
+        /* The failure this feature will actually meet: a destination deleted,
+         * renamed or unmounted. `Schedule::last_error` carries the whole chain
+         * and the card prints it, because a schedule that says it is running
+         * beside a folder that never fills is the worst outcome available. */
+        one.last_error ? el("span", { class: "failed", text: `failed: ${one.last_error}` }) : null,
+        one.last_path ? el("span", { class: "wrote", text: `last wrote ${one.last_path}` }) : null,
+      ),
+      el("span", { class: "spacer" }),
+      el("span", { class: `state-pill ${one.enabled ? "on" : "paused"}`, text: one.enabled ? "on" : "paused" }),
+      el("button", {
+        class: "schedule-remove",
+        type: "button",
+        text: "×",
+        disabled: Boolean(scheduleProblem),
+        title: "Remove schedule",
+        onclick: () => writeSchedule({ action: "remove", id: one.id }),
+      }),
+    );
+  }
+
+  function paintSchedules() {
+    const [, title] = def();
+    /* The design's sentence, with this build's values in it. The window clause
+     * is dropped for the three reports that have no window, rather than
+     * printed and then quietly ignored by the schedule it describes. */
+    const describes =
+      `Takes the report set up above — ${title.toLowerCase()}, ` +
+      (windowed() ? `last ${spanName().toLowerCase()}, ` : "") +
+      `${scopeWords()}, as ${fmt()[1]}. Change those and add again for a second schedule.`;
+    fill(
+      scheduleCard,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: "Schedules" }),
+        /* The design says `crontab in ~/.semlith/schedules.toml`. The file is
+         * `schedules.json`, it is not a crontab, and its directory is whatever
+         * home this daemon was started on. */
+        el("span", { class: "mono-chip", text: `run by the daemon · ${schedulesFile}` }),
+      ),
+      scheduleProblem
+        ? el("p", {
+            class: "subtitle",
+            text:
+              `This daemon serves no schedules route (${scheduleProblem}), so the card is ` +
+              "read-only until it does. The records themselves are real: `semlith schedule " +
+              "list` reads the same file the daemon runs from.",
+          })
+        : null,
+      scheduleRefused ? el("div", { class: "note bad" }, scheduleRefused) : null,
+      schedules.length
+        ? el("div", { class: "schedule-list" }, schedules.map(scheduleRow))
+        : el("div", { class: "empty centred" }, "No schedules. Set up a report above, then add it here — the daemon writes the file while it is running."),
+      el(
+        "div",
+        { class: "new-schedule" },
+        el("span", { class: "eyebrow", text: "New schedule" }),
+        el("p", { class: "subtitle strong", text: describes }),
+        el(
+          "div",
+          { class: "filters" },
+          REPORT_CADENCES.map(([label, every]) =>
+            chip(label, every === cadence, () => {
+              cadence = every;
+              paintSchedules();
+            }),
+          ),
+        ),
+        el(
+          "div",
+          { class: "filters" },
+          el("span", { class: "write-to", text: "write to" }),
+          destinations.map(([label, path]) =>
+            chip(
+              label,
+              path === destination,
+              () => {
+                destination = path;
+                paintSchedules();
+              },
+              path,
+            ),
+          ),
+        ),
+        el(
+          "div",
+          { class: "filters" },
+          el("button", {
+            class: "button add-schedule",
+            type: "button",
+            /* The design's label carries a cron phrase — `1st of the month,
+             * 08:00`. The record holds an interval and nothing else, so what
+             * is promised here is the interval. */
+            text: `Add schedule · ${everyWords(cadence)}`,
+            disabled: Boolean(scheduleProblem) || !destination,
+            onclick: () =>
+              writeSchedule({
+                action: "add",
+                kind,
+                format,
+                model: model[0],
+                every_seconds: cadence,
+                dir: destination,
+                // Null rather than absent for the three reports with no date
+                // to narrow by: `Window::Unset` is what the record holds.
+                window: windowed() ? span : null,
+                stores: scope,
+              }),
+          }),
+          el("span", {
+            class: "mono-chip",
+            text: `${everyWords(cadence)}  →  ${destination || "?"}/${kind}-<date>.${ext()}`,
+          }),
+        ),
+      ),
+      el("p", {
+        class: "subtitle",
+        text:
+          "The daemon runs these while it is up and writes the file in place, so a report can be " +
+          `a tracked file in the repo with a readable diff each month. The list is ${schedulesFile}; ` +
+          "× removes one.",
+      }),
+    );
+  }
+
+  // ------------------------------------------------------------- the CLI card
+
+  function paintCli() {
+    const flags = [`--format ${format}`];
+    if (windowed()) flags.push(`--window ${span}`);
+    for (const name of scope) flags.push(`--scope ${name}`);
+    if (kind === "savings") flags.push(`--model "${model[0]}"`);
+    const one = `semlith report ${kind} ${flags.join(" ")} --out ${home ? `${home}/reports/` : "."}`;
+    const block = [
+      one,
+      "",
+      // The design's comment, and true of this build: the list is a file.
+      "# the schedule list is a file — add, edit or delete by hand:",
+      `semlith schedule add ${kind} --every ${cadence} --to ${destination || reportDir} --format ${format}`,
+      "semlith schedule list   ·   semlith schedule remove 2",
+    ].join("\n");
+    fill(
+      cliCard,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: "Same thing without the browser" }),
+        el("span", { class: "spacer" }),
+        /* The 26px copy sibling of Export: the same height, in the secondary
+         * shape rather than filled with ink. The height comes from the card's
+         * own rule, because `copyButton` is shared with eight other sites. */
+        copyButton(one, "Copy", true),
+      ),
+      el("pre", { class: "code report-cli", text: block }),
+      /* The design's footnote, verbatim, with `semlith_report` set in mono. It
+       * is the only place the slug appears on this page: the v4 header has no
+       * right-hand mono slug on Reports, unlike Impact. */
+      el(
+        "p",
+        { class: "subtitle" },
+        "The agent can ask for one too: ",
+        mono("semlith_report"),
+        " returns the same document over MCP, so “write a change brief for this PR” needs no copy-paste.",
+      ),
+    );
+  }
+
+  function paintAll() {
+    paintBuilder();
+    paintMeta();
+    savingsCard.hidden = kind !== "savings";
+    gapsCard.hidden = kind !== "gaps";
+    if (kind === "savings") paintSavings();
+    if (kind === "gaps") paintGaps();
+    paintSchedules();
+    paintCli();
+  }
+
   paintPicker();
-  paintBuilder();
+  paintWritten();
+  paintAll();
   generate();
+  loadSchedules();
 
   return el(
     "div",
     { class: "view" },
     pageHead(
       "Reports",
-      // The v4 sub-line, with the claim 0.26.0's wording made and the design's
-      // does not. A report is built from the ledger, and a page that offers to
-      // export one has to say where it goes.
-      "Turn the ledger, the index and the graph into a file someone else can read. Generated locally and exported as a file you own. Nothing leaves the machine.",
-      { pill: el("span", { class: "mono-chip", text: "semlith_report" }) },
+      "Turn the ledger, the index and the graph into a file someone else can read — a saving number for finance, an access record for audit, a blast radius for a pull request. Generated locally, exported as a file you own.",
     ),
     picker,
     el(
       "div",
-      { class: "grid two" },
+      { class: "grid two report-row" },
       builder,
       el(
         "section",
         { class: "card report-preview-card" },
-        el("div", { class: "report-bar" }, previewName, el("span", { class: "spacer" }), copy, exportButton),
+        el(
+          "div",
+          { class: "report-bar" },
+          previewName,
+          el("span", { class: "spacer" }),
+          copy,
+          exportButton,
+        ),
         previewBody,
-        el("div", { class: "foot" }, previewMeta),
+        el("div", { class: "foot" }, previewMeta, el("span", { class: "spacer" }), saveButton),
       ),
+    ),
+    savingsCard,
+    gapsCard,
+    writtenCard,
+    el("div", { class: "grid two report-row" }, scheduleCard, cliCard),
+    /* What the design has no place for, after everything it does place. Both
+     * lines are facts about this build rather than about the design, which is
+     * why they are here and not woven into a card above. */
+    el(
+      "section",
+      { class: "card pad report-extras" },
+      el("span", { class: "card-title", text: "About this build" }),
+      el("p", {
+        class: "subtitle",
+        text:
+          "PDF is written by the binary itself — the same blocks as the other four formats, " +
+          "typeset on US Letter. Export and Save to disk hand you those bytes unchanged.",
+      }),
+      el("p", {
+        class: "subtitle",
+        text:
+          "Savings, index health and knowledge gaps count over a store's whole history and " +
+          "have no date to narrow by, so the Window chips are inert while one of them is chosen.",
+      }),
     ),
   );
 }
@@ -9517,7 +10645,7 @@ function buildShell() {
     // screen is reachable only by emptying the registry, so nobody who has a
     // store can ever read the page that explains the product.
     el("button", {
-      class: "link-button quiet replay-welcome",
+      class: "chip sm",
       type: "button",
       text: "Replay first-run screen",
       onclick: () => go("welcome"),

@@ -36,7 +36,17 @@ use std::time::Duration;
 /// the span already in hand. A page of its own could only be started by
 /// retyping a coordinate you got from Search, which is why there is no longer
 /// one. `/api/read` is what that button calls.
-const NO_VIEW: [&str; 4] = ["start", "mcp", "pattern", "read"];
+///
+/// `models` had a view until 0.27.0: a forty-eight-row table on the About page,
+/// of which one row is a model this machine has actually fetched. The v4 design
+/// has no place for it, and the page it sat on is seven facts and a language
+/// table. The capability is untouched — `semlith models` prints the full list
+/// and `/api/models` still answers, for anything that reads it — so what is
+/// gone is a table, not a thing a user could do. This is the one knowing
+/// exception to the portal-parity rule in this release, and it is recorded in
+/// `docs/compatibility.md` as well as here, because an exemption argued in one
+/// place is an exemption nobody outside this file can find.
+const NO_VIEW: [&str; 5] = ["start", "mcp", "pattern", "read", "models"];
 
 /// Which route is a command's portal view. Adding a command means adding a
 /// line here, which is the whole point: the compiler cannot notice a missing
@@ -56,7 +66,6 @@ const VIEWS: &[(&str, &str)] = &[
     // `semlith trust` is the Stores page's "Trust this store", beside a store
     // the daemon can see but has not been told to open.
     ("trust", "/api/trust"),
-    ("models", "/api/models"),
     // `semlith languages` is the About page's language table, which the v3
     // design puts there rather than on a page of its own. `/api/languages` is
     // still what fills it; the route named here is the page's own, because a
@@ -72,6 +81,10 @@ const VIEWS: &[(&str, &str)] = &[
     ("impact", "/api/impact"),
     ("trace", "/api/trace"),
     ("report", "/api/report"),
+    // `semlith schedule` is the Reports page's Schedules card. The card is the
+    // view and `/api/schedules` is what fills it, so both surfaces read the one
+    // file the daemon owns rather than each keeping a list.
+    ("schedule", "/api/schedules"),
     ("ledger", "/api/ledger"),
     // `semlith key` is the Agents page's Rotate button, which posts here.
     ("key", "/api/key"),

@@ -657,8 +657,10 @@ enum Command {
         /// Which report: savings, access, change, health or gaps.
         kind: String,
 
-        /// markdown, csv, json or html. PDF is the browser's print of the
-        /// HTML, which is why no PDF writer is in this binary.
+        /// markdown, csv, json, html or pdf.
+        ///
+        /// A PDF is bytes rather than text, so it needs `--out`: writing it to
+        /// a terminal would be a screenful of binary and a file nobody has.
         #[arg(long, short, default_value = "markdown")]
         format: String,
 
@@ -666,9 +668,49 @@ enum Command {
         #[arg(long, default_value = "Sonnet 5")]
         model: String,
 
+        /// Narrow the report to a period: all, day, week, month or quarter.
+        ///
+        /// Three of the five reports are lifetime aggregates with no date to
+        /// narrow by. They say so under their title rather than printing a
+        /// span they did not apply.
+        #[arg(long)]
+        window: Option<String>,
+
+        /// Narrow the report to these stores, by label. Repeatable.
+        ///
+        /// Every open store when none is named, which is what this command has
+        /// always done.
+        #[arg(long)]
+        scope: Vec<String>,
+
+        /// Attach the individual retrievals, not only the session totals.
+        ///
+        /// A session line says an agent asked forty times; this is which forty.
+        /// Access report only.
+        #[arg(long)]
+        excerpts: bool,
+
+        /// Replace every query text with a digest of it.
+        ///
+        /// Keeps the who, the when and the which-file, and drops what was
+        /// asked. Applies wherever a query reaches the page, not only to the
+        /// attachment above.
+        #[arg(long)]
+        redact: bool,
+
         /// Write to this file instead of standard output.
         #[arg(long, short)]
         out: Option<std::path::PathBuf>,
+    },
+
+    /// Add, list and remove the reports the daemon writes on a cadence.
+    ///
+    /// A schedule belongs to the daemon, not to this command: `semlith
+    /// schedule add` writes the record and a running `semlith start` picks it
+    /// up and does the work. Nothing is generated here.
+    Schedule {
+        #[command(subcommand)]
+        what: ScheduleCommand,
     },
 
     /// Show the shortest chain of edges between two symbols.
@@ -1797,13 +1839,18 @@ fn run() -> Result<()> {
             kind,
             format,
             model,
+            window,
+            scope,
+            excerpts,
+            redact,
             out,
         } => {
             // Both names checked before a store is opened: a typo in either
             // is a question about the argument, not about the directory the
             // command happened to run in.
             semlith::report::kind_of(&kind)?;
-            semlith::report::check_format(&format)?;
+            semlith::report::check_any_format(&format)?;
+            let window = semlith::report::window_of(window.as_deref())?;
             // The third of the three, for the same reason: `--model opus_5`
             // used to be accepted and priced at Sonnet 5, so the report said
             // Sonnet 5 and the reader had asked for Opus.
@@ -1813,17 +1860,30 @@ fn run() -> Result<()> {
                     semlith::report::price_names()
                 );
             }
+            // Refused before the fleet is opened, for the same reason: a PDF
+            // on standard output is a terminal full of binary and no file.
+            if format == semlith::report::PDF && out.is_none() {
+                anyhow::bail!("a pdf is bytes rather than text — name a file with --out");
+            }
             let fleet = read_fleet(&cli.store, &cwd, false)?;
-            let report = semlith::report::generate(&fleet, &kind, &model)?;
-            let text = report.render(&format)?;
+            let report = semlith::report::generate_with(
+                &fleet,
+                &kind,
+                &model,
+                window,
+                &scope,
+                semlith::report::Options { excerpts, redact },
+            )?;
             match out {
                 Some(path) => {
-                    std::fs::write(&path, text.as_bytes())?;
+                    std::fs::write(&path, report.render_bytes(&format)?)?;
                     println!("{} written to {}", report.title, display(&path));
                 }
-                None => print!("{text}"),
+                None => print!("{}", report.render(&format)?),
             }
         }
+
+        Command::Schedule { what } => run_schedule(what)?,
 
         Command::Path {
             from,
@@ -2277,8 +2337,37 @@ fn run() -> Result<()> {
                 // the screen does better than a bail! does.
                 eprintln!("semlith: no store registered yet — the portal will offer to make one");
             }
+            // A store a live daemon already holds is not a failure — it is the
+            // daemon the user asked for, already running. On a machine where
+            // the login service starts one, the error chain this used to print
+            // fired on the most ordinary command there is.
+            let (held, free) = semlith::daemon::held_by_daemon(&dirs);
+            for (dir, found) in &held {
+                println!(
+                    "semlith: {} is already served by a running daemon — pid {}, port {}, semlith {}",
+                    dir.display(),
+                    found.pid,
+                    found.port,
+                    found.version
+                );
+                // Alone on its line so a terminal makes it clickable, and on
+                // stdout for the reason `daemon::run` prints its own URL there:
+                // the token is in it and stderr is the log. Same shape as
+                // `http::Server::url`, which is a method on a running server
+                // and cannot be called about somebody else's.
+                println!("http://127.0.0.1:{}/?token={}", found.port, found.token);
+            }
+            // The held stores are skipped, not fatal. An invocation naming
+            // three stores of which one has a daemon still serves the other
+            // two: refusing all three would make the free stores hostage to
+            // the held one, and the held one is already being served by
+            // definition. Only when nothing is left to open does this return —
+            // with success, because nothing failed.
+            if free.is_empty() && !held.is_empty() {
+                return Ok(());
+            }
             semlith::daemon::run(
-                &dirs,
+                &free,
                 semlith::daemon::port_of(port),
                 std::time::Duration::from_millis(debounce),
                 semlith::embed::airgap(),
@@ -3349,4 +3438,213 @@ fn brief(
     writeln!(out, "{tail}")?;
 
     Ok(())
+}
+
+/// What `semlith schedule` can be asked to do.
+///
+/// Four verbs and no `run now`: a schedule is the daemon's work, and a command
+/// that generated a report here would be `semlith report` wearing a costume —
+/// with the difference that it would not be the run the record then describes.
+#[derive(clap::Subcommand, Debug)]
+enum ScheduleCommand {
+    /// List every schedule, with when it last ran and when it next will.
+    List,
+
+    /// Add a schedule.
+    Add {
+        /// Which report: savings, access, change, health or gaps.
+        kind: String,
+
+        /// How often, in seconds. `86400` is daily, `604800` weekly.
+        ///
+        /// A number rather than a word because that is what the record holds:
+        /// the portal's three cadence chips are shortcuts over this, and a
+        /// cadence they cannot spell is still a cadence.
+        #[arg(long)]
+        every: u64,
+
+        /// The directory the report file is written into. Absolute.
+        #[arg(long)]
+        to: std::path::PathBuf,
+
+        /// markdown, csv, json, html or pdf.
+        #[arg(long, short, default_value = "markdown")]
+        format: String,
+
+        /// Which model's prices the savings report costs tokens at.
+        #[arg(long, default_value = "Sonnet 5")]
+        model: String,
+
+        /// Narrow to a period: all, day, week, month or quarter.
+        #[arg(long)]
+        window: Option<String>,
+
+        /// Narrow to these stores, by label. Repeatable.
+        #[arg(long)]
+        scope: Vec<String>,
+    },
+
+    /// Remove a schedule by its id.
+    Remove {
+        /// The id `semlith schedule list` prints.
+        id: String,
+    },
+
+    /// Turn a schedule on or off without losing it.
+    Set {
+        /// The id `semlith schedule list` prints.
+        id: String,
+
+        /// `on` or `off`.
+        state: String,
+    },
+}
+
+/// The portal's Schedules card, in a terminal.
+///
+/// Both surfaces read and write the one file the daemon owns, so there is no
+/// second copy of what a schedule is; what differs is only how it is drawn. A
+/// daemon asleep on its timer notices a change here within a minute — see
+/// `schedule::IDLE` for why that ceiling exists at all.
+fn run_schedule(what: ScheduleCommand) -> anyhow::Result<()> {
+    use semlith::schedule::{Schedule, Schedules};
+
+    match what {
+        ScheduleCommand::List => {
+            let file = Schedules::load()?;
+            if file.schedules.is_empty() {
+                println!("no schedules — `semlith schedule add` writes one");
+                return Ok(());
+            }
+            for (id, s) in &file.schedules {
+                let cadence = every_words(s.every_seconds);
+                println!(
+                    "{id}  {}  {}  every {cadence}  {}",
+                    s.kind,
+                    s.format,
+                    if s.enabled { "on" } else { "off" }
+                );
+                // Absolute, not shortened against this terminal's working
+                // directory. `display` exists to make a hit's path short where
+                // the reader is standing; a schedule is run by the daemon from
+                // somewhere else entirely, and a destination that happens to be
+                // the directory you are in printed as nothing at all.
+                println!("      to {}", schedule_path(&s.dir));
+                // Last and next together, because a cadence with no outcome
+                // beside it cannot say whether it is working.
+                match s.last_run {
+                    Some(at) => println!("      last {}", semlith::clock::local_stamp(at)),
+                    None => println!("      last never"),
+                }
+                if let Some(at) = s.next_run.filter(|_| s.enabled) {
+                    println!("      next {}", semlith::clock::local_stamp(at));
+                }
+                if let Some(path) = &s.last_path {
+                    println!("      wrote {}", schedule_path(path));
+                }
+                // In full, and not folded into the line above: a destination
+                // that has gone away is the failure this feature will actually
+                // meet, and a schedule that says `on` beside a folder that
+                // never fills is the outcome this line exists to prevent.
+                if let Some(why) = &s.last_error {
+                    println!("      failed: {why}");
+                }
+            }
+        }
+
+        ScheduleCommand::Add {
+            kind,
+            every,
+            to,
+            format,
+            model,
+            window,
+            scope,
+        } => {
+            // Absolute here rather than in `check`, so a relative path typed at
+            // a terminal means what the person typing it meant. The daemon has
+            // no working directory of theirs, which is why the record may not
+            // hold a relative one.
+            let to = if to.is_absolute() {
+                to
+            } else {
+                std::env::current_dir()?.join(to)
+            };
+            let mut schedule = Schedule::new(&kind, &format, &model, every, &to);
+            schedule.window = window;
+            schedule.stores = scope;
+            // Refused before anything is written, naming what would have
+            // worked: half a schedules file is worse than none.
+            schedule.check()?;
+            let mut file = Schedules::load()?;
+            let id = file.add(schedule)?;
+            file.save()?;
+            println!(
+                "{id} added — {kind} as {format} every {} into {}",
+                every_words(every),
+                schedule_path(&to)
+            );
+            println!("a running daemon picks it up within a minute; `semlith start` runs them");
+        }
+
+        ScheduleCommand::Remove { id } => {
+            let mut file = Schedules::load()?;
+            if !file.remove(&id) {
+                anyhow::bail!("no schedule {id:?} — `semlith schedule list` prints the ids");
+            }
+            file.save()?;
+            println!("{id} removed");
+        }
+
+        ScheduleCommand::Set { id, state } => {
+            let enabled = match state.as_str() {
+                "on" => true,
+                "off" => false,
+                other => anyhow::bail!("{other:?} is not on or off"),
+            };
+            let mut file = Schedules::load()?;
+            let Some(schedule) = file.schedules.get_mut(&id) else {
+                anyhow::bail!("no schedule {id:?} — `semlith schedule list` prints the ids");
+            };
+            schedule.enabled = enabled;
+            file.save()?;
+            println!("{id} is {state}");
+        }
+    }
+    Ok(())
+}
+
+/// A schedule's own path, written out in full.
+///
+/// Every other path this command prints goes through `display`, which strips
+/// the working directory so a hit reads as `src/lib.rs` rather than as a line
+/// of absolute noise. A schedule is the one case where that is wrong twice
+/// over: the daemon runs it from a directory that is not this one, and
+/// `--to .` came back as an empty string, which is a destination printed as
+/// nothing.
+fn schedule_path(path: &std::path::Path) -> String {
+    semlith::plain(&path.display().to_string())
+}
+
+/// `604800` as `7 days`, for a line a person reads.
+///
+/// The record holds seconds and says so; this is the one place that translates,
+/// so nothing else has to carry a table of cadence words.
+fn every_words(seconds: u64) -> String {
+    const HOUR: u64 = 3600;
+    const DAY: u64 = 86400;
+    match seconds {
+        s if s % DAY == 0 && s >= DAY => plural(s / DAY, "day"),
+        s if s % HOUR == 0 && s >= HOUR => plural(s / HOUR, "hour"),
+        s if s % 60 == 0 && s >= 60 => plural(s / 60, "minute"),
+        s => format!("{s}s"),
+    }
+}
+
+fn plural(n: u64, unit: &str) -> String {
+    if n == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{n} {unit}s")
+    }
 }

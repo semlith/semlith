@@ -3,14 +3,19 @@
 //! Nothing here reaches the network, nothing here is a model's opinion, and
 //! nothing here is a number without its denominator. A report is a title and
 //! a list of blocks — a paragraph, or a table with named columns — and the
-//! four renderers below turn that one structure into Markdown, CSV, JSON or
-//! print-styled HTML. One structure rather than four writers, so the formats
-//! cannot disagree about what a report says, and so `semlith report` and the
-//! portal's export produce the same bytes.
+//! five renderers below turn that one structure into Markdown, CSV, JSON,
+//! print-styled HTML or PDF. One structure rather than five writers, so the
+//! formats cannot disagree about what a report says, and so `semlith report`
+//! and the portal's export produce the same bytes.
 //!
-//! PDF is the browser's own Print-to-PDF over the HTML, which is why the
-//! HTML carries a print stylesheet and why no PDF dependency is in the
-//! binary.
+//! PDF used to be the browser's own Print-to-PDF over the HTML. From 0.27.0 it
+//! is typeset here, because a saved report that only exists if a browser is
+//! open is not a saved report — a daemon on a build box, an agent over MCP and
+//! `semlith report --out` all have blocks and no browser. It is a typeset
+//! document, not a render of the portal's CSS: the HTML keeps its print
+//! stylesheet and the two are allowed to look different, because they are
+//! renderers over the same blocks rather than one being a picture of the
+//! other.
 
 use anyhow::{Result, bail};
 
@@ -40,8 +45,112 @@ pub struct Report {
     /// Local time with the offset, the same stamp the ledger prints.
     pub generated: String,
     /// The stores this was generated over, so a figure has a subject.
+    ///
+    /// This is the scope, after narrowing: a report over one store of six says
+    /// so here, and every renderer prints it.
     pub stores: Vec<String>,
+    /// The span this report covers, in words, and whether it was applied.
+    ///
+    /// Carried on the report rather than left to the caller because three of
+    /// the five reports cannot honour a window at all, and a heading claiming
+    /// seven days over a lifetime total is exactly the number-without-its-
+    /// denominator this module exists to refuse.
+    pub window: String,
     pub blocks: Vec<Block>,
+}
+
+/// How far back a report looks.
+///
+/// Days, because the only two things in a report that carry a date carry it as
+/// a second since the epoch: the change brief's `files_indexed_since` and the
+/// access audit's "last seen". The ledger's savings, latency and coverage
+/// figures are lifetime aggregates with no date on them at all, and the index
+/// and graph counts the health and gaps reports are built from describe what
+/// is on disk now. So the vocabulary is days and the three unwindowable
+/// reports say so rather than pretending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    /// No window was named. Every report keeps the span it has always had:
+    /// seven days for the change brief, everything for the rest. This is what
+    /// a caller who names no window gets, and what every caller got before
+    /// 0.27.0 — which is the whole of why it is a value of its own rather than
+    /// a synonym for `All` or for `Days(7)`.
+    Unset,
+    /// Everything recorded, the change brief included.
+    All,
+    /// The last N days.
+    Days(i64),
+}
+
+/// The window vocabulary, and the only spellings [`window_of`] accepts.
+pub const WINDOWS: [(&str, Window); 5] = [
+    ("all", Window::All),
+    ("day", Window::Days(1)),
+    ("week", Window::Days(7)),
+    ("month", Window::Days(30)),
+    ("quarter", Window::Days(90)),
+];
+
+/// The change brief's own span, and the one [`Window::Unset`] keeps for it.
+const CHANGE_DAYS: i64 = 7;
+
+/// Resolve a window name, or say which there are. `None` is [`Window::Unset`].
+pub fn window_of(name: Option<&str>) -> Result<Window> {
+    let Some(name) = name else {
+        return Ok(Window::Unset);
+    };
+    match WINDOWS.iter().find(|(n, _)| *n == name) {
+        Some((_, window)) => Ok(*window),
+        None => bail!(
+            "unknown window {name:?}; the windows are {}",
+            WINDOWS
+                .iter()
+                .map(|(n, _)| *n)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+impl Window {
+    /// The epoch second a dated row must be at or after, for a block that has
+    /// no span of its own.
+    fn since(self, now: i64) -> Option<i64> {
+        match self {
+            Window::Days(days) => Some(now - days * 24 * 60 * 60),
+            _ => None,
+        }
+    }
+
+    /// The same, for a block that already had one. [`Window::Unset`] keeps it.
+    fn since_or(self, now: i64, own_days: i64) -> Option<i64> {
+        match self {
+            Window::Unset => Some(now - own_days * 24 * 60 * 60),
+            _ => self.since(now),
+        }
+    }
+
+    /// What a report says it was taken over.
+    ///
+    /// `windowed` is whether this report's blocks carry a date at all. One
+    /// that does not says so in the same sentence, because the alternative is
+    /// a report headed "the last 7 days" over a figure counted since the store
+    /// was created.
+    fn note(self, windowed: bool) -> String {
+        let span = match self {
+            Window::Unset if windowed => "each block's own span".to_string(),
+            Window::Unset | Window::All => "everything recorded".to_string(),
+            Window::Days(1) => "the last day".to_string(),
+            Window::Days(days) => format!("the last {days} days"),
+        };
+        if windowed || matches!(self, Window::Unset) {
+            span
+        } else {
+            format!(
+                "{span} — this report counts over a store's whole history and has no date to narrow by"
+            )
+        }
+    }
 }
 
 /// The five reports, and nothing else.
@@ -57,8 +166,19 @@ pub const KINDS: [(&str, &str); 5] = [
     ("gaps", "Knowledge gaps"),
 ];
 
-/// The output formats. PDF is the browser's print of the HTML.
+/// The output formats [`Report::render`] returns text for.
 pub const FORMATS: [&str; 4] = ["markdown", "csv", "json", "html"];
+
+/// The fifth format.
+///
+/// Not in [`FORMATS`] because [`Report::render`] returns a `String` and a PDF
+/// is bytes. [`Report::render_bytes`] is the one call that serves all five,
+/// and it is a renderer over the same blocks as the other four — there is no
+/// second data path behind it.
+pub const PDF: &str = "pdf";
+
+/// The five formats, in the order a caller is offered them.
+pub const ALL_FORMATS: [&str; 5] = ["markdown", "csv", "json", "html", PDF];
 
 /// What a million tokens costs to read, by model. Input pricing, because a
 /// retrieval is something an agent reads.
@@ -144,6 +264,10 @@ pub fn kind_of(kind: &str) -> Result<(&'static str, &'static str)> {
 }
 
 /// Check a format name before anything is generated, for the same reason.
+///
+/// The four that render to text. A caller that can hand back bytes — the CLI
+/// writing a file, the route answering a request, the schedule runner — wants
+/// [`check_any_format`] instead, which is the same check over all five.
 pub fn check_format(format: &str) -> Result<()> {
     if FORMATS.contains(&format) || format == "md" {
         return Ok(());
@@ -154,29 +278,127 @@ pub fn check_format(format: &str) -> Result<()> {
     )
 }
 
-/// Generate one report over the chosen stores.
+/// Check a format name against all five, PDF included.
+///
+/// Two checks rather than one because the two sets are genuinely different: a
+/// PDF is bytes and [`Report::render`] returns a `String`, so a surface that
+/// can only print text may not accept `pdf`. Both read their list from the
+/// constants above, so there is no third place that knows what a format is.
+pub fn check_any_format(format: &str) -> Result<()> {
+    if ALL_FORMATS.contains(&format) || format == "md" {
+        return Ok(());
+    }
+    bail!(
+        "unknown format {format:?}; the formats are {}",
+        ALL_FORMATS.join(", ")
+    )
+}
+
+/// The stores one report is over: the scope, already narrowed.
+type Scope<'a> = [(&'a str, &'a crate::Semlith)];
+
+/// Generate one report over every open store, with no window.
+///
+/// The 0.26.x signature, kept so it still means what it meant: `semlith
+/// report` and `semlith_report` ask for exactly this.
 pub fn generate(fleet: &crate::fleet::Fleet, kind: &str, model: &str) -> Result<Report> {
+    generate_over(fleet, kind, model, Window::Unset, &[])
+}
+
+/// Generate one report over a window and a scope.
+///
+/// `only` is store labels; empty is every open store. A label no open store
+/// answers to is refused rather than dropped — a report headed with five
+/// stores when the caller asked for six is a figure with the wrong subject,
+/// and nothing in the output would say so.
+/// The builder's two content toggles.
+///
+/// Not three: the design draws a `Sign the report` toggle as well, and signing
+/// needs a key this product does not have and a decision about where it lives.
+/// A toggle that is drawn and does nothing is worse than one that is not drawn,
+/// so that one is rendered as unavailable and said to be, rather than shipped
+/// as a switch with no wire behind it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Attach the individual retrievals, not only the session totals.
+    pub excerpts: bool,
+    /// Replace every query text with a digest of it.
+    pub redact: bool,
+}
+
+/// A query text as it appears in a report: itself, or a digest of itself.
+///
+/// The same blake3 the ledger chains its rows with, truncated to sixteen
+/// characters — long enough that two different questions do not collide in any
+/// corpus a person will read, short enough to sit in a table cell. Redaction is
+/// report-wide rather than per-block on purpose: the access report is not the
+/// only place a query reaches paper, and a toggle that hid it in one table and
+/// printed it in another would be worse than no toggle at all.
+fn said(query: &str, options: Options) -> String {
+    if !options.redact {
+        return query.to_string();
+    }
+    format!("hash:{}", &blake3::hash(query.as_bytes()).to_hex()[..16])
+}
+
+pub fn generate_over(
+    fleet: &crate::fleet::Fleet,
+    kind: &str,
+    model: &str,
+    window: Window,
+    only: &[String],
+) -> Result<Report> {
+    generate_with(fleet, kind, model, window, only, Options::default())
+}
+
+/// Generate one report with the builder's toggles applied.
+pub fn generate_with(
+    fleet: &crate::fleet::Fleet,
+    kind: &str,
+    model: &str,
+    window: Window,
+    only: &[String],
+    options: Options,
+) -> Result<Report> {
     let (kind, title) = kind_of(kind)?;
-    let stores: Vec<String> = fleet.each().map(|(label, _)| label.to_string()).collect();
+    let open: Vec<&str> = fleet.each().map(|(label, _)| label).collect();
+    for name in only {
+        if !open.contains(&name.as_str()) {
+            bail!(
+                "no open store is named {name:?}; the open stores are {}",
+                if open.is_empty() {
+                    "none".to_string()
+                } else {
+                    open.join(", ")
+                }
+            );
+        }
+    }
+    let scope: Vec<(&str, &crate::Semlith)> = fleet
+        .each()
+        .filter(|(label, _)| only.is_empty() || only.iter().any(|n| n == label))
+        .collect();
+    let stores: Vec<String> = scope.iter().map(|(label, _)| label.to_string()).collect();
     let blocks = match kind {
-        "savings" => savings(fleet, model)?,
-        "access" => access(fleet)?,
-        "change" => change(fleet)?,
-        "health" => health(fleet)?,
-        _ => gaps(fleet)?,
+        "savings" => savings(&scope, model)?,
+        "access" => access(&scope, window, options)?,
+        "change" => change(&scope, window)?,
+        "health" => health(&scope)?,
+        _ => gaps(&scope, options)?,
     };
     Ok(Report {
         kind,
         title: title.to_string(),
         generated: crate::clock::local_stamp(unix_now()),
         stores,
+        window: window.note(matches!(kind, "access" | "change")),
         blocks,
     })
 }
 
 /// What was not read, what that would have cost, and how much of the ledger
 /// the figure covers.
-fn savings(fleet: &crate::fleet::Fleet, model: &str) -> Result<Vec<Block>> {
+fn savings(scope: &Scope<'_>, model: &str) -> Result<Vec<Block>> {
     let (name, per_million) = price_of(model);
     let (mut net, mut credited, mut total, mut measured) = (0i64, 0i64, 0i64, true);
     let (mut refunds, mut zero_hit, mut refunds_measured) = (0i64, 0i64, false);
@@ -184,7 +406,7 @@ fn savings(fleet: &crate::fleet::Fleet, model: &str) -> Result<Vec<Block>> {
     let (mut p50, mut p95) = (0i64, 0i64);
     let mut head = None;
     let mut intact = true;
-    for (_, store) in fleet.each() {
+    for (_, store) in scope {
         let s = crate::store::ledger_savings(store.db())?;
         net += s.net;
         credited += s.credited;
@@ -329,11 +551,19 @@ fn savings(fleet: &crate::fleet::Fleet, model: &str) -> Result<Vec<Block>> {
 }
 
 /// Which agents read this machine's corpus, how often, and what they missed.
-fn access(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
+fn access(scope: &Scope<'_>, window: Window, options: Options) -> Result<Vec<Block>> {
     let mut rows = Vec::new();
+    let mut attached: Vec<Vec<String>> = Vec::new();
     let mut intact = true;
-    for (label, store) in fleet.each() {
+    // `ledger_sessions` answers newest first, so narrowing the list it returns
+    // can only drop sessions older than the window — a session the window
+    // covers cannot have been pushed out of the 200 by an older one.
+    let since = window.since(unix_now());
+    for (label, store) in scope {
         for session in crate::store::ledger_sessions(store.db(), 200)? {
+            if since.is_some_and(|since| session.last < since) {
+                continue;
+            }
             rows.push(vec![
                 crate::clock::local_stamp(session.last),
                 if session.session.is_empty() {
@@ -349,10 +579,30 @@ fn access(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
                 session.tier().to_string(),
             ]);
         }
+        if options.excerpts {
+            for row in crate::store::ledger_retrievals(store.db(), since.unwrap_or(0), ATTACHED)? {
+                attached.push(vec![
+                    crate::clock::local_stamp(row.at),
+                    row.client,
+                    if row.tool.is_empty() {
+                        "—".into()
+                    } else {
+                        row.tool
+                    },
+                    said(&row.query, options),
+                    n(row.hits),
+                    n(row.excerpt_tokens),
+                    n(row.whole_file_tokens),
+                    label.to_string(),
+                ]);
+            }
+        }
         intact = intact && crate::store::ledger_break(store.db())?.is_none();
     }
     rows.sort_by(|a, b| b[0].cmp(&a[0]));
-    Ok(vec![
+    attached.sort_by(|a, b| b[0].cmp(&a[0]));
+    attached.truncate(ATTACHED);
+    let mut blocks = vec![
         Block::Text {
             text: format!(
                 "Every agent session recorded on this machine. The rows are hash-chained and the \
@@ -378,16 +628,55 @@ fn access(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
             ],
             rows,
         },
-    ])
+    ];
+    if options.excerpts {
+        blocks.push(Block::Text {
+            text: format!(
+                "Every retrieval behind the sessions above, newest first, to a ceiling of \
+                 {ATTACHED}. A session line says an agent asked forty times; this is which \
+                 forty.{}",
+                if options.redact {
+                    " The query column is a digest rather than the text, so this says who asked, \
+                     when, and what it cost, and not what was asked."
+                } else {
+                    ""
+                }
+            ),
+        });
+        blocks.push(Block::Table {
+            title: "Retrievals".into(),
+            columns: vec![
+                "at".into(),
+                "agent".into(),
+                "tool".into(),
+                "query".into(),
+                "hits".into(),
+                "excerpt tokens".into(),
+                "whole-file tokens".into(),
+                "store".into(),
+            ],
+            rows: attached,
+        });
+    }
+    Ok(blocks)
 }
 
+/// The most individual retrievals one access report attaches.
+///
+/// A ceiling rather than everything: a ledger is unbounded, and a report nobody
+/// can open is a report nobody reads. The sessions table above is the whole
+/// count either way, so what this bounds is the detail and not the total.
+const ATTACHED: usize = 500;
+
 /// What this machine has read lately.
-fn change(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
-    const WINDOW_DAYS: i64 = 7;
-    let since = unix_now() - WINDOW_DAYS * 24 * 60 * 60;
+fn change(scope: &Scope<'_>, window: Window) -> Result<Vec<Block>> {
+    // Zero rather than "no bound": `files_indexed_since` takes a second, and
+    // no file was indexed before the epoch.
+    let since = window.since_or(unix_now(), CHANGE_DAYS).unwrap_or(0);
+    let span = window.note(true);
     let mut rows = Vec::new();
     let mut retired = 0i64;
-    for (label, store) in fleet.each() {
+    for (label, store) in scope {
         for (path, at) in crate::store::files_indexed_since(store.db(), since, 200)? {
             rows.push(vec![
                 crate::clock::local_stamp(at),
@@ -401,18 +690,14 @@ fn change(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
     Ok(vec![
         Block::Text {
             text: format!(
-                "Files this machine re-read in the last {WINDOW_DAYS} days, newest first. \
+                "Files this machine re-read over {span}, newest first. \
                  Re-read, not rewritten: the store records when it read a file, not when anybody \
                  changed it."
             ),
         },
         Block::Facts {
             facts: vec![
-                (
-                    "Files re-read".into(),
-                    n(rows.len() as i64),
-                    format!("in {WINDOW_DAYS} days"),
-                ),
+                ("Files re-read".into(), n(rows.len() as i64), span.clone()),
                 (
                     "Definitions replaced".into(),
                     n(retired),
@@ -429,11 +714,11 @@ fn change(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
 }
 
 /// What the index holds and what the graph made of it.
-fn health(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
+fn health(scope: &Scope<'_>) -> Result<Vec<Block>> {
     let mut rows = Vec::new();
     let (mut files, mut chunks, mut bytes) = (0i64, 0i64, 0i64);
     let (mut unresolved, mut several) = (0i64, 0i64);
-    for (label, store) in fleet.each() {
+    for (label, store) in scope {
         let (f, c, b) = crate::store::stats(store.db())?;
         files += f;
         chunks += c;
@@ -502,13 +787,17 @@ fn health(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
 }
 
 /// What was asked and not answered, and the names that mislead.
-fn gaps(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
+fn gaps(scope: &Scope<'_>, options: Options) -> Result<Vec<Block>> {
     let mut asked = Vec::new();
     let mut missing = Vec::new();
     let mut several = 0i64;
-    for (label, store) in fleet.each() {
+    for (label, store) in scope {
         for (query, count) in crate::store::ledger_zero_hit_queries(store.db(), 20)? {
-            asked.push(vec![query, n(count), label.to_string()]);
+            // Redaction is not the access report's private arrangement: this is
+            // the other place a query text reaches paper, and a toggle that hid
+            // it in one table and printed it in another would be a promise
+            // broken by the same document that made it.
+            asked.push(vec![said(&query, options), n(count), label.to_string()]);
         }
         let (targets, _) = crate::store::unresolved_targets(store.db(), 20)?;
         for (name, edges) in targets {
@@ -545,6 +834,175 @@ fn gaps(fleet: &crate::fleet::Fleet) -> Result<Vec<Block>> {
     ])
 }
 
+// ------------------------------------------------------------------ typeset
+//
+// The PDF's page geometry. US Letter, because the reports price in dollars and
+// a fixed page is what makes the column arithmetic below exact rather than a
+// guess.
+const PAGE_W: f32 = 612.0;
+const PAGE_H: f32 = 792.0;
+const MARGIN: f32 = 54.0;
+const TITLE_PT: f32 = 16.0;
+const HEADING_PT: f32 = 11.0;
+const BODY_PT: f32 = 9.0;
+const META_PT: f32 = 8.0;
+
+/// How many characters of a given size fit between the margins.
+///
+/// Courier is a fixed-width face and every glyph in it is 0.6 em, so a line's
+/// width *is* its length. That is the whole layout engine, and it is the
+/// reason the face was chosen: wrapping a paragraph or fitting a table in a
+/// proportional base-14 font means carrying the 224 AFM widths of each of
+/// them, which is a metrics table this crate would then have to keep correct
+/// for ever. Here, nothing can run off the page edge because nothing can be
+/// wider than the number of characters that fit.
+fn columns_at(size: f32) -> usize {
+    ((PAGE_W - 2.0 * MARGIN) / (size * 0.6)) as usize
+}
+
+/// One thing to put on a page, before anything knows which page that is.
+///
+/// Laying out to pieces first and paginating second is what keeps the page
+/// break out of the block loop: a renderer that emitted directly would have to
+/// ask "am I near the bottom" in five places.
+enum Piece {
+    /// Vertical space, dropped at the top of a page.
+    Gap(f32),
+    /// A horizontal rule under a table's header row.
+    Rule,
+    Text {
+        text: String,
+        bold: bool,
+        size: f32,
+    },
+}
+
+/// A report's prose typeset as ASCII.
+///
+/// A base-14 font is WinAnsi-encoded, so an em dash could be written as one
+/// byte — but then every reader and every extractor has to agree about the
+/// encoding to get it back, and the one thing a saved report must survive is
+/// being read. The handful of characters the five reports actually use are
+/// transliterated, and anything else outside ASCII becomes `?`, which is
+/// visible rather than silent.
+fn ascii(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\t' => out.push(' '),
+            '—' | '–' => out.push_str("--"),
+            '·' | '•' => out.push('-'),
+            '…' => out.push_str("..."),
+            '‘' | '’' => out.push('\''),
+            '“' | '”' => out.push('"'),
+            '×' => out.push('x'),
+            '\n' | ' ' => out.push(c),
+            c if c.is_ascii_graphic() => out.push(c),
+            // Every other control character, dropped rather than drawn.
+            c if c.is_ascii() => {}
+            _ => out.push('?'),
+        }
+    }
+    out
+}
+
+/// Break text to a column count, on word boundaries where there are any.
+///
+/// A word longer than the column count — a path, a query, a symbol name — is
+/// cut rather than allowed past the margin, because the margin is the promise.
+fn wrap(text: &str, cols: usize) -> Vec<String> {
+    let cols = cols.max(1);
+    let text = ascii(text);
+    let mut out = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let mut word = word;
+            while word.len() > cols {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                out.push(word[..cols].to_string());
+                word = &word[cols..];
+            }
+            if line.is_empty() {
+                line = word.to_string();
+            } else if line.len() + 1 + word.len() <= cols {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(std::mem::replace(&mut line, word.to_string()));
+            }
+        }
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// Column widths that add up to no more than the page holds.
+///
+/// Each column starts at its widest cell and the widest column gives up a
+/// character at a time until the row fits. Shrinking costs height rather than
+/// content: a cell narrower than its text wraps inside its column.
+fn column_widths(columns: &[String], rows: &[Vec<String>], total: usize) -> Vec<usize> {
+    const GUTTER: usize = 2;
+    const MIN: usize = 6;
+    let budget = total.saturating_sub(GUTTER * columns.len().saturating_sub(1));
+    let mut widths: Vec<usize> = columns
+        .iter()
+        .map(|c| ascii(c).len().clamp(3, budget.max(3)))
+        .collect();
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if let Some(width) = widths.get_mut(i) {
+                *width = (*width).max(ascii(cell).len()).min(budget.max(MIN));
+            }
+        }
+    }
+    while widths.iter().sum::<usize>() > budget {
+        let Some(widest) = widths
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, width)| **width)
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        if widths[widest] <= MIN {
+            break;
+        }
+        widths[widest] -= 1;
+    }
+    widths
+}
+
+/// One table row as the physical lines it occupies.
+fn table_lines(cells: &[String], widths: &[usize]) -> Vec<String> {
+    let parts: Vec<Vec<String>> = widths
+        .iter()
+        .enumerate()
+        .map(|(i, width)| wrap(cells.get(i).map(String::as_str).unwrap_or(""), *width))
+        .collect();
+    let height = parts.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    (0..height)
+        .map(|line| {
+            let mut out = String::new();
+            for (i, (part, width)) in parts.iter().zip(widths).enumerate() {
+                if i > 0 {
+                    out.push_str("  ");
+                }
+                let cell = part.get(line).map(String::as_str).unwrap_or("");
+                out.push_str(cell);
+                out.push_str(&" ".repeat(width.saturating_sub(cell.len())));
+            }
+            out.trim_end().to_string()
+        })
+        .collect()
+}
+
 impl Report {
     /// Render in one of [`FORMATS`].
     pub fn render(&self, format: &str) -> Result<String> {
@@ -553,37 +1011,209 @@ impl Report {
             "csv" => self.csv(),
             "json" => serde_json::to_string_pretty(self)? + "\n",
             "html" => self.html(),
+            // Named rather than folded into the list below, because "the
+            // formats are markdown, csv, json, html" is a lie about a format
+            // this binary does produce — just not as text.
+            PDF => bail!("pdf is bytes rather than text; render it with render_bytes"),
             other => bail!(
                 "unknown format {other:?}; the formats are {}",
-                FORMATS.join(", ")
+                ALL_FORMATS.join(", ")
             ),
         })
     }
 
+    /// Render in one of [`ALL_FORMATS`], as the bytes that format is.
+    ///
+    /// The one call that serves all five. PDF is the only one that is not
+    /// UTF-8, and it is still a renderer over `self.blocks` — nothing here
+    /// reaches past the block structure the other four read.
+    pub fn render_bytes(&self, format: &str) -> Result<Vec<u8>> {
+        match format {
+            PDF => Ok(self.pdf()),
+            other => self.render(other).map(String::into_bytes),
+        }
+    }
+
+    /// The report as a flat list of things to draw, before pagination.
+    fn pieces(&self) -> Vec<Piece> {
+        let text = |out: &mut Vec<Piece>, body: &str, bold: bool, size: f32| {
+            for line in wrap(body, columns_at(size)) {
+                out.push(Piece::Text {
+                    text: line,
+                    bold,
+                    size,
+                });
+            }
+        };
+        let mut out = Vec::new();
+        text(&mut out, &self.title, true, TITLE_PT);
+        out.push(Piece::Gap(4.0));
+        text(&mut out, &self.meta(), false, META_PT);
+        for block in &self.blocks {
+            out.push(Piece::Gap(10.0));
+            match block {
+                Block::Text { text: body } => text(&mut out, body, false, BODY_PT),
+                Block::Facts { facts } => {
+                    for (label, value, over) in facts {
+                        text(
+                            &mut out,
+                            &format!("{label}: {value} — {over}"),
+                            false,
+                            BODY_PT,
+                        );
+                    }
+                }
+                Block::Table {
+                    title,
+                    columns,
+                    rows,
+                } => {
+                    text(&mut out, title, true, HEADING_PT);
+                    out.push(Piece::Gap(3.0));
+                    if rows.is_empty() {
+                        text(&mut out, "Nothing to report.", false, BODY_PT);
+                        continue;
+                    }
+                    let widths = column_widths(columns, rows, columns_at(BODY_PT));
+                    for line in table_lines(columns, &widths) {
+                        out.push(Piece::Text {
+                            text: line,
+                            bold: true,
+                            size: BODY_PT,
+                        });
+                    }
+                    out.push(Piece::Rule);
+                    for row in rows {
+                        for line in table_lines(row, &widths) {
+                            out.push(Piece::Text {
+                                text: line,
+                                bold: false,
+                                size: BODY_PT,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The same blocks, typeset and paginated.
+    fn pdf(&self) -> Vec<u8> {
+        use pdf_writer::{Content, Finish, Name, Pdf, Rect, Ref, Str};
+
+        const REGULAR: Name = Name(b"F1");
+        const BOLD: Name = Name(b"F2");
+        const TOP: f32 = PAGE_H - MARGIN;
+
+        let mut finished: Vec<Vec<u8>> = Vec::new();
+        let mut content = Content::new();
+        let mut y = TOP;
+        for piece in self.pieces() {
+            let height = match &piece {
+                Piece::Gap(gap) => *gap,
+                Piece::Rule => 6.0,
+                // 1.35 em of leading: enough that a wrapped table row reads as
+                // rows rather than as a block of text.
+                Piece::Text { size, .. } => size * 1.35,
+            };
+            if let Piece::Gap(_) = piece {
+                // Never before the first line of the document.
+                if y < TOP {
+                    y -= height;
+                }
+                continue;
+            }
+            if y - height < MARGIN {
+                finished.push(
+                    std::mem::replace(&mut content, Content::new())
+                        .finish()
+                        .to_vec(),
+                );
+                y = TOP;
+            }
+            y -= height;
+            match piece {
+                Piece::Gap(_) => unreachable!("handled above"),
+                Piece::Rule => {
+                    content.set_line_width(0.5);
+                    content.move_to(MARGIN, y + 3.0);
+                    content.line_to(PAGE_W - MARGIN, y + 3.0);
+                    content.stroke();
+                }
+                Piece::Text { text, bold, size } => {
+                    content.begin_text();
+                    content.set_font(if bold { BOLD } else { REGULAR }, size);
+                    // Absolute, because the text matrix is the identity at
+                    // every `begin_text` and `Td` is relative to it.
+                    content.next_line(MARGIN, y);
+                    content.show(Str(text.as_bytes()));
+                    content.end_text();
+                }
+            }
+        }
+        finished.push(content.finish().to_vec());
+
+        let mut pdf = Pdf::new();
+        let catalog = Ref::new(1);
+        let tree = Ref::new(2);
+        let regular = Ref::new(3);
+        let bold = Ref::new(4);
+        let page_id = |i: usize| Ref::new(5 + 2 * i as i32);
+        let body_id = |i: usize| Ref::new(6 + 2 * i as i32);
+
+        pdf.catalog(catalog).pages(tree);
+        pdf.pages(tree)
+            .kids((0..finished.len()).map(page_id))
+            .count(finished.len() as i32);
+        // The two base-14 faces every reader has. No font is embedded, so the
+        // binary grows by nothing and there is no font licence to carry.
+        pdf.type1_font(regular)
+            .base_font(Name(b"Courier"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+        pdf.type1_font(bold)
+            .base_font(Name(b"Courier-Bold"))
+            .encoding_predefined(Name(b"WinAnsiEncoding"));
+        for (i, body) in finished.iter().enumerate() {
+            let mut page = pdf.page(page_id(i));
+            page.parent(tree);
+            page.media_box(Rect::new(0.0, 0.0, PAGE_W, PAGE_H));
+            page.contents(body_id(i));
+            page.resources()
+                .fonts()
+                .pair(REGULAR, regular)
+                .pair(BOLD, bold);
+            page.finish();
+            pdf.stream(body_id(i), body);
+        }
+        pdf.finish()
+    }
+
     fn header(&self) -> String {
+        format!("{}\n\n{}", self.title, self.meta())
+    }
+
+    /// The one line every renderer puts under the title: when, over what, and
+    /// over how long. The scope and the window are printed rather than
+    /// implied, because a narrowed report that does not say it is narrowed is
+    /// a figure whose subject the reader has to guess.
+    fn meta(&self) -> String {
         format!(
-            "{}\n\nGenerated {} on this machine, over {}. Nothing left it.",
-            self.title,
+            "Generated {} on this machine, over {}, covering {}. Nothing left it.",
             self.generated,
             if self.stores.is_empty() {
                 "no open store".to_string()
             } else {
                 self.stores.join(", ")
-            }
+            },
+            self.window,
         )
     }
 
     fn markdown(&self) -> String {
         let mut out = format!("# {}\n\n", self.title);
-        out.push_str(&format!(
-            "Generated {} on this machine, over {}. Nothing left it.\n",
-            self.generated,
-            if self.stores.is_empty() {
-                "no open store".to_string()
-            } else {
-                self.stores.join(", ")
-            }
-        ));
+        out.push_str(&self.meta());
+        out.push('\n');
         for block in &self.blocks {
             match block {
                 Block::Text { text } => out.push_str(&format!("\n{text}\n")),
@@ -722,8 +1352,10 @@ impl Report {
                 }
             }
         }
-        // Print-styled on purpose: PDF is this page printed by the reader's
-        // own browser, which is why no PDF writer is in the binary.
+        // Print-styled on purpose, and still worth having now that a PDF
+        // renderer exists beside it: this is the format a reader opens in a
+        // browser, sends to somebody, and prints if they want to. The PDF is
+        // typeset from the blocks rather than printed from this.
         format!(
             "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
              <title>{title}</title>\n<style>\n\
@@ -763,6 +1395,7 @@ mod tests {
             title: "Index health".into(),
             generated: "2026-09-20 10:00:00 +05:30".into(),
             stores: vec!["semlith".into()],
+            window: Window::Unset.note(false),
             blocks: vec![
                 Block::Text {
                     text: "One sentence.".into(),
@@ -803,9 +1436,103 @@ mod tests {
     #[test]
     fn an_unknown_report_or_format_says_what_there_is() {
         let report = sample();
-        let e = report.render("pdf").unwrap_err().to_string();
+        let e = report.render("xml").unwrap_err().to_string();
         assert!(e.contains("markdown"), "{e}");
         assert!(e.contains("html"), "{e}");
+        assert!(e.contains("pdf"), "the fifth format is not named: {e}");
+        // `render` returns text, so it refuses the one format that is not
+        // text — but it says why rather than calling it unknown.
+        let e = report.render(PDF).unwrap_err().to_string();
+        assert!(e.contains("render_bytes"), "{e}");
+    }
+
+    #[test]
+    fn a_window_name_resolves_or_says_which_there_are() {
+        assert_eq!(window_of(None).unwrap(), Window::Unset);
+        assert_eq!(window_of(Some("week")).unwrap(), Window::Days(7));
+        assert_eq!(window_of(Some("all")).unwrap(), Window::All);
+        let e = window_of(Some("fortnight")).unwrap_err().to_string();
+        for wanted in ["all", "day", "week", "month", "quarter"] {
+            assert!(e.contains(wanted), "{e} does not name {wanted}");
+        }
+    }
+
+    #[test]
+    fn a_window_a_report_cannot_honour_is_said_rather_than_printed() {
+        // Three of the five count over a store's whole history. A heading
+        // reading "the last 7 days" over a lifetime total is the number
+        // without its denominator this module exists to refuse.
+        assert_eq!(Window::Days(7).note(true), "the last 7 days");
+        assert!(Window::Days(7).note(false).contains("whole history"));
+        assert_eq!(Window::Unset.note(true), "each block's own span");
+        assert_eq!(Window::Unset.note(false), "everything recorded");
+        // Every value says something different, so a reader can tell which
+        // was applied from the document alone.
+        let said: std::collections::BTreeSet<String> = WINDOWS
+            .iter()
+            .flat_map(|(_, w)| [w.note(true), w.note(false)])
+            .collect();
+        assert_eq!(said.len(), WINDOWS.len() * 2);
+    }
+
+    #[test]
+    fn nothing_a_table_holds_runs_off_the_page() {
+        // The margin is the promise, and a path or a query is the thing that
+        // breaks it: neither has a space to wrap at.
+        let wide = "/a/very/long/path/without/any/spaces/in/it/at/all/that/is/far/wider/than/the/page/is.rs";
+        let columns = vec!["when".to_string(), "file".to_string(), "store".to_string()];
+        let rows = vec![vec![
+            "2026-09-20 10:00:00".to_string(),
+            wide.to_string(),
+            "semlith".to_string(),
+        ]];
+        let widths = column_widths(&columns, &rows, columns_at(BODY_PT));
+        for line in table_lines(&rows[0], &widths) {
+            assert!(
+                line.len() <= columns_at(BODY_PT),
+                "{} characters in a {}-column page: {line}",
+                line.len(),
+                columns_at(BODY_PT)
+            );
+        }
+        // And nothing was thrown away to get there.
+        let laid = table_lines(&rows[0], &widths).join("");
+        assert!(
+            laid.replace(' ', "").contains(&wide[wide.len() - 20..]),
+            "the path was cut rather than wrapped: {laid}"
+        );
+    }
+
+    #[test]
+    fn the_pdf_is_a_renderer_over_the_same_blocks() {
+        // Not a second data path: every cell the other four formats carry
+        // reaches the typesetter, through `pieces`, from `self.blocks`.
+        let report = sample();
+        let drawn: String = report
+            .pieces()
+            .into_iter()
+            .filter_map(|piece| match piece {
+                Piece::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(drawn.contains("Index health"));
+        assert!(drawn.contains("two, with a comma"));
+        assert!(drawn.contains("Files: 3"));
+
+        let bytes = report.render_bytes(PDF).unwrap();
+        assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+        assert!(bytes.ends_with(b"%%EOF\n") || bytes.ends_with(b"%%EOF"));
+    }
+
+    #[test]
+    fn prose_outside_ascii_is_transliterated_rather_than_dropped() {
+        // A base-14 font is WinAnsi. The reports are full of em dashes, and a
+        // dash that silently became nothing would read as a missing word.
+        assert_eq!(ascii("net — over 3 rows"), "net -- over 3 rows");
+        assert_eq!(ascii("a · b"), "a - b");
+        assert_eq!(ascii("\u{4f60}"), "?");
     }
 
     #[test]

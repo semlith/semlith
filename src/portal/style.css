@@ -104,6 +104,13 @@
   --sp-4h: 18px;
   --sp-5: 20px;
   --sp-6: 24px;
+  /* The floor under the last card on a page. Not on the 4px step the rest of
+   * this scale is on, because it is not a gap between two things — it is the
+   * design's own `padding: 24px 24px 44px`, and what it buys is that the last
+   * card on a page does not sit against the viewport edge. Named rather than
+   * written twice, because the narrow breakpoint sets it too and the graph
+   * page is the one deliberate exception to it. */
+  --view-floor: 44px;
 
   /* What a pill-shaped control in a filter row stands at. The design holds
    * every one of them to the same height, which is what makes a row of
@@ -134,6 +141,10 @@
   --t-body-sm: 13px;
   --t-body: 14px;
   --t-lead: 16px;
+  /* The one figure the design draws larger than anything else on a page: the
+   * ledger's stat values. Its own token rather than `--t-display`, because the
+   * narrow breakpoint steps `--t-display` down and this one does not follow. */
+  --t-stat: 26px;
   --t-title: 18px;
   --t-h1: 21px;
   --t-display: 24px;
@@ -679,15 +690,10 @@ main {
   color: var(--muted);
 }
 
-/* Under the daemon card, indented to the card's own text: the design puts the
- * way back to the first-run screen here and nowhere else. */
-.replay-welcome {
-  font-size: var(--t-small);
-  padding: 0 var(--sp-1);
-}
-.replay-welcome:hover {
-  color: var(--ink);
-}
+/* The way back to the first-run screen sits under the daemon card, where the
+ * design puts it and nowhere else. It carried a size and an indent of its own
+ * while it was a line of muted text; as a chip it is a chip, and a second
+ * opinion about its size here would only fight `.chip.sm`. */
 
 .scrim {
   display: none;
@@ -723,10 +729,10 @@ main {
 
 .view {
   animation: rise var(--d-rise) var(--e-out);
-  padding: var(--sp-5) var(--sp-5) var(--sp-6);
+  padding: var(--sp-6) var(--sp-6) var(--view-floor);
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-4h);
   flex-grow: 1;
   min-width: 0;
   min-height: 0;
@@ -752,13 +758,26 @@ main {
 
 /* A group of blocks that scroll with the page rather than inside it, and that
  * takes the height left over so the cards at the bottom of a short page fill
- * it instead of floating above a band of empty grey. */
+ * it instead of floating above a band of empty grey.
+ *
+ * `flex-shrink: 0` is the whole of the first sentence, and it used to read
+ * `flex: 1 1 auto`. `.view > *` above sets `flex-shrink: 0` on every child for
+ * exactly this reason, but that rule and this one are both one class deep, so
+ * source order decided and this one — later in the file — put the shrink back.
+ * On a page whose content overflows, the one child that could shrink absorbed
+ * the entire overflow: the page stopped scrolling, this block was crushed
+ * toward zero, and `.card { overflow: hidden }` clipped whatever was inside it.
+ * The Retrieval ledger was where it showed, but it was never a ledger bug —
+ * five pages put a `.scroller` directly under `.view`.
+ *
+ * `.grow` below keeps `1 1 auto` and is not the same case: it scrolls *inside*
+ * itself through `.grow > .table-wrap`, so it has to be allowed to shrink. */
 .scroller {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
   min-height: 0;
-  flex: 1 1 auto;
+  flex: 1 0 auto;
 }
 
 .scroller.grid {
@@ -822,12 +841,37 @@ h2 {
   min-width: 0;
 }
 
+/* 12.5px, down from 14px, and this one class is the most visible drift there
+ * was: it carries nearly every muted explanatory line in the portal, so a
+ * whole page of secondary prose sat one and a half pixels above the design on
+ * every page at once.
+ *
+ * The design has three sizes for this, not one, and the other two are below:
+ * a page subtitle under an H1 keeps the body size, and a subtitle in a card's
+ * header row is 13px. Everything else -- a footnote under a card, a line under
+ * a control group -- is this. */
 .subtitle {
   margin: 0;
   color: var(--muted);
-  font-size: var(--t-body);
+  font-size: var(--t-small-h);
   line-height: var(--lh-prose);
   text-wrap: pretty;
+}
+
+/* The page subtitle, which has a row of its own under the heading and is the
+ * one the design leaves at the body size. It did not move; it is written down
+ * here because the base rule above moved under it. */
+.page-head > .subtitle {
+  font-size: var(--t-body);
+}
+
+/* The third size: a subtitle directly under a card's own title, inside the
+ * card's header stack. The design draws that pairing at 13px at every site it
+ * appears -- a tight column, the 600-weight title, then this. A footnote at
+ * the bottom of the same card is 12.5px and is the base rule above; the
+ * difference is position, not importance. */
+.titles > .subtitle {
+  font-size: var(--t-body-sm);
 }
 
 /* Inside a card, prose still wants a measure: a 900px-wide paragraph in a
@@ -852,6 +896,14 @@ h2 {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* The same eyebrow, half a pixel down, for the ones that sit *inline* in a
+ * dense header beside controls rather than above a group of them -- `Model`,
+ * `By client`, the ledger's filter labels. The design draws both sizes and
+ * uses this one only in that position; everything above a group keeps 11px. */
+.eyebrow.sm {
+  font-size: var(--t-micro-h);
 }
 
 .card-title {
@@ -1010,7 +1062,11 @@ h2 {
 }
 .stat .value {
   font-family: var(--mono);
-  font-size: var(--t-display);
+  /* 26px, up from 24px. The symmetric half of this release's type pass: the
+   * design draws several shapes larger than this implementation did, and a
+   * pass that only shrank things would have made the portal worse while
+   * looking like it was converging. */
+  font-size: var(--t-stat);
   font-weight: 500;
   line-height: var(--lh-tight);
   font-variant-numeric: tabular-nums;
@@ -1104,7 +1160,9 @@ h2 {
   align-items: center;
   justify-content: center;
   gap: var(--sp-2);
-  height: 36px;
+  /* 34px, which is the design's modal control height and what every other
+   * shape in the portal is measured against. */
+  height: 34px;
   padding: 0 var(--sp-4);
   border-radius: 7px;
   border: 1px solid transparent;
@@ -1145,16 +1203,14 @@ h2 {
   color: var(--blue-ink);
 }
 
-.button.ghost {
-  background: none;
-  border-color: transparent;
-  color: var(--muted);
-  font-weight: 500;
-}
-.button.ghost:hover {
-  color: var(--ink);
-  background: var(--soft);
-}
+/* `.button.ghost` stood here: no background, no border, muted text. It had no
+ * counterpart anywhere in the v4 design, and what it produced was a control
+ * that reads as a sentence -- the graph page's `Reset` was the clearest case,
+ * sitting beside `Fit` and `Pause` and looking like a caption. Every one of its
+ * fourteen call sites now takes the secondary shape, which is the design's own
+ * quiet action: a border, a panel background, and text that is ink rather than
+ * muted. Nothing in the portal renders with neither background nor border at
+ * rest any more. */
 
 /* A dimmed accent action returns to full opacity and brightens a little less
  * than a live one, so the two are distinguishable while both are under the
@@ -1189,6 +1245,23 @@ h2 {
   font-size: var(--t-body-sm);
 }
 
+/* The design's smallest control, and the only one it fills with ink: the
+ * report preview's `Export`. It is smaller than `.button.small` and darker
+ * than the accent, which is what makes it read as the toolbar's own action
+ * rather than as the page's primary one. */
+.button.tiny {
+  height: 26px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-2);
+  font-size: var(--t-small);
+  font-weight: 500;
+}
+.button.tiny.ink {
+  background: var(--ink);
+  color: var(--panel);
+  border-color: var(--ink);
+}
+
 .button[disabled] {
   opacity: 0.55;
   cursor: default;
@@ -1214,11 +1287,34 @@ h2 {
   border-color: var(--blue);
   color: var(--ink);
 }
+/* The design's pressed chip is filled with ink and inverted, not washed with
+ * blue. The wash is why a row of six pressed graph chips read as tinted text
+ * rather than as six controls -- at 13px on a soft blue there is almost nothing
+ * between pressed and unpressed but hue.
+ *
+ * And no `font-weight: 500`. A chip that gains weight on press is a chip that
+ * changes width on press, so picking one in a wrapped row reflowed the row
+ * under the pointer. The design declares no weight on either state. */
 .chip[aria-pressed="true"] {
-  background: var(--blue-soft);
-  border-color: var(--blue);
-  color: var(--blue-ink);
-  font-weight: 500;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--panel);
+}
+.chip[aria-pressed="true"]:hover {
+  border-color: var(--ink);
+  color: var(--panel);
+}
+
+/* A chip in a row of controls rather than in a filter bar: same shape, one
+ * step down in size. The Impact page's `Prefer verified edges` and `Strict`
+ * are the design's own use of it. */
+.chip.sm {
+  font-size: var(--t-small-h);
+}
+.chip[disabled],
+.report-toggle[disabled] {
+  opacity: 0.55;
+  cursor: default;
 }
 .chip.static {
   cursor: default;
@@ -1808,8 +1904,20 @@ td.meta {
   color: var(--muted);
 }
 
+/* 500, down from 600. There is no 600-weight name anywhere in the design; the
+ * heaviest it draws a filename is 500, above a block of code. The report
+ * preview's toolbar filename is lighter still and takes `.name.plain` below,
+ * which is the case that made this visible -- a bolded filename over a
+ * 400-weight preview read as a heading for the pane rather than as a label on
+ * the file. */
 .name {
-  font-weight: 600;
+  font-weight: 500;
+}
+
+/* A filename that is a label rather than a heading: the design's report
+ * preview toolbar, where it sits at the body's own weight. */
+.name.plain {
+  font-weight: 400;
 }
 
 /* A root the registry still lists but that is no longer on disk. */
@@ -1883,18 +1991,21 @@ td.meta {
   border-radius: var(--r-2);
   font-family: var(--mono);
 }
-.table-foot .button.ghost {
+/* The pager's step buttons. They were `.button.ghost` here and this rule put
+ * the border and the panel background straight back, which is the clearest
+ * evidence that the ghost shape was never what anyone wanted: the one place it
+ * was used at size had to undo it. `.button.secondary` carries both already,
+ * so what is left is the pager's own height and its square corner. */
+.table-foot .button.secondary {
   height: 30px;
   padding: 0 var(--sp-3);
-  border: 1px solid var(--line);
   border-radius: var(--r-2);
-  background: var(--panel);
 }
-.table-foot .button.ghost:hover:not([disabled]) {
+.table-foot .button.secondary:hover:not([disabled]) {
   border-color: var(--blue);
   color: var(--blue-ink);
 }
-.table-foot .button.ghost[disabled] {
+.table-foot .button.secondary[disabled] {
   border-color: var(--line-soft);
 }
 
@@ -1924,15 +2035,22 @@ pre.code {
   border-radius: var(--r-3);
   padding: var(--sp-4);
   font-family: var(--mono);
-  font-size: var(--t-small);
+  /* 11.5px, which is what both of the design's `<pre>` recipes use -- the
+   * report preview and the CLI card. The release contract said this class was
+   * one the design drew *larger*, at 12.5px; the design file says otherwise at
+   * both sites, and the design file is the truth this release was told to
+   * follow. */
+  font-size: var(--t-tiny-h);
   line-height: var(--lh-code);
   overflow: auto;
   white-space: pre;
-  /* A visible edge where the line continues. On a desktop the overflow
-   * scrollbar is an overlay that only appears while scrolling, so a line
-   * running off the pane looked like a line that ended there — `… releases
-   * the l`. The fade is the cue; the scrollbar below it is the control. */
-  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  /* No fade at the right edge. A 28px mask stood here to say "the line
+   * continues", because a desktop overlay scrollbar only appears while
+   * scrolling and a line running off the pane looked like a line that ended
+   * there. It cost more than it bought: every block this class draws is a
+   * command a user is meant to select and copy, and the fade made the last
+   * characters of it unreadable whether or not they were the end. The design's
+   * `<pre>` blocks scroll plainly, and the thin scrollbar below is the cue. */
   scrollbar-width: thin;
 }
 pre.code::-webkit-scrollbar {
@@ -2717,10 +2835,6 @@ pre.code::-webkit-scrollbar-thumb {
 .w-coverage {
   min-width: 760px;
 }
-.w-models {
-  min-width: 480px;
-}
-
 /* The Agents page's reason column. A repair line carries its own explanation
  * after a `#` and is longer than any screen, so unbounded the cell asks for
  * the width of the whole command and carries its own Copy button past the edge
@@ -3200,10 +3314,19 @@ td.why .copyfield {
   border-radius: var(--r-4);
   overflow: hidden;
 }
+/* On a plate, as the graph legend is. It was bare text over the canvas, and a
+ * node that settled into the bottom-left corner drew its label straight
+ * through it — two sets of glyphs in the same pixels, neither readable. The
+ * legend across the canvas has had a panel, a border and a radius all along;
+ * this is the same treatment for the same reason. */
 .ego-hint {
   position: absolute;
   left: var(--sp-3);
   bottom: var(--sp-2h);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
   font-family: var(--mono);
   font-size: var(--t-micro);
   color: var(--muted);
@@ -3789,9 +3912,13 @@ td.why .copyfield {
   cursor: pointer;
   text-align: left;
 }
-.link-button.quiet {
-  color: var(--muted);
-  font-size: var(--t-tiny);
+/* Underlined on hover, because the two shapes this portal has for "do
+ * something" are a button and a link, and a link has to be one or the other on
+ * sight. `.link-button.quiet` stood here -- muted grey at 11px -- and its two
+ * call sites now take `.chip.sm` instead: a control that is neither a button
+ * nor recognisably a link is the thing nobody clicks. */
+.link-button:hover {
+  text-decoration: underline;
 }
 
 /* Who the ledger recorded. One line, because it is one fact, and it is the
@@ -4075,7 +4202,6 @@ td.why .copyfield {
    * sideways. */
   .w-stores,
   .w-files,
-  .w-models,
   .w-agents,
   .w-coverage {
     min-width: 0;
@@ -4114,11 +4240,10 @@ td.why .copyfield {
 
   /* Below the narrow breakpoint the page scrolls rather than trapping a
    * stacked desktop layout in the viewport, which is worse than letting it
-   * scroll. Tables still scroll inside their own wrapper. */
-  .view {
-    overflow-y: auto;
-  }
-
+   * scroll. Tables still scroll inside their own wrapper.
+   *
+   * `.view { overflow-y: auto }` stood here too and was a word-for-word repeat
+   * of the base rule, which said the same thing at every width. */
   .grow {
     flex: 0 0 auto;
   }
@@ -4191,7 +4316,10 @@ td.why .copyfield {
   }
 
   .view {
-    padding: 18px var(--sp-4) var(--sp-6);
+    /* The sides come in at a phone width; the floor does not. A card against
+     * the bottom edge reads as a page that was cut off, and that is truer on a
+     * phone than anywhere else. */
+    padding: 18px var(--sp-4) var(--view-floor);
   }
   .search-band {
     padding: var(--sp-4) var(--sp-4) var(--sp-3);
@@ -4277,7 +4405,13 @@ td.why .copyfield {
 
   /* Nine store chips wrapped to three rows above the results, which on a
    * phone is the whole first screen spent on a filter nobody had asked for.
-   * One row, scrolled sideways, with the edge fading to say there is more. */
+   * One row, scrolled sideways, with the edge fading to say there is more.
+   *
+   * This is the one mask left in the file and it stays. The mask that came off
+   * `pre.code` was over text a user selects and copies, where hiding the last
+   * characters is the whole cost. A row of chips is a set of targets: the fade
+   * says there are more of them, nothing is read out of it, and the scrollbar
+   * it replaces is hidden on purpose because a phone has no room for one. */
   .store-chips {
     flex-wrap: nowrap;
     overflow-x: auto;
@@ -4619,14 +4753,15 @@ td.row-end {
   margin-bottom: var(--sp-3);
 }
 
-/* The subject line and the three counts above the Impact table. */
+/* The `Changing` line, inside the card the design puts it in. It was a
+ * page-wide unboxed band with a rule under it, which is why the rule and the
+ * margin below are gone: a card already has an edge, and a second one inside
+ * it is a line for its own sake. */
 .impact-subject-row {
   display: flex;
   align-items: baseline;
-  gap: var(--sp-2);
-  padding: var(--sp-2) 0;
-  border-bottom: 1px solid var(--line-soft);
-  margin-bottom: var(--sp-4);
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
 }
 
 /* The answer beside the two questions that follow from it, as the v4 page
@@ -4640,6 +4775,47 @@ td.row-end {
   align-items: start;
   min-width: 0;
 }
+
+/* One column of the pair. Both are a plain stack; the grid above decides
+ * whether they sit beside each other or under one another. */
+.impact-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+/* The canvas card: a fixed 320px, as the design draws it, because reverse
+ * reachability at an arbitrary height is a picture that changes meaning with
+ * the window. `overflow: hidden` keeps the rings inside the radius. */
+.impact-canvas-card {
+  position: relative;
+  height: 320px;
+  overflow: hidden;
+  padding: 0;
+}
+.impact-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The caption floats over the canvas at its top-left, on a plate for the same
+ * reason the graph legend and the ego hint have one: a label sat in the same
+ * pixels as a node is two labels and no reading. */
+.canvas-caption {
+  position: absolute;
+  left: var(--sp-3h);
+  top: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+  pointer-events: none;
+}
 .impact-subject {
   font-family: var(--mono);
   font-size: var(--t-body);
@@ -4648,13 +4824,17 @@ td.row-end {
 .impact-stats {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--sp-6);
-  margin-bottom: var(--sp-4);
+  gap: var(--sp-3);
 }
+/* Each cell takes an equal share and may wrap: three figures side by side in
+ * a 340px column, and stacked below that, which is what the design's own
+ * `flex: 1 1 110px` does. */
 .impact-stat {
   display: flex;
+  flex: 1 1 110px;
+  min-width: 0;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: 2px;
 }
 .impact-stat .n {
   font-family: var(--mono);
@@ -4673,11 +4853,10 @@ td.row-end {
   color: var(--muted);
 }
 
-/* The path finder and Trace, two cards under the reach list. */
-.card.pad.path-card,
-.card.pad.trace-card {
-  margin-top: var(--sp-6);
-}
+/* `.path-card` and `.trace-card` carried `margin-top` here while their column
+ * already spaced them with a gap, so the whole right column started 24px below
+ * the left one for no reason a reader could see. The column does the stacking
+ * now, once. */
 .card-head {
   display: flex;
   align-items: baseline;
@@ -4704,23 +4883,13 @@ td.row-end {
   flex: 1 1 10rem;
   min-width: 0;
 }
-/* On and off, as the design draws them: the on state is ink on panel
- * reversed, so which way a toggle is set is legible without reading it. */
-.chip-toggle {
-  font-family: var(--mono);
-  font-size: var(--t-tiny);
-  padding: 3px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--ink-2);
-  cursor: pointer;
-}
-.chip-toggle.on {
-  border-color: var(--ink);
-  background: var(--ink);
-  color: var(--panel);
-}
+/* `.chip-toggle` stood here: 11px mono, 3px of vertical padding, about 17px
+ * tall. Beside the 34px buttons it shares a row with on the Impact page it
+ * read as a footnote rather than as a control, and the two shapes disagreed on
+ * every property that matters -- height, family, radius and what "on" looks
+ * like. There is one chip in this portal now: `.chip.sm`, pressed through
+ * `aria-pressed` like every other, which is also where its ink fill comes
+ * from. The design draws these two toggles as chips and nothing else. */
 .hop {
   display: flex;
   flex-wrap: wrap;
@@ -5154,9 +5323,6 @@ td.row-end {
   flex-direction: column;
   gap: var(--sp-1);
 }
-.report-builder .eyebrow {
-  margin-top: var(--sp-1);
-}
 
 /* The preview is a document in a frame: a bar naming the file, the text, and
  * a line saying how big it is. No padding on the card itself, because each of
@@ -5214,6 +5380,457 @@ td.row-end {
   min-height: 4rem;
 }
 
+/* A labelled row of chips: an eyebrow over the row it names. Five groups on
+ * the Reports page take this shape and the design draws all five alike. */
+.chip-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+/* The variant that sits *beside* a heading instead of above a column. The
+ * design uses the 10.5px eyebrow only in this position -- see `.eyebrow.sm`. */
+.chip-group.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* The report's own sentence about the span it was taken over, under the two
+ * lines naming it. Mono, because it is a statement from the file rather than
+ * prose about the file, and the three reports that have no window say so
+ * here at length. */
+.report-builder .span-note {
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+}
+
+/* The three redaction toggles: a filled square, not a sliding switch, then a
+ * two-line label stack. They are disabled in this build and still carry a
+ * border and a background at rest, which is the rule for every control here. */
+.report-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.report-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2h);
+  text-align: left;
+  padding: var(--sp-3) var(--sp-3);
+  border-radius: var(--r-3);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  min-width: 0;
+}
+.report-toggle[aria-pressed="true"] {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+.report-toggle .knob {
+  width: 15px;
+  height: 15px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.report-toggle[aria-pressed="true"] .knob {
+  border-color: var(--green-ink);
+  background: var(--green-ink);
+}
+.report-toggle .stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.report-toggle .label {
+  font-size: var(--t-body-sm);
+  font-weight: 500;
+}
+.report-toggle .why {
+  color: var(--muted);
+  font-size: var(--t-small);
+  text-wrap: pretty;
+}
+
+/* The preview's footer carries the meta line and the one accent action on the
+ * page, so it is a row rather than a single line of text. */
+.report-preview-card .foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+.report-preview-card .foot .meta {
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  color: var(--muted);
+}
+/* 30px: the design's `Save to disk`, between the 34px secondary shape and the
+ * 26px toolbar controls above it. */
+.report-preview-card .foot .button {
+  height: 30px;
+  padding: 0 var(--sp-3h);
+}
+
+/* The savings breakdown: a header of dials, four line items, the net, and a
+ * strip of badges that say how far the figure can be trusted. */
+.savings-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
+}
+.savings-head > .rule {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+  margin: 0 var(--sp-1);
+  flex-shrink: 0;
+}
+.savings-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.savings-line {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-bottom: var(--sp-2h);
+  border-bottom: 1px solid var(--line-soft);
+  min-width: 0;
+}
+.savings-line .row,
+.savings-net {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.savings-line .name {
+  font-size: var(--t-body);
+  font-weight: 500;
+}
+.savings-line .tok,
+.savings-net .tok {
+  font-family: var(--mono);
+  font-size: var(--t-body);
+  color: var(--ink-2);
+}
+/* Named `amount` because `.cost` is already the MCP page's boxed price block
+ * (see above); a second meaning for one class is how a figure in this card
+ * inherited a panel background it never asked for. */
+.savings-line .amount {
+  font-family: var(--mono);
+  font-size: var(--t-lead);
+  font-weight: 500;
+  min-width: 96px;
+  text-align: right;
+}
+.savings-net .name {
+  font-size: var(--t-lead);
+  font-weight: 600;
+}
+.savings-net .amount {
+  font-family: var(--mono);
+  /* The largest figure on this card, and the one a reader came for. */
+  font-size: var(--t-display);
+  font-weight: 600;
+  min-width: 96px;
+  text-align: right;
+}
+
+/* Six badges under the net: what the number covers, what it missed, how fast
+ * the reads were, whether the chain verifies. A figure with no denominator
+ * beside it is the thing this card exists not to print. */
+.trust-strip {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.trust {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  padding: var(--sp-1) var(--sp-2h);
+  border-radius: var(--r-pill);
+  background: var(--chip);
+  color: var(--ink-2);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.trust.blue {
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+.trust.green {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+.trust.amber {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+
+/* Written reports: a strip naming the directory, then the log. The table is
+ * wider than a phone, so it scrolls sideways inside the card rather than
+ * pushing the page. */
+.written-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2h);
+  flex-wrap: wrap;
+  padding: var(--sp-3h) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+.written-card .scroll-x {
+  overflow-x: auto;
+}
+.written-table {
+  min-width: 620px;
+}
+.written-table .right {
+  text-align: right;
+}
+.written-table .file,
+.written-table .size,
+.written-table .when {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+}
+.written-table .when {
+  color: var(--muted);
+}
+.written-table .type,
+.written-table .window {
+  font-size: var(--t-body-sm);
+}
+.written-table .window {
+  color: var(--muted);
+}
+.written-card .empty {
+  border: 0;
+  border-top: 1px dashed var(--line);
+  border-radius: 0;
+}
+
+/* The design's one centred dashed empty state, on the Schedules card. */
+.empty.centred {
+  text-align: center;
+  font-size: var(--t-small-h);
+  padding: var(--sp-4) var(--sp-3h);
+}
+
+/* `.card-head` is a baseline flex row, so a mono label in it is sized by its
+ * content and an absolute store home ran straight out of the card at 390px. */
+.schedules-card .card-head {
+  flex-wrap: wrap;
+}
+.schedules-card .card-head .mono-chip {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Schedules: the daemon's own records, drawn as rows. Everything here is read
+ * back from the daemon after every change, because page state that disagrees
+ * with the file is the failure this card is for. */
+.schedule-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.schedule-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2h);
+  padding: var(--sp-3) var(--sp-3);
+  border-radius: var(--r-3);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  min-width: 0;
+}
+.schedule-knob {
+  width: 15px;
+  height: 15px;
+  border-radius: var(--r-1);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  flex-shrink: 0;
+  margin-top: 3px;
+  cursor: pointer;
+  padding: 0;
+}
+.schedule-knob.on {
+  border-color: var(--green-ink);
+  background: var(--green-ink);
+}
+.schedule-row .stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.schedule-row .name {
+  font-size: var(--t-body-sm);
+  font-weight: 500;
+}
+.schedule-row .spec,
+.schedule-row .wrote {
+  font-family: var(--mono);
+  font-size: var(--t-tiny-h);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.schedule-row .next {
+  font-size: var(--t-tiny-h);
+  color: var(--ink-2);
+}
+/* A destination that has gone away is the failure this feature will meet, and
+ * the whole error chain is printed rather than a shrug: a schedule that says
+ * it is running beside a folder that never fills is the worst outcome here. */
+.schedule-row .failed {
+  font-size: var(--t-small);
+  color: var(--red-ink);
+  overflow-wrap: anywhere;
+}
+.state-pill {
+  font: 500 var(--t-micro) var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  border-radius: var(--r-1);
+  flex-shrink: 0;
+  background: var(--chip);
+  color: var(--ink-2);
+}
+.state-pill.on {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+.state-pill.paused {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+.schedule-remove {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--t-body);
+  line-height: 1;
+  flex-shrink: 0;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color var(--d-hover) var(--e-in-out), color var(--d-hover) var(--e-in-out),
+    background var(--d-hover) var(--e-in-out);
+}
+.schedule-remove:hover {
+  border-color: var(--amber-ink);
+  color: var(--amber-ink);
+  background: var(--amber-soft);
+}
+.new-schedule {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2h);
+  border-top: 1px solid var(--line);
+  padding-top: var(--sp-3h);
+  min-width: 0;
+}
+/* The design writes this line in ink rather than muted: it is what the button
+ * under it will do, not a footnote about it. */
+.new-schedule .subtitle.strong {
+  color: var(--ink-2);
+}
+/* The one non-uppercase mono label in the design, and the only one: `write to`
+ * sits inline in front of the chips it names rather than above them. */
+.write-to {
+  font: 500 var(--t-tiny) var(--mono);
+  color: var(--muted);
+}
+/* 32px: taller than a chip, shorter than the standard 34px action. The design
+ * gives this one button its own height. */
+.button.add-schedule {
+  height: 32px;
+  padding: 0 var(--sp-3h);
+  border-color: var(--accent-edge);
+}
+
+/* The CLI card. Its `<pre>` is bordered and scrolls sideways only -- the
+ * preview's is unbordered and height-capped, and they are not the same block. */
+.report-cli-card .card-head .copy {
+  height: 26px;
+  padding: 0 var(--sp-2h);
+  width: auto;
+  opacity: 1;
+}
+pre.report-cli {
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  padding: var(--sp-3) var(--sp-3h);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+/* Everything the v4 design has no panel for, after every panel it does have.
+ * Separated rather than woven in, so a reader can tell which lines came from
+ * the design and which are this build talking about itself. */
+.report-extras {
+  border-style: dashed;
+}
+
+/* A destination is an absolute path and a chip is one line. The label is the
+ * tail; the whole path is in the title, in the spec line under the button and
+ * in the command the CLI card offers to copy. */
+.new-schedule .chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  line-height: 26px;
+}
+
+/* Two columns become one on a narrow screen — every `.grid.two`, not one page's.
+ *
+ * `.grid.two` is `minmax(320px, 1fr) minmax(0, 1.1fr)`, and a 320px minimum on
+ * the first track cannot be honoured at 390px with a gutter: the browser keeps
+ * two columns and gives the second whatever is left, which on the Reports page
+ * was about thirty pixels of preview setting one character per line. The About
+ * page had the same defect and nobody had looked at it on a phone; the comment
+ * on `.grid.two` arguing for two columns at every width was written about a
+ * models table that this release removes. */
+@media (max-width: 899px) {
+  .grid.two {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 599px) {
+  /* A 620px table cannot be made to fit 390px, so the card scrolls it and the
+   * page does not. */
+  .written-table {
+    min-width: 520px;
+  }
+  .savings-line .amount,
+  .savings-net .amount {
+    min-width: 0;
+    text-align: left;
+  }
+}
+
 /* The Cloud page's three rows and its two command blocks. */
 /* The design holds this page to 780px: it is prose and two commands, and a
  * sentence that runs the width of a 1 440px display is not read, it is
@@ -5257,4 +5874,42 @@ td.row-end {
 }
 .cloud-block {
   margin-bottom: var(--sp-3);
+}
+
+/* Stores that could not be read, over the page the rest of them drew.
+ *
+ * Its own slot rather than a card appended to the content: the notice belongs
+ * above what it qualifies, and a page whose results are short by a store has to
+ * say so before the reader has finished reading them. Empty when nothing
+ * failed, which is the normal state, so it collapses to nothing. */
+.unreadable-slot:empty {
+  display: none;
+}
+
+.notice.bad {
+  border-color: var(--amber-ink);
+  color: var(--ink-2);
+}
+.notice.bad .what {
+  color: var(--amber-ink);
+}
+
+/* One store, with its path on the summary line and the SQLite chain behind the
+ * disclosure. The error is the evidence a reader pastes into an issue; the
+ * remedy above it is the sentence they act on. */
+.unreadable > summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  cursor: pointer;
+  min-width: 0;
+}
+.unreadable > summary::marker {
+  color: var(--muted);
+}
+.unreadable > .subtitle {
+  margin: var(--sp-1) 0 var(--sp-2) var(--sp-4);
+}
+.unreadable > pre.code {
+  margin-left: var(--sp-4);
 }
