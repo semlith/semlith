@@ -10278,7 +10278,11 @@ async function reportsView() {
     { class: "view" },
     pageHead(
       "Reports",
-      "Turn the ledger, the index and the graph into a file someone else can read — a saving number for finance, an access record for audit, a blast radius for a pull request. Generated locally, exported as a file you own.",
+      // The claim at the end is not decoration and is asserted by the drive:
+      // this is the one page whose whole job is turning a local record into a
+      // file for somebody else, so where that file is built and where it goes
+      // are the first things a reader needs to know.
+      "Turn the ledger, the index and the graph into a file someone else can read — a saving number for finance, an access record for audit, a blast radius for a pull request. Generated locally and exported as a file you own. Nothing leaves the machine.",
     ),
     picker,
     el(

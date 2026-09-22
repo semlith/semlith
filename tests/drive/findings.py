@@ -1819,7 +1819,7 @@ def _(d):
         )
 
 
-@finding("3.15", "the models table carries a size for the model actually in use")
+@finding("3.15", "the model actually in use carries a size")
 def _(d):
     # The ambiguity: the finding complains that 43 of 48 rows are empty and
     # that sorting by SIZE hides the five that are not. It does not say every
@@ -1851,26 +1851,13 @@ def _(d):
             "Privacy page reports as cached, shows no SIZE" % in_use
         )
 
-    d.open_view("about")
-    d.click_text("th, th button", "SIZE")
-    d.eval("new Promise(done => setTimeout(() => done(true), 600))")
-    column = d.eval(
-        """
-        [...document.querySelectorAll('table')]
-          .filter(t => /size/i.test(t.innerText))
-          .slice(-1)
-          .flatMap(t => [...t.querySelectorAll('tbody tr')])
-          .map(r => (r.querySelector('td:nth-child(3)') || {}).innerText || '')
-          .map(s => s.trim())
-        """
-    )
-    known = [i for i, value in enumerate(column) if value and value != "—"]
-    unknown = [i for i, value in enumerate(column) if not value or value == "—"]
-    if known and unknown and min(unknown) < max(known):
-        fail(
-            "sorting the models table by SIZE puts rows with no size before rows "
-            "that have one, so the sort control hides the only data in the column"
-        )
+    # The second half of this check drove the About page's models table and its
+    # SIZE sort. 0.27.0 removed that table: forty-eight rows of a catalogue of
+    # which any machine has fetched one, on a page the v4 design gives seven
+    # facts and a language table. What the finding was actually about survives
+    # above — the model in use has a size, and `/api/models` still says so —
+    # and 7.9 asserts the table is gone and both routes still answer. There is
+    # no sort control left to mis-sort.
 
 
 @finding("3.16", "the Retrieval ledger page shows the ledger")
@@ -2547,7 +2534,14 @@ def _(d):
     d.set_viewport(390, 844, mobile=True)
     try:
         d.open_view("search", fresh=True)
-        chips = rects(d, "[aria-pressed], .chip")
+        # The store chips, and only those. This read `[aria-pressed], .chip`,
+        # which is every chip-shaped control on the page and several that are
+        # not above the results at all — the search dials, and from 0.27.0 the
+        # sidebar's `Replay first-run screen`, which became a chip when the
+        # muted text it used to be stopped reading as a control. Counting those
+        # as store chips made the check report three rows where the store chips
+        # occupied one, which is a failure about the wrong thing.
+        chips = rects(d, ".store-chips .chip, .store-chips [aria-pressed]")
         store_chips = [c for c in chips if c["text"]]
         if len(store_chips) < 3:
             skip("fewer than three store chips are drawn here")
