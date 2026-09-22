@@ -9302,7 +9302,7 @@ function traceCard() {
   );
 }
 
-/* Reports: five, generated here, exported in four formats.
+/* Reports: five, generated here, exported in five formats.
  *
  * The page asks `/api/report` for the text and hands it to the viewer — the
  * export is not a second renderer, so a file saved from here and one written
