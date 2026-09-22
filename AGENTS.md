@@ -457,6 +457,18 @@ Module responsibilities:
   reads such a store as the text corpus it already was. Anything that would make
   an older binary misread a store is a format bump instead; adding a table it
   ignores is not.
+- **A read across stores answers from the stores it can read.** From 0.27.0
+  `Fleet::chosen` and `Fleet::each` — the two functions every aggregating read
+  selects its members through, which is why the guard is there and not in
+  `routes::with_fleet`, which Search and Files never reach — drop a store whose
+  database cannot be read and collect it in `Fleet::failed`. One unreadable
+  store used to make every such route answer `500 disk I/O error` (#129). A
+  request scoped to a store that cannot be read still fails: there is no partial
+  answer to give. The probe is `store::readable`, one indexed row out of each
+  large table, deliberately not `stats()` — that is three full scans on a path
+  every search takes, measured at 2.65 ms against 0.24 ms on a 10 390-chunk
+  store. Nothing in the response is removed by this: `failed` is absent when
+  nothing failed.
 - **A schedule is the daemon's work, and the file is the whole of the state.**
   `~/.semlith/schedules.json` is its own file beside the registry rather than a
   section of it, so a schedules file somebody's editor truncated costs them

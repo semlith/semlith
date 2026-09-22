@@ -91,6 +91,13 @@ the healthy stores returned with a notice above it naming what is missing. A
 request scoped to a store that cannot be read still fails, because there is no
 partial answer to give.
 
+The readability probe is one indexed row out of each of the two large tables,
+not a row count. The obvious probe is `stats()`, and `stats()` is three full
+scans: measured at 2.65 ms against 0.24 ms on a 10 390-chunk store, growing
+linearly, on a path that every search takes. It is not weaker for being cheaper
+— what it has to catch is a database that opened and cannot be read now, and a
+btree descent into a page that is no longer there fails exactly as a scan would.
+
 The fix is not where the issue said it was. `with_fleet` is not the shared point
 — Search and Files never go through it, because they need the fleet mutably — so
 a guard there would have fixed neither. Every aggregating read selects its

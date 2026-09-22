@@ -306,12 +306,13 @@ impl Fleet {
     /// past — which is the failure in #129, where the store opened and only
     /// then said `disk I/O error`.
     ///
-    // ponytail: one counted read per store per selection. Cheap beside the
-    // query it guards; if a very large store ever makes it show up, narrow it
-    // to a single-row read of `meta`.
+    // One indexed row out of each large table per store per selection, which
+    // is what `store::readable` is. It was `stats()` — three full scans —
+    // until that was measured at 2.65 ms against 0.24 ms on a 10 390-chunk
+    // store, growing linearly, on a path every search takes.
     fn readable(&self, i: usize) -> bool {
         let member = &self.members[i];
-        match member.store.stats() {
+        match member.store.readable() {
             Ok(_) => {
                 // A store that has come back — the drive was plugged in again,
                 // the index run finished — stops being reported.

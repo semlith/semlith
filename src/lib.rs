@@ -3390,6 +3390,11 @@ impl Semlith {
         store::stats(&self.db)
     }
 
+    /// Whether this store can still be read. See [`store::readable`].
+    pub fn readable(&self) -> Result<()> {
+        store::readable(&self.db)
+    }
+
     /// The f32 sidecar's size, or `None` where the store has none.
     ///
     /// A store written before 0.23.0 has no sidecar and is never rescored until
