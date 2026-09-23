@@ -137,29 +137,56 @@ function setText(node, value) {
  * second, so a focused Pause button was blurred before anyone could press it
  * twice and a log scrolled back to read was thrown to its top.
  *
- * A node not yet in `parent` is inserted where it belongs, which is an
- * insertion and not a move. The node holding focus is never the one moved:
- * the others are moved around it instead.
- *
- * A node named twice is placed once. Two answers can name one run — a store
- * listed twice while it is being opened — and placing the same node at two
- * positions is a loop that never ends and a tab that stops answering. */
+ * What stays is the longest run of children already in the wanted order, and
+ * only the rest move — so one card finishing and dropping below the live ones
+ * is one move, not one for every card it passes. The focused node is always
+ * among those that stay. A node not yet in `parent` is inserted where it
+ * belongs, which is an insertion and not a move. A node named twice is placed
+ * once: two answers can name one run while a store is being opened. */
 function arrange(parent, want) {
-  const placed = new Set();
-  let i = 0;
-  for (const node of want) {
-    if (!node || placed.has(node)) continue;
-    placed.add(node);
-    while (parent.children[i] !== node) {
-      const here = parent.children[i];
-      if (here && node.parentNode === parent && node.contains(document.activeElement)) {
-        parent.append(here);
-      } else {
-        parent.insertBefore(node, here || null);
-      }
-    }
-    i++;
+  const order = [...new Set(want.filter(Boolean))];
+  const rank = new Map(order.map((node, i) => [node, i]));
+  const present = [...parent.children].filter((child) => rank.has(child));
+  const focused = present.findIndex((child) => child.contains(document.activeElement));
+  const items = present.map((child, at) => ({ at, value: rank.get(child) }));
+  const pivot = focused >= 0 ? items[focused].value : -1;
+  const staying =
+    focused < 0
+      ? increasing(items)
+      : [
+          ...increasing(items.filter((item) => item.at < focused && item.value < pivot)),
+          focused,
+          ...increasing(items.filter((item) => item.at > focused && item.value > pivot)),
+        ];
+  const stays = new Set(staying.map((at) => present[at]));
+  let next = null;
+  for (let i = order.length - 1; i >= 0; i--) {
+    const node = order[i];
+    const placed =
+      node.parentNode === parent && (next ? node.nextElementSibling === next : !node.nextElementSibling);
+    if (!stays.has(node) && !placed) parent.insertBefore(node, next);
+    next = node;
   }
+}
+
+/** The `at`s of a longest strictly increasing run of `value`s, in order. */
+function increasing(items) {
+  const tails = [];
+  const before = [];
+  items.forEach((item, k) => {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (items[tails[mid]].value < item.value) lo = mid + 1;
+      else hi = mid;
+    }
+    before[k] = lo > 0 ? tails[lo - 1] : -1;
+    tails[lo] = k;
+  });
+  const out = [];
+  for (let k = tails.length ? tails[tails.length - 1] : -1; k >= 0; k = before[k]) out.unshift(items[k].at);
+  return out;
 }
 
 /* The session token.
