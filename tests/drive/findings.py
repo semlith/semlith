@@ -2998,12 +2998,26 @@ def _(d):
         if "graph health" in view_text(d).lower():
             break
         time.sleep(0.5)
+    time.sleep(0.5)
     body = view_text(d).lower()
-    for wanted in ["language mix, by line", "chunks by month indexed", "graph health"]:
+    for wanted in ["language mix, by line", "chunks added per month", "graph health"]:
         if wanted not in body:
             fail("Inside the index is missing the %r card" % wanted)
-    if "call targets with no definition here" not in body:
+    if "unresolved targets" not in body or "names with several definitions" not in body:
         fail("Graph health does not state its unresolved targets: %s" % body[:400])
+    # Four tiers, and the same four the coverage table below reports. The page
+    # grouped `edges.confidence` for a while, which is a different question:
+    # it read `resolved 0 · ambiguous 0` directly above a table reading 2380
+    # and 2158.
+    for tier in ("extracted", "resolved", "ambiguous", "unresolved"):
+        if tier not in body:
+            fail("the call-edge tier %r is missing from Graph health" % tier)
+    # Twelve columns whatever the corpus holds: a store indexed this morning
+    # has one month in it, and one bar in a full-width card is a chart that has
+    # failed rather than a young corpus.
+    columns = d.eval("document.querySelectorAll('.month-col').length")
+    if columns != 12:
+        fail("the month chart draws %d columns; it should always draw 12" % columns)
     # Every bar is sized through the CSSOM, because the portal is served
     # under `style-src 'self'` and a width written into the markup is
     # blocked — silently, leaving every bar full width.

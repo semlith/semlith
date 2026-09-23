@@ -44,7 +44,7 @@ ok       3.18   the LAST WRITE column holds one vocabulary
 ok       3.19   the Files header's store count respects the filter
 ok       3.20   the empty state after a Forget blames the corpus, not the filter
 FAIL     3.21   a completed Forget says something
-         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-sdcmituu/small: disk I/O error: Error code 522: disk I/O error"}
 skip     3.22   the Privacy Rules badge agrees with the Privacy scan
          no open store is holding a file today's rules would refuse, so there is no disagreement for the badge to have with the scan
 ok       3.23   the theme toggle can return to following the system
@@ -63,9 +63,9 @@ ok       4.8    store chips do not consume the phone's first screen
 ok       4.9    a phone result card is not covered by the summary bar
 ok       4.10   the queued-runs line matches what is queued, and clears
 FAIL     4.11   a run card's header and its log describe the same run
-         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-sdcmituu/small: disk I/O error: Error code 522: disk I/O error"}
 FAIL     4.12   a sub-second run does not report a rate against a one-second clock
-         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-sdcmituu/small: disk I/O error: Error code 522: disk I/O error"}
 ok       4.13   /api/files?limit= refuses an out-of-range value instead of clamping
 ok       4.14   every table has a caption or an accessible name
 ok       4.15   'Chunks it lives in' is a button, because it behaves like one
@@ -74,7 +74,7 @@ ok       4.17   a failed adopt keeps the picker open where it was
 ok       4.18   the adopt picker says which folder is adoptable
 ok       5.1    the sidebar is every page, in four groups, in order
 FAIL     5.2    Impact answers for a symbol, by hop, with a support class on every row
-         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-sdcmituu/small: disk I/O error: Error code 522: disk I/O error"}
 ok       5.3    the path finder and Trace render on the Impact page
 ok       5.4    the Graph page lists the store's communities
 ok       5.5    Inside the index states what the graph covers

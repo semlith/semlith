@@ -6427,3 +6427,241 @@ pre.report-cli {
   font-size: var(--t-small);
   color: var(--ink-2);
 }
+
+/* The corpus page's own arrangement, from the v4 prototype.
+ *
+ * The mix on the left at the height of the four panels beside it, and those
+ * four as a two-by-two. They were a full-width mix over a row of four, which
+ * gives the mix a band to itself and squeezes each panel into a quarter of the
+ * page — the two shapes the design does not have. */
+.corpus-top {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr 1fr;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  align-items: start;
+}
+.corpus-top > .mix-card {
+  grid-row: span 2;
+  align-self: stretch;
+}
+/* Two columns, the mix across the top of them: three columns of a 320px-wide
+ * page is three columns of nothing. */
+@media (max-width: 1180px) {
+  .corpus-top {
+    grid-template-columns: 1fr 1fr;
+  }
+  .corpus-top > .mix-card {
+    grid-column: span 2;
+    grid-row: auto;
+  }
+}
+@media (max-width: 720px) {
+  .corpus-top {
+    grid-template-columns: 1fr;
+  }
+  .corpus-top > .mix-card {
+    grid-column: auto;
+  }
+}
+
+/* Chunks added per month: twelve columns across the card, bottom-aligned, the
+ * current month in the accent. */
+.months-card .card-head {
+  margin-bottom: var(--sp-4);
+}
+.month-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 150px;
+}
+.month-col {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 6px;
+  height: 100%;
+  align-items: flex-end;
+  border-radius: var(--r-2);
+}
+.month-col .col {
+  display: block;
+  width: 100%;
+  background: var(--blue);
+  border-radius: 4px 4px 2px 2px;
+  transition: filter var(--d-quick) var(--e-in-out);
+}
+/* A month the corpus does not reach at all still draws its sliver, in the
+ * track colour rather than in the series colour: an empty column and a column
+ * of nothing are different statements and the chart has to make both. */
+.month-col.none .col {
+  background: var(--line-soft);
+}
+.month-col.now .col {
+  background: var(--accent);
+}
+.month-col:hover .col,
+.month-col:focus-visible .col {
+  filter: brightness(1.08);
+}
+.month-col:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.month-axis {
+  display: flex;
+  gap: 6px;
+  margin-top: var(--sp-2);
+}
+.month-axis span {
+  flex: 1 1 0;
+  min-width: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+/* Graph health, full width: the tier bar, its legend, and three columns. */
+.health-card-full .card-head {
+  margin-bottom: var(--sp-4);
+}
+.tier-bar {
+  display: flex;
+  gap: 2px;
+  height: 12px;
+  margin: var(--sp-2) 0 var(--sp-3);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.tier-bar .seg {
+  min-width: 2px;
+  transition: filter var(--d-quick) var(--e-in-out);
+}
+.tier-bar .seg:hover,
+.tier-bar .seg:focus-visible {
+  filter: brightness(1.15);
+}
+.tier-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3h);
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--ink-2);
+}
+.tier-key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  background: var(--muted);
+}
+.dot.extracted,
+.seg.extracted {
+  background: var(--blue-ink);
+}
+.dot.resolved,
+.tier-bar .seg.resolved {
+  background: var(--green);
+}
+.dot.unresolved,
+.tier-bar .seg.unresolved {
+  background: var(--line);
+}
+.dot.ambiguous,
+.tier-bar .seg.ambiguous {
+  background: var(--accent);
+}
+.dot.blue {
+  background: var(--blue);
+}
+.dot.accent {
+  background: var(--accent);
+}
+
+.health-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-4);
+  margin-top: var(--sp-4);
+  align-items: start;
+}
+.health-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.health-figure {
+  font-family: var(--mono);
+  font-size: 18px;
+  color: var(--ink);
+}
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+/* A name, not a control: the design draws these as flat chips and nothing
+ * happens when one is pressed, so they are not buttons. */
+.chip-flat {
+  display: inline-flex;
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--chip);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  cursor: help;
+}
+
+/* The hover card the design draws: a title with the series' own colour, then
+ * label and value rows. The plain string tip stays for everything that is one
+ * sentence rather than a reading. */
+.tip-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 200px;
+}
+.tip-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--t-small);
+  color: var(--ink);
+}
+.tip-head .name {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+.tip-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tip-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  justify-content: space-between;
+}
+.tip-row .k {
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: var(--t-small);
+  /* One line. `chunks added` broken over two lines against a figure on the
+   * first of them reads as two rows with one number between them. */
+  white-space: nowrap;
+}
+.tip-row .v {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}

@@ -2549,10 +2549,11 @@ pub struct Corpus {
     pub vector_dim: i64,
     pub symbols: i64,
     pub edges: i64,
-    /// Edges by confidence, in the order the graph rail lists them.
+    /// Edges by tier, in the order the graph rail lists them. Decided by
+    /// `coverage_by_language`, which is the one rule for this.
     pub tiers: Vec<KindCount>,
-    /// Edges whose target is not a symbol this store holds, and the names
-    /// most often behind that.
+    /// Edges naming something no definition in this store satisfies, and the
+    /// names most often behind that.
     pub unresolved: i64,
     pub unresolved_names: Vec<KindCount>,
     /// Names defined more than once, and the worst of them.
@@ -2736,22 +2737,43 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
 
     out.symbols = db.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
     out.edges = db.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
-    out.tiers = counted(
-        db,
-        "SELECT confidence, COUNT(*) FROM edges GROUP BY confidence ORDER BY COUNT(*) DESC",
-    )?;
-    out.unresolved = db.query_row(
-        "SELECT COUNT(*) FROM edges e
-          WHERE NOT EXISTS (SELECT 1 FROM symbols s WHERE s.name = e.dst)",
-        [],
-        |r| r.get(0),
-    )?;
-    out.unresolved_names = counted(
-        db,
-        "SELECT e.dst, COUNT(*) FROM edges e
-          WHERE NOT EXISTS (SELECT 1 FROM symbols s WHERE s.name = e.dst)
-          GROUP BY e.dst ORDER BY COUNT(*) DESC LIMIT 7",
-    )?;
+
+    /* The four tiers, from `coverage_by_language`, which is the one place that
+     * decides them.
+     *
+     * Grouping `edges.confidence` stood here and is a different question: the
+     * column holds `extracted` or `inferred`, and whether an inferred edge is
+     * resolved, ambiguous or unresolved depends on how many definitions of its
+     * target this store holds. So the page read `resolved 0 · ambiguous 0`
+     * directly above a coverage table reading 2380 and 2158 -- two answers to
+     * one question, on one page, from one store.
+     *
+     * `languages_with_edges` comes from the same pass for the same reason. */
+    let coverage = coverage_by_language(db)?;
+    let mut tiers = [0i64; 4];
+    for row in &coverage {
+        tiers[0] += row.extracted as i64;
+        tiers[1] += row.resolved as i64;
+        tiers[2] += row.ambiguous as i64;
+        tiers[3] += row.unresolved as i64;
+        if row.extracted + row.resolved + row.ambiguous > 0 {
+            out.languages_with_edges += 1;
+        }
+    }
+    out.tiers = ["extracted", "resolved", "ambiguous", "unresolved"]
+        .iter()
+        .zip(tiers)
+        .map(|(name, count)| KindCount {
+            name: (*name).to_string(),
+            count,
+        })
+        .collect();
+    out.unresolved = tiers[3];
+    let (names, _) = unresolved_targets(db, 7)?;
+    out.unresolved_names = names
+        .into_iter()
+        .map(|(name, count)| KindCount { name, count })
+        .collect();
     out.ambiguous_names = db.query_row(
         "SELECT COUNT(*) FROM (SELECT name FROM symbols GROUP BY name HAVING COUNT(*) > 1)",
         [],
@@ -2762,27 +2784,6 @@ pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<C
         "SELECT name, COUNT(*) c FROM symbols GROUP BY name HAVING c > 1
           ORDER BY c DESC, name LIMIT 5",
     )?;
-
-    // Languages that carry an edge, over languages present at all. Counted
-    // here rather than in SQL because the language of a path is Rust's to
-    // decide, not SQLite's.
-    {
-        let mut with = std::collections::HashSet::new();
-        let mut q = db.prepare(
-            "SELECT DISTINCT f.path FROM edges e
-               JOIN symbols s ON s.id = e.src
-               JOIN files f ON f.id = s.file_id",
-        )?;
-        let mut rows = q.query([])?;
-        while let Some(row) = rows.next()? {
-            let path: String = row.get(0)?;
-            let language = language_of(&path);
-            if !language.is_empty() {
-                with.insert(language);
-            }
-        }
-        out.languages_with_edges = with.len() as i64;
-    }
 
     // The middle of what this machine actually measured. `ms` is recorded per
     // retrieval, so this is a fact about this store rather than a benchmark.

@@ -492,7 +492,10 @@ const tip = {
 
   /** Hang a tip off an element. */
   at(target, content) {
-    this.show(content || target.getAttribute("data-tip"), target.getBoundingClientRect(), target);
+    const own = target.hasAttribute("data-tip-title")
+      ? tipCard(target)
+      : target.getAttribute("data-tip");
+    this.show(content || own, target.getBoundingClientRect(), target);
   },
 
   /** Hang a tip off a point, for the canvas, which has no elements to hang on. */
@@ -513,7 +516,7 @@ const tip = {
  * its rows fresh, and binding two listeners to each of a thousand cells is how
  * a scroll starts to stutter. */
 function wireTips() {
-  const find = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+  const find = (node) => (node && node.closest ? node.closest("[data-tip], [data-tip-title]") : null);
 
   document.addEventListener("pointerover", (e) => {
     const target = find(e.target);
@@ -6849,6 +6852,251 @@ function factPanel(title, rows) {
   );
 }
 
+/** A hover card in the design's shape: a title with its colour, then rows.
+ *
+ * Carried on the element as `data-tip-title`, `data-tip-tone` and a JSON
+ * `data-tip-rows`, so it goes through the one delegated tooltip every other
+ * hover in the portal goes through rather than being a second implementation.
+ */
+function tipCard(target) {
+  let rows = [];
+  try {
+    rows = JSON.parse(target.getAttribute("data-tip-rows") || "[]");
+  } catch (_) {
+    rows = [];
+  }
+  const tone = target.getAttribute("data-tip-tone");
+  return el(
+    "div",
+    { class: "tip-card" },
+    el(
+      "div",
+      { class: "tip-head" },
+      tone ? el("span", { class: `dot ${tone}` }) : null,
+      el("span", { class: "name", text: target.getAttribute("data-tip-title") || "" }),
+    ),
+    rows.length
+      ? el(
+          "div",
+          { class: "tip-rows" },
+          rows.map(([label, value]) =>
+            el("div", { class: "tip-row" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: value })),
+          ),
+        )
+      : null,
+  );
+}
+
+/** The twelve months ending at the newest one the store holds.
+ *
+ * The design draws twelve bars. A store indexed this morning has one month in
+ * it, and one bar in a full-width card is a chart that has failed rather than a
+ * corpus that is young — so the months with nothing in them are drawn at zero
+ * and the chart keeps its shape. */
+function twelveMonths(months) {
+  const known = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (!known.length) return [];
+  const [lastYear, lastMonth] = known[known.length - 1][0].split("-").map(Number);
+  const out = [];
+  for (let back = 11; back >= 0; back -= 1) {
+    // `Date.UTC` so the arithmetic wraps the year for us rather than by hand.
+    const at = new Date(Date.UTC(lastYear, lastMonth - 1 - back, 1));
+    const key = `${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, "0")}`;
+    out.push([key, months.get(key) || 0]);
+  }
+  return out;
+}
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function monthLabel(key) {
+  const [year, month] = key.split("-").map(Number);
+  return `${MONTH_NAMES[month - 1]} ${year}`;
+}
+
+/** Chunks added per month, full width, as the design draws it. */
+function monthsCard(months, span) {
+  const bars = twelveMonths(months);
+  const peak = Math.max(1, ...bars.map(([, count]) => count));
+  const total = bars.reduce((sum, [, count]) => sum + count, 0) || 1;
+  return el(
+    "section",
+    { class: "card pad months-card" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Chunks added per month" }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "mono-chip", text: span }),
+    ),
+    bars.length
+      ? el(
+          "div",
+          { class: "month-chart" },
+          bars.map(([key, count], i) =>
+            el(
+              "div",
+              {
+                class: `month-col${i === bars.length - 1 ? " now" : ""}${count ? "" : " none"}`,
+                tabindex: "0",
+                "data-tip-title": monthLabel(key),
+                "data-tip-tone": i === bars.length - 1 ? "accent" : "blue",
+                "data-tip-rows": JSON.stringify([
+                  ["chunks added", n(count)],
+                  ["share of year", share(count, total)],
+                  ["vs. peak", share(count, peak)],
+                ]),
+              },
+              // Height as a share of the busiest month, and opacity with it, so
+              // a quiet month reads as quiet rather than only as short. A month
+              // with nothing in it still draws a sliver, because an absent bar
+              // and a bar at zero say different things.
+              sized("height", count ? Math.max(0.06, count / peak) : 0.05, { class: "col" }),
+            ),
+          ),
+        )
+      : el("div", { class: "rail-hint", text: "No files indexed yet." }),
+    bars.length
+      ? el(
+          "div",
+          { class: "month-axis" },
+          bars.map(([key], i) =>
+            el("span", {
+              // Five labels across twelve bars, as the design spaces them.
+              text: i % 3 === 0 || i === bars.length - 1 ? MONTH_NAMES[Number(key.split("-")[1]) - 1] : "",
+            }),
+          ),
+        )
+      : null,
+    el("p", { class: "note", text: "When semlith read the file, not when it was written." }),
+  );
+}
+
+/* The four confidences an edge can carry, in the order the graph rail lists
+ * them, so the bar and the legend read the same way round everywhere. */
+const EDGE_TIERS = ["extracted", "resolved", "ambiguous", "unresolved"];
+
+/** Graph health, full width, as the design draws it. */
+function graphHealthCard(corpus) {
+  const tiers = new Map(corpus.tiers);
+  const total = EDGE_TIERS.reduce((sum, tier) => sum + (tiers.get(tier) || 0), 0);
+  const settled = (tiers.get("extracted") || 0) + (tiers.get("resolved") || 0);
+  // The share the README quotes is over the edges that could be settled at
+  // all: an unresolved edge names something no store here holds, and counting
+  // it against the resolver is counting a dependency nobody indexed.
+  const answerable = settled + (tiers.get("ambiguous") || 0);
+  return el(
+    "section",
+    { class: "card pad health-card-full" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Graph health" }),
+      el("span", { class: "mono-chip", text: "counted from the edge table, every open store" }),
+    ),
+    el("span", { class: "eyebrow", text: "Call edges by tier" }),
+    total
+      ? el(
+          "div",
+          { class: "tier-bar", role: "img", "aria-label": EDGE_TIERS.map((t) => `${t} ${tiers.get(t) || 0}`).join(", ") },
+          EDGE_TIERS.map((tier) =>
+            // A tier with nothing in it still draws a sliver, because a legend
+            // that names four and a bar that shows three is a bar with a
+            // missing piece nobody can find.
+            sized("width", Math.max(0.01, (tiers.get(tier) || 0) / total), {
+              class: `seg ${tier}`,
+              tabindex: "0",
+              "data-tip-title": tier,
+              "data-tip-tone": tier,
+              "data-tip-rows": JSON.stringify([
+                ["edges", n(tiers.get(tier) || 0)],
+                ["share", share(tiers.get(tier) || 0, total)],
+                ["of total", n(total)],
+              ]),
+            }),
+          ),
+        )
+      : el("div", { class: "rail-hint", text: "No call edges yet." }),
+    el(
+      "div",
+      { class: "tier-legend" },
+      EDGE_TIERS.map((tier) =>
+        el(
+          "span",
+          { class: "tier-key" },
+          el("span", { class: `dot ${tier}` }),
+          el("span", { text: `${tier} ${n(tiers.get(tier) || 0)}` }),
+        ),
+      ),
+    ),
+    el("p", {
+      class: "note",
+      // The design's caption is a note about its own mock. This is the same
+      // sentence about this store: what settled, and what the hints are for.
+      text: total
+        ? `${share(settled, answerable || 1)} of the answerable edges settled on one definition. Unresolved ones name code no open store holds — the standard library, a dependency nobody indexed, a typo.`
+        : "Index something with a language that carries edges and this fills in.",
+    }),
+    el(
+      "div",
+      { class: "health-columns" },
+      el(
+        "div",
+        { class: "health-col" },
+        el("span", { class: "eyebrow", text: "Unresolved targets" }),
+        el("span", {
+          class: "health-figure",
+          text: total ? `${n(corpus.unresolved)} · ${share(corpus.unresolved, total)}` : "—",
+        }),
+        corpus.unresolvedNames.length
+          ? el(
+              "div",
+              { class: "chips" },
+              corpus.unresolvedNames.slice(0, 7).map(([name, count]) =>
+                el("span", {
+                  class: "chip-flat",
+                  tabindex: "0",
+                  "data-tip-title": name,
+                  "data-tip-rows": JSON.stringify([["calls", n(count)]]),
+                  text: name,
+                }),
+              ),
+            )
+          : null,
+        el("p", { class: "note", text: "Calls into code the store does not hold; hidden from views by default." }),
+      ),
+      el(
+        "div",
+        { class: "health-col" },
+        el("span", { class: "eyebrow", text: "Names with several definitions" }),
+        el("span", { class: "health-figure", text: n(corpus.ambiguousNames) }),
+        el(
+          "div",
+          { class: "kv" },
+          corpus.ambiguousWorst.length
+            ? corpus.ambiguousWorst.slice(0, 5).map(([name, count]) => factRow(name, n(count)))
+            : factRow("None", "—"),
+        ),
+      ),
+      el(
+        "div",
+        { class: "health-col" },
+        el("span", { class: "eyebrow", text: "Languages carrying edges" }),
+        el("span", {
+          class: "health-figure",
+          text: `${n(corpus.languagesWithEdges)} of ${n(corpus.languageCount)}`,
+        }),
+        el("button", {
+          class: "link-button",
+          type: "button",
+          text: "The language table",
+          onclick: () => go("about"),
+        }),
+      ),
+    ),
+  );
+}
+
 async function corpusView() {
   await refreshStores();
   let data;
@@ -6932,7 +7180,7 @@ async function corpusView() {
    * width. */
   const mixCard = el(
     "section",
-    { class: "card pad" },
+    { class: "card pad mix-card" },
     el(
       "div",
       { class: "card-head" },
@@ -6951,7 +7199,13 @@ async function corpusView() {
             sized("width", count / languageTotal, {
               class: `seg tone-${i % 6}`,
               tabindex: "0",
-              "data-tip": `${language} · ${n(count)} line${count === 1 ? "" : "s"} · ${share(count, languageTotal)} of ${n(languageTotal)}`,
+              "data-tip-title": language,
+              "data-tip-tone": `tone-${i % 6}`,
+              "data-tip-rows": JSON.stringify([
+                ["lines", n(count)],
+                ["share", share(count, languageTotal)],
+                ["of total", n(languageTotal)],
+              ]),
             }),
           ),
         )
@@ -6966,7 +7220,13 @@ async function corpusView() {
               {
                 class: "mix-row",
                 tabindex: "0",
-                "data-tip": `${language} · ${n(count)} line${count === 1 ? "" : "s"} · ${share(count, languageTotal)} of ${n(languageTotal)}`,
+                "data-tip-title": language,
+                "data-tip-tone": `tone-${i % 6}`,
+                "data-tip-rows": JSON.stringify([
+                  ["lines", n(count)],
+                  ["share", share(count, languageTotal)],
+                  ["of total", n(languageTotal)],
+                ]),
               },
               el("span", { class: `swatch tone-${i % 6}` }),
               el("span", { class: "k", text: language }),
@@ -6980,8 +7240,15 @@ async function corpusView() {
     el("p", { class: "note", text: "Every one of these carries graph edges as well as search." }),
   );
 
-  const health = healthPanel({ languages: false });
   const coverage = coveragePanel();
+
+  const unresolved = stores.reduce((sum, row) => sum + (row.unresolved || 0), 0);
+  const ambiguousNames = stores.reduce((sum, row) => sum + (row.ambiguous_names || 0), 0);
+  const languagesWithEdges = stores.reduce((sum, row) => sum + (row.languages_with_edges || 0), 0);
+  const tiers = pile("tiers", "name");
+  const spanLabel = first && last
+    ? `corpus spans ${new Date(first * 1000).toLocaleDateString(undefined, { month: "short", year: "numeric" })} → ${when(last)}`
+    : "nothing indexed yet";
 
   const ratio = ledger && ledger.ratio ? ledger.ratio : 0;
 
@@ -7046,10 +7313,14 @@ async function corpusView() {
         "non-stop at 250 words a minute, no sleep",
       ),
     ),
-    mixCard,
+    /* The design's arrangement: the mix on the left, at the height of the four
+     * panels beside it, and those four as a two-by-two rather than as a row of
+     * four under it. A row of four put the mix in a band of its own with a
+     * quarter-width column of facts under each end of it. */
     el(
       "div",
-      { class: "kv-panels" },
+      { class: "corpus-top" },
+      mixCard,
       factPanel(
         "What is in the prose",
         // Files, not pages and cells. The store keeps the text, not the page
@@ -7082,27 +7353,16 @@ async function corpusView() {
         factRow("Query at this size", median ? `${median} ms` : "not measured yet"),
       ]),
     ),
-    health.node,
-    /* Which names, not how many.
-     *
-     * Graph health above already counts the names defined more than once and
-     * lists the call targets nothing here defines. The count answers "is this
-     * bad"; the names answer "which of my code is it", and only the second one
-     * can be acted on. The unresolved list is not repeated here — Graph health
-     * draws it, and two lists of one thing on one page is the reader working
-     * out which is which. */
-    ambiguousWorst.length
-      ? el(
-          "div",
-          { class: "kv-panels" },
-          factPanel(
-            "Names with several definitions",
-            ambiguousWorst
-              .slice(0, 5)
-              .map(([name, count]) => factRow(name, `${n(count)} definitions`)),
-          ),
-        )
-      : null,
+    monthsCard(months, spanLabel),
+    graphHealthCard({
+      tiers,
+      unresolved,
+      unresolvedNames: pile("unresolved_names", "name"),
+      ambiguousNames,
+      ambiguousWorst,
+      languagesWithEdges,
+      languageCount: languages.length,
+    }),
     el(
       "div",
       { class: "fact-cards" },
