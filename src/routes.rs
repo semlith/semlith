@@ -1485,7 +1485,41 @@ fn privacy(state: &Arc<State>) -> Response {
         // a page; a page that states a policy and the reading behind it is
         // something a reader can disagree with.
         "rules": rules(state),
+        // Every download this binary can make, with where from, how large and
+        // when. The GPU components are fetched only when a hardware GPU was
+        // found with the GPU lane on, and the CUDA pack only after an explicit
+        // turn-on; `--airgap` refuses all of them unless they were pre-seeded.
+        "downloads": downloads(&cache),
     }))
+}
+
+/// The downloads the Privacy page lists, each with whether it is here already.
+fn downloads(cache: &Path) -> Value {
+    let webgpu =
+        crate::accel::component_dir(cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION));
+    json!([
+        {
+            "what": "the embedding model (granite-embedding-small-english-r2, int8)",
+            "source": "huggingface.co",
+            "bytes": 51_885_568 + 598_902,
+            "when": "the first time anything is indexed or searched",
+            "cached": crate::embed::is_cached(cache),
+        },
+        {
+            "what": format!("the WebGPU plugin {} and the fp16 model", crate::gpu::WEBGPU_VERSION),
+            "source": "files.pythonhosted.org (Microsoft's wheel) and huggingface.co",
+            "bytes": crate::gpu::FP16_FILES.iter().map(|(_, _, size)| size).sum::<u64>() + 13_149_847,
+            "when": "the first index run on a machine with a hardware GPU, with the GPU lane on",
+            "cached": webgpu.join(crate::gpu::plugin_file()).exists(),
+        },
+        {
+            "what": format!("the CUDA pack {}", crate::cuda::PACK_VERSION),
+            "source": "github.com (ONNX Runtime GPU) and pypi.org (NVIDIA's CUDA libraries)",
+            "bytes": crate::cuda::PACK_BYTES,
+            "when": "only after CUDA is turned on, on Linux",
+            "cached": crate::cuda::pack_installed(cache).is_some(),
+        },
+    ])
 }
 
 /// Every rule 0.14.0 added, and the daemon's own check of it.
