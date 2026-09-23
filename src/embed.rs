@@ -508,8 +508,10 @@ pub fn embed_threads() -> usize {
     })
 }
 
-/// Performance-core count on Apple silicon. `None` everywhere else, where all
-/// cores are equal and the total is the right answer.
+/// Performance-core count on a hybrid CPU: Apple silicon's P-cores, and
+/// Intel's P-cores on Linux and Windows. `None` where every core is equal, or
+/// where the platform's answer is not one this recognises, and the caller then
+/// uses the total, which is the right answer on a symmetric machine.
 #[cfg(target_os = "macos")]
 fn performance_cores() -> Option<usize> {
     let mut out: i32 = 0;
@@ -529,9 +531,133 @@ fn performance_cores() -> Option<usize> {
     (rc == 0 && out > 0).then_some(out as usize)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The kernel registers a `cpu_core` PMU beside `cpu_atom` only on Intel hybrid
+/// parts, so the file existing is itself the test for a hybrid CPU; a symmetric
+/// machine has a plain `cpu` PMU and no such directory.
+#[cfg(target_os = "linux")]
+fn performance_cores() -> Option<usize> {
+    cpulist_len(&std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?)
+}
+
+/// How many CPUs a kernel cpulist names: `0-15` is 16, `0-7,16-19` is 12.
+///
+/// Strict on purpose. A shape this does not know (a stride, a reversed range,
+/// an empty list) is `None`, and a wrong P-core count is worse than none: none
+/// falls back to every core, a wrong one starves or oversubscribes the pool.
+#[cfg(any(target_os = "linux", test))]
+fn cpulist_len(list: &str) -> Option<usize> {
+    let mut count = 0;
+    for part in list.trim().split(',') {
+        let (first, last) = part.split_once('-').unwrap_or((part, part));
+        let (first, last) = (first.parse::<usize>().ok()?, last.parse::<usize>().ok()?);
+        count += last.checked_sub(first)? + 1;
+    }
+    (count > 0).then_some(count)
+}
+
+/// Windows ranks cores by `EfficiencyClass`, higher meaning faster, and gives
+/// every core the same class on a symmetric CPU.
+#[cfg(windows)]
+fn performance_cores() -> Option<usize> {
+    use windows_sys::Win32::System::SystemInformation::{
+        CpuSetInformation, GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION,
+    };
+
+    let mut len = 0u32;
+    // SAFETY: a null buffer of length zero only asks for the size needed, which
+    // the call writes to len, a live u32. It fails by design here.
+    unsafe {
+        GetSystemCpuSetInformation(std::ptr::null_mut(), 0, &mut len, std::ptr::null_mut(), 0)
+    };
+    let mut buf = vec![0u8; len as usize];
+    // SAFETY: buf is live and exactly len bytes long, which is what the call is
+    // told; it writes no more than that and reports what it wrote in len.
+    let ok = unsafe {
+        GetSystemCpuSetInformation(
+            buf.as_mut_ptr().cast(),
+            len,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0;
+    if !ok || len as usize > buf.len() {
+        return None;
+    }
+
+    // Entries are variable-length, each led by its own size, so the walk goes by
+    // that field rather than by the struct's size.
+    let mut classes = Vec::new();
+    let mut at = 0;
+    let whole = std::mem::size_of::<SYSTEM_CPU_SET_INFORMATION>();
+    while at + whole <= len as usize {
+        // SAFETY: at + whole is inside the bytes the call wrote, read_unaligned
+        // needs no alignment, and every field is an integer, so any bytes are a
+        // valid value; the union is read as the CpuSet variant only when Type
+        // says that is what it holds.
+        let entry: SYSTEM_CPU_SET_INFORMATION =
+            unsafe { std::ptr::read_unaligned(buf.as_ptr().add(at).cast()) };
+        if entry.Size == 0 {
+            return None;
+        }
+        if entry.Type == CpuSetInformation {
+            // SAFETY: Type says the union holds CpuSet, and a u8 has no
+            // invalid values.
+            classes.push(unsafe { entry.Anonymous.CpuSet.EfficiencyClass });
+        }
+        at += entry.Size as usize;
+    }
+    fastest_class_len(&classes)
+}
+
+/// How many cores sit in the highest efficiency class, when there is more than
+/// one class. One class is a symmetric CPU, where the total is the answer.
+#[cfg(any(windows, test))]
+fn fastest_class_len(classes: &[u8]) -> Option<usize> {
+    let fastest = *classes.iter().max()?;
+    let count = classes.iter().filter(|c| **c == fastest).count();
+    (count < classes.len()).then_some(count)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn performance_cores() -> Option<usize> {
     None
+}
+
+#[cfg(test)]
+mod performance_cores_tests {
+    use super::*;
+
+    /// A 12th-gen Core i9-12900K as Linux lists it: 8 P-cores with two threads
+    /// each, then 8 E-cores in `cpu_atom`.
+    #[test]
+    fn a_hybrid_intel_cpulist_counts_its_performance_threads() {
+        assert_eq!(cpulist_len("0-15\n"), Some(16));
+        assert_eq!(cpulist_len("16-23\n"), Some(8));
+        assert_eq!(cpulist_len("0-7,16-19"), Some(12));
+        assert_eq!(cpulist_len("3"), Some(1));
+    }
+
+    #[test]
+    fn a_cpulist_this_does_not_know_is_none() {
+        for list in ["", "\n", "0-15:2/4", "15-0", "0-", "a-b", "0,,2"] {
+            assert_eq!(cpulist_len(list), None, "{list:?}");
+        }
+    }
+
+    /// Eight cores at class 1 and eight at class 0, as `GetSystemCpuSetInformation`
+    /// lists a hybrid part.
+    #[test]
+    fn two_efficiency_classes_count_the_higher() {
+        let classes = [[1u8; 8], [0u8; 8]].concat();
+        assert_eq!(fastest_class_len(&classes), Some(8));
+    }
+
+    #[test]
+    fn one_efficiency_class_is_a_symmetric_cpu() {
+        assert_eq!(fastest_class_len(&[0; 16]), None);
+        assert_eq!(fastest_class_len(&[]), None);
+    }
 }
 
 // ---------------------------------------------------------------- pinned weights
