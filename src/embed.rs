@@ -506,14 +506,6 @@ fn load_granite(
         .map_err(|e| anyhow::anyhow!("loading {GRANITE_NAME}: {e}"))
 }
 
-/// How many threads ONNX Runtime should use inside one operator.
-///
-/// ORT synchronises its threads at every operator boundary, so the slowest
-/// thread paces the whole batch. On a CPU with both performance and efficiency
-/// cores, a thread scheduled onto an efficiency core drags everything with it:
-/// measured on a 4P+4E M1, four threads indexed at 16.5 chunks/s while eight
-/// managed only 13.9, and one managed 5.1. Undersubscribing costs far more than
-/// oversubscribing, so only heterogeneous machines get a reduced count.
 /// Refuse to download model weights, so an air-gapped machine can prove this
 /// process never reached the network. Set by `--airgap` and readable directly.
 pub const AIRGAP_ENV: &str = "SEMLITH_AIRGAP";
@@ -729,6 +721,14 @@ pub fn threads_in_force() -> usize {
     }
 }
 
+/// How many threads ONNX Runtime should use inside one operator.
+///
+/// ORT synchronises its threads at every operator boundary, so the slowest
+/// thread paces the whole batch. On a CPU with both performance and efficiency
+/// cores, a thread scheduled onto an efficiency core drags everything with it:
+/// measured on a 4P+4E M1, four threads indexed at 16.5 chunks/s while eight
+/// managed only 13.9, and one managed 5.1. Undersubscribing costs far more than
+/// oversubscribing, so only heterogeneous machines get a reduced count.
 pub fn embed_threads() -> usize {
     if let Ok(raw) = std::env::var(THREADS_ENV)
         && let Ok(n) = raw.parse::<usize>()
