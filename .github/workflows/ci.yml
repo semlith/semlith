@@ -202,10 +202,12 @@ jobs:
 
   # The --release suites: measured claims and the retrieval harness. Hours on
   # the reference laptop, so a release pull request's CI is their gate, and
-  # the record says so. Only on release branches.
+  # the record says so. Only on release branches. macOS arm64, because that is
+  # the platform the thresholds were set on and `measure.rs` reads peak memory
+  # with BSD `time -l`.
   release-suites:
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/')
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
