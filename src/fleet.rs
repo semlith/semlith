@@ -1051,7 +1051,10 @@ static QUERY_SESSIONS: Mutex<QuerySessions> = Mutex::new(Vec::new());
 
 /// How many query sessions are loaded, for `/api/about`.
 pub fn query_sessions() -> usize {
-    QUERY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).len()
+    QUERY_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
 }
 
 /// Take the best `k` hits from per-store rankings, best first.

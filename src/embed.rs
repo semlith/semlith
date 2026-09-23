@@ -222,16 +222,20 @@ pub fn granite_tokenizer(cache_dir: &Path, max_length: usize) -> Result<tokenize
                     value["rstrip"].as_bool(),
                     value["normalized"].as_bool(),
                 ) {
-                    (Some(content), Some(single_word), Some(lstrip), Some(rstrip), Some(normalized)) => {
-                        AddedToken {
-                            content: content.into(),
-                            special: true,
-                            single_word,
-                            lstrip,
-                            rstrip,
-                            normalized,
-                        }
-                    }
+                    (
+                        Some(content),
+                        Some(single_word),
+                        Some(lstrip),
+                        Some(rstrip),
+                        Some(normalized),
+                    ) => AddedToken {
+                        content: content.into(),
+                        special: true,
+                        single_word,
+                        lstrip,
+                        rstrip,
+                        normalized,
+                    },
                     _ => continue,
                 },
                 _ => continue,

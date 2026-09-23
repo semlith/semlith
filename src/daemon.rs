@@ -388,6 +388,8 @@ pub struct RunState {
     /// `(active milliseconds, chunks)` since embedding began, trimmed to the
     /// rate window. Active time, so a paused or held stretch is not in it.
     samples: VecDeque<(u64, u64)>,
+    /// Each lane's chunk count at the same moments, for the rate per lane.
+    lane_samples: VecDeque<(u64, BTreeMap<String, u64>)>,
     /// The first sample, which the average is taken from: queued time and a
     /// walk of unchanged files before it do not dilute the figure.
     first_sample: Option<(u64, u64)>,
@@ -444,6 +446,7 @@ impl RunState {
             chunks_before: None,
             threads: 0,
             samples: VecDeque::new(),
+            lane_samples: VecDeque::new(),
             first_sample: None,
             delete: None,
             status: RunStatus::Queued,
@@ -537,6 +540,49 @@ impl RunState {
         (per_second(base), per_second((t0, c0)))
     }
 
+    /// Chunks per second per lane over the same window as [`Self::rates`].
+    fn lane_rates(&self) -> BTreeMap<String, f64> {
+        let (Some((_, latest)), Some(_)) = (self.lane_samples.back(), self.first_sample) else {
+            return BTreeMap::new();
+        };
+        let now = self.elapsed().as_millis() as u64;
+        let start = now.saturating_sub(RATE_WINDOW_MS);
+        let base = self
+            .lane_samples
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= start)
+            .or_else(|| self.lane_samples.front());
+        let Some((from, earlier)) = base else {
+            return BTreeMap::new();
+        };
+        let span = now.saturating_sub(*from).max(1) as f64 / 1000.0;
+        latest
+            .iter()
+            .map(|(lane, n)| {
+                let was = earlier.get(lane).copied().unwrap_or(0);
+                (
+                    lane.clone(),
+                    ((n.saturating_sub(was)) as f64 / span * 10.0).round() / 10.0,
+                )
+            })
+            .collect()
+    }
+
+    fn sample_lanes(&mut self, lanes: BTreeMap<String, u64>) {
+        let now = self.elapsed().as_millis() as u64;
+        self.lane_samples.push_back((now, lanes));
+        let start = now.saturating_sub(RATE_WINDOW_MS);
+        while self.lane_samples.len() > 2
+            && self.lane_samples.get(1).is_some_and(|(at, _)| *at <= start)
+        {
+            self.lane_samples.pop_front();
+        }
+        while self.lane_samples.len() > 1024 {
+            self.lane_samples.pop_front();
+        }
+    }
+
     fn sample(&mut self) {
         let now = self.elapsed().as_millis() as u64;
         if self.first_sample.is_none() {
@@ -600,6 +646,15 @@ impl RunState {
                     || event.get("outcome").and_then(serde_json::Value::as_str) == Some("indexing");
                 if embedding {
                     self.sample();
+                    if let Some(lanes) = event.get("lanes").and_then(serde_json::Value::as_object) {
+                        let lanes: BTreeMap<String, u64> = lanes
+                            .iter()
+                            .filter_map(|(k, v)| v.as_u64().map(|n| (k.clone(), n)))
+                            .collect();
+                        if !lanes.is_empty() {
+                            self.sample_lanes(lanes);
+                        }
+                    }
                 }
             }
             Some("paused") => {
@@ -968,6 +1023,8 @@ impl Store {
             // first batch. Null only before the first batch.
             "rate": if run.status.finished() { None } else { rate },
             "rate_average": average,
+            // e.g. `{"gpu": 48.1, "cpu": 25.0}`: which device is doing what.
+            "lane_rates": if run.status.finished() { BTreeMap::new() } else { run.lane_rates() },
             "delete": run.delete,
             "paths": run.paths.iter()
                 .map(|p| crate::plain(&p.display().to_string()))
@@ -2083,7 +2140,9 @@ impl State {
             let deadline = std::time::Instant::now() + Duration::from_secs(600);
             while store.run_live() || state.admission.position_of(&store.name).is_some() {
                 if std::time::Instant::now() > deadline {
-                    store.note("the stop did not finish in ten minutes; the store was not deleted".into());
+                    store.note(
+                        "the stop did not finish in ten minutes; the store was not deleted".into(),
+                    );
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -2619,6 +2678,10 @@ pub fn run(
     report_line(&limits.line());
     limits.apply();
 
+    // Index runs hand batches to the GPU lanes as well as the CPU. Only the
+    // daemon does; a terminal `semlith index` stays on the CPU.
+    crate::accel::manage();
+
     // Background while idle, normal while embedding. Before the watchers
     // start, so the catch-up they run is the first thing that lifts it.
     {
@@ -3072,6 +3135,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                     "chunks": chunks_before + progress.chunks as u64,
                     "symbols": symbols_before + progress.symbols as u64,
                     "threads": progress.threads,
+                    "lanes": progress.lanes,
                     "elapsed_ms": store.run_elapsed_ms(run),
                 }));
             };
@@ -3685,7 +3749,11 @@ mod tests {
         let admission = Admission::new(2);
         let stores: Vec<Arc<Store>> = ["a", "b", "c", "d"].into_iter().map(bare_store).collect();
         for store in &stores {
-            admission.submit(store, vec![PathBuf::from("/work").join(&store.name)], RunKind::Run);
+            admission.submit(
+                store,
+                vec![PathBuf::from("/work").join(&store.name)],
+                RunKind::Run,
+            );
         }
 
         assert_eq!(admission.running(), 2, "the limit admitted more than two");

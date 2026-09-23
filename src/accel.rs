@@ -135,9 +135,15 @@ pub enum Status {
     Idle,
     Starting,
     Active,
-    Downloading { percent: u8 },
-    Unavailable { reason: String },
-    Failed { reason: String },
+    Downloading {
+        percent: u8,
+    },
+    Unavailable {
+        reason: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 struct Job {
@@ -183,7 +189,10 @@ impl Lane {
     }
 
     pub fn status(&self) -> Status {
-        self.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn set(&self, status: Status) {
@@ -201,7 +210,10 @@ impl Lane {
     /// Clear a failure, so the next batch tries the lane again. A switch
     /// turned off and on is how a user asks for that.
     pub fn reset(&self) {
-        if matches!(self.status(), Status::Failed { .. } | Status::Unavailable { .. }) {
+        if matches!(
+            self.status(),
+            Status::Failed { .. } | Status::Unavailable { .. }
+        ) {
             self.set(Status::Idle);
         }
     }
@@ -362,10 +374,7 @@ pub fn snapshot() -> serde_json::Value {
             "rate": round(lane.rate()),
         }));
     }
-    let total: f64 = rows
-        .iter()
-        .filter_map(|row| row["rate"].as_f64())
-        .sum();
+    let total: f64 = rows.iter().filter_map(|row| row["rate"].as_f64()).sum();
     for row in &mut rows {
         let rate = row["rate"].as_f64().unwrap_or(0.0);
         row["share"] = serde_json::json!(if total > 0.0 {
@@ -435,7 +444,7 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
         if worker.is_none() {
             lane.set(Status::Starting);
             match start(&lane) {
-                Ok(started) => {
+                Ok((started, _)) => {
                     worker = Some(started);
                     lane.set(Status::Active);
                 }
@@ -498,9 +507,77 @@ fn run_batch(worker: &mut Worker, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     decode_vectors(&frame, texts.len())
 }
 
+/// Run the known-answer check on every lane this machine could use: the CPU
+/// in this process, then each worker lane in a worker of its own. A lane with
+/// nothing to run on is reported with the reason rather than as a failure.
+///
+/// What `semlith doctor --gpu` prints and the Doctor page shows. Components a
+/// lane needs are fetched first, as a run would, and `say` narrates that.
+pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    say("checking the CPU lane");
+    let cpu = (|| -> Result<Check> {
+        let cache = crate::model_cache_dir()?;
+        let mut model =
+            crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
+        known_answer("cpu", &crate::system::cpu_name(), "int8-cpu", |texts| {
+            let mut got = model
+                .embed(texts, Some(1))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            for vector in &mut got {
+                crate::normalize(vector);
+            }
+            Ok(got)
+        })
+    })();
+    out.push(match cpu {
+        Ok(check) => serde_json::to_value(check).unwrap_or_default(),
+        Err(e) => serde_json::json!({ "lane": "cpu", "passed": false, "reason": format!("{e:#}") }),
+    });
+    let on = enabled();
+    for (id, variant) in [
+        ("gpu", "fp16-webgpu"),
+        ("cuda", "fp16-cuda"),
+        ("worker", "int8-cpu"),
+    ] {
+        if id == "worker" && !on.worker {
+            continue;
+        }
+        say(&format!("checking the {id} lane"));
+        let lane = Arc::new(Lane::new(
+            if id == "gpu" {
+                "gpu"
+            } else if id == "cuda" {
+                "cuda"
+            } else {
+                "worker"
+            },
+            variant,
+        ));
+        out.push(match start(&lane) {
+            Ok((_, hello)) => serde_json::json!({
+                "lane": id,
+                "device": hello["device"],
+                "variant": hello["variant"],
+                "cosine": hello["cosine"],
+                "chunks_per_s": hello["chunks_per_s"],
+                "passed": true,
+            }),
+            Err(e) => {
+                let text = format!("{e:#}");
+                match text.strip_prefix("unavailable — ") {
+                    Some(reason) => serde_json::json!({ "lane": id, "reason": format!("unavailable — {reason}") }),
+                    None => serde_json::json!({ "lane": id, "passed": false, "reason": text }),
+                }
+            }
+        });
+    }
+    out
+}
+
 /// Start a lane's worker: fetch what it needs, spawn it, and read its hello,
 /// which carries the known-answer check.
-fn start(lane: &Arc<Lane>) -> Result<Worker> {
+fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     let args = match lane.id {
         "gpu" => {
             let device = detect_gpu().map_err(|why| anyhow::anyhow!("unavailable — {why}"))?;
@@ -535,7 +612,7 @@ fn start(lane: &Arc<Lane>) -> Result<Worker> {
             }
         }
     });
-    let mut worker = Worker {
+    let worker = Worker {
         child,
         stdin,
         answers,
@@ -545,7 +622,10 @@ fn start(lane: &Arc<Lane>) -> Result<Worker> {
     let hello = match worker.answers.recv_timeout(deadline() * 4) {
         Ok(Ok(frame)) => frame,
         Ok(Err(e)) => bail!("the worker exited before it was ready: {e}"),
-        Err(_) => bail!("the worker was not ready within {} s", (deadline() * 4).as_secs()),
+        Err(_) => bail!(
+            "the worker was not ready within {} s",
+            (deadline() * 4).as_secs()
+        ),
     };
     let hello: serde_json::Value = serde_json::from_slice(&hello).context("the worker's hello")?;
     if hello["ok"].as_bool() != Some(true) {
@@ -558,9 +638,7 @@ fn start(lane: &Arc<Lane>) -> Result<Worker> {
     if let Some(device) = hello["device"].as_str() {
         *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.to_string());
     }
-    // `worker` is mutated by the caller from here on.
-    let _ = &mut worker;
-    Ok(worker)
+    Ok((worker, hello))
 }
 
 // ---------------------------------------------------------------- the frames
@@ -779,7 +857,10 @@ pub fn worker_main(lane: &str, dir: Option<&Path>) -> i32 {
         batches += 1;
         match fault {
             Some(Fault::Batch(n)) if batches == n => {
-                let _ = write_frame(&mut out, &encode_error(&format!("{FAULT_ENV} failed batch {n}")));
+                let _ = write_frame(
+                    &mut out,
+                    &encode_error(&format!("{FAULT_ENV} failed batch {n}")),
+                );
                 return 1;
             }
             Some(Fault::Hang(ms)) => std::thread::sleep(Duration::from_millis(ms)),
@@ -864,7 +945,10 @@ mod tests {
         let vectors = vec![vec![0.5f32; DIM], vec![-1.0f32; DIM]];
         let frame = encode_vectors(&vectors);
         assert_eq!(decode_vectors(&frame, 2).unwrap(), vectors);
-        assert!(decode_vectors(&frame, 3).is_err(), "a short answer is refused");
+        assert!(
+            decode_vectors(&frame, 3).is_err(),
+            "a short answer is refused"
+        );
         let error = encode_error("the driver went away");
         assert_eq!(
             decode_vectors(&error, 1).unwrap_err().to_string(),

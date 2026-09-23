@@ -17,14 +17,14 @@ use std::path::{Path, PathBuf};
 /// software renderers. Microsoft's is WARP, Basic Render and Hyper-V's video;
 /// Mesa's is lavapipe and llvmpipe; Google's is SwiftShader.
 const SOFTWARE_VENDORS: &[u32] = &[
-    0x1414, // Microsoft: WARP, Basic Render Driver, Hyper-V video
+    0x1414,  // Microsoft: WARP, Basic Render Driver, Hyper-V video
     0x10005, // Mesa: lavapipe, llvmpipe
-    0x1ae0, // Google: SwiftShader
-    0x1234, // QEMU's standard VGA
-    0x15ad, // VMware SVGA
-    0x1af4, // virtio-gpu
-    0x80ee, // VirtualBox
-    0x1b36, // Red Hat QXL
+    0x1ae0,  // Google: SwiftShader
+    0x1234,  // QEMU's standard VGA
+    0x15ad,  // VMware SVGA
+    0x1af4,  // virtio-gpu
+    0x80ee,  // VirtualBox
+    0x1b36,  // Red Hat QXL
 ];
 
 /// Adapter names that give a software renderer away when a vendor id does not.
@@ -72,7 +72,11 @@ mod platform {
     /// for the plugin to reach it through.
     pub fn detect() -> std::result::Result<String, String> {
         let mut found = Vec::new();
-        for entry in std::fs::read_dir("/sys/class/drm").into_iter().flatten().flatten() {
+        for entry in std::fs::read_dir("/sys/class/drm")
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.starts_with("card") || name.contains('-') {
                 continue;
@@ -93,7 +97,10 @@ mod platform {
         // SAFETY: a NUL-terminated name; the handle is closed straight away
         // and nothing is looked up through it.
         let loader = unsafe {
-            let handle = libc::dlopen(c"libvulkan.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+            let handle = libc::dlopen(
+                c"libvulkan.so.1".as_ptr(),
+                libc::RTLD_NOW | libc::RTLD_LOCAL,
+            );
             if !handle.is_null() {
                 libc::dlclose(handle);
             }
@@ -277,7 +284,12 @@ pub fn fetch_webgpu(cache: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBu
     );
     for (file, sha256, _) in FP16_FILES {
         let name = Path::new(file).file_name().expect("a file name");
-        download(&format!("{base}/{file}"), &dir.join(name), sha256, &mut report)?;
+        download(
+            &format!("{base}/{file}"),
+            &dir.join(name),
+            sha256,
+            &mut report,
+        )?;
     }
     crate::home::write_private(&stamp, WEBGPU_VERSION.as_bytes())?;
     Ok(dir)
@@ -308,7 +320,9 @@ fn download(url: &str, to: &Path, sha256: &str, progress: &mut dyn FnMut(u64)) -
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 16];
     loop {
-        let n = reader.read(&mut buffer).with_context(|| format!("reading {url}"))?;
+        let n = reader
+            .read(&mut buffer)
+            .with_context(|| format!("reading {url}"))?;
         if n == 0 {
             break;
         }
@@ -346,7 +360,9 @@ fn extract_plugin(wheel: &Path, dir: &Path) -> Result<()> {
         let Some(base) = name.strip_prefix("onnxruntime_ep_webgpu/") else {
             continue;
         };
-        let library = [".dylib", ".so", ".dll"].iter().any(|ext| base.ends_with(ext));
+        let library = [".dylib", ".so", ".dll"]
+            .iter()
+            .any(|ext| base.ends_with(ext));
         if !library || base.contains('/') || base.contains("..") {
             continue;
         }
@@ -366,7 +382,7 @@ fn extract_plugin(wheel: &Path, dir: &Path) -> Result<()> {
 /// What a worker embeds with.
 pub enum Session {
     /// The int8 CPU session, run in a worker: the verification lane.
-    Cpu(fastembed::TextEmbedding, String),
+    Cpu(Box<fastembed::TextEmbedding>, String),
     /// fp16 on the GPU through ONNX Runtime directly, because fastembed has no
     /// way to hand a session a plugin device.
     Gpu(Box<GpuSession>),
@@ -384,12 +400,9 @@ impl Session {
         let cache = crate::model_cache_dir()?;
         match lane {
             "worker" => {
-                let model = crate::embed::Model::Granite.load(
-                    cache,
-                    crate::chunk::MAX_CHARS / 2,
-                    true,
-                )?;
-                Ok(Session::Cpu(model, crate::system::cpu_name()))
+                let model =
+                    crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
+                Ok(Session::Cpu(Box::new(model), crate::system::cpu_name()))
             }
             "gpu" => {
                 let dir = dir.context("the gpu lane needs its component directory")?;
@@ -417,7 +430,7 @@ impl Session {
         match self {
             Session::Cpu(model, _) => {
                 let mut out = model
-                    .embed(texts.to_vec(), Some(texts.len().max(1)))
+                    .embed(texts, Some(texts.len().max(1)))
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 for vector in &mut out {
                     crate::normalize(vector);

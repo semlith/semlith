@@ -28,10 +28,10 @@ pub mod doctor;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
-pub mod gpu;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
+pub mod gpu;
 pub mod graph;
 pub mod home;
 pub mod hook;
@@ -81,6 +81,9 @@ const BIT_WIDTH: usize = 4;
 /// 1799 MB — 2.9x the memory for no throughput at all (23.2 against 23.3
 /// chunks/sec), because a smaller batch also wastes less of itself on padding.
 const EMBED_BATCH: usize = 8;
+
+/// The meta row counting a store's chunks per vector variant.
+const VARIANTS_KEY: &str = "variants";
 
 /// Embedding sessions writers hold in this process, for `/api/about`.
 static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -885,6 +888,8 @@ pub struct IndexProgress {
     /// has one. What the run card shows, because a saved setting is a request
     /// and this is what the engine is doing.
     pub threads: usize,
+    /// Chunks each lane has embedded for this store: `cpu`, `gpu`, `cuda`.
+    pub lanes: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -958,6 +963,9 @@ pub struct IndexReport {
     /// The intra-op thread count the session ran with at the end of this
     /// call, or 0 when nothing was embedded.
     pub threads: usize,
+    /// Chunks each lane has embedded for this store, since it was opened.
+    #[serde(skip)]
+    pub lanes: std::collections::BTreeMap<String, usize>,
     /// Every file this call embedded, in order. The caller keeps these across
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
@@ -1001,6 +1009,7 @@ fn say_file(
             symbols: report.symbols,
             why,
             threads: report.threads,
+            lanes: report.lanes.clone(),
         },
     );
 }
@@ -1138,6 +1147,9 @@ pub struct Semlith {
     last_embed: Option<std::time::Instant>,
     /// The budget generation this store's indexes were last fitted to.
     budget_generation: u64,
+    /// Chunks each lane embedded for this store since it was opened, which a
+    /// run card turns into a rate per lane.
+    lane_chunks: std::collections::BTreeMap<String, usize>,
     /// The embedder's own tokenizer, for counting rather than estimating.
     tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
@@ -1230,6 +1242,7 @@ impl Semlith {
             embedder_threads: 0,
             last_embed: None,
             budget_generation: index::budget_generation(),
+            lane_chunks: std::collections::BTreeMap::new(),
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
@@ -2195,6 +2208,7 @@ impl Semlith {
                 }
             }
             report.threads = self.embedder_threads;
+            report.lanes = self.lane_chunks.clone();
             if halted {
                 // Stopped inside this file. Its rows are in `written`, so the
                 // caller's undo takes it out with everything else; nothing of
@@ -2616,19 +2630,11 @@ impl Semlith {
         // Loaded first so the tokenizer is there to sort by: the same count
         // the model pads by, on every window including the first.
         self.embedder()?;
+        self.follow_budget();
         let order = self.length_order(&texts);
-        let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); ids.len()];
-        for group in order.chunks(EMBED_BATCH) {
-            if let Some(ask) = control
-                && !hold(ask)
-            {
-                return Ok(false);
-            }
-            let slice: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
-            for (at, vector) in group.iter().zip(self.embed(slice)?) {
-                vectors[*at] = vector;
-            }
-        }
+        let Some(vectors) = self.embed_window(&texts, order, control)? else {
+            return Ok(false);
+        };
         let flat: Vec<f32> = vectors.into_iter().flatten().collect();
         self.index.add(&flat, &ids)?;
         // The sidecar is written in the same breath as the codes, from the same
@@ -2637,6 +2643,145 @@ impl Semlith {
         // rescoring silently reorders by a stale vector.
         self.exact.append(&flat, &ids)?;
         Ok(true)
+    }
+
+    /// Embed a sorted window across every lane a run may use, asking
+    /// `control` before each batch. `None` when a stop was asked for.
+    ///
+    /// The CPU takes the shortest chunks from the front of the window and each
+    /// GPU lane the longest from the back, whenever it is free, so a faster
+    /// device ends up with a larger share without anything being tuned. A
+    /// batch a lane fails, or loses with its worker, goes back on the window
+    /// for another lane; the lane is marked failed with its reason and the
+    /// window completes with the same vectors a CPU-only pass would have
+    /// counted. With no lane but the CPU this is the loop it always was.
+    fn embed_window(
+        &mut self,
+        texts: &[String],
+        order: Vec<usize>,
+        control: Option<&dyn Fn() -> Flow>,
+    ) -> Result<Option<Vec<Vec<f32>>>> {
+        let (lanes, cpu_on) = accel::for_run();
+        let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+        let mut waiting: std::collections::VecDeque<usize> = order.into();
+        type Answer = std::sync::mpsc::Receiver<std::result::Result<Vec<Vec<f32>>, String>>;
+        let mut flying: Vec<(std::sync::Arc<accel::Lane>, Vec<usize>, Answer)> = Vec::new();
+        let mut counts: Vec<(&'static str, usize)> = Vec::new();
+
+        loop {
+            if let Some(ask) = control
+                && !hold(ask)
+            {
+                return Ok(None);
+            }
+            // Every free lane takes the longest chunks left.
+            for lane in &lanes {
+                if waiting.is_empty() {
+                    break;
+                }
+                if !lane.usable()
+                    || flying
+                        .iter()
+                        .any(|(l, _, _)| std::sync::Arc::ptr_eq(l, lane))
+                {
+                    continue;
+                }
+                let take = lane.batch().min(waiting.len());
+                let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_back()).collect();
+                let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
+                let answer = lane.submit(batch);
+                flying.push((std::sync::Arc::clone(lane), group, answer));
+            }
+            // Whatever has come back.
+            let mut still = Vec::with_capacity(flying.len());
+            for (lane, group, answer) in flying.drain(..) {
+                match answer.try_recv() {
+                    Ok(Ok(got)) if got.len() == group.len() => {
+                        for (at, vector) in group.iter().zip(got) {
+                            vectors[*at] = vector;
+                        }
+                        counts.push((lane.variant(), group.len()));
+                        self.note_lane(lane.id, group.len());
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => still.push((lane, group, answer)),
+                    // Failed, lost, or the wrong shape: back on the window.
+                    _ => waiting.extend(group),
+                }
+            }
+            flying = still;
+
+            // The CPU's switch is honoured only while a GPU lane can carry the
+            // run; with none, the CPU is the fallback whatever it says.
+            let cpu = cpu_on || !lanes.iter().any(|lane| lane.usable());
+            if cpu && !waiting.is_empty() {
+                let take = EMBED_BATCH.min(waiting.len());
+                let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_front()).collect();
+                let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
+                for (at, vector) in group.iter().zip(self.embed(batch)?) {
+                    vectors[*at] = vector;
+                }
+                accel::count_cpu(group.len());
+                counts.push(("int8-cpu", group.len()));
+                self.note_lane("cpu", group.len());
+                continue;
+            }
+            if waiting.is_empty() && flying.is_empty() {
+                break;
+            }
+            // Nothing for the CPU to do: wait a moment on the oldest batch out.
+            if !flying.is_empty() {
+                let (lane, group, answer) = flying.remove(0);
+                match answer.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(Ok(got)) if got.len() == group.len() => {
+                        for (at, vector) in group.iter().zip(got) {
+                            vectors[*at] = vector;
+                        }
+                        counts.push((lane.variant(), group.len()));
+                        self.note_lane(lane.id, group.len());
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        flying.insert(0, (lane, group, answer))
+                    }
+                    _ => waiting.extend(group),
+                }
+            }
+        }
+        self.record_variants(&counts)?;
+        Ok(Some(vectors))
+    }
+
+    /// Count chunks one lane embedded in this pass, for the run card's rate
+    /// per lane.
+    fn note_lane(&mut self, lane: &'static str, chunks: usize) {
+        *self.lane_chunks.entry(lane.to_string()).or_default() += chunks;
+    }
+
+    /// Add this window's chunks to the store's count per vector variant.
+    ///
+    /// int8 on the CPU and fp16 on a GPU are two variants of one model, which
+    /// agree at cosine 0.987; a store holding both says how many of each, and
+    /// `stats` prints it. One meta row, which an older binary ignores.
+    fn record_variants(&self, counts: &[(&'static str, usize)]) -> Result<()> {
+        if counts.is_empty() {
+            return Ok(());
+        }
+        let mut variants: std::collections::BTreeMap<String, u64> =
+            store::get_meta(&self.db, VARIANTS_KEY)?
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+        for (variant, n) in counts {
+            *variants.entry((*variant).to_string()).or_default() += *n as u64;
+        }
+        store::set_meta(&self.db, VARIANTS_KEY, &serde_json::to_string(&variants)?)
+    }
+
+    /// Chunks this store holds per vector variant, where it has counted them.
+    pub fn variants(&self) -> std::collections::BTreeMap<String, u64> {
+        store::get_meta(&self.db, VARIANTS_KEY)
+            .ok()
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
     }
 
     /// Positions of `texts`, shortest first by the model's own token count.
