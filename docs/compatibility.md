@@ -26,6 +26,9 @@ break, and is treated as one.
 | The ledger's row kinds from 0.24.0 | `raw-read`, written by `semlith hook` for a whole-file read of a file a store holds. It is a row in the existing table with a `tool` of its own, so an older binary reading a 0.24.0 ledger verifies the chain unchanged and simply does not know what the row means. |
 | CLI flags added in 0.20.0 | `index --each`, one store per path; `index --projects <FOLDER>`, which takes the paths from the folder's children and implies `--each`. Neither changes what `semlith index` does without them. |
 | MCP tool arguments added in 0.19.0 | `semlith_pattern` takes `path`, an array of globs, and `offset`, an integer. Both are optional and both default to what 0.18.0 did, so a client that passes neither sees no change. |
+| `/api/report` arguments added in 0.27.0 | `window` — one of `all`, `day`, `week`, `month`, `quarter` — and `scope`, a repeatable store label. Both are optional. A request that names neither gets exactly what 0.26.x returned: every open store, and each report's own span (seven days for the change brief, everything for the rest). An unknown `window` is 400 and names the five; a `scope` no open store answers to is 400 and names the stores that are open. `semlith report` takes `--window` and `--scope` with the same meanings. |
+| Report formats from 0.27.0 | `markdown`, `csv`, `json`, `html` and `pdf`. The first four are unchanged, and `GET /api/report?format=<one of them>` still answers with the JSON envelope carrying the rendering as `text`. `format=pdf` answers with the PDF itself, `Content-Type: application/pdf`, because bytes cannot ride inside a JSON string; `semlith report --format pdf` needs `--out` for the same reason. The PDF is typeset from the same block structure the other four render, not a print of the HTML. |
+| `~/.semlith/schedules.json` from 0.27.0 | Tool-written state, like `registry.json` and the lock file — not a configuration file, and not a promise. It is absent until a schedule is added, and its absence is the normal state rather than an error. A 0.26.x binary reads no such file and ignores one left behind. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
 | The install scripts | `install.sh` and `install.ps1` stay at the root of the `main` branch, so the two `raw.githubusercontent.com` URLs in the README keep working. They keep honouring `SEMLITH_VERSION`, `SEMLITH_HOME`, `SEMLITH_YES` and `SEMLITH_NO_SERVICE`, and they keep verifying the download against the release's `SHA256SUMS` before writing anything. When `semlith.com` exists it will redirect to these URLs rather than replace them. |
@@ -91,6 +94,36 @@ as no file.
 
 **The portal itself.** Its routes, its markup, its assets and its appearance are
 not a contract. It is a page, served to a browser on the same machine.
+
+**`GET /api/report` honours `store` instead of discarding it.** The route read a
+`store` parameter and threw it away, so a request that asked for one store of six
+got all six and nothing said so. From 0.27.0 the store filter is `scope`, and
+`store` is read as its alias. A caller that never passed either is unaffected; a
+caller that was passing `store` now gets the report it was asking for. The
+report's own `stores` field, and the line every format prints under the title,
+name the scope that was applied.
+
+**Every report now states its window under the title.** The line that read
+"Generated <when> on this machine, over <stores>. Nothing left it." now reads
+"Generated <when> on this machine, over <stores>, covering <window>. Nothing left
+it.", and the JSON payload gains a `window` string beside `stores`. A report
+whose figures carry no date — savings, health and gaps — says so in that line
+rather than printing a span it did not apply. A script that parsed that line
+verbatim has to be updated; one that reads the JSON gains a field and loses none.
+
+**Portal parity, and its one exception.** Every CLI command and every MCP tool
+has a surface in the portal that a person can open; `tests/portal.rs` is the
+gate and the place each deliberate absence is argued. From 0.27.0 there is one
+more absence than there was, and it is worth stating here rather than only in a
+test file: **`semlith models` and `/api/models` have no portal view.** The About
+page carried a forty-eight-row table of every embedding model a store could be
+built with, of which one row is a model any given machine has fetched; the v4
+design has no place for it and the page it sat on is now seven facts and the
+language table. Nothing was withdrawn — `semlith models` prints the full list
+and `/api/models` answers exactly as before. `/api/pattern` has had no portal
+view in every release so far, for the reason recorded in `tests/portal.rs`: a
+tree-sitter query in S-expression syntax is not something anyone types into a
+browser box.
 
 **Ranking scores and result ordering.** The `score` on a hit is a reciprocal
 rank fusion score. It orders results within one query and means nothing across

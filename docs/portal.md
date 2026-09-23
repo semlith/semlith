@@ -627,7 +627,15 @@ The Graph page draws a neighbourhood and this page answers a question. The
 difference is what the answer is made of: a hundred callers is a hairball on a
 canvas and a hundred rows on a page, so this one is rows.
 
-**Controls.** Four of them, in one band across the top.
+**The shape of the page.** Two columns. On the left, a card carrying the
+controls, the `Changing` line and three figures, and under it the reached
+symbols themselves. On the right, the canvas, then [Path finder](#path-finder),
+then [Trace](#trace) — the answer on one side and the two questions that follow
+from it on the other. Below about 716 pixels of content width the two become
+one column and the order above is the order you read down the page; there is no
+breakpoint involved, the columns simply stop fitting.
+
+**Controls.** Four of them, in the card at the head of the left column.
 
 - **the name field** — one symbol, matched exactly, as the placeholder says: *A
   symbol's name, matched exactly*. Enter runs it; so does **Reach** beside it.
@@ -689,6 +697,30 @@ for different things. *The symbol is indexed; nothing in an open store calls it.
 means the walk ran and found nothing. *No definition of that name is in an open
 store. Check the spelling, or index the repository that holds it.* means there
 was nothing to walk from.
+
+### The canvas
+
+The card at the top of the right column draws the same answer as a picture,
+with the Graph page's own force simulation: the symbol you asked about drawn
+selected, and every symbol that reaches it around it, each joined by a line to
+the symbol it reached through, so a chain is a path in to the subject. Nodes
+move, can be dragged, and a click selects one and its neighbours, as on the
+Graph page. The caption reads *reverse reachability*.
+
+Hop distance is in the tables on the left, which group the reached set by hop,
+and in the hover card. The canvas is the shape of the answer, not its measure:
+a spring layout puts a symbol wherever repulsion leaves it, so how far a node
+sits from the subject says nothing about how many hops away it is.
+
+**The hover card** is the Graph page's, and follows the pointer the same way. For
+a symbol that reaches the subject it gives `hops`, the `file` and line of the
+row that reached it, what it `reaches` through and by which edge kind, and the
+edge's `confidence`; the subject itself says it is hop 0.
+
+At most 34 nodes are laid out, nearest hops first, so a large answer drops its
+far edge rather than whichever rows arrived last. When some are left out the
+caption says how many: *reverse reachability · 25 beyond the 34 drawn*. Every
+one of them is in the table on the left.
 
 ### The support classes
 
@@ -825,7 +857,13 @@ card where it actually is, with its log carrying on from the last line this page
 saw. A run is only ever cut short in two ways: its own **Stop**, or
 `semlith start` ending.
 
-**Controls.**
+**Controls.** Everything the button band opens appears in one place, directly
+under the band. Four of these buttons open a panel, and they used to open it in
+four different parts of the page — the folder picker under the band, the
+repository checklist and the URL card below the summary cards, and the machine
+limits at the very foot. Pressing one button opened something you were looking
+at; pressing another opened something a screen and a half away, with nothing on
+screen saying it had happened.
 
 - **paths** — one path per line, so several folders can be started without
   opening a picker at all. The first-run screen carries a path into this field.
@@ -993,9 +1031,26 @@ in front of you is about this machine at this moment rather than at startup.
 | threads each | The embedder's own thread count divided between the runs, clamped so runs × threads never exceeds the cores. Floor 1. |
 | MiB per store | 512 MiB of vectors, doubled once past 16 GiB free beyond the reserve and again past 64 GiB. Two steps rather than a curve, because a figure you recognise is worth more here than a fitted one. |
 
-Each is yours to change, and a value above what the machine derived is used as
-you set it — with the derivation in front of you rather than instead of it, which
-is why the field says what it was going to do. Changing *runs at once* takes
+Each is yours to change, and changing one is the ordinary thing to do with it —
+a laptop doing nothing else can index harder than a default chosen for a laptop
+that might be. Above the derived value the field says what that means rather
+than warning you: nothing here is drawn in red, because none of it is a mistake.
+
+**Each also has a ceiling, and the ceiling is not the derived value.** The
+derived value is what this machine would pick left alone. The ceiling is where
+the answer stops being a preference and becomes a machine that swaps: the
+logical core count for the two parallelism settings, and memory free now less
+the reserve for the store budget. The field will not go past it and neither
+will the route, because a cap only the page knows about is not a cap. An
+environment variable is exempt — somebody who exported one has said what they
+mean more deliberately than somebody typing in a box.
+
+The three answer each other. *threads each* is derived from the runs actually in
+force rather than from the runs this machine would have chosen, so raising *runs
+at once* changes what *threads each* suggests underneath you. That is why they
+are one card.
+
+Changing *runs at once* takes
 effect on the next admission: raising it admits the head immediately, lowering it
 stops nothing already going, because a run holds a writer and undoing it would
 cost the work it has done. The other two apply to the next run queued.
@@ -1048,9 +1103,12 @@ figure a reader cannot check is one they are being asked to take on trust.
   tokenizer, `modelled` when any of them was estimated at four characters per
   token. A mixed ledger reports `modelled`, because that is what the weaker half
   makes the whole.
-- **Zero-hit** — retrievals semlith answered with nothing. Read from the ledger
-  rather than derived by subtracting credited from total, which since 0.24.0
-  would have counted every raw read as a question the corpus could not answer.
+- **Zero-hit** — the share of retrievals semlith answered with nothing, as the
+  v4 design draws it: a percentage, with the count and its denominator kept in
+  the caption under it. `0 of 4` is two numbers a reader has to divide, and the
+  quotient is what they were dividing for. Read from the ledger rather than
+  derived by subtracting credited from total, which since 0.24.0 would have
+  counted every raw read as a question the corpus could not answer.
 - **Refunds** — files an agent read whole after all, on a file this store holds.
   It is a *measurement* on a client carrying the steering hook, which writes one
   `raw-read` row for each such read, and a *floor* everywhere else — the tile
@@ -1104,6 +1162,12 @@ would cost more than the saving being measured.
 **by client** breaks the count down under each client's own name, taken from the
 MCP handshake rather than guessed at here.
 
+**The rows and the replay are two tabs**, not two stacked cards. They are two
+readings of one ledger — what was retrieved, and what the agent did afterwards —
+so a tab says they are alternatives, where stacking them made the second one
+something you found by scrolling past the first. The sessions table keeps its
+own card above both, because it is the summary the two tabs are of.
+
 **This page reads live.** Every surface that records a retrieval writes through
 one function, and that is where the ledger domain is bumped, so a row lands here
 as an agent retrieves it — whichever window the agent is working in.
@@ -1151,14 +1215,25 @@ them.
 The card on the left is about the chosen report and nothing else. At the top,
 its name and the sentence saying what it answers once it exists — *What
 retrieval actually saved, per client, with the arithmetic shown.* for Retrieval
-savings, and one of its own for each of the other four. Under that, labelled
-**Reader**, the same line the picker card carried, so the builder does not make
-you remember which one you pressed.
+savings, and one of its own for each of the other four. Under that, the report's own span — what
+it covers, said by the report rather than inferred from the chips.
 
-**Format** is a row of four chips: **Markdown**, **CSV**, **JSON** and **HTML**.
-Pressing one re-generates at once, because the format is part of the request
-rather than something applied to the text afterwards — the server renders each
-one, and the preview is what the file will contain.
+**Window** is a row of four chips: **24 hours**, **7 days**, **30 days** and
+**This quarter**. Two of the five reports have a date to narrow by — the access
+audit and the change brief — and on the other three the chips are drawn inactive
+and the report says under its own title that it could not honour a window rather
+than printing a span it did not apply.
+
+**Scope** is **all stores** and one chip per open store. It is the filter
+`/api/report` used to read as `store` and throw away, so a request that asked for
+one store of six got all six with nothing saying so.
+
+**Format** is a row of five chips: **Markdown**, **CSV**, **JSON**, **HTML** and
+**PDF**. Pressing one re-generates at once, because the format is part of the
+request rather than something applied to the text afterwards — the server renders
+each one, and the preview is what the file will contain. The PDF is typeset from
+the same block structure the other four render, not a print of the HTML, by a
+writer inside the binary: there is no browser in this path and no network.
 
 **Price tokens at** is a row of model chips: **Sonnet 5**, **Opus 5** and
 **Haiku 4.5**. It sets which model's input price the savings arithmetic is
@@ -1167,37 +1242,122 @@ same reason the rest of the page is: a report has to generate on a machine with
 no network, and a price whose source a reader cannot see is worse than one they
 can argue with.
 
-Under the chips is the sentence that stops a reader looking for a fifth format:
-*HTML prints to PDF from your browser. No PDF writer ships in the binary, so
-none is claimed.* HTML is the print-to-PDF path and it is the whole of it.
-
-At the bottom of the card is the equivalent command, copyable —
-`semlith report <kind> --format <format> --model <model>` — so the same file can
-be produced from a script or a scheduled job without this page.
-
-**There is no window, scope or redaction control**, and that is deliberate
-rather than unfinished: `/api/report` takes a kind, a format and a model and
-nothing else, and a control that cannot change the file it claims to change is
-worse than no control at all.
+The equivalent command is not in this card. It has one of its own — *Same thing
+without the browser* — where the design puts it, with the flags the chips above
+set, so the same file can be produced from a script without this page.
 
 ### The preview
 
 The card on the right is the report itself. Its bar carries the file name it
-would be saved as — `reports/semlith-<kind>.<extension>` — and two controls.
-**Copy** puts the generated text on the clipboard. **Export** hands the same
-text to the browser as a download named `semlith-<kind>.<extension>`, with the
-content type of the format it is in. Both use the text of the one request that
-produced the preview, so the thing on screen, the thing copied and the thing
-saved cannot be three different reports.
+would be saved as and two controls. **Copy** puts the generated text on the
+clipboard. **Export** hands the same bytes to the browser as a download, with the
+content type of the format it is in. Both use the one request that produced the
+preview, so the thing on screen, the thing copied and the thing saved cannot be
+three different reports.
 
-Under the text is a footer stating its size in KB, its format, and the sentence
-that is the point of the page: *generated here, written only where you save
-it.* The report is built on this machine, handed to the browser and not to any
-server, and until **Export** is pressed it exists nowhere on disk.
+The footer states **rows shown, the full file size, the format and the
+signature**. The numbers are real rather than estimated: the row count is summed
+from the report's own table blocks, and the size is the length of the bytes
+Export would write, not a guess from the length of the preview. The signature
+reads `unsigned`, and will until there is something to sign with — see the
+toggles above.
+
+**Save to disk** beside them is the browser's own save. No route writes a report
+file: a report is a reading of a moment handed to the person who asked for it,
+and the daemon writing one into a directory on their behalf is what a schedule is
+for.
+
+The sentence beside them is the point of the page: *generated here, written only
+where you save it.* The report is built on this machine, handed to the browser
+and not to any server, and until you save it, it exists nowhere on disk.
 
 **This page does not read live.** A report is a reading of a moment, and one
 that redrew itself under a reader would be a different document from the one
 they were quoting.
+
+### The three toggles
+
+Two of them do something, and the third says what it is waiting for.
+
+**Hash the query text** replaces every query with a digest of it — `hash:` and
+sixteen characters of the same blake3 the ledger chains its rows with. What it
+keeps is the who, the when, the tool and the token counts; what it drops is what
+was asked. It applies *wherever a query reaches the document*, not only to the
+table it sits above: the gaps report names the questions that found nothing, and
+a toggle that hid a query in one table and printed it in another would be a
+promise broken by the document that made it.
+
+**Attach retrieved excerpts** unrolls the access report's session lines into the
+individual retrievals behind them, newest first, to a ceiling of 500. A session
+row says an agent asked forty times; this is which forty. The two compose: with
+both on you get every retrieval, with its agent, its tool and its cost, and no
+query text.
+
+**Sign the report** is drawn and disabled. A detached signature needs a key, and
+where that key lives, how it is rotated and what a reader checks it against are
+decisions this product has not made. A switch drawn as though it worked would put
+a promise on the page that the file does not keep, and one quietly left out would
+hide a gap the design says should be visible — so it is drawn, off, and says so.
+
+`semlith report access --excerpts --redact` is the same two toggles from a
+terminal.
+
+### Schedules
+
+A schedule is a report the daemon writes on its own, on a cadence, into a
+directory you name. It is the one thing on this page that is not a reading of
+right now.
+
+**It belongs to the daemon, not to this page.** The card shows what the daemon
+holds; adding a schedule here writes a record and the daemon does the work. If
+nothing is running `semlith start`, a schedule is still recorded and still
+listed — it simply does not fire until a daemon is up. Everything the card shows
+is on disk, so a restart loses none of it.
+
+**Where it lives.** `~/.semlith/schedules.json`, beside `registry.json` rather
+than inside it. That is deliberate: a schedules file somebody's editor truncated
+should cost them their schedules and not every store on the machine. It does not
+exist until the first schedule is added, and its absence is the normal state
+rather than an error. Like the registry and the lock file, it is tool-written
+state — semlith writes it, and nothing documents a way to hand-edit it.
+
+**Cadence.** The chips are the common ones. What the record holds is an interval
+in seconds, so a chip is a shortcut for a number rather than the whole
+vocabulary, and a cadence no chip spells still round-trips and still says what
+it means. The floor is a minute: a report reads every open store's database, so
+a schedule firing every second would be a background process nobody asked for.
+
+**What it records, and why all of it is shown.** Each schedule carries when it
+last ran, when it next will, and the path it last wrote. A cadence with no
+outcome beside it cannot say whether the thing is working, which is the failure
+this feature would otherwise have: a row that reads *on* beside a folder that
+never fills. So a run that wrote nothing says why, in full, and the path it
+wrote is cleared — a schedule can never show "failed" and a filename together.
+
+The failure this will actually meet is a destination that has gone away:
+deleted, renamed, or on a volume that is not mounted this morning. The daemon
+checks the directory and never creates it. Creating it would answer an unmounted
+volume by writing the report into the empty mount point, which looks like
+success and loses the file.
+
+**Two schedules never generate at once**, and a schedule due while its store is
+still indexing waits rather than reporting on a half-written index.
+
+**Same thing without the browser.** Per the parity rule, the CLI reaches the
+same schedules this card does — both read and write the one file the daemon
+owns, so there is no second list to disagree.
+
+```sh
+semlith schedule list
+semlith schedule add savings --every 604800 --to ~/Reports --format pdf
+semlith schedule remove s1
+semlith schedule set s1 off
+```
+
+`--every` is seconds, as the record holds it. `--to` must be absolute: the
+daemon runs the schedule from a working directory that is not yours, so a
+relative path is refused rather than resolved against somewhere nobody meant. A
+running daemon notices a schedule added from a terminal within a minute.
 
 ## Agents
 
@@ -1436,6 +1596,11 @@ you asked for; neither is refetched on a timer.
 and what to run for the ones that cannot — so the next person who hits an
 unregistered client reads the answer instead of bisecting a configuration file.
 
+**Rules first, then the clients.** The rules answer the question the page exists
+for — is this machine set up the way it claims — and the client table is
+twenty-seven rows that page ten at a time, so under the table the rules were
+below a screenful on every visit.
+
 **Clients** is one row per documented client: its name, whether semlith is
 registered in it and at what scope, and the command that fixes the row when it
 needs fixing. Four states are kept apart on purpose. *Not installed* is a client
@@ -1472,13 +1637,18 @@ graph is extracted from. It lives here rather than on a page of its own because 
 is a fact about the binary, and the search filter and the graph read the same
 table, so the two cannot disagree about what a language is.
 
-**Models** lists the embedding models a store can be built with, each with its
-dimension, its size on disk where this machine has fetched it, and a note. A model
-this machine has never fetched shows `—` rather than a guessed size.
+**The embedding models a store can be built with are not shown here.** A table
+of forty-eight rows, of which any given machine has fetched one, is a catalogue
+rather than a fact about this binary, and the v4 design has no place for it on a
+page that is seven facts and a language table. `semlith models` prints the full
+list — name, dimension, size where it has been fetched, and a note — and
+`GET /api/models` still answers for anything that reads it. This is the one
+capability in the product with no view in the portal, and it is argued in
+`tests/portal.rs` and recorded in `docs/compatibility.md` rather than assumed.
 
-The line under it is the one that matters operationally: the model is fixed when a
-store is created, because vectors from two models are not comparable. Switching
-means deleting the store and indexing again.
+The line that matters operationally stays: the model is fixed when a store is
+created, because vectors from two models are not comparable. Switching means
+deleting the store and indexing again.
 
 ## Concepts
 

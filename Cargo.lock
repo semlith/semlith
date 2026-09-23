@@ -1969,6 +1969,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdf-writer"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+dependencies = [
+ "bitflags",
+ "itoa",
+ "memchr",
+ "ryu",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2515,7 +2527,7 @@ dependencies = [
 
 [[package]]
 name = "semlith"
-version = "0.26.1"
+version = "0.27.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2531,6 +2543,7 @@ dependencies = [
  "notify",
  "ort",
  "pdf-extract",
+ "pdf-writer",
  "regex",
  "rusqlite",
  "serde",

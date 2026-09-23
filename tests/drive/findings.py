@@ -1195,6 +1195,12 @@ def _(d):
     # is asserted here — the button, the hint that names the key, and both
     # routes actually applying a scope. A release that later switches to
     # apply-as-you-type must rewrite this check, not delete it.
+    #
+    # From 0.27.0 the hint is read rather than seen. The sentence sat inside the
+    # field's border and pushed the button off its end, so it is `.sr-only` now:
+    # the button is the affordance for anyone looking at the field, and the
+    # description is still there for anyone who is not. Both halves of the
+    # finding still hold; only which sense they reach changed.
     d.open_view("graph")
     d.wait_for("/\\d+\\s+symbols/i.test(document.querySelector('.graph-count').innerText)",
                what="the graph summary")
@@ -1212,9 +1218,13 @@ def _(d):
             .find(b => (b.innerText || '').trim().length > 0);
           const described = field.getAttribute('aria-describedby');
           const hint = described && document.getElementById(described);
+          // `textContent`, not `innerText`: from 0.27.0 the hint is
+          // screen-reader-only, and `innerText` is what is rendered — which is
+          // nothing, by design. A screen reader reads the text either way, and
+          // the text is what this finding is about.
           return {button: button ? (button.innerText || '').trim() : null,
                   describedby: described,
-                  hint: hint ? (hint.innerText || '').trim() : null};
+                  hint: hint ? (hint.textContent || '').trim() : null};
         })()
         """
     )
@@ -1819,7 +1829,7 @@ def _(d):
         )
 
 
-@finding("3.15", "the models table carries a size for the model actually in use")
+@finding("3.15", "the model actually in use carries a size")
 def _(d):
     # The ambiguity: the finding complains that 43 of 48 rows are empty and
     # that sorting by SIZE hides the five that are not. It does not say every
@@ -1851,26 +1861,13 @@ def _(d):
             "Privacy page reports as cached, shows no SIZE" % in_use
         )
 
-    d.open_view("about")
-    d.click_text("th, th button", "SIZE")
-    d.eval("new Promise(done => setTimeout(() => done(true), 600))")
-    column = d.eval(
-        """
-        [...document.querySelectorAll('table')]
-          .filter(t => /size/i.test(t.innerText))
-          .slice(-1)
-          .flatMap(t => [...t.querySelectorAll('tbody tr')])
-          .map(r => (r.querySelector('td:nth-child(3)') || {}).innerText || '')
-          .map(s => s.trim())
-        """
-    )
-    known = [i for i, value in enumerate(column) if value and value != "—"]
-    unknown = [i for i, value in enumerate(column) if not value or value == "—"]
-    if known and unknown and min(unknown) < max(known):
-        fail(
-            "sorting the models table by SIZE puts rows with no size before rows "
-            "that have one, so the sort control hides the only data in the column"
-        )
+    # The second half of this check drove the About page's models table and its
+    # SIZE sort. 0.27.0 removed that table: forty-eight rows of a catalogue of
+    # which any machine has fetched one, on a page the v4 design gives seven
+    # facts and a language table. What the finding was actually about survives
+    # above — the model in use has a size, and `/api/models` still says so —
+    # and 7.9 asserts the table is gone and both routes still answer. There is
+    # no sort control left to mis-sort.
 
 
 @finding("3.16", "the Retrieval ledger page shows the ledger")
@@ -2547,7 +2544,14 @@ def _(d):
     d.set_viewport(390, 844, mobile=True)
     try:
         d.open_view("search", fresh=True)
-        chips = rects(d, "[aria-pressed], .chip")
+        # The store chips, and only those. This read `[aria-pressed], .chip`,
+        # which is every chip-shaped control on the page and several that are
+        # not above the results at all — the search dials, and from 0.27.0 the
+        # sidebar's `Replay first-run screen`, which became a chip when the
+        # muted text it used to be stopped reading as a control. Counting those
+        # as store chips made the check report three rows where the store chips
+        # occupied one, which is a failure about the wrong thing.
+        chips = rects(d, ".store-chips .chip, .store-chips [aria-pressed]")
         store_chips = [c for c in chips if c["text"]]
         if len(store_chips) < 3:
             skip("fewer than three store chips are drawn here")
@@ -2844,22 +2848,27 @@ def _(d):
 # leaves a screenshot behind, which is what the release record carries.
 
 
-@finding("5.1", "the sidebar is the thirteen pages, in four groups, in order")
+@finding("5.1", "the sidebar is every page, in four groups, in order")
 def _(d):
-    """Updated for 0.26.1, which took the v3 design's four groups back.
+    """Updated for 0.26.1, which took the v3 design's four groups back, and
+    again for 0.27.0, which split one page into two.
 
-    The thirteen entries are unchanged and this still asserts every one of
-    them: what moved is the grouping. v4 flattened v3's Workspace / Explore /
-    Operate / Account into two groups of six and seven, which is a list with
-    two headings in it rather than a menu. `Account` held License and About;
-    the binary is free and has no licence page, so the fourth group is the two
-    pages that describe this machine.
+    v4 flattened v3's Workspace / Explore / Operate / Account into two groups
+    of six and seven, which is a list with two headings in it rather than a
+    menu. `Account` held License and About; the binary is free and has no
+    licence page, so the fourth group is the two pages that describe this
+    machine.
+
+    `Index` and `Inside the index` are the split: the controls that read a
+    folder and the figures about what has already been read were one page, and
+    the design draws two.
     """
     d.open_view("stores")
     labels = [t for t in texts_of(d, ".sidebar .nav-item") if t]
     expected = [
         "Stores",
         "Files",
+        "Index",
         "Inside the index",
         "Search",
         "Graph",
@@ -2967,24 +2976,48 @@ def _(d):
 
 @finding("5.5", "Inside the index states what the graph covers")
 def _(d):
-    d.open_view("index")
+    # `corpus` since 0.27.0. The indexing controls and the corpus figures were
+    # one page; they are the design's two again, and this is the second of
+    # them.
+    d.open_view("corpus")
     # The three cards are a scan of every call edge away, so this waits for
     # them rather than sleeping a fixed time and calling a slow store a bug.
     # The three cards are a scan of every call edge away, so this waits for
     # them rather than sleeping a fixed time and calling a slow store a bug.
     # Compared case-blind: the card titles are uppercased by the stylesheet,
     # and innerText reads what is rendered.
-    deadline = time.time() + 30
+    # Waits for `graph health`, which is the last of them.
+    #
+    # It waited for the language mix, and since 0.27.0 that card is drawn from
+    # `/api/corpus` while the other two come from a scan of every call edge
+    # behind `/api/stores?coverage=1` — so the mix was on screen a second
+    # before the cards this is really about, and the check read the page in
+    # between.
+    deadline = time.time() + 45
     while time.time() < deadline:
-        if "language mix" in view_text(d).lower():
+        if "graph health" in view_text(d).lower():
             break
         time.sleep(0.5)
+    time.sleep(0.5)
     body = view_text(d).lower()
-    for wanted in ["language mix", "chunks by month indexed", "graph health"]:
+    for wanted in ["language mix, by line", "chunks added per month", "graph health"]:
         if wanted not in body:
             fail("Inside the index is missing the %r card" % wanted)
-    if "call targets with no definition here" not in body:
+    if "unresolved targets" not in body or "names with several definitions" not in body:
         fail("Graph health does not state its unresolved targets: %s" % body[:400])
+    # Four tiers, and the same four the coverage table below reports. The page
+    # grouped `edges.confidence` for a while, which is a different question:
+    # it read `resolved 0 · ambiguous 0` directly above a table reading 2380
+    # and 2158.
+    for tier in ("extracted", "resolved", "ambiguous", "unresolved"):
+        if tier not in body:
+            fail("the call-edge tier %r is missing from Graph health" % tier)
+    # Twelve columns whatever the corpus holds: a store indexed this morning
+    # has one month in it, and one bar in a full-width card is a chart that has
+    # failed rather than a young corpus.
+    columns = d.eval("document.querySelectorAll('.month-col').length")
+    if columns != 12:
+        fail("the month chart draws %d columns; it should always draw 12" % columns)
     # Every bar is sized through the CSSOM, because the portal is served
     # under `style-src 'self'` and a width written into the markup is
     # blocked — silently, leaving every bar full width.
@@ -3027,9 +3060,27 @@ def _(d):
 def _(d):
     d.open_view("ledger")
     time.sleep(1)
+    # From 0.27.0 the rows and the replay are two tabs over one ledger rather
+    # than two stacked cards, so the replay's copy is behind its tab. The check
+    # presses it, which is what a reader does.
     body = view_text(d)
     if "Session replay" not in body:
         fail("the ledger page has no Session replay tab")
+    opened = d.eval(
+        """
+        (() => {
+          const tab = [...document.querySelectorAll('.tab')]
+            .find(t => /session replay/i.test(t.textContent || ''));
+          if (!tab) return false;
+          tab.click();
+          return true;
+        })()
+        """
+    )
+    if not opened:
+        fail("the ledger has no Session replay tab to open")
+    time.sleep(0.5)
+    body = view_text(d)
     if "Turn on under Privacy" not in body:
         fail("Session replay does not say where it is turned on: %s" % body[:300])
     state = d.api("/api/ledger/replay")
@@ -3037,6 +3088,48 @@ def _(d):
         skip("session replay is already on on this machine, so its off state cannot be checked")
     if state.get("sessions"):
         fail("session replay is off and returned sessions anyway: %s" % state)
+    # The off state is the design's dashed strip with the one button in the
+    # whole portal that goes to Privacy. It said "Turn it on under Privacy" and
+    # left the reader to find the page, which on a sidebar of thirteen items is
+    # a sentence and not a route.
+    if not exists(d, ".replay-off"):
+        fail("Session replay's off state is not the design's panel")
+    if "Session replay is off. Nothing is read from your agent logs" not in body:
+        fail("Session replay's off state does not say what is not being read: %s" % body[:300])
+    went = d.eval(
+        """
+        (() => {
+          const b = [...document.querySelectorAll('.replay-off button')]
+            .find(x => (x.textContent || '').trim() === 'Open Privacy');
+          if (!b) return false;
+          b.click();
+          return true;
+        })()
+        """
+    )
+    if not went:
+        fail("Session replay's off state has no `Open Privacy` button")
+    d.wait_for(
+        "(location.hash || '') === '#privacy'",
+        what="the Privacy page, after pressing Open Privacy",
+    )
+    # The page renders from three routes, so the hash changes before the card
+    # this is about is on screen.
+    # Waited for until it is enabled, not until it exists: the switch is
+    # drawn at once and disabled with an empty status line while the page asks
+    # the daemon which state it is in, and a slow runner read it in that gap.
+    d.wait_for(
+        "!!document.querySelector('.replay-switch:not([disabled]) .replay-state')",
+        what="the Privacy page's session replay switch, loaded",
+    )
+    # And the control it lands on is the design's switch, not the button that
+    # used to be there: the state is the row, and the row says which state it
+    # is in rather than which one pressing it would reach.
+    switch = text_of(d, ".replay-switch .replay-state", "the Privacy page's replay switch")
+    if not switch.startswith("Off ·"):
+        fail("the Privacy page's session replay switch reads %r" % switch)
+    if d.eval("document.querySelector('.replay-switch').getAttribute('aria-checked')") != "false":
+        fail("the session replay switch is not announced as an unchecked switch")
 
 
 @finding("5.8", "Reports generates all five, locally")
@@ -3101,7 +3194,8 @@ def _(d):
     pages = [
         ("impact", "Impact"),
         ("graph", "Graph"),
-        ("index", "Inside the index"),
+        ("index", "Index"),
+        ("corpus", "Inside the index"),
         ("ledger", "Retrieval ledger"),
         ("reports", "Reports"),
         ("cloud", "Cloud"),
@@ -3210,32 +3304,39 @@ def _(d):
     d.wait_for("(location.hash || '') === '#reports'", what="the route into Reports")
 
 
-@finding("6.5", "About states the MCP revisions and the licence")
+@finding("6.5", "About states the licence the binary ships under")
 def _(d):
+    """0.27.0 took the MCP revisions row off this page and this check with it.
+
+    The row named a wire contract an agent settles in its handshake and a person
+    never acts on, and the v4 design's About page is seven facts and a language
+    table. `/api/about` still returns `revisions`, so nothing that reads them
+    lost anything — which is why this check no longer looks for them on the
+    page. See 7.9, which asserts they are gone.
+    """
     d.open_view("about")
     body = view_text(d)
     about = d.api("/api/about")
-    for revision in about.get("revisions") or []:
-        if revision not in body:
-            fail(
-                "the About page does not state MCP revision %s, which this binary "
-                "negotiates" % revision
-            )
     if about["license"] not in body:
         fail("the About page does not state the licence the binary ships under")
 
 
-@finding("6.6", "the sidebar states whether the ledger is recording, and offers the first run again")
+@finding("6.6", "the sidebar states whether the ledger is recording")
 def _(d):
+    """0.27.0 took the `Replay first-run screen` control out of the sidebar and
+    this check's second half with it.
+
+    It was added in 0.26.1 on the reasoning that without it the first-run screen
+    is unreachable once a store exists. That is still true, and it was judged
+    not to be worth a permanent control in the sidebar of every page — the
+    screen is a first run, and `#welcome` still reaches it. What the daemon card
+    says about recording is the part of this finding that was about the sidebar
+    doing its job, and it is kept.
+    """
     d.open_view("stores")
     card = text_of(d, "#daemon-stores", "the daemon card's second line")
     recording = (d.api("/api/about")).get("ledger") is not False
     want("the daemon card's ledger state", "ledger on" in card, recording)
-    if "Replay first-run screen" not in view_text(d):
-        fail(
-            "the sidebar offers no way back to the first-run screen, so once a store "
-            "exists the page that explains the product is unreachable"
-        )
 
 
 @finding("6.7", "Reports previews the one report that is selected")
@@ -3394,3 +3495,380 @@ def _(d):
     live = d.api("/api/index/runs")
     if not any(r.get("store") == store for r in (live.get("runs") or [])):
         fail("the daemon dropped the run for %s when the page reloaded" % store)
+
+
+# ---------------------------------------------------------------- 0.27.0
+#
+# The 7.x block. Where 6.x asserted that each page says what the design says,
+# these assert the things 0.27.0 changed underneath every page at once — the
+# shared flex rule, the control shapes, the type scale, the bottom floor — plus
+# the two surfaces it built from nothing.
+#
+# The point of writing them here rather than checking them by hand once: every
+# one of these was found by opening the portal and looking at it, and the next
+# portal release should inherit the gate instead of finding them again.
+
+
+@finding("7.1", "a page whose content overflows scrolls to its end")
+def _(d):
+    """`.view > *` set `flex-shrink: 0` and `.scroller` put it back at equal
+    specificity and later in the file, so on any page that overflowed one child
+    absorbed the whole overflow: the page stopped scrolling and the scroller was
+    crushed toward zero with `.card { overflow: hidden }` clipping what was
+    inside it.
+
+    The Retrieval ledger was where it showed, but it was never a ledger bug —
+    five pages put a `.scroller` directly under `.view`. So this is asserted on
+    the ledger *and* on a second page, which is the whole reason it is one
+    check with a loop rather than two checks.
+    """
+    for view in ("ledger", "stores"):
+        d.open_view(view)
+        d.eval("(document.querySelector('.view') || {}).scrollTop = 1e6")
+        d.eval("new Promise(done => requestAnimationFrame(() => done(true)))")
+        crushed = d.eval(
+            """
+            (() => {
+              const s = document.querySelector('.view > .scroller');
+              if (!s) return null;
+              const r = s.getBoundingClientRect();
+              return r.height < 40 ? r.height : 0;
+            })()
+            """
+        )
+        if crushed:
+            fail(
+                "on %s the scroller under .view is %dpx tall — it absorbed the "
+                "page's overflow instead of the page scrolling" % (view, crushed)
+            )
+        # Every card that is on the page is a card that can be read: nothing
+        # below the fold may be clipped to nothing by the same rule.
+        clipped = d.eval(
+            """
+            [...document.querySelectorAll('.view .card')].filter(el => {
+              const r = el.getBoundingClientRect();
+              return r.height > 0 && el.scrollHeight > Math.ceil(r.height) + 2;
+            }).length
+            """
+        )
+        if clipped:
+            fail("on %s, %d card(s) are shorter than their own content" % (view, clipped))
+
+
+@finding("7.2", "every page ends with the design's floor under its last card")
+def _(d):
+    """`.view` was `20px 20px 24px` against the design's `24px 24px 44px`, so
+    every page ended 20px short and the last card sat against the viewport edge.
+
+    The graph page is the one recorded exception: it is `.graph-page`, has no
+    padding at all by design, and its canvas fills the frame.
+    """
+    views = ("stores", "ledger", "reports", "impact", "about", "privacy")
+    # Two widths, because the narrow breakpoint sets `.view`'s padding again
+    # and used to keep the old 24px while the base rule moved. A card against
+    # the bottom edge is truer on a phone than anywhere else.
+    try:
+        for width in (1280, 390):
+            d.set_viewport(width, 844 if width < 600 else 900, mobile=width < 600)
+            for view in views:
+                d.open_view(view, fresh=True)
+                floor = d.eval(
+                    "(() => { const v = document.querySelector('.view');"
+                    " return v ? getComputedStyle(v).paddingBottom : null; })()"
+                )
+                if floor is None:
+                    fail("%s has no .view to measure a floor on" % view)
+                want("the floor under %s at %dpx" % (view, width), floor, "44px")
+    finally:
+        d.reset_viewport()
+
+    # The graph page is the one recorded exception and must stay one: it is
+    # `.graph-page`, its canvas fills the frame, and a 44px band under it would
+    # be a band of empty panel.
+    d.open_view("graph")
+    if exists(d, ".graph-page > .view"):
+        fail("the graph page now roots on .view, so the recorded exception no longer applies")
+
+
+@finding("7.3", "no control in the portal renders as bare text")
+def _(d):
+    """`.button.ghost` had no background and no border, which is what made the
+    graph page's `Reset` read as a caption rather than as a control. It is gone
+    and all fourteen call sites take the secondary shape.
+
+    A pressed chip is the design's ink fill rather than a blue wash, and does
+    not change font weight — a chip that gained weight on press changed width on
+    press, so picking one in a wrapped row reflowed the row under the pointer.
+    """
+    for view in ("stores", "graph", "ledger", "reports", "impact", "agents"):
+        d.open_view(view)
+        bare = d.eval(
+            """
+            [...document.querySelectorAll('.view .button, .graph-page .button,'
+              + ' .search-page .button')].filter(el => {
+              const s = getComputedStyle(el);
+              const noFill = s.backgroundColor === 'rgba(0, 0, 0, 0)'
+                          || s.backgroundColor === 'transparent';
+              const noEdge = s.borderTopWidth === '0px'
+                          || s.borderTopStyle === 'none'
+                          || s.borderTopColor === 'rgba(0, 0, 0, 0)';
+              return noFill && noEdge;
+            }).map(el => (el.textContent || '').trim()).slice(0, 5)
+            """
+        )
+        if bare:
+            fail("on %s these controls have neither a background nor a border: %r" % (view, bare))
+        weights = d.eval(
+            """
+            (() => {
+              const on = [...document.querySelectorAll('.chip[aria-pressed="true"]')];
+              const off = [...document.querySelectorAll('.chip[aria-pressed="false"]')];
+              if (!on.length || !off.length) return null;
+              return [getComputedStyle(on[0]).fontWeight,
+                      getComputedStyle(off[0]).fontWeight];
+            })()
+            """
+        )
+        if weights and weights[0] != weights[1]:
+            fail(
+                "on %s a pressed chip is weight %s and an unpressed one is %s, so a "
+                "chip row reflows when one is picked" % (view, weights[0], weights[1])
+            )
+
+
+@finding("7.4", "no code block fades out at its right edge")
+def _(d):
+    """`pre.code` carried a 28px right-edge mask to say "the line continues".
+    Every block that class draws is a command a user is meant to select and
+    copy, and the fade made its last characters unreadable whether or not they
+    were the end of the line. The design's `<pre>` blocks scroll plainly.
+
+    The phone-only `.store-chips` mask is not a code block and is left alone.
+    """
+    for view in ("agents", "privacy"):
+        d.open_view(view)
+        masked = d.eval(
+            """
+            [...document.querySelectorAll('pre.code, .report-text, .copyfield .text,'
+              + ' .hit pre, .brief-text, .code-line, .log')].filter(el => {
+              const s = getComputedStyle(el);
+              return (s.maskImage && s.maskImage !== 'none')
+                  || (s.webkitMaskImage && s.webkitMaskImage !== 'none');
+            }).length
+            """
+        )
+        if masked:
+            fail("on %s, %d code surface(s) still fade at the right edge" % (view, masked))
+
+
+@finding("7.5", "the Impact page draws its canvas beside the answer")
+def _(d):
+    """The right column of this page was a large empty area: the design puts a
+    320px reverse-reachability canvas at the top of it and the implementation
+    never drew one at all, while the `Changing` row and the three figures sat in
+    two unboxed page-wide bands above both columns.
+    """
+    d.open_view("impact")
+    if not exists(d, ".impact-canvas-card"):
+        fail("the Impact page draws no canvas card")
+    caption = text_of(d, ".impact-canvas-card .canvas-caption", "the canvas caption")
+    if not caption.startswith("reverse reachability"):
+        fail("the canvas caption reads %r" % caption)
+    # The shared force canvas, not a painter of this page's own: the drag, the
+    # hover and the drift are that component's, and a second implementation of
+    # them here is a second set of behaviours to keep in step.
+    if not exists(d, ".impact-canvas-card .graph-canvas"):
+        fail("the Impact canvas is not the shared force canvas")
+    # The design's 320px, as a floor rather than as an exact height. It is drawn
+    # against a five-node mock; a real store answers with dozens, and the layout
+    # needs the room to keep its labels apart — so the card grows with the
+    # viewport and stops at 460.
+    height = d.eval(
+        "Math.round(document.querySelector('.impact-canvas-card').getBoundingClientRect().height)"
+    )
+    if height < 320 or height > 460:
+        fail("the canvas card is %dpx tall; it should sit between 320 and 460" % height)
+    # The `Changing` line and the three figures belong to a card in the left
+    # column, not to a band across the page.
+    if not exists(d, ".impact-subject-card .impact-subject-row"):
+        fail("the `Changing` row is not inside the left column's card")
+    if not exists(d, ".impact-subject-card .impact-stats"):
+        fail("the three figures are not inside the left column's card")
+    d.shot("7.5-impact-canvas")
+
+
+@finding("7.6", "the Impact canvas is alive: it draws, it settles, it keeps moving")
+def _(d):
+    """This canvas was a static ring painter — drawn once, redrawn only on a
+    resize. Nothing could be dragged, hovered or picked, and the picture never
+    moved. It is the shared force simulation now, as the design paints it, so
+    what this asserts is that the simulation is really running on this page and
+    not that a still image was produced.
+    """
+    # A symbol this corpus really has callers for, asked of the store rather
+    # than hard-coded. A name that reaches nothing is a fact about whatever
+    # happens to be indexed, and a check that failed on it would be measuring
+    # the fixture.
+    graph = d.api("/api/graph")
+    reachable = None
+    for node in (graph.get("nodes") or [])[:40]:
+        answer = d.api("/api/impact?name=%s&depth=3" % node["name"])
+        if ((answer.get("impact") or {}).get("reached") or []):
+            reachable = node["name"]
+            break
+    if not reachable:
+        skip(
+            "no symbol in the open store is reached by anything, so there is no "
+            "question to put to the canvas"
+        )
+
+    d.open_view("impact")
+    driven = d.eval(
+        """
+        (() => {
+          const box = document.querySelector('.impact-band input[type="search"]');
+          if (!box) return false;
+          box.value = %s;
+          box.dispatchEvent(new Event('input', {bubbles: true}));
+          box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+          return true;
+        })()
+        """
+        % json.dumps(reachable)
+    )
+    if not driven:
+        fail("the Impact page has no symbol field to drive")
+    d.wait_for(
+        "!!document.querySelector('.impact-results .impact-row')",
+        what="a reached row on the Impact page for %s" % reachable,
+    )
+    ink = """
+        (() => {
+          const c = document.querySelector('.impact-canvas-card .graph-canvas');
+          if (!c) return null;
+          const ctx = c.getContext('2d');
+          const px = ctx.getImageData(0, 0, c.width, c.height).data;
+          let lit = 0, sum = 0;
+          for (let i = 3; i < px.length; i += 4) {
+            if (px[i] > 0) { lit += 1; sum += i; }
+          }
+          return [lit, sum];
+        })()
+        """
+    first = d.eval(ink)
+    if not first or first[0] < 500:
+        fail(
+            "the Impact canvas is blank after asking about %s, which returned rows"
+            % reachable
+        )
+    # And it is still moving a moment later. The layout cools but never freezes:
+    # every node carries a slow wander, which is what makes this a live view of
+    # the subgraph rather than a picture of one.
+    #
+    # Skipped under reduced motion, where the canvas is deliberately solved once
+    # and left still — asserting drift there would be asserting against the
+    # accessibility preference the page is honouring.
+    still = d.eval("matchMedia('(prefers-reduced-motion: reduce)').matches")
+    if not still:
+        time.sleep(1.2)
+        later = d.eval(ink)
+        if later and later[1] == first[1]:
+            fail(
+                "the Impact canvas has not moved in 1.2s; the simulation is not "
+                "running on this page"
+            )
+    # The three figures are the same answer counted, so a canvas that drew and
+    # a card that did not would be two readings of one question.
+    reached = text_of(d, ".impact-subject-card .impact-stat .n", "the Reached figure")
+    if reached.strip() in ("", "0"):
+        fail("the Changing card still reads 0 Reached while the table has rows")
+    d.shot("7.6-impact-canvas")
+
+
+@finding("7.7", "the Reports builder offers a window and a scope, and the route takes them")
+def _(d):
+    """The page offered neither, and `/api/report` read a `store` parameter and
+    threw it away — a control the route ignored would have been worse than no
+    control, which is why the route work landed with the page.
+    """
+    d.open_view("reports")
+    for group, what in (("window", "a Window group"), ("scope", "a Scope group")):
+        if not exists(d, "[data-group='%s'] .chip" % group):
+            fail("the Reports builder offers no %s" % what)
+    formats = d.eval("document.querySelectorAll(\"[data-group='format'] .chip\").length")
+    want("the formats the builder offers", formats, 5)
+    # The route has to answer differently, not just accept the argument.
+    week = d.api("/api/report?kind=change&window=week")
+    month = d.api("/api/report?kind=change&window=month")
+    if week.get("text") == month.get("text"):
+        fail("/api/report returns the same change brief for a week and for a month")
+
+
+@finding("7.8", "a schedule the page adds is a schedule the daemon runs")
+def _(d):
+    """Schedules are the first persistent, daemon-owned, time-driven state in
+    the product, and the one thing that makes them worth having is that the
+    daemon really runs them. The card reflects what the daemon holds rather than
+    page state, so this reads the list back out of the route rather than off the
+    page it was typed into.
+    """
+    d.open_view("reports")
+    if not exists(d, ".schedules-card"):
+        fail("the Reports page has no Schedules card")
+    held = d.api("/api/schedules")
+    listed = d.eval("document.querySelectorAll('.schedules-card .schedule-row').length")
+    want("the rows the card draws", listed, len(held.get("schedules") or {}))
+    # A schedule whose destination has gone away says so on the card. Silent
+    # failure here is the worst available outcome: a schedule that reads `on`
+    # beside a folder that never fills.
+    broken = [s for s in (held.get("schedules") or {}).values() if s.get("last_error")]
+    if broken:
+        body = view_text(d)
+        for schedule in broken:
+            if "failed" not in body.lower():
+                fail("a schedule recorded an error and the card does not say so")
+    d.shot("7.8-schedules")
+
+
+@finding("7.9", "About has lost the two blocks the v4 page has no place for")
+def _(d):
+    """A forty-eight-row catalogue of embedding models, of which this machine
+    has fetched one, and a row of MCP protocol revisions an agent settles in its
+    handshake. Both routes still answer — what went is a table, not a capability.
+    """
+    d.open_view("about")
+    if exists(d, ".w-models"):
+        fail("the About page still draws the models table")
+    if "MCP revisions" in view_text(d):
+        fail("the About page still states the MCP revisions")
+    # The capability is untouched, which is the whole argument for removing the
+    # view: assert the routes rather than trusting the sentence.
+    if not (d.api("/api/models").get("models") or []):
+        fail("/api/models stopped answering when its portal view was removed")
+    if not (d.api("/api/about").get("revisions") or []):
+        fail("/api/about stopped returning the MCP revisions")
+
+
+@finding("7.10", "an unreadable store does not take the readable ones down with it")
+def _(d):
+    """One store whose database cannot be read made every route that aggregates
+    over `with_fleet` return `500 {"error":"disk I/O error"}`, so the Graph page
+    drew nothing and the message named neither the store nor the fact that the
+    others were fine.
+
+    The fixture for this is a damaged store, which the drive does not build —
+    when there is none registered, there is nothing to assert and the check says
+    so rather than passing quietly.
+    """
+    answer = d.api("/api/stores")
+    unreadable = [s for s in (answer.get("stores") or []) if s.get("unreadable")]
+    if not unreadable:
+        skip("no unreadable store is registered, so there is nothing to answer around")
+    for route in ("/api/graph", "/api/files"):
+        got = d.api(route)
+        failures = got.get("failed") or []
+        if not failures:
+            fail("%s answered with no failures listed while a store is unreadable" % route)
+        for entry in failures:
+            if not entry.get("store") or not entry.get("path"):
+                fail("%s reports a failure that names neither the store nor its path" % route)

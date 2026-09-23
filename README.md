@@ -374,7 +374,7 @@ tools over HTTP at `/mcp`:
 | `semlith_path` | The shortest chain of resolved edges between two symbols, or a refusal when it cannot get there without crossing a name it cannot pin down. |
 | `semlith_impact` | Everything that reaches a symbol, breadth first to a hop limit, with the files it lives in — who would notice if it changed. |
 | `semlith_trace` | A chain between two symbols as evidence: the answer sentence, the hops, and one supporting source line per hop, each marked a supporting fact or a candidate to corroborate. |
-| `semlith_report` | One of five reports — savings, access, change, health, gaps — from this machine's ledger, index and graph, as Markdown, CSV, JSON or print-styled HTML. |
+| `semlith_report` | One of five reports — savings, access, change, health, gaps — from this machine's ledger, index and graph, as Markdown, CSV, JSON, HTML or PDF. |
 | `semlith_languages` | Every name `lang` accepts, and the extensions and filenames behind each. |
 
 The write tools take the store's lock for the call and give it back; a store
@@ -452,7 +452,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **30** |
+| CLI commands | **31** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

@@ -326,6 +326,9 @@ const NAV_ICONS = {
   stores: "M12 4l8 4-8 4-8-4 8-4|M4 12l8 4 8-4|M4 16.5l8 4 8-4",
   files: "M6 3h7l5 5v13H6z|M13 3v5h5",
   index: "M4 6h16|M4 12h10|M4 18h13",
+  // The design's own mark for this page: two book spines. What is already on
+  // the shelf, as against `index`, which is the list of what to put there.
+  corpus: "M5 4h6v16H5z|M13 4h6v16h-6",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
   // v3's mark: a plain ruled page. The folded corner it grew in v4 reads as a
@@ -448,10 +451,12 @@ function empty(message) {
  * `overflow: auto`, so a scroll container clipped it. The Files page's path
  * tip — the reason the feature exists — was the one that could not be read.
  *
- * `show` takes content and the rectangle to hang it off. It prefers to sit
- * above and left-aligned, and flips or clamps when that would leave the
- * viewport. The Graph canvas uses the same element for its richer card, so
- * there is one implementation rather than two. */
+ * A pointer places it beside the pointer and it follows as the pointer moves,
+ * which is how the Graph canvas's card has always behaved and how the design
+ * draws every hover: one behaviour everywhere, rather than a card that tracks
+ * the mouse on one page and hangs off an element's corner on the next. Focus
+ * has no pointer, so a keyboard-shown tip hangs off the focused element
+ * instead, above it and flipped below when there is no room. */
 const tip = {
   node: null,
   owner: null,
@@ -464,22 +469,30 @@ const tip = {
     return this.node;
   },
 
-  /** `content` is a string or an element; `rect` is a viewport rectangle. */
-  show(content, rect, owner) {
+  /** Fill and open it; the caller places it. */
+  open(content, owner) {
     const node = this.ensure();
     this.owner = owner || null;
     fill(node, content);
     node.setAttribute("aria-hidden", "false");
+    node.dataset.open = "true";
+    return node;
+  },
+
+  /** Hang it off a viewport rectangle: `content` is a string or an element. */
+  show(content, rect, owner) {
+    const node = this.open(content, owner);
     // Measured after filling and before positioning: the size depends on the
     // text, and a stale measurement puts the flip decision on the wrong side.
-    node.dataset.open = "true";
-    const box = node.getBoundingClientRect();
+    // `offset*` rather than the bounding box, which the opening scale shrinks.
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
     const margin = 8;
     let left = rect.left;
-    if (left + box.width > window.innerWidth - margin) {
-      left = Math.max(margin, window.innerWidth - margin - box.width);
+    if (left + width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - margin - width);
     }
-    let top = rect.top - box.height - 6;
+    let top = rect.top - height - 6;
     // Above by default, below when there is no room — the flip the criterion
     // asks for, and the reason this is measured against the viewport.
     if (top < margin) top = rect.bottom + 6;
@@ -487,14 +500,37 @@ const tip = {
     node.style.top = `${Math.round(top)}px`;
   },
 
-  /** Hang a tip off an element. */
-  at(target, content) {
-    this.show(content || target.getAttribute("data-tip"), target.getBoundingClientRect(), target);
+  /** Keep an open tip beside the pointer: above and to the right of it,
+   * flipped to the left or below at the viewport's edge, as the design's
+   * `tipMove` places it. */
+  follow(x, y) {
+    const node = this.node;
+    if (!node) return;
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
+    const margin = 10;
+    let left = x + 14;
+    let top = y - height - 14;
+    if (left + width > window.innerWidth - margin) left = Math.max(margin, x - width - 14);
+    if (top < margin) top = y + 20;
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(top)}px`;
   },
 
-  /** Hang a tip off a point, for the canvas, which has no elements to hang on. */
+  /** What an element's own tip says: a card when it carries one, else text. */
+  contentOf(target) {
+    return target.hasAttribute("data-tip-title") ? tipCardOf(target) : target.getAttribute("data-tip");
+  },
+
+  /** Hang a tip off an element, for focus, which has no pointer to follow. */
+  at(target) {
+    this.show(this.contentOf(target), target.getBoundingClientRect(), target);
+  },
+
+  /** Open a tip beside a point: the canvases, and every pointer hover. */
   atPoint(x, y, content, owner) {
-    this.show(content, { left: x + 12, top: y - 8, bottom: y + 18 }, owner);
+    this.open(content, owner);
+    this.follow(x, y);
   },
 
   hide(owner) {
@@ -510,16 +546,24 @@ const tip = {
  * its rows fresh, and binding two listeners to each of a thousand cells is how
  * a scroll starts to stutter. */
 function wireTips() {
-  const find = (node) => (node && node.closest ? node.closest("[data-tip]") : null);
+  const find = (node) => (node && node.closest ? node.closest("[data-tip], [data-tip-title]") : null);
 
   document.addEventListener("pointerover", (e) => {
     const target = find(e.target);
-    if (target) tip.at(target);
-    else if (tip.owner && tip.owner.nodeType) tip.hide();
+    if (target) {
+      // Moving between an element's own children fires this again; the tip
+      // is already showing, and refilling it would only reset its fade.
+      if (tip.owner !== target) tip.atPoint(e.clientX, e.clientY, tip.contentOf(target), target);
+    } else if (tip.owner && tip.owner.nodeType) tip.hide();
+  });
+  // Follows the pointer across the element it describes, as the canvas's does.
+  document.addEventListener("pointermove", (e) => {
+    if (tip.owner && tip.owner.nodeType && tip.owner.contains(e.target)) tip.follow(e.clientX, e.clientY);
   });
   document.addEventListener("pointerout", (e) => {
     const target = find(e.target);
-    if (target) tip.hide(target);
+    // Into one of its own children is not leaving it.
+    if (target && !(e.relatedTarget && target.contains(e.relatedTarget))) tip.hide(target);
   });
   // Keyboard parity: focus shows the same label a hover does.
   document.addEventListener("focusin", (e) => {
@@ -690,7 +734,7 @@ function dataTable(spec) {
       foot,
       el("span", { class: "meta", text: `${n(from)}–${n(to)} of ${n(total)}` }),
       el("span", { class: "divider-v" }),
-      el("span", { class: "eyebrow", text: "per page" }),
+      el("span", { class: "eyebrow sm", text: "per page" }),
       el(
         "span",
         { class: "chips" },
@@ -710,7 +754,7 @@ function dataTable(spec) {
       ),
       el("span", { class: "spacer" }),
       el("button", {
-        class: "button ghost small",
+        class: "button secondary small",
         type: "button",
         text: "Prev",
         disabled: view.page <= 1,
@@ -721,7 +765,7 @@ function dataTable(spec) {
       }),
       el("span", { class: "meta", text: `Page ${n(view.page)} / ${n(pages())}` }),
       el("button", {
-        class: "button ghost small",
+        class: "button secondary small",
         type: "button",
         text: "Next",
         disabled: view.page >= pages(),
@@ -828,7 +872,7 @@ function folderPicker(options) {
               },
             }),
         el("button", {
-          class: "button ghost small",
+          class: "button secondary small",
           type: "button",
           text: "Close",
           onclick: () => {
@@ -1109,13 +1153,16 @@ const state = {
  * licence page, so the last group is the two pages that describe the machine
  * this is running on.
  *
- * Every page is in exactly one group, and the thirteen are the thirteen v4
- * draws: the grouping changed, not what there is.
+ * Every page is in exactly one group. The v4 design draws thirteen and this
+ * is fourteen: `Index` and `Inside the index` are two pages there and were
+ * one here, which is why the indexing controls and the corpus figures were
+ * stacked on top of each other.
  */
 const VIEWS = [
   { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
-  { group: "Workspace", id: "index", label: "Inside the index", title: "Inside the index" },
+  { group: "Workspace", id: "index", label: "Index", title: "Index" },
+  { group: "Workspace", id: "corpus", label: "Inside the index", title: "Inside the index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
   { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
   { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
@@ -1283,10 +1330,23 @@ const TICKING = new Set(["queued", "running", "paused", "stopping"]);
  * of their own, so it paints in place. */
 async function repaintView() {
   if (!shell.main) return;
-  const at = shell.main.querySelector(".scroller")?.scrollTop ?? 0;
+  const at = scrollHolder()?.scrollTop ?? 0;
   await render();
-  const scroller = shell.main?.querySelector(".scroller");
-  if (scroller) scroller.scrollTop = at;
+  const holder = scrollHolder();
+  if (holder) holder.scrollTop = at;
+}
+
+/* The element that actually scrolls on the page that is open.
+ *
+ * This used to read `.scroller`, which never scrolled: `.view` carries
+ * `overflow-y: auto` and is the scroll container, and `.scroller` is a stack
+ * inside it that takes the leftover height. So a live repaint of the ledger or
+ * the Stores table read 0 and wrote 0 back, and a reader watching rows arrive
+ * was returned to the top every time one did. `.view` first, and `.scroller`
+ * kept after it for any page that grows its own inner scroller later. */
+function scrollHolder() {
+  if (!shell.main) return null;
+  return shell.main.querySelector(".view") || shell.main.querySelector(".scroller");
 }
 
 
@@ -1315,6 +1375,62 @@ function graphInk() {
     selText: read("--accent-ink", "#1e2a35"),
     muted: read("--muted", "#64778a"),
   };
+}
+
+/* Stores that could not be read, over a page drawn from the ones that could.
+ *
+ * Issue #129: one store whose database cannot be opened used to make every
+ * route that reads across stores answer `500 disk I/O error`, so the Graph page
+ * drew nothing and the message named neither the store nor the fact that the
+ * others were fine. The routes answer partially now, and this is the other half
+ * — a page that quietly returned four stores' results where a reader expected
+ * five would be the same defect wearing a 200.
+ *
+ * Derived from the response every time, never accumulated: a store that comes
+ * back — a drive plugged in again — is simply absent from the next `failed`, and
+ * a notice that had remembered it would outlive the problem.
+ *
+ * No button. The remedy is `semlith drop`, and a one-click drop beside what may
+ * be an unplugged volume is how somebody loses a store they could have had back
+ * by plugging it in. The command is text they run themselves.
+ */
+function unreadableNotice(failed) {
+  if (!failed || !failed.length) return null;
+  const many = failed.length > 1;
+  return el(
+    "div",
+    { class: "notice bad" },
+    el("div", {
+      class: "what",
+      // The consequence first, because it is what changes how the page under
+      // this is read: these results are short by a store.
+      text: `${failed.length} store${many ? "s" : ""} could not be read, so ${
+        many ? "they are" : "it is"
+      } not in these results.`,
+    }),
+    el(
+      "div",
+      { class: "rows tight" },
+      failed.map((store) =>
+        el(
+          "details",
+          { class: "unreadable" },
+          el(
+            "summary",
+            {},
+            el("span", { class: "name", text: store.store }),
+            el("span", { class: "meta one-line", "data-tip": store.path, text: store.path }),
+          ),
+          el("p", { class: "subtitle", text: store.remedy }),
+          // The whole chain, behind the disclosure. It is the evidence, not
+          // the message: `database disk image is malformed: Error code 11: …`
+          // is what a reader pastes into an issue, not what tells them what
+          // happened.
+          el("pre", { class: "code", text: store.error }),
+        ),
+      ),
+    ),
+  );
 }
 
 /** The last two segments of a path: enough to recognise, short enough to read. */
@@ -1403,6 +1519,22 @@ function graphCanvas(options) {
   const ALPHA_FLOOR = 0;
   const DRIFT = 0.00003;
 
+  /* The box a node's centre may sit in, in fractions of the canvas.
+   *
+   * It used to be a flat 6% margin, which is a margin for a dot and not for a
+   * label: a box 200px wide on a 570px canvas has 100px of itself outside the
+   * frame at 0.94, so the Impact card sliced its outermost names in half. The
+   * margin is half the node's own measured width, so every label lands inside
+   * whatever canvas it is drawn on. Capped at 0.45 for the case where one
+   * label is wider than the canvas, which has nowhere to be put.
+   */
+  function pen(node, w, h) {
+    return {
+      mx: Math.min(0.45, ((node.w || 80) / 2 + 4) / w),
+      my: Math.min(0.45, ((node.h || 28) / 2 + 4) / h),
+    };
+  }
+
   function step(w, h) {
     const clock = performance.now() * 0.00028;
     for (let i = 0; i < nodes.length; i++) {
@@ -1463,9 +1595,10 @@ function graphCanvas(options) {
       node.vy = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vy));
       moved += Math.abs(node.vx) + Math.abs(node.vy);
       // Kept inside the frame: a node that drifts off-canvas is a node nobody
-      // can click.
-      node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
-      node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
+      // can click, and a label half outside it is a name nobody can read.
+      const bound = pen(node, w, h);
+      node.x = Math.min(1 - bound.mx, Math.max(bound.mx, node.x + node.vx));
+      node.y = Math.min(1 - bound.my, Math.max(bound.my, node.y + node.vy));
     }
     alpha = Math.max(ALPHA_FLOOR, alpha * 0.985);
     return moved;
@@ -1509,14 +1642,16 @@ function graphCanvas(options) {
           if (overX <= 0 || overY <= 0) continue;
           // Along whichever axis needs the smaller move, so a label is nudged
           // aside rather than thrown across the canvas.
+          const pa = pen(a, w, h);
+          const pb = pen(b, w, h);
           if (overX / w < overY / h) {
             const push = ((dx >= 0 ? 1 : -1) * overX) / w / 2;
-            a.x = Math.min(0.94, Math.max(0.06, a.x - push));
-            b.x = Math.min(0.94, Math.max(0.06, b.x + push));
+            a.x = Math.min(1 - pa.mx, Math.max(pa.mx, a.x - push));
+            b.x = Math.min(1 - pb.mx, Math.max(pb.mx, b.x + push));
           } else {
             const push = ((dy >= 0 ? 1 : -1) * overY) / h / 2;
-            a.y = Math.min(0.92, Math.max(0.08, a.y - push));
-            b.y = Math.min(0.92, Math.max(0.08, b.y + push));
+            a.y = Math.min(1 - pa.my, Math.max(pa.my, a.y - push));
+            b.y = Math.min(1 - pb.my, Math.max(pb.my, b.y + push));
           }
         }
       }
@@ -1684,8 +1819,9 @@ function graphCanvas(options) {
   canvas.addEventListener("pointermove", (event) => {
     const point = at(event);
     if (dragging) {
-      dragging.x = Math.min(0.94, Math.max(0.06, point.x / point.w));
-      dragging.y = Math.min(0.92, Math.max(0.08, point.y / point.h));
+      const bound = pen(dragging, point.w, point.h);
+      dragging.x = Math.min(1 - bound.mx, Math.max(bound.mx, point.x / point.w));
+      dragging.y = Math.min(1 - bound.my, Math.max(bound.my, point.y / point.h));
       if (!frame) paint();
       return;
     }
@@ -1905,6 +2041,7 @@ async function graphView() {
   const chosen = new Set();
   const meta = el("span", { class: "graph-count" });
   const rail = el("div", { class: "graph-rail" });
+  const unreadable = el("div", { class: "unreadable-slot" });
 
   const canvas = graphCanvas({
     onPick: (node) => select(node),
@@ -1913,31 +2050,16 @@ async function graphView() {
       tip.atPoint(
         x,
         y,
-        [
-          el(
-            "div",
-            { class: "tip-head" },
-            el("i", {}),
-            node.name,
-          ),
-          row("kind", node.kind),
-          row("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`),
-          row("store", node.store || (state.stores[0] && state.stores[0].name) || "—"),
-          row("calls", `${node.callers} in · ${node.callees} out`),
-        ],
+        tipCard(node.name, "blue", [
+          ["kind", node.kind],
+          ["file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`],
+          ["store", node.store || (state.stores[0] && state.stores[0].name) || "—"],
+          ["calls", `${node.callers} in · ${node.callees} out`],
+        ]),
         "graph",
       );
     },
   });
-
-  function row(key, value) {
-    return el(
-      "div",
-      { class: "tip-row" },
-      el("span", { class: "k", text: key }),
-      el("span", { class: "v", text: String(value) }),
-    );
-  }
 
   const pause = el("button", {
     class: "button secondary small",
@@ -1958,7 +2080,7 @@ async function graphView() {
     onclick: () => canvas.fit(),
   });
   const reset = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     text: "Reset",
     onclick: () => load({}),
@@ -2148,7 +2270,10 @@ async function graphView() {
         // index" are different facts.
         data.hidden
           ? el("button", {
-              class: "link-button quiet",
+              // A chip, not muted text. At 11px in `--muted` this read as a
+              // caption about the list rather than as the control that opens
+              // the rest of it, which is the whole of why it was missed.
+              class: "chip sm",
               type: "button",
               text: `Show ${data.hidden} unresolved`,
               onclick: async (e) => {
@@ -2234,6 +2359,11 @@ async function graphView() {
       meta.textContent = "";
       return fill(rail, error(e.message));
     }
+    // Stores that did not answer, over the graph the rest of them drew. This
+    // page was the whole of issue #129: one unreadable store used to make it
+    // draw nothing at all, with a message naming neither the store nor the
+    // fact that the others were fine.
+    fill(unreadable, unreadableNotice(data.failed));
     if (!data.nodes.length) {
       meta.textContent = "0 symbols";
       canvas.draw({ nodes: [], edges: [] }, kinds);
@@ -2290,7 +2420,7 @@ async function graphView() {
     },
   });
   const scopeButton = el("button", {
-    class: "button secondary small",
+    class: "button secondary small in-field",
     type: "button",
     text: "Scope",
     onclick: () => applyScope(),
@@ -2333,6 +2463,7 @@ async function graphView() {
   const page = el(
     "div",
     { class: "graph-page" },
+    unreadable,
     el(
       "div",
       { class: "graph-band" },
@@ -2349,12 +2480,18 @@ async function graphView() {
           { class: "graph-scope" },
           icon(ICONS.search, 16),
           labelled("graph-scope", "Scope the graph", scopeInput),
-          scopeButton,
+          /* `Enter applies it` was a visible sentence inside the field's own
+           * border, which pushed the button off its end. It is still here, and
+           * still the thing `aria-describedby` on the input points at — a
+           * dangling `aria-describedby` is worse than the sentence was. What
+           * changed is that it is read rather than seen: the button beside it
+           * says the same thing to anybody looking at the field. */
           el("span", {
-            class: "meta",
+            class: "sr-only",
             id: "graph-scope-hint",
             text: "Enter applies it",
           }),
+          scopeButton,
         ),
         storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
       ),
@@ -2465,6 +2602,23 @@ async function ledgerView() {
         ],
       },
     ),
+    // Directly under the head, where the design puts it. It was second from
+    // the bottom of the page, so a ledger that had recorded nothing said so
+    // after everything it had failed to record.
+    on
+      ? null
+      : el(
+          "div",
+          { class: "notice" },
+          el("div", { class: "what", text: "Recording is off" }),
+          el(
+            "div",
+            {},
+            "The daemon was started with ",
+            mono("--no-ledger"),
+            ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
+          ),
+        ),
     // Six across, then two wide, then who asked — the order the design puts
     // them in, and the order they are read in: what was asked, what it cost,
     // what it saved, and how much of the ledger that figure covers.
@@ -2513,10 +2667,13 @@ async function ledgerView() {
        * a question semlith could not answer, and a file an agent read whole
        * without asking — and subtracting one number from another counted them
        * as the same thing. */
+      /* A share, as the v4 design draws it. `0 of 4` is two numbers a reader
+       * has to divide; the percentage is the thing they were dividing for, and
+       * the count is kept in the caption so the denominator is never lost. */
       stat(
         "Zero-hit",
-        `${n(data.zero_hit || 0)} of ${n(data.queries)}`,
-        "queries the corpus could not answer — recorded, and credited nothing",
+        `${share(data.zero_hit || 0, data.queries || 0)}`,
+        `${n(data.zero_hit || 0)} of ${n(data.queries)} queries the corpus could not answer — recorded, and credited nothing`,
       ),
       /* The figure the savings claim is defended against: what an agent read
        * whole anyway, on a file this store holds. Measured on a client with the
@@ -2533,19 +2690,19 @@ async function ledgerView() {
       stat("Tier", data.tier || "modelled", "modelled · measured — measured when the store's own tokenizer counted it"),
     ),
     clientBreakdown(data.by_client),
-    // The rows themselves. The page called itself a debugging trail and an
-    // audit record and had no table on it at all — three snippets telling the
-    // reader to go and run `semlith ledger` in a terminal instead, which is
-    // also the portal-parity rule broken: the CLI prints rows, so this does.
-    ledgerSessions(data),
-    sessionReplay(),
-    ledgerRows(data),
+    /* From here the page is the design's order, which it was not.
+     *
+     * The three command cards were at the foot, under everything, where the
+     * design puts them sixth — directly after the by-client line and before
+     * the tabs. Session replay sat between the session list and the rows
+     * table; the design has it last of the cards, after the rows it annotates,
+     * which is also the only order in which it means anything. And the
+     * recording-off notice was second from the bottom, so a page that was
+     * recording nothing said so after everything it had failed to record; it
+     * is now directly under the page head. */
     el(
       "div",
-      { class: "scroller" },
-      el(
-        "div",
-        { class: "grid three" },
+      { class: "grid three" },
         el(
           "div",
           { class: "card pad dense" },
@@ -2579,34 +2736,27 @@ async function ledgerView() {
             text: "Run the daemon without recording, for this session only. SEMLITH_LEDGER=0 does the same for a machine.",
           }),
         ),
-      ),
-      on
-        ? null
-        : el(
-            "div",
-            { class: "notice" },
-            el("div", { class: "what", text: "Recording is off" }),
-            el(
-              "div",
-              {},
-              "The daemon was started with ",
-              mono("--no-ledger"),
-              ". Start it without that flag to record what your agents retrieve. Nothing is sent anywhere; the rows live in the store beside the chunks.",
-            ),
-          ),
-      says(
-        "Stored in ",
-        mono("~/.semlith/stores/<name>/store.db"),
-        ", table ",
-        mono("retrievals"),
-        ". On by default; ",
-        mono("--no-ledger"),
-        " or ",
-        mono("SEMLITH_LEDGER=0"),
-        " turns it off, and deleting the rows is one ",
-        mono("DELETE"),
-        ".",
-      ),
+    ),
+    /* Two tabs rather than three stacked cards, as the v4 design has it.
+     *
+     * The rows and the replay are two readings of the same ledger, and stacked
+     * they made a long page where the second one was found by scrolling past
+     * the first. A tab says they are alternatives. The sessions table keeps its
+     * own card above them, because it is the summary both tabs are of. */
+    ledgerSessions(data),
+    ledgerTabs(data),
+    says(
+      "Stored in ",
+      mono("~/.semlith/stores/<name>/store.db"),
+      ", table ",
+      mono("retrievals"),
+      ". On by default; ",
+      mono("--no-ledger"),
+      " or ",
+      mono("SEMLITH_LEDGER=0"),
+      " turns it off, and deleting the rows is one ",
+      mono("DELETE"),
+      ".",
     ),
   );
 }
@@ -2616,27 +2766,54 @@ async function ledgerView() {
  * Off unless turned on, because what it reads belongs to another program.
  * The row says what would be read and from where before anything is, so the
  * answer to "what does this turn on" is on the page rather than in a doc. */
+/* The Privacy page's session replay control.
+ *
+ * The design draws this as a clickable row rather than as a heading with a
+ * button beside it: a 15px square knob, a status line, and the sentence that
+ * says what turning it on does, all inside one hit target that changes colour
+ * with the state. The button it replaced said `Turn on` and left the reader to
+ * infer the state from a paragraph under it.
+ *
+ * It is not a `checkbox` element because it is not one control in a form; it
+ * is the whole row. The ARIA is `switch`, which is what it behaves like, and
+ * the keyboard reaches it because it is a `button`.
+ */
 function sessionReplayToggle() {
   const state_ = { enabled: false, from: "", client: "" };
-  const note = el("p", { class: "note" });
-  const button = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Loading…",
-    disabled: true,
-  });
+  const knob = el("span", { class: "knob", "aria-hidden": "true" });
+  const status = el("span", { class: "replay-state" });
+  const row = el(
+    "button",
+    { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false", disabled: true },
+    knob,
+    el(
+      "span",
+      { class: "replay-switch-text" },
+      status,
+      el("span", {
+        class: "replay-switch-note",
+        text: "Session replay reads this machine's agent session logs to confirm what an agent did after a semlith answer. Off by default. Local only. Nothing is uploaded.",
+      }),
+    ),
+  );
+  const failure = el("p", { class: "note" });
 
   function paint() {
-    button.disabled = false;
-    button.textContent = state_.enabled ? "Turn off" : "Turn on";
-    button.classList.toggle("on", state_.enabled);
-    note.textContent = state_.enabled
-      ? `On. The Retrieval ledger's Session replay tab reads ${state_.client} transcripts under ${state_.from} to mark what happened after each answer. Nothing is sent anywhere.`
-      : `Off. Nothing reads ${state_.from || "this machine's agent transcripts"}. Turning this on lets the ledger's Session replay tab mark each answer as a refund, a miss or an edit — locally, and still sent nowhere.`;
+    row.disabled = false;
+    row.classList.toggle("on", state_.enabled);
+    row.setAttribute("aria-checked", String(state_.enabled));
+    /* The design's two status lines, verbatim. Where the transcripts are read
+     * from is appended when this machine has told us, because `no agent log is
+     * opened` is a claim about a directory and a reader may want to know
+     * which. */
+    status.textContent = state_.enabled
+      ? `On · reading local agent logs${state_.from ? ` under ${state_.from}` : ""}`
+      : "Off · no agent log is opened";
   }
 
-  button.addEventListener("click", async () => {
-    button.disabled = true;
+  row.addEventListener("click", async () => {
+    row.disabled = true;
+    failure.textContent = "";
     try {
       const answer = await api("/api/ledger/replay", {
         method: "POST",
@@ -2645,8 +2822,8 @@ function sessionReplayToggle() {
       });
       state_.enabled = !!answer.enabled;
     } catch (e) {
-      note.textContent = e.message;
-      button.disabled = false;
+      failure.textContent = e.message;
+      row.disabled = false;
       return;
     }
     paint();
@@ -2667,14 +2844,9 @@ function sessionReplayToggle() {
   return el(
     "div",
     { class: "card pad" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Session replay" }),
-      el("span", { class: "spacer" }),
-      button,
-    ),
-    note,
+    el("div", { class: "card-head" }, el("h2", { text: "Session replay" })),
+    row,
+    failure,
   );
 }
 
@@ -2684,11 +2856,97 @@ function sessionReplayToggle() {
  * page's toggle is on. Nothing read here is sent anywhere — the files belong
  * to another program, which is exactly why the toggle exists and why the tab
  * says where it read from. */
-function sessionReplay() {
+/** The rows and the replay, as two tabs over one ledger. */
+function ledgerTabs(data) {
+  const panel = el("div", { class: "tab-panel" });
+  const views = [
+    ["Retrievals", () => ledgerRows(data)],
+    ["Session replay", () => sessionReplay(data)],
+  ];
+  const buttons = views.map(([label], i) =>
+    el("button", {
+      class: "tab",
+      type: "button",
+      text: label,
+      "aria-pressed": String(i === 0),
+      onclick: () => show(i),
+    }),
+  );
+
+  function show(index) {
+    buttons.forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
+    fill(panel, views[index][1]());
+  }
+
+  show(0);
+  return el("div", { class: "rows tight" }, el("div", { class: "tabs" }, buttons), panel);
+}
+
+function sessionReplay(ledger) {
   const body = el("div", { class: "replay-body" });
+  // `sess-7f21 · Claude Code · 41 queries` in the design: which transcript, the
+  // client it belongs to, and how much of it this panel is about.
+  const meta = el("span", { class: "replay-meta", text: "reading…" });
+
+  /* The ledger's own row for one question, if it has one.
+   *
+   * The transcript knows what was asked and what the agent did next; it does
+   * not know what the answer cost, because that is semlith's own record. The
+   * design prints both on one line, so they are joined here — on the query
+   * text, over the rows the Retrievals tab already fetched, newest first. No
+   * round trip, and no second reading of the ledger.
+   *
+   * A query asked twice matches the newer row. That is a join on text rather
+   * than on identity: the transcript carries no retrieval id, and minting one
+   * to match against would be a change to the protocol for a subtitle.
+   */
+  const rows = (ledger && ledger.rows) || [];
+  function costOf(query) {
+    if (!query) return "";
+    const row = rows.find((r) => (r.query || "") === query);
+    if (!row) return "";
+    const hits = row.hits === undefined ? null : row.hits;
+    const tokens = row.net_tokens === undefined ? row.tokens : row.net_tokens;
+    const parts = [];
+    if (hits !== null) parts.push(`${hits} hit${hits === 1 ? "" : "s"}`);
+    if (tokens !== undefined && tokens !== null) parts.push(`${n(tokens)} tokens`);
+    return parts.join(" · ");
+  }
+
+  /** `14:22:08` in the reader's own zone, from the transcript's timestamp. */
+  function clockOf(at) {
+    if (!at) return "—";
+    const when = new Date(at);
+    if (Number.isNaN(when.getTime())) return "—";
+    return when.toLocaleTimeString(undefined, { hour12: false });
+  }
+
+  function answerRow(answer) {
+    const cost = costOf(answer.query);
+    return el(
+      "div",
+      { class: "replay-answer" },
+      el("span", { class: "at", text: clockOf(answer.at) }),
+      el(
+        "div",
+        { class: "replay-what" },
+        el(
+          "div",
+          { class: "line one" },
+          // The question, and beside it what it cost. A call whose input this
+          // build does not know how to read has no question, so the tool's own
+          // name stands in — once, not in both slots, which printed
+          // `semlith_stats semlith_stats`.
+          el("span", { class: "q", text: answer.query || answer.tool }),
+          el("span", { class: "muted", text: answer.query ? cost || answer.tool : cost }),
+        ),
+        el("span", { class: `replay-badge ${answer.outcome}`, text: answer.word }),
+      ),
+    );
+  }
 
   function counts(session) {
-    const rows = [
+    const shown = [
       ["read the whole file", session.refund, "refund"],
       ["grepped anyway", session.miss, "miss"],
       ["edited", session.sufficed, "sufficed"],
@@ -2697,11 +2955,29 @@ function sessionReplay() {
     return el(
       "span",
       { class: "replay-counts" },
-      rows.map(([label, count, kind]) =>
-        count
-          ? el("span", { class: `replay-count ${kind}`, text: `${count} ${label}` })
-          : null,
+      shown.map(([label, count, kind]) =>
+        count ? el("span", { class: `replay-count ${kind}`, text: `${count} ${label}` }) : null,
       ),
+    );
+  }
+
+  /* The off state, as the design draws it: one dashed strip, the sentence, and
+   * the one button in the prototype that goes to Privacy. The button is here
+   * rather than a line of prose telling the reader to find the page, because
+   * this panel is where somebody discovers the feature exists. */
+  function offPanel() {
+    return el(
+      "div",
+      { class: "replay-off" },
+      el("p", {
+        text: "Session replay is off. Nothing is read from your agent logs until you turn it on.",
+      }),
+      el("button", {
+        class: "button secondary small",
+        type: "button",
+        text: "Open Privacy",
+        onclick: () => go("privacy"),
+      }),
     );
   }
 
@@ -2710,20 +2986,18 @@ function sessionReplay() {
     try {
       data = await api("/api/ledger/replay");
     } catch (e) {
+      meta.textContent = "";
       fill(body, error(e.message));
       return;
     }
+    const client = data.client === "claude-code" ? "Claude Code" : data.client || "an agent";
     if (!data.enabled) {
-      fill(
-        body,
-        el("p", {
-          class: "subtitle",
-          text: "Off. Turn it on under Privacy and this reads this machine's agent transcripts to mark what happened after each answer. Nothing is sent anywhere.",
-        }),
-      );
+      meta.textContent = `off · ${client}`;
+      fill(body, offPanel());
       return;
     }
     if (!data.sessions.length) {
+      meta.textContent = `on · ${client} · no transcript yet`;
       fill(
         body,
         el("p", {
@@ -2733,15 +3007,18 @@ function sessionReplay() {
       );
       return;
     }
+    const answers = data.sessions.reduce((sum, session) => sum + session.answers, 0);
+    const newest = data.sessions[0];
+    meta.textContent = `${newest.id.slice(0, 12)} · ${client} · ${n(answers)} quer${answers === 1 ? "y" : "ies"}`;
     fill(
       body,
       el("p", {
         class: "note",
-        text: `Read from ${data.client} transcripts under ${data.from}${data.skipped ? `, ${data.skipped} older transcript${data.skipped === 1 ? "" : "s"} not read` : ""}.`,
+        text: `Read from ${client} transcripts under ${data.from}${data.skipped ? `, ${data.skipped} older transcript${data.skipped === 1 ? "" : "s"} not read` : ""}.`,
       }),
       data.sessions.map((session) =>
         el(
-          "div",
+          "section",
           { class: "replay-row" },
           el(
             "span",
@@ -2755,6 +3032,16 @@ function sessionReplay() {
             }),
           ),
           counts(session),
+          // The timeline the design draws. `recent` is capped in the reader, so
+          // a long session says how much of itself is shown rather than
+          // silently ending early.
+          (session.recent || []).map(answerRow),
+          session.answers > (session.recent || []).length
+            ? el("p", {
+                class: "rail-hint",
+                text: `The last ${(session.recent || []).length} of ${session.answers}.`,
+              })
+            : null,
         ),
       ),
     );
@@ -2764,7 +3051,12 @@ function sessionReplay() {
   return el(
     "div",
     { class: "card pad" },
-    el("span", { class: "card-title", text: "Session replay" }),
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Session replay" }),
+      meta,
+    ),
     el("p", {
       class: "subtitle",
       text: "Read from this machine's agent session logs, never sent anywhere. Turn on under Privacy.",
@@ -3030,10 +3322,14 @@ function ledgerRows(data) {
     ],
   });
   table.update(rows, rows.length);
+  /* The table, and nothing around it.
+   *
+   * It was inside a `card pad` headed `The rows`, under a tab already labelled
+   * `Retrievals` — a title restating its tab, and a card border immediately
+   * inside the panel's own. The table brings its own surface. */
   return el(
     "div",
-    { class: "card pad" },
-    el("span", { class: "card-title", text: "The rows" }),
+    { class: "rows tight" },
     rows.length
       ? table.node
       : empty("Nothing recorded yet. A search from any client writes a row here."),
@@ -3062,7 +3358,7 @@ function clientBreakdown(byClient) {
     // reads as a caption for the cards rather than as its own fact. The line
     // after it is the fact: these are the client's own names, from the MCP
     // handshake, not a guess made here.
-    el("span", { class: "eyebrow", text: "by client" }),
+    el("span", { class: "eyebrow sm", text: "by client" }),
     entries.map(([client, count], i) =>
       el(
         "span",
@@ -3098,11 +3394,14 @@ function liveStores() {
   });
 }
 
-/** Read the store list into `state`, so every view agrees on how many exist. *//** Read the store list into `state`, so every view agrees on how many exist. */
+/** Read the store list into `state`, so every view agrees on how many exist. */
 async function refreshStores() {
   try {
     const data = await api("/api/stores");
     state.stores = data.stores || [];
+    // Kept on the state rather than drawn here, because this runs before every
+    // view and the view decides where a notice belongs on its own page.
+    state.failed = data.failed || [];
     paintStoreCount();
   } catch (_) {
     // A failed refresh must not empty the list: `state.stores.length` decides
@@ -3627,11 +3926,6 @@ async function storesView() {
     "div",
     { class: "view" },
     head,
-    picker.node,
-    adoptNote,
-    rootPicker.node,
-    rootNote,
-    el("div", { class: "note page-note" }),
     el(
       "div",
       { class: "strip" },
@@ -3694,6 +3988,18 @@ async function storesView() {
         agentsCard(),
       ),
     ),
+    /* The four ways into this page, after the table they act on.
+     *
+     * They stood between the page head and the stat strip, which put four
+     * stacked blocks of picker between a reader and the thing they came for.
+     * The design has the two affordances they cover — `Adopt existing
+     * .semlith` and `Index a folder` — as two buttons in the header row, and
+     * those are still there; these are the panels they open. */
+    picker.node,
+    adoptNote,
+    rootPicker.node,
+    rootNote,
+    el("div", { class: "note page-note" }),
   );
 }
 
@@ -3714,6 +4020,7 @@ async function filesView() {
   const chosenExt = new Set();
   const summary = el("span", { class: "pill" });
   const holder = el("div", {});
+  const unreadable = el("div", { class: "unreadable-slot" });
   /* Announced rather than only drawn: a Forget made the row disappear and said
    * nothing anywhere a screen reader would hear it. */
   const announcer = el("div", { class: "sr-only", role: "status", "aria-live": "polite" });
@@ -3796,7 +4103,7 @@ async function filesView() {
       matches > many
         ? matches <= FILES_SELECTABLE
           ? el("button", {
-              class: "button ghost small",
+              class: "button secondary small",
               type: "button",
               text: `Select all ${n(matches)} matches`,
               onclick: () => selectEveryMatch(),
@@ -3810,7 +4117,7 @@ async function filesView() {
         : null,
       el("span", { class: "spacer" }),
       el("button", {
-        class: "button ghost small",
+        class: "button secondary small",
         type: "button",
         text: "Clear",
         onclick: () => {
@@ -4023,6 +4330,7 @@ async function filesView() {
       return;
     }
     if (mine !== generation) return;
+    fill(unreadable, unreadableNotice(data.failed));
 
     summary.textContent = `${n(data.total)} files · ${n(data.formats)} format${
       data.formats === 1 ? "" : "s"
@@ -4109,6 +4417,7 @@ async function filesView() {
   return el(
     "div",
     { class: "view" },
+    unreadable,
     pageHead(
       "Files",
       "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
@@ -4347,13 +4656,14 @@ async function searchView() {
       tip.atPoint(
         x,
         y,
-        [
-          el("div", { class: "tip-head" }, el("i", {}), node.name),
-          node.kind ? egoRow("kind", node.kind) : null,
-          node.path
-            ? egoRow("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`)
-            : null,
-        ].filter(Boolean),
+        tipCard(
+          node.name,
+          "blue",
+          [
+            node.kind ? ["kind", node.kind] : null,
+            node.path ? ["file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`] : null,
+          ].filter(Boolean),
+        ),
         "ego",
       );
     },
@@ -5118,16 +5428,6 @@ async function searchView() {
  * A caller or callee row is an `EdgeEnd`, which flattens the symbol it
  * reached into itself: the name is on the row, not under a `symbol` key, and
  * `kind` is the edge's kind rather than the symbol's. */
-/** One `key  value` line in the ego panel's hover card. */
-function egoRow(key, value) {
-  return el(
-    "div",
-    { class: "tip-row" },
-    el("span", { class: "k", text: key }),
-    el("span", { class: "v", text: String(value) }),
-  );
-}
-
 function egoGraph(name, data) {
   const centre = (data.symbols || [])[0] || {};
   const nodes = [
@@ -5205,7 +5505,11 @@ function sized(property, share, attrs) {
   return node;
 }
 
-function healthPanel() {
+function healthPanel(options) {
+  // `languages: false` for a page that draws the mix itself, by line rather
+  // than by file. Two language cards on one page are two answers to one
+  // question, and the reader cannot tell which is which.
+  const withLanguages = !options || options.languages !== false;
   // A placeholder rather than an empty element: the read is a scan of every
   // call edge, so on a large store the three cards are a second or two away,
   // and a gap where a card will be reads as a page that has finished.
@@ -5214,7 +5518,7 @@ function healthPanel() {
     { class: "health" },
     // Three cards are coming, so three cards of skeleton: the read is a
     // scan of every call edge and on a large store it is a second or two.
-    el("section", { class: "health-card" }, skeletonRows(5)),
+    withLanguages ? el("section", { class: "health-card" }, skeletonRows(5)) : null,
     el("section", { class: "health-card" }, skeletonRows(4)),
     el("section", { class: "health-card" }, skeletonRows(6)),
   );
@@ -5321,7 +5625,7 @@ function healthPanel() {
 
     fill(
       node,
-      el(
+      !withLanguages ? null : el(
         "section",
         { class: "health-card" },
         el("span", { class: "eyebrow", text: "Language mix" }),
@@ -5564,9 +5868,9 @@ function runCard(run, controls) {
   const where = el("span", { class: "meta" });
 
   const pause = el("button", { class: "button secondary small", type: "button" });
-  const stop = el("button", { class: "button ghost small", type: "button" });
+  const stop = el("button", { class: "button secondary small", type: "button" });
   const remove = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     text: "Remove",
     title: "Dismiss this card. The store is not touched.",
@@ -5575,7 +5879,7 @@ function runCard(run, controls) {
    * finished runs used to be four full cards with their whole logs, and the
    * live one was appended below them, off the bottom of the screen. */
   const expand = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     "aria-expanded": "false",
   });
@@ -5809,50 +6113,74 @@ function logText(event) {
 }
 
 /** One of the three settings, with what the machine derived and why. */
+/** Why a given setting stops where it does, in the machine's own terms. */
+function capped(limit) {
+  return limit.ceiling === limit.derived
+    ? "It is already what this machine derives."
+    : "Past it the machine would be promising work it cannot carry.";
+}
+
 function settingField(key, label, limit, onSave) {
   const fixed = limit.source === "environment";
   const input = el("input", {
     type: "number",
     min: "1",
+    // The field will not go above what the machine will accept, and the route
+    // clamps it as well — a `max` on an input is a courtesy, not a control.
+    max: String(limit.ceiling),
     value: String(limit.value),
     disabled: fixed,
     "aria-label": label,
   });
   const why = el("div", { class: "note" });
 
+  /* What the field says under itself.
+   *
+   * None of this is a warning any more. Changing these is the ordinary thing
+   * to do with them — a laptop doing nothing else can index harder than the
+   * default — and the panel used to answer every such change in red, which
+   * reads as "you have broken something" rather than "here is what that
+   * means". The only genuinely constrained case is the ceiling, and the field
+   * will not go past it, so there is nothing left to warn about.
+   */
   function explain() {
     const asked = Number(input.value);
-    // A value above what the machine can carry is the user's to make, and it
-    // is made with the derivation in front of them rather than instead of it.
-    if (!fixed && asked > limit.derived) {
-      why.className = "note bad";
-      // Where it came from, on this branch too. A saved value above the
-      // derived one takes this branch every time, so saying only "derived"
-      // here is saying it in exactly the case where a user is trying to work
-      // out whether their setting took effect — and the daemon's own line
-      // calls the same value saved.
-      const held = limit.source === "saved" ? `${limit.value} saved. ` : "";
-      why.textContent = `${held}Above the ${limit.derived} this machine derived — ${limit.reason}. It will be used as you set it.`;
+    // Where the value in force came from, on every branch. A saved value above
+    // the derived one takes the second branch every time, so a branch that did
+    // not say "saved" said nothing about it in exactly the case where a user is
+    // trying to work out whether their setting took effect — while the daemon's
+    // own line calls the same value saved.
+    const held = limit.source === "saved" && asked === limit.value ? `${limit.value} saved. ` : "";
+    if (fixed) {
+      why.className = "note";
+      why.textContent = `Set in this daemon's environment, so the page leaves it alone. This machine would derive ${limit.derived} — ${limit.reason}`;
+      return;
+    }
+    if (asked >= limit.ceiling) {
+      // Not red either. It is the top of the range, which is a fact about the
+      // machine rather than a mistake by the person.
+      why.className = "note";
+      why.textContent = `${held}${limit.ceiling} is as high as this machine goes. ${capped(limit)}`;
+      return;
+    }
+    if (asked > limit.derived) {
+      why.className = "note";
+      why.textContent = `${held}Above the ${limit.derived} this machine would pick on its own, and under the ${limit.ceiling} it will allow — ${limit.reason} Yours to set; it applies to the next run.`;
       return;
     }
     why.className = "note";
-    // Where the value in force came from, in the daemon's own words. The panel
-    // used to call every value "derived", including one the user had saved, so
-    // the two disagreed exactly when someone was trying to work out whether
-    // their setting had taken effect.
     const from =
       limit.source === "saved"
-        ? `${limit.value} saved; ${limit.derived} is what this machine derives`
-        : `${limit.derived} derived`;
-    why.textContent = fixed
-      ? `Set by the environment, so the page cannot change it. Derived here: ${limit.derived} — ${limit.reason}`
-      : `${from} — ${limit.reason}`;
+        ? `${limit.value} saved, and this machine derives ${limit.derived}`
+        : `${limit.derived}, derived`;
+    why.textContent = `${from} — ${limit.reason} Room up to ${limit.ceiling}.`;
   }
 
   input.addEventListener("input", explain);
   input.addEventListener("change", () => {
-    const asked = Math.max(1, Number(input.value) || 1);
+    const asked = Math.min(limit.ceiling, Math.max(1, Number(input.value) || 1));
     input.value = String(asked);
+    explain();
     onSave(key, asked);
   });
   explain();
@@ -5886,7 +6214,7 @@ async function indexView() {
    * one, and the private-address refusal was unreachable from this page. */
   const urlTarget = el("select", { class: "select" });
   const clearDone = el("button", {
-    class: "button ghost small",
+    class: "button secondary small",
     type: "button",
     text: "Remove all finished",
     hidden: true,
@@ -6019,6 +6347,15 @@ async function indexView() {
 
     clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
 
+    /* A page with nothing on it says nothing.
+     *
+     * Before the split this page ended in three cards about the corpus, so an
+     * idle machine still had something under the button band. Those moved to
+     * `Inside the index`, and what was left on a machine with no run in flight
+     * was a heading, a text box and four buttons over half a screen of white.
+     * The design draws the run card in both states; this is its idle one. */
+    idle.hidden = runs.length > 0 || (data?.queue || []).length > 0;
+
     const queue = data?.queue || [];
     queueCard.hidden = !queue.length;
     if (queue.length) {
@@ -6041,7 +6378,7 @@ async function indexView() {
               pathCell((row.paths || []).join(", ")),
               el("span", { class: "spacer" }),
               el("button", {
-                class: "button ghost small",
+                class: "button secondary small",
                 type: "button",
                 text: "Take out of the queue",
                 // Nothing of it was embedded, so there is nothing to undo and
@@ -6073,6 +6410,13 @@ async function indexView() {
     // Redrawn only when a value or its reason actually changed: the memory
     // figure moves every second, and a field that rebuilds under the cursor
     // cannot be typed into.
+    // Every field of every limit, not just the three values.
+    //
+    // `embed_threads` is derived from the runs actually in force, so changing
+    // `runs at once` changes the *sentence* under `threads each` while leaving
+    // its number alone. Keying the redraw on the numbers alone meant the panel
+    // skipped exactly the repaint that would have shown one field answering
+    // another, which is the whole of why these three live in one card.
     const signature = JSON.stringify([
       limits.runs_at_once,
       limits.embed_threads,
@@ -6090,7 +6434,7 @@ async function indexView() {
           machine.total_memory_mb,
         )} MiB of memory, ${n(
           machine.available_memory_mb,
-        )} MiB free now. Each value below is derived from that, and each is yours to change.`,
+        )} MiB free now. Each value below starts from that and is yours to change — they answer each other, so raising one moves what the others suggest. Each stops where this machine does.`,
       }),
       el(
         "div",
@@ -6270,9 +6614,32 @@ async function indexView() {
     settingsButton.setAttribute("aria-pressed", String(wantSettings));
   }
 
+  const idle = el(
+    "div",
+    { class: "card pad run-idle" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Nothing is being read right now" }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "mono-chip", text: "queued · writer idle" }),
+    ),
+    el("p", {
+      class: "subtitle",
+      text: "Name a folder above and press Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
+    }),
+    el("p", {
+      class: "note",
+      text: "Checkpointed every 30 seconds: vectors are written before the files they cover are marked indexed, so a run that is killed resumes rather than starting again.",
+    }),
+  );
+
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
   const addButton = el("button", {
-    class: "button secondary",
+    // The accent shape, like `Start indexing` beside it. Both of them begin
+    // work on the machine, and one of the two reading as a quiet secondary
+    // made the URL card look like a thing that had not been finished.
+    class: "button",
     type: "button",
     text: "Fetch and index",
   });
@@ -6356,27 +6723,18 @@ async function indexView() {
   });
 
   paint(first);
-  const coverage = coveragePanel();
-  const health = healthPanel();
   // The page's only subscription. The shared poll decides when; this decides
   // what with. No timer of this page's own.
   // The poll hands this the runs it just read, and `paint` reads them off it.
   // Calling it with nothing — which an added second painter made easy to do —
   // redraws the page as though every run had ended.
-  state.onRuns = (data) => {
-    paint(data);
-    coverage.paint();
-    health.paint();
-  };
+  state.onRuns = (data) => paint(data);
   watchLive(["runs", "stores"], refreshRuns);
 
   return el(
     "div",
     { class: "view" },
-    pageHead(
-      "Inside the index",
-      "What this machine has read, what the graph made of it, and what is being kept current.",
-    ),
+    pageHead("Index", "What to read, and the run that reads it."),
     says(
       "Each folder becomes its own store, indexed by its own writer. A run lives in the daemon, not in this page — leaving, refreshing or closing the tab changes nothing, and a run ends only on its Stop or when ",
       mono("semlith start"),
@@ -6402,6 +6760,22 @@ async function indexView() {
     el(
       "div",
       { class: "scroller" },
+      /* The design's order.
+       *
+       * This page was the design's two merged — `INDEX`, which is the picked
+       * files and the run, and `CORPUS`, which is what the store already
+       * holds. They are two pages again: everything about what the store
+       * already contains moved to `Inside the index`, and what is left here is
+       * the question "read this" and the answer "reading it". */
+      /* Every panel the button band opens, in one slot directly under it.
+       *
+       * They were in four places: the folder picker here, the repository
+       * checklist and the URL card below the corpus cards, and the queue and
+       * the machine limits at the very foot of the page. Pressing `Choose
+       * folders…` opened something you were looking at; pressing any of the
+       * other three opened something a screen and a half away, with nothing
+       * saying it had happened. One slot, so a button and what it opens are
+       * always in the same relationship. */
       picker.node,
       projects.node,
       fill(
@@ -6426,14 +6800,629 @@ async function indexView() {
         ),
         urlNote,
       ),
-      el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
-      health.node,
-      el("span", { class: "eyebrow", text: "What the graph covers" }),
-      coverage.node,
-      cards,
       queueCard,
       settingsCard,
+      /* Then the run itself. */
+      cards,
+      idle,
+      el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
     ),
+  );
+}
+
+/* Inside the index: what the store already holds, measured.
+ *
+ * The design's CORPUS page, which until now was the bottom half of the
+ * indexing page. Every figure comes from `/api/corpus`, which counts them out
+ * of the store when it is called — the page's own subtitle says "measured, not
+ * estimated", and a cached number under that sentence would make the page a
+ * liar about itself.
+ *
+ * What the design draws and this does not: PDF pages, slides, spreadsheet
+ * cells and notebook cells as *counts of pages and cells*. The store records
+ * the text it extracted, not how many pages it came off, so those are counted
+ * as files here and the panel says `files`. Adding the real figures is a
+ * column in `files` and a change to every extractor, which is a release of its
+ * own rather than a page.
+ */
+
+/** Words a printed page holds, and words a reader gets through in a minute.
+ *
+ * Both are conventions rather than measurements, so they are written down
+ * where the page can point at them: roughly 500 words on a page of A4 set at a
+ * readable size, and 250 words a minute is the figure reading research has
+ * settled on for prose. The word count they multiply is measured. */
+const WORDS_PER_PAGE = 500;
+const WORDS_PER_MINUTE = 250;
+
+/** `26 days`, `4 hours`, `18 minutes` — one unit, the largest that fits. */
+function spellDuration(minutes) {
+  if (minutes < 90) return `${Math.max(1, Math.round(minutes))} minutes`;
+  const hours = minutes / 60;
+  if (hours < 48) return `${Math.round(hours)} hours`;
+  return `${Math.round(hours / 24)} days`;
+}
+
+/** `7 years, 6 months` between two unix seconds. */
+function spellSpan(from, to) {
+  if (!from || !to || to <= from) return "—";
+  const months = Math.max(0, Math.round((to - from) / (86400 * 30.44)));
+  const years = Math.floor(months / 12);
+  const rest = months % 12;
+  if (!years) return `${months} month${months === 1 ? "" : "s"}`;
+  return `${years} year${years === 1 ? "" : "s"}${rest ? `, ${rest} month${rest === 1 ? "" : "s"}` : ""}`;
+}
+
+/** A label over a value, as the design's four small panels list their facts. */
+function factRow(label, value) {
+  return el(
+    "div",
+    { class: "kv-row" },
+    el("span", { class: "k", text: label }),
+    el("span", { class: "v", text: value }),
+  );
+}
+
+function factPanel(title, rows) {
+  return el(
+    "section",
+    { class: "card pad kv-panel" },
+    el("h2", { text: title }),
+    el("div", { class: "kv-list" }, rows.filter(Boolean)),
+  );
+}
+
+/** The hover card, in the design's shape: a title with its colour, then
+ * label and value rows. Every card in the portal is built here — the canvases
+ * and the elements that carry one alike — so they cannot drift apart.
+ * `tone` is a class that colours the dot: `tone-N`, an edge tier, `blue` or
+ * `accent`. */
+function tipCard(title, tone, rows) {
+  return el(
+    "div",
+    { class: "tip-card" },
+    el(
+      "div",
+      { class: "tip-head" },
+      el("span", { class: `legend-dot ${tone || "blue"}` }),
+      el("span", { class: "name", text: title }),
+    ),
+    rows.length
+      ? el(
+          "div",
+          { class: "tip-rows" },
+          rows.map(([label, value]) =>
+            el("div", { class: "tip-row" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: String(value) })),
+          ),
+        )
+      : null,
+  );
+}
+
+/** An element's own card, carried as `data-tip-title`, `data-tip-tone` and a
+ * JSON `data-tip-rows`, so it goes through the one delegated tooltip. */
+function tipCardOf(target) {
+  let rows = [];
+  try {
+    rows = JSON.parse(target.getAttribute("data-tip-rows") || "[]");
+  } catch (_) {
+    rows = [];
+  }
+  return tipCard(target.getAttribute("data-tip-title") || "", target.getAttribute("data-tip-tone"), rows);
+}
+
+/** The twelve months ending at the newest one the store holds.
+ *
+ * The design draws twelve bars. A store indexed this morning has one month in
+ * it, and one bar in a full-width card is a chart that has failed rather than a
+ * corpus that is young — so the months with nothing in them are drawn at zero
+ * and the chart keeps its shape. */
+function twelveMonths(months) {
+  const known = [...months.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (!known.length) return [];
+  const [lastYear, lastMonth] = known[known.length - 1][0].split("-").map(Number);
+  const out = [];
+  for (let back = 11; back >= 0; back -= 1) {
+    // `Date.UTC` so the arithmetic wraps the year for us rather than by hand.
+    const at = new Date(Date.UTC(lastYear, lastMonth - 1 - back, 1));
+    const key = `${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, "0")}`;
+    out.push([key, months.get(key) || 0]);
+  }
+  return out;
+}
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function monthLabel(key) {
+  const [year, month] = key.split("-").map(Number);
+  return `${MONTH_NAMES[month - 1]} ${year}`;
+}
+
+/** Chunks added per month, full width, as the design draws it. */
+function monthsCard(months, span) {
+  const bars = twelveMonths(months);
+  const peak = Math.max(1, ...bars.map(([, count]) => count));
+  const total = bars.reduce((sum, [, count]) => sum + count, 0) || 1;
+  return el(
+    "section",
+    { class: "card pad months-card" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Chunks added per month" }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "mono-chip", text: span }),
+    ),
+    bars.length
+      ? el(
+          "div",
+          { class: "month-chart" },
+          bars.map(([key, count], i) =>
+            el(
+              "div",
+              {
+                class: `month-col${i === bars.length - 1 ? " now" : ""}${count ? "" : " none"}`,
+                tabindex: "0",
+                "data-tip-title": monthLabel(key),
+                "data-tip-tone": i === bars.length - 1 ? "accent" : "blue",
+                "data-tip-rows": JSON.stringify([
+                  ["chunks added", n(count)],
+                  ["share of year", share(count, total)],
+                  ["vs. peak", share(count, peak)],
+                ]),
+              },
+              // Height as a share of the busiest month, and opacity with it, so
+              // a quiet month reads as quiet rather than only as short. A month
+              // with nothing in it still draws a sliver, because an absent bar
+              // and a bar at zero say different things.
+              sized("height", count ? Math.max(0.06, count / peak) : 0.05, { class: "col" }),
+            ),
+          ),
+        )
+      : el("div", { class: "rail-hint", text: "No files indexed yet." }),
+    bars.length
+      ? el(
+          "div",
+          { class: "month-axis" },
+          bars.map(([key], i) =>
+            el("span", {
+              // Five labels across twelve bars, as the design spaces them.
+              text: i % 3 === 0 || i === bars.length - 1 ? MONTH_NAMES[Number(key.split("-")[1]) - 1] : "",
+            }),
+          ),
+        )
+      : null,
+    el("p", { class: "note", text: "When semlith read the file, not when it was written." }),
+  );
+}
+
+/* The four confidences an edge can carry, in the order the graph rail lists
+ * them, so the bar and the legend read the same way round everywhere. */
+const EDGE_TIERS = ["extracted", "resolved", "ambiguous", "unresolved"];
+
+/** Graph health, full width, as the design draws it. */
+function graphHealthCard(corpus) {
+  const tiers = new Map(corpus.tiers);
+  const total = EDGE_TIERS.reduce((sum, tier) => sum + (tiers.get(tier) || 0), 0);
+  const settled = (tiers.get("extracted") || 0) + (tiers.get("resolved") || 0);
+  // The share the README quotes is over the edges that could be settled at
+  // all: an unresolved edge names something no store here holds, and counting
+  // it against the resolver is counting a dependency nobody indexed.
+  const answerable = settled + (tiers.get("ambiguous") || 0);
+  return el(
+    "section",
+    { class: "card pad health-card-full" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Graph health" }),
+      el("span", { class: "mono-chip", text: "counted from the edge table, every open store" }),
+    ),
+    el("span", { class: "eyebrow", text: "Call edges by tier" }),
+    total
+      ? el(
+          "div",
+          { class: "tier-bar", role: "img", "aria-label": EDGE_TIERS.map((t) => `${t} ${tiers.get(t) || 0}`).join(", ") },
+          EDGE_TIERS.map((tier) =>
+            // A tier with nothing in it still draws a sliver, because a legend
+            // that names four and a bar that shows three is a bar with a
+            // missing piece nobody can find.
+            sized("width", Math.max(0.01, (tiers.get(tier) || 0) / total), {
+              class: `seg ${tier}`,
+              tabindex: "0",
+              "data-tip-title": tier,
+              "data-tip-tone": tier,
+              "data-tip-rows": JSON.stringify([
+                ["edges", n(tiers.get(tier) || 0)],
+                ["share", share(tiers.get(tier) || 0, total)],
+                ["of total", n(total)],
+              ]),
+            }),
+          ),
+        )
+      : el("div", { class: "rail-hint", text: "No call edges yet." }),
+    el(
+      "div",
+      { class: "tier-legend" },
+      EDGE_TIERS.map((tier) =>
+        el(
+          "span",
+          { class: "tier-key" },
+          el("span", { class: `legend-dot ${tier}` }),
+          el("span", { text: `${tier} ${n(tiers.get(tier) || 0)}` }),
+        ),
+      ),
+    ),
+    el("p", {
+      class: "note",
+      // The design's caption is a note about its own mock. This is the same
+      // sentence about this store: what settled, and what the hints are for.
+      text: total
+        ? `${share(settled, answerable || 1)} of the answerable edges settled on one definition. Unresolved ones name code no open store holds — the standard library, a dependency nobody indexed, a typo.`
+        : "Index something with a language that carries edges and this fills in.",
+    }),
+    el(
+      "div",
+      { class: "health-columns" },
+      el(
+        "div",
+        { class: "health-col" },
+        el("span", { class: "eyebrow", text: "Unresolved targets" }),
+        el("span", {
+          class: "health-figure",
+          text: total ? `${n(corpus.unresolved)} · ${share(corpus.unresolved, total)}` : "—",
+        }),
+        corpus.unresolvedNames.length
+          ? el(
+              "div",
+              { class: "chips" },
+              corpus.unresolvedNames.slice(0, 7).map(([name, count]) =>
+                el("span", {
+                  class: "chip-flat",
+                  tabindex: "0",
+                  "data-tip-title": name,
+                  "data-tip-rows": JSON.stringify([["calls", n(count)]]),
+                  text: name,
+                }),
+              ),
+            )
+          : null,
+        el("p", { class: "note", text: "Calls into code the store does not hold; hidden from views by default." }),
+      ),
+      el(
+        "div",
+        { class: "health-col" },
+        el("span", { class: "eyebrow", text: "Names with several definitions" }),
+        el("span", { class: "health-figure", text: n(corpus.ambiguousNames) }),
+        el(
+          "div",
+          { class: "kv-list" },
+          corpus.ambiguousWorst.length
+            ? corpus.ambiguousWorst.slice(0, 5).map(([name, count]) => factRow(name, n(count)))
+            : factRow("None", "—"),
+        ),
+      ),
+      el(
+        "div",
+        { class: "health-col" },
+        el("span", { class: "eyebrow", text: "Languages carrying edges" }),
+        el("span", {
+          class: "health-figure",
+          text: `${n(corpus.languagesWithEdges)} of ${n(corpus.languageCount)}`,
+        }),
+        el("button", {
+          class: "link-button",
+          type: "button",
+          text: "The language table",
+          onclick: () => go("about"),
+        }),
+      ),
+    ),
+  );
+}
+
+async function corpusView() {
+  await refreshStores();
+  let data;
+  try {
+    data = await api("/api/corpus");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Inside the index"), error(e.message));
+  }
+  // The ledger's own summary, for the last of the three cards at the foot. It
+  // is the one figure on this page that is about what the corpus *saved*
+  // rather than about what it contains, and the ledger is where that is
+  // measured.
+  let ledger = null;
+  try {
+    ledger = await api("/api/ledger");
+  } catch (_) {
+    /* the card says so */
+  }
+
+  const stores = (data.stores || []).filter((row) => !row.error);
+  const broken = (data.stores || []).filter((row) => row.error);
+  const sum = (field) => stores.reduce((total, row) => total + (row[field] || 0), 0);
+
+  const files = sum("files");
+  const chunks = sum("chunks");
+  const lines = sum("lines");
+  const words = sum("words");
+  const characters = sum("characters");
+  const blank = sum("blank_lines");
+  const comments = sum("comment_lines");
+  const symbols = sum("symbols");
+  const dim = stores.length ? stores[0].vector_dim || 384 : 384;
+  const numbers = chunks * dim;
+
+  // Merged across stores, because the reader has several open and the page is
+  // about what this machine holds.
+  const pile = (field, key) => {
+    const into = new Map();
+    for (const store of stores) {
+      for (const row of store[field] || []) {
+        into.set(row[key], (into.get(row[key]) || 0) + (row.count || row.lines || 0));
+      }
+    }
+    return [...into.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const languages = pile("languages", "language");
+  const kinds = pile("kinds", "name");
+  const ambiguousWorst = pile("ambiguous_worst", "name");
+  const languageTotal = languages.reduce((total, [, count]) => total + count, 0) || 1;
+
+  const longest = stores
+    .map((row) => row.longest_file)
+    .filter(Boolean)
+    .sort((a, b) => b.lines - a.lines)[0];
+  const deepest = Math.max(0, ...stores.map((row) => row.deepest_path || 0));
+  const first = Math.min(...stores.map((row) => row.first_indexed || 0).filter(Boolean));
+  const last = Math.max(0, ...stores.map((row) => row.last_indexed || 0));
+  const ms = stores.map((row) => row.median_query_ms || 0).filter(Boolean);
+  const median = ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : 0;
+
+  const months = new Map();
+  for (const store of stores) {
+    for (const row of store.months || []) {
+      months.set(row.month, (months.get(row.month) || 0) + row.chunks);
+    }
+  }
+  const busiest = [...months.entries()].sort((a, b) => b[1] - a[1])[0];
+
+  const empty = !files;
+  const pages = Math.round(words / WORDS_PER_PAGE);
+
+  /* The language mix, by line rather than by file.
+   *
+   * By file is the wrong denominator for this question: a repository of four
+   * hundred small TypeScript files and thirty large Rust ones is mostly Rust
+   * by every measure that matters to a reader, and mostly TypeScript by file
+   * count. The design measures lines, and this measures lines.
+   *
+   * `.mix-row .meter` deliberately, which is the shape the rest of the portal
+   * draws a proportion in and the shape the drive checks for a CSP-dropped
+   * width. */
+  const mixCard = el(
+    "section",
+    { class: "card pad mix-card" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Language mix, by line" }),
+      el("span", { class: "spacer" }),
+      el("span", {
+        class: "mono-chip",
+        text: `${n(lines)} lines · ${languages.length} language${languages.length === 1 ? "" : "s"}`,
+      }),
+    ),
+    languages.length
+      ? el(
+          "div",
+          { class: "mix-bar", role: "img", "aria-label": languages.map(([k, v]) => `${k} ${v} lines`).join(", ") },
+          languages.map(([language, count], i) =>
+            sized("width", count / languageTotal, {
+              class: `seg tone-${i % 6}`,
+              tabindex: "0",
+              "data-tip-title": language,
+              "data-tip-tone": `tone-${i % 6}`,
+              "data-tip-rows": JSON.stringify([
+                ["lines", n(count)],
+                ["share", share(count, languageTotal)],
+                ["of total", n(languageTotal)],
+              ]),
+            }),
+          ),
+        )
+      : null,
+    languages.length
+      ? el(
+          "div",
+          { class: "mix" },
+          languages.slice(0, 8).map(([language, count], i) =>
+            el(
+              "div",
+              {
+                class: "mix-row",
+                tabindex: "0",
+                "data-tip-title": language,
+                "data-tip-tone": `tone-${i % 6}`,
+                "data-tip-rows": JSON.stringify([
+                  ["lines", n(count)],
+                  ["share", share(count, languageTotal)],
+                  ["of total", n(languageTotal)],
+                ]),
+              },
+              el("span", { class: `swatch tone-${i % 6}` }),
+              el("span", { class: "k", text: language }),
+              el("span", { class: "meter" }, sized("width", count / languageTotal, { class: `tone-${i % 6}` })),
+              el("span", { class: "v", text: n(count) }),
+              el("span", { class: "pct", text: share(count, languageTotal) }),
+            ),
+          ),
+        )
+      : el("div", { class: "rail-hint", text: "Nothing indexed yet." }),
+    el("p", { class: "note", text: "Every one of these carries graph edges as well as search." }),
+  );
+
+  const coverage = coveragePanel();
+
+  const unresolved = stores.reduce((sum, row) => sum + (row.unresolved || 0), 0);
+  const ambiguousNames = stores.reduce((sum, row) => sum + (row.ambiguous_names || 0), 0);
+  const languagesWithEdges = stores.reduce((sum, row) => sum + (row.languages_with_edges || 0), 0);
+  const tiers = pile("tiers", "name");
+  const spanLabel = first && last
+    ? `corpus spans ${new Date(first * 1000).toLocaleDateString(undefined, { month: "short", year: "numeric" })} → ${when(last)}`
+    : "nothing indexed yet";
+
+  const ratio = ledger && ledger.ratio ? ledger.ratio : 0;
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Inside the index",
+      "Measured from the store itself, not estimated. Nobody else can show you this, because nobody else keeps the whole corpus on your machine.",
+      {
+        pill: el("span", {
+          class: "mono-chip",
+          text: `${stores.length} store${stores.length === 1 ? "" : "s"} · recomputed on every read`,
+        }),
+      },
+    ),
+    // Two different failures, said differently. A store the fleet could not
+    // open at all is the shared notice every cross-store page draws; a store
+    // that opened and could not be measured is this page's own problem and is
+    // named here with what it said.
+    unreadableNotice(data.failed),
+    broken.length
+      ? el(
+          "div",
+          { class: "notice bad" },
+          el("div", {
+            class: "what",
+            text: `${broken.length} store${broken.length === 1 ? "" : "s"} could not be measured, so ${
+              broken.length === 1 ? "it is" : "they are"
+            } not in these figures.`,
+          }),
+          el(
+            "div",
+            { class: "rows tight" },
+            broken.map((row) =>
+              el(
+                "details",
+                { class: "unreadable" },
+                el("summary", {}, el("span", { class: "name", text: row.store })),
+                el("pre", { class: "code", text: row.error }),
+              ),
+            ),
+          ),
+        )
+      : null,
+    empty
+      ? el("p", { class: "subtitle", text: "Nothing is indexed yet, so there is nothing to measure." })
+      : null,
+    el(
+      "div",
+      { class: "stat-cards" },
+      stat("Lines of code", n(lines), "counted, not estimated — comments and blanks separated out"),
+      stat("Words indexed", n(words), "code, prose, slides, spreadsheets and notebooks together"),
+      stat(
+        "If it were printed",
+        `${n(pages)} pp`,
+        `a stack of A4 you can search in ${median ? `${median} ms` : "milliseconds"}`,
+      ),
+      stat(
+        "Reading time",
+        spellDuration(words / WORDS_PER_MINUTE),
+        "non-stop at 250 words a minute, no sleep",
+      ),
+    ),
+    /* The design's arrangement: two equal columns, the mix on the left and the
+     * four panels as a two-by-two on the right, each card as tall as what it
+     * holds. A row of four put the mix in a band of its own with a
+     * quarter-width column of facts under each end of it. */
+    el(
+      "div",
+      { class: "corpus-top" },
+      mixCard,
+      el(
+        "div",
+        { class: "corpus-panels" },
+        factPanel(
+          "What is in the prose",
+          // Files, not pages and cells. The store keeps the text, not the page
+          // it came off — said in the panel rather than in a comment nobody
+          // reading the page can see.
+          kinds.length
+            ? kinds.map(([kind, count]) => factRow(kind, `${n(count)} file${count === 1 ? "" : "s"}`))
+            : [factRow("Nothing indexed", "—")],
+        ),
+        factPanel("Shape of the code", [
+          factRow("Average line", lines ? `${Math.round(characters / lines)} chars` : "—"),
+          factRow("Comment lines", lines ? share(comments, lines) : "—"),
+          factRow("Blank lines", lines ? share(blank, lines) : "—"),
+          factRow("Longest file", longest ? `${shortPath(longest.path)} · ${n(longest.lines)}` : "—"),
+          factRow("Deepest path", `${deepest} folder${deepest === 1 ? "" : "s"}`),
+        ]),
+        factPanel("Time in the corpus", [
+          // Indexed, not written: the store records when it read a file and has
+          // never been told when anybody wrote it.
+          factRow("First read", Number.isFinite(first) && first ? new Date(first * 1000).toLocaleDateString() : "—"),
+          factRow("Newest write", last ? when(last) : "—"),
+          factRow("Span", spellSpan(first, last)),
+          factRow("Busiest month", busiest ? `${busiest[0]} · ${n(busiest[1])} chunks` : "—"),
+        ]),
+        factPanel("The vectors themselves", [
+          factRow("Vectors", n(chunks)),
+          factRow("Numbers stored", n(numbers)),
+          factRow("As float32 it would be", bytes(numbers * 4)),
+          factRow("Quantised to int8", bytes(numbers)),
+          factRow("Query at this size", median ? `${median} ms` : "not measured yet"),
+        ]),
+      ),
+    ),
+    monthsCard(months, spanLabel),
+    graphHealthCard({
+      tiers,
+      unresolved,
+      unresolvedNames: pile("unresolved_names", "name"),
+      ambiguousNames,
+      ambiguousWorst,
+      languagesWithEdges,
+      languageCount: languages.length,
+    }),
+    el(
+      "div",
+      { class: "fact-cards" },
+      el(
+        "section",
+        { class: "fact-card" },
+        el("h2", { text: `${n(characters)} characters` }),
+        el("p", { text: "Every keystroke in the corpus, kept on this machine and nowhere else." }),
+      ),
+      el(
+        "section",
+        { class: "fact-card" },
+        el("h2", { text: median ? `${median} ms` : "milliseconds" }),
+        el("p", {
+          text: median
+            ? "The middle of every retrieval this machine has recorded — meaning, not just words."
+            : "Ask this index something and the ledger will start recording how long it took.",
+        }),
+      ),
+      el(
+        "section",
+        { class: "fact-card" },
+        el("h2", { text: ratio ? `${ratio.toFixed(1)}× fewer tokens` : `${n(symbols)} definitions` }),
+        el("p", {
+          text: ratio
+            ? `What your agents read versus reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}`
+            : "Every definition the graph extracted from this corpus.",
+        }),
+      ),
+    ),
+    el("span", { class: "eyebrow", text: "What the graph covers" }),
+    coverage.node,
   );
 }
 
@@ -6476,7 +7465,7 @@ function projectsChecklist(options) {
         // Without it this opened at the home directory and stayed there, so a
         // monorepo anywhere else on the machine was unreachable.
         el("button", {
-          class: "button ghost small",
+          class: "button secondary small",
           type: "button",
           text: "Up",
           disabled: !data.parent,
@@ -6514,7 +7503,7 @@ function projectsChecklist(options) {
           },
         }),
         el("button", {
-          class: "button ghost small",
+          class: "button secondary small",
           type: "button",
           text: "Close",
           onclick: () => {
@@ -6910,6 +7899,26 @@ async function doctorView() {
       "Doctor",
       "Whether each agent client on this machine can reach semlith, and what to run for the ones that cannot.",
     ),
+    /* The rules first, then the table.
+     *
+     * The clients table is twenty-seven rows and pages ten at a time, so the
+     * rules underneath it were below a screenful of table on every visit —
+     * and they are the part that answers "is this machine set up correctly",
+     * which is the question the page is for. The table is the detail.
+     *
+     * The rules are already cards — one `.stat` each — so they sit in the view
+     * beside their heading rather than inside a second card. A card of cards
+     * is a border drawn around some borders. */
+    el(
+      "div",
+      { class: "head" },
+      el("span", { class: "card-title", text: "Rules" }),
+      el("span", {
+        class: "meta",
+        text: "what the daemon found when it looked, not what the documentation says",
+      }),
+    ),
+    rulesBox,
     el(
       "div",
       // `card pad`, like every other section on every other page. A bare card
@@ -6928,19 +7937,6 @@ async function doctorView() {
       ),
       clients.node,
     ),
-    // The rules are already cards — one `.stat` each — so they sit in the view
-    // beside their heading rather than inside a second card. A card of cards
-    // is a border drawn around some borders.
-    el(
-      "div",
-      { class: "head" },
-      el("span", { class: "card-title", text: "Rules" }),
-      el("span", {
-        class: "meta",
-        text: "what the daemon found when it looked, not what the documentation says",
-      }),
-    ),
-    rulesBox,
     note,
   );
 }
@@ -7572,25 +8568,6 @@ async function agentsView() {
       ],
     }),
     endpointNote,
-    serviceCard(),
-    el(
-      "div",
-      { class: "card pad dense" },
-      el("span", { class: "card-title", text: "Agent key" }),
-      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
-      says(
-        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
-        mono("semlith mcp"),
-        ", which reads the key from ",
-        mono(data.key_path || "~/.semlith/agent.key"),
-        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
-        mono("${" + KEY_ENV + "}"),
-        " yourself.",
-      ),
-    ),
-    keyNote,
-    registerAll,
-    inUseCard,
     el(
       "div",
       { class: "grid scroller" },
@@ -7656,10 +8633,47 @@ async function agentsView() {
             ]),
           ),
         ),
+        // Under the tools rather than beside the registration card: it is a
+        // short card about this machine, and paired with a wide one it was
+        // stretched to that card's height and centred in it.
         installPanel(),
       ),
       el("div", { class: "card pad stanzas" }, tabs, chips, body),
     ),
+    /* Everything below is this project's own, after the four panels the v4
+     * design draws. They were interleaved with them — the service card, the
+     * agent key and the two registration cards sat between the endpoint note
+     * and `Connected`, and the installer sat inside the design's own grid
+     * between `Tools exposed` and the stanzas — so a reader following the
+     * design's argument met four unrelated cards in the middle of it. */
+    /* Two columns, equal height. These were five full-width cards down a page
+     * that is mostly narrow text, so the page scrolled for a screenful of
+     * content and every card was the width of the window for no reason. The
+     * service card and the key are a pair — what runs the daemon and what an
+     * agent authenticates with — and the two registration cards are another. */
+    el(
+      "div",
+      { class: "grid two agent-extras" },
+      serviceCard(),
+      el(
+      "div",
+      { class: "card pad dense" },
+      el("span", { class: "card-title", text: "Agent key" }),
+      el("div", { class: "copyfield" }, keyBox, el("div", { class: "actions" }, reveal)),
+      says(
+        "Shown truncated, and fetched in full only when you press Reveal — the page does not receive it just for being open. No registration semlith writes carries it: a registered client launches ",
+        mono("semlith mcp"),
+        ", which reads the key from ",
+        mono(data.key_path || "~/.semlith/agent.key"),
+        " itself, so a rotation reconfigures nothing. The key is for the HTTP stanzas below, which a daemon on another machine still needs — paste one of those and you export ",
+        mono("${" + KEY_ENV + "}"),
+        " yourself.",
+      ),
+    ),
+    ),
+    keyNote,
+    registerAll,
+    inUseCard,
   );
 }
 
@@ -7989,75 +9003,46 @@ async function privacyView() {
         "this binary has no cloud command and opens no connection to any host; the Cloud page describes an optional service and contacts nothing",
       ),
     ),
-    sessionReplayToggle(),
     el(
       "div",
       { class: "grid scroller" },
-      el(
-        "div",
-        { class: "card pad" },
-        el("span", { class: "card-title", text: "Verify it yourself" }),
-        el(
-          "div",
-          { class: "steps-list" },
-          step(
-            "1",
-            "Ask the operating system what this process has open. Only loopback should appear.",
-            "lsof -nP -p $(pgrep -f 'semlith start') -i",
-          ),
-          step(
-            "2",
-            "Watch every interface but loopback while you search. Nothing should appear.",
-            "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
-          ),
-          step(
-            "3",
-            "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
-            "semlith start --airgap",
-          ),
-          step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
-          // The fifth step the design ends on, and the one that settles the
-          // ledger: it is a table in a file on this disk, readable by anything
-          // that reads SQLite, and countable without asking semlith.
-          step(
-            "5",
-            "See the ledger for what it is: one local table, written by this machine and nothing else.",
-            `sqlite3 ${data.store_home || "~/.semlith"}/stores/<name>/store.db 'select count(*) from retrievals'`,
-          ),
-        ),
-      ),
+      /* How to check the promise, and what the stores already hold: both are
+       * things a reader does rather than reads, so they share a column. */
       el(
         "div",
         { class: "rows" },
-        /* The rules this release added, each with what the daemon found when it
-         * looked. A page that states a policy is a page; a page that states a
-         * policy and the reading behind it is something a reader can disagree
-         * with, which is the only version worth putting on a Privacy page. */
         el(
           "div",
           { class: "card pad" },
+          el("span", { class: "card-title", text: "Verify it yourself" }),
           el(
             "div",
-            { class: "head" },
-            el("span", { class: "card-title", text: "Rules" }),
-            el("span", { class: "spacer" }),
-            pill(
-              // What the badge is actually about. "All holding" read as a
-              // statement about everything semlith is storing, three lines
-              // above a scan that had found a private key in a store — the
-              // rules are forward-looking, and this now says so.
-              (data.rules || []).every((r) => r.ok)
-                ? "holding for new writes"
-                : "check the rows",
-              (data.rules || []).every((r) => r.ok) ? "good" : "warn",
+            { class: "steps-list" },
+            step(
+              "1",
+              "Ask the operating system what this process has open. Only loopback should appear.",
+              "lsof -nP -p $(pgrep -f 'semlith start') -i",
+            ),
+            step(
+              "2",
+              "Watch every interface but loopback while you search. Nothing should appear.",
+              "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
+            ),
+            step(
+              "3",
+              "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
+              "semlith start --airgap",
+            ),
+            step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
+            // The fifth step the design ends on, and the one that settles the
+            // ledger: it is a table in a file on this disk, readable by anything
+            // that reads SQLite, and countable without asking semlith.
+            step(
+              "5",
+              "See the ledger for what it is: one local table, written by this machine and nothing else.",
+              `sqlite3 ${data.store_home || "~/.semlith"}/stores/<name>/store.db 'select count(*) from retrievals'`,
             ),
           ),
-          el("p", {
-            class: "subtitle",
-            text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
-          }),
-          rulesBox,
-          fixNote,
         ),
         el(
           "div",
@@ -8073,11 +9058,19 @@ async function privacyView() {
           ),
           el("p", {
             class: "subtitle",
-            text: "The rules above decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
+            text: "The rules below decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
           }),
           scanBox,
           scanNote,
         ),
+      ),
+      el(
+        "div",
+        { class: "rows" },
+        /* The rules this release added, each with what the daemon found when it
+         * looked. A page that states a policy is a page; a page that states a
+         * policy and the reading behind it is something a reader can disagree
+         * with, which is the only version worth putting on a Privacy page. */
         el(
           "div",
           { class: "card pad" },
@@ -8102,6 +9095,11 @@ async function privacyView() {
             }),
           ),
         ),
+        /* Fifth, between the outbound card and the session token, which is
+         * where the design has it. It stood outside this grid entirely, so
+         * the one switch on the page sat above the cards that explain what
+         * the page promises rather than among them. */
+        sessionReplayToggle(),
         el(
           "div",
           { class: "card pad" },
@@ -8124,6 +9122,36 @@ async function privacyView() {
           }),
         ),
       ),
+    ),
+    /* After the grid, at the page's full width. Inside either column it is a
+     * narrow strip holding eight rules of prose, several screens tall on its
+     * own, and the page scrolled almost entirely because of it. Across the
+     * page its rules sit two or three abreast. */
+    el(
+      "div",
+      { class: "card pad rules-card" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Rules" }),
+        el("span", { class: "spacer" }),
+        pill(
+          // What the badge is actually about. "All holding" read as a
+          // statement about everything semlith is storing, three lines
+          // above a scan that had found a private key in a store — the
+          // rules are forward-looking, and this now says so.
+          (data.rules || []).every((r) => r.ok)
+            ? "holding for new writes"
+            : "check the rows",
+          (data.rules || []).every((r) => r.ok) ? "good" : "warn",
+        ),
+      ),
+      el("p", {
+        class: "subtitle",
+        text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
+      }),
+      rulesBox,
+      fixNote,
     ),
   );
 }
@@ -8199,14 +9227,9 @@ function langCard(languages, withEdges) {
 
 async function aboutView() {
   let about;
-  let models;
   let languages;
   try {
-    [about, models, languages] = await Promise.all([
-      api("/api/about"),
-      api("/api/models"),
-      api("/api/languages"),
-    ]);
+    [about, languages] = await Promise.all([api("/api/about"), api("/api/languages")]);
   } catch (e) {
     return el("div", { class: "view" }, pageHead("About"), error(e.message));
   }
@@ -8218,51 +9241,6 @@ async function aboutView() {
       el("span", { class: "k", text: key }),
       el("span", { class: "v", text: value }),
     );
-
-  const list = (models && models.models) || [];
-  const table = dataTable({
-    className: "w-models",
-    caption: "Every embedding model a store can be built with, and which of them this machine has fetched.",
-    sort: "name",
-    perPage: 10,
-    rows: list,
-    columns: [
-      {
-        key: "name",
-        label: "Model",
-        className: "path",
-        value: (m) => m.name,
-        // The name to type beside where it comes from. The column mixed three
-        // naming schemes — fastembed's CamelCase, a HuggingFace path and
-        // semlith's own kebab-case — with nothing saying which was which; the
-        // name is what `--model` takes, and the repository is the second line.
-        render: (m) =>
-          el(
-            "div",
-            { class: "rows tight" },
-            el("span", { class: "one-line", "data-tip": m.name, text: m.name }),
-            m.code
-              ? el("span", { class: "meta one-line", "data-tip": m.code, text: m.code })
-              : null,
-          ),
-      },
-      { key: "dim", label: "Dims", className: "num", value: (m) => m.dim, render: (m) => String(m.dim) },
-      {
-        key: "bytes",
-        label: "Size",
-        className: "num",
-        // Empty last, whichever way the column is sorted. Forty-three of the
-        // forty-eight rows have no size, so sorting ascending put every blank
-        // first and buried the only five rows with data.
-        value: (m) => m.bytes || 0,
-        empty: (m) => !m.bytes,
-        // Blank rather than guessed: a model this machine has never fetched has
-        // no size here to measure, and fastembed's catalogue does not carry one.
-        render: (m) => (m.bytes ? bytes(m.bytes) : "—"),
-      },
-      { key: "description", label: "Note", className: "meta", value: (m) => m.description },
-    ],
-  });
 
   return el(
     "div",
@@ -8291,15 +9269,21 @@ async function aboutView() {
           row("Bound to", about.bind),
           row("Store home", about.store_home),
           row("Model cache", about.model_cache),
-          // Which protocol revisions a client can negotiate, and under what
-          // terms the binary ships. Both are facts the binary already knows and
-          // the v4 About page states; neither reached the page before.
-          row("MCP revisions", (about.revisions || []).join(" · ")),
+          // `MCP revisions` stood here. The v4 design's About page has seven
+          // facts and this is not one of them, and what it showed -- which
+          // protocol revisions a client may negotiate -- is a thing an agent
+          // settles in its handshake and a person never acts on. The route
+          // still answers `revisions` for anything else that reads it.
           row("Source", `${about.license} · free and complete`),
           row("Uptime", `${Math.floor(about.uptime / 60)}m · pid ${about.pid}`),
         ),
       ),
-      list.length ? table.node : el("div", { class: "card pad" }, empty("No model is listed.")),
+      // The models table stood between these two. Forty-eight rows of a
+      // catalogue, of which this machine has fetched one -- the design has no
+      // place for it, and `semlith models` prints the same list for anyone who
+      // wants it. `/api/models` is left answering and is now the one route with
+      // no portal view; that exception is argued in `tests/portal.rs` and
+      // recorded in `docs/compatibility.md` rather than assumed.
       langCard(languages.languages || [], about.graph_languages || []),
     ),
     el("p", {
@@ -8397,7 +9381,7 @@ function welcomeView() {
           onclick: () => go("stores"),
         }),
         el("button", {
-          class: "button ghost",
+          class: "button secondary",
           type: "button",
           text: "Skip for now",
           // Stores, not About: skipping the first run means going to the page
@@ -8545,12 +9529,132 @@ function statCell(label, value) {
   return el("div", { class: "impact-stat" }, capLabel(label), el("span", { class: "n", text: String(value) }));
 }
 
+/* Reverse reachability, drawn the way the Graph page draws the graph.
+ *
+ * This was a static painter: concentric rings, one per hop, drawn once and
+ * redrawn only on a resize or a theme change. It said the hop count clearly and
+ * said nothing else — the nodes could not be moved, hovered or picked, and a
+ * ring with more symbols than fit at its radius simply counted the rest.
+ *
+ * The design paints this canvas with the same force simulation the Graph page
+ * uses, and that is what the page is for: the same picture, the same
+ * interactions, the same drift, on a subgraph instead of on the whole store. So
+ * this is `graphCanvas` with an impact answer converted into its nodes and
+ * edges, rather than a second painter with its own behaviour to keep in step.
+ *
+ * Hop is not lost by dropping the rings — every row carries it in the table
+ * beside this, and each edge here is one hop, so the distance from the subject
+ * is the number of edges to it.
+ */
+
+/* The most nodes worth laying out. `graphView` caps at 180 for a whole store;
+ * this card is a third of that one's height, so it takes a third of its
+ * budget. Nearest hops are kept, because a caller two hops away is the one the
+ * reader is looking for. */
+const IMPACT_NODE_CAP = 34;
+
+function impactCanvas() {
+  /* The Graph page's hover card, with what this answer knows about the node:
+   * how far it is from the subject, where it lives, and which edge reached it. */
+  const graph = graphCanvas({
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("impact");
+      tip.atPoint(
+        x,
+        y,
+        node.hop
+          ? tipCard(node.name, "blue", [
+              ["hops", node.hop],
+              ["file", node.path ? `${shortPath(node.path)}:${node.line}` : "—"],
+              ["reaches", `${node.via} · ${node.edge}`],
+              ["confidence", node.confidence || "—"],
+            ])
+          : tipCard(node.name, "accent", [["hops", "0 · the subject"]]),
+        "impact",
+      );
+    },
+  });
+  const caption = el("span", { class: "canvas-caption", text: "reverse reachability" });
+  const wrap = el("div", { class: "card impact-canvas-card" }, graph.node, caption);
+
+  /* An impact answer is a list of rows, each naming what it reaches through.
+   * The canvas wants nodes and edges, so `via` becomes the other end: a row is
+   * the edge `name -> via`, and the subject is the node every chain ends at. */
+  function shape(subject, rows) {
+    const index = new Map([[subject, 0]]);
+    const nodes = [{ name: subject, kind: "symbol" }];
+    const edges = [];
+    const add = (name) => {
+      if (index.has(name)) return index.get(name);
+      if (nodes.length >= IMPACT_NODE_CAP) return null;
+      index.set(name, nodes.length);
+      nodes.push({ name, kind: "symbol" });
+      return nodes.length - 1;
+    };
+    // Nearest first, so the cap drops the far edge of the answer rather than
+    // whichever rows the store happened to return last.
+    for (const row of [...rows].sort((a, b) => a.hop - b.hop)) {
+      const from = add(row.name);
+      // The first row to reach a node is its nearest, and the one the card
+      // describes. The subject is never a row's `name`, so it keeps no hop.
+      if (from !== null && from !== 0 && !nodes[from].hop) {
+        Object.assign(nodes[from], {
+          hop: row.hop,
+          path: row.path,
+          line: row.line,
+          via: row.via,
+          edge: row.kind || "calls",
+          confidence: row.confidence,
+        });
+      }
+      const to = add(row.via);
+      if (from === null || to === null) continue;
+      edges.push({ from, to, kind: row.kind || "calls", confidence: row.confidence });
+    }
+    return { nodes, edges, total: rows.length + 1 };
+  }
+
+  return {
+    node: wrap,
+    show(name, reached) {
+      if (!name) return this.clear();
+      const data = shape(name, reached || []);
+      graph.draw(data);
+      // The subject selected, as though it had been clicked: it is the one node
+      // every other node on this canvas is measured from, and selecting it
+      // lights its own edges as well as drawing it in the accent.
+      graph.pick(name);
+      const hidden = data.total - data.nodes.length;
+      caption.textContent = hidden > 0
+        ? `reverse reachability · ${hidden} beyond the ${IMPACT_NODE_CAP} drawn`
+        : "reverse reachability";
+      graph.start();
+    },
+    clear() {
+      graph.draw({ nodes: [], edges: [], total: 0 });
+      caption.textContent = "reverse reachability";
+    },
+  };
+}
+
 async function impactView() {
   await refreshStores();
 
   const results = el("div", { class: "impact-results" });
   const subject = el("span", { class: "impact-subject", text: "—" });
   const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
+  const rings = impactCanvas();
+  const pathCard = pathFinderCard();
+  const traceLane = traceCard();
+  const reached = statCell("Reached", 0);
+  const files = statCell("Files", 0);
+  const inferredCell = statCell("Inferred", 0);
+  const stats = el("div", { class: "impact-stats" }, reached, files, inferredCell);
+  const setStats = (a, b, c) => {
+    reached.querySelector(".n").textContent = String(a);
+    files.querySelector(".n").textContent = String(b);
+    inferredCell.querySelector(".n").textContent = String(c);
+  };
 
   const nameInput = el("input", {
     type: "search",
@@ -8581,19 +9685,57 @@ async function impactView() {
 
   const go = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
 
+  /* A real table row, in a real table.
+   *
+   * These were `div`s on a grid, and a grid is only a table for as long as
+   * every row agrees about its tracks: a long symbol pushed its own row's
+   * columns out of line with the heading above it, and the whole block read as
+   * loose text rather than as an answer with columns. `table` is the element
+   * for this, its heading sticks, and the browser sizes the columns from the
+   * content instead of from a guess written in `fr` units. */
   function reachedRow(row) {
     return el(
-      "div",
+      "tr",
       { class: "impact-row" },
-      el("span", { class: "sym", text: row.name }),
-      el("span", { class: "where", text: `${shortPath(row.path)}:${row.line}` }),
+      el("td", { class: "sym" }, el("code", { title: row.name, text: row.name })),
+      // The whole path in the title, because the cell truncates it.
+      el("td", {
+        class: "where path",
+        title: `${row.path}:${row.line}`,
+        text: `${shortPath(row.path)}:${row.line}`,
+      }),
       el(
-        "span",
+        "td",
         { class: "via" },
         el("span", { class: "one-line", text: `${row.via} · ${row.kind}` }),
         confidenceBadge(row.confidence),
       ),
-      el("span", { class: "hops-n", text: String(row.hop) }),
+      el("td", { class: "hops-n num", text: String(row.hop) }),
+    );
+  }
+
+  // One table, split into a `tbody` per hop, rather than one table per hop:
+  // the hops are groups of one answer and share its columns, so the heading is
+  // written once and the group label rides a row that spans it.
+  function hopGroup(hop, rows) {
+    return el(
+      "tbody",
+      { class: "impact-block" },
+      el(
+        "tr",
+        { class: "impact-hop-row" },
+        el(
+          "th",
+          { colspan: "4", scope: "rowgroup" },
+          el(
+            "div",
+            { class: "impact-hop" },
+            el("h2", { text: `${hop} hop${hop === 1 ? "" : "s"}` }),
+            el("span", { class: "muted", text: `${rows.length} definition${rows.length === 1 ? "" : "s"}` }),
+          ),
+        ),
+      ),
+      rows.map(reachedRow),
     );
   }
 
@@ -8602,6 +9744,8 @@ async function impactView() {
     state.impactSymbol = name;
     if (!name) {
       subject.textContent = "—";
+      setStats(0, 0, 0);
+      rings.clear();
       fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
       return;
     }
@@ -8616,11 +9760,17 @@ async function impactView() {
       if (allEdges) query.set("all_edges", "1");
       data = await api(`/api/impact?${query}`);
     } catch (e) {
+      rings.clear();
+      setStats(0, 0, 0);
       fill(results, error(e.message));
       return;
     }
     const impact = data.impact;
     if (!impact || !impact.reached.length) {
+      // A canvas still showing the last symbol's rings under a headline about
+      // this one is the worst thing this page could draw.
+      rings.clear();
+      setStats(0, impact ? impact.files.length : 0, 0);
       fill(
         results,
         el("p", { class: "headline", text: data.headline || "nothing reaches that name" }),
@@ -8641,16 +9791,27 @@ async function impactView() {
       byHop.get(row.hop).push(row);
     }
 
+    // The three figures belong to the `Changing` card in the left column, where
+    // the design puts them, not to the table below. `Inferred` is the design's
+    // own word for this cell; it read `Unsettled` here, which is the word this
+    // project uses for the pair of confidences and not the word on the page.
+    setStats(impact.reached.length, impact.files.length, inferred);
+    rings.show(name, impact.reached);
+
+    /* The two cards below now have a question to answer.
+     *
+     * The furthest caller to the symbol being changed: the longest chain this
+     * answer contains, which is the one worth reading. Seeded only while both
+     * fields are empty, so a question somebody typed is never overwritten. */
+    const furthest = impact.reached[impact.reached.length - 1];
+    if (furthest) {
+      pathCard.seed(furthest.name, name);
+      traceLane.seed(furthest.name, name);
+    }
+
     fill(
       results,
       el("p", { class: "headline", text: data.headline }),
-      el(
-        "div",
-        { class: "impact-stats" },
-        statCell("Reached", impact.reached.length),
-        statCell("Files", impact.files.length),
-        statCell("Unsettled", inferred),
-      ),
       allEdges
         ? el("p", {
             class: "note hypothesis",
@@ -8659,39 +9820,68 @@ async function impactView() {
         : null,
       el(
         "div",
-        { class: "impact-head-row" },
-        capLabel("Reached symbol"),
-        capLabel("Where"),
-        capLabel("Via"),
-        capLabel("Hops"),
-      ),
-      [...byHop.entries()].map(([hop, rows]) =>
+        { class: "card table-card impact-table" },
         el(
-          "section",
-          { class: "impact-block" },
+          "div",
+          { class: "table-wrap" },
           el(
-            "div",
-            { class: "impact-hop" },
-            el("h2", { text: `${hop} hop${hop === 1 ? "" : "s"}` }),
-            el("span", { class: "muted", text: `${rows.length} definition${rows.length === 1 ? "" : "s"}` }),
+            "table",
+            {},
+            el("caption", { class: "sr-only", text: `Everything that reaches ${name}, nearest hop first` }),
+            el(
+              "thead",
+              {},
+              el(
+                "tr",
+                {},
+                el("th", { text: "Reached symbol" }),
+                el("th", { text: "Where" }),
+                el("th", { text: "Via" }),
+                el("th", { class: "num", text: "Hops" }),
+              ),
+            ),
+            [...byHop.entries()].map(([hop, rows]) => hopGroup(hop, rows)),
           ),
-          rows.map(reachedRow),
         ),
       ),
       el(
-        "section",
-        // Its own class: a file is not an edge and carries no support class,
-        // so a check counting unbadged hops must be able to tell the two
-        // blocks apart.
-        { class: "impact-block impact-files" },
-        el("div", { class: "impact-hop" }, el("h2", { text: "Files" })),
-        impact.files.map((file) =>
+        "div",
+        { class: "card table-card impact-table" },
+        el("div", { class: "table-head" }, el("h2", { text: "Files" })),
+        el(
+          "div",
+          { class: "table-wrap" },
           el(
-            "div",
-            { class: "impact-row" },
-            el("span", { class: "sym", text: shortPath(file.path) }),
-            el("span", { class: "where", text: `${file.symbols} definition${file.symbols === 1 ? "" : "s"}` }),
-            el("span", { class: "via", text: `nearest ${file.nearest} hop${file.nearest === 1 ? "" : "s"}` }),
+            "table",
+            {},
+            el("caption", { class: "sr-only", text: "The files those definitions are in" }),
+            el(
+              "thead",
+              {},
+              el(
+                "tr",
+                {},
+                el("th", { text: "File" }),
+                el("th", { class: "num", text: "Definitions" }),
+                el("th", { class: "num", text: "Nearest" }),
+              ),
+            ),
+            el(
+              "tbody",
+              // Its own class: a file is not an edge and carries no support
+              // class, so a check counting unbadged hops must be able to tell
+              // the two blocks apart.
+              { class: "impact-block impact-files" },
+              impact.files.map((file) =>
+                el(
+                  "tr",
+                  { class: "impact-row" },
+                  el("td", { class: "sym path", text: shortPath(file.path) }),
+                  el("td", { class: "num", text: String(file.symbols) }),
+                  el("td", { class: "num", text: `${file.nearest} hop${file.nearest === 1 ? "" : "s"}` }),
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -8710,27 +9900,64 @@ async function impactView() {
     pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
       pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
     }),
-    el(
-      "div",
-      { class: "impact-band" },
-      nameInput,
-      el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
-      verified,
-      go,
-    ),
-    el("div", { class: "impact-subject-row" }, capLabel("Changing"), subject, el("span", { class: "spacer" }), depthPill),
-    // Two columns, as the v4 page is laid out: the answer on the left, the
-    // two questions that follow from it on the right. Stacked full width, the
-    // Path finder's two fields ran a metre wide on a large display and the
-    // answer scrolled off the top before the reader reached them.
+    /* Two columns, as the design lays the page out: the answer on the left,
+     * the two questions that follow from it on the right, and the canvas at
+     * the top of the right column rather than spanning.
+     *
+     * The `Changing` row and the three figures were two unboxed page-wide
+     * bands across the top; they are one card at the head of the left column,
+     * which is where the design has them and is why the right column used to
+     * read as a large empty area beside them.
+     *
+     * The search band is this project's own addition -- the design is a
+     * prototype with one fixed subject and no way to ask about another -- and
+     * it sits at the head of that same card rather than after it. Against a
+     * real store there is nothing on this page until a name is typed, so a
+     * control placed below the answer it produces would be a control nobody
+     * finds. Recorded as a deliberate departure. */
     el(
       "div",
       { class: "impact-columns" },
-      results,
-      el("div", { class: "rows" }, pathFinderCard(), traceCard()),
+      el(
+        "div",
+        { class: "impact-col" },
+        el(
+          "div",
+          { class: "card pad impact-subject-card" },
+          el(
+            "div",
+            { class: "impact-band" },
+            nameInput,
+            el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
+            verified,
+            go,
+          ),
+          el(
+            "div",
+            { class: "impact-subject-row" },
+            capLabel("Changing"),
+            subject,
+            el("span", { class: "spacer" }),
+            depthPill,
+          ),
+          stats,
+        ),
+        results,
+      ),
+      el("div", { class: "impact-col" }, rings.node, pathCard, traceLane),
     ),
   );
 }
+
+/* What each of these two cards says before it has been asked anything.
+ *
+ * Both said `Name both ends of the chain.` -- the same sentence at four sites,
+ * two of which sit one above the other on screen, which reads as a page that
+ * has failed rather than as two cards waiting for a question. Each says what
+ * it will do with the two names instead, and the two differ because the cards
+ * do: one finds a chain, the other writes the chain out with its evidence. */
+const PATH_EMPTY = "Two names, and this walks the edges between them.";
+const TRACE_EMPTY = "Two names, and this writes the chain out with the lines that support it.";
 
 /* The path finder, which until now answered only from the terminal.
  *
@@ -8749,7 +9976,6 @@ function pathFinderCard() {
   const verifiedChip = chipToggle("Prefer verified edges", true, (on) => {
     preferVerified = on;
     if (!on) strict = false;
-    strictChip.classList.toggle("on", strict);
     strictChip.setAttribute("aria-pressed", String(strict));
     run();
   });
@@ -8757,7 +9983,6 @@ function pathFinderCard() {
     strict = on;
     if (on) {
       preferVerified = true;
-      verifiedChip.classList.add("on");
       verifiedChip.setAttribute("aria-pressed", "true");
     }
     run();
@@ -8767,7 +9992,7 @@ function pathFinderCard() {
     const a = from.value.trim();
     const b = to.value.trim();
     if (!a || !b) {
-      fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+      fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
       return;
     }
     // `--strict` wins over `--all-edges`, exactly as it does on the command
@@ -8805,9 +10030,7 @@ function pathFinderCard() {
                 onclick: () => {
                   preferVerified = false;
                   strict = false;
-                  verifiedChip.classList.remove("on");
                   verifiedChip.setAttribute("aria-pressed", "false");
-                  strictChip.classList.remove("on");
                   strictChip.setAttribute("aria-pressed", "false");
                   run();
                 },
@@ -8819,27 +10042,45 @@ function pathFinderCard() {
     fill(body, chainBlock(data.path, data.summary));
   }
 
-  fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+  fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
 
-  return el(
+  const node = el(
     "section",
     { class: "card pad path-card" },
     el("div", { class: "card-head" }, el("h2", { text: "Path finder" }), query),
     el("div", { class: "path-band" }, from, to, verifiedChip, strictChip, el("button", { class: "button small", type: "button", text: "Walk", onclick: () => run() })),
     body,
   );
+  /* Seeded from the answer above it, once, and never over a typed question.
+   *
+   * Arriving here from the Graph page's `Blast radius` fills the reach box and
+   * runs it, and these two cards sat empty underneath saying "two names" — with
+   * the two names on screen a few inches above them. The design shows both
+   * cards answering, which is only possible if something puts a question in
+   * them. */
+  node.seed = (a, b) => {
+    if (from.value.trim() || to.value.trim()) return;
+    if (!a || !b || a === b) return;
+    from.value = a;
+    to.value = b;
+    run();
+  };
+  return node;
 }
 
 /** A pill that is on or off, in the two states the v4 design draws. */
 function chipToggle(label, on, onchange) {
   const node = el("button", {
-    class: `chip-toggle${on ? " on" : ""}`,
+    // A chip, at the smaller of the design's two chip sizes. The pressed look
+    // comes from `aria-pressed` through `.chip`, so a toggle and a filter chip
+    // cannot drift apart -- and the state a screen reader is told is the same
+    // attribute the stylesheet paints from, rather than a class beside it.
+    class: "chip sm",
     type: "button",
     text: label,
     "aria-pressed": String(on),
     onclick: () => {
-      const next = !node.classList.contains("on");
-      node.classList.toggle("on", next);
+      const next = node.getAttribute("aria-pressed") !== "true";
       node.setAttribute("aria-pressed", String(next));
       onchange(next);
     },
@@ -8905,7 +10146,7 @@ function traceCard() {
     const a = from.value.trim();
     const b = to.value.trim();
     if (!a || !b) {
-      fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+      fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
       return;
     }
     fill(body, el("p", { class: "subtitle", text: "Reading…" }));
@@ -8945,9 +10186,9 @@ function traceCard() {
     fill(body, ...parts);
   }
 
-  fill(body, el("p", { class: "subtitle", text: "Name both ends of the chain." }));
+  fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
 
-  return el(
+  const node = el(
     "section",
     { class: "card pad trace-card" },
     el(
@@ -8961,9 +10202,18 @@ function traceCard() {
     el("div", { class: "path-band" }, from, to, el("button", { class: "button small", type: "button", text: "Trace", onclick: () => run() })),
     body,
   );
+  // Seeded like the path finder above it, and for the same reason. See there.
+  node.seed = (a, b) => {
+    if (from.value.trim() || to.value.trim()) return;
+    if (!a || !b || a === b) return;
+    from.value = a;
+    to.value = b;
+    run();
+  };
+  return node;
 }
 
-/* Reports: five, generated here, exported in four formats.
+/* Reports: five, generated here, exported in five formats.
  *
  * The page asks `/api/report` for the text and hands it to the viewer — the
  * export is not a second renderer, so a file saved from here and one written
@@ -9014,7 +10264,88 @@ const REPORT_FORMATS = [
   ["csv", "CSV", "csv", "text/csv"],
   ["json", "JSON", "json", "application/json"],
   ["html", "HTML", "html", "text/html"],
+  /* The fifth format is bytes, not text. `/api/report?format=pdf` answers
+   * `application/pdf` outside the JSON envelope the other four ride in, so it
+   * is fetched as a blob and named in the preview rather than painted into it:
+   * a PDF rendered as characters is a screenful of noise with a filename. */
+  ["pdf", "PDF", "pdf", "application/pdf"],
 ];
+
+/* The design's four window chips, and the name `/api/report` takes for each.
+ *
+ * `report::WINDOWS` also has `all`, and naming no window at all is a fifth
+ * behaviour again — but the design draws neither, and a chip this page invents
+ * is a chip the design cannot be checked against. Leaving a store's whole
+ * history unreachable from here costs nothing a reader can see, because the
+ * three reports that count over it ignore the window anyway. */
+const REPORT_WINDOWS = [
+  ["day", "24 hours"],
+  ["week", "7 days"],
+  ["month", "30 days"],
+  ["quarter", "This quarter"],
+];
+
+/* The two reports that carry a date to narrow by.
+ *
+ * `report::generate_over` windows `access` and `change` and nothing else; the
+ * other three are lifetime aggregates over what is on disk now, and
+ * `Window::note` makes each of them say so in its own heading. The chips
+ * follow that rather than offering a dial that moves no figure — a control
+ * that cannot change the file it claims to change is worse than no control. */
+/* The reports whose figures a window actually moves.
+ *
+ * `savings` and `gaps` joined these in 0.27.0. Every row in the ledger carries
+ * `at` and always has; what was missing was a reader that took a bound, so the
+ * page drew four window chips over the savings figure, disabled them, and
+ * explained why the control it had just drawn could not work. The readers take
+ * a bound now.
+ *
+ * `health` is still out, and genuinely: it is the index as it stands — files,
+ * chunks, stale rows — and none of those figures has a date to narrow by. */
+const WINDOWED_KINDS = ["access", "change", "savings", "gaps"];
+
+/* The design's cadence chips, as the interval `schedule::Schedule` holds.
+ *
+ * The record's field is `every_seconds` and these are shortcuts over it, not a
+ * smaller vocabulary: a cadence no chip spells is still a cadence, and
+ * `semlith schedule add --every` can still say it. The design's fourth chip,
+ * `On git commit`, is not here — nothing in this binary hooks a commit, and a
+ * chip for it would be the one kind of lie this page exists to refuse. */
+const REPORT_CADENCES = [
+  ["Daily", 86400],
+  ["Weekly", 604800],
+  ["Monthly", 2592000],
+];
+
+/** An interval in seconds, as the design's cadence blocks read it. */
+/* A chip is one line and cannot hold an absolute path. The design's chip reads
+ * `~/.semlith/reports/`; a real store home is longer than that, so the tail is
+ * what the chip shows and the whole path travels in its title and in the spec
+ * line under the button. */
+function tailPath(path) {
+  const parts = String(path).split("/").filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}/` : `${path}/`;
+}
+
+function everyWords(seconds) {
+  const hit = REPORT_CADENCES.find(([, every]) => every === seconds);
+  if (hit) return hit[0].toLowerCase();
+  const plural = (count, unit) => `every ${count} ${unit}${count === 1 ? "" : "s"}`;
+  if (seconds % 86400 === 0) return plural(seconds / 86400, "day");
+  if (seconds % 3600 === 0) return plural(seconds / 3600, "hour");
+  return plural(Math.max(1, Math.round(seconds / 60)), "minute");
+}
+
+/** How long until a unix second, in words. `when()` only looks backwards. */
+function until(unix) {
+  if (!unix) return "not scheduled";
+  const seconds = unix - Math.floor(Date.now() / 1000);
+  if (seconds <= 0) return "due now";
+  if (seconds < 60) return `in ${seconds}s`;
+  if (seconds < 3600) return `in ${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `in ${Math.round(seconds / 3600)}h`;
+  return `in ${Math.round(seconds / 86400)}d`;
+}
 
 /* Reports, in the v4 shape: pick a type, set it up, read the result.
  *
@@ -9024,124 +10355,238 @@ const REPORT_FORMATS = [
  * shape is one selection and one builder: the picker says which report, the
  * builder says how, and the preview is the one it is about.
  *
- * The design's Window, Scope and redaction controls are not here. `/api/report`
- * takes a kind, a format and a model and nothing else, and a control that
- * cannot change the file it claims to change is worse than no control. They
- * arrive with the route that serves them. */
+ * Window and Scope are here now because `/api/report` takes them, and so are
+ * two of the design's three toggles: `Hash the query text` replaces every query
+ * with a digest of it wherever one reaches the page, and `Attach retrieved
+ * excerpts` unrolls the access report's session lines into the retrievals
+ * behind them. The design draws a third, `Sign the report`, and it is not here:
+ * signing needs a key, and where that key lives, how it rotates and what a
+ * reader checks it against are decisions this product has not made. A switch
+ * with nothing behind it is a promise the file does not keep, so the option is
+ * gone rather than drawn and disabled. */
 async function reportsView() {
   await refreshStores();
+
+  /* The real store home, so the paths this page prints are the daemon's own
+   * rather than `~/.semlith/` assumed. A home the page cannot read leaves the
+   * paths out rather than guessing at them. */
+  let home = "";
+  try {
+    home = (await api("/api/about")).store_home || "";
+  } catch (_) {
+    /* The page still works; only the paths in two footers go unnamed. */
+  }
+  const reportDir = home ? `${home}/reports/` : "the store home's reports/ directory";
+  const schedulesFile = home ? `${home}/schedules.json` : "schedules.json in the store home";
 
   let kind = REPORTS[0][0];
   let format = REPORT_FORMATS[0][0];
   let model = MODEL_PRICES[0];
+  let span = "month";
+  /* Empty is every open store, which is exactly what `/api/report` means by no
+   * `scope` — so "all stores" is the absence of a narrowing, not a value. */
+  let scope = [];
+  // The two content toggles, off to begin with, which is the request 0.26.x
+  // made and the file it produced.
+  let redact = false;
+  let excerpts = false;
   let body = "";
+  let file = null;
+  let report = null;
+  /* What this page actually wrote, this session. Not the daemon's directory —
+   * see the Written reports card for why that list cannot be read from here. */
+  let written = [];
+
+  const def = () => REPORTS.find(([id]) => id === kind);
+  const fmt = () => REPORT_FORMATS.find(([id]) => id === format);
+  const ext = () => fmt()[2];
+  const windowed = () => WINDOWED_KINDS.includes(kind);
+  const spanName = () => (REPORT_WINDOWS.find(([id]) => id === span) || REPORT_WINDOWS[2])[1];
+  const scopeWords = () => (scope.length ? scope.join(", ") : "all stores");
+  /* The date in the filename is the one inside the file, taken off the report
+   * the daemon generated, so the two cannot disagree. */
+  const stamp = () => (report && report.generated ? report.generated.slice(0, 10) : "");
+  const baseName = () => `${kind}${stamp() ? `-${stamp()}` : ""}.${ext()}`;
 
   const picker = el("div", { class: "report-types" });
   const builder = el("div", { class: "card pad report-builder" });
-  const previewName = el("span", { class: "name" });
+  const builderProblem = el("div", { class: "note bad" });
+  // Plain, not bold: in the design this is a label on the previewed file, at
+  // the body's own weight and 12px mono. See `.name.plain`.
+  const previewName = el("span", { class: "name plain" });
   const previewBody = el("pre", { class: "report-text" });
   const previewMeta = el("span", { class: "meta" });
+  const savingsCard = el("section", { class: "card pad savings-card" });
+  const gapsCard = el("section", { class: "card pad gaps-card" });
+  const writtenCard = el("section", { class: "card written-card" });
+  const scheduleCard = el("section", { class: "card pad schedules-card" });
+  const cliCard = el("section", { class: "card pad report-cli-card" });
 
-  const def = () => REPORTS.find(([id]) => id === kind);
-  const ext = () => REPORT_FORMATS.find(([id]) => id === format)[2];
-
-  function fileName() {
-    return `reports/semlith-${kind}.${ext()}`;
+  /* A labelled row of chips, the shape all five chip groups on this page take.
+   * `inline` is the design's 10.5px eyebrow, for the two groups that sit beside
+   * a heading rather than above a column of controls. */
+  function chipGroup(label, chips, options) {
+    const { inline, note, group } = options || {};
+    return el(
+      "div",
+      {
+        class: inline ? "chip-group inline" : "chip-group",
+        // A name a test can hold on to. The eyebrow is the label a reader
+        // sees and is free to be reworded; this is not.
+        "data-group": group || label.toLowerCase(),
+      },
+      el("span", { class: inline ? "eyebrow sm" : "eyebrow", text: label }),
+      el("div", { class: "filters" }, chips),
+      note ? el("p", { class: "subtitle", text: note }) : null,
+    );
   }
 
-  /** Generate the chosen report and show it. One request, whose text is then
-   * what Copy copies and what Export writes — so the three cannot disagree. */
+  function chip(label, on, onclick, why) {
+    return el("button", {
+      class: "chip",
+      type: "button",
+      text: label,
+      "aria-pressed": String(on),
+      disabled: !onclick,
+      title: why || null,
+      onclick: onclick || null,
+    });
+  }
+
+  // ------------------------------------------------------------- the report
+
+  /** Generate the chosen report and show it. One request, whose bytes are then
+   * what Copy copies, what Export writes and what Save to disk saves — so the
+   * four cannot disagree, and none of them is a second renderer. */
   async function generate() {
-    previewName.textContent = fileName();
+    previewName.textContent = `reports/${baseName()}`;
     previewMeta.textContent = "Generating…";
     fill(previewBody, "");
     body = "";
-    let data;
+    file = null;
+    report = null;
+    const query = new URLSearchParams({ kind, format, model: model[0] });
+    // Omitted rather than sent and ignored: a report that cannot honour a
+    // window should not have one in the URL that produced it.
+    if (windowed()) query.set("window", span);
+    for (const name of scope) query.append("scope", name);
+    // Sent only when on, so the URL that produced a plain report is the URL
+    // 0.26.x would have produced.
+    if (excerpts) query.set("excerpts", "1");
+    if (redact) query.set("redact", "1");
     try {
-      data = await api(`/api/report?${new URLSearchParams({ kind, format, model: model[0] })}`);
+      if (format === "pdf") {
+        // The one format outside the JSON envelope: bytes, fetched as bytes.
+        const response = await fetch(`/api/report?${query}`, {
+          credentials: "omit",
+          headers: authed(),
+        });
+        if (!response.ok) throw new Error(response.statusText || "request failed");
+        file = await response.blob();
+      } else {
+        const data = await api(`/api/report?${query}`);
+        body = data.text;
+        report = data.report;
+        file = new Blob([body], { type: `${fmt()[3]};charset=utf-8` });
+      }
     } catch (e) {
       // The failure goes beside the controls that caused it, not into the
       // preview: the preview is the file, and an error is not one.
       previewMeta.textContent = "";
       previewBody.textContent = "";
       fill(builderProblem, error(e.message));
+      paintAll();
       return;
     }
     fill(builderProblem);
-    body = data.text;
-    previewBody.textContent = body;
-    const kb = (body.length / 1024).toFixed(1);
-    previewMeta.textContent = `${kb} KB · ${ext()} · generated here, written only where you save it`;
+    previewName.textContent = `reports/${baseName()}`;
+    if (format === "pdf") {
+      previewBody.textContent =
+        `${bytes(file.size)} of PDF. A page cannot show it as text; ` +
+        `Export and Save to disk write these exact bytes.`;
+    } else {
+      previewBody.textContent = body;
+    }
+    paintMeta();
+    paintAll();
   }
 
-  const builderProblem = el("div", { class: "note" });
+  /* The three things the footer states, each read off the file that exists
+   * rather than estimated from the preview:
+   *   rows shown  — every `Table` block's row count in the generated report,
+   *                 which is the rows in the document, not the rows on screen;
+   *   full file   — `Blob.size`, the byte length Export hands the browser;
+   *   format      — the format the request asked for and the envelope echoed.
+   * The design's fourth is a signature, and it is not here: nothing in this
+   * binary signs a report, and a footer reading `unsigned` on every file for
+   * ever is a column about a feature rather than about the document.
+   * The trailing clause is the design's and is true of all three: every byte
+   * above was produced on this machine. */
+  function paintMeta() {
+    const rows = ((report && report.blocks) || [])
+      .filter((block) => block.block === "table")
+      .reduce((total, block) => total + block.rows.length, 0);
+    const size = file ? bytes(file.size) : "—";
+    const parts = [
+      format === "pdf" ? "rows not counted in a PDF" : `${rows} rows shown`,
+      `full file ${size}`,
+      format,
+      "written to disk, never uploaded",
+    ];
+    previewMeta.textContent = parts.join(" · ");
+  }
 
   const copy = copyButton(() => body, "Copy", true);
 
   const exportButton = el("button", {
-    class: "button secondary small",
+    // The design's 26px ink shape: the smallest solid control on the page, and
+    // the toolbar's own action rather than the page's primary one.
+    class: "button tiny ink",
     type: "button",
     text: "Export",
     onclick: () => {
-      if (!body) return;
-      const [, , extension, type] = REPORT_FORMATS.find(([id]) => id === format);
-      offerDownload(`semlith-${kind}.${extension}`, body, type);
+      if (!file) return;
+      offerDownload(baseName(), file, fmt()[3]);
     },
   });
 
-  function paintBuilder() {
-    const [, title, , who, answers] = def();
-    fill(
-      builder,
-      el("div", { class: "titles" }, el("span", { class: "card-title", text: title }), el("p", { class: "subtitle", text: answers })),
-      el("span", { class: "eyebrow", text: "Reader" }),
-      el("span", { class: "meta", text: who }),
-      el("span", { class: "eyebrow", text: "Format" }),
-      el(
-        "div",
-        { class: "filters" },
-        REPORT_FORMATS.map(([id, label]) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            text: label,
-            "aria-pressed": String(id === format),
-            onclick: () => {
-              format = id;
-              paintBuilder();
-              generate();
-            },
-          }),
-        ),
-      ),
-      el("span", { class: "eyebrow", text: "Price tokens at" }),
-      el(
-        "div",
-        { class: "filters" },
-        MODEL_PRICES.map((price) =>
-          el("button", {
-            class: "chip",
-            type: "button",
-            text: price[0],
-            "aria-pressed": String(price[0] === model[0]),
-            onclick: () => {
-              model = price;
-              paintBuilder();
-              generate();
-            },
-          }),
-        ),
-      ),
-      el("p", {
-        class: "subtitle",
-        text: "HTML prints to PDF from your browser. No PDF writer ships in the binary, so none is claimed.",
-      }),
-      builderProblem,
-      // The name the page shows, quoted, rather than the slug: what you copy
-      // should be what you read, and the two words need the quotes.
-      copyField(`semlith report ${kind} --format ${format} --model "${model[0]}"`),
-    );
+  /* The design's accent action. It saves the file and logs it; `Export` beside
+   * the filename above saves it and says nothing, which is the split the design
+   * draws — its own Save to disk writes no file at all and only prepends a row.
+   *
+   * It is the browser's save, not the daemon's: no route on this machine writes
+   * a report into `reports/`, so a button claiming to fill that directory would
+   * be claiming something no request from this page can do. The picker API was
+   * tried here and taken out again — `showSaveFilePicker` exists in a headless
+   * browser and its promise then never settles, which is a button that silently
+   * does nothing for ever. */
+  const saveButton = el("button", {
+    class: "button",
+    type: "button",
+    text: "Save to disk",
+    title: "Saves through the browser and lists it below",
+    onclick: () => {
+      if (!file) return;
+      offerDownload(baseName(), file, fmt()[3]);
+      record(baseName(), file.size);
+    },
+  });
+
+  /** Remember a file this page really wrote, for the Written reports table. */
+  function record(name, size) {
+    written.unshift({
+      name,
+      title: def()[1],
+      span: report ? report.window : "",
+      size,
+      at: Math.floor(Date.now() / 1000),
+    });
+    // The design caps its log at six rows once anything is saved.
+    written = written.slice(0, 6);
+    paintWritten();
   }
+
+  // ------------------------------------------------------------- the builder
 
   function paintPicker() {
     fill(
@@ -9156,7 +10601,6 @@ async function reportsView() {
             onclick: () => {
               kind = id;
               paintPicker();
-              paintBuilder();
               generate();
             },
           },
@@ -9168,33 +10612,626 @@ async function reportsView() {
     );
   }
 
+  function paintBuilder() {
+    const [, title, , , answers] = def();
+    /* Under the title, the report's own sentence about the span it was taken
+     * over — `Window::note`, which for savings, health and gaps says outright
+     * that it counts over a store's whole history and has no date to narrow
+     * by. That is the page's one statement about the window, and it comes from
+     * the file rather than from the chip that is pressed. */
+    const spanLine = report ? report.window : answers;
+    fill(
+      builder,
+      el(
+        "div",
+        { class: "titles" },
+        el("span", { class: "card-title", text: title }),
+        el("p", { class: "subtitle", text: answers }),
+        el("p", { class: "subtitle span-note", text: spanLine }),
+      ),
+      chipGroup(
+        "Window",
+        REPORT_WINDOWS.map(([id, label]) =>
+          chip(
+            label,
+            windowed() && id === span,
+            windowed()
+              ? () => {
+                  span = id;
+                  generate();
+                }
+              : null,
+            windowed() ? null : `${title} has no date to narrow by`,
+          ),
+        ),
+      ),
+      chipGroup("Scope", [
+        chip("all stores", scope.length === 0, () => {
+          scope = [];
+          generate();
+        }),
+        ...state.stores.map((store) =>
+          chip(store.name, scope.includes(store.name), () => {
+            scope = scope.includes(store.name)
+              ? scope.filter((name) => name !== store.name)
+              : scope.concat(store.name);
+            generate();
+          }),
+        ),
+      ]),
+      chipGroup(
+        "Format",
+        REPORT_FORMATS.map(([id, label]) =>
+          chip(label, id === format, () => {
+            format = id;
+            generate();
+          }),
+        ),
+      ),
+      el(
+        "div",
+        { class: "report-toggles" },
+        [
+          [
+            "Hash the query text",
+            "Keeps the who, when and which-file; drops what was asked.",
+            () => redact,
+            (on) => {
+              redact = on;
+            },
+          ],
+          [
+            "Attach retrieved excerpts",
+            "The exact lines each agent was shown. Larger file.",
+            () => excerpts,
+            (on) => {
+              excerpts = on;
+            },
+          ],
+        ].map(([label, note, get, set]) => {
+          const node = el(
+            "button",
+            { class: "report-toggle", type: "button", "aria-pressed": String(get()) },
+            el("span", { class: "knob" }),
+            el(
+              "span",
+              { class: "stack" },
+              el("span", { class: "label", text: label }),
+              el("span", { class: "why", text: note }),
+            ),
+          );
+          node.onclick = () => {
+            const next = node.getAttribute("aria-pressed") !== "true";
+            node.setAttribute("aria-pressed", String(next));
+            set(next);
+            generate();
+          };
+          return node;
+        }),
+      ),
+      builderProblem,
+    );
+  }
+
+  // ------------------------------------------------- the savings breakdown
+
+  /** One fact out of the generated report, by the label `report.rs` gives it. */
+  function fact(label) {
+    for (const block of (report && report.blocks) || []) {
+      if (block.block !== "facts") continue;
+      const hit = block.facts.find(([name]) => name === label);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  function factValue(label, fallback) {
+    const hit = fact(label);
+    return hit ? hit[1] : fallback || "—";
+  }
+
+  function tableStarting(prefix) {
+    return ((report && report.blocks) || []).find(
+      (block) => block.block === "table" && block.title.startsWith(prefix),
+    );
+  }
+
+  function trustBadge(text, tone) {
+    return el("span", { class: `trust ${tone}`, text });
+  }
+
+  function paintSavings() {
+    const table = tableStarting("What was not read");
+    if (!table) {
+      fill(savingsCard, el("span", { class: "card-title", text: "Retrieval savings" }), empty("Nothing generated yet."));
+      return;
+    }
+    const chain = fact("Ledger chain");
+    fill(
+      savingsCard,
+      el(
+        "div",
+        { class: "savings-head" },
+        el("span", { class: "card-title", text: "Retrieval savings" }),
+        el("span", { class: "spacer" }),
+        /* The design puts the model chips here, in this card's header, rather
+         * than in the builder — they price one report, not all five. */
+        chipGroup(
+          "Model",
+          MODEL_PRICES.map((price) =>
+            chip(price[0], price[0] === model[0], () => {
+              model = price;
+              generate();
+            }),
+          ),
+          { inline: true },
+        ),
+        /* The design prints `prices as of 2026-09-01`. This binary's prices
+         * are `report::PRICES`, written into the source with no date on them,
+         * so what is stated here is the rate itself — a number the reader can
+         * check against the arithmetic above it. */
+        el("span", { class: "mono-chip", text: `$${model[1].toFixed(2)} per Mtok, input` }),
+        el("span", { class: "rule" }),
+        chipGroup(
+          "Cycle",
+          REPORT_WINDOWS.slice(1).map(([, label]) => chip(label, false, null, "This report has no date to narrow by")),
+          { inline: true },
+        ),
+      ),
+      el(
+        "div",
+        { class: "savings-lines" },
+        table.rows.map(([name, tokens, cost, rule]) =>
+          el(
+            "div",
+            { class: "savings-line" },
+            el(
+              "div",
+              { class: "row" },
+              el("span", { class: "name", text: name }),
+              el("span", { class: "spacer" }),
+              el("span", { class: "tok", text: tokens }),
+              el("span", { class: "amount", text: cost || "—" }),
+            ),
+            el("p", { class: "subtitle", text: rule }),
+          ),
+        ),
+      ),
+      el(
+        "div",
+        { class: "savings-net" },
+        el("span", { class: "name", text: "Net" }),
+        el("span", { class: "spacer" }),
+        el("span", { class: "tok", text: factValue("Net") }),
+        el("span", { class: "amount", text: factValue("Net cost avoided") }),
+      ),
+      el(
+        "div",
+        { class: "trust-strip" },
+        trustBadge(`coverage ${factValue("Coverage")}`, "blue"),
+        trustBadge(`zero-hit ${factValue("Zero-hit")}`, "plain"),
+        trustBadge(`refunds ${factValue("Refund rate")}`, "plain"),
+        trustBadge(`p50 ${factValue("p50")} · p95 ${factValue("p95")}`, "plain"),
+        trustBadge(`tier ${factValue("Tier")}`, "blue"),
+        trustBadge(
+          `ledger ${chain ? chain[2] : "no rows yet"} · ${factValue("Ledger chain", "unknown")}`,
+          chain && chain[1] === "verifies" ? "green" : "amber",
+        ),
+      ),
+      /* The design's footnote says the baseline is priced at the cache-write
+       * rate and that a reconciliation states a drift against Claude's own
+       * counter. Neither is true of this binary: `report::PRICES` is input
+       * pricing, said so in its own doc comment, and nothing reconciles
+       * anything. What is written here is what the numbers above actually are. */
+      el("p", {
+        class: "subtitle",
+        text:
+          "Priced at input rates, because a retrieval is something an agent reads. " +
+          "Token counts are this store's own tokenizer; a model's counter will differ, " +
+          "and nothing here reconciles the two.",
+      }),
+    );
+  }
+
+  // ------------------------------------------------------------ the gaps card
+
+  function paintGaps() {
+    const several = fact("Names that mislead");
+    fill(
+      gapsCard,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: "Names that mislead" }),
+        el("span", { class: "mono-chip", text: several ? `${several[1]} names` : "—" }),
+      ),
+      several ? el("p", { class: "subtitle", text: several[2] }) : null,
+      /* The design lists each name with its definition count and how many
+       * hypothesis chains it sits on. `store::names_with_several_definitions`
+       * returns a count and nothing else, and no route breaks it down, so the
+       * rows are absent rather than invented. */
+      empty(
+        "Which names, and how many chains each sits on, is not in the gaps report — " +
+          "the store counts them without listing them.",
+      ),
+    );
+  }
+
+  // -------------------------------------------------------- written reports
+
+  function paintWritten() {
+    const head = (text, right) =>
+      el("th", { class: right ? "right" : null, scope: "col", text });
+    fill(
+      writtenCard,
+      el(
+        "div",
+        { class: "written-head" },
+        el("span", { class: "card-title", text: "Written reports" }),
+        el("span", { class: "mono-chip", text: reportDir }),
+      ),
+      el(
+        "div",
+        { class: "scroll-x" },
+        el(
+          "table",
+          { class: "written-table" },
+          el(
+            "thead",
+            null,
+            el("tr", null, head("Written"), head("Report"), head("Window"), head("Size", true), head("When", true)),
+          ),
+          el(
+            "tbody",
+            null,
+            written.map((row) =>
+              el(
+                "tr",
+                null,
+                el("td", { class: "file", text: row.name }),
+                el("td", { class: "type", text: row.title }),
+                el("td", { class: "window", text: row.span }),
+                el("td", { class: "size right", text: bytes(row.size) }),
+                el("td", { class: "when right", text: when(row.at) }),
+              ),
+            ),
+          ),
+        ),
+      ),
+      /* Not the daemon's directory. Nothing serves a listing of it — there is
+       * no route that reads `reports/`, and `/api/dirs` answers names without
+       * a size or a time, which is three of these five columns empty. What is
+       * listed is what this page wrote, which it knows exactly. */
+      written.length
+        ? null
+        : empty(
+            `Nothing written from this page yet. What the daemon has already put in ${reportDir} ` +
+              "is not listed here: no route reads that directory.",
+          ),
+    );
+  }
+
+  // ---------------------------------------------------------- the schedules
+
+  let schedules = [];
+  let scheduleProblem = "";
+  /* A refused write, kept apart from a missing route: the list is reloaded
+   * after every write, so a refusal folded into the same slot would be wiped
+   * by the very read that followed it and the button would look inert. */
+  let scheduleRefused = "";
+  let cadence = REPORT_CADENCES[2][1];
+  const destinations = [[tailPath(`${home}/reports`), home ? `${home}/reports` : ""]].concat(
+    state.stores.map((store) => [`${store.name} root`, store.dir]),
+  );
+  let destination = destinations[0][1];
+
+  async function loadSchedules() {
+    try {
+      const data = await api("/api/schedules");
+      schedules = Object.entries(data.schedules || {}).map(([id, one]) => ({ id, ...one }));
+      scheduleProblem = "";
+    } catch (e) {
+      schedules = [];
+      scheduleProblem = e.message;
+    }
+    paintSchedules();
+  }
+
+  /* Every change is a POST to the one route, naming the verb `semlith
+   * schedule` names. The page holds no schedule state of its own: the daemon
+   * owns the file, and a card that remembered what it asked for would be a
+   * second copy of what a schedule is. */
+  async function writeSchedule(sent) {
+    scheduleRefused = "";
+    try {
+      await post("/api/schedules", sent);
+    } catch (e) {
+      // The daemon names what would have worked -- a destination that is not a
+      // directory, a kind this binary does not have. Printed as it was said.
+      scheduleRefused = e.message;
+    }
+    // Reloaded rather than patched in place: the card states what the daemon
+    // holds, and the daemon is the only thing that knows what it now holds.
+    loadSchedules();
+  }
+
+  function scheduleRow(one) {
+    const title = (REPORTS.find(([id]) => id === one.kind) || [, one.kind])[1];
+    const where = String(one.dir || "");
+    const spec = [
+      everyWords(one.every_seconds),
+      one.format,
+      one.stores && one.stores.length ? one.stores.join(", ") : "all stores",
+    ].join("  ·  ");
+    return el(
+      "div",
+      { class: "schedule-row" },
+      el("button", {
+        class: `schedule-knob${one.enabled ? " on" : ""}`,
+        type: "button",
+        disabled: Boolean(scheduleProblem),
+        title: one.enabled ? "Pause this schedule" : "Resume this schedule",
+        "aria-pressed": String(Boolean(one.enabled)),
+        onclick: () => writeSchedule({ action: "set", id: one.id, enabled: !one.enabled }),
+      }),
+      el(
+        "div",
+        { class: "stack" },
+        el("span", { class: "name", text: `${title} → ${where.split("/").filter(Boolean).pop() || where}` }),
+        el("span", { class: "spec", text: `${spec}  →  ${where}` }),
+        el("span", {
+          class: "next",
+          text: one.enabled ? `next run ${until(one.next_run)}` : "paused",
+        }),
+        /* The failure this feature will actually meet: a destination deleted,
+         * renamed or unmounted. `Schedule::last_error` carries the whole chain
+         * and the card prints it, because a schedule that says it is running
+         * beside a folder that never fills is the worst outcome available. */
+        one.last_error ? el("span", { class: "failed", text: `failed: ${one.last_error}` }) : null,
+        one.last_path ? el("span", { class: "wrote", text: `last wrote ${one.last_path}` }) : null,
+      ),
+      el("span", { class: "spacer" }),
+      el("span", { class: `state-pill ${one.enabled ? "on" : "paused"}`, text: one.enabled ? "on" : "paused" }),
+      el("button", {
+        class: "schedule-remove",
+        type: "button",
+        text: "×",
+        disabled: Boolean(scheduleProblem),
+        title: "Remove schedule",
+        onclick: () => writeSchedule({ action: "remove", id: one.id }),
+      }),
+    );
+  }
+
+  function paintSchedules() {
+    const [, title] = def();
+    /* The design's sentence, with this build's values in it. The window clause
+     * is dropped for the three reports that have no window, rather than
+     * printed and then quietly ignored by the schedule it describes. */
+    const describes =
+      `Takes the report set up above — ${title.toLowerCase()}, ` +
+      (windowed() ? `last ${spanName().toLowerCase()}, ` : "") +
+      `${scopeWords()}, as ${fmt()[1]}. Change those and add again for a second schedule.`;
+    fill(
+      scheduleCard,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: "Schedules" }),
+        /* The design says `crontab in ~/.semlith/schedules.toml`. The file is
+         * `schedules.json`, it is not a crontab, and its directory is whatever
+         * home this daemon was started on. */
+        el("span", { class: "mono-chip", text: `run by the daemon · ${schedulesFile}` }),
+      ),
+      scheduleProblem
+        ? el("p", {
+            class: "subtitle",
+            text:
+              `This daemon serves no schedules route (${scheduleProblem}), so the card is ` +
+              "read-only until it does. The records themselves are real: `semlith schedule " +
+              "list` reads the same file the daemon runs from.",
+          })
+        : null,
+      scheduleRefused ? el("div", { class: "note bad" }, scheduleRefused) : null,
+      schedules.length
+        ? el("div", { class: "schedule-list" }, schedules.map(scheduleRow))
+        : el("div", { class: "empty centred" }, "No schedules. Set up a report above, then add it here — the daemon writes the file while it is running."),
+      el(
+        "div",
+        { class: "new-schedule" },
+        el("span", { class: "eyebrow", text: "New schedule" }),
+        el("p", { class: "subtitle strong", text: describes }),
+        el(
+          "div",
+          { class: "filters" },
+          REPORT_CADENCES.map(([label, every]) =>
+            chip(label, every === cadence, () => {
+              cadence = every;
+              paintSchedules();
+            }),
+          ),
+        ),
+        el(
+          "div",
+          { class: "filters" },
+          el("span", { class: "write-to", text: "write to" }),
+          destinations.map(([label, path]) =>
+            chip(
+              label,
+              path === destination,
+              () => {
+                destination = path;
+                paintSchedules();
+              },
+              path,
+            ),
+          ),
+        ),
+        el(
+          "div",
+          { class: "filters" },
+          el("button", {
+            class: "button add-schedule",
+            type: "button",
+            /* The design's label carries a cron phrase — `1st of the month,
+             * 08:00`. The record holds an interval and nothing else, so what
+             * is promised here is the interval. */
+            text: `Add schedule · ${everyWords(cadence)}`,
+            disabled: Boolean(scheduleProblem) || !destination,
+            onclick: () =>
+              writeSchedule({
+                action: "add",
+                kind,
+                format,
+                model: model[0],
+                every_seconds: cadence,
+                dir: destination,
+                // Null rather than absent for the three reports with no date
+                // to narrow by: `Window::Unset` is what the record holds.
+                window: windowed() ? span : null,
+                stores: scope,
+              }),
+          }),
+          el("span", {
+            class: "mono-chip",
+            text: `${everyWords(cadence)}  →  ${destination || "?"}/${kind}-<date>.${ext()}`,
+          }),
+        ),
+      ),
+      el("p", {
+        class: "subtitle",
+        text:
+          "The daemon runs these while it is up and writes the file in place, so a report can be " +
+          `a tracked file in the repo with a readable diff each month. The list is ${schedulesFile}; ` +
+          "× removes one.",
+      }),
+    );
+  }
+
+  // ------------------------------------------------------------- the CLI card
+
+  function paintCli() {
+    const flags = [`--format ${format}`];
+    if (windowed()) flags.push(`--window ${span}`);
+    for (const name of scope) flags.push(`--scope ${name}`);
+    if (kind === "savings") flags.push(`--model "${model[0]}"`);
+    const out = home ? `${home}/reports/` : ".";
+    // What the Copy button puts on the clipboard: one line, runnable as it is.
+    const one = `semlith report ${kind} ${flags.join(" ")} --out ${out}`;
+    /* What the card shows: the same command wrapped the way the design wraps
+     * it, with a continuation at each break. A single line of eight flags ran
+     * off the right edge of a half-width card and the reader saw `semlith
+     * report savings --format mark…` — the flags are the part worth reading.
+     * Backslashes rather than a soft wrap, so what is on screen is still
+     * something that runs if it is selected by hand. */
+    const wrapped = [`semlith report ${kind} \\`, ...flags.map((f) => `  ${f} \\`), `  --out ${out}`];
+    const block = [
+      ...wrapped,
+      "",
+      // The design's comment, and true of this build: the list is a file.
+      "# the schedule list is a file — add, edit or delete by hand:",
+      `semlith schedule add ${kind} \\`,
+      `  --every ${cadence} --to ${destination || reportDir} \\`,
+      `  --format ${format}`,
+      "semlith schedule list   ·   semlith schedule remove 2",
+    ].join("\n");
+    fill(
+      cliCard,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: "Same thing without the browser" }),
+        el("span", { class: "spacer" }),
+        /* The 26px copy sibling of Export: the same height, in the secondary
+         * shape rather than filled with ink. The height comes from the card's
+         * own rule, because `copyButton` is shared with eight other sites. */
+        copyButton(one, "Copy", true),
+      ),
+      el("pre", { class: "code report-cli", text: block }),
+      /* The design's footnote, verbatim, with `semlith_report` set in mono. It
+       * is the only place the slug appears on this page: the v4 header has no
+       * right-hand mono slug on Reports, unlike Impact. */
+      el(
+        "p",
+        { class: "subtitle" },
+        "The agent can ask for one too: ",
+        mono("semlith_report"),
+        " returns the same document over MCP, so “write a change brief for this PR” needs no copy-paste.",
+      ),
+    );
+  }
+
+  function paintAll() {
+    paintBuilder();
+    paintMeta();
+    savingsCard.hidden = kind !== "savings";
+    gapsCard.hidden = kind !== "gaps";
+    if (kind === "savings") paintSavings();
+    if (kind === "gaps") paintGaps();
+    paintSchedules();
+    paintCli();
+  }
+
   paintPicker();
-  paintBuilder();
+  paintWritten();
+  paintAll();
   generate();
+  loadSchedules();
 
   return el(
     "div",
     { class: "view" },
     pageHead(
       "Reports",
-      // The v4 sub-line, with the claim 0.26.0's wording made and the design's
-      // does not. A report is built from the ledger, and a page that offers to
-      // export one has to say where it goes.
-      "Turn the ledger, the index and the graph into a file someone else can read. Generated locally and exported as a file you own. Nothing leaves the machine.",
-      { pill: el("span", { class: "mono-chip", text: "semlith_report" }) },
+      // The claim at the end is not decoration and is asserted by the drive:
+      // this is the one page whose whole job is turning a local record into a
+      // file for somebody else, so where that file is built and where it goes
+      // are the first things a reader needs to know.
+      "Turn the ledger, the index and the graph into a file someone else can read — a saving number for finance, an access record for audit, a blast radius for a pull request. Generated locally and exported as a file you own. Nothing leaves the machine.",
     ),
     picker,
     el(
       "div",
-      { class: "grid two" },
+      { class: "grid two report-row" },
       builder,
       el(
         "section",
         { class: "card report-preview-card" },
-        el("div", { class: "report-bar" }, previewName, el("span", { class: "spacer" }), copy, exportButton),
+        el(
+          "div",
+          { class: "report-bar" },
+          previewName,
+          el("span", { class: "spacer" }),
+          copy,
+          exportButton,
+        ),
         previewBody,
-        el("div", { class: "foot" }, previewMeta),
+        el("div", { class: "foot" }, previewMeta, el("span", { class: "spacer" }), saveButton),
       ),
+    ),
+    savingsCard,
+    gapsCard,
+    writtenCard,
+    el("div", { class: "grid two report-row" }, scheduleCard, cliCard),
+    /* What the design has no place for, after everything it does place. Both
+     * lines are facts about this build rather than about the design, which is
+     * why they are here and not woven into a card above. */
+    el(
+      "section",
+      { class: "card pad report-extras" },
+      el("span", { class: "card-title", text: "About this build" }),
+      el("p", {
+        class: "subtitle",
+        text:
+          "PDF is written by the binary itself — the same blocks as the other four formats, " +
+          "typeset on US Letter. Export and Save to disk hand you those bytes unchanged.",
+      }),
+      el("p", {
+        class: "subtitle",
+        text:
+          "Savings, index health and knowledge gaps count over a store's whole history and " +
+          "have no date to narrow by, so the Window chips are inert while one of them is chosen.",
+      }),
     ),
   );
 }
@@ -9285,6 +11322,7 @@ const RENDER = {
   stores: storesView,
   files: filesView,
   index: indexView,
+  corpus: corpusView,
   search: searchView,
   agents: agentsView,
   privacy: privacyView,
@@ -9513,15 +11551,6 @@ function buildShell() {
       el("div", { class: "fact", text: `${location.host} · sole writer` }),
       el("div", { class: "fact", id: "daemon-stores", text: "" }),
     ),
-    // The design keeps a way back to the first-run screen. Without it that
-    // screen is reachable only by emptying the registry, so nobody who has a
-    // store can ever read the page that explains the product.
-    el("button", {
-      class: "link-button quiet replay-welcome",
-      type: "button",
-      text: "Replay first-run screen",
-      onclick: () => go("welcome"),
-    }),
   );
 
   const scrim = el("button", {

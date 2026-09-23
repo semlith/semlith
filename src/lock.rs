@@ -104,6 +104,15 @@ impl Drop for StoreLock {
 /// The file alone is not proof — a killed daemon leaves one behind — but the
 /// OS lock being held is, and this is only ever consulted after `try_lock`
 /// has already failed. The two together mean a live daemon.
+///
+/// It stays existence-based deliberately. This predicate only picks which
+/// refusal to word, and both wordings are refusals, so being generous costs a
+/// slightly wrong sentence. `daemon::held_by_daemon`, which decides whether
+/// `semlith start` stops being an error at all, must not be generous: it asks
+/// `daemon::Discovery::read`, which checks the registry trusts the store, the
+/// file's owner and mode, the token's shape and the pid's liveness. Being wrong
+/// there would print a URL nothing listens on and exit 0 over a genuine
+/// conflict.
 fn daemon_holds(dir: &Path) -> bool {
     dir.join(crate::daemon::DISCOVERY_FILE).exists()
 }

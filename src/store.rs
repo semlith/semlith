@@ -2164,6 +2164,18 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
 /// this release does not add. The number is therefore an upper bound on what
 /// was saved, and `semlith stats` says so rather than presenting it as exact.
 pub fn ledger_savings(db: &Connection) -> Result<Savings> {
+    ledger_savings_since(db, 0)
+}
+
+/// The savings, over retrievals recorded at or after `since`.
+///
+/// `since` of 0 is every row, which is what [`ledger_savings`] asks for and
+/// what every caller before 0.27.0 meant. The ledger has always carried `at`
+/// and an index on it; what it did not have was a reader that took a bound, so
+/// the Reports page drew a window control over a figure that could not honour
+/// one. A control that cannot change the thing it claims to change is worse
+/// than no control.
+pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     // Retrievals rather than rows on both sides of the ratio, for the reason
     // `ledger_totals` gives: the rows of one cross-store search are one search.
     // The token sums stay sums of rows, because each row holds its own store's
@@ -2171,19 +2183,20 @@ pub fn ledger_savings(db: &Connection) -> Result<Savings> {
     let (credited, net): (i64, i64) = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
                 COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
-         FROM retrievals WHERE hits > 0",
-        [],
+         FROM retrievals WHERE hits > 0 AND at >= ?1",
+        [since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let total: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals",
-        [],
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+         WHERE at >= ?1",
+        [since],
         |r| r.get(0),
     )?;
     let estimated: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')",
-        [],
+         WHERE hits > 0 AND at >= ?1 AND (tokenizer IS NULL OR tokenizer != 'model')",
+        [since],
         |r| r.get(0),
     )?;
     Ok(Savings {
@@ -2456,6 +2469,35 @@ pub fn graph_stats(db: &Connection) -> Result<(i64, i64)> {
 }
 
 /// `(files, chunks, indexed bytes)`
+/// Whether this store can still be read, as cheaply as that can be asked.
+///
+/// One row out of each of the two large tables, by the rowid index. It exists
+/// because the obvious probe — `stats()` below — is three full scans, and this
+/// runs once per store on every aggregating read, which includes every search.
+/// Measured on a 10 390-chunk store: `stats()` 2.65 ms, this 0.24 ms, and the
+/// gap widens linearly because one is O(n) and the other is O(log n).
+///
+/// It is not weaker for being cheaper. What it has to catch is a database that
+/// opened and cannot be read now — truncated by a killed index run, on a volume
+/// that was unplugged — and a btree descent into a page that is no longer there
+/// fails exactly as a scan would. What it deliberately does not do is read
+/// `meta` and call that proof: `Semlith::open` already read `meta`, and page one
+/// of a truncated file is usually the part that survived.
+///
+/// An empty table is not a failure: a store with nothing indexed yet is a store
+/// that reads fine and holds nothing.
+pub fn readable(db: &Connection) -> Result<()> {
+    for table in ["files", "chunks"] {
+        let sql = format!("SELECT id FROM {table} ORDER BY id DESC LIMIT 1");
+        let mut stmt = db.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        // Stepped rather than collected: the error this is looking for arrives
+        // on the step, and `Option` is the empty-table case rather than a fault.
+        let _: Option<i64> = rows.next()?.map(|r| r.get(0)).transpose()?;
+    }
+    Ok(())
+}
+
 pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let chunks: i64 = db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
@@ -2463,6 +2505,315 @@ pub fn stats(db: &Connection) -> Result<(i64, i64, i64)> {
         r.get(0)
     })?;
     Ok((files, chunks, bytes))
+}
+
+/// Everything the `Inside the index` page shows about one store.
+///
+/// Measured, not estimated — that is the page's own claim about itself and so
+/// it is the contract for this function. Where a figure cannot be measured
+/// from what the store holds, it is not here; the page says what it does not
+/// know rather than printing a plausible number.
+///
+/// One pass over `chunks` is the expensive part: the text of every chunk is
+/// read to count lines, words, characters and blanks. A 130k-chunk store is
+/// tens of megabytes, which is a second or so — this runs when the page is
+/// opened, not on every write.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Corpus {
+    pub files: i64,
+    pub chunks: i64,
+    pub bytes: i64,
+    /// Lines covered by chunks. A file's lines are `MAX(end_line)` over its
+    /// chunks, which is the file's length wherever it was chunked whole.
+    pub lines: i64,
+    pub words: i64,
+    pub characters: i64,
+    pub blank_lines: i64,
+    /// Lines whose first non-space characters open a comment in that file's
+    /// language. A heuristic over a short table of openers, named as one on
+    /// the page.
+    pub comment_lines: i64,
+    /// Per language, by line: the mix the page draws as a stacked bar.
+    pub languages: Vec<LanguageLines>,
+    /// Files by the kind of thing they are, for the prose panel.
+    pub kinds: Vec<KindCount>,
+    pub longest_file: Option<FileLines>,
+    /// The most folders any indexed path descends through.
+    pub deepest_path: i64,
+    /// Unix seconds of the first and last `indexed_at` in the store.
+    pub first_indexed: i64,
+    pub last_indexed: i64,
+    /// Chunks added per month, oldest first, as `("2026-09", 9610)`.
+    pub months: Vec<MonthCount>,
+    /// One vector per chunk, of this many numbers each.
+    pub vector_dim: i64,
+    pub symbols: i64,
+    pub edges: i64,
+    /// Edges by tier, in the order the graph rail lists them. Decided by
+    /// `coverage_by_language`, which is the one rule for this.
+    pub tiers: Vec<KindCount>,
+    /// Edges naming something no definition in this store satisfies, and the
+    /// names most often behind that.
+    pub unresolved: i64,
+    pub unresolved_names: Vec<KindCount>,
+    /// Names defined more than once, and the worst of them.
+    pub ambiguous_names: i64,
+    pub ambiguous_worst: Vec<KindCount>,
+    /// Languages this store holds, and how many of them carry an edge.
+    pub languages_with_edges: i64,
+    /// The median milliseconds of the retrievals the ledger recorded, or zero
+    /// when it has recorded none: a claim about this machine rather than a
+    /// benchmark from somewhere else.
+    pub median_query_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LanguageLines {
+    pub language: String,
+    pub lines: i64,
+    pub files: i64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct KindCount {
+    pub name: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FileLines {
+    pub path: String,
+    pub lines: i64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MonthCount {
+    /// `YYYY-MM`, in UTC, because that is what SQLite's `strftime` gives and a
+    /// month boundary in the reader's zone is not worth a time-zone database.
+    pub month: String,
+    pub chunks: i64,
+}
+
+/// A line's comment openers, by the language the path says it is.
+///
+/// Short on purpose. It is here to answer "how much of this corpus is prose
+/// inside code", and getting `//` and `#` right answers that for nearly every
+/// file anybody indexes. A language missing from it contributes no comment
+/// lines rather than a wrong count.
+fn comment_openers(language: &str) -> &'static [&'static str] {
+    // Lowercased, because `filter::Language::name` is already lowercase —
+    // `rust`, not `Rust`. Matching the capitalised spellings found nothing and
+    // reported a corpus with no comments in it at all.
+    match language.to_ascii_lowercase().as_str() {
+        "rust" | "c" | "c++" | "c#" | "go" | "java" | "javascript" | "typescript" | "tsx"
+        | "jsx" | "swift" | "kotlin" | "scala" | "php" | "dart" | "zig" | "css" => {
+            &["//", "/*", "*"]
+        }
+        "python" | "ruby" | "shell" | "bash" | "perl" | "r" | "yaml" | "toml" | "makefile"
+        | "dockerfile" | "elixir" | "nix" => &["#"],
+        "sql" | "lua" | "haskell" => &["--"],
+        "html" | "xml" | "markdown" => &["<!--"],
+        "lisp" | "clojure" => &[";"],
+        _ => &[],
+    }
+}
+
+/// Measure one store, for the `Inside the index` page.
+pub fn corpus(db: &Connection, language_of: impl Fn(&str) -> String) -> Result<Corpus> {
+    let (files, chunks, bytes) = stats(db)?;
+    let mut out = Corpus {
+        files,
+        chunks,
+        bytes,
+        vector_dim: 384,
+        ..Default::default()
+    };
+
+    // One pass over the chunks, joined to the path so the comment rule knows
+    // which language it is reading. Everything counted per file first, so
+    // "lines" is the file's own length rather than the sum of its chunks'
+    // spans — chunks overlap.
+    let mut per_file: std::collections::HashMap<i64, (String, i64)> =
+        std::collections::HashMap::new();
+    {
+        let mut q = db.prepare(
+            "SELECT c.file_id, f.path, c.end_line, c.text
+               FROM chunks c JOIN files f ON f.id = c.file_id",
+        )?;
+        let mut rows = q.query([])?;
+        while let Some(row) = rows.next()? {
+            let file_id: i64 = row.get(0)?;
+            let path: String = row.get(1)?;
+            let end: i64 = row.get(2)?;
+            let text: String = row.get(3)?;
+            let language = language_of(&path);
+            let openers = comment_openers(&language);
+            out.characters += text.chars().count() as i64;
+            out.words += text.split_whitespace().count() as i64;
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.is_empty() {
+                    out.blank_lines += 1;
+                } else if openers.iter().any(|o| trimmed.starts_with(o)) {
+                    out.comment_lines += 1;
+                }
+            }
+            let slot = per_file.entry(file_id).or_insert((path, 0));
+            slot.1 = slot.1.max(end);
+        }
+    }
+
+    let mut by_language: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    for (path, lines) in per_file.values() {
+        out.lines += lines;
+        let language = language_of(path);
+        let name = if language.is_empty() {
+            "other".to_string()
+        } else {
+            language
+        };
+        let slot = by_language.entry(name).or_insert((0, 0));
+        slot.0 += lines;
+        slot.1 += 1;
+        if out.longest_file.as_ref().is_none_or(|f| f.lines < *lines) {
+            out.longest_file = Some(FileLines {
+                path: path.clone(),
+                lines: *lines,
+            });
+        }
+        let depth = path.trim_matches('/').matches('/').count() as i64;
+        out.deepest_path = out.deepest_path.max(depth);
+    }
+    out.languages = by_language
+        .into_iter()
+        .map(|(language, (lines, files))| LanguageLines {
+            language,
+            lines,
+            files,
+        })
+        .collect();
+    out.languages
+        .sort_by_key(|row| std::cmp::Reverse(row.lines));
+
+    out.kinds = counted(
+        db,
+        "SELECT CASE
+                  WHEN lower(path) LIKE '%.pdf' THEN 'PDF'
+                  WHEN lower(path) LIKE '%.pptx' OR lower(path) LIKE '%.key' THEN 'Slide deck'
+                  WHEN lower(path) LIKE '%.xlsx' OR lower(path) LIKE '%.csv' THEN 'Spreadsheet'
+                  WHEN lower(path) LIKE '%.ipynb' THEN 'Notebook'
+                  WHEN lower(path) LIKE '%.docx' THEN 'Document'
+                  WHEN lower(path) LIKE '%.png' OR lower(path) LIKE '%.jpg'
+                    OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.webp' THEN 'Image'
+                  ELSE 'Text and code'
+                END AS k,
+                COUNT(*)
+           FROM files GROUP BY k ORDER BY COUNT(*) DESC",
+    )?;
+
+    let span: (i64, i64) = db.query_row(
+        "SELECT COALESCE(MIN(indexed_at), 0), COALESCE(MAX(indexed_at), 0) FROM files",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    out.first_indexed = span.0;
+    out.last_indexed = span.1;
+
+    {
+        let mut q = db.prepare(
+            "SELECT strftime('%Y-%m', f.indexed_at, 'unixepoch') AS m, COUNT(c.id)
+               FROM files f JOIN chunks c ON c.file_id = f.id
+              GROUP BY m ORDER BY m",
+        )?;
+        let mut rows = q.query([])?;
+        while let Some(row) = rows.next()? {
+            out.months.push(MonthCount {
+                month: row.get(0)?,
+                chunks: row.get(1)?,
+            });
+        }
+    }
+
+    out.symbols = db.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
+    out.edges = db.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+
+    /* The four tiers, from `coverage_by_language`, which is the one place that
+     * decides them.
+     *
+     * Grouping `edges.confidence` stood here and is a different question: the
+     * column holds `extracted` or `inferred`, and whether an inferred edge is
+     * resolved, ambiguous or unresolved depends on how many definitions of its
+     * target this store holds. So the page read `resolved 0 · ambiguous 0`
+     * directly above a coverage table reading 2380 and 2158 -- two answers to
+     * one question, on one page, from one store.
+     *
+     * `languages_with_edges` comes from the same pass for the same reason. */
+    let coverage = coverage_by_language(db)?;
+    let mut tiers = [0i64; 4];
+    for row in &coverage {
+        tiers[0] += row.extracted as i64;
+        tiers[1] += row.resolved as i64;
+        tiers[2] += row.ambiguous as i64;
+        tiers[3] += row.unresolved as i64;
+        if row.extracted + row.resolved + row.ambiguous > 0 {
+            out.languages_with_edges += 1;
+        }
+    }
+    out.tiers = ["extracted", "resolved", "ambiguous", "unresolved"]
+        .iter()
+        .zip(tiers)
+        .map(|(name, count)| KindCount {
+            name: (*name).to_string(),
+            count,
+        })
+        .collect();
+    out.unresolved = tiers[3];
+    let (names, _) = unresolved_targets(db, 7)?;
+    out.unresolved_names = names
+        .into_iter()
+        .map(|(name, count)| KindCount { name, count })
+        .collect();
+    out.ambiguous_names = db.query_row(
+        "SELECT COUNT(*) FROM (SELECT name FROM symbols GROUP BY name HAVING COUNT(*) > 1)",
+        [],
+        |r| r.get(0),
+    )?;
+    out.ambiguous_worst = counted(
+        db,
+        "SELECT name, COUNT(*) c FROM symbols GROUP BY name HAVING c > 1
+          ORDER BY c DESC, name LIMIT 5",
+    )?;
+
+    // The middle of what this machine actually measured. `ms` is recorded per
+    // retrieval, so this is a fact about this store rather than a benchmark.
+    out.median_query_ms = db
+        .query_row(
+            // `micros`, which is what the column is called. Asking for `ms`
+            // did not fail loudly — the row read errored and the fallback
+            // reported a store that had never been queried.
+            "SELECT micros / 1000 FROM retrievals ORDER BY micros
+              LIMIT 1 OFFSET (SELECT COUNT(*) FROM retrievals) / 2",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(out)
+}
+
+/// A two-column `name, count` query, as the list the page draws from it.
+fn counted(db: &Connection, sql: &str) -> Result<Vec<KindCount>> {
+    let mut q = db.prepare(sql)?;
+    let mut rows = q.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(KindCount {
+            name: row.get(0)?,
+            count: row.get(1)?,
+        });
+    }
+    Ok(out)
 }
 
 /// One session's whole ledger, as the per-session table reads it.
@@ -2569,11 +2920,63 @@ pub fn ledger_head(db: &Connection) -> Result<Option<String>> {
 /// is either a missing document or a name nobody uses in the words they
 /// searched with.
 pub fn ledger_zero_hit_queries(db: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    ledger_zero_hit_queries_since(db, 0, limit)
+}
+
+/// The questions that found nothing, at or after `since`.
+pub fn ledger_zero_hit_queries_since(
+    db: &Connection,
+    since: i64,
+    limit: usize,
+) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0
-         GROUP BY query ORDER BY n DESC, query LIMIT ?1",
+        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
+         GROUP BY query ORDER BY n DESC, query LIMIT ?2",
     )?;
-    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// One recorded retrieval, as the access report attaches them.
+#[derive(Debug, Clone)]
+pub struct RetrievalRow {
+    pub at: i64,
+    pub client: String,
+    pub tool: String,
+    pub query: String,
+    pub hits: i64,
+    pub excerpt_tokens: i64,
+    pub whole_file_tokens: i64,
+}
+
+/// Every retrieval since `since`, newest first.
+///
+/// `ledger_sessions` above aggregates these into one row per session, which is
+/// what the access report shows by default. This is the same rows unrolled, for
+/// the report's `Attach retrieved excerpts` toggle: a session line says an agent
+/// asked forty times, and an auditor's question is which forty.
+///
+/// `tool` is NULL on every row written before 0.15.0 and is reported as `—`
+/// rather than guessed — those rows are real retrievals and dropping them would
+/// make the attachment disagree with the session counts above it.
+pub fn ledger_retrievals(db: &Connection, since: i64, limit: usize) -> Result<Vec<RetrievalRow>> {
+    let mut stmt = db.prepare(
+        "SELECT at, client, COALESCE(tool, ''), query, hits, excerpt_tokens, whole_file_tokens
+         FROM retrievals WHERE at >= ?1 ORDER BY at DESC, id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
+        Ok(RetrievalRow {
+            at: r.get(0)?,
+            client: r.get(1)?,
+            tool: r.get(2)?,
+            query: r.get(3)?,
+            hits: r.get(4)?,
+            excerpt_tokens: r.get(5)?,
+            whole_file_tokens: r.get(6)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 

@@ -7,6 +7,219 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-23
+
+### The portal drawn the way the design draws it, and reports that write themselves
+
+0.26.1 made the portal's *structure* agree with the v4 design. What it did not
+do is make its *content* agree: Reports was a stub against a six-section design,
+Impact never drew its canvas, the ledger's bottom collapsed under a shared flex
+rule, the body-copy class ran one and a half pixels hot on every page at once,
+and a row of pressed chips read as tinted text rather than as six controls.
+
+**`semlith start` against a store a daemon already holds is no longer an error.**
+On a machine where the daemon starts at login this fired on the most ordinary
+command there is, and printed an anyhow chain for something that had not failed.
+It now says which store, names the holding daemon's pid, port and version, prints
+the portal's full URL with its token on a line of its own so a terminal makes it
+clickable, and exits 0. Only a *live, answering* daemon named by a valid discovery
+file takes that path: with no daemon, a stale discovery file, or one naming a dead
+port, today's error chain prints unchanged and the exit code is still non-zero. A
+multi-store `start` serves the free stores and names the held ones.
+
+**Reports schedules itself.** A schedule is a report the daemon writes on a
+cadence, to a directory you name: report type, window, scope, format, toggles,
+cadence, destination. It lives in `~/.semlith/schedules.json`, its own file beside
+the registry rather than a section of it, so a schedules file somebody's editor
+truncated costs them their schedules and not every store on the machine. The
+cadence is stored as an interval in seconds, so the three chips on the page are
+shortcuts over a number rather than the whole vocabulary. A daemon restart loses
+nothing. Two schedules never generate at once, a schedule due while its store is
+still indexing waits rather than reporting on a half-written index, and a
+destination that has gone away — deleted, renamed, on a volume that is not
+mounted — is recorded and shown rather than silently skipped, which was the worst
+available outcome. `semlith schedule list|add|remove|set` reaches the same
+schedules the page does.
+
+**Reports is the page the design specifies.** The builder gains the `Window` and
+`Scope` chip groups it has never had, a fifth format, and the three toggles; the
+preview gains `Save to disk` and a meta line that states rows, size, format and
+signature; and the `Retrieval savings`, `Names that mislead` and `Written
+reports` cards are built. The CLI block moves out of the builder into its own
+card. Where the design's mock and real data disagree — a `for whoever approves
+the spend` card priced against a model this binary does not price, a cadence
+chip for a git commit nothing hooks, a `schedules.toml` crontab that is neither
+TOML nor a crontab — the real thing is drawn and the difference recorded.
+
+**Two of the builder's three toggles do what they say.** `Hash the query text`
+replaces every query with a digest of it *wherever a query reaches the document*,
+not only in the table the toggle sits above — the who, the when, the tool and the
+token counts all stay. `Attach retrieved excerpts` unrolls the access report's
+session lines into the individual retrievals behind them, to a ceiling: a session
+row says an agent asked forty times, and an auditor's next question is which
+forty. The third, `Sign the report`, is drawn disabled and says what it is waiting
+for. Signing needs a key, and where that key lives, how it rotates and what a
+reader checks it against are decisions this product has not made; a switch drawn
+as though it worked would put a promise on the page that the file does not keep.
+
+**A fifth report format: PDF**, typeset from the same block structure the other
+four render rather than printed from the HTML, by a pure-Rust writer that adds no
+native build dependency and no runtime browser.
+
+**`/api/report` takes a window and a scope.** It read a `store` parameter and
+threw it away, so a request asking for one store of six got all six with nothing
+saying so. `scope` is that filter, `store` is kept as its alias, and `window`
+narrows to a day, week, month or quarter. Three of the five reports have no date
+to narrow by and say so under their title rather than printing a span they did not
+apply. A request naming neither is byte-identical to 0.26.x. `semlith report`
+takes `--window`, `--scope` and `--format pdf`.
+
+**Impact draws the canvas its caption promised.** The right column of that page
+was a large empty area. It now carries a reverse-reachability canvas above Path
+finder and Trace, drawn by the same force simulation the Graph page uses: the
+subject selected, everything that reaches it around it, nodes that move, can be
+dragged and carry the Graph page's hover card — hops, file and line, what they
+reach through and with what confidence. The reached set and its files are tables
+now, one group row per hop, instead of columns that wrapped. The `Changing` row
+and the three figures move into a card at the head of the left column, where the
+design has them, instead of two unboxed bands across the page. A label near the
+edge of either canvas no longer runs out of the frame: the bound is half the
+node's own measured width, not a margin sized for a dot.
+
+**Index and Inside the index are two pages**, as the design draws them. Index
+carries the controls that start and watch a run. Inside the index carries what
+the corpus is — lines of code, words, the language mix by line, the shape of the
+code, the indexing span, chunks by month, graph health and the vectors themselves
+— measured from the store each time the page opens, and saying on the page where
+what it can measure differs from what the design prints. Building it found that
+the recorded query time read a column called `ms` where the column is `micros`,
+so a store that had answered hundreds of queries said it had never been asked one.
+
+**Session replay looks like the design in all three places it appears**: a dashed
+panel on the ledger when it is off, with a button that goes to Privacy; a timeline
+of one row per answer when it is on, carrying what the answer cost and what the
+agent did next; and a switch on Privacy whose status line names the state it is
+in rather than the state pressing it would reach.
+
+**One hover card, everywhere.** Every hover in the portal — the Graph and Search
+canvases, the Impact canvas, the language mix, the month chart, the edge tiers —
+is the same card built by one function, in the design's measurements, and it
+follows the pointer as the Graph canvas's always did. Keyboard focus still hangs
+it off the focused element, which has no pointer to follow.
+
+**One unreadable store no longer takes the readable ones down with it.** A store
+whose database could not be read made every route that aggregates across stores
+return `500 disk I/O error`, blanking Graph, Search and Files, with a message that
+named neither the store nor the fact that the others were fine. They answer from
+every store they can read now and return the rest as a `failed` list carrying the
+store, its path, the whole error chain and a runnable remedy; the page draws what
+the healthy stores returned with a notice above it naming what is missing. A
+request scoped to a store that cannot be read still fails, because there is no
+partial answer to give.
+
+The readability probe is one indexed row out of each of the two large tables,
+not a row count. The obvious probe is `stats()`, and `stats()` is three full
+scans: measured at 2.65 ms against 0.24 ms on a 10 390-chunk store, growing
+linearly, on a path that every search takes. It is not weaker for being cheaper
+— what it has to catch is a database that opened and cannot be read now, and a
+btree descent into a page that is no longer there fails exactly as a scan would.
+
+The fix is not where the issue said it was. `with_fleet` is not the shared point
+— Search and Files never go through it, because they need the fleet mutably — so
+a guard there would have fixed neither. Every aggregating read selects its
+members through one of two functions in `fleet.rs`, and that is where the probe
+lives, which covers seventeen routes including every sibling the issue does not
+name. The notice carries no button: the remedy is `semlith drop`, and a one-click
+drop beside what may be an unplugged volume is how somebody loses a store they
+could have had back by plugging it in.
+
+**Pages scroll to their end.** `.view > *` set `flex-shrink: 0` and `.scroller`
+put it back at equal specificity and later in the file, so on any page whose
+content overflowed one child absorbed the whole overflow: the page stopped
+scrolling and the scroller was crushed toward zero. It is fixed in the shared rule
+— five pages put a `.scroller` directly under `.view` — and every page now ends
+with the design's 44px floor under its last card instead of 24px.
+
+**Controls read as controls.** The pressed chip takes the design's ink fill
+instead of a blue wash, and stops changing font weight on press, so a chip row no
+longer reflows when one is picked. `.button.ghost` — no background, no border,
+muted text, and no counterpart anywhere in the design — is gone, and all fourteen of
+its call sites take the secondary shape. The Impact page's two toggles come up from
+11px mono at roughly 17px tall to the design's chip shape. Nothing in the portal
+renders with neither a background nor a border at rest.
+
+**Two columns become one on a phone.** `.grid.two` held both of its tracks at
+every width, and its first track has a 320px minimum that cannot be honoured at
+390px: the browser kept two columns and gave the second whatever was left. On
+Reports that was about thirty pixels of preview setting one character per line.
+About had the same defect and nobody had looked at it on a phone.
+
+**Every page's panels are in the design's order.** All thirteen were walked
+against the reference. Four already agreed and one — Doctor — has no design
+counterpart at all, so the whole page is this project's own. Five were
+interleaved: the ledger had its recording-off notice second from the bottom, so
+a ledger recording nothing said so after everything it had failed to record;
+Agents had four unrelated cards between the endpoint note and `Connected`;
+Privacy had two between the promise and the check; Stores put four stacked
+pickers between the page head and the numbers; and Inside the index had the run
+cards fifth on a page whose whole point is watching a run.
+
+**Scroll position survives a live repaint.** The ledger and the Stores table
+redraw themselves as rows arrive, and the code that preserved the reader's place
+across that redraw read `.scroller`, which never scrolls — `.view` carries the
+overflow. It read 0 and wrote 0 back, returning the reader to the top every time
+a row landed.
+
+**Code blocks lose the fade.** A 28px right-edge mask stood on `pre.code` to say
+"the line continues"; every block that class draws is a command you are meant to
+select and copy, and the fade made its last characters unreadable.
+
+**The type scale is the design's.** `.subtitle` carried nearly every muted
+explanatory line in the portal at 14px against the design's 12.5px — one class,
+and the most visible drift in the product. The design has three sizes for it and
+all three are now expressed. The pass is symmetric: the shapes the design draws
+*larger* are corrected too. Every declaration that moved is listed with its before
+value, its after value and the design line that sets it; three the plan asked for
+turned out to have no design line behind them and are recorded as not done, with
+what the design actually says.
+
+**Three layouts that fought the page.** The corpus page's new rules redefined
+`.kv`, `.dot` and `.chips` globally: the Agents page's setup steps stacked and
+centred, and the Privacy rule lights turned grey. They carry their own names now.
+On Agents, `This machine` sits under `Tools exposed` and the registration card is
+full width; on Privacy, `What is already stored` sits under `Verify it yourself`
+and `Rules` spans the page, three abreast, instead of a narrow column several
+screens tall. A two-column grid with cards after it no longer grows into a tall
+window's spare height and pushes them a screenful down.
+
+**The Stores page notices a root folder that has gone.** Deleting a store's
+corpus writes nothing to any store, so the counter the page polls stood still and
+the `root missing` badge appeared only on the next navigation. `/api/changes`
+now compares which roots are on disk against the last poll — a `stat` per root, a
+handful a second while a page is open — and moves the counter when one goes or
+comes back.
+
+**A saved limit is called saved on every branch.** The machine-limits panel
+dropped the word from its explanation whenever the saved value sat above what the
+machine would derive, which is exactly when free memory is low and someone is
+trying to work out whether their setting took effect.
+
+**About loses two blocks.** The `MCP revisions` row states a wire contract an
+agent settles in its handshake and a person never acts on. The models table is a
+forty-eight-row catalogue of which any machine has fetched one. `semlith models`
+still prints the full list and both routes still answer; this leaves `/api/models`
+as the one capability with no portal view, argued in `tests/portal.rs` and recorded
+in `docs/compatibility.md`.
+
+**The retrieval harness gains an image class.** Issue #122 — a source file
+outranking an actual red circle for "a red circle" — survived a whole retrieval
+release because nothing the release measured could see it: the pinned corpus holds
+no images. The class has a second pinned corpus of its own, so the first one's hash
+does not move and every figure read against it still reproduces. Eight questions;
+seven reach their picture at rank 1 and one does not, which is left failing and
+named rather than rewritten until it passed.
+
+
 ## [0.26.1] - 2026-09-21
 
 ### The portal, opened beside the design it was built from
@@ -2970,7 +3183,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.26.1...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/semlith/semlith/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/semlith/semlith/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/semlith/semlith/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/semlith/semlith/compare/v0.24.0...v0.25.0

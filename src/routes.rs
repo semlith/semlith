@@ -97,10 +97,12 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/trace") => trace(state, request),
         (true, _, "/api/map") => map(state, request),
         (true, _, "/api/report") => report(state, request),
+        (true, _, "/api/schedules") => schedules(state),
         // Both verbs: a GET reports whether the toggle is on and, when it
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),
         (true, _, "/api/graph") => graph(state, request),
+        (true, _, "/api/corpus") => corpus(state),
         (true, _, "/api/ledger") => ledger(state),
         (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
@@ -132,6 +134,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/store/delete") => delete_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
+        (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
         // A route that exists on another verb is worth telling apart from one
@@ -158,6 +161,128 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
     }
 }
 
+/// Every schedule the daemon holds, exactly as the file holds them.
+///
+/// Read from disk rather than from anything the runner is caching, because the
+/// file is the state: `semlith schedule add` is a different process writing the
+/// same file, and a route answering from memory would show the page one list
+/// while the terminal showed another.
+fn schedules(_state: &Arc<State>) -> Response {
+    match crate::schedule::Schedules::load() {
+        Ok(file) => Response::json(&serde_json::json!({ "schedules": file.schedules })),
+        // A schedules file this binary cannot read is a report that will not be
+        // written, not a reason for the page to fail to draw.
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
+/// Add, remove, or turn one on and off.
+///
+/// One route and an `action` rather than three paths: every one of them is the
+/// same read-modify-write of one small file, and splitting them would be three
+/// places to remember to wake the timer from.
+fn schedule_write(state: &Arc<State>, request: &Request) -> Response {
+    let body: serde_json::Value = match serde_json::from_slice(&request.body) {
+        Ok(value) => value,
+        Err(e) => return Response::error(400, &format!("the body is not JSON: {e}")),
+    };
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut file = match crate::schedule::Schedules::load() {
+        Ok(file) => file,
+        Err(e) => return Response::error(500, &format!("{e:#}")),
+    };
+
+    let answer = match action {
+        "add" => {
+            let Some(kind) = body.get("kind").and_then(|v| v.as_str()) else {
+                return Response::error(400, "missing kind");
+            };
+            let Some(dir) = body.get("dir").and_then(|v| v.as_str()) else {
+                return Response::error(400, "missing dir");
+            };
+            let Some(every) = body.get("every_seconds").and_then(|v| v.as_u64()) else {
+                return Response::error(400, "missing every_seconds");
+            };
+            let format = body
+                .get("format")
+                .and_then(|v| v.as_str())
+                .unwrap_or("markdown");
+            let model = body
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Sonnet 5");
+            let mut schedule = crate::schedule::Schedule::new(
+                kind,
+                format,
+                model,
+                every,
+                std::path::Path::new(dir),
+            );
+            schedule.window = body
+                .get("window")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            schedule.stores = body
+                .get("stores")
+                .and_then(|v| v.as_array())
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // Refused before anything is written, naming what would have
+            // worked. Half a schedules file is worse than none.
+            if let Err(e) = schedule.check() {
+                return Response::error(400, &format!("{e:#}"));
+            }
+            match file.add(schedule) {
+                Ok(id) => serde_json::json!({ "id": id }),
+                Err(e) => return Response::error(400, &format!("{e:#}")),
+            }
+        }
+        "remove" => {
+            let Some(id) = body.get("id").and_then(|v| v.as_str()) else {
+                return Response::error(400, "missing id");
+            };
+            if !file.remove(id) {
+                return Response::error(404, &format!("no schedule {id:?}"));
+            }
+            serde_json::json!({ "removed": id })
+        }
+        "set" => {
+            let Some(id) = body.get("id").and_then(|v| v.as_str()) else {
+                return Response::error(400, "missing id");
+            };
+            let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) else {
+                return Response::error(400, "missing enabled");
+            };
+            let Some(schedule) = file.schedules.get_mut(id) else {
+                return Response::error(404, &format!("no schedule {id:?}"));
+            };
+            schedule.enabled = enabled;
+            serde_json::json!({ "id": id, "enabled": enabled })
+        }
+        other => {
+            return Response::error(
+                400,
+                &format!("unknown action {other:?}; the actions are add, remove, set"),
+            );
+        }
+    };
+
+    if let Err(e) = file.save() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    // The timer is asleep on a condition variable until the next due time. It
+    // would find this within a minute anyway — that ceiling exists for the CLI,
+    // which cannot reach this condvar — but a page that has just added a
+    // schedule should not have to wait out a sleep to see its next run.
+    state.schedules.wake();
+    Response::json(&answer)
+}
+
 // ---------------------------------------------------------------- reads
 
 /// Every open store, what it holds, and whether it is being kept current.
@@ -181,6 +306,17 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
     }
     let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
     let registry = home::Registry::load().unwrap_or_default();
+    // Probed once, before the rows are built. Selecting stores is what probes
+    // them, so every store is asked for first and the answers are read off
+    // afterwards: a store whose database cannot be read has no figures to show
+    // and its row has to say why rather than show a convincing set of zeros.
+    let failed = fleet
+        .as_ref()
+        .map(|f| {
+            let _ = f.each().count();
+            f.failed()
+        })
+        .unwrap_or_default();
     let mut out = Vec::new();
 
     for handle in state.stores() {
@@ -361,6 +497,12 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             // visible rather than silent.
             "pruned": handle.pruned.load(Ordering::Relaxed),
             "missing": false,
+            // Open, registered, and unreadable: the figures on this row are
+            // zeros because the database could not be read, not because the
+            // store is empty. `failed` below carries the reason and the remedy.
+            "unreadable": failed
+                .iter()
+                .any(|f| f.store == handle.name || Path::new(&f.path) == handle.dir),
             // Tokens saved, what they cover, and how they were counted. One
             // line, no chart: a chart of one number is decoration, and the
             // three qualifiers are what make the number defensible.
@@ -407,7 +549,11 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
         }));
     }
 
-    Response::json(&json!({ "stores": out }))
+    let mut answer = json!({ "stores": out });
+    if !failed.is_empty() {
+        answer["failed"] = json!(failed);
+    }
+    Response::json(&answer)
 }
 
 /// The indexed files, with the filters the CLI has and the reader that parsed
@@ -472,12 +618,18 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     let mut total = 0i64;
     let mut extensions: Vec<String> = Vec::new();
     let mut stores = 0usize;
+    // Through the fleet rather than filtered here: a store that cannot be read
+    // is left out of the listing and reported beside it, and a listing scoped
+    // to nothing but unreadable stores is refused rather than answered empty.
+    let only = (!only.is_empty()).then_some(only);
+    let chosen = match fleet.selected(only.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return Response::error(500, &format!("{e:#}")),
+    };
     // Counted first, because how many rows each store has to be asked for
     // depends on it: a derived sort needs all of them.
-    for (label, opened) in fleet.each() {
-        if !only.is_empty() && !only.iter().any(|n| n == label) {
-            continue;
-        }
+    for (_, opened) in &chosen {
+        let opened = *opened;
         // Stores with a matching file, not stores that happen to be open. The
         // header read "0 files · 0 formats · 2 stores", where two of the three
         // numbers answered the filter and the third did not.
@@ -507,10 +659,8 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     } else {
         offset.saturating_add(limit)
     };
-    for (label, opened) in fleet.each() {
-        if !only.is_empty() && !only.iter().any(|n| n == label) {
-            continue;
-        }
+    for (label, opened) in &chosen {
+        let (label, opened) = (*label, *opened);
         let listed = match store::file_rows(opened.db(), filter.groups(), sort, desc, take) {
             Ok(r) => r,
             Err(e) => return Response::error(500, &e.to_string()),
@@ -560,7 +710,7 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     extensions.sort();
     extensions.dedup();
 
-    Response::json(&json!({
+    let mut out = json!({
         "files": rows,
         "total": total,
         "offset": offset,
@@ -572,7 +722,9 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         // the table rather than about the corpus.
         "formats": extensions.len(),
         "stores": stores,
-    }))
+    });
+    failures_beside(fleet, &mut out);
+    Response::json(&out)
 }
 
 /// The same fused search the CLI and `semlith_search` run.
@@ -620,7 +772,7 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
     let brief = match crate::brief::brief(fleet, only.as_deref(), question, budget, &filter, prefer)
     {
         Ok(b) => b,
-        Err(e) => return Response::error(500, &e.to_string()),
+        Err(e) => return Response::error(500, &format!("{e:#}")),
     };
     let elapsed = started.elapsed();
 
@@ -649,11 +801,13 @@ fn brief(state: &Arc<State>, request: &Request) -> Response {
             elapsed,
         );
     }
-    Response::json(&json!({
+    let mut answer = json!({
         "brief": body,
         "chunks": fleet.chunks(),
         "micros": elapsed.as_micros() as u64,
-    }))
+    });
+    failures_beside(fleet, &mut answer);
+    Response::json(&answer)
 }
 
 fn search(state: &Arc<State>, request: &Request) -> Response {
@@ -703,7 +857,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     } else {
         match fleet.matching_files(&filter) {
             Ok(n) => Some(n),
-            Err(e) => return Response::error(500, &e.to_string()),
+            Err(e) => return Response::error(500, &format!("{e:#}")),
         }
     };
     if selected == Some(0) {
@@ -730,7 +884,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         .min(FILE_OFFSET_MAX as usize);
     let found = match fleet.search_preferring(only.as_deref(), query, deep, &filter, prefer) {
         Ok(h) => h,
-        Err(e) => return Response::error(500, &e.to_string()),
+        Err(e) => return Response::error(500, &format!("{e:#}")),
     };
     let elapsed = started.elapsed();
     let hits: Vec<_> = found.into_iter().skip(offset as usize).take(k).collect();
@@ -785,7 +939,7 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     // rule in JavaScript, so there is one classifier and it is the one that
     // ranked the answer.
     let shape = crate::shape_of(query);
-    Response::json(&json!({
+    let mut answer = json!({
         "hits": out,
         "offset": offset,
         "selected": selected,
@@ -795,7 +949,9 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "shape_label": shape.as_str(),
         "weighting": shape.weighting(),
         "prefer": prefer,
-    }))
+    });
+    failures_beside(fleet, &mut answer);
+    Response::json(&answer)
 }
 
 /// The free half of the ledger: whether it is recording, and the totals.
@@ -1504,10 +1660,12 @@ fn privacy_scan(state: &Arc<State>) -> Response {
                     }));
                 }
             }
-            Err(e) => return Response::error(500, &e.to_string()),
+            Err(e) => return Response::error(500, &format!("{e:#}")),
         }
     }
-    Response::json(&json!({ "findings": findings }))
+    let mut answer = json!({ "findings": findings });
+    failures_beside(fleet, &mut answer);
+    Response::json(&answer)
 }
 
 /// Apply one Privacy repair, or every one that qualifies.
@@ -1839,8 +1997,30 @@ fn with_fleet(
         return Response::json(&empty);
     };
     match read(fleet) {
-        Ok(value) => Response::json(&value),
-        Err(e) => Response::error(500, &e.to_string()),
+        Ok(mut value) => {
+            failures_beside(fleet, &mut value);
+            Response::json(&value)
+        }
+        // The whole chain: the outermost message of a store that cannot be read
+        // is four words, and the store, the path and the remedy are all below
+        // it.
+        Err(e) => Response::error(500, &format!("{e:#}")),
+    }
+}
+
+/// Say which stores an answer could not reach, beside the answer.
+///
+/// Additive by construction: the key is absent when every store answered, so a
+/// reader written against 0.26 sees exactly the payload it saw then. Every
+/// route that aggregates over several stores ends with this, which is why the
+/// portal has one notice to draw rather than one per page.
+fn failures_beside(fleet: &crate::fleet::Fleet, value: &mut Value) {
+    let failed = fleet.failed();
+    if failed.is_empty() {
+        return;
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("failed".into(), json!(failed));
     }
 }
 
@@ -2126,17 +2306,77 @@ fn replay(request: &Request) -> Response {
     }
 }
 
-/// One of the five reports, in one of the four formats.
+/// What is inside the index, measured from the stores themselves.
+///
+/// The `Inside the index` page. Every figure here is counted from the store
+/// when this is called — the page's own subtitle promises that, and a cached
+/// number behind that sentence would be a lie the page tells about itself.
+///
+/// Answers per store and totalled, because the reader has several open and
+/// the one question they ask first is how big the whole thing is. An
+/// unreadable store is left out and named, as everywhere else that reads
+/// across the fleet.
+fn corpus(state: &Arc<State>) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::json(&json!({ "stores": [] }));
+    };
+    let mut stores = Vec::new();
+    for (label, opened) in fleet.each() {
+        match crate::store::corpus(opened.db(), |path| {
+            language_of(std::path::Path::new(path)).to_string()
+        }) {
+            Ok(measured) => {
+                let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
+                if let Some(map) = row.as_object_mut() {
+                    map.insert("store".into(), json!(label));
+                }
+                stores.push(row);
+            }
+            // One store that cannot be measured is not the whole page. It is
+            // reported as itself, the way an unreadable store is.
+            Err(e) => stores.push(json!({ "store": label, "error": format!("{e:#}") })),
+        }
+    }
+    let mut answer = json!({ "stores": stores });
+    failures_beside(fleet, &mut answer);
+    Response::json(&answer)
+}
+
+/// One of the five reports, in one of the five formats, over a window and a
+/// scope.
 ///
 /// The same bytes `semlith report` writes, from the same generator: the
 /// portal's export is not a second renderer, so a file downloaded from the
 /// page and one written in a terminal are the same file.
+///
+/// `window` and `scope` are both optional and both omitted means exactly what
+/// it meant in 0.26.x — every open store, and each report's own span. `scope`
+/// is the store filter the route took as `store` and discarded; `store` is
+/// still read, as its own alias, because a caller that was already sending it
+/// meant it.
 fn report(state: &Arc<State>, request: &Request) -> Response {
     let Some(kind) = request.query("kind") else {
         return Response::error(400, "missing kind");
     };
     let kind = kind.to_string();
     let format = request.query("format").unwrap_or("markdown").to_string();
+    if !crate::report::ALL_FORMATS.contains(&format.as_str()) && format != "md" {
+        return Response::error(
+            400,
+            &format!(
+                "unknown format {format:?}; the formats are {}",
+                crate::report::ALL_FORMATS.join(", ")
+            ),
+        );
+    }
+    let window = match crate::report::window_of(request.query("window")) {
+        Ok(window) => window,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
     let model = request.query("model").unwrap_or("Sonnet 5").to_string();
     // Refused rather than defaulted. The savings report is a figure in money,
     // and a model nobody prices used to come back priced at Sonnet 5 under
@@ -2150,13 +2390,41 @@ fn report(state: &Arc<State>, request: &Request) -> Response {
             ),
         );
     }
-    let only = request.query_all("store");
+    let mut only = request.query_all("scope");
+    only.extend(request.query_all("store"));
+
+    // The builder's two content toggles. Absent is off, which is what every
+    // 0.26.x caller sends.
+    let flag = |name: &str| matches!(request.query(name), Some("1" | "true" | "on"));
+    let options = crate::report::Options {
+        excerpts: flag("excerpts"),
+        redact: flag("redact"),
+    };
+
+    // A PDF is bytes and cannot ride inside the JSON envelope the other four
+    // use, so this one format answers as the file itself. Same generator, same
+    // blocks, same window and scope — only the wrapper differs.
+    if format == crate::report::PDF {
+        if let Err(e) = state.open_fleet() {
+            return Response::error(500, &e.to_string());
+        }
+        let fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(fleet) = fleet.as_ref() else {
+            return Response::error(409, "no store is open to report on");
+        };
+        return match crate::report::generate_with(fleet, &kind, &model, window, &only, options)
+            .and_then(|report| report.render_bytes(&format))
+        {
+            Ok(bytes) => Response::new(200, "application/pdf", bytes),
+            Err(e) => Response::error(400, &e.to_string()),
+        };
+    }
+
     // The body is text of whichever format was asked for, wrapped in JSON so
     // one route answers every format and the page can show a report before
     // deciding to save it.
     with_fleet(state, json!({ "report": null }), move |fleet| {
-        let _ = &only;
-        let report = crate::report::generate(fleet, &kind, &model)?;
+        let report = crate::report::generate_with(fleet, &kind, &model, window, &only, options)?;
         Ok(json!({
             "kind": report.kind,
             "title": report.title,
@@ -2191,13 +2459,10 @@ fn graph(state: &Arc<State>, request: &Request) -> Response {
 
     with_fleet(state, empty, move |fleet| {
         let only = (!only.is_empty()).then_some(only);
-        let chosen: Vec<(&str, &crate::Semlith)> = match &only {
-            Some(names) => fleet
-                .each()
-                .filter(|(label, _)| names.iter().any(|n| n == label))
-                .collect(),
-            None => fleet.each().collect(),
-        };
+        // Through the fleet rather than filtered here, so a store that cannot
+        // be read is left out of the drawing and reported beside it, and so a
+        // request scoped to nothing but unreadable stores is refused.
+        let chosen = fleet.selected(only.as_deref())?;
         let many = fleet.len() > 1;
         crate::graph::scoped(&chosen, focus.as_deref(), prefix.as_deref(), limit, many)
     })
@@ -2518,12 +2783,18 @@ fn folders(dir: &Path) -> Vec<Value> {
 /// this and refetches only what moved, so a quiet daemon with a tab open costs
 /// one small request a second and nothing else.
 fn changes(state: &Arc<State>) -> Response {
-    let _ = state;
     // A store another process just made is a change to the stores domain, and
     // nothing in *this* process bumped the counter for it. One `stat` here is
     // what closes the circle; `/api/stores` does the reconciling, once, when
     // the page comes to ask.
     daemon::changes::notice_registry();
+    // The same for a root folder deleted or restored underneath a store.
+    let stores = state.stores();
+    daemon::changes::notice_roots(
+        stores
+            .iter()
+            .flat_map(|store| store.roots.iter().map(PathBuf::as_path)),
+    );
     let mut out = serde_json::Map::new();
     for domain in daemon::changes::DOMAINS {
         out.insert(
@@ -2546,13 +2817,16 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     };
     let mut saved = home::Settings::load();
     let limits = daemon::Limits::in_force();
-    let read = |key: &str| {
+    // Clamped here and not only on the page. A cap the page knows about and
+    // the route does not is a cap that any other caller walks past, and what
+    // it guards is a machine that swaps rather than a preference.
+    let read = |key: &str, ceiling: usize| {
         body.get(key)
             .and_then(Value::as_u64)
-            .map(|n| n.max(1) as usize)
+            .map(|n| (n.max(1) as usize).min(ceiling.max(1)))
     };
 
-    if let Some(n) = read("runs_at_once") {
+    if let Some(n) = read("runs_at_once", limits.runs_at_once.ceiling) {
         if limits.runs_at_once.source == daemon::Source::Environment {
             return Response::error(
                 409,
@@ -2564,7 +2838,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.runs_at_once = Some(n);
     }
-    if let Some(n) = read("embed_threads") {
+    if let Some(n) = read("embed_threads", limits.embed_threads.ceiling) {
         if limits.embed_threads.source == daemon::Source::Environment {
             return Response::error(
                 409,
@@ -2576,7 +2850,7 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.embed_threads = Some(n);
     }
-    if let Some(n) = read("index_memory_mb") {
+    if let Some(n) = read("index_memory_mb", limits.index_memory_mb.ceiling) {
         if limits.index_memory_mb.source == daemon::Source::Environment {
             return Response::error(
                 409,

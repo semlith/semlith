@@ -162,6 +162,21 @@ pub fn settings_path() -> Result<PathBuf> {
     Ok(home_or_error()?.join("settings.json"))
 }
 
+/// Where the schedules the daemon runs are kept.
+///
+/// Beside `registry.json` and deliberately not inside it. The registry is what
+/// stores exist and where — lose it and a machine forgets every corpus it has
+/// indexed. A schedule is a standing request for a report, and a schedules file
+/// that has been truncated, hand-edited or written by a newer binary must be
+/// able to fail on its own: folded into the registry, one unparseable schedule
+/// would cost the user every store on the machine.
+///
+/// Tool-written state like the registry and `settings.json`, not a user-editable
+/// config file, which AGENTS.md says this project does not have.
+pub fn schedules_path() -> Result<PathBuf> {
+    Ok(home_or_error()?.join("schedules.json"))
+}
+
 /// The projects directly under a directory: the children that are git
 /// repositories, or its plain subdirectories where none of them is.
 ///

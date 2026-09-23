@@ -46,6 +46,7 @@ pub mod replay;
 pub mod report;
 pub mod rerank;
 pub mod routes;
+pub mod schedule;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
 pub mod setup;
@@ -3387,6 +3388,11 @@ impl Semlith {
     /// `(files, chunks, indexed bytes)`
     pub fn stats(&self) -> Result<(i64, i64, i64)> {
         store::stats(&self.db)
+    }
+
+    /// Whether this store can still be read. See [`store::readable`].
+    pub fn readable(&self) -> Result<()> {
+        store::readable(&self.db)
     }
 
     /// The f32 sidecar's size, or `None` where the store has none.

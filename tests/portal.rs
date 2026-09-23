@@ -36,7 +36,17 @@ use std::time::Duration;
 /// the span already in hand. A page of its own could only be started by
 /// retyping a coordinate you got from Search, which is why there is no longer
 /// one. `/api/read` is what that button calls.
-const NO_VIEW: [&str; 4] = ["start", "mcp", "pattern", "read"];
+///
+/// `models` had a view until 0.27.0: a forty-eight-row table on the About page,
+/// of which one row is a model this machine has actually fetched. The v4 design
+/// has no place for it, and the page it sat on is seven facts and a language
+/// table. The capability is untouched — `semlith models` prints the full list
+/// and `/api/models` still answers, for anything that reads it — so what is
+/// gone is a table, not a thing a user could do. This is the one knowing
+/// exception to the portal-parity rule in this release, and it is recorded in
+/// `docs/compatibility.md` as well as here, because an exemption argued in one
+/// place is an exemption nobody outside this file can find.
+const NO_VIEW: [&str; 5] = ["start", "mcp", "pattern", "read", "models"];
 
 /// Which route is a command's portal view. Adding a command means adding a
 /// line here, which is the whole point: the compiler cannot notice a missing
@@ -56,7 +66,6 @@ const VIEWS: &[(&str, &str)] = &[
     // `semlith trust` is the Stores page's "Trust this store", beside a store
     // the daemon can see but has not been told to open.
     ("trust", "/api/trust"),
-    ("models", "/api/models"),
     // `semlith languages` is the About page's language table, which the v3
     // design puts there rather than on a page of its own. `/api/languages` is
     // still what fills it; the route named here is the page's own, because a
@@ -72,6 +81,10 @@ const VIEWS: &[(&str, &str)] = &[
     ("impact", "/api/impact"),
     ("trace", "/api/trace"),
     ("report", "/api/report"),
+    // `semlith schedule` is the Reports page's Schedules card. The card is the
+    // view and `/api/schedules` is what fills it, so both surfaces read the one
+    // file the daemon owns rather than each keeping a list.
+    ("schedule", "/api/schedules"),
     ("ledger", "/api/ledger"),
     // `semlith key` is the Agents page's Rotate button, which posts here.
     ("key", "/api/key"),
@@ -550,6 +563,55 @@ fn the_changes_route_reports_every_domain() {
     }
 }
 
+/// A root folder deleted under an open store moves the stores counter.
+///
+/// Deleting a folder writes nothing to any store, so before `notice_roots` the
+/// counter stood still and an open Stores page drew the root as present until
+/// something unrelated moved it — the badge for a gone corpus appeared only on
+/// the next navigation.
+#[test]
+fn a_deleted_root_moves_the_stores_counter() {
+    let corpus = tempfile::Builder::new()
+        .prefix("semlith-gone-root-")
+        .tempdir()
+        .unwrap();
+    std::fs::write(corpus.path().join("a.md"), "A root that is about to go.").unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("semlith-gone-home-")
+        .tempdir()
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", "--quiet", &corpus.path().display().to_string()])
+        .env("SEMLITH_HOME", home.path())
+        .current_dir(corpus.path())
+        .output()
+        .expect("semlith index runs");
+    assert!(
+        out.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let daemon = Daemon::start_in(home.path());
+    let counter = || daemon.json("/api/changes")["stores"].as_u64().unwrap();
+    // The first poll is the baseline, and a second one with nothing changed
+    // must not move.
+    let before = counter();
+    assert_eq!(counter(), before, "an idle poll moved the stores counter");
+
+    // Removed by hand rather than by the guard's drop, which swallows a
+    // failure: a root the watcher kept open would read as a counter that did
+    // not move rather than as a folder that was never deleted.
+    let root = corpus.path().to_path_buf();
+    std::fs::remove_dir_all(&root).unwrap_or_else(|e| panic!("removing {}: {e}", root.display()));
+    assert_ne!(
+        counter(),
+        before,
+        "the root at {} was deleted and the stores counter did not move",
+        root.display()
+    );
+}
+
 /// The two flags 0.20.0 adds to `index` have a surface on the page, which is
 /// what portal parity asks of a capability.
 ///
@@ -995,13 +1057,20 @@ fn the_agents_route_reports_the_service_and_every_client() {
 /// there is no licence page, so the last group is the two pages that describe
 /// the machine this is running on.
 ///
-/// Doctor is the thirteenth and is deliberately not in the design's twelve.
+/// Fourteen, not thirteen: `Index` and `Inside the index` are two pages in the
+/// design and were one here, so the indexing controls and the figures about
+/// what was indexed were stacked on one page. Splitting them is what the
+/// design draws, and the second half — the corpus — is the page nothing else
+/// in this product can show.
+///
+/// Doctor is deliberately not in the design's own list.
 /// It is a page this binary already serves, and `semlith doctor` would
 /// otherwise be the one command with no view — which the parity test above
 /// would fail anyway, from the other direction.
 const SIDEBAR: &[(&str, &str)] = &[
     ("Workspace", "Stores"),
     ("Workspace", "Files"),
+    ("Workspace", "Index"),
     ("Workspace", "Inside the index"),
     ("Explore", "Search"),
     ("Explore", "Graph"),

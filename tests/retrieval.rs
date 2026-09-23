@@ -72,6 +72,182 @@ struct Span {
 /// per-class figure covers.
 const SHAPES: [&str; 3] = ["identifier", "concept", "multi-hop"];
 
+/// Turns the image class on. Off by default, and deliberately.
+///
+/// The image half needs CLIP's two encoders, which are a download this run does
+/// not otherwise make. Folding that into every run would make the standard
+/// measurement heavier for everybody measuring text, which is most of the time,
+/// so the class is opted into and its absence is printed rather than silently
+/// passed over.
+const IMAGES_ENV: &str = "SEMLITH_RETRIEVAL_IMAGES";
+
+/// How many of the eight image questions must reach their picture in the top
+/// three. Measured, not chosen: 0.27.0 read 7 of 8 at k=1, k=3 and k=8 on the
+/// laptop that wrote the corpus, with one question finding nothing at any
+/// depth. The floor is set at what was measured rather than at eight, because a
+/// gate a release cannot pass is a gate somebody deletes; raising it is the
+/// work of whatever release fixes the eighth question.
+const IMAGE_FLOOR: usize = 7;
+
+/// One measured image class: the runs, the questions they scored, and where.
+struct ImageClass {
+    summary: Summary,
+    questions: Vec<Question>,
+    corpus: String,
+    files: usize,
+}
+
+/// Score the image class over its own pinned corpus.
+///
+/// Why a second corpus rather than eight more files in the first: the text
+/// corpus's `files` and `bytes` are asserted on every run because every figure
+/// this harness prints is a reading of that snapshot as much as of the ranking.
+/// Adding images to it rebaselines hit@1, hit@3, hit@8, bytes per answer and the
+/// resolution census at once — and this release's own gate is that its
+/// predecessor's figures reproduce over that corpus unchanged. The two
+/// requirements cannot both hold in one directory, so there are two.
+fn score_the_image_class(fixtures: &Path, runs: usize) -> Option<ImageClass> {
+    std::env::var_os(IMAGES_ENV)?;
+
+    let root = fixtures.join("images");
+    let questions = read_questions(&root.join("questions.yaml"));
+    // The class is the file, so a question in it that is not an image question
+    // is a question measured by nothing — the same trap the `SHAPES` assertion
+    // above exists to close for the text set.
+    for question in &questions {
+        assert_eq!(
+            question.shape, "image",
+            "{} sits in the image question set and carries shape {:?}",
+            question.id, question.shape
+        );
+        assert_eq!(
+            question.tool, "search",
+            "{} is an image question and asks for tool {:?}; the image list is \
+             reached through search and through nothing else",
+            question.id, question.tool
+        );
+        for span in &question.spans {
+            assert_eq!(
+                (span.start_line, span.end_line),
+                (0, 0),
+                "{}: an image hit carries no line range, so its span is the whole \
+                 file and both line numbers are 0",
+                question.id
+            );
+        }
+    }
+
+    let manifest = read_manifest(&root.join("corpus.yaml"));
+    let corpus = root
+        .join("corpus")
+        .canonicalize()
+        .expect("the image corpus is checked in at tests/fixtures/retrieval/images/corpus");
+    let (files, bytes) = weigh(&corpus);
+    assert_eq!(
+        (files, bytes),
+        (manifest.files, manifest.bytes),
+        "the image corpus has been edited: corpus.yaml records {} files and {} bytes \
+         and the tree on disk holds {files} files and {bytes} bytes. Regenerate it with \
+         `python3 tests/fixtures/retrieval/images/generate.py` rather than editing it.",
+        manifest.files,
+        manifest.bytes
+    );
+    println!(
+        "\n  image corpus  {files} files, {bytes} bytes, {} questions",
+        questions.len()
+    );
+
+    let reports: Vec<Report> = (0..runs)
+        .map(|run| index_and_score(&corpus, &questions, run == 0))
+        .collect();
+
+    Some(ImageClass {
+        summary: Summary::of(reports),
+        questions,
+        corpus: "tests/fixtures/retrieval/images/corpus".to_string(),
+        files,
+    })
+}
+
+/// The image class on its own, without indexing the text corpus first.
+///
+/// The class exists to be a gate, and a gate that costs eleven minutes of
+/// somebody else's measurement before it says anything is a gate nobody runs.
+/// This is the same scoring the by-shape table shows, over the same eleven
+/// files, and it takes seconds once CLIP is in the cache:
+///
+/// ```sh
+/// SEMLITH_RETRIEVAL_IMAGES=on cargo test --test retrieval -- --ignored the_image_class
+/// ```
+#[test]
+#[ignore = "indexes the image corpus and downloads CLIP on first run"]
+fn the_image_class_is_measured() {
+    // SAFETY: as in the harness above -- one test per process at
+    // `--test-threads=1`, set before a model is loaded or a thread is spawned.
+    unsafe { std::env::set_var(semlith::embed::THREADS_ENV, "1") };
+
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/retrieval");
+    let runs = std::env::var("SEMLITH_RETRIEVAL_RUNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+    let Some(class) = score_the_image_class(&fixtures, runs) else {
+        println!("\n  the image class is opted into: {IMAGES_ENV}=on runs it");
+        return;
+    };
+
+    println!("\n  image class, at k=1 / k=3 / k=8:");
+    let all: Vec<&Question> = class.questions.iter().collect();
+    class.summary.print_shape_row("image", &all);
+
+    // Named, not counted. A class that reports "7 of 8" and stops is a class
+    // that tells you a regression happened and not which picture stopped being
+    // found, which is the only part anybody can act on.
+    let misses: Vec<&str> = class
+        .questions
+        .iter()
+        .filter(|q| class.summary.rank_of(&q.id).0.is_none())
+        .map(|q| q.id.as_str())
+        .collect();
+    if misses.is_empty() {
+        println!("    every image question lands a span within k=8");
+    } else {
+        println!("    no span within k=8: {}", misses.join(", "));
+    }
+    for question in &class.questions {
+        println!(
+            "    {:<22} {}",
+            question.id,
+            match class.summary.rank_of(&question.id).0 {
+                Some(rank) => format!("rank {rank}"),
+                None => "—".to_string(),
+            }
+        );
+    }
+
+    // The gate. #122 was a text file outranking a picture for a query about
+    // that picture, and it survived a retrieval release because no number
+    // moved. This is the number.
+    let named = if misses.is_empty() {
+        "none at k=8".to_string()
+    } else {
+        misses.join(", ")
+    };
+    let at_three = class
+        .questions
+        .iter()
+        .filter(|q| matches!(class.summary.rank_of(&q.id).0, Some(rank) if rank <= 3))
+        .count();
+    assert!(
+        at_three >= IMAGE_FLOOR,
+        "{at_three} of {} image questions reach their picture in the top three, against a \
+         floor of {IMAGE_FLOOR}. Misses: {}. The floor is a measurement, not an aspiration -- \
+         if a ranking change is meant to have moved it, move it here deliberately.",
+        class.questions.len(),
+        named
+    );
+}
+
 #[test]
 #[ignore = "indexes the repository and downloads an embedding model on first run"]
 fn the_retrieval_metrics_are_measured() {
@@ -294,7 +470,15 @@ fn the_retrieval_metrics_are_measured() {
     let tool_list = semlith::mcp::tool_list_bytes();
     let tool_tokens = tool_list.div_ceil(4);
     let summary = Summary::of(reports);
-    summary.print(&questions, tool_list, tool_tokens, baseline.as_ref());
+    // Measured before the table is drawn, because its row goes in that table.
+    let image = score_the_image_class(&fixtures, runs);
+    summary.print(
+        &questions,
+        tool_list,
+        tool_tokens,
+        baseline.as_ref(),
+        image.as_ref(),
+    );
 
     // What the release exists for: one call against several, and the tokens
     // each costs.
@@ -743,12 +927,36 @@ impl Summary {
             .collect()
     }
 
+    /// One row of the by-shape table. Shared so the image class, which is
+    /// scored over a corpus of its own, is drawn by the same code as the three
+    /// classes above it rather than by a second formatter that could drift.
+    fn print_shape_row(&self, shape: &str, of_this_shape: &[&Question]) {
+        let at = |k: usize| {
+            of_this_shape
+                .iter()
+                .filter(|q| matches!(self.rank_of(&q.id).0, Some(rank) if rank <= k))
+                .count()
+        };
+        let total = of_this_shape.len();
+        let percent = |hits: usize| hits * 100 / total.max(1);
+        println!(
+            "    {shape:<11} {:>3} ({:>3} %) / {:>3} ({:>3} %) / {:>3} ({:>3} %)  of {total}",
+            at(1),
+            percent(at(1)),
+            at(3),
+            percent(at(3)),
+            at(8),
+            percent(at(8))
+        );
+    }
+
     fn print(
         &self,
         questions: &[Question],
         tool_list: usize,
         tool_tokens: usize,
         baseline: Option<&Baseline>,
+        image: Option<&ImageClass>,
     ) {
         let scored = self.scored().max(1);
         println!(
@@ -832,23 +1040,31 @@ impl Summary {
         for shape in shapes {
             let of_this_shape: Vec<&Question> =
                 questions.iter().filter(|q| q.shape == shape).collect();
-            let at = |k: usize| {
-                of_this_shape
-                    .iter()
-                    .filter(|q| matches!(self.rank_of(&q.id).0, Some(rank) if rank <= k))
-                    .count()
-            };
-            let total = of_this_shape.len();
-            let percent = |hits: usize| hits * 100 / total.max(1);
-            println!(
-                "    {shape:<11} {:>3} ({:>3} %) / {:>3} ({:>3} %) / {:>3} ({:>3} %)  of {total}",
-                at(1),
-                percent(at(1)),
-                at(3),
-                percent(at(3)),
-                at(8),
-                percent(at(8))
-            );
+            self.print_shape_row(shape, &of_this_shape);
+        }
+        // The image class, in the same table, measured over a corpus of its own.
+        //
+        // In this table rather than under a heading of its own because a class
+        // reported somewhere else is a class nobody reads: #122 survived a whole
+        // retrieval release precisely because the only thing watching images was
+        // a printout a person had to go and look at. Its figures come from a
+        // different corpus, so they are labelled and never summed with the rows
+        // above — the aggregate hit@k at the top of this report is the text
+        // corpus and nothing else, which is what makes the release's
+        // reproduce-the-figures gate mean anything.
+        match image {
+            Some(class) => {
+                let of_this_shape: Vec<&Question> = class.questions.iter().collect();
+                class.summary.print_shape_row("image", &of_this_shape);
+                println!(
+                    "    ^ measured over {} ({} files), not the corpus above",
+                    class.corpus, class.files
+                );
+            }
+            None => println!(
+                "    image       not measured — {IMAGES_ENV}=on runs it, over its own corpus \
+                 (it downloads CLIP)"
+            ),
         }
 
         if let Some(census) = self.runs[0].census.as_ref() {

@@ -950,12 +950,19 @@ every time it is opened is not a map.
 
 ## The reports, and what the ledger cannot see (0.26.0)
 
-`src/report.rs` is one structure and four renderers rather than four writers:
+`src/report.rs` is one structure and five renderers rather than five writers:
 a report is a title and a list of blocks — a sentence, a row of counted facts,
-or a named table — and Markdown, CSV, JSON and print-styled HTML are four
-readings of it. That is why `semlith report` and the portal's export produce
-the same bytes: the portal is not a second renderer. PDF is the reader's own
-browser printing the HTML, which is why no PDF writer is in the binary.
+or a named table — and Markdown, CSV, JSON, print-styled HTML and, from 0.27.0,
+PDF are five readings of it. That is why `semlith report` and the portal's
+export produce the same bytes: the portal is not a second renderer.
+
+The PDF is typeset from the blocks rather than printed from the HTML, which
+0.26.x said was the whole of PDF support. It is set in the base-14 Courier
+faces, where every glyph is 0.6 em — the width of a line is its length, which is
+what makes the table arithmetic provable, and why no font is embedded. That is
+also why `Report::render` returns a `String` and serves the four text formats
+while `Report::render_bytes` serves all five: a surface that can only print text
+calls `check_format`, and one that can hand back bytes calls `check_any_format`.
 
 The savings report never sums its three counterfactual lines. Whole files not
 read, excerpts read instead and refunds answer three different questions, and
