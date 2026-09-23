@@ -575,9 +575,43 @@ pub struct Store {
     /// gained three files. A deadline rather than a flag, so a run that never
     /// arrives costs the watcher a minute rather than the session.
     pub expecting_run_until: AtomicUsize,
+    /// Why the writer thread ended, when it has. `/api/stores` reports it
+    /// beside `watching: false`, so a stopped store says what stopped it.
+    pub stopped_because: Mutex<Option<String>>,
 }
 
 impl Store {
+    /// A store's record with nothing going on yet. One constructor, so a field
+    /// added here is a field every caller gets.
+    fn new(
+        name: String,
+        dir: PathBuf,
+        roots: Vec<PathBuf>,
+        watched: Vec<PathBuf>,
+        watching: bool,
+        expecting_run_until: usize,
+    ) -> Self {
+        Self {
+            name,
+            dir,
+            roots,
+            watched,
+            queue: Mutex::new(VecDeque::new()),
+            events: Mutex::new(VecDeque::new()),
+            runs: Mutex::new(Vec::new()),
+            watching: AtomicBool::new(watching),
+            stop: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            last_write: AtomicUsize::new(0),
+            pruned: AtomicUsize::new(0),
+            // Set before the watcher thread exists, which is the point: a flag
+            // set afterwards is a flag the catch-up may already have run past.
+            expecting_run_until: AtomicUsize::new(expecting_run_until),
+            stopped_because: Mutex::new(None),
+        }
+    }
+
     fn note(&self, text: String) {
         let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
         if events.len() == EVENT_HISTORY {
@@ -1939,28 +1973,19 @@ impl State {
         let (name, roots) = roots_for(&dir, &registry);
         let watched: Vec<PathBuf> = roots.iter().filter(|r| r.exists()).cloned().collect();
 
-        let store = Arc::new(Store {
-            name: name.clone(),
-            dir: dir.clone(),
+        let expecting = if expect_run {
+            now() as usize + EXPECTED_RUN_GRACE_SECS
+        } else {
+            0
+        };
+        let store = Arc::new(Store::new(
+            name.clone(),
+            dir.clone(),
             roots,
             watched,
-            queue: Mutex::new(VecDeque::new()),
-            events: Mutex::new(VecDeque::new()),
-            runs: Mutex::new(Vec::new()),
-            watching: AtomicBool::new(true),
-            stop: AtomicBool::new(false),
-            paused: AtomicBool::new(false),
-            cancelled: AtomicBool::new(false),
-            last_write: AtomicUsize::new(0),
-            pruned: AtomicUsize::new(0),
-            // Set before the watcher thread exists, which is the point: a flag
-            // set afterwards is a flag the catch-up may already have run past.
-            expecting_run_until: AtomicUsize::new(if expect_run {
-                now() as usize + EXPECTED_RUN_GRACE_SECS
-            } else {
-                0
-            }),
-        });
+            true,
+            expecting,
+        ));
 
         discovery(self.server.port(), &self.server.token()).write(&store.dir)?;
         self.stores
@@ -1977,11 +2002,7 @@ impl State {
         let admission = Arc::clone(&self.admission);
         std::thread::spawn(move || {
             let _lock = lock;
-            if let Err(e) = tend(&watching, debounce, &watching.stop, &*report, &admission) {
-                report(&format!("{}: watcher stopped: {e}", watching.name));
-                watching.note(format!("watcher stopped: {e}"));
-            }
-            watching.watching.store(false, Ordering::Relaxed);
+            keep_writing(&watching, debounce, &*report, &admission);
         });
 
         (self.report)(&format!(
@@ -2259,22 +2280,7 @@ pub fn run(
             dir.display(),
             watched.len()
         ));
-        stores.push(Arc::new(Store {
-            name,
-            dir,
-            roots,
-            watched,
-            queue: Mutex::new(VecDeque::new()),
-            events: Mutex::new(VecDeque::new()),
-            runs: Mutex::new(Vec::new()),
-            watching: AtomicBool::new(false),
-            stop: AtomicBool::new(false),
-            paused: AtomicBool::new(false),
-            cancelled: AtomicBool::new(false),
-            last_write: AtomicUsize::new(0),
-            pruned: AtomicUsize::new(0),
-            expecting_run_until: AtomicUsize::new(0),
-        }));
+        stores.push(Arc::new(Store::new(name, dir, roots, watched, false, 0)));
     }
 
     let fleet = if dirs.is_empty() {
@@ -2303,6 +2309,13 @@ pub fn run(
     // moves.
     let limits = Limits::in_force();
     report_line(&limits.line());
+
+    // Background while idle, normal while embedding. Before the watchers
+    // start, so the catch-up they run is the first thing that lifts it.
+    {
+        let log = Arc::clone(&report_line);
+        crate::priority::manage(move |line| log(line));
+    }
 
     let state = Arc::new(State {
         server: Arc::clone(&server),
@@ -2353,11 +2366,7 @@ pub fn run(
             // Moved in so the lock's life is the thread's life, which is what
             // makes "the daemon is the writer" true rather than intended.
             let _lock = lock;
-            if let Err(e) = tend(&store, debounce, &store.stop, &*report, &admission) {
-                report(&format!("{}: watcher stopped: {e}", store.name));
-                store.note(format!("watcher stopped: {e}"));
-            }
-            store.watching.store(false, Ordering::Relaxed);
+            keep_writing(&store, debounce, &*report, &admission);
         }));
     }
 
@@ -2436,6 +2445,45 @@ pub fn run(
         report("stopped");
         result.map(|()| state)
     })
+}
+
+/// Run a store's writer until it returns, and say why it did.
+///
+/// A panic is caught here as well as an error. Either way the thread is gone,
+/// so `watching` goes false and the reason is on the store's feed; before
+/// 0.28.0 a panic skipped both, and `/api/stores` went on reporting a store
+/// nobody was watching as watched.
+fn keep_writing(
+    store: &Arc<Store>,
+    debounce: Duration,
+    report: &(dyn Fn(&str) + Send + Sync),
+    admission: &Arc<Admission>,
+) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tend(store, debounce, &store.stop, report, admission)
+    }));
+    let why = match outcome {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(format!("{e:#}")),
+        Err(panic) => Some(format!(
+            "the writer panicked: {}",
+            panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "no message".to_string())
+        )),
+    };
+    store.watching.store(false, Ordering::Relaxed);
+    if let Some(why) = why {
+        report(&format!("{}: watcher stopped: {why}", store.name));
+        store.note(format!("watcher stopped: {why}"));
+        *store
+            .stopped_because
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(why);
+    }
+    changes::bump(changes::Domain::Stores);
 }
 
 /// One store's watcher thread: the same loop `semlith watch` runs, plus the
@@ -3158,22 +3206,14 @@ mod tests {
     /// A store with nothing behind it, for the parts of a run that are
     /// bookkeeping rather than embedding.
     fn bare_store(name: &str) -> Arc<Store> {
-        Arc::new(Store {
-            name: name.to_string(),
-            dir: PathBuf::from("/nowhere").join(name),
-            roots: Vec::new(),
-            watched: Vec::new(),
-            queue: Mutex::new(VecDeque::new()),
-            events: Mutex::new(VecDeque::new()),
-            runs: Mutex::new(Vec::new()),
-            watching: AtomicBool::new(true),
-            stop: AtomicBool::new(false),
-            paused: AtomicBool::new(false),
-            cancelled: AtomicBool::new(false),
-            last_write: AtomicUsize::new(0),
-            pruned: AtomicUsize::new(0),
-            expecting_run_until: AtomicUsize::new(0),
-        })
+        Arc::new(Store::new(
+            name.to_string(),
+            PathBuf::from("/nowhere").join(name),
+            Vec::new(),
+            Vec::new(),
+            true,
+            0,
+        ))
     }
 
     /// The clock restarted from zero every forty-five seconds, because it was
@@ -3499,22 +3539,14 @@ mod tests {
                 ["api", "cli"]
                     .into_iter()
                     .map(|name| {
-                        Arc::new(Store {
-                            name: name.to_string(),
-                            dir: PathBuf::from("/nowhere").join(name),
-                            roots: Vec::new(),
-                            watched: Vec::new(),
-                            queue: Mutex::new(VecDeque::new()),
-                            events: Mutex::new(VecDeque::new()),
-                            runs: Mutex::new(Vec::new()),
-                            watching: AtomicBool::new(false),
-                            stop: AtomicBool::new(false),
-                            paused: AtomicBool::new(false),
-                            cancelled: AtomicBool::new(false),
-                            last_write: AtomicUsize::new(0),
-                            pruned: AtomicUsize::new(0),
-                            expecting_run_until: AtomicUsize::new(0),
-                        })
+                        Arc::new(Store::new(
+                            name.to_string(),
+                            PathBuf::from("/nowhere").join(name),
+                            Vec::new(),
+                            Vec::new(),
+                            false,
+                            0,
+                        ))
                     })
                     .collect(),
             ),

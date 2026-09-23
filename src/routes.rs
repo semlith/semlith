@@ -490,6 +490,9 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             "formats": facets.extensions.len(),
             "readers": readers.len(),
             "watching": handle.watching.load(Ordering::Relaxed),
+            // Why the writer ended, beside `watching: false`, so a store that
+            // stopped being kept current says what stopped it.
+            "stopped_because": handle.stopped_because.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "queue": handle.queue_depth(),
             "last_write": last_write,
             // Rows this store held for files outside its roots, dropped when
@@ -1805,6 +1808,10 @@ fn about(state: &Arc<State>) -> Response {
         "graph_languages": crate::graph::languages(),
         "edge_kinds": crate::graph::KINDS,
         "stores": state.stores().len(),
+        // Background while idle, normal while embedding, and what the last
+        // switch cost. Read by the About page and by the acceptance check that
+        // times each transition.
+        "priority": crate::priority::snapshot(),
     }))
 }
 

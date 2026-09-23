@@ -220,6 +220,7 @@ pub fn order(model: &mut TextRerank, query: &str, texts: &[String]) -> Result<Ve
     if texts.is_empty() {
         return Ok(Vec::new());
     }
+    let _lifted = crate::priority::embedding();
     let scored = model
         .rerank(
             query,

@@ -41,6 +41,7 @@ pub mod lock;
 pub mod mcp;
 pub mod pattern;
 pub mod portal;
+pub mod priority;
 pub mod proxy;
 pub mod replay;
 pub mod report;
@@ -995,6 +996,36 @@ fn skip(report: &mut IndexReport, why: &SkipReason) {
 /// `{e:#}` rather than `{e}` so the decoder's own message survives the
 /// `anyhow` context above it. "failed to embed image" alone is not a reason,
 /// and the reason is the point of the line.
+/// Names a file whose reader should panic, so the containment below can be
+/// proved on every runner without a real reader bug to lean on. Read only here.
+pub const FAULT_PANIC_ENV: &str = "SEMLITH_FAULT_PANIC";
+
+fn fault_panic(path: &Path) {
+    if let Ok(name) = std::env::var(FAULT_PANIC_ENV)
+        && path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == name)
+    {
+        panic!("{FAULT_PANIC_ENV} names {name}");
+    }
+}
+
+/// Run one file's reading, parsing or chunking with a panic caught.
+///
+/// Only work that has not written a row yet goes through here, so a panic
+/// leaves nothing half-done: the file is reported as failed, with the message,
+/// and the pass moves to the next one.
+fn contained<T>(work: impl FnOnce() -> T) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|panic| {
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        anyhow::anyhow!("the reader panicked on this file: {message}")
+    })
+}
+
 fn failed(report: &mut IndexReport, path: &Path, e: &anyhow::Error) {
     report
         .failed
@@ -1301,6 +1332,7 @@ impl Semlith {
     }
 
     fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        let _lifted = priority::embedding();
         let mut out = self
             .embedder()?
             .embed(texts, Some(EMBED_BATCH))
@@ -1467,6 +1499,10 @@ impl Semlith {
         control: Option<&dyn Fn() -> Flow>,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
+        // The whole pass, not only its embeds: reading, hashing and chunking
+        // between batches is the run's work too, and dropping to background
+        // for it would put the next batch behind the efficiency cores again.
+        let _lifted = priority::embedding();
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.
@@ -1860,9 +1896,28 @@ impl Semlith {
             // no reason, no counter movement — so a tree of binaries left the
             // portal's progress bar short of its own total with no line
             // saying why.
-            let text = match chunk::extract(&path, &bytes) {
-                Ok(text) => text,
-                Err(why) => {
+            // A reader that panics on one file's bytes is that file's failure.
+            // Before 0.28.0 the panic unwound the store's writer thread, the
+            // store stopped being kept current, and `/api/stores` went on
+            // saying it was watched.
+            let text = match contained(|| {
+                fault_panic(&path);
+                chunk::extract(&path, &bytes)
+            }) {
+                Err(e) => {
+                    failed(&mut report, &path, &e);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Failed,
+                        Some(format!("{e:#}")),
+                    );
+                    continue;
+                }
+                Ok(Ok(text)) => text,
+                Ok(Err(why)) => {
                     skip(&mut report, &why);
                     say_file(
                         &mut on_file,
@@ -1922,7 +1977,7 @@ impl Semlith {
             // nothing to undo and the shared pending batch is never left
             // holding an id whose row was rolled back.
             //
-            let extraction = match graph::extract(&path, &text) {
+            let extraction = match contained(|| graph::extract(&path, &text)).and_then(|r| r) {
                 Ok(extraction) => extraction,
                 Err(e) => {
                     failed(&mut report, &path, &e);
@@ -1938,11 +1993,27 @@ impl Semlith {
                 }
             };
 
-            let chunks = chunk::chunk_file(
-                &path,
-                &text,
-                extraction.as_ref().map_or(&[][..], |e| &e.symbols),
-            );
+            let chunks = match contained(|| {
+                chunk::chunk_file(
+                    &path,
+                    &text,
+                    extraction.as_ref().map_or(&[][..], |e| &e.symbols),
+                )
+            }) {
+                Ok(chunks) => chunks,
+                Err(e) => {
+                    failed(&mut report, &path, &e);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Failed,
+                        Some(format!("{e:#}")),
+                    );
+                    continue;
+                }
+            };
             if chunks.is_empty() {
                 let why = SkipReason::NoText;
                 skip(&mut report, &why);

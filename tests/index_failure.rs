@@ -386,3 +386,40 @@ fn the_same_tree_with_a_valid_image_indexes_it() {
     assert_eq!(report.images, 1);
     assert_eq!(find(&events, "broken.png").outcome, FileOutcome::Indexing);
 }
+
+/// A reader that panics on one file is that file's failure, named with the
+/// panic's message, and the pass carries on to the next file. Before 0.28.0 the
+/// panic unwound the daemon's writer thread and the store stopped being kept
+/// current. No model: neither file reaches the embedder.
+#[test]
+fn a_panicking_reader_fails_its_file_and_the_pass_carries_on() {
+    let store = tempfile::tempdir().unwrap();
+    let corpus = tempfile::tempdir().unwrap();
+    write(corpus.path(), "boom.md", b"# anything at all\n");
+    write(corpus.path(), "empty.md", b"");
+    // SAFETY: this test binary reads the variable only through the index pass
+    // below, on this thread.
+    unsafe { std::env::set_var(semlith::FAULT_PANIC_ENV, "boom.md") };
+    let (report, events) = run(store.path(), corpus.path());
+    unsafe { std::env::remove_var(semlith::FAULT_PANIC_ENV) };
+
+    let boom = find(&events, "boom.md");
+    assert_eq!(boom.outcome, FileOutcome::Failed, "{events:?}");
+    let why = boom.why.as_deref().unwrap_or("");
+    assert!(
+        why.contains("panicked"),
+        "the message names the panic: {why}"
+    );
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(path, _)| path.ends_with("boom.md")),
+        "{:?}",
+        report.failed
+    );
+    assert_eq!(
+        report.scanned, 2,
+        "the pass reached the file after the panic"
+    );
+}

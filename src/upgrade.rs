@@ -242,6 +242,29 @@ fn swap(base: &str, archive: &str, work: &Path, current: &Path, tag: &str) -> Re
     }
 
     println!("installed {} at {}", &tag[1..], current.display());
+
+    // A login service is re-registered by the binary just installed, so its
+    // definition is the one that binary writes. Before 0.28.0 that definition
+    // asked for background priority, which a daemon cannot lift itself out
+    // of; re-registering also restarts the daemon onto the new binary rather
+    // than leaving the old one running until the next login.
+    if crate::service::status().installed {
+        match std::process::Command::new(current)
+            .args(["start", "--service"])
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                println!("re-registered the login service with the new binary")
+            }
+            Ok(out) => println!(
+                "the login service could not be re-registered ({}) — run `semlith start --service`",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(e) => println!(
+                "the login service could not be re-registered ({e}) — run `semlith start --service`"
+            ),
+        }
+    }
     println!(
         "the previous binary is {} — delete it when you are happy",
         old.display()

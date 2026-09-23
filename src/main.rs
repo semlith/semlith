@@ -2970,6 +2970,18 @@ fn print_proof(proof: &semlith::doctor::Proof) {
             "not installed — `semlith start --service`".to_string()
         },
     );
+    // A definition from before 0.28.0 asks for background priority, which a
+    // daemon cannot lift itself out of: the service runs, and indexes on the
+    // efficiency cores. Named until `setup` or `upgrade` has rewritten it.
+    if service.installed {
+        match semlith::service::stale_definition() {
+            Some(why) => println!("  {:<4} {:<20} {why}", "FAIL", "service priority"),
+            None => println!(
+                "  {:<4} {:<20} normal while embedding, background while idle",
+                "ok  ", "service priority"
+            ),
+        }
+    }
     println!(
         "  {:<4} {:<20} {}",
         "ok  ", "a client would run", proof.command

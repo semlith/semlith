@@ -998,6 +998,7 @@ impl Fleet {
     fn embed_query(&mut self, model: &Model, query: &str) -> Result<Vec<f32>> {
         let text = model.query_text(query);
         let i = self.embedder(model)?;
+        let _lifted = crate::priority::embedding();
         let mut out = self.embedders[i]
             .1
             .embed(vec![text], Some(1))

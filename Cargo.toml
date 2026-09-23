@@ -128,7 +128,7 @@ pdf-writer = "0.15.0"
 # `GlobalMemoryStatusEx` how much memory this machine has, which Windows
 # exposes nowhere else.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [features]
 # How ONNX Runtime is linked, and the one thing that differs between the binary
