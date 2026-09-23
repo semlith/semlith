@@ -613,7 +613,7 @@ impl RunState {
                 self.status = RunStatus::Held;
                 self.hold();
             }
-            Some("file") => {
+            Some(kind @ ("file" | "progress")) => {
                 // A card asked to pause or stop keeps saying so until the
                 // engine answers; a file line is not that answer.
                 if !matches!(self.status, RunStatus::Pausing | RunStatus::Stopping) {
@@ -621,14 +621,18 @@ impl RunState {
                 }
                 // A `writing` line is the run saying it has stopped reading
                 // files for a moment; the next line of any other outcome ends
-                // the phase.
-                self.phase = match event.get("outcome").and_then(serde_json::Value::as_str) {
-                    Some("writing") => event
-                        .get("why")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| Some("writing the index to disk".to_string())),
-                    _ => None,
+                // the phase. Progress inside a file says nothing about it.
+                self.phase = if kind == "progress" {
+                    self.phase.take()
+                } else {
+                    match event.get("outcome").and_then(serde_json::Value::as_str) {
+                        Some("writing") => event
+                            .get("why")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| Some("writing the index to disk".to_string())),
+                        _ => None,
+                    }
                 };
                 // Taken rather than added: every one of these is the run's
                 // own running total, so summing them would count each file
@@ -643,6 +647,7 @@ impl RunState {
                 // unchanged files before it is not part of either rate.
                 let embedding = self.first_sample.is_some()
                     || self.chunks > 0
+                    || kind == "progress"
                     || event.get("outcome").and_then(serde_json::Value::as_str) == Some("indexing");
                 if embedding {
                     self.sample();
@@ -698,6 +703,11 @@ impl RunState {
             _ => {}
         }
 
+        // Per-batch progress moves the snapshot and nothing else: a log line
+        // per eight chunks would push every file line off the ring.
+        if event.get("event").and_then(serde_json::Value::as_str) == Some("progress") {
+            return;
+        }
         let mut line = event.clone();
         if let Some(object) = line.as_object_mut() {
             object.insert("seq".into(), serde_json::json!(self.next_seq));
@@ -3114,7 +3124,9 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
             let on_file = |path: &Path, progress: crate::IndexProgress| {
                 let scanned = scanned_before + progress.scanned as u64;
                 say(serde_json::json!({
-                    "event": "file",
+                    // A batch inside a file is progress, not a verdict about
+                    // the file: it moves the counters and stays off the log.
+                    "event": if progress.outcome == crate::FileOutcome::Progress { "progress" } else { "file" },
                     // Plain, like every other path semlith hands out. The
                     // store keeps the verbatim form; a `\\?\C:\` prefix in
                     // an event is a path no editor opens and no shell

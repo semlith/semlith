@@ -83,6 +83,10 @@ const BIT_WIDTH: usize = 4;
 /// chunks/sec), because a smaller batch also wastes less of itself on padding.
 const EMBED_BATCH: usize = 8;
 
+/// Told after every embedding batch: chunks embedded, the session's thread
+/// count, and each lane's running total for the store.
+type Tick<'a> = dyn FnMut(usize, usize, &std::collections::BTreeMap<String, usize>) + 'a;
+
 /// The meta row counting a store's chunks per vector variant.
 const VARIANTS_KEY: &str = "variants";
 
@@ -676,6 +680,10 @@ pub enum FileOutcome {
     /// one corrupt PNG in a tree of ten thousand files used to end the whole
     /// run, which is the defect this release exists to fix.
     Failed,
+    /// Not a verdict: a batch of the file in hand has been embedded. Said per
+    /// batch so a file of thousands of chunks moves the counters, the rate
+    /// and the thread count as it goes rather than all at once at its end.
+    Progress,
 }
 
 impl FileOutcome {
@@ -689,6 +697,7 @@ impl FileOutcome {
             Self::Removed => "removed",
             Self::Refused => "refused",
             Self::Failed => "failed",
+            Self::Progress => "progress",
         }
     }
 }
@@ -964,6 +973,9 @@ pub struct IndexReport {
     /// The intra-op thread count the session ran with at the end of this
     /// call, or 0 when nothing was embedded.
     pub threads: usize,
+    /// Chunks embedded so far in this call, counted per batch. `chunks` counts
+    /// finished files, so it stands still through a large one; this does not.
+    pub embedded: usize,
     /// Chunks each lane has embedded for this store, since it was opened.
     #[serde(skip)]
     pub lanes: std::collections::BTreeMap<String, usize>,
@@ -1005,7 +1017,7 @@ fn say_file(
             outcome,
             scanned: report.scanned,
             indexed: report.indexed,
-            chunks: report.chunks,
+            chunks: report.embedded.max(report.chunks),
             total,
             symbols: report.symbols,
             why,
@@ -2241,7 +2253,21 @@ impl Semlith {
                 // into thousands of pieces, and holding them all to embed in a
                 // single call makes peak memory a function of the largest
                 // file in the corpus rather than of the window.
-                if pending.ids.len() >= SORT_WINDOW && !self.flush(&mut pending, control)? {
+                if pending.ids.len() >= SORT_WINDOW
+                    && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
+                        report.embedded += n;
+                        report.threads = threads;
+                        report.lanes = lanes.clone();
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Progress,
+                            None,
+                        );
+                    })?
+                {
                     halted = true;
                     break;
                 }
@@ -2291,7 +2317,19 @@ impl Semlith {
                     FileOutcome::Writing,
                     Some("writing the index to disk".to_string()),
                 );
-                if !self.flush(&mut pending, control)? {
+                if !self.flush(&mut pending, control, &mut |n, threads, lanes| {
+                    report.embedded += n;
+                    report.threads = threads;
+                    report.lanes = lanes.clone();
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Progress,
+                        None,
+                    );
+                })? {
                     report.remaining = total - seen - 1;
                     report.stopped = true;
                     break;
@@ -2309,7 +2347,13 @@ impl Semlith {
             }
         }
 
-        if !report.stopped && !self.flush(&mut pending, control)? {
+        if !report.stopped
+            && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
+                report.embedded += n;
+                report.threads = threads;
+                report.lanes = lanes.clone();
+            })?
+        {
             report.stopped = true;
         }
         report.threads = self.embedder_threads;
@@ -2659,7 +2703,12 @@ impl Semlith {
     /// minute. A pause holds here with the window in memory; nothing is
     /// half-committed, because a file's hash is written only after its last
     /// chunk is durable, whichever batch that is.
-    fn flush(&mut self, batch: &mut Batch, control: Option<&dyn Fn() -> Flow>) -> Result<bool> {
+    fn flush(
+        &mut self,
+        batch: &mut Batch,
+        control: Option<&dyn Fn() -> Flow>,
+        tick: &mut Tick<'_>,
+    ) -> Result<bool> {
         if batch.ids.is_empty() {
             return Ok(true);
         }
@@ -2671,7 +2720,7 @@ impl Semlith {
         self.embedder()?;
         self.follow_budget();
         let order = self.length_order(&texts);
-        let Some(vectors) = self.embed_window(&texts, order, control)? else {
+        let Some(vectors) = self.embed_window(&texts, order, control, tick)? else {
             return Ok(false);
         };
         let flat: Vec<f32> = vectors.into_iter().flatten().collect();
@@ -2699,6 +2748,7 @@ impl Semlith {
         texts: &[String],
         order: Vec<usize>,
         control: Option<&dyn Fn() -> Flow>,
+        tick: &mut Tick<'_>,
     ) -> Result<Option<Vec<Vec<f32>>>> {
         let (lanes, cpu_on) = accel::for_run();
         let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
@@ -2741,6 +2791,7 @@ impl Semlith {
                         }
                         counts.push((lane.variant(), group.len()));
                         self.note_lane(lane.id, group.len());
+                        tick(group.len(), self.embedder_threads, &self.lane_chunks);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => still.push((lane, group, answer)),
                     // Failed, lost, or the wrong shape: back on the window.
@@ -2762,6 +2813,7 @@ impl Semlith {
                 accel::count_cpu(group.len());
                 counts.push((self.last_variant, group.len()));
                 self.note_lane("cpu", group.len());
+                tick(group.len(), self.embedder_threads, &self.lane_chunks);
                 continue;
             }
             if waiting.is_empty() && flying.is_empty() {
@@ -2777,6 +2829,7 @@ impl Semlith {
                         }
                         counts.push((lane.variant(), group.len()));
                         self.note_lane(lane.id, group.len());
+                        tick(group.len(), self.embedder_threads, &self.lane_chunks);
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         flying.insert(0, (lane, group, answer))

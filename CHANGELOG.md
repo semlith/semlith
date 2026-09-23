@@ -7,6 +7,226 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The service indexes at the machine's speed, the GPU works beside the CPU, and the run controls act at once
+
+On the reference M1 (4 performance and 4 efficiency cores, 8 GB), the login
+service indexed at 3.3 chunks/s while the same binary in a terminal did 28,
+measured on 2026-09-23. Every throughput figure in the documentation had been
+taken in a terminal, so nothing measured the path most users are on. Two of the
+three machine limits the Index page offered were saved and never applied.
+Watcher catch-ups ignored the concurrency limit, and Pause and Stop could take a
+minute to act.
+
+**Priority now follows the work.** The launchd plist asked for `ProcessType
+Background`, which on Apple silicon keeps a process on the efficiency cores. A
+process launchd starts that way cannot lift itself out: `setpriority` returns 0
+and the scheduler priority stays at 4. The plist now asks for `Standard`, and the
+daemon switches its own priority. One process-wide count covers every embed
+pass: a portal run, a watcher catch-up, a watcher batch, `add`, and the query
+embedding behind a search. When the count goes from 0 to 1, the daemon clears
+its darwin background state. When it returns to 0, the daemon waits 300 ms and
+sets the state again, so a burst of searches does not toggle it. Each switch is
+logged with its direction and how long it took, which was under 100 µs in both
+directions on the M1. `/api/about` reports the current state and the number of
+switches.
+<!-- MEASURE: pinned corpus (≥ 400 chunks, hash recorded) on the reference M1, median of three — CLI in a terminal vs a portal run through the launchd service (chunks/s, both in one unit; acceptance: service ≥ 85 % of terminal), against 3.3 of 28 chunks/s on 2026-09-23 -->
+
+This trades some battery for speed. While it embeds, the daemon runs at full
+priority on the performance cores, where before it ran on the efficiency cores
+whatever it was doing. While idle it is in background state, as the old plist
+intended. An idle daemon uses no CPU, so being idle costs nothing either way.
+
+`semlith setup` and `semlith upgrade` rewrite an installed plist that still
+says `Background`. `upgrade` also re-registers the login service, so the new
+binary is what runs. Until the plist has been rewritten, `semlith doctor`
+reports `FAIL service priority` and names the file. On Windows the logon task
+is registered at `-Priority 5`. It used to run at Task Scheduler's default of 7,
+below normal, and on Windows 11 that can bring EcoQoS throttling onto the
+efficiency cores. While idle, the daemon sets itself to `BELOW_NORMAL` with
+power throttling on. While embedding, it runs at `NORMAL` with power
+throttling off. `setup`, `upgrade` and `doctor` treat a task at any priority
+other than 5 the way they treat the old plist. The Linux systemd unit does not
+change. An unprivileged process cannot lower its nice value again once it has
+raised it, so Linux has no idle switch.
+
+**Machine limits apply as soon as they are saved.** A new *threads each* value
+reaches every writer at its next batch. A writer whose session was built with a
+different thread count rebuilds the session there. Each run card shows the
+thread count its session was actually built with. A new *MiB per store* value
+applies to every open index at once, and any resident shards above the new
+budget are released. Raising *runs at once* admits waiting runs at once, as it
+did before. Lowering it now holds the newest runs above the limit at their next
+batch and puts them at the front of the queue as `held`. They keep their list
+of written files, so a later Stop still undoes everything they embedded, and
+they resume in submission order as slots free. The environment variables keep
+their precedence. The route's reply states the values the engine now runs with.
+The limits line `semlith start` prints shows the values in force, so it no
+longer says "1 embedder thread(s) each" while every session runs 4.
+
+**Values saved under 0.27.0 take effect now.** In 0.27.0, *threads each* and
+*MiB per store* were written to `~/.semlith/settings.json` and then ignored.
+After the upgrade they are applied. A *threads each* of 1 saved earlier now
+limits every writer to one thread, on a machine whose writers were running 4.
+If indexing is slower after the upgrade, check the Machine limits card, or
+remove the field from `settings.json` to go back to the derived value.
+
+**Everything the daemon embeds goes through one queue.** A watcher catch-up, the
+walk of a whole root when a store is opened, is now admitted like a portal run.
+It has a card of its own on the Index page, with kind `catch-up`, Pause and
+Stop. A watcher event batch of up to 32 files still runs straight away, because
+a saved file has to reach search within seconds. A larger batch, such as a `git
+checkout` that touches thousands of files, is admitted as a run of kind `batch`.
+With *runs at once* at N, no more than N runs embed at the same time, apart
+from the event batches of 32 files or fewer.
+
+**Pause and Stop act at the next batch.** The run checks its control before
+every embedding batch, inside a file as well as between files. Before, it
+checked once per file, and a file can hold thousands of chunks. Pause holds the
+unflushed batch in memory and commits nothing partial. Stop inside a file
+removes that file's rows along with every file the run wrote. The file's hash
+is written only after its last chunk is durable, so a half-written file is
+never recorded as indexed. The undo now removes everything and then writes the
+index once. Before, it called `forget_held` once per file, and each call
+rewrote the whole index. `POST /api/index/control` replies at once with the
+requested state, `pausing` or `stopping`. The card shows that state as soon as
+the button is pressed and changes to `paused` or `stopped` when the engine
+confirms it.
+
+**Stop can delete the store.** The Stop confirmation has a checkbox, "Also
+delete the store". It is ticked by default when the store held no files before
+the run, and unticked when it held content. The daemon records the pre-run file
+and chunk counts on the run (`files_before`, `chunks_before`), so the page does
+not have to guess them. With the box ticked, the undo is followed by the same
+removal `semlith drop` performs: the store directory, its registry entry and its
+watcher thread. The card then says the store was deleted. On Windows, an open
+handle stops a directory from being removed, so the store directory is first
+renamed out of the way. If the rename is refused, nothing is deleted and the
+error names the directory. A partial delete does not happen.
+
+**The chunks/s figure is a rolling rate.** A run reports `rate`, the chunks it
+embedded over the last 10 seconds of active time, and `rate_average`, the rate
+since its first batch. Paused and held time is excluded from both, as is the
+time spent queued or walking unchanged files. `rate` is null only before the
+first batch, and it is still reported while the index is being written to disk.
+Watcher batch lines report how long the batch actually took. Every catch-up
+used to print "in 0.0s".
+
+**Idle sessions are released, and all readers share one query session.** ONNX
+Runtime's arenas grow to the largest batch a session has run and never shrink,
+so a writer that indexed once kept that peak for as long as the daemon ran. On
+the M1 that came to 5 392 MB across seven stores on an 8 GB machine, measured
+with `footprint` on 2026-09-23. A writer now drops its session, its arena and
+its threads after 60 seconds without embedding, and loads them again on the
+next embed, which takes about a second. The portal's reader and the MCP reader
+used to hold one query session each. They now share one per model, and it stays
+loaded, so a search never waits for a model load. `/api/about` reports
+`sessions.writers` and `sessions.query`.
+<!-- MEASURE: daemon footprint on the reference M1, seven stores open, GPU lane on — idle, during a run, and 60 s after the last run ends (MB, `footprint`), against 5 392 MB on 2026-09-23 -->
+
+**Chunks are batched by length.** A batch pads every text to the length of its
+longest one. The index pass used to embed chunks in file order, eight at a
+time, so one long chunk made seven short ones as expensive as itself. It now
+holds a window of up to 64 chunks, sorts it by length, and embeds it in batches
+of 8 on the CPU, 16 on WebGPU and 64 on CUDA. On the M1 over 512 real chunks, on
+the CPU alone with int8, throughput went from 19.5 to 29.1 chunks/s (median of
+three runs). The window is formed in walk order and sorted stably, so the same
+corpus on one lane always produces the same batches. Sorting changes each
+chunk's padding, so int8 vectors can differ in their last bits from the ones
+0.27.0 made.
+<!-- MEASURE: pinned corpus (hash recorded) on the CPU lane alone, sorted against unsorted, same release binary, median of three (chunks/s; acceptance ≥ 1.3×) -->
+
+**The GPU works beside the CPU, on by default.** Each accelerator is a *lane*.
+The CPU lane is the run's own in-process session. A GPU lane is a worker process,
+`semlith __embed-worker <lane>`, which exchanges length-framed batches with the
+daemon over stdin and stdout, and one worker per lane serves every run. Every
+enabled lane takes the next sorted batch when it is free, so a faster device
+ends up doing more of the work with no tuning. A driver crash kills the worker
+and not the daemon. The worker's batch goes back to the queue for another lane,
+the lane is marked `failed` with the reason, and the run finishes with the same
+files and chunks. A batch that takes longer than 30 seconds fails the lane.
+A worker that has had nothing to do for 60 seconds exits, and its GPU memory is
+freed when it does.
+
+- **WebGPU** runs on Metal on macOS, D3D12 on Windows and Vulkan on Linux,
+  through Microsoft's WebGPU plugin execution provider 0.4.0. The plugin comes
+  from its PyPI wheel, which is 5.2 to 13.1 MB depending on the platform. It
+  runs the fp16 export of the same granite model at the same pinned revision,
+  97.6 MB, because the int8 graph does not load on WebGPU. Only a hardware
+  adapter is used. The following software adapters are rejected by vendor and
+  name before anything is downloaded or any session is created: Mesa lavapipe
+  and llvmpipe, SwiftShader, Microsoft WARP and the Basic Render Driver.
+  lavapipe aborts the process on any MatMul. On the M1's Metal, at batch 16
+  with length-sorted batches, the lane embedded 50.6 chunks/s. The CPU path of
+  the time did 19.5.
+- **CUDA** is available on x86_64 Linux in this release. It stays off until it
+  is turned on explicitly, because turning it on downloads a 1.89 GB pack. The
+  pack is Microsoft's ONNX Runtime 1.24.4 GPU build and NVIDIA's CUDA 12.8,
+  cuBLAS, cuFFT, cuRAND, NVRTC, nvJitLink and cuDNN 9 libraries, all pinned by
+  digest. A library the system already has at a compatible version is used
+  from the system instead. The card is read through NVML, which is loaded at
+  run time. A driver older than 525.60.13 is reported as too old and the card
+  is not used. On Windows, an NVIDIA card is used through WebGPU on D3D12.
+- **Switches.** `semlith accel [status | on <lane> | off <lane> | remove
+  <lane>]`, the new Accelerators section on the Machine limits card, the
+  `accelerators` key in `settings.json` and `SEMLITH_ACCEL` (for example
+  `cpu,gpu`) all control the same lanes. `SEMLITH_ACCEL` takes precedence, like
+  the other limit variables. By default CPU and GPU are on and CUDA is off. A
+  change reaches every run at its next window of chunks. The CPU can be turned
+  off only while a GPU lane is on and usable. With no usable GPU the CPU keeps
+  indexing, and the card says it is the fallback. Turning a lane off never
+  deletes what it downloaded. `accel remove` deletes it and reports how much
+  space that freed.
+- **Where each vector came from.** A store keeps a count of the chunks each
+  variant embedded (`int8-cpu`, `fp16-webgpu`, `fp16-cuda`) in one meta row.
+  `semlith stats` prints it as a `variants` line, and `semlith_stats` lists it
+  along with the lanes that are on. Tested on the 2026-09-23 corpus, int8 and
+  fp16 vectors of the same text agree at cosine 0.987.
+- **Lanes are checked before they are trusted.** Before a lane's first real
+  batch, its worker embeds 32 fixed chunks and compares them with CPU fp32
+  vectors committed under `tests/fixtures/gpu/`. An fp16 lane with a cosine
+  below 0.999 on any chunk is refused. `semlith doctor --gpu` runs the same check
+  on every lane the machine has and prints the device, the variant, the lowest
+  cosine of the 32 and the chunks/s. On the M1's Metal, WebGPU scored cosine
+  1.0000 against CPU fp32 on all 32 chunks, and the CPU int8 lane scored
+  0.9851.
+- Only the daemon uses GPU lanes. `semlith index` in a terminal and the
+  retrieval harness run on the CPU alone, which keeps their results
+  reproducible (#88).
+
+<!-- MEASURE: portal run through the launchd service, default settings (CPU + WebGPU), pinned corpus on the reference M1, median of three (chunks/s), against the unsorted CPU-only path of the same binary (acceptance ≥ 2.5×), with the per-lane rates the card showed -->
+<!-- MEASURE: the four-way retrieval harness of item 1.16 on the sealed split (all int8, all fp16, 50/50 mix, mix with fp16 queries), median of three — hit@1/3/8 as counts of 30 — and which rule it selected -->
+
+**A reader panic fails one file, not the store.** `raw_text_tag` sliced a
+`str` at a byte offset, which panicked on a multi-byte character directly after
+a four-letter tag (`<abbré`). That panic killed the store's writer thread. The
+function now compares bytes. The index pass also catches a panic during one
+file's extraction and reports that file as `failed` with the panic message. A
+writer thread that does exit sets `watching` to false, and `/api/stores`
+reports why in `stopped_because`.
+
+**The hybrid-core thread count covers Linux and Windows.** On Intel hybrid
+CPUs, the default thread count is the number of performance cores. Linux reads
+it from `/sys/devices/cpu_core/cpus`, and Windows reads the cores in the
+highest `EfficiencyClass` from `GetSystemCpuSetInformation`. Any other machine
+keeps `available_parallelism`, as before.
+
+**Fixed.** Concurrent `POST /api/index` requests for a new folder could answer
+409 with `SQLITE_IOERR_SHORT_READ` or "duplicate column name" (#132). Store
+creation is now serialised, and a store the daemon already serves is reused
+rather than opened again. Opening a store retries a busy or short read for up
+to 2 seconds. Schema upgrades run under the write lock. `registry.json` and
+`settings.json` are written through a temporary file unique to each save,
+rather than one per process that concurrent routes overwrote.
+`tests/doctor.rs` closes its fake client before running it, so Linux can no
+longer fail the test with `ETXTBSY` (#135).
+
+**The Privacy route lists every download.** `/api/privacy` returns a
+`downloads` list. Each entry gives what is downloaded, where from, its size,
+when it happens and whether it is already cached. The list covers the
+embedding model, the WebGPU plugin with the fp16 model, and the CUDA pack.
+`--airgap` refuses all three unless they are already in the model cache.
+<!-- MEASURE: search p50 at 7 000 chunks with the daemon idle, priority lift included, side by side with 0.27.0's 37.9 ms (ms, median of three) -->
+
 ## [0.27.0] - 2026-09-23
 
 ### The portal drawn the way the design draws it, and reports that write themselves
