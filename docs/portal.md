@@ -916,11 +916,40 @@ here" and "all of it is already done" are different answers. **All**, **None** a
 last one that finished, kept afterwards so a page opened later says what it did
 rather than showing nothing. Each card carries its store's name, a status pill, a
 percentage and bar, files scanned over files found, chunks written, a
-chunks-per-second rate, the elapsed clock, the paths, and the log.
+chunks-per-second rate, the thread count, the elapsed clock, the paths, and the
+log.
+
+**The rate is the last ten seconds.** The chunks/s figure is what the daemon
+reports as `rate`: chunks embedded over the last 10 seconds of active time.
+Paused and held time is not counted, and neither is time spent queued or
+walking files that had not changed. It is shown on every poll while the run is
+live, including while the index is being written to disk, and reads `—` until
+the first batch has been embedded. The rate since the first batch is in the
+figure's tooltip. When more than one lane is embedding, the card also shows the
+rate per lane, for example `GPU 48/s · CPU 25/s`, so you can see which device is
+doing the work.
+
+**The thread count is what the engine used.** The card shows the thread count
+the run's session was actually built with, which is not necessarily the value
+saved in *threads each*. After that setting changes, the session is rebuilt at
+the next batch and the card shows the new count.
+
+**Catch-ups are cards too.** When the daemon opens a store, its watcher walks
+every root to pick up what changed while nothing was watching. That walk is
+admitted through the same queue as a run you start, counts against *runs at
+once*, and has a card of its own reading `catching up`, with Pause and Stop.
+The same applies to a burst of file events of more than 32 files, such as a
+`git checkout` that rewrites half a repository. A smaller burst is indexed
+straight away without a card, because a saved file has to reach search within
+seconds.
 
 **This page reads live**, on the runs and stores domains, and it is the one page
 that paints in place rather than redrawing itself: a card holds a log and a
-scroll position of its own, and redrawing would throw both away. A store whose
+scroll position of its own, and redrawing would throw both away. Cards are
+reordered only when the order actually changes. A card that holds focus is
+never detached, and a field being typed into is never replaced. Pause, Resume,
+Stop and its dialog, a limit save, a run finishing and **Remove** all leave the
+page's scroll offset where it was. A store whose
 run the daemon has forgotten — it was deleted, or the daemon restarted — loses
 its card rather than keeping a stale one.
 
@@ -928,8 +957,10 @@ its card rather than keeping a stale one.
 |---|---|
 | `queued` | Submitted and not yet under way. The pill carries its place in line when it is waiting on the daemon-wide queue below; without a place it is waiting on its own store's writer, which is the watcher being mid-file — one writer per store is the rule that stops two passes corrupting each other. |
 | `running` | A writer has it. |
-| `paused` | Held between files by this card's **Pause**. |
-| `stopping` | A stop was asked for and what the run embedded is being undone. Told apart from `stopped` because on a large corpus the undoing takes as long as the embedding did, and a card that jumped straight to `stopped` would be claiming the store was already back to what it was. |
+| `pausing` | **Pause** was pressed and the engine has not reached its next batch yet. Shown from the click, not from the next poll. |
+| `paused` | Held by this card's **Pause**, at a batch boundary. |
+| `held` | Admitted once, then held because *runs at once* was lowered below the number running. Held runs are at the front of the queue in submission order and resume as slots free, keeping their progress. |
+| `stopping` | A stop was asked for, shown from the click, and what the run embedded is being undone. Told apart from `stopped` because on a large corpus the undoing takes as long as the embedding did, and a card that jumped straight to `stopped` would be claiming the store was already back to what it was. |
 | `done` | Finished. |
 | `stopped` | Stopped, and undone. The bar returns to 0% rather than filling, because a full bar would say the opposite of what happened. |
 | `failed` | Ended on an error that was not a file's — the model, or the store. |
@@ -987,15 +1018,34 @@ redrew a run that had just begun. The clock belongs to the run now.
 
 **What Stop does that Pause does not, and what Remove does that neither does.**
 
-**Pause** holds the run between files. The writer is still this run's — the lock
-is not handed back, the store is left mid-corpus, and **Resume** carries on from
-where it stopped. Nothing that has been embedded is touched.
+**Pause** holds the run at its next embedding batch, inside a file as well as
+between files. It used to wait for the end of the file, and a file can be
+thousands of chunks. The batch not yet written is held in memory and nothing
+is half-committed. The writer is still this run's: the lock is not handed back,
+the store is left mid-corpus, and **Resume** carries on from the same chunk.
+Nothing that has been embedded is touched. The card reads `pausing` from the
+click and `paused` once the engine holds.
 
 **Stop** undoes the run. Everything it embedded is rolled back, so the store is
 left exactly as it was before the run started, the bar returns to 0% rather than
 filling, and indexing the same folder again begins from the beginning. The
 confirmation says so before it happens. Pause is "wait"; Stop is "as though it
-never ran".
+never ran". A stop also takes effect at the next batch. A file the run was in
+the middle of is removed along with every file it finished, and the index is
+written once for the whole undo rather than once per file.
+
+**Also delete the store.** The Stop confirmation has a checkbox. With it ticked,
+the undo is followed by the same removal `semlith drop` performs: the store's
+directory, its registry entry and its watcher all go, and the card says the
+store was deleted. The Stores page and the sidebar count update without a
+reload. The daemon records how many files the store held before the run, and
+that decides the default. The box is ticked for a store that held nothing,
+because the run created it or it was empty. It is unticked for a store that
+held content, and the dialog then says how many files that is. A store with
+earlier content is deleted only when you tick the box. On Windows, an open
+handle stops a directory from being deleted, so every holder is closed first.
+A directory that still cannot be removed is named in the card, and nothing of
+it is deleted.
 
 **Remove** is what the button says on a run that is still `queued`, and it takes
 that run out of the line. It answers at once and confirms nothing, because there
@@ -1015,9 +1065,9 @@ once whatever the machine had; there is one daemon-wide queue now, ordered by
 submission, and a run is admitted only while fewer than *runs at once* are
 running. Anything submitted while the queue exists joins its end. The head is
 admitted the moment a run finishes, stops or fails — with this page open or not,
-which is the point of the run living in the daemon. The watcher's own re-embeds
-do not pass through the queue: they are small, they already interleave with runs,
-and holding a file save behind eleven queued repositories would make the watcher
+which is the point of the run living in the daemon. Watcher catch-ups and event
+bursts of more than 32 files join the same queue. Smaller bursts do not, because
+holding a file save behind eleven queued repositories would make the watcher
 useless exactly when the machine is busy.
 
 **How hard this machine may work** is the last card: three numbers, each with the
@@ -1050,10 +1100,46 @@ force rather than from the runs this machine would have chosen, so raising *runs
 at once* changes what *threads each* suggests underneath you. That is why they
 are one card.
 
-Changing *runs at once* takes
-effect on the next admission: raising it admits the head immediately, lowering it
-stops nothing already going, because a run holds a writer and undoing it would
-cost the work it has done. The other two apply to the next run queued.
+**A saved value applies at once**, to runs already going, and the reply under
+the card states what the engine now runs with. *threads each* reaches every
+writer at its next batch. A session built with a different count is rebuilt
+there, and an idle writer picks up the new count the next time it loads. *MiB
+per store* applies to every open index at once, and resident shards above the
+new budget are released. Raising *runs at once* admits the head of the queue
+immediately. Lowering it holds the newest runs above the limit at their next
+batch and marks them `held` at the front of the queue. They keep their written
+list, so a later Stop still undoes everything they embedded, and they resume in
+submission order as slots free. None of their work is undone. The free-memory
+reading is shown in a subtitle that updates in place, not inside the
+explanations, so the card does not redraw every time free memory changes.
+
+**Accelerators** is the section at the foot of the card: one switch each for
+CPU, GPU and CUDA. Each row names its device, its state and its live share of
+the chunks/s. The state is `active`, `idle`, `downloading` with a percentage,
+`unavailable` with the reason, or `failed` with the reason. A change reaches
+every run at its next window of chunks. It is the same control as `semlith accel`,
+and it is saved to `accelerators` in `settings.json`.
+
+- **CPU** is the in-process session, running the int8 model. It can be turned
+  off only while a GPU lane is on and usable. With no GPU, or a failed one, the
+  CPU keeps indexing whatever its switch says, and the row says it is doing so
+  as the fallback.
+- **GPU** is WebGPU (Metal, D3D12 or Vulkan), in a worker process running the
+  fp16 model. It is on by default. On a machine with a hardware adapter, the
+  first run downloads the plugin and the fp16 weights, about 103 to 111 MB
+  depending on the platform, and the row shows the download's progress. A
+  machine whose only adapter is a software renderer reads `unavailable — no
+  hardware GPU found`, and nothing is downloaded.
+- **CUDA** is NVIDIA's runtime, on x86_64 Linux in this release. It is off by
+  default. Turning it on downloads a 1.89 GB pack, and the switch states that
+  size before the download starts. Until the pack is installed, an NVIDIA card
+  is used through the GPU lane.
+
+A lane that fails, whether its worker crashes, a batch takes longer than 30
+seconds, or it fails the known-answer check, reads `failed` with the reason.
+Its batch goes to another lane and the run completes. Turning the switch off
+and on again retries the lane. Turning a lane off keeps its downloaded files.
+**Remove** on a lane deletes them and says how much space that freed.
 
 A value the environment sets — `SEMLITH_INDEX_PARALLEL`, `SEMLITH_EMBED_THREADS`
 or `SEMLITH_INDEX_MEMORY` — is shown, disabled, and says so. An explicit variable
@@ -1570,10 +1656,16 @@ this is a list of files whose removal is a decision about your corpus. There is
 also no MCP tool for it — an agent is not the party that decides what a store may
 hold.
 
-**The one outbound connection that exists** is the embedding model, downloaded
-once on first index and cached. `semlith upgrade` and `semlith add` reach the
-network only in the second you ask them to. `--airgap` refuses all three and exits
-naming what it refused.
+**Downloads** lists everything this binary can fetch, each with its source, its
+size, when it happens and whether it is already cached. There are three. The
+embedding model comes from Hugging Face, once, on the first index or search.
+The WebGPU plugin and the fp16 model come from PyPI and Hugging Face, on the
+first run on a machine that has a hardware GPU with the GPU lane on. The CUDA
+pack comes from GitHub and PyPI, only after CUDA has been turned on. `semlith
+upgrade` and `semlith add` reach the network only when you ask them to.
+`--airgap` refuses all of these unless the files are already in the model
+cache, and exits naming what it refused. On a machine with no GPU and CUDA off,
+nothing past the model is ever fetched.
 
 **Session token.** Shown truncated, with a **Rotate** button. See below for what
 rotation does; the short version is on the page itself, including the sentence
@@ -1617,6 +1709,13 @@ and the same Fix button, read from the same function. The page and
 `semlith doctor` in a terminal cannot disagree about whether a client is
 registered or a rule holds, because they call the same two functions.
 
+**Accelerators** is the Doctor page's view of `semlith doctor --gpu`. Each
+lane embeds 32 fixed chunks and compares them with CPU fp32 vectors committed to
+the repository. Each row shows the device, the variant, the lowest cosine of the
+32 and the chunks/s. An fp16 lane needs 0.999. A lane with nothing to run on
+says why rather than failing. This is how someone with a Windows, Linux or
+NVIDIA machine checks that their GPU gives the right answers.
+
 Nothing on this page runs a client's CLI. The registration state is read out of
 each client's own configuration file, because asking sixteen command-line tools on
 a route the portal loads every time is sixteen processes per page load.
@@ -1627,7 +1726,11 @@ a route the portal loads every time is sixteen processes per page load.
 
 One card of facts: the version and the store format version, the binary's path,
 size and target triple, what it is bound to, where the store home is, where the
-model cache is, and how long it has been up with its process id. The MCP protocol
+model cache is, and how long it has been up with its process id. `GET
+/api/about` also reports the daemon's priority, `background` while idle and
+`normal` while embedding, with how many switches it has made, and how many
+embedding sessions are loaded: one per writer that has embedded in the last
+minute, plus the one query session all readers share. The MCP protocol
 revisions the server speaks are a wire contract with an agent client rather than
 something a reader can act on, so they are not shown here; `GET /api/about`
 still returns them, and `docs/compatibility.md` says what dropping one means.

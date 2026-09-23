@@ -87,6 +87,10 @@ const EMBED_BATCH: usize = 8;
 /// count, and each lane's running total for the store.
 type Tick<'a> = dyn FnMut(usize, usize, &std::collections::BTreeMap<String, usize>) + 'a;
 
+/// Embed each window in walk order rather than by length: the unsorted path
+/// the length-sorted window is measured against.
+const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
+
 /// The meta row counting a store's chunks per vector variant.
 const VARIANTS_KEY: &str = "variants";
 
@@ -2891,7 +2895,11 @@ impl Semlith {
             })
             .collect();
         let mut order: Vec<usize> = (0..texts.len()).collect();
-        order.sort_by_key(|i| lengths[*i]);
+        // The comparison the sorted window was measured against. Not part of
+        // the documented environment.
+        if std::env::var_os(UNSORTED_ENV).is_none() {
+            order.sort_by_key(|i| lengths[*i]);
+        }
         order
     }
 

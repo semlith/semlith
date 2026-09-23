@@ -45,11 +45,21 @@ Worth being explicit, because it determines what is and is not a vulnerability
 here.
 
 **Nothing is sent anywhere at query time.** semlith embeds and searches locally.
-It makes exactly four kinds of outbound request, all of them because somebody
+It makes exactly five kinds of outbound request, all of them because somebody
 asked:
 
 - **Model weights**, once per model, from Hugging Face, at a pinned commit and
   verified against a digest recorded in [`docs/models.md`](docs/models.md).
+  That includes the fp16 export the GPU lane runs.
+- **Accelerator components**, pinned by digest in the same file. Microsoft's
+  WebGPU plugin comes from its PyPI wheel on `files.pythonhosted.org`. It is
+  fetched, with the fp16 weights, on the first index run in a daemon that has
+  found a hardware GPU with the GPU lane on, and never where the only adapter
+  is a software renderer. The CUDA pack is ONNX Runtime's GPU build from
+  `github.com` and NVIDIA's CUDA libraries from their wheels on
+  `files.pythonhosted.org`. It is fetched only after somebody turns CUDA on,
+  and its size, 1.89 GB, is stated before the download starts. semlith never
+  hosts or re-distributes NVIDIA's libraries.
 - **`semlith add <url>`**, one request for exactly that URL. No crawling, no
   credential, and from 0.14.0 no address that is not on the public internet.
 - **`semlith upgrade`**, from `https://github.com` and nowhere else — a release
@@ -60,8 +70,9 @@ asked:
   all: from 0.14.0 they ship Microsoft's own ONNX Runtime release beside them,
   verified against the checksum GitHub publishes with it.
 
-`--airgap`, or `SEMLITH_AIRGAP=1`, refuses all of the runtime ones and exits
-naming what it refused. After the weights are cached, semlith runs fully
+`--airgap`, or `SEMLITH_AIRGAP=1`, refuses all of the runtime ones, apart from
+files already present in the model cache, and exits naming what it refused.
+After the weights and any accelerator components are cached, semlith runs fully
 offline.
 
 **The store is not encrypted.** `store.db` contains the plain text of every

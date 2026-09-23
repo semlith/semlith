@@ -227,9 +227,11 @@ empty body without it. The agent key is the other credential and it opens `/mcp`
 and nothing else, so a key sitting in a client's configuration file cannot
 rotate a token, adopt a store or start an upgrade. Every response carries a
 `Content-Security-Policy` allowing only `'self'`, no CORS header is sent, and
-every byte the page loads is compiled into the binary. `--airgap` makes that
-falsifiable: it refuses to download model weights at all and exits naming the
-cache path. [docs/security.md](docs/security.md) is the full account, and the
+every byte the page loads is compiled into the binary. The only downloads are
+pinned by digest: model weights, the WebGPU plugin on a machine with a hardware
+GPU, and the CUDA pack after you turn CUDA on. `--airgap` makes that
+falsifiable: it refuses all of them unless they are already cached, and exits
+naming the cache path. [docs/security.md](docs/security.md) is the full account, and the
 Privacy page checks each claim on the running daemon rather than restating it.
 
 The daemon also ends the one-writer trade-off without weakening the rule: it
@@ -548,4 +550,6 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Note that semlith downloads embedding model weights at runtime; those are
 covered by their own licenses. The default,
 ibm-granite/granite-embedding-small-english-r2, is Apache-2.0, and the CLIP
-ViT-B/32 pair a store fetches once it holds an image carries its own too.
+ViT-B/32 pair a store fetches once it holds an image carries its own too. The
+WebGPU plugin is MIT, and the NVIDIA libraries the CUDA pack fetches from PyPI
+carry NVIDIA's licence; see [docs/models.md](docs/models.md).

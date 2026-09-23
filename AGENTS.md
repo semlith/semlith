@@ -637,10 +637,23 @@ relaxation without an issue like
   GitHub, but only in the second a user asks: there is no startup check, no
   timer, and no banner that appears without a click. `semlith add` is the same
   shape from 0.11.0 — one request, for one URL, because somebody asked for it,
-  with no crawling and no re-fetching. The other downloads are all model
-  weights: the embedding model, once, on first index; `semlith setup`'s
-  pre-fetch of the same file; and CLIP's two halves, on the first image a store
-  indexes and never at start — `--airgap` refuses all of it, naming the model it
+  with no crawling and no re-fetching. The other downloads are model weights
+  and the pinned components the accelerator lanes run on:
+  - the embedding model, once, on the first index, and `semlith setup`'s
+    pre-fetch of the same file;
+  - CLIP's two halves, on the first image a store indexes and never at start;
+  - from 0.28.0, the WebGPU plugin (Microsoft's `onnxruntime-ep-webgpu` wheel,
+    from PyPI's `files.pythonhosted.org`) and the fp16 export of the embedding
+    model (Hugging Face, at the same pinned commit). They are fetched on the
+    first run in a daemon that has found a hardware GPU with the GPU lane on,
+    and never on a machine whose only adapter is a software renderer;
+  - from 0.28.0, the CUDA pack (ONNX Runtime's GPU build from GitHub, and
+    NVIDIA's CUDA libraries from their PyPI wheels). It is fetched only after
+    somebody turns CUDA on with `semlith accel on cuda` or the switch on the
+    page, and its size is stated before the download starts.
+
+  Every one of them is pinned by digest in `docs/models.md`. `--airgap` refuses
+  all of them unless they were pre-seeded into the model cache, naming what it
   would have fetched.
 
 Discuss in an issue before building: any other bind address, hosted embedding
