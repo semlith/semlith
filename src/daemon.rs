@@ -2140,7 +2140,8 @@ impl State {
         while store.watching.load(Ordering::Relaxed) {
             if std::time::Instant::now() > deadline {
                 anyhow::bail!(
-                    "{name}'s watcher did not stop, so its lock is still held;                      nothing was deleted"
+                    "{name}'s watcher did not stop, so its lock is still held; \
+                     nothing was deleted"
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -2156,8 +2157,12 @@ impl State {
         self.reopen_readers();
         Discovery::remove(&store.dir);
 
+        // The registry entry goes before the bump: a client that re-reads
+        // /api/stores on the bump must not still see the store, and no further
+        // bump would come to correct it.
+        let removed = crate::home::delete_store(name);
         changes::bump(changes::Domain::Stores);
-        crate::home::delete_store(name)
+        removed
     }
 
     /// Stop a store's run and, once its undo has finished, delete the store.
