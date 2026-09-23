@@ -513,6 +513,19 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
         Some(path) => plain(path.canonicalize().unwrap_or_else(|_| path.to_path_buf())),
         None => exe()?,
     };
+    // A service pointing into the temp directory is one the next cleanup
+    // breaks, and it is what a test that forgot `--no-service` produces: HOME
+    // is redirected, but launchd and systemd register into the real session,
+    // and on 2026-09-23 a test run replaced the developer's own login service
+    // with a binary under /var/folders.
+    if under_temp(&exe) {
+        anyhow::bail!(
+            "{} is under the temporary directory, and a login service pointing there stops \
+             working when it is cleaned up. Install semlith first (`semlith setup`) and \
+             register the installed binary.",
+            exe.display()
+        );
+    }
     if let Some(guarded) = tcc_guarded(&exe) {
         anyhow::bail!(
             "this binary is at {} — macOS gates {} for a background login agent, and a launchd job pointing there hangs inside the dynamic linker before it can write a word to its own log. Install semlith outside that directory and run `semlith start --service` from there; `semlith setup` puts it in {}.",
@@ -546,6 +559,14 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
     // is the whole of what this release is about.
     status.started_now = status.installed && waits_for(answering);
     Ok(status)
+}
+
+/// Whether a binary lives under the system's temporary directory.
+fn under_temp(exe: &Path) -> bool {
+    let temp = std::env::temp_dir();
+    let temp = temp.canonicalize().unwrap_or(temp);
+    let exe = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    exe.starts_with(&temp) || exe.starts_with("/private/var/folders") || exe.starts_with("/var/folders")
 }
 
 /// Whether something answers on the port within a few seconds of being asked to.

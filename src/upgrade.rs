@@ -248,7 +248,16 @@ fn swap(base: &str, archive: &str, work: &Path, current: &Path, tag: &str) -> Re
     // asked for background priority, which a daemon cannot lift itself out
     // of; re-registering also restarts the daemon onto the new binary rather
     // than leaving the old one running until the next login.
-    if crate::service::status().installed {
+    // Only a service whose definition names the binary just replaced: a
+    // label is global to the session, so "a service is installed" can be
+    // somebody else's install -- a developer's own, seen from a test.
+    let status = crate::service::status();
+    let names_this = status
+        .definition
+        .as_deref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| text.contains(&*current.to_string_lossy()));
+    if status.installed && names_this {
         match std::process::Command::new(current)
             .args(["start", "--service"])
             .output()

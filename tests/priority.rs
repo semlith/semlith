@@ -19,10 +19,13 @@ fn priority_follows_the_embedding_count() {
         .push(line.to_string())));
     assert!(background(), "the daemon starts in background state");
 
+    // The lift alone is timed: reading the priority back spawns `ps` or
+    // PowerShell, which on a Windows runner takes most of a second.
     let lifted = Instant::now();
     let guard = semlith::priority::embedding();
+    let took = lifted.elapsed();
+    assert!(took < Duration::from_millis(50), "the lift took {took:?}");
     assert!(!background(), "an embed pass lifts the process at once");
-    assert!(lifted.elapsed() < Duration::from_millis(50));
 
     // A second pass inside the first changes nothing.
     let inner = semlith::priority::embedding();

@@ -328,6 +328,9 @@ fn a_hostile_store_home_is_quoted_into_the_rc_file_or_refused() {
         .arg("setup")
         .arg("--yes")
         .arg("--airgap")
+        // A login service is not a file: launchctl registers into the real
+        // session whatever HOME says. See `Machine::setup`.
+        .arg("--no-service")
         .env("HOME", &home)
         .env("SHELL", "/bin/zsh")
         .env("SEMLITH_HOME", &store_home)
@@ -398,6 +401,9 @@ fn a_hostile_store_home_is_quoted_into_the_rc_file_or_refused() {
         .arg("setup")
         .arg("--yes")
         .arg("--airgap")
+        // A login service is not a file: launchctl registers into the real
+        // session whatever HOME says. See `Machine::setup`.
+        .arg("--no-service")
         .env("HOME", &home)
         .env("SHELL", "/bin/zsh")
         .env("SEMLITH_HOME", &newline_home)
@@ -815,7 +821,7 @@ fn setup_invokes_each_client_with_the_documented_command_line() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
     command
         .arg("setup")
-        .args(["--yes", "--airgap"])
+        .args(["--yes", "--airgap", "--no-service"])
         .env("HOME", &machine.home)
         .env("SEMLITH_HOME", &machine.store_home)
         .env("SEMLITH_MODEL_CACHE", &machine.cache)
@@ -879,7 +885,7 @@ fn a_client_that_refuses_is_reported_and_the_install_still_succeeds() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_semlith"));
     command
         .arg("setup")
-        .args(["--yes", "--airgap"])
+        .args(["--yes", "--airgap", "--no-service"])
         .env("HOME", &machine.home)
         .env("SEMLITH_HOME", &machine.store_home)
         .env("SEMLITH_MODEL_CACHE", &machine.cache)
