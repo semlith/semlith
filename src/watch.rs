@@ -132,7 +132,7 @@ pub fn run(
             defer: &|_| false,
         },
         progress,
-        |_| Ok(()),
+        |_| Ok(Vec::new()),
     )
 }
 
@@ -166,7 +166,7 @@ pub fn run_held(
     stop: &AtomicBool,
     held: Held<'_>,
     mut progress: impl FnMut(Progress),
-    mut pump: impl FnMut(&mut Semlith) -> Result<()>,
+    mut pump: impl FnMut(&mut Semlith) -> Result<Vec<PathBuf>>,
 ) -> Result<()> {
     let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
 
@@ -218,8 +218,39 @@ pub fn run_held(
         // Before waiting on the filesystem, not after: a request that arrived
         // while the last batch was embedding should not sit for another idle
         // tick behind a tree nobody is editing.
-        if let Err(e) = pump(store) {
-            progress(Progress::Error(e.to_string()));
+        let stopped = match pump(store) {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                progress(Progress::Error(e.to_string()));
+                Vec::new()
+            }
+        };
+
+        // A run that was stopped owns the events that queued up while it held
+        // the writer: they are mostly its own corpus being written, and a stop
+        // means "leave it". Indexing them here re-embedded the very files the
+        // stop had just undone. Events already waiting for paths under the
+        // stopped run's roots are dropped; the rest are indexed as usual.
+        if !stopped.is_empty() {
+            let stopped: Vec<PathBuf> = stopped.iter().map(|r| canonical(r)).collect();
+            let mut waiting_events: BTreeSet<PathBuf> = BTreeSet::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    Ok(event) => collect(&mut waiting_events, event.paths),
+                    Err(e) => progress(Progress::Error(e.to_string())),
+                }
+            }
+            waiting_events.retain(|path| !stopped.iter().any(|root| path.starts_with(root)));
+            let paths = admissible(&roots, waiting_events);
+            if !paths.is_empty() && !(held.defer)(&paths) {
+                let started = Instant::now();
+                let report =
+                    store.index_changed(paths, |path, p| progress(file_progress(path, &p)))?;
+                if report.indexed > 0 || report.removed > 0 {
+                    progress(Progress::Batch(report, started.elapsed()));
+                }
+            }
+            continue;
         }
 
         // Whatever the catch-up stepped aside from, once the queue is clear.

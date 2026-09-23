@@ -1157,6 +1157,9 @@ c_rate_every_poll() {
 }
 
 c_limit_live() {
+  # Two threads to start from, so lowering to one is a change. A two-core
+  # runner derives one, and then the check proves nothing.
+  rc_post /api/index/settings '{"embed_threads": 2}' > /dev/null
   mkdir -p "$rc_dir/threads"
   rc_markdown "$rc_dir/threads/big.md" 1000
   s=$(rc_index "$rc_dir/threads")

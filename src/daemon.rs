@@ -924,6 +924,27 @@ impl Store {
         self.record(id, event);
     }
 
+    /// What started a run.
+    fn run_kind(&self, id: u64) -> Option<RunKind> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|run| run.id == id)
+            .map(|run| run.kind)
+    }
+
+    /// The paths a run was asked to index.
+    fn run_paths(&self, id: u64) -> Vec<PathBuf> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|run| run.id == id)
+            .map(|run| run.paths.clone())
+            .unwrap_or_default()
+    }
+
     /// The id of the run a stop just ended, or is ending.
     pub fn last_run(&self) -> Option<u64> {
         self.runs
@@ -3009,6 +3030,9 @@ fn tend(
             writer.follow_budget();
             writer.release_if_idle(session_idle());
             // The writer is this thread, so a queued job runs here or nowhere.
+            // The roots of any run that was stopped go back to the watcher,
+            // which drops the events it queued for them meanwhile.
+            let mut stopped = Vec::new();
             loop {
                 let Some(next) = store
                     .queue
@@ -3016,16 +3040,24 @@ fn tend(
                     .unwrap_or_else(|e| e.into_inner())
                     .pop_front()
                 else {
-                    return Ok(());
+                    return Ok(stopped);
                 };
-                perform(store, writer, next, admission);
+                if let Some(roots) = perform(store, writer, next, admission) {
+                    stopped.extend(roots);
+                }
             }
         },
     )
 }
 
 /// Run one queued job, reporting progress back to whoever asked for it.
-fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: &Arc<Admission>) {
+/// Run one queued job. For a run that was stopped, the roots it covered.
+fn perform(
+    store: &Arc<Store>,
+    writer: &mut Semlith,
+    queued: Queued,
+    admission: &Arc<Admission>,
+) -> Option<Vec<PathBuf>> {
     let Queued { run, job, report } = queued;
     // The run the watcher was holding off for has arrived, so the hold ends
     // here rather than when its grace period runs out.
@@ -3200,7 +3232,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                         store.paused.store(false, Ordering::Relaxed);
                         store.cancelled.store(false, Ordering::Relaxed);
                         release(run, admission);
-                        return;
+                        return Some(store.run_paths(run));
                     }
 
                     // More to do: the rest goes back on the queue with the same
@@ -3240,9 +3272,15 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                             "indexed": tally.indexed,
                             "chunks": tally.chunks,
                         }));
-                        return;
+                        return None;
                     }
 
+                    // A burst of watcher events that turned out to change
+                    // nothing leaves no card: it was the daemon checking, not
+                    // work anybody asked for or needs to dismiss.
+                    let quiet_batch = store.run_kind(run) == Some(RunKind::Batch)
+                        && tally.indexed == 0
+                        && tally.removed == 0;
                     store.note(format!("{} indexed from the portal", tally.indexed));
                     say(serde_json::json!({
                         "event": "done",
@@ -3282,6 +3320,9 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                         // corrected to the run rather than to the tab.
                         "elapsed_ms": store.run_elapsed_ms(run),
                     }));
+                    if quiet_batch {
+                        store.remove_run(run);
+                    }
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
             }
@@ -3289,22 +3330,26 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
             store.paused.store(false, Ordering::Relaxed);
             store.cancelled.store(false, Ordering::Relaxed);
             release(run, admission);
+            None
         }
-        Job::Forget(path) => match writer.forget_held(&path) {
-            // Counted apart, because an image has no chunks: a single number
-            // would report forgetting a picture as having done nothing.
-            Ok((chunks, images)) => {
-                store.last_write.store(now() as usize, Ordering::Relaxed);
-                store.note(format!("forgot {}", path.display()));
-                say(serde_json::json!({
-                    "event": "done",
-                    "forgot": chunks,
-                    "images": images,
-                    "path": path.display().to_string(),
-                }));
+        Job::Forget(path) => {
+            match writer.forget_held(&path) {
+                // Counted apart, because an image has no chunks: a single number
+                // would report forgetting a picture as having done nothing.
+                Ok((chunks, images)) => {
+                    store.last_write.store(now() as usize, Ordering::Relaxed);
+                    store.note(format!("forgot {}", path.display()));
+                    say(serde_json::json!({
+                        "event": "done",
+                        "forgot": chunks,
+                        "images": images,
+                        "path": path.display().to_string(),
+                    }));
+                }
+                Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
             }
-            Err(e) => say(serde_json::json!({ "event": "error", "error": e.to_string() })),
-        },
+            None
+        }
     }
 }
 
