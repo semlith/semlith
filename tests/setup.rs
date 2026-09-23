@@ -12,6 +12,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -728,18 +730,14 @@ impl FakeClients {
         let log = root.join("invocations.txt");
         std::fs::create_dir_all(&dir).unwrap();
         for program in programs {
-            let path = dir.join(program);
-            std::fs::write(
-                &path,
-                format!(
+            common::write_executable(
+                &dir.join(program),
+                &format!(
                     "#!/bin/sh\nprintf '%s' \"{program}\" >> \"$SEMLITH_FAKE_LOG\"\n\
                      for a in \"$@\"; do printf ' %s' \"$a\" >> \"$SEMLITH_FAKE_LOG\"; done\n\
                      printf '\\n' >> \"$SEMLITH_FAKE_LOG\"\nexit {exit}\n"
                 ),
-            )
-            .unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
         }
         Self { dir, log }
     }
