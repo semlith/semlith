@@ -861,7 +861,13 @@ card where it actually is, with its log carrying on from the last line this page
 saw. A run is only ever cut short in two ways: its own **Stop**, or
 `semlith start` ending.
 
-**Controls.**
+**Controls.** Everything the button band opens appears in one place, directly
+under the band. Four of these buttons open a panel, and they used to open it in
+four different parts of the page — the folder picker under the band, the
+repository checklist and the URL card below the summary cards, and the machine
+limits at the very foot. Pressing one button opened something you were looking
+at; pressing another opened something a screen and a half away, with nothing on
+screen saying it had happened.
 
 - **paths** — one path per line, so several folders can be started without
   opening a picker at all. The first-run screen carries a path into this field.
@@ -1029,9 +1035,26 @@ in front of you is about this machine at this moment rather than at startup.
 | threads each | The embedder's own thread count divided between the runs, clamped so runs × threads never exceeds the cores. Floor 1. |
 | MiB per store | 512 MiB of vectors, doubled once past 16 GiB free beyond the reserve and again past 64 GiB. Two steps rather than a curve, because a figure you recognise is worth more here than a fitted one. |
 
-Each is yours to change, and a value above what the machine derived is used as
-you set it — with the derivation in front of you rather than instead of it, which
-is why the field says what it was going to do. Changing *runs at once* takes
+Each is yours to change, and changing one is the ordinary thing to do with it —
+a laptop doing nothing else can index harder than a default chosen for a laptop
+that might be. Above the derived value the field says what that means rather
+than warning you: nothing here is drawn in red, because none of it is a mistake.
+
+**Each also has a ceiling, and the ceiling is not the derived value.** The
+derived value is what this machine would pick left alone. The ceiling is where
+the answer stops being a preference and becomes a machine that swaps: the
+logical core count for the two parallelism settings, and memory free now less
+the reserve for the store budget. The field will not go past it and neither
+will the route, because a cap only the page knows about is not a cap. An
+environment variable is exempt — somebody who exported one has said what they
+mean more deliberately than somebody typing in a box.
+
+The three answer each other. *threads each* is derived from the runs actually in
+force rather than from the runs this machine would have chosen, so raising *runs
+at once* changes what *threads each* suggests underneath you. That is why they
+are one card.
+
+Changing *runs at once* takes
 effect on the next admission: raising it admits the head immediately, lowering it
 stops nothing already going, because a run holds a writer and undoing it would
 cost the work it has done. The other two apply to the next run queued.
@@ -1084,9 +1107,12 @@ figure a reader cannot check is one they are being asked to take on trust.
   tokenizer, `modelled` when any of them was estimated at four characters per
   token. A mixed ledger reports `modelled`, because that is what the weaker half
   makes the whole.
-- **Zero-hit** — retrievals semlith answered with nothing. Read from the ledger
-  rather than derived by subtracting credited from total, which since 0.24.0
-  would have counted every raw read as a question the corpus could not answer.
+- **Zero-hit** — the share of retrievals semlith answered with nothing, as the
+  v4 design draws it: a percentage, with the count and its denominator kept in
+  the caption under it. `0 of 4` is two numbers a reader has to divide, and the
+  quotient is what they were dividing for. Read from the ledger rather than
+  derived by subtracting credited from total, which since 0.24.0 would have
+  counted every raw read as a question the corpus could not answer.
 - **Refunds** — files an agent read whole after all, on a file this store holds.
   It is a *measurement* on a client carrying the steering hook, which writes one
   `raw-read` row for each such read, and a *floor* everywhere else — the tile
@@ -1139,6 +1165,12 @@ would cost more than the saving being measured.
 
 **by client** breaks the count down under each client's own name, taken from the
 MCP handshake rather than guessed at here.
+
+**The rows and the replay are two tabs**, not two stacked cards. They are two
+readings of one ledger — what was retrieved, and what the agent did afterwards —
+so a tab says they are alternatives, where stacking them made the second one
+something you found by scrolling past the first. The sessions table keeps its
+own card above both, because it is the summary the two tabs are of.
 
 **This page reads live.** Every surface that records a retrieval writes through
 one function, and that is where the ledger domain is bumped, so a row lands here
@@ -1567,6 +1599,11 @@ you asked for; neither is refetched on a timer.
 **What it is for.** Whether each agent client on this machine can reach semlith,
 and what to run for the ones that cannot — so the next person who hits an
 unregistered client reads the answer instead of bisecting a configuration file.
+
+**Rules first, then the clients.** The rules answer the question the page exists
+for — is this machine set up the way it claims — and the client table is
+twenty-seven rows that page ten at a time, so under the table the rules were
+below a screenful on every visit.
 
 **Clients** is one row per documented client: its name, whether semlith is
 registered in it and at what scope, and the command that fixes the row when it
