@@ -23,6 +23,7 @@ pub mod chunk;
 pub mod clientfile;
 pub mod clients;
 pub mod clock;
+pub mod cuda;
 pub mod daemon;
 pub mod doctor;
 pub mod embed;
