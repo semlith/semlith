@@ -2663,7 +2663,12 @@ pub fn run(
     let fleet = if dirs.is_empty() {
         None
     } else {
-        let mut fleet = Fleet::open(dirs)?;
+        // Canonical, as every store in `stores` is recorded: `/api/stores`
+        // pairs each store with its fleet member by directory, and a home
+        // reached through a symlink (`/var` on macOS) gave the two different
+        // spellings, so every row read zero files until the fleet was reopened.
+        let canonical: Vec<PathBuf> = dirs.iter().map(|d| crate::canonical(d)).collect();
+        let mut fleet = Fleet::open(&canonical)?;
         // The fleet every route answers from, so this is the one that has to
         // agree with `/api/stores` about what each store is called.
         fleet.name_from(&named(&stores));

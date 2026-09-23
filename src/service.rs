@@ -566,7 +566,9 @@ fn under_temp(exe: &Path) -> bool {
     let temp = std::env::temp_dir();
     let temp = temp.canonicalize().unwrap_or(temp);
     let exe = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
-    exe.starts_with(&temp) || exe.starts_with("/private/var/folders") || exe.starts_with("/var/folders")
+    exe.starts_with(&temp)
+        || exe.starts_with("/private/var/folders")
+        || exe.starts_with("/var/folders")
 }
 
 /// Whether something answers on the port within a few seconds of being asked to.
