@@ -781,16 +781,22 @@ c_daemon_mcp_with_key() {
   printf '%s' "$body" | grep -q '"tools"' || { echo "$body" | head -3; return 1; }
 }
 c_daemon_second_instance() {
-  # A second daemon must refuse, say why, and never quietly take another port:
-  # the README calls the URL a bookmark. Whether it stops at the store lock or
-  # at the bind, the requirement is the same.
+  # A second `semlith start` against the store a live daemon holds is not a
+  # failure from 0.27.0: nothing went wrong, the portal is already up. It
+  # names the daemon that holds the store, prints that daemon's portal URL —
+  # the one already bookmarked, never a new port — and exits 0. It must not
+  # start a second listener, and it must not print an error chain.
   out=$(semlith start --port "$port" 2>&1)
   rc=$?
   echo "$out" | grep -qi 'panic' && { echo "panicked:"; echo "$out"; return 1; }
-  [ $rc -ne 0 ] || { echo "a second daemon exited 0:"; echo "$out" | head -5; return 1; }
-  [ -n "$out" ] || { echo "a second daemon refused with no message at all"; return 1; }
-  # A refusal must not also announce a listener. POSIX grep has no lookahead,
-  # so this asserts the simpler and stronger thing: it did not start at all.
+  [ $rc -eq 0 ] || { echo "a second start against a held store exited $rc:"; echo "$out" | head -5; return 1; }
+  echo "$out" | grep -qE '^(Error|Caused by):' && {
+    echo "a second start printed an error chain:"; echo "$out" | head -5; return 1; }
+  echo "$out" | grep -q 'already served by a running daemon' || {
+    echo "a second start did not say which daemon holds the store:"; echo "$out" | head -5; return 1; }
+  echo "$out" | grep -qE "^http://127\.0\.0\.1:$port/\?token=[0-9a-f]{64}\$" || {
+    echo "a second start did not print the running daemon's URL on a line of its own:"
+    echo "$out" | head -5; return 1; }
   echo "$out" | grep -qi 'listening on' && {
     echo "a second daemon started anyway:"; echo "$out" | head -3; return 1; }
   return 0
@@ -805,7 +811,7 @@ if start_daemon; then
   check cli/daemon/token-url     "it prints a tokenised URL"        c_daemon_token_url
   check cli/daemon/mcp-needs-key "/mcp without a key is 401"        c_daemon_mcp_needs_key
   check cli/daemon/mcp-with-key  "/mcp with the key lists tools"    c_daemon_mcp_with_key
-  check cli/daemon/second-instance "a second daemon refuses clearly" c_daemon_second_instance
+  check cli/daemon/second-instance "a second start names the running one" c_daemon_second_instance
   check cli/daemon/search-while-up "search works with it running"   c_daemon_search_while_up
 else
   echo "the daemon did not come up:"

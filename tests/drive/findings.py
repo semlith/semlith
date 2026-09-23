@@ -3115,9 +3115,12 @@ def _(d):
     )
     # The page renders from three routes, so the hash changes before the card
     # this is about is on screen.
+    # Waited for until it is enabled, not until it exists: the switch is
+    # drawn at once and disabled with an empty status line while the page asks
+    # the daemon which state it is in, and a slow runner read it in that gap.
     d.wait_for(
-        "!!document.querySelector('.replay-switch .replay-state')",
-        what="the Privacy page's session replay switch",
+        "!!document.querySelector('.replay-switch:not([disabled]) .replay-state')",
+        what="the Privacy page's session replay switch, loaded",
     )
     # And the control it lands on is the design's switch, not the button that
     # used to be there: the state is the row, and the row says which state it
