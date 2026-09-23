@@ -6433,6 +6433,14 @@ function settingField(key, label, limit, onSave) {
  * that sentence is shown as it came, on this card. */
 const LANE_NAMES = { cpu: "CPU", gpu: "GPU", cuda: "CUDA", worker: "Worker" };
 
+/** A size in the binary units the Machine limits card already counts in: its
+ * memory field is "MiB per store", and one card with two units for sizes is
+ * what finding 3.2 was about. */
+function binarySize(value) {
+  const mib = (Number(value) || 0) / 1048576;
+  return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib.toFixed(1)} MiB`;
+}
+
 function laneState(status) {
   const state = (status && status.state) || "idle";
   if (state === "downloading") return `downloading ${status.percent ?? 0}%`;
@@ -6486,7 +6494,7 @@ function accelSection() {
       if (on && lane === "cuda") {
         ask({
           title: "Turn CUDA on?",
-          body: `It downloads the CUDA pack first, ${bytes(data?.bytes?.cuda_download || 0)}, once, into this machine's model cache. Runs use it from their next batch.`,
+          body: `It downloads the CUDA pack first, ${binarySize(data?.bytes?.cuda_download || 0)}, once, into this machine's model cache. Runs use it from their next batch.`,
           confirm: "Download and turn on",
           run: () => change(lane, "on"),
         });
@@ -6519,7 +6527,7 @@ function accelSection() {
       setText(r.share, `${Math.round(lane.share || 0)} %`);
       const held = (next.bytes || {})[lane.lane] || 0;
       r.removeRow.hidden = !(held > 0 && (lane.lane === "gpu" || lane.lane === "cuda"));
-      setText(r.remove, `Remove downloaded files (${bytes(held)})`);
+      setText(r.remove, `Remove downloaded files (${binarySize(held)})`);
     }
     for (const [lane, r] of drawn) {
       if (seen.has(lane)) continue;
