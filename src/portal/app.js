@@ -3158,10 +3158,14 @@ function ledgerRows(data) {
     ],
   });
   table.update(rows, rows.length);
+  /* The table, and nothing around it.
+   *
+   * It was inside a `card pad` headed `The rows`, under a tab already labelled
+   * `Retrievals` — a title restating its tab, and a card border immediately
+   * inside the panel's own. The table brings its own surface. */
   return el(
     "div",
-    { class: "card pad" },
-    el("span", { class: "card-title", text: "The rows" }),
+    { class: "rows tight" },
     rows.length
       ? table.node
       : empty("Nothing recorded yet. A search from any client writes a row here."),
@@ -8954,6 +8958,8 @@ async function impactView() {
   const subject = el("span", { class: "impact-subject", text: "—" });
   const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
   const rings = impactRings();
+  const pathCard = pathFinderCard();
+  const traceLane = traceCard();
   const reached = statCell("Reached", 0);
   const files = statCell("Files", 0);
   const inferredCell = statCell("Inferred", 0);
@@ -9068,6 +9074,17 @@ async function impactView() {
     setStats(impact.reached.length, impact.files.length, inferred);
     rings.show(name, impact.reached);
 
+    /* The two cards below now have a question to answer.
+     *
+     * The furthest caller to the symbol being changed: the longest chain this
+     * answer contains, which is the one worth reading. Seeded only while both
+     * fields are empty, so a question somebody typed is never overwritten. */
+    const furthest = impact.reached[impact.reached.length - 1];
+    if (furthest) {
+      pathCard.seed(furthest.name, name);
+      traceLane.seed(furthest.name, name);
+    }
+
     fill(
       results,
       el("p", { class: "headline", text: data.headline }),
@@ -9174,7 +9191,7 @@ async function impactView() {
         ),
         results,
       ),
-      el("div", { class: "impact-col" }, rings.node, pathFinderCard(), traceCard()),
+      el("div", { class: "impact-col" }, rings.node, pathCard, traceLane),
     ),
   );
 }
@@ -9274,13 +9291,28 @@ function pathFinderCard() {
 
   fill(body, el("p", { class: "subtitle", text: PATH_EMPTY }));
 
-  return el(
+  const node = el(
     "section",
     { class: "card pad path-card" },
     el("div", { class: "card-head" }, el("h2", { text: "Path finder" }), query),
     el("div", { class: "path-band" }, from, to, verifiedChip, strictChip, el("button", { class: "button small", type: "button", text: "Walk", onclick: () => run() })),
     body,
   );
+  /* Seeded from the answer above it, once, and never over a typed question.
+   *
+   * Arriving here from the Graph page's `Blast radius` fills the reach box and
+   * runs it, and these two cards sat empty underneath saying "two names" — with
+   * the two names on screen a few inches above them. The design shows both
+   * cards answering, which is only possible if something puts a question in
+   * them. */
+  node.seed = (a, b) => {
+    if (from.value.trim() || to.value.trim()) return;
+    if (!a || !b || a === b) return;
+    from.value = a;
+    to.value = b;
+    run();
+  };
+  return node;
 }
 
 /** A pill that is on or off, in the two states the v4 design draws. */
@@ -9403,7 +9435,7 @@ function traceCard() {
 
   fill(body, el("p", { class: "subtitle", text: TRACE_EMPTY }));
 
-  return el(
+  const node = el(
     "section",
     { class: "card pad trace-card" },
     el(
@@ -9417,6 +9449,15 @@ function traceCard() {
     el("div", { class: "path-band" }, from, to, el("button", { class: "button small", type: "button", text: "Trace", onclick: () => run() })),
     body,
   );
+  // Seeded like the path finder above it, and for the same reason. See there.
+  node.seed = (a, b) => {
+    if (from.value.trim() || to.value.trim()) return;
+    if (!a || !b || a === b) return;
+    from.value = a;
+    to.value = b;
+    run();
+  };
+  return node;
 }
 
 /* Reports: five, generated here, exported in five formats.
@@ -9498,7 +9539,17 @@ const REPORT_WINDOWS = [
  * `Window::note` makes each of them say so in its own heading. The chips
  * follow that rather than offering a dial that moves no figure — a control
  * that cannot change the file it claims to change is worse than no control. */
-const WINDOWED_KINDS = ["access", "change"];
+/* The reports whose figures a window actually moves.
+ *
+ * `savings` and `gaps` joined these in 0.27.0. Every row in the ledger carries
+ * `at` and always has; what was missing was a reader that took a bound, so the
+ * page drew four window chips over the savings figure, disabled them, and
+ * explained why the control it had just drawn could not work. The readers take
+ * a bound now.
+ *
+ * `health` is still out, and genuinely: it is the index as it stands — files,
+ * chunks, stale rows — and none of those figures has a date to narrow by. */
+const WINDOWED_KINDS = ["access", "change", "savings", "gaps"];
 
 /* The design's cadence chips, as the interval `schedule::Schedule` holds.
  *
@@ -9555,8 +9606,11 @@ function until(unix) {
  * two of the design's three toggles: `Hash the query text` replaces every query
  * with a digest of it wherever one reaches the page, and `Attach retrieved
  * excerpts` unrolls the access report's session lines into the retrievals
- * behind them. The third, `Sign the report`, is drawn disabled and says what it
- * is waiting for — see the comment beside it. */
+ * behind them. The design draws a third, `Sign the report`, and it is not here:
+ * signing needs a key, and where that key lives, how it rotates and what a
+ * reader checks it against are decisions this product has not made. A switch
+ * with nothing behind it is a promise the file does not keep, so the option is
+ * gone rather than drawn and disabled. */
 async function reportsView() {
   await refreshStores();
 
@@ -9704,16 +9758,16 @@ async function reportsView() {
     paintAll();
   }
 
-  /* The four things the footer states, each read off the file that exists
+  /* The three things the footer states, each read off the file that exists
    * rather than estimated from the preview:
    *   rows shown  — every `Table` block's row count in the generated report,
    *                 which is the rows in the document, not the rows on screen;
    *   full file   — `Blob.size`, the byte length Export hands the browser;
-   *   format      — the format the request asked for and the envelope echoed;
-   *   signature   — nothing in this binary signs a report, so `unsigned` is
-   *                 the only honest word for it. `report::Report` has no
-   *                 signature field and no route offers one.
-   * The trailing clause is the design's and is true of all four: every byte
+   *   format      — the format the request asked for and the envelope echoed.
+   * The design's fourth is a signature, and it is not here: nothing in this
+   * binary signs a report, and a footer reading `unsigned` on every file for
+   * ever is a column about a feature rather than about the document.
+   * The trailing clause is the design's and is true of all three: every byte
    * above was produced on this machine. */
   function paintMeta() {
     const rows = ((report && report.blocks) || [])
@@ -9724,7 +9778,6 @@ async function reportsView() {
       format === "pdf" ? "rows not counted in a PDF" : `${rows} rows shown`,
       `full file ${size}`,
       format,
-      "unsigned",
       "written to disk, never uploaded",
     ];
     previewMeta.textContent = parts.join(" · ");
@@ -9902,35 +9955,6 @@ async function reportsView() {
           };
           return node;
         }),
-        /* The third toggle the design draws, and the one thing on this page
-         * that is not offered.
-         *
-         * Signing needs a key, and a key needs somewhere to live, how it is
-         * rotated, and what a reader checks it against — none of which this
-         * product has decided. A switch drawn as though it worked would put a
-         * promise on the page that the file it produces does not keep, and one
-         * quietly left out would hide a gap the design says should be visible.
-         * So it is drawn, disabled, and says what it is waiting for. */
-        el(
-          "button",
-          {
-            class: "report-toggle",
-            type: "button",
-            disabled: true,
-            "aria-pressed": "false",
-            title: "No signing key exists yet",
-          },
-          el("span", { class: "knob" }),
-          el(
-            "span",
-            { class: "stack" },
-            el("span", { class: "label", text: "Sign the report" }),
-            el("span", {
-              class: "why",
-              text: "Detached ed25519 signature, so the reader can verify it offline. Waiting on a signing key: semlith has no key to sign with and nowhere decided to keep one.",
-            }),
-          ),
-        ),
       ),
       builderProblem,
     );

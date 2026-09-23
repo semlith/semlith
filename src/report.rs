@@ -380,25 +380,28 @@ pub fn generate_with(
         .collect();
     let stores: Vec<String> = scope.iter().map(|(label, _)| label.to_string()).collect();
     let blocks = match kind {
-        "savings" => savings(&scope, model)?,
+        "savings" => savings(&scope, model, window)?,
         "access" => access(&scope, window, options)?,
         "change" => change(&scope, window)?,
         "health" => health(&scope)?,
-        _ => gaps(&scope, options)?,
+        _ => gaps(&scope, options, window)?,
     };
     Ok(Report {
         kind,
         title: title.to_string(),
         generated: crate::clock::local_stamp(unix_now()),
         stores,
-        window: window.note(matches!(kind, "access" | "change")),
+        // Four of the five narrow now. `health` is the index as it stands and
+        // has no date on any of its figures; `gaps` narrows its questions half
+        // and says so about the other.
+        window: window.note(matches!(kind, "access" | "change" | "savings" | "gaps")),
         blocks,
     })
 }
 
 /// What was not read, what that would have cost, and how much of the ledger
 /// the figure covers.
-fn savings(scope: &Scope<'_>, model: &str) -> Result<Vec<Block>> {
+fn savings(scope: &Scope<'_>, model: &str, window: Window) -> Result<Vec<Block>> {
     let (name, per_million) = price_of(model);
     let (mut net, mut credited, mut total, mut measured) = (0i64, 0i64, 0i64, true);
     let (mut refunds, mut zero_hit, mut refunds_measured) = (0i64, 0i64, false);
@@ -406,8 +409,13 @@ fn savings(scope: &Scope<'_>, model: &str) -> Result<Vec<Block>> {
     let (mut p50, mut p95) = (0i64, 0i64);
     let mut head = None;
     let mut intact = true;
+    // Every row the ledger holds carries `at`, so this figure can be narrowed
+    // like any other. It could not before 0.27.0 — not because the data was
+    // missing but because no reader took a bound — and the page drew a window
+    // control over it anyway.
+    let since = window.since(unix_now()).unwrap_or(0);
     for (_, store) in scope {
-        let s = crate::store::ledger_savings(store.db())?;
+        let s = crate::store::ledger_savings_since(store.db(), since)?;
         net += s.net;
         credited += s.credited;
         total += s.total;
@@ -787,12 +795,18 @@ fn health(scope: &Scope<'_>) -> Result<Vec<Block>> {
 }
 
 /// What was asked and not answered, and the names that mislead.
-fn gaps(scope: &Scope<'_>, options: Options) -> Result<Vec<Block>> {
+fn gaps(scope: &Scope<'_>, options: Options, window: Window) -> Result<Vec<Block>> {
+    // The questions half of this report is ledger rows and narrows; the call
+    // targets half is the graph as it stands and has no date to narrow by. The
+    // report says which is which rather than implying the window reached both.
+    let gaps_since = window.since(unix_now()).unwrap_or(0);
     let mut asked = Vec::new();
     let mut missing = Vec::new();
     let mut several = 0i64;
     for (label, store) in scope {
-        for (query, count) in crate::store::ledger_zero_hit_queries(store.db(), 20)? {
+        for (query, count) in
+            crate::store::ledger_zero_hit_queries_since(store.db(), gaps_since, 20)?
+        {
             // Redaction is not the access report's private arrangement: this is
             // the other place a query text reaches paper, and a toggle that hid
             // it in one table and printed it in another would be a promise

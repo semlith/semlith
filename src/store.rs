@@ -2164,6 +2164,18 @@ pub fn ledger_totals(db: &Connection) -> Result<(i64, i64, i64, i64)> {
 /// this release does not add. The number is therefore an upper bound on what
 /// was saved, and `semlith stats` says so rather than presenting it as exact.
 pub fn ledger_savings(db: &Connection) -> Result<Savings> {
+    ledger_savings_since(db, 0)
+}
+
+/// The savings, over retrievals recorded at or after `since`.
+///
+/// `since` of 0 is every row, which is what [`ledger_savings`] asks for and
+/// what every caller before 0.27.0 meant. The ledger has always carried `at`
+/// and an index on it; what it did not have was a reader that took a bound, so
+/// the Reports page drew a window control over a figure that could not honour
+/// one. A control that cannot change the thing it claims to change is worse
+/// than no control.
+pub fn ledger_savings_since(db: &Connection, since: i64) -> Result<Savings> {
     // Retrievals rather than rows on both sides of the ratio, for the reason
     // `ledger_totals` gives: the rows of one cross-store search are one search.
     // The token sums stay sums of rows, because each row holds its own store's
@@ -2171,19 +2183,20 @@ pub fn ledger_savings(db: &Connection) -> Result<Savings> {
     let (credited, net): (i64, i64) = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)),
                 COALESCE(SUM(whole_file_tokens - excerpt_tokens), 0)
-         FROM retrievals WHERE hits > 0",
-        [],
+         FROM retrievals WHERE hits > 0 AND at >= ?1",
+        [since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     let total: i64 = db.query_row(
-        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals",
-        [],
+        "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
+         WHERE at >= ?1",
+        [since],
         |r| r.get(0),
     )?;
     let estimated: i64 = db.query_row(
         "SELECT COUNT(DISTINCT COALESCE(query_id, 'row:' || id)) FROM retrievals
-         WHERE hits > 0 AND (tokenizer IS NULL OR tokenizer != 'model')",
-        [],
+         WHERE hits > 0 AND at >= ?1 AND (tokenizer IS NULL OR tokenizer != 'model')",
+        [since],
         |r| r.get(0),
     )?;
     Ok(Savings {
@@ -2598,11 +2611,22 @@ pub fn ledger_head(db: &Connection) -> Result<Option<String>> {
 /// is either a missing document or a name nobody uses in the words they
 /// searched with.
 pub fn ledger_zero_hit_queries(db: &Connection, limit: usize) -> Result<Vec<(String, i64)>> {
+    ledger_zero_hit_queries_since(db, 0, limit)
+}
+
+/// The questions that found nothing, at or after `since`.
+pub fn ledger_zero_hit_queries_since(
+    db: &Connection,
+    since: i64,
+    limit: usize,
+) -> Result<Vec<(String, i64)>> {
     let mut stmt = db.prepare(
-        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0
-         GROUP BY query ORDER BY n DESC, query LIMIT ?1",
+        "SELECT query, COUNT(*) AS n FROM retrievals WHERE hits = 0 AND at >= ?1
+         GROUP BY query ORDER BY n DESC, query LIMIT ?2",
     )?;
-    let rows = stmt.query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(rusqlite::params![since, limit as i64], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
