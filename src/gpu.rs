@@ -293,6 +293,42 @@ pub fn fetch_webgpu(cache: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBu
     extract_plugin(&wheel_path, &dir)?;
     let _ = std::fs::remove_file(&wheel_path);
 
+    fetch_fp16_into(&dir, &mut report)?;
+    crate::home::write_private(&stamp, WEBGPU_VERSION.as_bytes())?;
+    Ok(dir)
+}
+
+/// The fp16 weights alone, for the CUDA lane, which needs them and not the
+/// WebGPU plugin. Same directory, same digests.
+pub fn fetch_fp16(cache: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBuf> {
+    let dir = crate::accel::component_dir(cache, &format!("webgpu-{WEBGPU_VERSION}"));
+    let total: u64 = FP16_FILES.iter().map(|(_, _, size)| size).sum();
+    let present = FP16_FILES.iter().all(|(file, _, _)| {
+        Path::new(file)
+            .file_name()
+            .is_some_and(|name| dir.join(name).exists())
+    });
+    if present {
+        return Ok(dir);
+    }
+    if crate::embed::airgap() {
+        bail!(
+            "{} is set and the fp16 model is not in {}",
+            crate::embed::AIRGAP_ENV,
+            crate::plain(&dir.display().to_string())
+        );
+    }
+    crate::embed::check_cache_dir(cache)?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mut done = 0u64;
+    fetch_fp16_into(&dir, &mut |bytes| {
+        done += bytes;
+        progress(((done * 100) / total.max(1)).min(100) as u8);
+    })?;
+    Ok(dir)
+}
+
+fn fetch_fp16_into(dir: &Path, report: &mut dyn FnMut(u64)) -> Result<()> {
     let base = format!(
         "https://huggingface.co/{}/resolve/{}",
         crate::embed::GRANITE_REPO,
@@ -300,15 +336,14 @@ pub fn fetch_webgpu(cache: &Path, progress: &mut dyn FnMut(u8)) -> Result<PathBu
     );
     for (file, sha256, _) in FP16_FILES {
         let name = Path::new(file).file_name().expect("a file name");
-        download(
-            &format!("{base}/{file}"),
-            &dir.join(name),
-            sha256,
-            &mut report,
-        )?;
+        download(&format!("{base}/{file}"), &dir.join(name), sha256, report)?;
     }
-    crate::home::write_private(&stamp, WEBGPU_VERSION.as_bytes())?;
-    Ok(dir)
+    Ok(())
+}
+
+/// The plugin wheel's size on this platform, for the Privacy page.
+pub fn plugin_bytes() -> u64 {
+    wheel().map(|w| w.size).unwrap_or(0)
 }
 
 /// Stream `url` to `to`, hashing as it goes, and refuse it unless the digest

@@ -635,7 +635,20 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
         ("cuda", "fp16-cuda"),
         ("worker", "int8-cpu"),
     ] {
-        if id == "worker" && !on.worker {
+        // A lane that is off is not checked: checking it would fetch its
+        // components, and CUDA's are fetched only on an explicit turn-on.
+        let switched_on = match id {
+            "gpu" => on.gpu,
+            "cuda" => on.cuda,
+            _ => on.worker,
+        };
+        if !switched_on {
+            if id != "worker" {
+                out.push(serde_json::json!({
+                    "lane": id,
+                    "reason": format!("off — `semlith accel on {id}` turns it on"),
+                }));
+            }
             continue;
         }
         say(&format!("checking the {id} lane"));
@@ -691,8 +704,11 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
             // Fetched only because somebody turned CUDA on, which is the only
             // way this lane is ever started. The fp16 weights are the WebGPU
             // lane's; the pack is NVIDIA's runtime and ORT's GPU build.
-            fetch_webgpu(lane).context("fetching the fp16 model")?;
             let cache = crate::model_cache_dir()?;
+            crate::gpu::fetch_fp16(&cache, &mut |percent| {
+                lane.set(Status::Downloading { percent });
+            })
+            .context("fetching the fp16 model")?;
             let pack = crate::cuda::fetch_pack(&cache, &mut |percent| {
                 lane.set(Status::Downloading { percent });
             })

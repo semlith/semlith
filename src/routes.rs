@@ -135,6 +135,11 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
         (true, _, "/api/accel") => accel_status(),
+        (_, true, "/api/doctor/gpu") => Response::json(&json!({
+            // The same checks `semlith doctor --gpu` prints, lane by lane. A
+            // POST because the first one may download a lane's components.
+            "checks": crate::accel::check_all(|_| {}),
+        })),
         (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
@@ -1508,13 +1513,13 @@ fn downloads(cache: &Path) -> Value {
         {
             "what": format!("the WebGPU plugin {} and the fp16 model", crate::gpu::WEBGPU_VERSION),
             "source": "files.pythonhosted.org (Microsoft's wheel) and huggingface.co",
-            "bytes": crate::gpu::FP16_FILES.iter().map(|(_, _, size)| size).sum::<u64>() + 13_149_847,
+            "bytes": crate::gpu::FP16_FILES.iter().map(|(_, _, size)| size).sum::<u64>() + crate::gpu::plugin_bytes(),
             "when": "the first index run on a machine with a hardware GPU, with the GPU lane on",
             "cached": webgpu.join(crate::gpu::plugin_file()).exists(),
         },
         {
             "what": format!("the CUDA pack {}", crate::cuda::PACK_VERSION),
-            "source": "github.com (ONNX Runtime GPU) and pypi.org (NVIDIA's CUDA libraries)",
+            "source": "github.com (ONNX Runtime GPU) and files.pythonhosted.org (NVIDIA's CUDA wheels)",
             "bytes": crate::cuda::PACK_BYTES,
             "when": "only after CUDA is turned on, on Linux",
             "cached": crate::cuda::pack_installed(cache).is_some(),

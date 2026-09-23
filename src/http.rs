@@ -322,7 +322,18 @@ struct Late {
 /// by several doors — answered on a worker, held in the waiting room, or
 /// streaming on a thread of its own — and a count that is only right on the
 /// paths somebody remembered is a leak waiting for the one they did not.
-struct InFlight(Arc<std::sync::atomic::AtomicUsize>);
+/// A connection the server is holding, and the priority it lifts while held.
+///
+/// The daemon sits in background state while it is idle (see
+/// `crate::priority`), and on a busy machine a background thread can wait
+/// seconds for a core. Measured on the reference M1 with three builds running:
+/// a request made just after the daemon dropped back waited past a 30-second
+/// client timeout. A request is work somebody is waiting on, so the process
+/// is lifted from the moment the connection is accepted until it closes.
+struct InFlight(
+    Arc<std::sync::atomic::AtomicUsize>,
+    #[allow(dead_code)] crate::priority::Embedding,
+);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
@@ -589,7 +600,7 @@ impl Server {
                     // holding open, and the flood that matters never reaches a
                     // worker at all.
                     let taken = live.fetch_add(1, Ordering::Relaxed);
-                    let in_flight = InFlight(Arc::clone(&live));
+                    let in_flight = InFlight(Arc::clone(&live), crate::priority::embedding());
                     if taken >= MAX_CONNECTIONS {
                         let _ = write_response(
                             &mut stream,

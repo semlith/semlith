@@ -2754,7 +2754,7 @@ impl Semlith {
         control: Option<&dyn Fn() -> Flow>,
         tick: &mut Tick<'_>,
     ) -> Result<Option<Vec<Vec<f32>>>> {
-        let (lanes, cpu_on) = accel::for_run();
+        let (mut lanes, mut cpu_on): (Vec<std::sync::Arc<accel::Lane>>, bool);
         let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
         let mut waiting: std::collections::VecDeque<usize> = order.into();
         type Answer = std::sync::mpsc::Receiver<std::result::Result<Vec<Vec<f32>>, String>>;
@@ -2767,6 +2767,9 @@ impl Semlith {
             {
                 return Ok(None);
             }
+            // Read before every batch, so a switch reaches a run already
+            // going at its next batch rather than at its next window.
+            (lanes, cpu_on) = accel::for_run();
             // Every free lane takes the longest chunks left.
             for lane in &lanes {
                 if waiting.is_empty() {

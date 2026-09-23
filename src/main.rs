@@ -2109,6 +2109,13 @@ fn run() -> Result<()> {
                         variants.iter().map(|(v, n)| format!("{n} {v}")).collect();
                     println!("variants {}", parts.join(", "));
                 }
+                let on = semlith::accel::enabled();
+                let lanes: Vec<&str> = [("cpu", on.cpu), ("gpu", on.gpu), ("cuda", on.cuda)]
+                    .into_iter()
+                    .filter(|(_, on)| *on)
+                    .map(|(lane, _)| lane)
+                    .collect();
+                println!("lanes    {} ({})", lanes.join(", "), on.source);
                 let images = store.image_count()?;
                 if images > 0 {
                     println!("images   {images}");
