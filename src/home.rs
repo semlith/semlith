@@ -260,7 +260,7 @@ impl Settings {
         let path = settings_path()?;
         let dir = path.parent().unwrap_or(Path::new("."));
         secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
-        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
+        let temp = path.with_extension(unique_temp_suffix());
         let body = serde_json::to_string_pretty(self)? + "\n";
         write_private(&temp, body.as_bytes())
             .with_context(|| format!("writing {}", temp.display()))?;
@@ -270,6 +270,19 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+/// A temporary file suffix no other writer in this process or any other is
+/// using. The pid alone was shared by every thread of a daemon, so two routes
+/// saving at once wrote one temporary file and renamed each other's half
+/// (issue #132).
+fn unique_temp_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "json.{}.{}.new",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// Where the agent key lives.
@@ -569,7 +582,7 @@ impl Registry {
         // for every process on the machine, so two semliths saving at once
         // wrote the same temporary file and one of them renamed the other's
         // half-written bytes into place.
-        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
+        let temp = path.with_extension(unique_temp_suffix());
         let body = serde_json::to_string_pretty(self)? + "\n";
         write_private(&temp, body.as_bytes())
             .with_context(|| format!("writing {}", temp.display()))?;
