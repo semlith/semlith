@@ -220,6 +220,22 @@ rather than one per process that concurrent routes overwrote.
 `tests/doctor.rs` closes its fake client before running it, so Linux can no
 longer fail the test with `ETXTBSY` (#135).
 
+**Fixed, found while building this release.** On Linux the watcher counted its
+own reads as changes: every file the index pass opened raised an inotify
+`IN_OPEN`, which queued the file again, so an idle store kept re-reading its
+folder and spent 3 to 6 seconds of CPU a minute doing nothing. Access events
+are no longer changes. A stopped run's queued watcher events are dropped with
+the run, where before the watcher re-indexed what the stop had just undone and
+a stop with the delete box could time out waiting for it. `/api/stores`
+reported zero files and chunks when the semlith home was reached through a
+symlink, because the first fleet opened stores under a path the registry did
+not use. Deleting a store now removes its registry entry before announcing the
+change, so a page re-reading the store list on that announcement no longer
+sees the deleted store. `tests/setup.rs` ran `setup --yes` without
+`--no-service` and replaced the developer's own login service with a temporary
+binary; those calls now pass `--no-service`, and `service install` refuses a
+binary under the temporary directory.
+
 **The Privacy route lists every download.** `/api/privacy` returns a
 `downloads` list. Each entry gives what is downloaded, where from, its size,
 when it happens and whether it is already cached. The list covers the
