@@ -2848,22 +2848,27 @@ def _(d):
 # leaves a screenshot behind, which is what the release record carries.
 
 
-@finding("5.1", "the sidebar is the thirteen pages, in four groups, in order")
+@finding("5.1", "the sidebar is every page, in four groups, in order")
 def _(d):
-    """Updated for 0.26.1, which took the v3 design's four groups back.
+    """Updated for 0.26.1, which took the v3 design's four groups back, and
+    again for 0.27.0, which split one page into two.
 
-    The thirteen entries are unchanged and this still asserts every one of
-    them: what moved is the grouping. v4 flattened v3's Workspace / Explore /
-    Operate / Account into two groups of six and seven, which is a list with
-    two headings in it rather than a menu. `Account` held License and About;
-    the binary is free and has no licence page, so the fourth group is the two
-    pages that describe this machine.
+    v4 flattened v3's Workspace / Explore / Operate / Account into two groups
+    of six and seven, which is a list with two headings in it rather than a
+    menu. `Account` held License and About; the binary is free and has no
+    licence page, so the fourth group is the two pages that describe this
+    machine.
+
+    `Index` and `Inside the index` are the split: the controls that read a
+    folder and the figures about what has already been read were one page, and
+    the design draws two.
     """
     d.open_view("stores")
     labels = [t for t in texts_of(d, ".sidebar .nav-item") if t]
     expected = [
         "Stores",
         "Files",
+        "Index",
         "Inside the index",
         "Search",
         "Graph",
@@ -2981,9 +2986,16 @@ def _(d):
     # them rather than sleeping a fixed time and calling a slow store a bug.
     # Compared case-blind: the card titles are uppercased by the stylesheet,
     # and innerText reads what is rendered.
-    deadline = time.time() + 30
+    # Waits for `graph health`, which is the last of them.
+    #
+    # It waited for the language mix, and since 0.27.0 that card is drawn from
+    # `/api/corpus` while the other two come from a scan of every call edge
+    # behind `/api/stores?coverage=1` — so the mix was on screen a second
+    # before the cards this is really about, and the check read the page in
+    # between.
+    deadline = time.time() + 45
     while time.time() < deadline:
-        if "language mix, by line" in view_text(d).lower():
+        if "graph health" in view_text(d).lower():
             break
         time.sleep(0.5)
     body = view_text(d).lower()
@@ -3086,6 +3098,12 @@ def _(d):
     d.wait_for(
         "(location.hash || '') === '#privacy'",
         what="the Privacy page, after pressing Open Privacy",
+    )
+    # The page renders from three routes, so the hash changes before the card
+    # this is about is on screen.
+    d.wait_for(
+        "!!document.querySelector('.replay-switch .replay-state')",
+        what="the Privacy page's session replay switch",
     )
     # And the control it lands on is the design's switch, not the button that
     # used to be there: the state is the row, and the row says which state it

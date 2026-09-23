@@ -1,0 +1,110 @@
+platform : macos (Darwin)
+portal   : http://127.0.0.1:7480
+home     : /private/tmp/semlith-0.27.0-lab/home
+known    : /Users/aakashpawar/Documents/Aakash/AI/Apps/live/semlith/semlith/.claude/worktrees/feat-0.27.0/.github/known-failures.txt
+out      : /Users/aakashpawar/Documents/Aakash/AI/Apps/live/semlith/semlith/.claude/worktrees/feat-0.27.0/drive-out
+checks   : 93
+
+ok       1.1    a store holds no files outside its registered roots
+ok       1.2    one cross-store search raises the ledger's query count by exactly one
+ok       1.3    a URL fetched into a store is indexed, not left orphaned
+ok       1.4    a finished run card offers Remove, never Pause or Stop
+ok       1.5    the live chunk counter never goes backwards during a run
+ok       1.6    a run card's totals agree with the store it wrote
+ok       1.7    LAST WRITE is a real time for a store that has been written
+ok       1.8    ledger and portal timestamps carry the same zone, and say which
+ok       2.1    a folder holding a .semlith store can be adopted through the portal
+ok       2.2    the URL panel names its own store, and a private address is refused as one
+ok       2.3    Open in Files filters the Files page to that store
+ok       2.4    with every edge-kind chip off, the graph draws no edges and says so
+ok       2.5    the projects picker can be pointed somewhere other than $HOME
+ok       2.6    finished runs can be dismissed and the active run sorts first
+ok       2.7    lang:, path: and budget re-run the query like every other filter
+ok       2.8    the graph's scope field says how it is applied, and both ways work
+ok       2.9    the PWA manifest's icons resolve, and a page load logs no errors
+ok       2.10   an unknown path is 404, not 401
+ok       3.1    a registry entry with no directory is badged, and not offered as a target
+ok       3.2    the machine limits panel does not contradict itself
+ok       3.3    'threads each' recomputes when 'runs at once' changes
+ok       3.4    a value the daemon calls saved, the portal calls saved too
+ok       3.5    the graph's CALLERS list holds only call edges
+ok       3.6    the graph opens on something legible and offers fit and zoom
+ok       3.7    scoping the graph cannot raise the edge count
+ok       3.8    Doctor gives no fix command for a client that is not installed
+ok       3.9    one Doctor state has one fix command
+ok       3.10   the recommended Claude Code HTTP command carries --scope user
+ok       3.11   the Agents page renders no literal backticks
+ok       3.12   stopping the MCP endpoint asks first
+ok       3.13   the dry run is the primary button, writing files is not
+ok       3.14   the About page's model notes describe the models they sit beside
+ok       3.15   the model actually in use carries a size
+ok       3.16   the Retrieval ledger page shows the ledger
+ok       3.17   the LINES tile's caption describes lines
+ok       3.18   the LAST WRITE column holds one vocabulary
+ok       3.19   the Files header's store count respects the filter
+ok       3.20   the empty state after a Forget blames the corpus, not the filter
+FAIL     3.21   a completed Forget says something
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+skip     3.22   the Privacy Rules badge agrees with the Privacy scan
+         no open store is holding a file today's rules would refuse, so there is no disagreement for the badge to have with the scan
+ok       3.23   the theme toggle can return to following the system
+ok       3.24   the search box has one name, and the rail names its own journey
+ok       3.25   the URL field's placeholder does not change after a failed attempt
+ok       3.26   naming a target store and 'each folder becomes its own store' are exclusive
+ok       4.1    a truncated path carries its full value in a title
+ok       4.2    every Files column sorts
+skip     4.3    the code preview shows that it scrolls
+         no preview pane in this result set is wider than its box
+ok       4.4    folder pickers sort case-insensitively
+ok       4.5    files in a folder picker read as not selectable
+ok       4.6    the stat tiles do not wrap four-and-one at tablet width
+ok       4.7    a store's root path is reachable on a phone
+ok       4.8    store chips do not consume the phone's first screen
+ok       4.9    a phone result card is not covered by the summary bar
+ok       4.10   the queued-runs line matches what is queued, and clears
+FAIL     4.11   a run card's header and its log describe the same run
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+FAIL     4.12   a sub-second run does not report a rate against a one-second clock
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+ok       4.13   /api/files?limit= refuses an out-of-range value instead of clamping
+ok       4.14   every table has a caption or an accessible name
+ok       4.15   'Chunks it lives in' is a button, because it behaves like one
+ok       4.16   there is a way to act on the whole result set, not just the page
+ok       4.17   a failed adopt keeps the picker open where it was
+ok       4.18   the adopt picker says which folder is adoptable
+ok       5.1    the sidebar is every page, in four groups, in order
+FAIL     5.2    Impact answers for a symbol, by hop, with a support class on every row
+         ProtocolError: POST /api/index answered 409: {"error":"/Users/aakashpawar/semlith-drive-corpus-3quvj9ow/small: disk I/O error: Error code 522: disk I/O error"}
+ok       5.3    the path finder and Trace render on the Impact page
+ok       5.4    the Graph page lists the store's communities
+ok       5.5    Inside the index states what the graph covers
+ok       5.6    the ledger lists sessions, filters them, and exports what it shows
+ok       5.7    Session replay is off until Privacy turns it on
+ok       5.8    Reports generates all five, locally
+ok       5.9    the Cloud page describes the service and contacts nothing
+ok       5.10   the Agents page measures what its tool list costs
+ok       5.11   every new page renders in both themes
+ok       6.1    the first-run screen carries everything the v4 lockup and card carry
+ok       6.2    Skip for now lands on Stores
+ok       6.3    the Stores table offers the way into what the index holds
+ok       6.4    the Retrieval ledger offers the way into Reports
+ok       6.5    About states the licence the binary ships under
+ok       6.6    the sidebar states whether the ledger is recording
+ok       6.7    Reports previews the one report that is selected
+ok       6.8    no page scrolls sideways, at any width the design supports
+ok       6.9    no page writes an error to the browser console
+ok       6.10   an index run outlives the page that started it
+ok       7.1    a page whose content overflows scrolls to its end
+ok       7.2    every page ends with the design's floor under its last card
+ok       7.3    no control in the portal renders as bare text
+ok       7.4    no code block fades out at its right edge
+ok       7.5    the Impact page draws its canvas beside the answer
+ok       7.6    the Impact canvas is alive: it draws, it settles, it keeps moving
+ok       7.7    the Reports builder offers a window and a scope, and the route takes them
+ok       7.8    a schedule the page adds is a schedule the daemon runs
+ok       7.9    About has lost the two blocks the v4 page has no place for
+ok       7.10   an unreadable store does not take the readable ones down with it
+
+--------------------------------------------------------------
+pass 87   fail 4   xfail 0   XPASS 0   skip 2
+needs attention: 3.21 4.11 4.12 5.2
