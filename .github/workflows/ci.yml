@@ -112,3 +112,113 @@ jobs:
           $found = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error
           $found | Format-Table -AutoSize
           if ($found) { throw "PSScriptAnalyzer reported $($found.Count) finding(s)" }
+
+  # 0.28.0 item 1.17: every GPU claim checked somewhere real. The macOS arm64
+  # runner exposes a Metal device, so the WebGPU lane is run there for
+  # correctness -- the known-answer check, cosine against the committed fp32
+  # fixture -- on every pull request. Linux and Windows runners have no
+  # hardware GPU, so there the same command must say so and fall back, and
+  # must never abort: Linux with Mesa's lavapipe forced as the only Vulkan
+  # device, Windows with only the Basic Render Driver (WARP) it already has.
+  gpu:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - run: cargo build --release
+
+      - name: A software Vulkan device, and nothing else
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mesa-vulkan-drivers libvulkan1 vulkan-tools
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+
+      - name: doctor --gpu
+        shell: bash
+        run: |
+          set -o pipefail
+          target/release/semlith doctor --gpu --json | tee gpu.json
+          gpu=$(jq -c '.[] | select(.lane == "gpu")' gpu.json)
+          echo "gpu lane: $gpu"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Real Metal: the lane must run and match the fixture.
+            echo "$gpu" | jq -e '.passed == true and .cosine >= 0.999' > /dev/null
+          else
+            # No hardware GPU: named as unavailable, nothing downloaded.
+            echo "$gpu" | jq -e '.reason | startswith("unavailable")' > /dev/null
+            cache="${SEMLITH_MODEL_CACHE:-$HOME/.cache/semlith/models}"
+            if [ -d "$cache/accel" ] && find "$cache/accel" -type f | grep -q .; then
+              echo "::error::a machine with no hardware GPU downloaded GPU components"
+              find "$cache/accel" -type f
+              exit 1
+            fi
+          fi
+
+  # Item 1.14 without a card: the pinned CUDA pack downloads, every digest
+  # verifies, the lane loads it, and says there is no NVIDIA device. Linux
+  # only in this release; the Windows leg checks the refusal says why.
+  cuda:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: The pack, fetched and loaded on a machine with no card
+        if: runner.os == 'Linux'
+        run: |
+          df -h .
+          cargo test --release --no-default-features --features dynamic-ort --test cuda -- --ignored --nocapture
+
+      - name: Turning CUDA on is refused with the reason
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release
+          if target/release/semlith accel on cuda 2> out.txt; then
+            echo "::error::CUDA was turned on on Windows"; exit 1
+          fi
+          cat out.txt
+          grep -q "Linux-only" out.txt
+
+  # The --release suites: measured claims and the retrieval harness. Hours on
+  # the reference laptop, so a release pull request's CI is their gate, and
+  # the record says so. Only on release branches.
+  release-suites:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: shards
+        run: cargo test --release --test shards -- --ignored --nocapture --test-threads=1
+
+      - name: measure
+        run: cargo test --release --test measure -- --ignored --nocapture --test-threads=1
+
+      - name: retrieval
+        run: cargo test --release --test retrieval -- --ignored --nocapture --test-threads=1
