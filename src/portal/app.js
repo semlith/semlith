@@ -2428,11 +2428,17 @@ async function graphView() {
           { class: "graph-scope" },
           icon(ICONS.search, 16),
           labelled("graph-scope", "Scope the graph", scopeInput),
-          // `Enter applies it` stood after this button, which put a sentence
-          // inside the field's own border and pushed the control off its end.
-          // Enter still applies it; the button says the same thing by being a
-          // button, and `aria-describedby` on the input carries it for anyone
-          // who is not looking at it.
+          /* `Enter applies it` was a visible sentence inside the field's own
+           * border, which pushed the button off its end. It is still here, and
+           * still the thing `aria-describedby` on the input points at — a
+           * dangling `aria-describedby` is worse than the sentence was. What
+           * changed is that it is read rather than seen: the button beside it
+           * says the same thing to anybody looking at the field. */
+          el("span", {
+            class: "sr-only",
+            id: "graph-scope-hint",
+            text: "Enter applies it",
+          }),
           scopeButton,
         ),
         storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,

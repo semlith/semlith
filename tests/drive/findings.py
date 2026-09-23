@@ -1195,6 +1195,12 @@ def _(d):
     # is asserted here — the button, the hint that names the key, and both
     # routes actually applying a scope. A release that later switches to
     # apply-as-you-type must rewrite this check, not delete it.
+    #
+    # From 0.27.0 the hint is read rather than seen. The sentence sat inside the
+    # field's border and pushed the button off its end, so it is `.sr-only` now:
+    # the button is the affordance for anyone looking at the field, and the
+    # description is still there for anyone who is not. Both halves of the
+    # finding still hold; only which sense they reach changed.
     d.open_view("graph")
     d.wait_for("/\\d+\\s+symbols/i.test(document.querySelector('.graph-count').innerText)",
                what="the graph summary")
@@ -1212,9 +1218,13 @@ def _(d):
             .find(b => (b.innerText || '').trim().length > 0);
           const described = field.getAttribute('aria-describedby');
           const hint = described && document.getElementById(described);
+          // `textContent`, not `innerText`: from 0.27.0 the hint is
+          // screen-reader-only, and `innerText` is what is rendered — which is
+          // nothing, by design. A screen reader reads the text either way, and
+          // the text is what this finding is about.
           return {button: button ? (button.innerText || '').trim() : null,
                   describedby: described,
-                  hint: hint ? (hint.innerText || '').trim() : null};
+                  hint: hint ? (hint.textContent || '').trim() : null};
         })()
         """
     )
@@ -3021,9 +3031,27 @@ def _(d):
 def _(d):
     d.open_view("ledger")
     time.sleep(1)
+    # From 0.27.0 the rows and the replay are two tabs over one ledger rather
+    # than two stacked cards, so the replay's copy is behind its tab. The check
+    # presses it, which is what a reader does.
     body = view_text(d)
     if "Session replay" not in body:
         fail("the ledger page has no Session replay tab")
+    opened = d.eval(
+        """
+        (() => {
+          const tab = [...document.querySelectorAll('.tab')]
+            .find(t => /session replay/i.test(t.textContent || ''));
+          if (!tab) return false;
+          tab.click();
+          return true;
+        })()
+        """
+    )
+    if not opened:
+        fail("the ledger has no Session replay tab to open")
+    time.sleep(0.5)
+    body = view_text(d)
     if "Turn on under Privacy" not in body:
         fail("Session replay does not say where it is turned on: %s" % body[:300])
     state = d.api("/api/ledger/replay")
@@ -3221,17 +3249,22 @@ def _(d):
         fail("the About page does not state the licence the binary ships under")
 
 
-@finding("6.6", "the sidebar states whether the ledger is recording, and offers the first run again")
+@finding("6.6", "the sidebar states whether the ledger is recording")
 def _(d):
+    """0.27.0 took the `Replay first-run screen` control out of the sidebar and
+    this check's second half with it.
+
+    It was added in 0.26.1 on the reasoning that without it the first-run screen
+    is unreachable once a store exists. That is still true, and it was judged
+    not to be worth a permanent control in the sidebar of every page — the
+    screen is a first run, and `#welcome` still reaches it. What the daemon card
+    says about recording is the part of this finding that was about the sidebar
+    doing its job, and it is kept.
+    """
     d.open_view("stores")
     card = text_of(d, "#daemon-stores", "the daemon card's second line")
     recording = (d.api("/api/about")).get("ledger") is not False
     want("the daemon card's ledger state", "ledger on" in card, recording)
-    if "Replay first-run screen" not in view_text(d):
-        fail(
-            "the sidebar offers no way back to the first-run screen, so once a store "
-            "exists the page that explains the product is unreachable"
-        )
 
 
 @finding("6.7", "Reports previews the one report that is selected")
@@ -3568,10 +3601,15 @@ def _(d):
         fail("the Impact page draws no canvas card")
     caption = text_of(d, ".impact-canvas-card .canvas-caption", "the canvas caption")
     want("the canvas caption", caption, "reverse reachability, rings by hop")
+    # The design's 320px, as a floor rather than as an exact height. It is drawn
+    # against a five-node mock; a real store answers with dozens, and the rings
+    # need the room to keep their labels apart — so the card grows with the
+    # viewport and stops at 460.
     height = d.eval(
         "Math.round(document.querySelector('.impact-canvas-card').getBoundingClientRect().height)"
     )
-    want("the canvas card's height", height, 320)
+    if height < 320 or height > 460:
+        fail("the canvas card is %dpx tall; it should sit between 320 and 460" % height)
     # The `Changing` line and the three figures belong to a card in the left
     # column, not to a band across the page.
     if not exists(d, ".impact-subject-card .impact-subject-row"):
