@@ -1216,7 +1216,9 @@ c_lower_limit_holds() {
   hold_stores=$(rc_post /api/index "$body" | jq -c '[.runs[].store]')
   [ "$(printf '%s' "$hold_stores" | jq 'length')" = 3 ] || { echo "three folders started $hold_stores"; return 1; }
   rc_until 300 hold_all_embedding ||
-    { echo "three runs were never embedding at once:"; rc_get /api/index/runs | jq -c '{running, held, limits}'; return 1; }
+    { echo "three runs were never embedding at once:"; rc_get /api/index/runs | jq -c '{running, held, runs_at_once: .limits.runs_at_once.value}'
+      rc_get /api/index/runs | jq -c '.runs[] | {store, kind, status, chunks, elapsed_ms, summary}'
+      tail -20 "$runs_root/hold/daemon.out" 2>/dev/null; return 1; }
   rc_post /api/index/settings '{"runs_at_once": 1}' | jq -e 'has("applied")' > /dev/null ||
     { echo "runs_at_once 1 was not applied"; return 1; }
   rc_until 6 eval '[ "$(hold_count running)" = 1 ] && [ "$(hold_count held)" = 2 ]' ||
