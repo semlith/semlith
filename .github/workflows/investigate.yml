@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [branch, develop]
+        side: [branch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -53,9 +53,9 @@ jobs:
           echo "--- watch.log"; cat $W/watch.log
           echo "--- threads"; cat $W/snap.$n
           echo "--- strace -c -f 20s"
-          sudo timeout -s INT 20 strace -c -f -p $PID 2>&1 | head -40
+          sudo timeout -s INT 20 strace -c -f -p $PID 2>&1 | head -40 || true
           echo "--- strace -f -tt 2s"
-          sudo timeout -s INT 2 strace -f -tt -p $PID 2>&1 | head -150
+          sudo timeout -s INT 2 strace -f -tt -p $PID 2>&1 | head -150 || true
           kill -INT $PID; wait $PID
         shell: bash
       - name: measure_the_watcher
