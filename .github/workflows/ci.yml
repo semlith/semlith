@@ -222,3 +222,55 @@ jobs:
 
       - name: retrieval
         run: cargo test --release --test retrieval -- --ignored --nocapture --test-threads=1
+
+  # Item 1.16: a store embedded by the CPU and a GPU together holds int8 and
+  # fp16 vectors of one model, which agree at cosine 0.987. Before hybrid ships
+  # as the default the sealed split is scored four ways, median of three, on
+  # the CPU alone so each leg is reproducible: all int8, all fp16, a
+  # deterministic 50/50 mix, and the mix searched with fp16 queries. Mixing is
+  # allowed if the mix is within one question of all-int8 at every k.
+  mixed-vectors:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: int8
+            embed: int8
+            query: int8
+          - leg: fp16
+            embed: fp16
+            query: fp16
+          - leg: mix
+            embed: mix
+            query: int8
+          - leg: mix-fp16-queries
+            embed: mix
+            query: fp16
+    env:
+      SEMLITH_RETRIEVAL_SEALED: "1"
+      SEMLITH_RETRIEVAL_RUNS: "3"
+      SEMLITH_EMBED_VARIANT: ${{ matrix.embed }}
+      SEMLITH_QUERY_VARIANT: ${{ matrix.query }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: sealed split, ${{ matrix.leg }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release --test retrieval -- --ignored --nocapture --test-threads=1 \
+            the_retrieval_metrics_are_measured 2>&1 | tee harness.log
+          {
+            echo "### ${{ matrix.leg }}"
+            echo '```'
+            grep -A6 "sealed, median of the runs" harness.log || true
+            grep "run [0-9]/" harness.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

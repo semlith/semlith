@@ -1145,6 +1145,9 @@ pub struct Semlith {
     embedder_threads: usize,
     /// The second session a `mix` harness run alternates with, batch by batch.
     embedder_alt: Option<TextEmbedding>,
+    /// A query session of a variant other than the index pass's, for the
+    /// harness's mixed runs.
+    query_embedder: Option<TextEmbedding>,
     /// Batches this store has embedded, which is what the alternation counts.
     batches: u64,
     /// The variant the last batch was embedded with.
@@ -1248,6 +1251,7 @@ impl Semlith {
             embedder: None,
             embedder_threads: 0,
             embedder_alt: None,
+            query_embedder: None,
             batches: 0,
             last_variant: embed::Variant::Int8.name(),
             last_embed: None,
@@ -1419,6 +1423,7 @@ impl Semlith {
             SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
         self.embedder_alt = None;
+        self.query_embedder = None;
         self.clip = image::Clip::default();
     }
 
@@ -3087,7 +3092,33 @@ impl Semlith {
     /// finish — and under int8 quantisation that moves a ranking, which is
     /// noise in a measurement that is about something else.
     pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
-        Ok(self.embed(vec![self.model.query_text(query)])?.remove(0))
+        let text = self.model.query_text(query);
+        let wanted = embed::query_variant();
+        // A query is always embedded by the query variant, never by an index
+        // pass's alternation: a mixed store is searched with int8 queries
+        // unless the harness asks for another, which is item 1.16's design.
+        if embed::index_variant() == (wanted, None) {
+            return Ok(self.embed(vec![text])?.remove(0));
+        }
+        let _lifted = priority::embedding();
+        if self.query_embedder.is_none() {
+            self.query_embedder = Some(self.model.load_variant(
+                model_cache_dir()?,
+                chunk::MAX_CHARS / 2,
+                self.quiet,
+                embed::embed_threads(),
+                wanted,
+            )?);
+        }
+        let mut out = self
+            .query_embedder
+            .as_mut()
+            .expect("loaded above")
+            .embed(vec![text], Some(1))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut vector = out.remove(0);
+        normalize(&mut vector);
+        Ok(vector)
     }
 
     /// [`Semlith::search_filtered`] with the query already embedded.
