@@ -1200,7 +1200,10 @@ hold_count() {
     jq --argjson s "$hold_stores" --arg st "$1" '[.runs[] | select(.store as $n | $s | any(. == $n)) | select(.status == $st)] | length'
 }
 hold_all_embedding() {
-  [ "$(rc_get /api/index/runs | jq '.running')" = 3 ] || return 1
+  # Every poll's view, for the failure message: what the three cards read
+  # when they were not all embedding.
+  rc_get /api/index/runs | jq -c '{running, r: [.runs[] | [.store, .kind, .status, .chunks]]}' >> "$rc_dir/hold-trace"
+  [ "$(rc_get /api/index/runs | jq '.running' | tr -d '\r')" = 3 ] || return 1
   for s in $(printf '%s' "$hold_stores" | jq -r '.[]'); do rc_embedding "$s" || return 1; done
 }
 
@@ -1218,6 +1221,7 @@ c_lower_limit_holds() {
   rc_until 300 hold_all_embedding ||
     { echo "three runs were never embedding at once:"; rc_get /api/index/runs | jq -c '{running, held, runs_at_once: .limits.runs_at_once.value}'
       rc_get /api/index/runs | jq -c '.runs[] | {store, kind, status, chunks, elapsed_ms, summary}'
+      echo "each distinct poll, in order:"; uniq "$rc_dir/hold-trace" | head -40
       tail -20 "$runs_root/hold/daemon.out" 2>/dev/null; return 1; }
   rc_post /api/index/settings '{"runs_at_once": 1}' | jq -e 'has("applied")' > /dev/null ||
     { echo "runs_at_once 1 was not applied"; return 1; }
