@@ -1028,6 +1028,19 @@ def _(d):
     d.close_index_panel("Projects under a folder…")
 
 
+def sidebar_stores(d):
+    """The sidebar's store count, as the daemon card says it."""
+    text = text_of(d, "#daemon-stores", "the sidebar's daemon card")
+    found = re.search(r"(\d+) stores?", text)
+    if not found:
+        fail("the sidebar's daemon card does not count stores: %r" % text)
+    return int(found.group(1))
+
+
+#: The Stop dialog's "Also delete the store" box.
+DELETE_BOX = "document.querySelector('dialog.modal[open] input[type=checkbox]')"
+
+
 def stop_quietly(d, store):
     """Stop a run if one is going, and say nothing when there is not.
 
@@ -1038,7 +1051,8 @@ def stop_quietly(d, store):
     try:
         d.api("/api/index/control", method="POST", body={"store": store, "action": "stop"})
     except cdp.ProtocolError as refused:
-        if "no run to stop" not in str(refused):
+        # A store its own stop deleted has nothing left to stop either.
+        if not re.search(r"no run to stop|no store called|no store is open", str(refused)):
             raise
 
 
@@ -4167,20 +4181,39 @@ def _(d):
         if run_by_id(d, run_id).get("status") in TERMINAL:
             fail("cancelling the Stop dialog stopped the run anyway")
 
+        # Confirmed with "Also delete the store" as the dialog offers it: this
+        # run is creating its store, so the box starts ticked, and the stop
+        # takes the store with it — off the sidebar's count too, with no reload.
+        stores_before = sidebar_stores(d)
         press(d, card, "Stop")
         d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
+        ticked = d.eval(DELETE_BOX + ".checked")
+        if ticked is not True:
+            fail(
+                "the Stop dialog for %s, a store this run is creating, left 'Also "
+                "delete the store' %s; stopping the run that makes a store should "
+                "offer to take the empty store with it" % (store, "unticked" if ticked is False else "missing")
+            )
         d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
                ".find(b => b.textContent.trim() === 'Stop and undo').click()")
         wait_status(d, run_id, {"stopped"}, "Stop and undo")
         d.wait_for(
-            "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
-            ".some(b => !b.hidden && b.offsetParent !== null && b.textContent.trim() === 'Remove'); })()"
-            % card,
-            what="the stopped card to offer Remove",
+            "(() => { const c = %s; return !!c && /the store was deleted/.test(c.innerText)"
+            " && [...c.querySelectorAll('button')].some(b => !b.hidden && b.offsetParent !== null"
+            " && b.textContent.trim() === 'Remove'); })()" % card,
+            timeout=60,
+            what="the stopped card to say its store was deleted and offer Remove",
         )
-        settle(d, "the Stop dialog confirmed")
+        settle(d, "the Stop dialog confirmed with the delete box")
         # Not the focus: a stopped run has no Stop to hold it.
-        held(d, "the Stop dialog confirmed")
+        held(d, "the Stop dialog confirmed with the delete box")
+        d.wait_for(
+            "window.__still && (() => { const m = /(\\d+) stores?/.exec("
+            "(document.getElementById('daemon-stores') || {}).textContent || '');"
+            " return !!m && Number(m[1]) === %d; })()" % (stores_before - 1),
+            what="the sidebar to count %d store(s) after the delete, without a reload"
+            % (stores_before - 1),
+        )
     finally:
         d.reset_viewport()
         stop_quietly(d, store)
@@ -4226,9 +4259,19 @@ def _(d):
         )
         d.wait_for(
             "[...document.querySelectorAll('#root .view .note')]"
-            ".some(n => (n.textContent || '').startsWith('Saved.'))",
+            ".some(n => (n.textContent || '').startsWith('Saved'))",
             what="the save to be answered",
         )
+        # The daemon applies all three at once and says what it is running
+        # with; the page used to promise the next run instead.
+        answered = d.eval(
+            "[...document.querySelectorAll('#root .view .note')]"
+            ".map(n => n.textContent || '').find(t => t.startsWith('Saved')) || ''"
+        )
+        if "now running with" not in answered:
+            fail("a saved limit says %r, not what the daemon is now running with" % answered)
+        if re.search(r"applies to the next run", view_text(d)):
+            fail("the Index page still says a limit applies to the next run; it applies now")
         settle(d, "a limit saved")
         held(d, "a limit saved", focus=True, place=True)
 
@@ -4266,7 +4309,7 @@ def _(d):
 THREADS_EACH = 'input[aria-label="threads each"]'
 
 
-@finding("8.3", "over a live run nothing on the Index page is rebuilt, detached or retyped")
+@finding("8.3", "over a live run nothing on the Index page is rebuilt or retyped, and the rate is on every poll")
 def _(d):
     """Sixty seconds of a live run under a MutationObserver.
 
@@ -4332,17 +4375,36 @@ def _(d):
               });
               observer.observe(limits, {childList: true, subtree: true});
               observer.observe(cards, {childList: true, subtree: true});
+              // The rate, read four times a second off the live card: the
+              // daemon's rolling figure, or "—" before the first batch, and
+              // never "—" again once there has been one.
+              const card = %s;
+              const rate = card.querySelector('.filters .meta').children[0];
+              const rates = {samples: 0, missing: [], lapsed: [], numbered: false};
+              const sampler = setInterval(() => {
+                const word = (card.querySelector('.pill') || {}).textContent || '';
+                if (!/indexing|catching up/.test(word)) return;
+                rates.samples++;
+                const said = rate.hidden ? '' : (rate.textContent || '').trim();
+                const m = /^(—|[\\d.,]+) chunks\\/s/.exec(said);
+                if (!m) rates.missing.push(said || '(hidden)');
+                else if (m[1] === '—' && rates.numbered) rates.lapsed.push(said);
+                else if (m[1] !== '—') rates.numbered = true;
+              }, 250);
               setTimeout(() => {
+                clearInterval(sampler);
                 observer.takeRecords();
                 observer.disconnect();
                 done({limits: found.limits.slice(0, 5), limitsCount: found.limits.length,
                       detached: found.detached.slice(0, 5), detachedCount: found.detached.length,
                       rebuilt: [...new Set(found.rebuilt)].slice(0, 5), rebuiltCount: found.rebuilt.length,
-                      loading: still.loading - loading, paints: still.runs - runs});
+                      loading: still.loading - loading, paints: still.runs - runs,
+                      rates: {samples: rates.samples, numbered: rates.numbered,
+                              missing: rates.missing.slice(0, 5), lapsed: rates.lapsed.slice(0, 5)}});
               }, 60000);
             })
             """
-            % json.dumps(RUNS_AT_ONCE),
+            % (json.dumps(RUNS_AT_ONCE), still_card(store)),
             timeout=120,
         )
         kept = d.eval(
@@ -4388,6 +4450,20 @@ def _(d):
                     typed,
                 )
             )
+        rates = seen["rates"]
+        if rates["missing"]:
+            fail(
+                "the live card showed no rate on %d of %d reads, e.g. %r: the rolling "
+                "rate is on the card on every poll while a run is live, '—' until "
+                "its first batch" % (len(rates["missing"]), rates["samples"], rates["missing"])
+            )
+        if rates["lapsed"]:
+            fail(
+                "the live card's rate went back to '—' after it had a number (%r); "
+                "the daemon's rate is null only before the first batch" % rates["lapsed"]
+            )
+        if rates["samples"] and not rates["numbered"]:
+            fail("in %d reads of a live run the card never showed a rate" % rates["samples"])
         if seen["paints"] < 10:
             fail(
                 "the page read the runs only %d time(s) in the minute, so the "
@@ -4396,3 +4472,309 @@ def _(d):
     finally:
         d.reset_viewport()
         stop_quietly(d, store)
+
+
+def live_card(store):
+    """A JS expression for the store's card that still offers Stop, or null.
+
+    A store can have a finished card and a live one; the live one is the one
+    with a Stop on offer.
+    """
+    return (
+        "[...document.querySelectorAll(%s)].find(c =>"
+        " ((c.querySelector('.card-title') || {}).textContent || '').trim() === %s"
+        " && [...c.querySelectorAll('button')].some(b => !b.hidden && b.offsetParent !== null"
+        " && b.textContent.trim() === 'Stop'))"
+        % (json.dumps(RUN_CARD), json.dumps(store))
+    )
+
+
+@finding("8.4", "Pause reads 'pausing' the moment it is pressed, and never goes back to indexing")
+def _(d):
+    """The route answers `{"state": "pausing"}` at once and the engine stops at
+    its next batch. The card says "pausing" on that answer, not a poll later,
+    and no poll asked before the click paints "indexing" back over it.
+
+    Every word the pill shows is recorded by a MutationObserver from before the
+    click until the run is paused, so a flicker between two polls is seen even
+    though no single read would catch it.
+    """
+    run_id, store = start_index(d, d.fixtures.unique("pausing", count=400))
+    try:
+        running(d, run_id, store)
+        still_open(d, STILL_VIEWPORT)
+        card = live_card(store)
+        d.wait_for(
+            "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
+            ".some(b => !b.hidden && b.textContent.trim() === 'Pause'); })()" % card,
+            what="the live run's card, offering Pause",
+        )
+        seen = d.eval(
+            """
+            new Promise(done => {
+              const card = %s, pill = card.querySelector('.pill');
+              const words = [];
+              const note = () => {
+                const word = (pill.textContent || '').trim();
+                if (words[words.length - 1] !== word) words.push(word);
+              };
+              note();
+              const observer = new MutationObserver(note);
+              observer.observe(pill, {characterData: true, childList: true, subtree: true});
+              const at = words.length;
+              [...card.querySelectorAll('button')].find(b => !b.hidden
+                && b.textContent.trim() === 'Pause').click();
+              const started = Date.now();
+              const tick = setInterval(() => {
+                if ((pill.textContent || '').trim() === 'paused' || Date.now() - started > 30000) {
+                  clearInterval(tick);
+                  observer.disconnect();
+                  done({before: words.slice(0, at), after: words.slice(at)});
+                }
+              }, 50);
+            })
+            """
+            % card,
+            timeout=60,
+        )
+        after = seen["after"]
+        if not after or after[0] != "pausing":
+            fail(
+                "after Pause the pill read %r; the first word after the click is "
+                "'pausing', from the route's own answer, before the engine gets "
+                "there" % after
+            )
+        if "indexing" in after:
+            fail(
+                "after Pause the pill went back to 'indexing' (%r): a poll asked "
+                "before the click was painted over the pausing state" % after
+            )
+        if after[-1] != "paused":
+            fail("the run never reached 'paused' within 30s of Pause: %r" % after)
+    finally:
+        stop_quietly(d, store)
+        d.reset_viewport()
+
+
+def quiet(d, timeout=180):
+    """Wait until no run is live anywhere, so the next check's run is admitted
+    at once rather than queued behind the last check's tidying up."""
+    deadline = time.time() + timeout
+    live = []
+    while time.time() < deadline:
+        answer = d.api("/api/index/runs")
+        live = [r["store"] for r in answer.get("runs") or [] if r.get("status") not in TERMINAL]
+        if not live and not answer.get("queue"):
+            return
+        time.sleep(0.5)
+    fail("runs were still live after %ds: %s" % (timeout, ", ".join(live)))
+
+
+@finding("8.5", "the Stop dialog leaves 'Also delete the store' unticked for a store with files, and says how many stay")
+def _(d):
+    """A store that already held files is a store somebody has: stopping a run
+    on it must not offer to delete it by default, and the dialog says what is
+    at stake. (A store the run is creating starts ticked: 8.1.)
+
+    The run is the one the store's own watcher starts when four hundred new
+    files land in its folder: a run on a store that held three, long enough to
+    pause. A second submission into the same folder only queued behind it, and
+    by the time it started the watcher had indexed most of what it was for.
+    """
+    quiet(d)
+    corpus = d.fixtures.unique("kept", count=3)
+    store = indexed_fixture(d, corpus)
+    d.fixtures._write_corpus(corpus, 400, prefix="more")
+    deadline = time.time() + RUN_APPEARS * 2
+    run = None
+    while time.time() < deadline and run is None:
+        run = next(
+            (r for r in d.api("/api/index/runs")["runs"]
+             if r["store"] == store and r.get("status") == "running"),
+            None,
+        )
+        time.sleep(0.2)
+    if run is None:
+        fail(
+            "four hundred files written into %s's folder started no run on it "
+            "within %ds; the store's watcher should read them" % (store, RUN_APPEARS * 2)
+        )
+    run_id = run["id"]
+    try:
+        control_run(d, store, "pause", run_id)
+        wait_status(d, run_id, {"paused"}, "pausing %s" % store)
+        before = (run_by_id(d, run_id) or {}).get("files_before")
+        if not before:
+            fail("the daemon says %s held %r files before this run; it held at least 3" % (store, before))
+
+        d.open_view("index")
+        card = live_card(store)
+        d.wait_for("!!(%s)" % card, what="the paused run's card on %s, offering Stop" % store)
+        d.eval("[...(%s).querySelectorAll('button')].find(b => !b.hidden"
+               " && b.textContent.trim() === 'Stop').click()" % card)
+        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
+        dialog = d.eval(
+            "({checked: (%s || {}).checked, text: document.querySelector('dialog.modal[open]').innerText})"
+            % DELETE_BOX
+        )
+        d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
+               ".find(b => b.textContent.trim() === 'Cancel').click()")
+        if dialog["checked"] is not False:
+            fail(
+                "the Stop dialog for %s, which held %d files before this run, has "
+                "'Also delete the store' %s; it starts unticked for a store with files"
+                % (store, before, "ticked" if dialog["checked"] else "missing")
+            )
+        said = "This store holds %d file%s; they stay." % (before, "" if before == 1 else "s")
+        if said not in dialog["text"]:
+            fail("the Stop dialog does not say %r: %r" % (said, dialog["text"][:300]))
+    finally:
+        stop_quietly(d, store)
+        quiet(d)
+
+
+@finding("8.6", "a store deleted by a stop leaves the Stores page and the sidebar count without a reload")
+def _(d):
+    """The stop's delete moves the stores counter, and the page's one poll
+    picks it up: the row goes from the Stores table and the sidebar counts one
+    store fewer, on the page that was already open.
+    """
+    quiet(d)
+    # A second store, so deleting this one does not leave the machine with
+    # none, which is the welcome screen and has no sidebar to count with.
+    indexed_fixture(d, d.fixtures.unique("stays"))
+    run_id, store = start_index(d, d.fixtures.unique("deleted", count=400))
+    try:
+        running(d, run_id, store)
+        control_run(d, store, "pause", run_id)
+        wait_status(d, run_id, {"paused"}, "pausing %s" % store)
+        d.open_view("stores", fresh=True)
+        # A row whose first line is the store's name. Not any row mentioning
+        # it: the page's events table says "deleted-N: the store was deleted",
+        # which is the delete being reported, not the store still listed.
+        listed = (
+            "[...document.querySelectorAll('#root tbody tr')].some(r => r.cells.length"
+            " && (r.cells[0].innerText || '').split('\\n')[0].trim() === %s)" % json.dumps(store)
+        )
+        d.wait_for(listed, what="%s in the Stores table" % store)
+        before = sidebar_stores(d)
+        # Set on this document; a reload would take it away.
+        d.eval("window.__sameDocument = true")
+        d.api("/api/index/control", method="POST",
+              body={"store": store, "action": "stop", "run": run_id, "delete": True})
+        try:
+            d.wait_for(
+                "window.__sameDocument === true && !(%s) && (() => {"
+                " const m = /(\\d+) stores?/.exec((document.getElementById('daemon-stores') || {}).textContent || '');"
+                " return !!m && Number(m[1]) === %d; })()" % (listed, before - 1),
+                timeout=60,
+                what="%s to leave the Stores table and the sidebar to count %d, without a reload"
+                % (store, before - 1),
+            )
+        except cdp.ProtocolError:
+            seen = d.eval(
+                "({same: window.__sameDocument === true,"
+                " sidebar: (document.getElementById('daemon-stores') || {}).textContent,"
+                " rows: [...document.querySelectorAll('#root tbody tr')].map(r =>"
+                " r.cells.length ? (r.cells[0].innerText || '').split('\\n')[0].trim() : '')})"
+            )
+            fail(
+                "a minute after %s's stop deleted it, the Stores page %s: the sidebar "
+                "reads %r (it counted %d before) and the table's rows are %r"
+                % (
+                    store,
+                    "is the same document" if seen["same"] else "was reloaded",
+                    seen["sidebar"],
+                    before,
+                    seen["rows"],
+                )
+            )
+    finally:
+        stop_quietly(d, store)
+
+
+@finding("8.7", "the Machine limits card lists the accelerator lanes, with the CPU active")
+def _(d):
+    """One row per lane `/api/accel` reports, each a switch with its device,
+    its state and its share of the rate. The CPU is always a lane and always
+    active; CI runners have no GPU, so nothing here depends on one.
+
+    Turning CUDA on says what it downloads before anything is posted: the
+    dialog is opened and cancelled, and the lane is still off afterwards.
+    """
+    accel = d.api("/api/accel")
+    lanes = accel.get("lanes") or []
+    d.open_view("index")
+    d.open_index_panel("Machine limits")
+    limits = "document.querySelector(%s).closest('.card')" % json.dumps(RUNS_AT_ONCE)
+    d.wait_for(
+        "%s.querySelectorAll('.replay-switch').length === %d" % (limits, len(lanes)),
+        what="one switch per accelerator lane (%d) on the Machine limits card" % len(lanes),
+    )
+    rows = d.eval(
+        "[...%s.querySelectorAll('.replay-switch')].map(b => ({"
+        " title: b.querySelector('.replay-state').textContent,"
+        " state: b.querySelector('.replay-switch-note').textContent,"
+        " on: b.getAttribute('aria-checked'),"
+        " share: b.querySelector('.meta').textContent}))" % limits
+    )
+    names = [row["title"].split(" · ")[0] for row in rows]
+    for wanted in ("CPU", "GPU", "CUDA"):
+        if wanted not in names:
+            fail("the Accelerators section has no %s row; it lists %r" % (wanted, names))
+    cpu = rows[names.index("CPU")]
+    if not cpu["state"].endswith("active"):
+        fail("the CPU row reads %r; the CPU lane is always active" % cpu["state"])
+    for row in rows:
+        if not re.match(r"^\d+ %$", row["share"]):
+            fail("the %s row's share of the rate reads %r, not 'N %%'" % (row["title"], row["share"]))
+
+    cuda = next((lane for lane in lanes if lane["lane"] == "cuda"), None)
+    if cuda is None or cuda.get("enabled"):
+        return
+    d.eval("[...%s.querySelectorAll('.replay-switch')].find(b =>"
+           " b.querySelector('.replay-state').textContent.startsWith('CUDA')).click()" % limits)
+    d.wait_for("!!document.querySelector('dialog.modal[open]')",
+               what="a confirmation before CUDA is turned on")
+    said = d.eval("document.querySelector('dialog.modal[open]').innerText")
+    d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
+           ".find(b => b.textContent.trim() === 'Cancel').click()")
+    if not re.search(r"\d+(\.\d)? (MB|GB)", said):
+        fail("turning CUDA on did not say its download size first: %r" % said[:300])
+    still = next(lane for lane in d.api("/api/accel")["lanes"] if lane["lane"] == "cuda")
+    if still.get("enabled"):
+        fail("cancelling the CUDA confirmation turned CUDA on anyway")
+
+
+@finding("8.8", "the Privacy page lists every download, where from, its size, when, and whether it is here")
+def _(d):
+    want = d.api("/api/privacy").get("downloads") or []
+    if not want:
+        fail("/api/privacy lists no downloads; the embedding model at least is one")
+    d.open_view("privacy")
+    rows = d.eval(
+        """
+        (() => {
+          const table = [...document.querySelectorAll('#root table')].find(t =>
+            /can download/.test((t.querySelector('caption') || {}).textContent || ''));
+          if (!table) return null;
+          return [...table.querySelectorAll('tbody tr')]
+            .map(tr => [...tr.cells].map(td => (td.innerText || '').trim()));
+        })()
+        """
+    )
+    if rows is None:
+        fail("the Privacy page has no downloads table")
+    if len(rows) != len(want):
+        fail("the downloads table has %d rows; /api/privacy lists %d" % (len(rows), len(want)))
+    for row, download in zip(rows, want):
+        if row[0] != download["what"] or row[1] != download["source"]:
+            fail("a downloads row reads %r where the route says %r from %r"
+                 % (row[:2], download["what"], download["source"]))
+        if not re.match(r"^[\d.]+ (B|KB|MB|GB)$", row[2]):
+            fail("the size of %r reads %r" % (download["what"], row[2]))
+        if row[3] != download["when"]:
+            fail("when %r happens reads %r, not %r" % (download["what"], row[3], download["when"]))
+        here = "here" if download["cached"] else "not downloaded"
+        if row[4] != here:
+            fail("%r reads %r; the route says it is %s" % (download["what"], row[4], here))
