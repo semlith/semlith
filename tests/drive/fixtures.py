@@ -323,17 +323,22 @@ class Fixtures:
         )
         return self._second
 
-    def unique(self, prefix="solo"):
+    def unique(self, prefix="solo", count=3):
         """A corpus nobody else indexes, so the store it makes is this call's.
 
         For a check that has to name one card on a live page (finding 2.6): the
         Index page grows cards from every other check's runs while this one
         watches, and a store only this call indexes is the one handle on the
         page that stays a handle.
+
+        `count` is for a check that needs the run to stay live while it
+        watches (the 8.x block): files nobody has indexed are embedded, not
+        skipped as unchanged, so a run over a fresh corpus is as long as its
+        file count makes it.
         """
         self._unique += 1
         return self._write_corpus(
-            os.path.join(self.root, "%s-%d" % (prefix, self._unique)), 3, prefix=prefix
+            os.path.join(self.root, "%s-%d" % (prefix, self._unique)), count, prefix=prefix
         )
 
     def doomed(self):

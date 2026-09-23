@@ -3872,3 +3872,527 @@ def _(d):
         for entry in failures:
             if not entry.get("store") or not entry.get("path"):
                 fail("%s reports a failure that names neither the store nor its path" % route)
+
+
+# ---------------------------------------------------------------- 0.28.0
+#
+# The 8.x block: the page checks of 0.28.0's functional items 1.3 to 1.8, run
+# on every operating system. 8.1 to 8.3 are item 1.8, "an Index page that
+# repaints in place".
+#
+# The Index page is the one page that paints itself from the live poll rather
+# than re-rendering, and it did it by rebuilding: every run card was re-appended
+# once a second, the machine-limits card was rebuilt whenever a reason quoted a
+# new free-memory figure, and a save announced itself above the card that had
+# just been typed into. Each of those moves something under the reader, so the
+# checks measure the page the way a reader meets it — the view's scroll offset,
+# where the pressed control sits, what holds focus, and which nodes a
+# MutationObserver sees replaced — rather than reading the code's intentions.
+#
+# Every wait is on a condition and bounded. "Settled" means two `/api/changes`
+# polls have come back since the action and no `/api/index/runs` read is still
+# in flight, counted by wrapping the page's own `fetch`; the one fixed interval
+# is 8.3's sixty seconds, which is the length of the observation the contract
+# asks for and not a wait for anything.
+
+#: A short window, so the Index page scrolls with only a handful of cards on it
+#: and the offset being held is not zero. Chrome does not anchor a scroller
+#: sitting at 0, so an offset of 0 proves nothing about anchoring. Short enough,
+#: too, that with the limits card held at the top of it the page still
+#: overflows once every finished card is gone — at 560 it did not, and "Remove
+#: all finished" clamped the offset to a bottom that had moved, which is the
+#: browser being right and not the page jumping.
+STILL_VIEWPORT = (1280, 440)
+
+#: The page's own scroller: `.view` carries the overflow, see `scrollHolder`.
+VIEW = "document.querySelector('#root .view:not(.loading)')"
+
+STILL_INSTRUMENT = r"""
+(() => {
+  if (window.__still) return true;
+  const still = window.__still = {changes: 0, runs: 0, runsInFlight: 0, loading: 0};
+  const real = window.fetch.bind(window);
+  // Counted when the body has been read, which is the moment before the page
+  // paints from it, so "none in flight" means every answer has been drawn.
+  window.fetch = (input, init) => {
+    const url = String((input && input.url) || input);
+    const runs = url.includes('/api/index/runs');
+    const changes = url.includes('/api/changes');
+    if (runs) still.runsInFlight++;
+    const done = () => {
+      if (runs) { still.runsInFlight--; still.runs++; }
+      if (changes) still.changes++;
+    };
+    return real(input, init).then(response => {
+      const json = response.json.bind(response);
+      response.json = () => json().then(v => { done(); return v; }, e => { done(); throw e; });
+      return response;
+    }, error => { done(); throw error; });
+  };
+  // The loading view, anywhere, at any time from here on. A live update is
+  // never a navigation, so it must never show the page-wide loader.
+  new MutationObserver(records => {
+    for (const record of records) for (const node of record.addedNodes) {
+      if (node.nodeType === 1 && (node.matches('.loading') || node.querySelector('.loading'))) still.loading++;
+    }
+  }).observe(document.body, {childList: true, subtree: true});
+  return true;
+})()
+"""
+
+
+def still_card(store):
+    """A JS expression for the run card of one store, or null."""
+    return (
+        "[...document.querySelectorAll(%s)].find(c =>"
+        " ((c.querySelector('.card-title') || {}).textContent || '').trim() === %s)"
+        % (json.dumps(RUN_CARD), json.dumps(store))
+    )
+
+
+def still_open(d, viewport):
+    """The Index page on a short window, instrumented, with no panel open."""
+    d.set_viewport(*viewport)
+    d.open_view("index", fresh=True)
+    d.eval(STILL_INSTRUMENT)
+    d.wait_for("window.__still.changes >= 1", timeout=15, what="the page's live poll to be running")
+
+
+def settle(d, what):
+    """Wait until every poll the action set off has been painted."""
+    mark = d.eval("window.__still.changes")
+    d.wait_for(
+        "window.__still.changes >= %d && window.__still.runsInFlight === 0" % (mark + 2),
+        timeout=30,
+        what="the page to settle after %s: two polls answered and no runs read in flight" % what,
+    )
+    d.eval("new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(true))))")
+
+
+def hold_at(d, element_js, above):
+    """Scroll the view so `element_js` sits `above` px under its top.
+
+    Returns the offset, which has to be neither 0 nor the bottom: at 0 nothing
+    about the offset is being tested, and at the bottom a page that shrinks
+    has to clamp, which is the browser being right.
+    """
+    at = d.eval(
+        """
+        (() => {
+          const view = %s, target = %s;
+          if (!view || !target) return null;
+          const want = view.scrollTop + target.getBoundingClientRect().top
+            - view.getBoundingClientRect().top - %d;
+          view.scrollTop = Math.max(0, Math.min(want, view.scrollHeight - view.clientHeight));
+          return {at: view.scrollTop, max: view.scrollHeight - view.clientHeight};
+        })()
+        """
+        % (VIEW, element_js, above)
+    )
+    if not at:
+        fail("the Index page or the element to scroll to was not on screen")
+    if at["at"] < 1:
+        fail(
+            "the Index page could not be scrolled at all at this window size "
+            "(%d px of overflow), so there was no offset to hold" % at["max"]
+        )
+    return at["at"]
+
+
+def press(d, element_js, label):
+    """Focus a control and activate it, as a keyboard user does, recording
+    where the page was. `click()` never scrolls, which is the point: the drive's
+    own `click` scrolls its target into view and would move the offset itself.
+    """
+    pressed = d.eval(
+        """
+        (() => {
+          const scope = %s;
+          if (!scope) return 'the element holding it is not on the page';
+          const wanted = %s;
+          const control = scope.matches('button, input') ? scope
+            : [...scope.querySelectorAll('button')].find(b => !b.hidden
+                && b.offsetParent !== null && (b.textContent || '').trim() === wanted);
+          if (!control) return 'nothing on offer reads ' + wanted;
+          const view = %s;
+          window.__still.pressed = control;
+          window.__still.before = {scroll: view.scrollTop, top: control.getBoundingClientRect().top,
+                                   loading: window.__still.loading};
+          control.focus({preventScroll: true});
+          control.click();
+          return 'pressed';
+        })()
+        """
+        % (element_js, json.dumps(label), VIEW)
+    )
+    if pressed != "pressed":
+        fail("pressing %r: %s" % (label, pressed))
+
+
+def held(d, what, focus=False, place=False):
+    """Assert the page held still through `what`, measured against `press`."""
+    seen = d.eval(
+        """
+        (() => {
+          const view = %s, still = window.__still, control = still.pressed;
+          return {scroll: view.scrollTop, before: still.before,
+                  bottom: view.scrollHeight - view.clientHeight,
+                  loading: still.loading - still.before.loading,
+                  connected: control.isConnected,
+                  top: control.isConnected ? control.getBoundingClientRect().top : null,
+                  focused: document.activeElement === control,
+                  active: document.activeElement ? document.activeElement.tagName.toLowerCase()
+                    + ' ' + (document.activeElement.textContent || '').trim().slice(0, 30) : null};
+        })()
+        """
+        % VIEW
+    )
+    before = seen["before"]
+    if seen["loading"]:
+        fail("%s showed the page-wide loading view; a live update is not a navigation" % what)
+    if abs(seen["scroll"] - before["scroll"]) > 0.5:
+        # Said apart, because the remedy differs: a page that shrank under the
+        # offset has to clamp, and the fix is a shorter window in this file.
+        clamped = seen["scroll"] < before["scroll"] and abs(seen["scroll"] - seen["bottom"]) < 1
+        fail(
+            "%s moved the Index page's scroll offset from %.1f to %.1f%s"
+            % (
+                what,
+                before["scroll"],
+                seen["scroll"],
+                " — clamped: the page is now too short to hold the offset, so "
+                "shorten STILL_VIEWPORT" if clamped else "",
+            )
+        )
+    if place and (seen["top"] is None or abs(seen["top"] - before["top"]) > 1):
+        fail(
+            "%s moved the pressed control on screen from y=%.1f to %s: the page "
+            "held its offset but the content under the reader jumped"
+            % (what, before["top"], seen["top"])
+        )
+    if focus and not (seen["connected"] and seen["focused"]):
+        fail(
+            "%s took the focus off the control that was pressed (connected: %s; "
+            "focus is now on %s). A control rebuilt or re-parented by its own "
+            "repaint loses the focus a keyboard user just gave it."
+            % (what, seen["connected"], seen["active"])
+        )
+
+
+def running(d, run_id, store):
+    """Wait for a run to be admitted and reading, so it can be paused."""
+    deadline = time.time() + RUN_APPEARS * 2
+    while time.time() < deadline:
+        run = run_by_id(d, run_id)
+        status = run and str(run.get("status"))
+        if status == "running":
+            return
+        if status in TERMINAL:
+            fail(
+                "the run on %s was %s before it could be paused; the corpus is "
+                "too small for this machine" % (store, status)
+            )
+        time.sleep(0.2)
+    fail("the run on %s was never admitted within %ds" % (store, RUN_APPEARS * 2))
+
+
+def control_run(d, store, action, run_id):
+    d.api("/api/index/control", method="POST", body={"store": store, "action": action, "run": run_id})
+
+
+def wait_status(d, run_id, statuses, what, timeout=60):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = run_by_id(d, run_id)
+        if last and last.get("status") in statuses:
+            return last
+        time.sleep(0.2)
+    fail("%s: the run never reached %s within %ds (last: %s)"
+         % (what, "/".join(sorted(statuses)), timeout, last and last.get("status")))
+
+
+@finding("8.1", "Pause, Resume and the Stop dialog leave the Index page where it was")
+def _(d):
+    """Pause, Resume, the Stop dialog cancelled and the Stop dialog confirmed.
+
+    Each is pressed with the view scrolled so the run's card is on screen and
+    the offset is neither 0 nor the bottom. After each: the offset is where it
+    was, the page never showed its loader, and — for the three where the
+    pressed button is still on offer afterwards — the button is where it was
+    on screen and still holds the focus. Pause turning into Resume is that
+    button's own repaint; it used to be re-parented once a second with every
+    other card, which blurred it.
+    """
+    # Four hundred files nobody has indexed, so the run is still reading when
+    # it is paused, and paused straight away over HTTP so nothing below races
+    # it to the end.
+    run_id, store = start_index(d, d.fixtures.unique("still", count=400))
+    try:
+        running(d, run_id, store)
+        control_run(d, store, "pause", run_id)
+        wait_status(d, run_id, {"paused"}, "pausing %s" % store)
+
+        still_open(d, STILL_VIEWPORT)
+        card = still_card(store)
+        d.wait_for(
+            "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
+            ".some(b => !b.hidden && b.textContent.trim() === 'Resume'); })()" % card,
+            what="the paused run's card, offering Resume",
+        )
+        hold_at(d, card, above=60)
+
+        press(d, card, "Resume")
+        d.wait_for("window.__still.pressed.textContent.trim() === 'Pause'",
+                   what="Resume to turn into Pause")
+        settle(d, "Resume")
+        held(d, "Resume", focus=True, place=True)
+
+        press(d, card, "Pause")
+        d.wait_for("window.__still.pressed.textContent.trim() === 'Resume'",
+                   what="Pause to turn into Resume")
+        wait_status(d, run_id, {"paused"}, "Pause on the card")
+        settle(d, "Pause")
+        held(d, "Pause", focus=True, place=True)
+
+        press(d, card, "Stop")
+        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
+        d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
+               ".find(b => b.textContent.trim() === 'Cancel').click()")
+        d.wait_for("!document.querySelector('dialog.modal')", what="the Stop dialog to close")
+        settle(d, "the Stop dialog cancelled")
+        # The platform hands the focus back to the button that opened the
+        # dialog, as long as the page has not replaced that button meanwhile.
+        held(d, "the Stop dialog cancelled", focus=True, place=True)
+        if run_by_id(d, run_id).get("status") in TERMINAL:
+            fail("cancelling the Stop dialog stopped the run anyway")
+
+        press(d, card, "Stop")
+        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the Stop dialog")
+        d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
+               ".find(b => b.textContent.trim() === 'Stop and undo').click()")
+        wait_status(d, run_id, {"stopped"}, "Stop and undo")
+        d.wait_for(
+            "(() => { const c = %s; return !!c && [...c.querySelectorAll('button')]"
+            ".some(b => !b.hidden && b.offsetParent !== null && b.textContent.trim() === 'Remove'); })()"
+            % card,
+            what="the stopped card to offer Remove",
+        )
+        settle(d, "the Stop dialog confirmed")
+        # Not the focus: a stopped run has no Stop to hold it.
+        held(d, "the Stop dialog confirmed")
+    finally:
+        d.reset_viewport()
+        stop_quietly(d, store)
+
+
+@finding("8.2", "a limit saved, a run finishing and a card removed leave the Index page where it was")
+def _(d):
+    """A limit saved, a run finishing, a card removed, and Remove all finished.
+
+    The view is scrolled so the machine-limits card is at the top of it, which
+    is where a reader is when they change a limit, and every card is under it.
+    A save used to announce itself on the page's note above the card, pushing
+    the card being typed into down a line; the queued-runs note emptying when a
+    run finished did the same to every card; and a rebuilt limits card put a
+    new input in place of the focused one.
+    """
+    # A finished card to remove, made before the page is open so its arrival is
+    # not one of the things being measured.
+    dismiss = indexed_fixture(d, d.fixtures.unique("dismiss"))
+    run_id, store = start_index(d, d.fixtures.unique("finishing", count=200))
+    try:
+        running(d, run_id, store)
+        control_run(d, store, "pause", run_id)
+        wait_status(d, run_id, {"paused"}, "pausing %s" % store)
+
+        still_open(d, STILL_VIEWPORT)
+        d.open_index_panel("Machine limits")
+        d.wait_for("!!(%s)" % still_card(store), what="the paused run's card")
+        d.wait_for("!!(%s)" % still_card(dismiss), what="the finished card for %s" % dismiss)
+        limits = "document.querySelector(%s).closest('.card')" % json.dumps(RUNS_AT_ONCE)
+        hold_at(d, limits, above=8)
+
+        if d.eval("document.querySelector(%s).disabled" % json.dumps(RUNS_AT_ONCE)):
+            skip("runs at once is set by this daemon's environment, so the page cannot save it")
+        # The value it already holds, so the drive leaves the machine as it
+        # found it; `change` saves whatever the field says.
+        field = "document.querySelector(%s)" % json.dumps(RUNS_AT_ONCE)
+        press(d, field, "")
+        d.eval(
+            "(() => { const f = window.__still.pressed;"
+            " f.dispatchEvent(new Event('input', {bubbles: true}));"
+            " f.dispatchEvent(new Event('change', {bubbles: true})); })()"
+        )
+        d.wait_for(
+            "[...document.querySelectorAll('#root .view .note')]"
+            ".some(n => (n.textContent || '').startsWith('Saved.'))",
+            what="the save to be answered",
+        )
+        settle(d, "a limit saved")
+        held(d, "a limit saved", focus=True, place=True)
+
+        press(d, still_card(store), "Resume")
+        d.wait_for(
+            "(() => { const c = %s; return !!c && /\\bdone\\b/.test(c.querySelector('.pill').textContent); })()"
+            % still_card(store),
+            timeout=RUN_FINISHES,
+            what="the run on %s to finish on the page" % store,
+        )
+        settle(d, "a run finishing")
+        held(d, "a run finishing")
+
+        press(d, still_card(dismiss), "Remove")
+        d.wait_for("!(%s)" % still_card(dismiss), what="the removed card to go")
+        settle(d, "a card removed")
+        held(d, "a card removed")
+
+        press(d, "document.querySelector('#root .view')", "Remove all finished")
+        d.wait_for(
+            "![...document.querySelectorAll(%s)].some(c => [...c.querySelectorAll('button')]"
+            ".some(b => !b.hidden && b.offsetParent !== null && b.textContent.trim() === 'Remove'))"
+            % json.dumps(RUN_CARD),
+            timeout=60,
+            what="every finished card to go",
+        )
+        settle(d, "Remove all finished")
+        held(d, "Remove all finished")
+    finally:
+        d.reset_viewport()
+        stop_quietly(d, store)
+
+
+#: The "threads each" field, typed into by 8.3 and never saved.
+THREADS_EACH = 'input[aria-label="threads each"]'
+
+
+@finding("8.3", "over a live run nothing on the Index page is rebuilt, detached or retyped")
+def _(d):
+    """Sixty seconds of a live run under a MutationObserver.
+
+    The machine-limits card may change its words but not its nodes: no child
+    of it, at any depth, is added or removed. No run card is taken out of the
+    list, and no part of a card outside its log — the log is the one thing
+    that is meant to grow — is rebuilt. And the loading view never appears.
+
+    Through all of it "threads each" holds a number that has been typed and not
+    saved, with the focus in it. The limits card used to be rebuilt about once
+    a second, so what was being typed went with the input it was typed into.
+
+    Fifteen hundred files nobody has indexed keep the run reading for the
+    whole minute on any machine the drive runs on; the check fails rather
+    than passes if the page did not repaint often enough to prove anything.
+    """
+    run_id, store = start_index(d, d.fixtures.unique("steady", count=1500))
+    try:
+        running(d, run_id, store)
+        still_open(d, STILL_VIEWPORT)
+        d.open_index_panel("Machine limits")
+        d.wait_for("!!(%s)" % still_card(store), what="the live run's card")
+        if d.eval("document.querySelector(%s).disabled" % json.dumps(THREADS_EACH)):
+            skip("threads each is set by this daemon's environment, so it cannot be typed into")
+        # Typed and not saved: `input` without `change`, which is where a
+        # person is between two keystrokes. Put back before the focus leaves,
+        # so the blur has nothing to save.
+        typed = d.eval(
+            """
+            (() => {
+              const field = document.querySelector(%s);
+              window.__still.typed = {field, was: field.value};
+              field.focus({preventScroll: true});
+              field.value = String(Number(field.value) + 1);
+              field.dispatchEvent(new Event('input', {bubbles: true}));
+              return field.value;
+            })()
+            """
+            % json.dumps(THREADS_EACH)
+        )
+        seen = d.eval(
+            """
+            new Promise(done => {
+              const still = window.__still, loading = still.loading, runs = still.runs;
+              const limits = document.querySelector(%s).closest('.card');
+              const cards = document.querySelector('.cards');
+              const found = {limits: [], detached: [], rebuilt: []};
+              const name = n => n.nodeType === 1 ? n.tagName.toLowerCase()
+                + (n.className ? '.' + String(n.className).split(' ').join('.') : '') : '#text';
+              const observer = new MutationObserver(records => {
+                for (const r of records) {
+                  if (r.type !== 'childList') continue;
+                  if (limits.contains(r.target)) {
+                    found.limits.push(name(r.target) + ' lost ' + [...r.removedNodes].map(name).join(',')
+                      + ' gained ' + [...r.addedNodes].map(name).join(','));
+                  } else if (r.target === cards) {
+                    for (const n of r.removedNodes) found.detached.push(
+                      (n.querySelector && (n.querySelector('.card-title') || {}).textContent) || name(n));
+                  } else if (cards.contains(r.target) && !r.target.closest('.log')) {
+                    found.rebuilt.push(name(r.target));
+                  }
+                }
+              });
+              observer.observe(limits, {childList: true, subtree: true});
+              observer.observe(cards, {childList: true, subtree: true});
+              setTimeout(() => {
+                observer.takeRecords();
+                observer.disconnect();
+                done({limits: found.limits.slice(0, 5), limitsCount: found.limits.length,
+                      detached: found.detached.slice(0, 5), detachedCount: found.detached.length,
+                      rebuilt: [...new Set(found.rebuilt)].slice(0, 5), rebuiltCount: found.rebuilt.length,
+                      loading: still.loading - loading, paints: still.runs - runs});
+              }, 60000);
+            })
+            """
+            % json.dumps(RUNS_AT_ONCE),
+            timeout=120,
+        )
+        kept = d.eval(
+            """
+            (() => {
+              const t = window.__still.typed, now = document.querySelector(%s);
+              const kept = {same: now === t.field, focused: document.activeElement === t.field,
+                            value: t.field.value};
+              t.field.value = t.was;
+              t.field.blur();
+              return kept;
+            })()
+            """
+            % json.dumps(THREADS_EACH)
+        )
+        if seen["loading"]:
+            fail("the loading view appeared %d time(s) during a live run" % seen["loading"])
+        if seen["limitsCount"]:
+            fail(
+                "the machine-limits card had %d child replacement(s) in a minute with "
+                "no limit changed, e.g. %s. A card rebuilt under the cursor cannot be "
+                "typed into." % (seen["limitsCount"], seen["limits"])
+            )
+        if seen["detachedCount"]:
+            fail(
+                "%d run card(s) were taken out of the list in a minute where the "
+                "order never changed: %s. A detached card loses its focus and its "
+                "log's scroll position." % (seen["detachedCount"], seen["detached"])
+            )
+        if seen["rebuiltCount"]:
+            fail(
+                "parts of a run card outside its log were rebuilt %d time(s) "
+                "instead of updated in place: %s" % (seen["rebuiltCount"], seen["rebuilt"])
+            )
+        if not (kept["same"] and kept["focused"] and kept["value"] == typed):
+            fail(
+                "a minute of repaints did not leave the field being typed into alone: "
+                "the same input %s, it %s the focus, and it holds %r where %r was typed"
+                % (
+                    "is still there" if kept["same"] else "was replaced",
+                    "kept" if kept["focused"] else "lost",
+                    kept["value"],
+                    typed,
+                )
+            )
+        if seen["paints"] < 10:
+            fail(
+                "the page read the runs only %d time(s) in the minute, so the "
+                "observation proves nothing about repainting" % seen["paints"]
+            )
+    finally:
+        d.reset_viewport()
+        stop_quietly(d, store)

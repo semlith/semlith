@@ -106,6 +106,62 @@ function fill(node, ...kids) {
   return node;
 }
 
+/* Write words into a node that a live poll keeps rewriting.
+ *
+ * `textContent =` swaps the node's text child for a new one even when the words
+ * are the same, so a card written once a second replaced a child per field per
+ * second — which a live region re-announces, a selection loses and a
+ * MutationObserver reports as churn. This edits the one text node's data, and
+ * only when the words moved. A bare Text node works too, for the words inside
+ * a pill that sit beside its dot. */
+function setText(node, value) {
+  const text = value === null || value === undefined ? "" : String(value);
+  if (node.nodeType === Node.TEXT_NODE) {
+    if (node.data !== text) node.data = text;
+    return node;
+  }
+  const only = node.firstChild;
+  if (only && only === node.lastChild && only.nodeType === Node.TEXT_NODE) {
+    if (only.data !== text) only.data = text;
+  } else if (node.textContent !== text) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+/* Put a parent's children into `want`'s order, moving only what is out of place.
+ *
+ * Appending every child in turn re-parents all of them on every call, and a
+ * node that is taken out and put back loses its focus and the scroll position
+ * of everything inside it. The Index page did that to every run card once a
+ * second, so a focused Pause button was blurred before anyone could press it
+ * twice and a log scrolled back to read was thrown to its top.
+ *
+ * A node not yet in `parent` is inserted where it belongs, which is an
+ * insertion and not a move. The node holding focus is never the one moved:
+ * the others are moved around it instead.
+ *
+ * A node named twice is placed once. Two answers can name one run — a store
+ * listed twice while it is being opened — and placing the same node at two
+ * positions is a loop that never ends and a tab that stops answering. */
+function arrange(parent, want) {
+  const placed = new Set();
+  let i = 0;
+  for (const node of want) {
+    if (!node || placed.has(node)) continue;
+    placed.add(node);
+    while (parent.children[i] !== node) {
+      const here = parent.children[i];
+      if (here && node.parentNode === parent && node.contains(document.activeElement)) {
+        parent.append(here);
+      } else {
+        parent.insertBefore(node, here || null);
+      }
+    }
+    i++;
+  }
+}
+
 /* The session token.
  *
  * It arrives once, in the query of the URL the daemon printed, and from then on
@@ -1291,13 +1347,23 @@ function startLive() {
  * One fetch serves both readers — the navigation's count on every page, and
  * the Index page's cards — because two fetches of one route is how a count in
  * the sidebar disagrees with the cards beside it. */
+let runsAsked = 0;
+let runsPainted = 0;
+
 async function refreshRuns() {
+  // Numbered, because two can be in flight: the poll's, and the one a button
+  // makes after its own POST. The poll's can be the older question and still
+  // arrive second, and painting it put "Pause" back on a button that had just
+  // turned to "Resume" for a second before the next poll turned it back.
+  const mine = ++runsAsked;
   let data;
   try {
     data = await api("/api/index/runs");
   } catch (_) {
     return state.runs;
   }
+  if (mine < runsPainted) return state.runs;
+  runsPainted = mine;
   state.runs = data;
   paintRunCount();
   if (state.onRuns) state.onRuns(data);
@@ -5864,7 +5930,11 @@ function runCard(run, controls) {
   const status = el("span", { class: "meta" });
   const elapsed = el("span", { class: "meta" });
   const log = el("div", { class: "log", "aria-live": "polite" });
+  // What a refused control said, on the card it was pressed on.
+  const problem = el("div", { class: "note bad" });
   const badge = pill("", "good");
+  // `pill` writes its text as the last child, after the dot.
+  const badgeWord = badge.lastChild;
   const where = el("span", { class: "meta" });
 
   const pause = el("button", { class: "button secondary small", type: "button" });
@@ -5900,7 +5970,7 @@ function runCard(run, controls) {
     const ms = ticking ? shown + (Date.now() - readAt) : shown;
     // Under a second, tenths. `spell` counts in whole seconds, so every short
     // run read `00:01` whatever it had actually taken.
-    elapsed.textContent = ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : spell(ms);
+    setText(elapsed, ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : spell(ms));
   }
 
   function absorb(next) {
@@ -5918,7 +5988,7 @@ function runCard(run, controls) {
     // opposite of what happened.
     const width = finished ? 100 : next.status === "stopped" ? 0 : scanned;
     bar.style.width = `${width.toFixed(1)}%`;
-    pct.textContent = `${Math.round(width)}%`;
+    setText(pct, `${Math.round(width)}%`);
     // What the bar is a bar of. The card states files and chunks elsewhere;
     // the bar itself said only a percentage of something unnamed.
     track.setAttribute(
@@ -5930,16 +6000,16 @@ function runCard(run, controls) {
           )} chunk${next.chunks === 1 ? "" : "s"} written · ${Math.round(width)}%`,
     );
 
-    // Rebuilt rather than assigned: a pill carries its own dot, and setting
-    // the text alone would take the dot away with it.
-    fill(
-      badge,
-      el("i", {}),
+    // The pill's own text node, beside its dot. It used to be rebuilt dot and
+    // all on every poll, which replaced two children a second on every card.
+    setText(
+      badgeWord,
       next.status === "queued" && next.position
         ? `queued · ${next.position} in line`
         : RUN_WORD[next.status] || next.status,
     );
-    badge.className = `pill ${RUN_TONE[next.status] || "warn"}`;
+    const tone = `pill ${RUN_TONE[next.status] || "warn"}`;
+    if (badge.className !== tone) badge.className = tone;
 
     /* Chunks a second, to one decimal under ten so a short run reads as
      * "2.4 chunks/s" rather than rounding to nothing and dropping the field
@@ -5950,23 +6020,28 @@ function runCard(run, controls) {
     // The phase, when the run is doing something other than reading files.
     // Twenty seconds of a bar not moving is a hang unless the card says what
     // it is: every two hundred files the run rewrites its shards.
-    status.textContent = next.phase
-      ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} ·`
-      : next.total
-        ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · ${rate} chunks/s ·`
-        : RUN_WORD[next.status] || next.status;
-    where.textContent = (next.paths || []).join(", ");
+    setText(
+      status,
+      next.phase
+        ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} ·`
+        : next.total
+          ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · ${rate} chunks/s ·`
+          : RUN_WORD[next.status] || next.status,
+    );
+    setText(where, (next.paths || []).join(", "));
 
     const held = next.status === "paused";
     const live = TICKING.has(next.status);
-    pause.textContent = held ? "Resume" : "Pause";
+    // In place, so the button somebody just pressed is still the focused one
+    // when it turns from Pause to Resume.
+    setText(pause, held ? "Resume" : "Pause");
     pause.hidden = !live || next.status === "queued";
     // A queued run has embedded nothing, so taking it out of the line costs
     // nothing and is not the same act as stopping one that is going.
     // "Take out of the queue" rather than "Remove": a finished card's Remove
     // dismisses the card and touches nothing, and one word for both put two
     // different acts on one page under one label.
-    stop.textContent = next.status === "queued" ? "Take out of the queue" : "Stop";
+    setText(stop, next.status === "queued" ? "Take out of the queue" : "Stop");
     stop.hidden = !live;
     stop.disabled = next.status === "stopping";
     // A run that has finished has nothing to pause and nothing to stop. It
@@ -5987,7 +6062,7 @@ function runCard(run, controls) {
   function paintFold() {
     log.hidden = !open;
     where.hidden = !open;
-    expand.textContent = open ? "Hide the log" : "Show the log";
+    setText(expand, open ? "Hide the log" : "Show the log");
     expand.setAttribute("aria-expanded", String(open));
   }
 
@@ -6034,6 +6109,7 @@ function runCard(run, controls) {
       stop,
       remove,
     ),
+    problem,
     where,
     log,
   );
@@ -6044,7 +6120,7 @@ function runCard(run, controls) {
     if (ticking) paintClock();
   }, 1000);
 
-  return { node, absorb, log, isOpen: () => open };
+  return { node, absorb, log, problem, isOpen: () => open };
 }
 
 /** Append one log line, keeping the reader's place if they have scrolled up. */
@@ -6120,16 +6196,36 @@ function capped(limit) {
     : "Past it the machine would be promising work it cannot carry.";
 }
 
+/* The moving free-memory figure, taken out of a limit's reason.
+ *
+ * The daemon writes how much memory is free now into two of the three
+ * reasons, and that figure moves every second. A sentence that changes every
+ * second under a field is a sentence nobody can read, and it re-wrapped the
+ * card while it was being typed into. The figure is on the card once, in the
+ * subtitle, where it updates in place; the reasons keep the rule and lose the
+ * reading.
+ *
+ * ponytail: rewrites the daemon's prose (`derive` in src/system.rs), so a
+ * rewording there makes these two patterns miss and the figure comes back in
+ * the reason — visibly, and harmlessly. The durable fix is the daemon not
+ * writing the figure into the reason, and this goes when it does. */
+function steady(reason) {
+  return String(reason || "")
+    .replace(/^[\d.]+ [GM]iB free (?=minus|is under)/, "free memory ")
+    .replace(/, and (?:none|[\d.]+ [GM]iB) is free beyond the reserve out of the [\d.]+ [GM]iB free now$/, "");
+}
+
 function settingField(key, label, limit, onSave) {
-  const fixed = limit.source === "environment";
+  /* The limit in force, replaced by `update` on every poll. The field is
+   * built once and patched, never rebuilt: a field rebuilt under the cursor
+   * cannot be typed into. */
+  let current = limit;
+  /* Typed into and not yet saved. A dirty field is the reader's, and the poll
+   * leaves its value alone until `change` hands it to the daemon. */
+  let dirty = false;
   const input = el("input", {
     type: "number",
     min: "1",
-    // The field will not go above what the machine will accept, and the route
-    // clamps it as well — a `max` on an input is a courtesy, not a control.
-    max: String(limit.ceiling),
-    value: String(limit.value),
-    disabled: fixed,
     "aria-label": label,
   });
   const why = el("div", { class: "note" });
@@ -6144,6 +6240,7 @@ function settingField(key, label, limit, onSave) {
    * will not go past it, so there is nothing left to warn about.
    */
   function explain() {
+    const limit = current;
     const asked = Number(input.value);
     // Where the value in force came from, on every branch. A saved value above
     // the derived one takes the second branch every time, so a branch that did
@@ -6151,46 +6248,70 @@ function settingField(key, label, limit, onSave) {
     // trying to work out whether their setting took effect — while the daemon's
     // own line calls the same value saved.
     const held = limit.source === "saved" && asked === limit.value ? `${limit.value} saved. ` : "";
-    if (fixed) {
-      why.className = "note";
-      why.textContent = `Set in this daemon's environment, so the page leaves it alone. This machine would derive ${limit.derived} — ${limit.reason}`;
+    if (limit.source === "environment") {
+      setText(why, `Set in this daemon's environment, so the page leaves it alone. This machine would derive ${limit.derived} — ${limit.reason}`);
       return;
     }
     if (asked >= limit.ceiling) {
       // Not red either. It is the top of the range, which is a fact about the
       // machine rather than a mistake by the person.
-      why.className = "note";
-      why.textContent = `${held}${limit.ceiling} is as high as this machine goes. ${capped(limit)}`;
+      setText(why, `${held}${limit.ceiling} is as high as this machine goes. ${capped(limit)}`);
       return;
     }
+    // The memory ceiling is what is free now less the reserve, so as a number
+    // it moves every second like the free figure it comes from. It is said as
+    // the rule here; the input's `max` still carries the number.
+    const room = key === "index_memory_mb" ? "what is free now, less the reserve," : `the ${limit.ceiling}`;
     if (asked > limit.derived) {
-      why.className = "note";
-      why.textContent = `${held}Above the ${limit.derived} this machine would pick on its own, and under the ${limit.ceiling} it will allow — ${limit.reason} Yours to set; it applies to the next run.`;
+      setText(why, `${held}Above the ${limit.derived} this machine would pick on its own, and under ${room} it will allow — ${limit.reason} Yours to set; it applies to the next run.`);
       return;
     }
-    why.className = "note";
     const from =
       limit.source === "saved"
         ? `${limit.value} saved, and this machine derives ${limit.derived}`
         : `${limit.derived}, derived`;
-    why.textContent = `${from} — ${limit.reason} Room up to ${limit.ceiling}.`;
+    setText(
+      why,
+      `${from} — ${limit.reason} Room up to ${key === "index_memory_mb" ? "what is free now, less the reserve" : limit.ceiling}.`,
+    );
   }
 
-  input.addEventListener("input", explain);
+  /** Take the daemon's latest reading, touching only what it moved. */
+  function update(next) {
+    current = { ...next, reason: steady(next.reason) };
+    // The field will not go above what the machine will accept, and the route
+    // clamps it as well — a `max` on an input is a courtesy, not a control.
+    const max = String(current.ceiling);
+    if (input.max !== max) input.max = max;
+    const fixed = current.source === "environment";
+    if (input.disabled !== fixed) input.disabled = fixed;
+    const value = String(current.value);
+    if (!dirty && document.activeElement !== input && input.value !== value) input.value = value;
+    explain();
+  }
+
+  input.addEventListener("input", () => {
+    dirty = true;
+    explain();
+  });
   input.addEventListener("change", () => {
-    const asked = Math.min(limit.ceiling, Math.max(1, Number(input.value) || 1));
+    const asked = Math.min(current.ceiling, Math.max(1, Number(input.value) || 1));
     input.value = String(asked);
+    dirty = false;
     explain();
     onSave(key, asked);
   });
-  explain();
+  update(limit);
 
-  return el(
-    "div",
-    { class: "setting" },
-    el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
-    why,
-  );
+  return {
+    update,
+    node: el(
+      "div",
+      { class: "setting" },
+      el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
+      why,
+    ),
+  };
 }
 
 async function indexView() {
@@ -6199,7 +6320,19 @@ async function indexView() {
 
   const note = el("div", { class: "note" });
   const cards = el("div", { class: "cards" });
-  const queueCard = el("div", { class: "card pad", hidden: true });
+  const queueList = el("div", { class: "queue" });
+  /** Waiting runs' rows, by run id. */
+  const queued = new Map();
+  const queueCard = el(
+    "div",
+    { class: "card pad", hidden: true },
+    el("span", { class: "eyebrow", text: "Waiting" }),
+    el("p", {
+      class: "subtitle",
+      text: "In the order they will start. Each one begins by itself the moment a run finishes, whether or not this page is open.",
+    }),
+    queueList,
+  );
   const settingsCard = el("div", { class: "card pad", hidden: true });
   const urlCard = el("div", { class: "card pad", hidden: true });
   const urlNote = el("div", { class: "note" });
@@ -6247,10 +6380,16 @@ async function indexView() {
   }
 
   async function control(store, action, run) {
+    // A card's own control answers on its own card, under its buttons. On the
+    // page's note the answer appeared above every card and pushed them all
+    // down a line — the refusal a Pause meets when its run finishes under it.
+    const card = drawn.get(run);
     try {
       await post("/api/index/control", { store, action, run });
+      if (card) setText(card.problem, "");
     } catch (e) {
-      complain(e.message);
+      if (card) setText(card.problem, e.message);
+      else complain(e.message);
     }
     await refreshRuns();
   }
@@ -6304,8 +6443,9 @@ async function indexView() {
             if (card) catchUpLog(run, card);
           },
         });
+        // Not appended here: `arrange` below inserts it where the order puts
+        // it, so a new card is one insertion rather than an append and a move.
         drawn.set(run.id, card);
-        cards.append(card.node);
       } else {
         card.absorb(run);
       }
@@ -6336,13 +6476,18 @@ async function indexView() {
       })
       .map((run) => drawn.get(run.id)?.node)
       .filter(Boolean);
-    for (const node of order) cards.append(node);
+    // Only what is out of place moves. Every card used to be re-appended once
+    // a second, which blurred the button under the reader's keyboard and
+    // threw every log back to its top.
+    arrange(cards, order);
 
     // "N runs queued." is an answer to a button, and it stopped being true the
-    // moment the last run finished.
+    // moment the last run finished. Its words go and its line stays: emptied,
+    // the note collapsed and pulled every card under it up by a line at the
+    // moment a run finished — the moment somebody is watching the cards.
     if (transient && !runs.some((run) => TICKING.has(run.status)) && !(data?.queue || []).length) {
       transient = false;
-      say("");
+      say("\u00a0");
     }
 
     clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
@@ -6356,94 +6501,132 @@ async function indexView() {
      * The design draws the run card in both states; this is its idle one. */
     idle.hidden = runs.length > 0 || (data?.queue || []).length > 0;
 
+    /* The queue, one row per waiting run, kept across polls like the cards.
+     * It was rebuilt whole on every poll while anything waited, so the "Take
+     * out of the queue" button under the pointer was a different button each
+     * second and lost its focus with the one before it. A row's store and
+     * paths are fixed for its run; only its place in line moves. */
     const queue = data?.queue || [];
     queueCard.hidden = !queue.length;
-    if (queue.length) {
-      fill(
-        queueCard,
-        el("span", { class: "eyebrow", text: "Waiting" }),
-        el("p", {
-          class: "subtitle",
-          text: "In the order they will start. Each one begins by itself the moment a run finishes, whether or not this page is open.",
-        }),
-        el(
-          "div",
-          { class: "queue" },
-          queue.map((row) =>
-            el(
-              "div",
-              { class: "queue-row" },
-              el("span", { class: "key", text: `${row.position}` }),
-              el("span", { class: "name", text: row.store }),
-              pathCell((row.paths || []).join(", ")),
-              el("span", { class: "spacer" }),
-              el("button", {
-                class: "button secondary small",
-                type: "button",
-                text: "Take out of the queue",
-                // Nothing of it was embedded, so there is nothing to undo and
-                // nothing to confirm.
-                onclick: () => control(row.store, "dequeue", row.run),
-              }),
-            ),
+    const waiting = new Set();
+    for (const row of queue) {
+      const key = String(row.run ?? row.store);
+      waiting.add(key);
+      let drawnRow = queued.get(key);
+      if (!drawnRow) {
+        const position = el("span", { class: "key" });
+        drawnRow = {
+          position,
+          node: el(
+            "div",
+            { class: "queue-row" },
+            position,
+            el("span", { class: "name", text: row.store }),
+            pathCell((row.paths || []).join(", ")),
+            el("span", { class: "spacer" }),
+            el("button", {
+              class: "button secondary small",
+              type: "button",
+              text: "Take out of the queue",
+              // Nothing of it was embedded, so there is nothing to undo and
+              // nothing to confirm.
+              onclick: () => control(row.store, "dequeue", row.run),
+            }),
           ),
-        ),
-      );
+        };
+        queued.set(key, drawnRow);
+      }
+      setText(drawnRow.position, `${row.position}`);
     }
+    for (const [key, row] of queued) {
+      if (waiting.has(key)) continue;
+      row.node.remove();
+      queued.delete(key);
+    }
+    arrange(
+      queueList,
+      queue.map((row) => queued.get(String(row.run ?? row.store)).node),
+    );
 
     paintSettings(data?.limits);
   }
 
   async function saveSetting(key, value) {
+    // The answer is said inside the card, under the three fields. On the
+    // page's note it appeared above everything, pushing the card that had just
+    // been typed into down a line at the moment it was being looked at.
     try {
       const answer = await post("/api/index/settings", { [key]: value });
-      say("Saved. It applies to the next run queued.");
+      settingsNote.className = "note";
+      setText(settingsNote, "Saved. It applies to the next run queued.");
       paintSettings(answer.limits);
     } catch (e) {
-      complain(e.message);
+      settingsNote.className = "note bad";
+      setText(settingsNote, e.message);
     }
   }
 
-  let limitsDrawn = null;
+  /* The machine-limits card, built on the first reading and patched in place
+   * after it.
+   *
+   * It used to be rebuilt with `fill` whenever any field of any limit moved,
+   * and one of them always did: two reasons quoted the memory free now, and
+   * the memory ceiling is derived from it, so the card was torn down and
+   * rebuilt about once a second — under the cursor of anyone typing a number
+   * into it, and with a new input in place of the focused one. Now a changed
+   * number is a changed text node and nothing else. */
+  const settingsNote = el("div", { class: "note" });
+  let limitsCard = null;
   function paintSettings(limits) {
     if (!limits) return;
-    // Redrawn only when a value or its reason actually changed: the memory
-    // figure moves every second, and a field that rebuilds under the cursor
-    // cannot be typed into.
-    // Every field of every limit, not just the three values.
-    //
-    // `embed_threads` is derived from the runs actually in force, so changing
-    // `runs at once` changes the *sentence* under `threads each` while leaving
-    // its number alone. Keying the redraw on the numbers alone meant the panel
-    // skipped exactly the repaint that would have shown one field answering
-    // another, which is the whole of why these three live in one card.
-    const signature = JSON.stringify([
-      limits.runs_at_once,
-      limits.embed_threads,
-      limits.index_memory_mb,
-    ]);
-    if (signature === limitsDrawn) return;
-    limitsDrawn = signature;
     const machine = limits.machine || {};
-    fill(
-      settingsCard,
-      el("span", { class: "eyebrow", text: "How hard this machine may work" }),
-      el("p", {
-        class: "subtitle",
-        text: `${machine.logical_cores} logical core(s), ${n(
-          machine.total_memory_mb,
-        )} MiB of memory, ${n(
-          machine.available_memory_mb,
-        )} MiB free now. Each value below starts from that and is yours to change — they answer each other, so raising one moves what the others suggest. Each stops where this machine does.`,
-      }),
-      el(
-        "div",
-        { class: "settings" },
-        settingField("runs_at_once", "runs at once", limits.runs_at_once, saveSetting),
-        settingField("embed_threads", "threads each", limits.embed_threads, saveSetting),
-        settingField("index_memory_mb", "MiB per store", limits.index_memory_mb, saveSetting),
-      ),
-    );
+    if (!limitsCard) {
+      const cores = document.createTextNode("");
+      const total = document.createTextNode("");
+      const free = document.createTextNode("");
+      limitsCard = {
+        cores,
+        total,
+        free,
+        fields: [
+          settingField("runs_at_once", "runs at once", limits.runs_at_once, saveSetting),
+          settingField("embed_threads", "threads each", limits.embed_threads, saveSetting),
+          settingField("index_memory_mb", "MiB per store", limits.index_memory_mb, saveSetting),
+        ],
+      };
+      fill(
+        settingsCard,
+        el("span", { class: "eyebrow", text: "How hard this machine may work" }),
+        el(
+          "p",
+          { class: "subtitle" },
+          cores,
+          " logical core(s), ",
+          total,
+          " MiB of memory, ",
+          free,
+          " MiB free now. Each value below starts from that and is yours to change — they answer each other, so raising one moves what the others suggest. Each stops where this machine does.",
+        ),
+        el(
+          "div",
+          { class: "settings" },
+          limitsCard.fields.map((field) => field.node),
+        ),
+        settingsNote,
+      );
+    }
+    // Every field of every limit, every time, and each patch is a no-op when
+    // nothing moved. `embed_threads` is derived from the runs actually in
+    // force, so changing `runs at once` changes the *sentence* under `threads
+    // each` while leaving its number alone — which is why the three are
+    // patched together rather than only the one that was saved.
+    setText(limitsCard.cores, `${machine.logical_cores}`);
+    setText(limitsCard.total, n(machine.total_memory_mb));
+    setText(limitsCard.free, n(machine.available_memory_mb));
+    const [runsAtOnce, threads, memory] = limitsCard.fields;
+    runsAtOnce.update(limits.runs_at_once);
+    threads.update(limits.embed_threads);
+    memory.update(limits.index_memory_mb);
   }
 
   // The path field takes one path per line, so several folders can be started
