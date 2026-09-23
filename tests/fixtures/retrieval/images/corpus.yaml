@@ -1,0 +1,30 @@
+# The image class's pinned corpus.
+#
+# Separate from `../corpus/` on purpose, and the reason is the whole of why this
+# class exists at all.
+#
+# `../corpus/` is the 0.21.0 tree, and its `files` and `bytes` are asserted on
+# every run because every retrieval figure the repository publishes is a reading
+# of that snapshot as much as of the ranking. Adding eight pictures to it would
+# have rebaselined hit@1, hit@3, hit@8, bytes per answer and the resolution
+# census in one commit — and the release that did it could no longer claim its
+# predecessor's numbers reproduced, which is that release's own gate.
+#
+# So the image class is measured over this tree instead, which has a hash of its
+# own and moves only when someone regenerates it deliberately.
+#
+# It is generated rather than collected: `generate.py` draws all eight pictures
+# from arithmetic, so the corpus is reproducible byte for byte on any machine
+# and carries nobody else's licence. The three text files beside them are hand
+# written and are not optional — #122 was a *source file* outranking a picture,
+# and a picture that wins against nothing proves nothing.
+#
+# Regenerating it re-pins every span in `questions.yaml`:
+#
+#   python3 tests/fixtures/retrieval/images/generate.py
+#   # then update files/bytes below from what it prints, plus the three text files
+
+commit: generated
+tag: v0.27.0
+files: 11
+bytes: 13428

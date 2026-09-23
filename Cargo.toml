@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.26.1"
+version = "0.27.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -116,6 +116,13 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 # release archive in this process rather than through whatever `tar` is on
 # PATH. `rust_backend` keeps it from linking a system zlib.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# The PDF half of `semlith report`. Chosen for what it does not bring: no
+# dependencies at all, no build script, no system library and no font file, so
+# it cross-compiles to the three release targets like the rest of the crate and
+# `cargo publish` has nothing to object to. It writes PDF objects rather than
+# laying anything out, which is why `report::pdf` typesets in a fixed-width
+# base-14 face — the layout is arithmetic, not a font metrics table.
+pdf-writer = "0.15.0"
 
 # Already in the tree transitively; named here so `system::read` can ask
 # `GlobalMemoryStatusEx` how much memory this machine has, which Windows
@@ -144,6 +151,12 @@ dynamic-ort = ["fastembed/ort-load-dynamic", "dep:ort"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# The same version the crate already depends on to read a PDF into the store,
+# named again here so the report's own PDF is checked with the extractor this
+# binary already ships rather than with whatever happens to be on PATH — a
+# report semlith writes has to be a report semlith can read back. Compiles
+# nothing that was not already being compiled.
+pdf-extract = "0.12.0"
 # The same version the crate itself already depends on, named again here so a
 # test can build a `.docx` — a zip of XML — to prove the credential scan reads
 # what a document reader produced rather than only what a text file holds.

@@ -1274,6 +1274,39 @@ pub mod changes {
         }
     }
 
+    /// Notice a root folder that has gone, or come back.
+    ///
+    /// `/api/stores` says per root whether it is on disk, and the Stores page
+    /// badges a store whose corpus has gone — but only when it reads that
+    /// route, which it does when the stores counter moves. Deleting a folder
+    /// writes nothing to any store, so an open page kept drawing the root as
+    /// present until something unrelated moved the counter.
+    ///
+    /// One `stat` per root on the poll that is already happening, compared
+    /// with the set missing at the last poll. A store has one or two roots, so
+    /// this is a handful of `stat`s a second on a daemon a page is watching,
+    /// and nothing on one nobody is.
+    pub fn notice_roots<'a>(roots: impl Iterator<Item = &'a std::path::Path>) {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Option<Vec<std::path::PathBuf>>> = Mutex::new(None);
+
+        let mut missing: Vec<std::path::PathBuf> = roots
+            .filter(|root| !root.exists())
+            .map(|root| root.to_path_buf())
+            .collect();
+        missing.sort();
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        match seen.as_ref() {
+            // A baseline, as the registry's first poll is.
+            None => *seen = Some(missing),
+            Some(was) if *was != missing => {
+                *seen = Some(missing);
+                bump(Domain::Stores);
+            }
+            Some(_) => {}
+        }
+    }
+
     /// What each counter stands at.
     pub fn read(domain: Domain) -> u64 {
         domain.cell().load(Ordering::Relaxed)
@@ -1319,17 +1352,38 @@ pub struct Limit {
     pub source: Source,
     pub derived: usize,
     pub reason: String,
+    /// The most this machine will accept for this setting.
+    ///
+    /// Distinct from `derived`, and the distinction is the point. `derived` is
+    /// what this machine would choose left alone, and going above it is an
+    /// ordinary thing to want — a laptop that is doing nothing else can index
+    /// harder than the default. `ceiling` is where the answer stops being a
+    /// choice and starts being a machine that swaps or thrashes, and a page
+    /// that let somebody past it would be offering a setting that makes the
+    /// product worse with no way to tell.
+    ///
+    /// Enforced in the route as well as drawn on the page: a cap only the page
+    /// knows about is not a cap.
+    pub ceiling: usize,
 }
 
 impl Limit {
-    fn new(derived: crate::system::Derivation, saved: Option<usize>, variable: &str) -> Self {
+    fn new(
+        derived: crate::system::Derivation,
+        saved: Option<usize>,
+        variable: &str,
+        ceiling: usize,
+    ) -> Self {
         let from_env = std::env::var(variable)
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
             .filter(|n| *n > 0);
         let (value, source) = match (from_env, saved.filter(|n| *n > 0)) {
+            // The environment is the machine's owner speaking directly and is
+            // not clamped: somebody who exported a variable has said what they
+            // mean more deliberately than somebody typing in a box.
             (Some(n), _) => (n, Source::Environment),
-            (None, Some(n)) => (n, Source::Saved),
+            (None, Some(n)) => (n.min(ceiling), Source::Saved),
             (None, None) => (derived.value, Source::Derived),
         };
         Self {
@@ -1337,6 +1391,7 @@ impl Limit {
             source,
             derived: derived.value,
             reason: derived.reason,
+            ceiling: ceiling.max(derived.value),
         }
     }
 }
@@ -1367,7 +1422,21 @@ impl Limits {
         let machine = crate::system::read();
         let derived = crate::system::derive(&machine, crate::system::PER_RUN_PEAK_MB);
         let saved = home::Settings::load();
-        let runs_at_once = Limit::new(derived.runs_at_once, saved.runs_at_once, PARALLEL_ENV);
+        // The ceilings. Every logical core may carry a run, and every logical
+        // core may carry an embedding thread, but nothing may ask for more
+        // parallelism than the machine has hardware for. Memory stops at what
+        // is free now less the reserve, because a store budget larger than
+        // that is a promise the machine cannot keep.
+        let cores = machine.logical_cores.max(1);
+        let memory_ceiling = machine
+            .available_memory_mb
+            .saturating_sub(crate::system::RESERVE_MB) as usize;
+        let runs_at_once = Limit::new(
+            derived.runs_at_once,
+            saved.runs_at_once,
+            PARALLEL_ENV,
+            cores,
+        );
         // Derived from the runs actually in force, not from the runs this
         // machine would have chosen. The two differ exactly when someone has
         // changed the setting, which is the moment the sentence under the
@@ -1379,11 +1448,13 @@ impl Limits {
                 threads_derived,
                 saved.embed_threads,
                 crate::embed::THREADS_ENV,
+                cores,
             ),
             index_memory_mb: Limit::new(
                 derived.index_memory_mb,
                 saved.index_memory_mb,
                 crate::index::INDEX_MEMORY_ENV,
+                memory_ceiling,
             ),
             machine: serde_json::json!({
                 "logical_cores": machine.logical_cores,
@@ -1478,6 +1549,12 @@ pub struct State {
     /// retrievals it did record was the portal's own search box, which is not
     /// who the product is for.
     pub ledger: bool,
+    /// The schedules timer's handle.
+    ///
+    /// Here rather than in a global so a route can reach it: a surface that has
+    /// changed `schedules.json` calls `state.schedules.wake()` and the timer
+    /// re-reads it at once instead of waiting out its sleep.
+    pub schedules: Arc<crate::schedule::Runner>,
 }
 
 /// How recently a proxy must have called to count as connected.
@@ -1959,6 +2036,16 @@ impl State {
         Ok(())
     }
 
+    /// Put a line on the daemon's own log.
+    ///
+    /// The `report` closure is private because nothing outside this module
+    /// should be choosing what a daemon says; the schedules timer is a thread
+    /// this daemon owns and has failures only its log can carry, so it gets a
+    /// way to say them rather than a way to hold the closure.
+    pub fn say(&self, text: &str) {
+        (self.report)(text);
+    }
+
     pub fn refuse(&self, class: Refusal) {
         *self
             .refusals
@@ -2005,6 +2092,46 @@ pub fn stores_to_open(flags: &[PathBuf], paths: &[PathBuf], cwd: &Path) -> Resul
         }
     }
     Ok(out)
+}
+
+/// Split `dirs` into the ones a live daemon already holds and the ones free to
+/// open, pairing each held store with the daemon that holds it.
+///
+/// A store counts as held only when both halves agree. The write lock has to
+/// refuse — so something really is the writer — *and* the discovery file beside
+/// it has to name a daemon that will answer. Either alone is a guess: a lock
+/// with no discovery is an `index` or `watch` run, and a discovery file with no
+/// lock is what a SIGKILLed daemon left behind.
+///
+/// The live half is `Discovery::read` rather than `lock::daemon_holds`, which
+/// answers from the file existing. The criterion here is a daemon that is
+/// *answering*, and `read` is the only predicate that checks all of it: the
+/// registry trusts the store, the file is this user's and 0600, the token is a
+/// token, and the pid is alive. A stale file passes `daemon_holds` and would
+/// turn a genuine conflict into a cheerful "already running" pointing at a URL
+/// nothing listens on.
+///
+/// The probe takes each free store's lock and drops it again. The window
+/// between that and `run`'s own acquire is harmless both ways: a daemon that
+/// exits inside it hands `run` the lock, and one that starts inside it hands
+/// `run` the refusal a genuine conflict deserves.
+pub fn held_by_daemon(dirs: &[PathBuf]) -> (Vec<(PathBuf, Discovery)>, Vec<PathBuf>) {
+    let mut held = Vec::new();
+    let mut free = Vec::new();
+    for dir in dirs {
+        match StoreLock::acquire(dir) {
+            Ok(_) => free.push(dir.clone()),
+            Err(_) => match Discovery::read(dir) {
+                Some(found) => held.push((dir.clone(), found)),
+                // Refused by something that is not a daemon we can reach. Left
+                // in `free` on purpose: `run` acquires it again and fails with
+                // the error a real conflict has always produced, rather than
+                // this function inventing a second wording for it.
+                None => free.push(dir.clone()),
+            },
+        }
+    }
+    (held, free)
 }
 
 /// What a store watches, and what it should be watching but cannot find.
@@ -2191,7 +2318,22 @@ pub fn run(
         clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
         ledger,
+        schedules: crate::schedule::Runner::new(),
     });
+
+    // The timer, over whatever `~/.semlith/schedules.json` holds. A home with
+    // no such file is the normal state: nothing is created, nothing is said,
+    // and the thread sleeps until somebody adds one and wakes it.
+    match crate::schedule::Schedules::load() {
+        Ok(file) if !file.schedules.is_empty() => {
+            report_line(&format!("schedules: {} registered", file.schedules.len()))
+        }
+        Ok(_) => {}
+        // Never fatal. A schedules file this binary cannot read is a report
+        // that will not be written, not a reason to refuse to serve a corpus.
+        Err(e) => report_line(&format!("schedules: {e:#}")),
+    }
+    crate::schedule::Runner::spawn(Arc::clone(&state));
 
     // Installed before the first thread starts: the signal is how this process
     // ends, so the ordinary exit has to be the safe one.
@@ -2262,6 +2404,10 @@ pub fn run(
         // going: what this records is which folders the next start owes the
         // user an explanation for.
         remember_dropped_queue(&state.stores(), &state.admission.waiting());
+        // Nothing waits on the timer — it holds no lock and owns no store —
+        // but a thread asleep for an hour should not be what keeps a process
+        // alive, so it is told to go.
+        state.schedules.stop();
         // Each watcher waits on its own store's flag now, so that a single
         // store can be closed and deleted without stopping the daemon. A
         // shutdown is every store at once.
@@ -3382,6 +3528,7 @@ mod tests {
             clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),
             ledger: false,
+            schedules: crate::schedule::Runner::new(),
         };
 
         // An `Arc` because the reconciliation a miss triggers opens stores,

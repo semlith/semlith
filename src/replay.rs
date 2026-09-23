@@ -48,6 +48,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// The word this release prints for it, in the terminal and on the page.
     pub fn word(self) -> &'static str {
         match self {
             Outcome::Refund => "read the whole file",
@@ -56,7 +57,47 @@ impl Outcome {
             Outcome::Unknown => "nothing recorded",
         }
     }
+
+    /// The name the page styles the badge by. `word` is prose and may be
+    /// rewritten; this is an identifier and may not.
+    pub fn key(self) -> &'static str {
+        match self {
+            Outcome::Refund => "refund",
+            Outcome::Miss => "miss",
+            Outcome::Sufficed => "sufficed",
+            Outcome::Unknown => "unknown",
+        }
+    }
 }
+
+/// One semlith call in a transcript, and what the agent did after it.
+///
+/// The counts on [`Session`] are these rows totalled. Both are sent, because
+/// the page shows the timeline and the summary line above it, and recomputing
+/// one from the other in the browser would be a second implementation of the
+/// same arithmetic.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Answer {
+    /// The transcript event's own timestamp, as it wrote it — an RFC 3339
+    /// string, or empty when the event carried none. Formatted by the reader,
+    /// not here: this process does not know the viewer's time zone.
+    pub at: String,
+    /// What the agent asked, as it asked it. Empty when the call's input had
+    /// no field this knows to read.
+    pub query: String,
+    /// The tool it asked with, with the client's MCP prefix stripped.
+    pub tool: String,
+    /// What it did next, as an identifier and as prose.
+    pub outcome: &'static str,
+    pub word: &'static str,
+}
+
+/// Most answers kept per transcript, newest last.
+///
+/// A long session holds hundreds and the panel is a timeline of what just
+/// happened. The counts on [`Session`] are over every answer in the file, not
+/// over these, so a truncated list never changes a total.
+const KEEP: usize = 24;
 
 /// One transcript, counted.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -75,6 +116,8 @@ pub struct Session {
     pub miss: usize,
     pub sufficed: usize,
     pub unknown: usize,
+    /// The last [`KEEP`] answers, oldest first, for the timeline.
+    pub recent: Vec<Answer>,
 }
 
 /// Everything the replay pass found.
@@ -125,6 +168,41 @@ fn kind_of(name: &str) -> Option<Outcome> {
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Some(Outcome::Sufficed),
         _ => None,
     }
+}
+
+/// The question inside a semlith call's input, whichever tool it was.
+///
+/// Each tool names its argument differently — `search` takes a `query`,
+/// `symbol` and `impact` take a `name`, `brief` takes a `question`, `read`
+/// takes a `target`. Tried in that order, then any single string the input
+/// holds, and an empty string when there is nothing that reads as a question:
+/// a row with no question is still a row, and inventing one would be worse
+/// than a blank.
+fn question_in(input: Option<&serde_json::Value>) -> String {
+    let Some(input) = input else {
+        return String::new();
+    };
+    for key in ["query", "question", "name", "target", "from", "path"] {
+        if let Some(text) = input.get(key).and_then(|v| v.as_str())
+            && !text.is_empty()
+        {
+            return text.to_string();
+        }
+    }
+    input
+        .as_object()
+        .and_then(|map| map.values().find_map(|v| v.as_str()))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// A tool name without the client's MCP prefixing, for display.
+///
+/// `mcp__my-index__semlith_search` is the same tool as `semlith_search`, and
+/// the server's local name is the reader's own configuration rather than
+/// anything about the call.
+fn short_tool(name: &str) -> String {
+    name.rsplit("__").next().unwrap_or(name).to_string()
 }
 
 /// Whether a tool name is one of semlith's, under any client's prefixing.
@@ -209,12 +287,21 @@ pub fn read(dir: &Path, limit: usize) -> Result<Replay> {
 fn one(path: &Path, project: &str, last: i64) -> Option<Session> {
     let text = read_tail(path, BYTES)?;
     let mut calls: Vec<String> = Vec::new();
+    // Parallel to `calls`, and only filled for semlith's own: what was asked
+    // and when. A `Vec` of the same length keeps the index arithmetic below
+    // unchanged — the window that decides an outcome is over tool names.
+    let mut asked: Vec<Option<(String, String)>> = Vec::new();
     for line in text.lines() {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             // A partial line at the head of a tail read, or a format this
             // build does not know. Skipped rather than guessed at.
             continue;
         };
+        let at = event
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_string();
         let content = event
             .get("message")
             .and_then(|m| m.get("content"))
@@ -224,6 +311,11 @@ fn one(path: &Path, project: &str, last: i64) -> Option<Session> {
                 continue;
             }
             if let Some(name) = part.get("name").and_then(|n| n.as_str()) {
+                asked.push(if is_semlith(name) {
+                    Some((at.clone(), question_in(part.get("input"))))
+                } else {
+                    None
+                });
                 calls.push(name.to_string());
             }
         }
@@ -240,12 +332,26 @@ fn one(path: &Path, project: &str, last: i64) -> Option<Session> {
             continue;
         }
         session.answers += 1;
-        match outcome_of(&calls[i + 1..]) {
+        let outcome = outcome_of(&calls[i + 1..]);
+        match outcome {
             Outcome::Refund => session.refund += 1,
             Outcome::Miss => session.miss += 1,
             Outcome::Sufficed => session.sufficed += 1,
             Outcome::Unknown => session.unknown += 1,
         }
+        let (at, query) = asked.get(i).cloned().flatten().unwrap_or_default();
+        session.recent.push(Answer {
+            at,
+            query,
+            tool: short_tool(name),
+            outcome: outcome.key(),
+            word: outcome.word(),
+        });
+    }
+    // The newest, oldest first: the panel reads downwards in time, and the
+    // count above it is over the whole file either way.
+    if session.recent.len() > KEEP {
+        session.recent.drain(..session.recent.len() - KEEP);
     }
     Some(session)
 }
@@ -309,5 +415,52 @@ mod tests {
             Outcome::Unknown
         );
         assert_eq!(outcome_of(&[]), Outcome::Unknown);
+    }
+
+    #[test]
+    fn the_question_is_read_from_whichever_field_the_tool_names_it() {
+        let ask = |json: &str| question_in(Some(&serde_json::from_str(json).unwrap()));
+        assert_eq!(
+            ask(r#"{"query": "how is the lock taken"}"#),
+            "how is the lock taken"
+        );
+        assert_eq!(ask(r#"{"name": "acquire", "depth": 3}"#), "acquire");
+        assert_eq!(
+            ask(r#"{"question": "what writes the ledger"}"#),
+            "what writes the ledger"
+        );
+        // `query` wins over the others when a tool sends several.
+        assert_eq!(
+            ask(r#"{"name": "acquire", "query": "the lock"}"#),
+            "the lock"
+        );
+        // Any string beats nothing, and nothing is empty rather than invented.
+        assert_eq!(ask(r#"{"store": "big"}"#), "big");
+        assert_eq!(ask(r#"{"k": 8}"#), "");
+        assert_eq!(question_in(None), "");
+    }
+
+    #[test]
+    fn a_tool_is_shown_without_the_readers_own_server_name() {
+        assert_eq!(
+            short_tool("mcp__my-index__semlith_search"),
+            "semlith_search"
+        );
+        assert_eq!(short_tool("semlith_impact"), "semlith_impact");
+    }
+
+    #[test]
+    fn every_outcome_has_a_key_the_page_can_style_by() {
+        for outcome in [
+            Outcome::Refund,
+            Outcome::Miss,
+            Outcome::Sufficed,
+            Outcome::Unknown,
+        ] {
+            assert!(!outcome.key().is_empty());
+            assert!(!outcome.word().is_empty());
+            // The key is an identifier, so it is one lowercase word.
+            assert!(outcome.key().chars().all(|c| c.is_ascii_lowercase()));
+        }
     }
 }

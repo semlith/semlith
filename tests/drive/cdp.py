@@ -494,7 +494,8 @@ class Drive:
     VIEW_TITLES = {
         "stores": "Stores",
         "files": "Files",
-        "index": "Inside the index",
+        "index": "Index",
+        "corpus": "Inside the index",
         "search": "Search",
         "graph": "Graph",
         "impact": "Impact",
@@ -529,7 +530,7 @@ class Drive:
         """
         if view_id not in self.VIEW_TITLES:
             raise ProtocolError(
-                "the portal has no view called %r. The thirteen are %s."
+                "the portal has no view called %r. They are %s."
                 % (view_id, ", ".join(sorted(self.VIEW_TITLES)))
             )
 

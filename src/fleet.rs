@@ -16,11 +16,20 @@ use crate::filter::Filter;
 use crate::{Hit, Semlith, canonical, chunk, model_cache_dir};
 use anyhow::{Context, Result, bail};
 use fastembed::TextEmbedding;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 pub struct Fleet {
     members: Vec<Member>,
+    /// Stores that were named but could not be opened at all — the database
+    /// header, the meta row or a page under them is unreadable.
+    broken: Vec<Broken>,
+    /// Stores that opened and then failed a read, remembered by the readability
+    /// probe every selection runs. Interior mutability because every read path
+    /// through a fleet takes `&self`, and a store going unreadable mid-session
+    /// is an observation about the disk rather than a change to the fleet.
+    unreadable: RefCell<Vec<Unreadable>>,
     /// One loaded model per distinct model, shared by every store using it.
     /// Three stores built with the same model cost one copy of the weights.
     embedders: Vec<(Model, TextEmbedding)>,
@@ -44,6 +53,59 @@ pub struct Fleet {
 struct Member {
     label: String,
     store: Semlith,
+}
+
+/// A store directory that holds a `store.db` the process could not open.
+struct Broken {
+    label: String,
+    dir: PathBuf,
+    error: String,
+}
+
+/// A store an answer could not reach, and what to do about it.
+///
+/// Serialised beside the answer by every aggregating route, so a page can draw
+/// what the healthy stores said and report this rather than showing nothing.
+/// The whole error chain is carried, because `disk I/O error` on its own names
+/// neither the store nor the file it was read from.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Unreadable {
+    pub store: String,
+    pub path: String,
+    pub error: String,
+    pub remedy: String,
+}
+
+impl Unreadable {
+    fn new(store: &str, dir: &Path, error: String) -> Self {
+        Self {
+            store: store.to_string(),
+            path: crate::plain(&dir.display().to_string()),
+            error,
+            remedy: format!("semlith drop {store} — or index its root again to rebuild the store"),
+        }
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "{} at {}: {} — {}",
+            self.store, self.path, self.error, self.remedy
+        )
+    }
+}
+
+/// What a request scoped to nothing but unreadable stores is told.
+///
+/// There is no partial answer to give, so this is an error rather than an empty
+/// one — and it names the store, the path and the remedy rather than repeating
+/// SQLite's four words.
+fn nothing_readable(failed: &[Unreadable]) -> String {
+    let each: Vec<String> = failed.iter().map(Unreadable::line).collect();
+    if each.len() == 1 {
+        format!("this store cannot be read: {}", each[0])
+    } else {
+        format!("none of these stores can be read: {}", each.join("; "))
+    }
 }
 
 /// What every surface says when the filters admit no indexed file at all.
@@ -71,6 +133,8 @@ impl Fleet {
     pub fn empty() -> Self {
         Self {
             members: Vec::new(),
+            broken: Vec::new(),
+            unreadable: RefCell::new(Vec::new()),
             embedders: Vec::new(),
             tokenizer: None,
             embeds: 0,
@@ -97,6 +161,14 @@ impl Fleet {
                 member.label = name;
             }
         }
+        // A store that could not be opened is reported by the name its owner
+        // knows it by for the same reason: a remedy naming a directory basename
+        // the registry never used is a remedy nobody can run.
+        for store in &mut self.broken {
+            if let Some(name) = name_for(&store.dir, named) {
+                store.label = name;
+            }
+        }
     }
 
     /// Open every store in `dirs`, which must all already be stores.
@@ -112,10 +184,30 @@ impl Fleet {
 
         let mut keys: Vec<PathBuf> = Vec::new();
         let mut members = Vec::new();
+        let mut broken: Vec<Broken> = Vec::new();
         for dir in dirs {
             // A store that does not exist is an error before anything is
             // opened, and `open_existing` is what refuses to create one.
-            let store = Semlith::open_existing(dir)?;
+            let store = match Semlith::open_existing(dir) {
+                Ok(store) => store,
+                // A directory that holds a `store.db` and still cannot be
+                // opened is a damaged store, not a mistyped path. It is set
+                // aside with its reason rather than taken as a reason to open
+                // none of the others: one unplugged drive used to blank every
+                // page that reads across stores (#129).
+                Err(e) if dir.join("store.db").exists() => {
+                    let key = canonical(dir);
+                    if !broken.iter().any(|b| b.dir == key) {
+                        broken.push(Broken {
+                            label: label(&key),
+                            dir: key,
+                            error: format!("{e:#}"),
+                        });
+                    }
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let key = canonical(dir);
             if keys.contains(&key) {
                 continue;
@@ -132,8 +224,21 @@ impl Fleet {
         }
         disambiguate(&mut members, &keys);
 
+        // Every store named is damaged. There is no partial answer to give, so
+        // this fails the way it always did — with the store, the path and the
+        // remedy instead of SQLite's four words.
+        if members.is_empty() && !broken.is_empty() {
+            let failed: Vec<Unreadable> = broken
+                .iter()
+                .map(|b| Unreadable::new(&b.label, &b.dir, b.error.clone()))
+                .collect();
+            bail!("{}", nothing_readable(&failed));
+        }
+
         Ok(Self {
             members,
+            broken,
+            unreadable: RefCell::new(Vec::new()),
             embedders: Vec::new(),
             tokenizer: None,
             embeds: 0,
@@ -149,9 +254,83 @@ impl Fleet {
         self.members.is_empty()
     }
 
-    /// `(label, store)` for each store, in the order they were named.
+    /// `(label, store)` for each store that can be read, in the order they were
+    /// named.
+    ///
+    /// A store that fails the probe is left out here rather than allowed to
+    /// abort the caller's whole loop, and is reported by [`Fleet::failed`].
+    /// Together with [`Fleet::chosen`] this is the only way into the members,
+    /// which is what makes one guard cover every aggregating caller.
     pub fn each(&self) -> impl Iterator<Item = (&str, &Semlith)> {
-        self.members.iter().map(|m| (m.label.as_str(), &m.store))
+        (0..self.members.len())
+            .filter(|i| self.readable(*i))
+            .map(|i| (self.members[i].label.as_str(), &self.members[i].store))
+    }
+
+    /// The stores `only` names, unreadable ones left out.
+    ///
+    /// What a caller that wants [`Fleet::each`] narrowed to some stores should
+    /// ask for: it refuses an unknown name the way every other read does, and
+    /// it refuses outright when nothing it was asked for can be read.
+    pub fn selected(&self, only: Option<&[String]>) -> Result<Vec<(&str, &Semlith)>> {
+        Ok(self
+            .chosen(only)?
+            .into_iter()
+            .map(|i| (self.members[i].label.as_str(), &self.members[i].store))
+            .collect())
+    }
+
+    /// Every store this fleet cannot read, with the path and the remedy.
+    ///
+    /// Empty when all of them answered, which is what lets a route put it in
+    /// the response only when there is something to say.
+    pub fn failed(&self) -> Vec<Unreadable> {
+        let mut out: Vec<Unreadable> = self
+            .broken
+            .iter()
+            .map(|b| Unreadable::new(&b.label, &b.dir, b.error.clone()))
+            .collect();
+        for found in self.unreadable.borrow().iter() {
+            if !out.iter().any(|o| o.store == found.store) {
+                out.push(found.clone());
+            }
+        }
+        out
+    }
+
+    /// Whether member `i` still answers, remembering the answer for
+    /// [`Fleet::failed`].
+    ///
+    /// `stats` is the probe because it counts rows in both of the big tables,
+    /// so it notices damage a read of the header or the meta row would sail
+    /// past — which is the failure in #129, where the store opened and only
+    /// then said `disk I/O error`.
+    ///
+    // One indexed row out of each large table per store per selection, which
+    // is what `store::readable` is. It was `stats()` — three full scans —
+    // until that was measured at 2.65 ms against 0.24 ms on a 10 390-chunk
+    // store, growing linearly, on a path every search takes.
+    fn readable(&self, i: usize) -> bool {
+        let member = &self.members[i];
+        match member.store.readable() {
+            Ok(_) => {
+                // A store that has come back — the drive was plugged in again,
+                // the index run finished — stops being reported.
+                self.unreadable
+                    .borrow_mut()
+                    .retain(|u| u.store != member.label);
+                true
+            }
+            Err(e) => {
+                let found = Unreadable::new(&member.label, member.store.dir(), format!("{e:#}"));
+                let mut held = self.unreadable.borrow_mut();
+                match held.iter_mut().find(|u| u.store == member.label) {
+                    Some(slot) => *slot = found,
+                    None => held.push(found),
+                }
+                false
+            }
+        }
     }
 
     pub fn labels(&self) -> Vec<&str> {
@@ -167,8 +346,8 @@ impl Fleet {
     /// Files indexed across every store.
     pub fn files(&self) -> Result<i64> {
         let mut total = 0;
-        for member in &self.members {
-            total += member.store.stats()?.0;
+        for (_, store) in self.each() {
+            total += store.stats()?.0;
         }
         Ok(total)
     }
@@ -197,8 +376,8 @@ impl Fleet {
     /// How many indexed files `filter` selects across every store.
     pub fn matching_files(&self, filter: &Filter) -> Result<i64> {
         let mut total = 0;
-        for member in &self.members {
-            total += member.store.matching_files(filter)?;
+        for (_, store) in self.each() {
+            total += store.matching_files(filter)?;
         }
         Ok(total)
     }
@@ -764,25 +943,56 @@ impl Fleet {
     }
 
     /// Indices of the stores a query should reach.
+    ///
+    /// A store that cannot be read is dropped from the selection and reported
+    /// through [`Fleet::failed`], so a query over several stores answers from
+    /// the ones that work. When nothing the caller asked for can be read there
+    /// is no partial answer to give, and this fails naming each store, its path
+    /// and its remedy.
     fn chosen(&self, only: Option<&[String]>) -> Result<Vec<usize>> {
-        let Some(names) = only.filter(|n| !n.is_empty()) else {
-            return Ok((0..self.members.len()).collect());
-        };
-        let mut chosen = Vec::new();
-        for name in names {
-            match self.members.iter().position(|m| m.label == *name) {
-                Some(i) => {
-                    if !chosen.contains(&i) {
-                        chosen.push(i);
+        let mut asked = Vec::new();
+        // Names that resolved to a store this fleet could not even open. They
+        // are not members, so they cannot be selected — but they are what the
+        // caller asked about, and the refusal has to be about them.
+        let mut blamed: Vec<String> = Vec::new();
+        match only.filter(|n| !n.is_empty()) {
+            None => {
+                asked.extend(0..self.members.len());
+                blamed.extend(self.broken.iter().map(|b| b.label.clone()));
+            }
+            Some(names) => {
+                for name in names {
+                    if let Some(i) = self.members.iter().position(|m| m.label == *name) {
+                        if !asked.contains(&i) {
+                            asked.push(i);
+                        }
+                    } else if self.broken.iter().any(|b| b.label == *name) {
+                        if !blamed.contains(name) {
+                            blamed.push(name.clone());
+                        }
+                    } else {
+                        bail!(
+                            "no store called {name} is open; these are: {}",
+                            self.labels().join(", ")
+                        );
                     }
                 }
-                None => bail!(
-                    "no store called {name} is open; these are: {}",
-                    self.labels().join(", ")
-                ),
             }
         }
-        Ok(chosen)
+
+        let live: Vec<usize> = asked
+            .iter()
+            .copied()
+            .filter(|i| self.readable(*i))
+            .collect();
+        if live.is_empty() && !(asked.is_empty() && blamed.is_empty()) {
+            let mut failed = self.failed();
+            failed.retain(|f| {
+                blamed.contains(&f.store) || asked.iter().any(|i| self.members[*i].label == f.store)
+            });
+            bail!("{}", nothing_readable(&failed));
+        }
+        Ok(live)
     }
 
     fn embed_query(&mut self, model: &Model, query: &str) -> Result<Vec<f32>> {
