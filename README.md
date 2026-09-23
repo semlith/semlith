@@ -452,7 +452,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **31** |
+| CLI commands | **32** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

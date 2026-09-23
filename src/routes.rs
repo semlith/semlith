@@ -134,6 +134,8 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/store/delete") => delete_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
+        (true, _, "/api/accel") => accel_status(),
+        (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
@@ -2908,6 +2910,41 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
     );
     Response::json(&json!({ "limits": limits, "applied": applied }))
+}
+
+/// The accelerator lanes: each one's switch, state, device and share of the
+/// rate, and what its components take on disk.
+fn accel_status() -> Response {
+    let mut body = crate::accel::snapshot();
+    body["bytes"] = crate::accel::component_bytes();
+    Response::json(&body)
+}
+
+/// Turn a lane on or off, or remove its components. The same functions
+/// `semlith accel` calls, so the page and the terminal refuse the same things.
+fn accel_change(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(lane) = body.get("lane").and_then(Value::as_str) else {
+        return Response::error(400, "name the lane: cpu, gpu or cuda");
+    };
+    let outcome = match body.get("action").and_then(Value::as_str) {
+        Some("on") => crate::accel::set(lane, true),
+        Some("off") => crate::accel::set(lane, false),
+        Some("remove") => crate::accel::remove(lane)
+            .map(|bytes| format!("{lane}'s components removed, {} freed", crate::human_bytes(bytes as i64))),
+        _ => return Response::error(400, "action must be \"on\", \"off\" or \"remove\""),
+    };
+    match outcome {
+        Ok(said) => {
+            let mut answer = crate::accel::snapshot();
+            answer["said"] = json!(said);
+            Response::json(&answer)
+        }
+        Err(e) => Response::error(409, &format!("{e:#}")),
+    }
 }
 
 /// Pause, resume or stop the index run a store is working on.

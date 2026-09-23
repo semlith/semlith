@@ -169,7 +169,25 @@ mod platform {
 
 /// Why the CUDA lane cannot run in this build, when it cannot.
 pub fn cuda_unavailable() -> String {
-    "the CUDA lane is not part of this build".to_string()
+    cuda_unavailable_here().unwrap_or_else(|| "the CUDA lane is not part of this build".to_string())
+}
+
+/// Why CUDA cannot be turned on at all on this platform. Linux only in this
+/// release: an NVIDIA card on Windows runs through WebGPU (D3D12).
+pub fn cuda_unavailable_here() -> Option<String> {
+    (!cfg!(target_os = "linux")).then(|| {
+        "CUDA is Linux-only in this release; an NVIDIA card here runs through WebGPU".to_string()
+    })
+}
+
+/// Where the CUDA pack lives in the model cache.
+pub fn cuda_dir(cache: &Path) -> PathBuf {
+    crate::accel::component_dir(cache, "cuda")
+}
+
+/// What turning CUDA on downloads, in bytes, said before it starts.
+pub fn cuda_pack_bytes() -> u64 {
+    0
 }
 
 // ------------------------------------------------------------ the components

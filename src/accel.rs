@@ -399,6 +399,97 @@ fn round(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
+/// Turn a lane on or off, as the page's switch and `semlith accel` do.
+///
+/// Saved to `settings.json` and read by every run at its next window, which is
+/// the "next batch" the contract promises. Turning a failed lane on again
+/// clears its failure so it is tried afresh. The CPU may be turned off only
+/// while a GPU lane can carry the work; with none, the refusal says why.
+pub fn set(lane: &str, on: bool) -> Result<String> {
+    if std::env::var(ACCEL_ENV).is_ok() {
+        bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
+    }
+    let mut settings = crate::home::Settings::load();
+    match (lane, on) {
+        ("cpu", false) => {
+            let gpu_on = enabled().gpu || enabled().cuda;
+            let can = gpu_on && lanes().iter().any(|l| l.id != "worker" && l.usable())
+                && detect_gpu().is_ok();
+            if !can {
+                bail!(
+                    "the CPU cannot be turned off: no GPU lane is on and usable here ({}), so the CPU \
+                     is what indexes",
+                    detect_gpu().err().unwrap_or_else(|| "the GPU lane is off".to_string())
+                );
+            }
+            settings.accelerators.cpu = Some(false);
+        }
+        ("cpu", true) => settings.accelerators.cpu = Some(true),
+        ("gpu", _) => settings.accelerators.gpu = Some(on),
+        ("cuda", _) => {
+            if let Some(why) = crate::gpu::cuda_unavailable_here() {
+                bail!("{why}");
+            }
+            settings.accelerators.cuda = Some(on);
+        }
+        (other, _) => bail!("there is no lane called {other}; the lanes are cpu, gpu and cuda"),
+    }
+    settings.save()?;
+    if on && let Some(found) = lanes().iter().find(|l| l.id == lane) {
+        found.reset();
+    }
+    Ok(format!(
+        "{lane} {} — runs pick it up at their next batch",
+        if on { "on" } else { "off" }
+    ))
+}
+
+/// Delete a lane's downloaded components, and say how many bytes that freed.
+/// Turning a lane off never does this; only asking does.
+pub fn remove(lane: &str) -> Result<u64> {
+    let cache = crate::model_cache_dir()?;
+    let dir = match lane {
+        "gpu" => component_dir(&cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION)),
+        "cuda" => crate::gpu::cuda_dir(&cache),
+        other => bail!("{other} has nothing downloaded to remove; the lanes with components are gpu and cuda"),
+    };
+    let bytes = dir_bytes(&dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).with_context(|| {
+            format!("removing {}", crate::plain(&dir.display().to_string()))
+        })?;
+    }
+    Ok(bytes)
+}
+
+/// What each lane's downloaded components take on disk.
+pub fn component_bytes() -> serde_json::Value {
+    let Ok(cache) = crate::model_cache_dir() else {
+        return serde_json::json!({});
+    };
+    serde_json::json!({
+        "gpu": dir_bytes(&component_dir(&cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION))),
+        "cuda": dir_bytes(&crate::gpu::cuda_dir(&cache)),
+        "cuda_download": crate::gpu::cuda_pack_bytes(),
+    })
+}
+
+fn dir_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                dir_bytes(&path)
+            } else {
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
 // ------------------------------------------------------------ the dispatcher
 
 fn deadline() -> Duration {

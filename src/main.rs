@@ -496,6 +496,22 @@ enum Command {
         gpu: bool,
     },
 
+    /// Which devices embed: the CPU, a GPU through WebGPU, and NVIDIA's CUDA.
+    ///
+    /// `status` names each lane, its device and whether it is on. `on` and
+    /// `off` take effect at the next batch of every run. `remove` deletes a
+    /// lane's downloaded components; turning a lane off never does.
+    Accel {
+        /// status, on, off or remove.
+        #[arg(default_value = "status")]
+        action: String,
+        /// cpu, gpu or cuda.
+        lane: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// An accelerator lane's worker: embeds batches on stdin for the daemon.
     /// Started by the daemon and nothing else; not part of the interface.
     #[command(name = "__embed-worker", hide = true)]
@@ -918,6 +934,38 @@ fn run() -> Result<()> {
                 no_service || std::env::var(semlith::setup::NO_SERVICE_ENV).is_ok_and(|v| v == "1");
             semlith::setup::run(yes, airgap, register_all, !no_service, !no_hooks, strict)?;
         }
+
+        Command::Accel { action, lane, json } => match (action.as_str(), lane.as_deref()) {
+            ("status", _) => {
+                let status = semlith::accel::snapshot();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    for row in status["lanes"].as_array().into_iter().flatten() {
+                        let state = &row["status"];
+                        let detail = state["reason"]
+                            .as_str()
+                            .map(|r| format!("{} — {r}", state["state"].as_str().unwrap_or("")))
+                            .unwrap_or_else(|| state["state"].as_str().unwrap_or("").to_string());
+                        println!(
+                            "{:<5} {:<4} {:<28} {detail}",
+                            row["lane"].as_str().unwrap_or("?"),
+                            if row["enabled"].as_bool() == Some(true) { "on" } else { "off" },
+                            row["device"].as_str().unwrap_or("not asked for yet"),
+                        );
+                    }
+                    println!("switches: {}", status["source"].as_str().unwrap_or(""));
+                }
+            }
+            ("on" | "off", Some(lane)) => println!("{}", semlith::accel::set(lane, action == "on")?),
+            ("remove", Some(lane)) => {
+                let freed = semlith::accel::remove(lane)?;
+                println!("{lane}: components removed, {} freed", semlith::human_bytes(freed as i64));
+            }
+            _ => anyhow::bail!(
+                "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>], lanes cpu, gpu, cuda"
+            ),
+        },
 
         Command::EmbedWorker { lane, dir } => {
             std::process::exit(semlith::accel::worker_main(&lane, dir.as_deref()));
@@ -2043,6 +2091,15 @@ fn run() -> Result<()> {
                     "chunks   {chunks} (cut at {})",
                     semlith::store::chunking(store.db())?
                 );
+                // Which variant of the model embedded them, where the store
+                // has counted: int8 on the CPU and fp16 on a GPU are two
+                // variants of one model that agree at cosine 0.987.
+                let variants = store.variants();
+                if !variants.is_empty() {
+                    let parts: Vec<String> =
+                        variants.iter().map(|(v, n)| format!("{n} {v}")).collect();
+                    println!("vectors  {}", parts.join(", "));
+                }
                 let images = store.image_count()?;
                 if images > 0 {
                     println!("images   {images}");
