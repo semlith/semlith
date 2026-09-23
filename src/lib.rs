@@ -1142,6 +1142,12 @@ pub struct Semlith {
     /// The intra-op thread count `embedder` was built with. A different value
     /// in force rebuilds it at the next batch.
     embedder_threads: usize,
+    /// The second session a `mix` harness run alternates with, batch by batch.
+    embedder_alt: Option<TextEmbedding>,
+    /// Batches this store has embedded, which is what the alternation counts.
+    batches: u64,
+    /// The variant the last batch was embedded with.
+    last_variant: &'static str,
     /// When this store last embedded anything, so a daemon can drop an idle
     /// writer's session and the arena that comes with it.
     last_embed: Option<std::time::Instant>,
@@ -1240,6 +1246,9 @@ impl Semlith {
             dim,
             embedder: None,
             embedder_threads: 0,
+            embedder_alt: None,
+            batches: 0,
+            last_variant: embed::Variant::Int8.name(),
             last_embed: None,
             budget_generation: index::budget_generation(),
             lane_chunks: std::collections::BTreeMap::new(),
@@ -1388,11 +1397,13 @@ impl Semlith {
             // tokens with it, so it is loaded exactly when the model is and
             // never fetched on its own.
             self.tokenizer = self.model.tokenizer(&cache);
-            self.embedder = Some(self.model.load_with_threads(
+            let (variant, _) = embed::index_variant();
+            self.embedder = Some(self.model.load_variant(
                 cache,
                 chunk::MAX_CHARS / 2,
                 self.quiet,
                 threads,
+                variant,
             )?);
             self.embedder_threads = threads;
             SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1406,6 +1417,7 @@ impl Semlith {
         if self.embedder.take().is_some() {
             SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
+        self.embedder_alt = None;
         self.clip = image::Clip::default();
     }
 
@@ -1465,8 +1477,29 @@ impl Semlith {
     fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         let _lifted = priority::embedding();
         self.last_embed = Some(std::time::Instant::now());
-        let mut out = self
-            .embedder()?
+        self.embedder()?;
+        self.batches += 1;
+        // A `mix` run alternates variants by batch, deterministically, so a
+        // store holds both and the harness can measure what that costs.
+        let (main, alt) = embed::index_variant();
+        let use_alt = alt.is_some() && self.batches % 2 == 0;
+        let session = if let (true, Some(variant)) = (use_alt, alt) {
+            if self.embedder_alt.is_none() {
+                self.embedder_alt = Some(self.model.load_variant(
+                    model_cache_dir()?,
+                    chunk::MAX_CHARS / 2,
+                    self.quiet,
+                    self.embedder_threads,
+                    variant,
+                )?);
+            }
+            self.last_variant = variant.name();
+            self.embedder_alt.as_mut().expect("loaded above")
+        } else {
+            self.last_variant = main.name();
+            self.embedder.as_mut().expect("loaded above")
+        };
+        let mut out = session
             .embed(texts, Some(EMBED_BATCH))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         for v in &mut out {
@@ -2721,7 +2754,7 @@ impl Semlith {
                     vectors[*at] = vector;
                 }
                 accel::count_cpu(group.len());
-                counts.push(("int8-cpu", group.len()));
+                counts.push((self.last_variant, group.len()));
                 self.note_lane("cpu", group.len());
                 continue;
             }

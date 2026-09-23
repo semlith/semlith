@@ -1034,10 +1034,12 @@ impl Fleet {
         if let Some((_, session)) = shared.iter().find(|(m, _)| m == model) {
             return Ok(Arc::clone(session));
         }
-        let loaded = Arc::new(Mutex::new(model.load(
+        let loaded = Arc::new(Mutex::new(model.load_variant(
             cache,
             chunk::MAX_CHARS / 2,
             self.quiet,
+            crate::embed::embed_threads(),
+            crate::embed::query_variant(),
         )?));
         shared.push((model.clone(), Arc::clone(&loaded)));
         Ok(loaded)

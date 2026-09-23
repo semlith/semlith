@@ -2098,7 +2098,7 @@ fn run() -> Result<()> {
                 if !variants.is_empty() {
                     let parts: Vec<String> =
                         variants.iter().map(|(v, n)| format!("{n} {v}")).collect();
-                    println!("vectors  {}", parts.join(", "));
+                    println!("variants {}", parts.join(", "));
                 }
                 let images = store.image_count()?;
                 if images > 0 {

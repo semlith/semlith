@@ -946,7 +946,7 @@ fn call_tool(
                 if !variants.is_empty() {
                     let parts: Vec<String> =
                         variants.iter().map(|(v, n)| format!("{n} {v}")).collect();
-                    body.push_str(&format!("\n  vectors: {}", parts.join(", ")));
+                    body.push_str(&format!("\n  variants: {}", parts.join(", ")));
                 }
                 // One store answers exactly as it did before stores could be
                 // combined; a name in front of it would only cost tokens.

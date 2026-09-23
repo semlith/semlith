@@ -136,6 +136,19 @@ impl Model {
         quiet: bool,
         threads: usize,
     ) -> Result<TextEmbedding> {
+        self.load_variant(cache_dir, max_length, quiet, threads, Variant::Int8)
+    }
+
+    /// [`Self::load_with_threads`] for one of granite's variants. A builtin
+    /// model has one and ignores the argument.
+    pub fn load_variant(
+        &self,
+        cache_dir: PathBuf,
+        max_length: usize,
+        quiet: bool,
+        threads: usize,
+        variant: Variant,
+    ) -> Result<TextEmbedding> {
         let threads = threads.max(1);
         // Checked here, in the one place weights are ever fetched, rather than
         // at each call site: an airgapped machine's whole claim is that this
@@ -159,9 +172,93 @@ impl Model {
                     .with_cache_dir(cache_dir);
                 TextEmbedding::try_new(opts).map_err(|e| anyhow::anyhow!("{e}"))
             }
-            Model::Granite => load_granite(cache_dir, max_length, quiet, threads),
+            Model::Granite => load_granite(cache_dir, max_length, quiet, threads, variant),
         }
     }
+}
+
+/// Which of granite's pinned exports a CPU session loads.
+///
+/// int8 is the default and the only one a store is built with unless asked:
+/// a quarter of fp32's download and faster on ARM. fp16 is what the GPU lanes
+/// run, and fp32 is what the known-answer fixture was made with. The CPU can
+/// load all three, which is how the retrieval harness measures a store holding
+/// a mix of them (item 1.16) on a machine with no GPU in the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    Int8,
+    Fp16,
+    Fp32,
+}
+
+impl Variant {
+    /// The graph and its weights, each with the SHA-256 at [`GRANITE_REVISION`].
+    fn files(self) -> [(&'static str, &'static str); 2] {
+        match self {
+            Variant::Int8 => [GRANITE_FILES[4], GRANITE_FILES[5]],
+            Variant::Fp16 => [
+                (
+                    "onnx/model_fp16.onnx",
+                    "ee200de55cb2f94e858aabca54be7697a9c0805a14c858ee26ad0922b05f57d7",
+                ),
+                (
+                    "onnx/model_fp16.onnx_data",
+                    "28d16e29cd623f25cc6fa0968700c5bc31036466091a5fa06d1353c1777f050e",
+                ),
+            ],
+            Variant::Fp32 => [
+                (
+                    "onnx/model.onnx",
+                    "cddb145cd1147ec24a3908b2ca2602b98b20a3d198365cff270b7cb26c98179e",
+                ),
+                (
+                    "onnx/model.onnx_data",
+                    "86a3a705d4598615894d89540ea71a3d9bbdb17a315e79edcd5dfc737222834b",
+                ),
+            ],
+        }
+    }
+
+    /// What a store's variant counts call vectors this session made.
+    pub fn name(self) -> &'static str {
+        match self {
+            Variant::Int8 => "int8-cpu",
+            Variant::Fp16 => "fp16-cpu",
+            Variant::Fp32 => "fp32-cpu",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "int8" => Some(Variant::Int8),
+            "fp16" => Some(Variant::Fp16),
+            "fp32" => Some(Variant::Fp32),
+            _ => None,
+        }
+    }
+}
+
+/// The variant an index pass embeds with, and the second one a `mix`
+/// alternates with batch by batch. A harness knob, not part of the documented
+/// environment: `int8` (the default), `fp16`, `fp32` or `mix`.
+pub const VARIANT_ENV: &str = "SEMLITH_EMBED_VARIANT";
+
+/// The variant a query is embedded with. Also a harness knob.
+pub const QUERY_VARIANT_ENV: &str = "SEMLITH_QUERY_VARIANT";
+
+pub fn index_variant() -> (Variant, Option<Variant>) {
+    match std::env::var(VARIANT_ENV).ok().as_deref() {
+        Some("mix") => (Variant::Int8, Some(Variant::Fp16)),
+        Some(other) => (Variant::parse(other).unwrap_or(Variant::Int8), None),
+        None => (Variant::Int8, None),
+    }
+}
+
+pub fn query_variant() -> Variant {
+    std::env::var(QUERY_VARIANT_ENV)
+        .ok()
+        .and_then(|v| Variant::parse(&v))
+        .unwrap_or(Variant::Int8)
 }
 
 /// granite's tokenizer, prepared exactly as fastembed prepares it for the
@@ -316,16 +413,29 @@ fn load_granite(
     max_length: usize,
     quiet: bool,
     threads: usize,
+    variant: Variant,
 ) -> Result<TextEmbedding> {
     link_runtime()?;
     check_cache_dir(&cache_dir)?;
     let cache = cache_dir.clone();
+    // The tokenizer's four files and this variant's two. int8 keeps the stamp
+    // it always had, so no cache written before 0.28.0 is checked again.
+    let [graph, weights] = variant.files();
+    let files: Vec<(&str, &str)> = GRANITE_FILES[..4]
+        .iter()
+        .copied()
+        .chain([graph, weights])
+        .collect();
+    let stamp = match variant {
+        Variant::Int8 => STAMP.to_string(),
+        other => format!("{STAMP}-{}", other.name()),
+    };
 
     // Whether this cache has already been checked against this pin, with every
     // file still the size and age it was. Asked once here rather than per file,
     // because the answer is about the set.
     let checked = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION)
-        .is_some_and(|dir| already_verified(&dir, GRANITE_REVISION, GRANITE_FILES));
+        .is_some_and(|dir| already_verified_as(&dir, &stamp, GRANITE_REVISION, &files));
 
     // A revision rather than a branch. `main` is a name somebody else controls;
     // a commit is the bytes this release was built against.
@@ -351,7 +461,7 @@ fn load_granite(
         // Verified whether it was just fetched or was already in the cache: a
         // cache is a directory on disk, and the point of a digest is that it
         // does not matter how the bytes got there.
-        let expected = GRANITE_FILES
+        let expected = files
             .iter()
             .find(|(file, _)| *file == name)
             .map(|(_, digest)| *digest)
@@ -369,23 +479,23 @@ fn load_granite(
 
     // fastembed does not export ExternalInitializerFile, so the weights can
     // only be attached through this builder — a struct literal will not compile.
-    let model = UserDefinedEmbeddingModel::new(fetch(GRANITE_ONNX)?, tokenizer_files)
+    let model = UserDefinedEmbeddingModel::new(fetch(graph.0)?, tokenizer_files)
         // 1_Pooling/config.json in the source repo sets pooling_mode_cls_token.
         .with_pooling(Pooling::Cls)
         .with_external_initializer(
-            Path::new(GRANITE_WEIGHTS)
+            Path::new(weights.0)
                 .file_name()
                 .expect("weights constant has a file name")
                 .to_string_lossy()
                 .into_owned(),
-            fetch(GRANITE_WEIGHTS)?,
+            fetch(weights.0)?,
         );
 
     // Recorded after every file has been read and checked, and only when this
     // run did the checking — the fetch above may have created the snapshot
     // directory that did not exist when `checked` was read.
     if !checked && let Some(dir) = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION) {
-        record_verified(&dir, GRANITE_REVISION, GRANITE_FILES);
+        record_verified_as(&dir, &stamp, GRANITE_REVISION, &files);
     }
 
     let opts = InitOptionsUserDefined::new()
@@ -867,7 +977,11 @@ fn fingerprint(path: &Path) -> Option<(u64, u128)> {
 
 /// Whether every pinned file was verified at this revision and has not moved.
 fn already_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) -> bool {
-    let Ok(text) = std::fs::read_to_string(dir.join(STAMP)) else {
+    already_verified_as(dir, STAMP, revision, files)
+}
+
+fn already_verified_as(dir: &Path, stamp: &str, revision: &str, files: &[(&str, &str)]) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(stamp)) else {
         return false;
     };
     let Ok(stamp) = serde_json::from_str::<Verified>(&text) else {
@@ -889,6 +1003,10 @@ fn already_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) -> bool 
 
 /// Record that every pinned file has been checked, so the next process need not.
 fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
+    record_verified_as(dir, STAMP, revision, files)
+}
+
+fn record_verified_as(dir: &Path, stamp_name: &str, revision: &str, files: &[(&str, &str)]) {
     let mut stamp = Verified {
         revision: revision.to_string(),
         files: std::collections::BTreeMap::new(),
@@ -908,7 +1026,7 @@ fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
     };
     // Best effort: a cache that cannot be written to is one that gets verified
     // every time, which is slower and not wrong.
-    let _ = crate::home::write_private(&dir.join(STAMP), &body);
+    let _ = crate::home::write_private(&dir.join(stamp_name), &body);
 }
 
 /// The SHA-256 of some bytes, as lowercase hex.
