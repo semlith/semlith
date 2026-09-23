@@ -23,7 +23,7 @@ libc = "0.2.189"
 fastembed = { version = "6.0.3", default-features = false, features = ["hf-hub", "image-models"] }
 # ONNX Runtime, named here so it can be linked two ways. `ort` is fastembed's
 # dependency and is pinned to the exact version fastembed pins.
-ort = { version = "=2.0.0-rc.13", default-features = false, optional = true }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-22"] }
 # Already in the tree under fastembed's image feature; named here to read an
 # image's pixel size out of its header without decoding the whole thing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
@@ -147,7 +147,7 @@ windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", 
 # no runtime at all and no tarball to have got one from.
 default = ["static-ort"]
 static-ort = ["fastembed/ort-download-binaries-rustls-tls"]
-dynamic-ort = ["fastembed/ort-load-dynamic", "dep:ort"]
+dynamic-ort = ["fastembed/ort-load-dynamic"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

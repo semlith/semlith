@@ -164,6 +164,84 @@ impl Model {
     }
 }
 
+/// granite's tokenizer, prepared exactly as fastembed prepares it for the
+/// CPU session: padding to the batch's longest with the model's pad token,
+/// truncation at `max_length`, and the special tokens registered. The GPU
+/// lanes run ONNX Runtime directly, and a tokenizer set up any other way
+/// would give their vectors a different input from the CPU lane's.
+pub fn granite_tokenizer(cache_dir: &Path, max_length: usize) -> Result<tokenizers::Tokenizer> {
+    use tokenizers::{AddedToken, PaddingParams, PaddingStrategy, TruncationParams};
+    let dir = snapshot_dir(cache_dir, GRANITE_REPO, GRANITE_REVISION)
+        .context("granite is not cached yet; the CPU lane fetches it first")?;
+    let read = |name: &str| -> Result<Vec<u8>> {
+        let bytes = std::fs::read(dir.join(name)).with_context(|| format!("reading {name}"))?;
+        let expected = GRANITE_FILES
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, digest)| *digest)
+            .with_context(|| format!("{name} is not a file semlith pins"))?;
+        verify(name, &bytes, expected)?;
+        Ok(bytes)
+    };
+    let config: serde_json::Value = serde_json::from_slice(&read("config.json")?)?;
+    let special: serde_json::Value = serde_json::from_slice(&read("special_tokens_map.json")?)?;
+    let tokenizer_config: serde_json::Value =
+        serde_json::from_slice(&read("tokenizer_config.json")?)?;
+    let mut tokenizer = tokenizers::Tokenizer::from_bytes(read("tokenizer.json")?)
+        .map_err(|e| anyhow::anyhow!("reading the tokenizer: {e}"))?;
+    let model_max = tokenizer_config["model_max_length"]
+        .as_f64()
+        .unwrap_or(max_length as f64) as usize;
+    tokenizer
+        .with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            pad_token: tokenizer_config["pad_token"]
+                .as_str()
+                .unwrap_or("[PAD]")
+                .to_string(),
+            pad_id: config["pad_token_id"].as_u64().unwrap_or(0) as u32,
+            ..Default::default()
+        }))
+        .with_truncation(Some(TruncationParams {
+            max_length: max_length.min(model_max),
+            ..Default::default()
+        }))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let serde_json::Value::Object(map) = special {
+        for value in map.values() {
+            let token = match value {
+                serde_json::Value::String(content) => AddedToken {
+                    content: content.clone(),
+                    special: true,
+                    ..Default::default()
+                },
+                serde_json::Value::Object(_) => match (
+                    value["content"].as_str(),
+                    value["single_word"].as_bool(),
+                    value["lstrip"].as_bool(),
+                    value["rstrip"].as_bool(),
+                    value["normalized"].as_bool(),
+                ) {
+                    (Some(content), Some(single_word), Some(lstrip), Some(rstrip), Some(normalized)) => {
+                        AddedToken {
+                            content: content.into(),
+                            special: true,
+                            single_word,
+                            lstrip,
+                            rstrip,
+                            normalized,
+                        }
+                    }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let _ = tokenizer.add_special_tokens([token]);
+        }
+    }
+    Ok(tokenizer)
+}
+
 /// Point ONNX Runtime at the library shipped beside this binary.
 ///
 /// Only in a `dynamic-ort` build, which is the two Linux release binaries and

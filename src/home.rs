@@ -230,6 +230,9 @@ pub struct Settings {
     /// so nothing reads them until somebody says so on the Privacy page.
     #[serde(default)]
     pub session_replay: Option<bool>,
+    /// The CPU, GPU and CUDA switches. Absent means CPU and GPU on, CUDA off.
+    #[serde(default)]
+    pub accelerators: crate::accel::Switches,
 }
 
 impl Settings {

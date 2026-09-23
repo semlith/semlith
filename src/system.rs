@@ -530,3 +530,39 @@ mod tests {
         );
     }
 }
+
+/// This machine's processor, by name, for the CPU lane's row on the Machine
+/// limits card. A generic answer where the platform will not say.
+pub fn cpu_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+        {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo")
+            && let Some(name) = info
+                .lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        {
+            return name;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(name) = std::env::var("PROCESSOR_IDENTIFIER") {
+            return name;
+        }
+    }
+    format!("{} CPU", std::env::consts::ARCH)
+}

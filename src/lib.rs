@@ -15,6 +15,7 @@
 //! A search quantizes the query, gets ids back from the index, then resolves
 //! them to text with one SQLite lookup each.
 
+pub mod accel;
 pub mod add;
 pub mod agentfiles;
 pub mod brief;
@@ -27,6 +28,7 @@ pub mod doctor;
 pub mod embed;
 pub mod filter;
 pub mod fleet;
+pub mod gpu;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
