@@ -175,19 +175,17 @@ pub fn cuda_unavailable() -> String {
 /// Why CUDA cannot be turned on at all on this platform. Linux only in this
 /// release: an NVIDIA card on Windows runs through WebGPU (D3D12).
 pub fn cuda_unavailable_here() -> Option<String> {
-    (!cfg!(target_os = "linux")).then(|| {
-        "CUDA is Linux-only in this release; an NVIDIA card here runs through WebGPU".to_string()
-    })
+    crate::cuda::unavailable_here()
 }
 
 /// Where the CUDA pack lives in the model cache.
 pub fn cuda_dir(cache: &Path) -> PathBuf {
-    crate::accel::component_dir(cache, "cuda")
+    crate::cuda::pack_dir(cache)
 }
 
 /// What turning CUDA on downloads, in bytes, said before it starts.
 pub fn cuda_pack_bytes() -> u64 {
-    0
+    crate::cuda::PACK_BYTES
 }
 
 // ------------------------------------------------------------ the components
@@ -404,6 +402,8 @@ pub enum Session {
     /// fp16 on the GPU through ONNX Runtime directly, because fastembed has no
     /// way to hand a session a plugin device.
     Gpu(Box<GpuSession>),
+    /// fp16 on an NVIDIA card through the CUDA pack's own ONNX Runtime.
+    Cuda(Box<crate::cuda::Session>),
 }
 
 pub struct GpuSession {
@@ -414,8 +414,19 @@ pub struct GpuSession {
 
 impl Session {
     pub fn open(lane: &str, dir: Option<&Path>) -> Result<Self> {
-        crate::embed::link_runtime()?;
         let cache = crate::model_cache_dir()?;
+        // Before anything touches ONNX Runtime: the CUDA worker loads the
+        // pack's GPU core, and a CPU core loaded first would make that a
+        // silent no-op.
+        if lane == "cuda" {
+            let pack = dir.context("the cuda lane needs its pack directory")?;
+            let model = crate::accel::component_dir(&cache, &format!("webgpu-{WEBGPU_VERSION}"))
+                .join("model_fp16.onnx");
+            return Ok(Session::Cuda(Box::new(crate::cuda::Session::open(
+                pack, &model,
+            )?)));
+        }
+        crate::embed::link_runtime()?;
         match lane {
             "worker" => {
                 let model =
@@ -434,6 +445,7 @@ impl Session {
         match self {
             Session::Cpu(_, name) => name.clone(),
             Session::Gpu(gpu) => gpu.device.clone(),
+            Session::Cuda(cuda) => cuda.device(),
         }
     }
 
@@ -441,6 +453,7 @@ impl Session {
         match self {
             Session::Cpu(..) => "int8-cpu",
             Session::Gpu(_) => "fp16-webgpu",
+            Session::Cuda(_) => "fp16-cuda",
         }
     }
 
@@ -456,6 +469,7 @@ impl Session {
                 Ok(out)
             }
             Session::Gpu(gpu) => gpu.embed(texts),
+            Session::Cuda(cuda) => cuda.embed(texts),
         }
     }
 }

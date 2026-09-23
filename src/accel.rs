@@ -413,13 +413,16 @@ pub fn set(lane: &str, on: bool) -> Result<String> {
     match (lane, on) {
         ("cpu", false) => {
             let gpu_on = enabled().gpu || enabled().cuda;
-            let can = gpu_on && lanes().iter().any(|l| l.id != "worker" && l.usable())
+            let can = gpu_on
+                && lanes().iter().any(|l| l.id != "worker" && l.usable())
                 && detect_gpu().is_ok();
             if !can {
                 bail!(
                     "the CPU cannot be turned off: no GPU lane is on and usable here ({}), so the CPU \
                      is what indexes",
-                    detect_gpu().err().unwrap_or_else(|| "the GPU lane is off".to_string())
+                    detect_gpu()
+                        .err()
+                        .unwrap_or_else(|| "the GPU lane is off".to_string())
                 );
             }
             settings.accelerators.cpu = Some(false);
@@ -451,13 +454,14 @@ pub fn remove(lane: &str) -> Result<u64> {
     let dir = match lane {
         "gpu" => component_dir(&cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION)),
         "cuda" => crate::gpu::cuda_dir(&cache),
-        other => bail!("{other} has nothing downloaded to remove; the lanes with components are gpu and cuda"),
+        other => bail!(
+            "{other} has nothing downloaded to remove; the lanes with components are gpu and cuda"
+        ),
     };
     let bytes = dir_bytes(&dir);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| {
-            format!("removing {}", crate::plain(&dir.display().to_string()))
-        })?;
+        std::fs::remove_dir_all(&dir)
+            .with_context(|| format!("removing {}", crate::plain(&dir.display().to_string())))?;
     }
     Ok(bytes)
 }
@@ -680,7 +684,28 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
                 dir.display().to_string(),
             ]
         }
-        "cuda" => bail!("unavailable — {}", crate::gpu::cuda_unavailable()),
+        "cuda" => {
+            if let Some(why) = crate::cuda::unavailable_here() {
+                bail!("unavailable — {why}");
+            }
+            // Fetched only because somebody turned CUDA on, which is the only
+            // way this lane is ever started. The fp16 weights are the WebGPU
+            // lane's; the pack is NVIDIA's runtime and ORT's GPU build.
+            fetch_webgpu(lane).context("fetching the fp16 model")?;
+            let cache = crate::model_cache_dir()?;
+            let pack = crate::cuda::fetch_pack(&cache, &mut |percent| {
+                lane.set(Status::Downloading { percent });
+            })
+            .context("fetching the CUDA pack")?;
+            if let Ok(device) = crate::cuda::detect() {
+                *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.name);
+            }
+            vec![
+                "__embed-worker".to_string(),
+                "cuda".to_string(),
+                pack.display().to_string(),
+            ]
+        }
         _ => vec!["__embed-worker".to_string(), "worker".to_string()],
     };
     let exe = std::env::current_exe().context("locating this binary")?;

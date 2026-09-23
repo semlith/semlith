@@ -2933,8 +2933,12 @@ fn accel_change(request: &Request) -> Response {
     let outcome = match body.get("action").and_then(Value::as_str) {
         Some("on") => crate::accel::set(lane, true),
         Some("off") => crate::accel::set(lane, false),
-        Some("remove") => crate::accel::remove(lane)
-            .map(|bytes| format!("{lane}'s components removed, {} freed", crate::human_bytes(bytes as i64))),
+        Some("remove") => crate::accel::remove(lane).map(|bytes| {
+            format!(
+                "{lane}'s components removed, {} freed",
+                crate::human_bytes(bytes as i64)
+            )
+        }),
         _ => return Response::error(400, "action must be \"on\", \"off\" or \"remove\""),
     };
     match outcome {

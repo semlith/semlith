@@ -950,17 +950,26 @@ fn run() -> Result<()> {
                         println!(
                             "{:<5} {:<4} {:<28} {detail}",
                             row["lane"].as_str().unwrap_or("?"),
-                            if row["enabled"].as_bool() == Some(true) { "on" } else { "off" },
+                            if row["enabled"].as_bool() == Some(true) {
+                                "on"
+                            } else {
+                                "off"
+                            },
                             row["device"].as_str().unwrap_or("not asked for yet"),
                         );
                     }
                     println!("switches: {}", status["source"].as_str().unwrap_or(""));
                 }
             }
-            ("on" | "off", Some(lane)) => println!("{}", semlith::accel::set(lane, action == "on")?),
+            ("on" | "off", Some(lane)) => {
+                println!("{}", semlith::accel::set(lane, action == "on")?)
+            }
             ("remove", Some(lane)) => {
                 let freed = semlith::accel::remove(lane)?;
-                println!("{lane}: components removed, {} freed", semlith::human_bytes(freed as i64));
+                println!(
+                    "{lane}: components removed, {} freed",
+                    semlith::human_bytes(freed as i64)
+                );
             }
             _ => anyhow::bail!(
                 "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>], lanes cpu, gpu, cuda"

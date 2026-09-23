@@ -394,7 +394,7 @@ fn record() -> Recorded {
 
 // ----------------------------------------------------------------- the pack
 
-fn pack_dir(cache: &Path) -> PathBuf {
+pub fn pack_dir(cache: &Path) -> PathBuf {
     crate::accel::component_dir(cache, &format!("cuda-{PACK_VERSION}"))
 }
 
