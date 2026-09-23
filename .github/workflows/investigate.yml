@@ -1,0 +1,64 @@
+# TEMPORARY: Linux idle-CPU investigation for `semlith watch`. Not for merge.
+name: investigate
+
+on:
+  push:
+    branches: ["investigate/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  idle:
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [branch, develop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ matrix.side == 'develop' && 'develop' || github.sha }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: investigate-${{ matrix.side }}
+      - run: sudo apt-get install -y -qq strace >/dev/null
+      - run: cargo build --release
+      - name: probe
+        run: |
+          set -u
+          BIN=$PWD/target/release/semlith
+          W=$(mktemp -d); mkdir -p $W/corpus
+          for i in $(seq -w 0 999); do
+            echo "Note $i. Fermentation, ownership, retries and backoff, described at moderate length so the chunk is worth embedding." > $W/corpus/note_$i.md
+          done
+          nproc; cat /proc/cpuinfo | grep "model name" | head -1
+          $BIN --store $W/store index $W/corpus --quiet
+          $BIN --store $W/store watch $W/corpus --quiet > $W/watch.log 2>&1 &
+          PID=$!; T0=$(date +%s.%N)
+          # per-thread: tid comm utime stime (ticks, CLK_TCK=100)
+          snap() {
+            for t in /proc/$PID/task/*; do
+              printf "%s %s %s\n" "${t##*/}" "$(tr ' ' _ < $t/comm)" "$(sed 's/.*) //' $t/stat | awk '{print $12, $13}')"
+            done | sort -n > $W/snap.$1
+            awk -v n=$1 -v t=$(awk -v a=$(date +%s.%N) -v b=$T0 'BEGIN{printf "%.1f", a-b}') '{s+=$3+$4} END{print "snap", n, "t+" t "s total ticks:", s}' $W/snap.$1
+          }
+          delta() { echo "--- per-thread ticks $1 -> $2"; join <(awk '{print $1, $2, $3+$4}' $W/snap.$1) <(awk '{print $1, $3+$4}' $W/snap.$2) | awk '{d=$4-$3; if (d>0) print "  ", $1, $2, d}'; }
+          n=0
+          for s in 1 2 2 2 3 5 5 10 10 20 30; do
+            sleep $s; n=$((n+1)); snap $n
+            [ $n -gt 1 ] && delta $((n-1)) $n
+          done
+          echo "--- watch.log"; cat $W/watch.log
+          echo "--- threads"; cat $W/snap.$n
+          echo "--- strace -c -f 20s"
+          sudo timeout -s INT 20 strace -c -f -p $PID 2>&1 | head -40
+          echo "--- strace -f -tt 2s"
+          sudo timeout -s INT 2 strace -f -tt -p $PID 2>&1 | head -150
+          kill -INT $PID; wait $PID
+        shell: bash
+      - name: measure_the_watcher
+        if: always()
+        run: cargo test --release --test measure -- --ignored --nocapture --test-threads=1 measure_the_watcher 2>&1 | tee measure.txt
+        shell: bash
