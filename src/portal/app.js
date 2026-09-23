@@ -1188,6 +1188,8 @@ const state = {
   /** The Index page's painter while that page is on screen, so one fetch of
    * the runs route serves both readers. */
   onRuns: null,
+  /** The open page's reader of a changed store list, if it has one. */
+  onStores: null,
 };
 
 /* Pages, in the design's grouping. The ones the roadmap puts in a later
@@ -1321,6 +1323,14 @@ async function pollChanges() {
     }
   }
   if (!moved.length) return;
+  /* The sidebar's store count is on every page, so it follows the stores
+   * domain on every page rather than only where a view asked. A store deleted
+   * by a stop on the Index page used to stay counted until a reload. */
+  if (moved.includes("stores")) {
+    refreshStores()
+      .then(() => state.onStores && state.onStores())
+      .catch(() => {});
+  }
   for (const watcher of live.watchers) {
     if (watcher.domains.some((domain) => moved.includes(domain))) {
       try {
@@ -1349,6 +1359,11 @@ function startLive() {
  * the sidebar disagrees with the cards beside it. */
 let runsAsked = 0;
 let runsPainted = 0;
+
+/** Make every runs read still in flight too old to paint. */
+function supersedeRuns() {
+  runsPainted = ++runsAsked;
+}
 
 async function refreshRuns() {
   // Numbered, because two can be in flight: the poll's, and the one a button
@@ -1382,7 +1397,7 @@ function paintRunCount() {
 }
 
 /** The statuses a run is still in. */
-const TICKING = new Set(["queued", "running", "paused", "stopping"]);
+const TICKING = new Set(["queued", "running", "pausing", "paused", "held", "stopping"]);
 
 /** Draw the view on screen again, keeping where the reader had scrolled to.
  *
@@ -3460,10 +3475,22 @@ function liveStores() {
   });
 }
 
-/** Read the store list into `state`, so every view agrees on how many exist. */
+/** Read the store list into `state`, so every view agrees on how many exist.
+ *
+ * Numbered, like the runs reads. A delete moves the stores counter and the
+ * events counter together, so the sidebar and the Stores page each ask at
+ * once — and an answer from before the delete arriving after one from after
+ * it left the deleted store counted until the next change, which a delete
+ * never follows with. */
+let storesAsked = 0;
+let storesRead = 0;
+
 async function refreshStores() {
+  const mine = ++storesAsked;
   try {
     const data = await api("/api/stores");
+    if (mine < storesRead) return state.stores;
+    storesRead = mine;
     state.stores = data.stores || [];
     // Kept on the state rather than drawn here, because this runs before every
     // view and the view decides where a notice belongs on its own page.
@@ -3551,7 +3578,7 @@ function agentsCard() {
  * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
  * it is pending the dialog says so, and an error is shown inside it rather
  * than behind it. */
-function ask({ title, body, confirm, tone, run }) {
+function ask({ title, body, extra, confirm, tone, run }) {
   const dialog = el("dialog", { class: "modal" });
   const problem = el("div", { class: "note" });
   const go = el("button", {
@@ -3579,6 +3606,7 @@ function ask({ title, body, confirm, tone, run }) {
     dialog,
     el("h2", { class: "card-title", text: title }),
     el("p", { class: "subtitle", text: body }),
+    extra || null,
     problem,
     el(
       "div",
@@ -5894,6 +5922,12 @@ function coveragePanel() {
  */
 
 /** How long a run has taken, as `12:34` or `1:02:03`. */
+/** Chunks a second, to one decimal under ten so a slow lane reads as "2.4"
+ * rather than rounding to nothing. */
+function perSecond(value) {
+  return value >= 10 ? n(Math.round(value)) : Number(value).toFixed(1);
+}
+
 function spell(ms) {
   const all = Math.max(0, Math.round(ms / 1000));
   const seconds = String(all % 60).padStart(2, "0");
@@ -5905,7 +5939,9 @@ function spell(ms) {
 const RUN_TONE = {
   queued: "warn",
   running: "good",
+  pausing: "warn",
   paused: "warn",
+  held: "warn",
   stopping: "warn",
   done: "good",
   stopped: "bad",
@@ -5915,7 +5951,13 @@ const RUN_TONE = {
 const RUN_WORD = {
   queued: "queued",
   running: "indexing",
+  // Said the moment Pause is pressed: the engine stops at its next batch, and
+  // a button that answers nothing until then reads as a button that failed.
+  pausing: "pausing",
   paused: "paused",
+  // Admitted once and held again because `runs at once` was lowered. It is
+  // not paused and it has not lost anything, and the pill says both.
+  held: "held — waiting for a slot, keeps its progress",
   stopping: "stopping",
   done: "done",
   stopped: "stopped",
@@ -5927,11 +5969,25 @@ function runCard(run, controls) {
   const bar = el("span", {});
   const track = el("div", { class: "bar", tabindex: "0" }, bar);
   const pct = el("span", { class: "pct" });
-  const status = el("span", { class: "meta" });
+  /* The run's reading, one line of text with its parts as their own nodes, so
+   * a poll moves the words that moved and nothing else — and a field the
+   * daemon adds is one more node here and one `setText` in `absorb`. */
+  const counts = document.createTextNode("");
+  // Each starts holding an empty text node, so its first words are an edit
+  // of that node rather than a child added under a card being watched.
+  const rate = el("span", {}, "");
+  const lanes = el("span", {}, "");
+  const threads = el("span", {}, "");
+  const status = el("span", { class: "meta" }, counts, rate, lanes, threads);
   const elapsed = el("span", { class: "meta" });
   const log = el("div", { class: "log", "aria-live": "polite" });
   // What a refused control said, on the card it was pressed on.
-  const problem = el("div", { class: "note bad" });
+  const problem = el("div", { class: "note bad" }, "");
+  // What the run's stop did to its store, when it was asked to delete it.
+  const outcome = el("div", { class: "note" }, "");
+  /** The last reading, so a control's answer can move the card before the
+   * next poll does. */
+  let last = run;
   const badge = pill("", "good");
   // `pill` writes its text as the last child, after the dot.
   const badgeWord = badge.lastChild;
@@ -5974,6 +6030,7 @@ function runCard(run, controls) {
   }
 
   function absorb(next) {
+    last = next;
     shown = next.elapsed_ms || 0;
     readAt = Date.now();
     ticking = !!next.ticking;
@@ -6002,40 +6059,62 @@ function runCard(run, controls) {
 
     // The pill's own text node, beside its dot. It used to be rebuilt dot and
     // all on every poll, which replaced two children a second on every card.
+    // A catch-up is the watcher's run rather than somebody's, and says so.
     setText(
       badgeWord,
       next.status === "queued" && next.position
         ? `queued · ${next.position} in line`
-        : RUN_WORD[next.status] || next.status,
+        : next.kind === "catch-up" && next.status === "running"
+          ? "catching up"
+          : RUN_WORD[next.status] || next.status,
     );
     const tone = `pill ${RUN_TONE[next.status] || "warn"}`;
     if (badge.className !== tone) badge.className = tone;
 
-    /* Chunks a second, to one decimal under ten so a short run reads as
-     * "2.4 chunks/s" rather than rounding to nothing and dropping the field
-     * entirely — which is what made the rate vanish for several samples after
-     * every reset of the counter. */
-    const perSecond = next.elapsed_ms ? (next.chunks / next.elapsed_ms) * 1000 : 0;
-    const rate = perSecond >= 10 ? n(Math.round(perSecond)) : perSecond.toFixed(1);
+    const live = TICKING.has(next.status);
     // The phase, when the run is doing something other than reading files.
     // Twenty seconds of a bar not moving is a hang unless the card says what
     // it is: every two hundred files the run rewrites its shards.
     setText(
-      status,
+      counts,
       next.phase
-        ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} ·`
+        ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} · `
         : next.total
-          ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · ${rate} chunks/s ·`
-          : RUN_WORD[next.status] || next.status,
+          ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · `
+          : `${RUN_WORD[next.status] || next.status} · `,
     );
+    /* The daemon's rolling rate, over the last ten seconds of work, on every
+     * poll while the run is live — "—" until the first batch has given it one.
+     * It used to be chunks over the whole elapsed clock, which counted the
+     * time a run sat queued or paused against it. A finished run keeps its
+     * average, which is the one reading that is still true of it. */
+    const reading = live ? next.rate : next.rate_average;
+    // A run still in the line has read nothing, so it has no rate to show,
+    // and a finished run that never embedded a batch has no average either.
+    rate.hidden = next.status === "queued" || (!live && (reading === null || reading === undefined));
+    setText(rate, `${reading === null || reading === undefined ? "—" : perSecond(reading)} chunks/s · `);
+    const average = next.rate_average;
+    const tip = average === null || average === undefined ? "" : `${perSecond(average)} chunks/s on average since the first batch`;
+    if (rate.title !== tip) rate.title = tip;
+    // Which device is doing what, once there is more than one doing it.
+    const split = Object.entries(next.lane_rates || {}).sort((a, b) => b[1] - a[1]);
+    lanes.hidden = split.length < 2;
+    setText(lanes, split.length < 2 ? "" : `${split.map(([lane, r]) => `${lane.toUpperCase()} ${n(Math.round(r))}/s`).join(" · ")} · `);
+    threads.hidden = !next.threads;
+    setText(threads, next.threads ? `${n(next.threads)} thread${next.threads === 1 ? "" : "s"} · ` : "");
     setText(where, (next.paths || []).join(", "));
+    const deleted = next.delete || "";
+    setText(outcome, deleted);
+    const outcomeClass = deleted.startsWith("the store was not deleted") ? "note bad" : "note";
+    if (outcome.className !== outcomeClass) outcome.className = outcomeClass;
 
-    const held = next.status === "paused";
-    const live = TICKING.has(next.status);
+    // Pausing reads as held already: the button offers the way back.
+    const held = next.status === "paused" || next.status === "pausing";
     // In place, so the button somebody just pressed is still the focused one
     // when it turns from Pause to Resume.
     setText(pause, held ? "Resume" : "Pause");
-    pause.hidden = !live || next.status === "queued";
+    // Nothing to pause in a run that has not started or is held for a slot.
+    pause.hidden = !live || next.status === "queued" || next.status === "held";
     // A queued run has embedded nothing, so taking it out of the line costs
     // nothing and is not the same act as stopping one that is going.
     // "Take out of the queue" rather than "Remove": a finished card's Remove
@@ -6110,6 +6189,7 @@ function runCard(run, controls) {
       remove,
     ),
     problem,
+    outcome,
     where,
     log,
   );
@@ -6120,7 +6200,7 @@ function runCard(run, controls) {
     if (ticking) paintClock();
   }, 1000);
 
-  return { node, absorb, log, problem, isOpen: () => open };
+  return { node, absorb, log, problem, last: () => last, isOpen: () => open };
 }
 
 /** Append one log line, keeping the reader's place if they have scrolled up. */
@@ -6263,7 +6343,7 @@ function settingField(key, label, limit, onSave) {
     // the rule here; the input's `max` still carries the number.
     const room = key === "index_memory_mb" ? "what is free now, less the reserve," : `the ${limit.ceiling}`;
     if (asked > limit.derived) {
-      setText(why, `${held}Above the ${limit.derived} this machine would pick on its own, and under ${room} it will allow — ${limit.reason} Yours to set; it applies to the next run.`);
+      setText(why, `${held}Above the ${limit.derived} this machine would pick on its own, and under ${room} it will allow — ${limit.reason} Yours to set.`);
       return;
     }
     const from =
@@ -6310,6 +6390,143 @@ function settingField(key, label, limit, onSave) {
       { class: "setting" },
       el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
       why,
+    ),
+  };
+}
+
+/* The accelerator lanes, on the Machine limits card.
+ *
+ * One row per lane — the CPU, WebGPU, CUDA, and the worker when it is on —
+ * each the row-wide switch the Privacy page's replay control already is, with
+ * the lane's device, where it stands and its share of the rate. Built once and
+ * patched from `/api/accel`, which the Index page reads with its runs.
+ *
+ * The daemon refuses what it will not do — the CPU off with no GPU lane able
+ * to carry the work, CUDA anywhere but Linux — with a 409 that says why, and
+ * that sentence is shown as it came, on this card. */
+const LANE_NAMES = { cpu: "CPU", gpu: "GPU", cuda: "CUDA", worker: "Worker" };
+
+function laneState(status) {
+  const state = (status && status.state) || "idle";
+  if (state === "downloading") return `downloading ${status.percent ?? 0}%`;
+  if (status && status.reason) return `${state} — ${status.reason}`;
+  return state;
+}
+
+function accelSection() {
+  const rows = el("div", { class: "rows" });
+  const fallback = el("p", { class: "note" });
+  const problem = el("div", { class: "note" });
+  const drawn = new Map();
+  let data = null;
+  let asked = 0;
+  let painted = 0;
+
+  function say(text, bad) {
+    problem.className = bad ? "note bad" : "note";
+    setText(problem, text);
+  }
+
+  async function change(lane, action) {
+    try {
+      const answer = await post("/api/accel", { lane, action });
+      say(answer.said || "");
+    } catch (e) {
+      say(e.message, true);
+    }
+    await refresh();
+  }
+
+  function row(lane) {
+    const knob = el("span", { class: "knob", "aria-hidden": "true" });
+    const title = el("span", { class: "replay-state" });
+    const where = el("span", { class: "replay-switch-note" });
+    const share = el("span", { class: "meta" });
+    const toggle = el(
+      "button",
+      { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false" },
+      knob,
+      el("span", { class: "replay-switch-text" }, title, where),
+      el("span", { class: "spacer" }),
+      share,
+    );
+    const remove = el("button", { class: "button secondary small", type: "button" });
+    const removeRow = el("div", { class: "filters" }, remove);
+    const drawnRow = { title, where, share, toggle, remove, removeRow, enabled: false, node: null };
+    toggle.addEventListener("click", () => {
+      const on = !drawnRow.enabled;
+      // A download of that size is somebody's decision, made knowing it.
+      if (on && lane === "cuda") {
+        ask({
+          title: "Turn CUDA on?",
+          body: `It downloads the CUDA pack first, ${bytes(data?.bytes?.cuda_download || 0)}, once, into this machine's model cache. Runs use it from their next batch.`,
+          confirm: "Download and turn on",
+          run: () => change(lane, "on"),
+        });
+        return;
+      }
+      change(lane, on ? "on" : "off");
+    });
+    remove.addEventListener("click", () => change(lane, "remove"));
+    drawnRow.node = el("div", { class: "rows tight" }, toggle, removeRow);
+    return drawnRow;
+  }
+
+  function paint(next) {
+    data = next;
+    const seen = new Set();
+    for (const lane of next.lanes || []) {
+      seen.add(lane.lane);
+      let r = drawn.get(lane.lane);
+      if (!r) {
+        r = row(lane.lane);
+        drawn.set(lane.lane, r);
+      }
+      r.enabled = !!lane.enabled;
+      r.toggle.classList.toggle("on", r.enabled);
+      const checked = String(r.enabled);
+      if (r.toggle.getAttribute("aria-checked") !== checked) r.toggle.setAttribute("aria-checked", checked);
+      const name = LANE_NAMES[lane.lane] || lane.lane;
+      setText(r.title, `${name} · ${lane.device || "no device found"}${lane.variant ? ` · ${lane.variant}` : ""}`);
+      setText(r.where, `${r.enabled ? "" : "off · "}${laneState(lane.status)}`);
+      setText(r.share, `${Math.round(lane.share || 0)} %`);
+      const held = (next.bytes || {})[lane.lane] || 0;
+      r.removeRow.hidden = !(held > 0 && (lane.lane === "gpu" || lane.lane === "cuda"));
+      setText(r.remove, `Remove downloaded files (${bytes(held)})`);
+    }
+    for (const [lane, r] of drawn) {
+      if (seen.has(lane)) continue;
+      r.node.remove();
+      drawn.delete(lane);
+    }
+    arrange(rows, (next.lanes || []).map((lane) => drawn.get(lane.lane).node));
+    setText(fallback, next.cpu_fallback ? "The CPU is carrying the work: no GPU lane can." : "");
+  }
+
+  /** Read the lanes again. Numbered like the runs, so a late answer to an
+   * older question is not painted over a newer one. */
+  async function refresh() {
+    const mine = ++asked;
+    let next;
+    try {
+      next = await api("/api/accel");
+    } catch (_) {
+      return;
+    }
+    if (mine < painted) return;
+    painted = mine;
+    paint(next);
+  }
+
+  return {
+    refresh,
+    node: el(
+      "div",
+      { class: "rows" },
+      el("span", { class: "eyebrow", text: "Accelerators" }),
+      fallback,
+      rows,
+      problem,
     ),
   };
 }
@@ -6379,14 +6596,27 @@ async function indexView() {
     note.textContent = message;
   }
 
-  async function control(store, action, run) {
+  async function control(store, action, run, extra) {
     // A card's own control answers on its own card, under its buttons. On the
     // page's note the answer appeared above every card and pushed them all
     // down a line — the refusal a Pause meets when its run finishes under it.
     const card = drawn.get(run);
+    const was = card && card.last().status;
     try {
-      await post("/api/index/control", { store, action, run });
-      if (card) setText(card.problem, "");
+      const answer = await post("/api/index/control", { store, action, run, ...(extra || {}) });
+      if (card) {
+        setText(card.problem, "");
+        /* The route answers with the state it was asked for at once —
+         * `pausing`, `running`, `stopping` — and the engine reaches it at its
+         * next batch. The card says so now rather than at the next poll, and
+         * a poll already in flight, asked before the click, is not painted
+         * over it. Only if no poll has moved the card since the click: one
+         * that already reads "paused" is further on than the answer. */
+        if (answer && answer.state && card.last().status === was && TICKING.has(was)) {
+          supersedeRuns();
+          card.absorb({ ...card.last(), status: answer.state });
+        }
+      }
     } catch (e) {
       if (card) setText(card.problem, e.message);
       else complain(e.message);
@@ -6426,12 +6656,40 @@ async function indexView() {
           hold: (wantPause) => control(run.store, wantPause ? "pause" : "resume", run.id),
           stop: (queued) => {
             if (queued) return control(run.store, "dequeue", run.id);
+            /* "Also delete the store". Ticked for a store this run is
+             * creating — it held nothing before, or the run has not started
+             * and nobody knows yet — because stopping that run leaves an
+             * empty store nobody asked for. Unticked for a store that held
+             * files, and the dialog says how many stay. */
+            const before = (drawn.get(run.id)?.last() || run).files_before;
+            const box = el("input", {
+              type: "checkbox",
+              class: "pick",
+              checked: !before,
+            });
+            const consequence = el("p", { class: "note" });
+            const files = `${n(before)} file${before === 1 ? "" : "s"}`;
+            const explain = () =>
+              setText(
+                consequence,
+                box.checked
+                  ? `${before ? `This store holds ${files}. ` : ""}The store is deleted once the run is undone. The files on disk are untouched.`
+                  : before
+                    ? `This store holds ${files}; they stay.`
+                    : "The store stays, empty.",
+              );
+            box.addEventListener("change", explain);
+            explain();
             ask({
               title: `Stop ${run.store}'s index run?`,
               body: "Everything it has embedded so far is undone, so the store is left exactly as it was before the run started. The other runs are untouched.",
+              extra: [
+                el("label", { class: "filters" }, box, el("span", { class: "subtitle", text: "Also delete the store" })),
+                consequence,
+              ],
               confirm: "Stop and undo",
               tone: "bad",
-              run: () => control(run.store, "stop", run.id),
+              run: () => control(run.store, "stop", run.id, { delete: box.checked }),
             });
           },
           // Dismissing a card, which touches nothing in the store. No confirm,
@@ -6558,7 +6816,9 @@ async function indexView() {
     try {
       const answer = await post("/api/index/settings", { [key]: value });
       settingsNote.className = "note";
-      setText(settingsNote, "Saved. It applies to the next run queued.");
+      // What the daemon is running with now, in its words: all three take
+      // effect at once, the running runs at their next batch.
+      setText(settingsNote, answer.applied ? `Saved — ${answer.applied}.` : "Saved.");
       paintSettings(answer.limits);
     } catch (e) {
       settingsNote.className = "note bad";
@@ -6576,6 +6836,7 @@ async function indexView() {
    * into it, and with a new input in place of the focused one. Now a changed
    * number is a changed text node and nothing else. */
   const settingsNote = el("div", { class: "note" });
+  const accel = accelSection();
   let limitsCard = null;
   function paintSettings(limits) {
     if (!limits) return;
@@ -6613,6 +6874,7 @@ async function indexView() {
           limitsCard.fields.map((field) => field.node),
         ),
         settingsNote,
+        accel.node,
       );
     }
     // Every field of every limit, every time, and each patch is a no-op when
@@ -6897,11 +7159,14 @@ async function indexView() {
   });
 
   clearDone.addEventListener("click", async () => {
-    const stores = new Set(
-      (state.runs?.runs || [])
-        .filter((run) => !TICKING.has(run.status))
-        .map((run) => run.store),
-    );
+    const finished = (state.runs?.runs || []).filter((run) => !TICKING.has(run.status));
+    /* A card whose stop deleted its store has no store left to clear, and
+     * `clear` naming one was refused after it had already dropped every such
+     * card — so the refusal landed on the page note over the cards. Those are
+     * removed one by one, by run, which the route answers without a store. */
+    const gone = (run) => (run.delete || "").startsWith("the store was deleted");
+    for (const run of finished.filter(gone)) await control(run.store, "remove", run.id);
+    const stores = new Set(finished.filter((run) => !gone(run)).map((run) => run.store));
     for (const store of stores) await control(store, "clear");
   });
 
@@ -6912,7 +7177,18 @@ async function indexView() {
   // Calling it with nothing — which an added second painter made easy to do —
   // redraws the page as though every run had ended.
   state.onRuns = (data) => paint(data);
-  watchLive(["runs", "stores"], refreshRuns);
+  // The lanes with the runs: a lane starts, downloads and carries its share
+  // while a run is going, which is when the runs domain moves.
+  accel.refresh();
+  watchLive(["runs", "stores"], () => {
+    refreshRuns();
+    accel.refresh();
+  });
+  // A store deleted, or made, while the page is open: the dropdown stops
+  // offering the one that is gone. Not while it is open under the pointer.
+  state.onStores = () => {
+    if (document.activeElement !== target) paintTargets();
+  };
 
   return el(
     "div",
@@ -8068,6 +8344,67 @@ async function doctorView() {
   };
   paintRules(data.rules || []);
 
+  /* The GPU check: `semlith doctor --gpu`, from the page. Each lane embeds the
+   * committed known-answer texts and is compared with the CPU's fp32 vectors,
+   * so "the GPU works" is a cosine and a rate rather than a device name. On
+   * request only: the first check of a lane downloads what it needs, which is
+   * nothing a page load should do on its own. */
+  const gpuNote = el("div", { class: "note" });
+  const gpuTable = dataTable({
+    caption:
+      "Each accelerator lane's check: whether its vectors match the CPU's, on which device and variant, the lowest cosine over the known answers, and its rate.",
+    rows: [],
+    perPage: 10,
+    columns: [
+      { key: "lane", label: "Lane", value: (r) => LANE_NAMES[r.lane] || r.lane },
+      {
+        key: "result",
+        label: "Result",
+        value: (r) => (r.reason ? "n/a" : r.passed ? "ok" : "FAIL"),
+        render: (r) =>
+          r.reason ? pill("n/a", null) : r.passed ? pill("ok", "good") : pill("FAIL", "bad"),
+      },
+      { key: "device", label: "Device", value: (r) => r.device || r.reason || "—" },
+      { key: "variant", label: "Variant", value: (r) => r.variant || "—" },
+      {
+        key: "cosine",
+        label: "Cosine",
+        value: (r) => (typeof r.cosine === "number" ? r.cosine.toFixed(4) : "—"),
+      },
+      {
+        key: "rate",
+        label: "Chunks/s",
+        value: (r) => (typeof r.chunks_per_s === "number" ? perSecond(r.chunks_per_s) : "—"),
+      },
+    ],
+  });
+  gpuTable.node.hidden = true;
+  const gpuButton = el("button", {
+    class: "button secondary small",
+    type: "button",
+    text: "Run the GPU check",
+    onclick: async () => {
+      gpuButton.disabled = true;
+      gpuButton.setAttribute("aria-busy", "true");
+      setText(gpuButton, "Checking…");
+      gpuNote.className = "note";
+      setText(gpuNote, "Checking each lane. The first check of a lane downloads what it needs, so it can take a minute.");
+      try {
+        const answer = await post("/api/doctor/gpu", {});
+        gpuTable.update(answer.checks || []);
+        gpuTable.node.hidden = false;
+        setText(gpuNote, "");
+      } catch (e) {
+        gpuNote.className = "note bad";
+        setText(gpuNote, e.message);
+      } finally {
+        gpuButton.disabled = false;
+        gpuButton.removeAttribute("aria-busy");
+        setText(gpuButton, "Run the GPU check");
+      }
+    },
+  });
+
   // What the table is a list of, said once above it rather than counted off
   // the rows by the reader — the page is twenty-seven rows and two of them
   // matter.
@@ -8102,6 +8439,23 @@ async function doctorView() {
       }),
     ),
     rulesBox,
+    el(
+      "div",
+      { class: "card pad" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "GPU check" }),
+        el("span", { class: "spacer" }),
+        gpuButton,
+      ),
+      el("p", {
+        class: "subtitle",
+        text: "Whether each accelerator lane's vectors agree with the CPU's, and how fast it runs. The same check as semlith doctor --gpu.",
+      }),
+      gpuNote,
+      gpuTable.node,
+    ),
     el(
       "div",
       // `card pad`, like every other section on every other page. A bare card
@@ -9185,6 +9539,42 @@ async function privacyView() {
         "not connected",
         "this binary has no cloud command and opens no connection to any host; the Cloud page describes an optional service and contacts nothing",
       ),
+    ),
+    /* Every download there is, listed rather than implied by "no telemetry":
+     * the embedding model on first use, and the two accelerator packs only
+     * when their lane is on. Each says where it comes from, how large it is,
+     * when it would happen, and whether it already has. */
+    el(
+      "div",
+      { class: "card pad" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Downloads" }),
+        el("span", { class: "spacer" }),
+        el("span", {
+          class: "meta",
+          text: "everything semlith ever fetches, and when",
+        }),
+      ),
+      dataTable({
+        caption:
+          "Every file semlith can download: what it is, where it comes from, its size, when the download happens, and whether it is on this machine already.",
+        rows: data.downloads || [],
+        perPage: 10,
+        columns: [
+          { key: "what", label: "What", value: (r) => r.what },
+          { key: "source", label: "From", value: (r) => r.source },
+          { key: "bytes", label: "Size", value: (r) => r.bytes, render: (r) => bytes(r.bytes) },
+          { key: "when", label: "When", value: (r) => r.when },
+          {
+            key: "cached",
+            label: "Here",
+            value: (r) => (r.cached ? "here" : "not downloaded"),
+            render: (r) => pill(r.cached ? "here" : "not downloaded", r.cached ? "good" : null),
+          },
+        ],
+      }).node,
     ),
     el(
       "div",
@@ -11807,6 +12197,7 @@ async function render() {
   // does. Without this, leaving a page would leave its refetch running.
   resetLive();
   state.onRuns = null;
+  state.onStores = null;
 
   const view = VIEWS.find((v) => v.id === current) || VIEWS[0];
   shell.pageTitle.textContent = view.title;
@@ -11846,6 +12237,13 @@ async function boot() {
 
   wireTips();
 
+  /* The change counters' baseline, read before anything they describe. The
+   * first poll used to take it a second after the page had drawn, so a change
+   * landing in between — a store deleted while the page loaded — was folded
+   * into the baseline and never refetched: the page counted a store that was
+   * gone until the next unrelated change. Read first, a change in that gap is
+   * one the next poll sees move. */
+  await pollChanges();
   await refreshStores();
   // Not awaited: the sidebar's agent count is a detail, and `claude mcp list`
   // behind this route is slow on some machines. It fills itself in.
