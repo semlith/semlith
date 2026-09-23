@@ -619,13 +619,15 @@ impl Runner {
 mod tests {
     use super::*;
 
+    // The temporary directory rather than `/tmp`: on Windows `/tmp` has no
+    // drive, so it is relative, and `Schedules::add` refuses it.
     fn weekly() -> Schedule {
         Schedule::new(
             "health",
             "markdown",
             "Sonnet 5",
             7 * 24 * 60 * 60,
-            Path::new("/tmp"),
+            &std::env::temp_dir(),
         )
     }
 
