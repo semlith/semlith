@@ -556,7 +556,11 @@ def _(d):
     deadline = time.time() + 900
     final = None
     while time.time() < deadline:
-        run = run_for(d, store_name)
+        # The run this check started, by id. "The store's newest run" stopped
+        # being that run in 0.28.0: a watcher burst of more than 32 files is
+        # admitted as a run of its own, with its own counter from zero, and
+        # following it read as this run's counter falling to 0.
+        run = run_by_id(d, run_id)
         if run is None:
             time.sleep(0.5)
             continue
@@ -4315,8 +4319,11 @@ def _(d):
 
     The machine-limits card may change its words but not its nodes: no child
     of it, at any depth, is added or removed. No run card is taken out of the
-    list, and no part of a card outside its log — the log is the one thing
-    that is meant to grow — is rebuilt. And the loading view never appears.
+    list beyond the fewest moves a change of order needs — other checks' runs
+    may finish during the minute and drop below this one, and on Linux a
+    watcher burst is a run with a card of its own — and no part of a card
+    outside its log, the one thing meant to grow, is rebuilt. And the loading
+    view never appears.
 
     Through all of it "threads each" holds a number that has been typed and not
     saved, with the focus in it. The limits card used to be rebuilt about once
@@ -4359,19 +4366,39 @@ def _(d):
               const found = {limits: [], detached: [], rebuilt: []};
               const name = n => n.nodeType === 1 ? n.tagName.toLowerCase()
                 + (n.className ? '.' + String(n.className).split(' ').join('.') : '') : '#text';
+              // The fewest cards a change of order can be made with: those
+              // outside the longest run that kept its order. A card finishing
+              // under a live one is one move; every card re-parented on every
+              // poll is what this block is here to catch.
+              const needed = (before, after) => {
+                const at = new Map(after.map((n, i) => [n, i]));
+                const common = before.filter(n => at.has(n)).map(n => at.get(n));
+                const tails = [];
+                for (const v of common) {
+                  let lo = 0, hi = tails.length;
+                  while (lo < hi) { const mid = (lo + hi) >> 1; if (tails[mid] < v) lo = mid + 1; else hi = mid; }
+                  tails[lo] = v;
+                }
+                return (common.length - tails.length) + (before.length - common.length);
+              };
+              let last = [...cards.children];
+              const title = n => (n.querySelector && (n.querySelector('.card-title') || {}).textContent) || name(n);
               const observer = new MutationObserver(records => {
+                const out = [];
                 for (const r of records) {
                   if (r.type !== 'childList') continue;
                   if (limits.contains(r.target)) {
                     found.limits.push(name(r.target) + ' lost ' + [...r.removedNodes].map(name).join(',')
                       + ' gained ' + [...r.addedNodes].map(name).join(','));
                   } else if (r.target === cards) {
-                    for (const n of r.removedNodes) found.detached.push(
-                      (n.querySelector && (n.querySelector('.card-title') || {}).textContent) || name(n));
+                    for (const n of r.removedNodes) if (n.nodeType === 1) out.push(n);
                   } else if (cards.contains(r.target) && !r.target.closest('.log')) {
                     found.rebuilt.push(name(r.target));
                   }
                 }
+                const now = [...cards.children];
+                if (out.length > needed(last, now)) found.detached.push(...out.map(title));
+                last = now;
               });
               observer.observe(limits, {childList: true, subtree: true});
               observer.observe(cards, {childList: true, subtree: true});
@@ -4430,9 +4457,10 @@ def _(d):
             )
         if seen["detachedCount"]:
             fail(
-                "%d run card(s) were taken out of the list in a minute where the "
-                "order never changed: %s. A detached card loses its focus and its "
-                "log's scroll position." % (seen["detachedCount"], seen["detached"])
+                "%d run card(s) were taken out of the list beyond what the order "
+                "changes needed: %s. A detached card loses its focus and its log's "
+                "scroll position, so only the cards whose place changed may move."
+                % (seen["detachedCount"], seen["detached"])
             )
         if seen["rebuiltCount"]:
             fail(
@@ -4557,17 +4585,18 @@ def _(d):
 
 
 def quiet(d, timeout=180):
-    """Wait until no run is live anywhere, so the next check's run is admitted
-    at once rather than queued behind the last check's tidying up."""
+    """Wait, bounded, until no run is live anywhere, so the next check's run
+    is admitted at once rather than queued behind an earlier check's tidying
+    up. Not a failure when it does not happen: an earlier check may leave a
+    run going on purpose (6.10), and the checks that follow wait for their own
+    run to be admitted anyway."""
     deadline = time.time() + timeout
-    live = []
     while time.time() < deadline:
         answer = d.api("/api/index/runs")
-        live = [r["store"] for r in answer.get("runs") or [] if r.get("status") not in TERMINAL]
+        live = [r for r in answer.get("runs") or [] if r.get("status") not in TERMINAL]
         if not live and not answer.get("queue"):
             return
         time.sleep(0.5)
-    fail("runs were still live after %ds: %s" % (timeout, ", ".join(live)))
 
 
 @finding("8.5", "the Stop dialog leaves 'Also delete the store' unticked for a store with files, and says how many stay")
