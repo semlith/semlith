@@ -563,6 +563,53 @@ fn the_changes_route_reports_every_domain() {
     }
 }
 
+/// A root folder deleted under an open store moves the stores counter.
+///
+/// Deleting a folder writes nothing to any store, so before `notice_roots` the
+/// counter stood still and an open Stores page drew the root as present until
+/// something unrelated moved it — the badge for a gone corpus appeared only on
+/// the next navigation.
+#[test]
+fn a_deleted_root_moves_the_stores_counter() {
+    let corpus = tempfile::Builder::new()
+        .prefix("semlith-gone-root-")
+        .tempdir()
+        .unwrap();
+    std::fs::write(corpus.path().join("a.md"), "A root that is about to go.").unwrap();
+    let home = tempfile::Builder::new()
+        .prefix("semlith-gone-home-")
+        .tempdir()
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .args(["index", "--quiet", &corpus.path().display().to_string()])
+        .env("SEMLITH_HOME", home.path())
+        .current_dir(corpus.path())
+        .output()
+        .expect("semlith index runs");
+    assert!(
+        out.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let daemon = Daemon::start_in(home.path());
+    let counter = || daemon.json("/api/changes")["stores"].as_u64().unwrap();
+    // The first poll is the baseline, and a second one with nothing changed
+    // must not move.
+    let before = counter();
+    assert_eq!(counter(), before, "an idle poll moved the stores counter");
+
+    let root = corpus.path().to_path_buf();
+    drop(corpus);
+    assert!(!root.exists());
+    assert_ne!(
+        counter(),
+        before,
+        "the root at {} was deleted and the stores counter did not move",
+        root.display()
+    );
+}
+
 /// The two flags 0.20.0 adds to `index` have a surface on the page, which is
 /// what portal parity asks of a capability.
 ///

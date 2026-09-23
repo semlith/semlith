@@ -698,38 +698,29 @@ means the walk ran and found nothing. *No definition of that name is in an open
 store. Check the spelling, or index the repository that holds it.* means there
 was nothing to walk from.
 
-### The canvas, and what a ring means
+### The canvas
 
-The card at the top of the right column draws the same answer as a picture:
-the symbol you asked about at the centre, and every symbol that reaches it
-placed on a ring. **The ring is the hop count.** The innermost ring is
-everything one hop away — the direct callers — the next is two hops, and so on
-out to the depth you asked for. The caption says so: *reverse reachability,
-rings by hop*.
+The card at the top of the right column draws the same answer as a picture,
+with the Graph page's own force simulation: the symbol you asked about drawn
+selected, and every symbol that reaches it around it, each joined by a line to
+the symbol it reached through, so a chain is a path in to the subject. Nodes
+move, can be dragged, and a click selects one and its neighbours, as on the
+Graph page. The caption reads *reverse reachability*.
 
-A line runs from each symbol to the symbol it reached through, so a chain is a
-path inwards to the centre. A name drawn in amber is one whose edge is
-`inferred` or `ambiguous`, which is the same amber its badge carries in the
-table on the left — a reader who has learned one has learned the other.
+Hop distance is in the tables on the left, which group the reached set by hop,
+and in the hover card. The canvas is the shape of the answer, not its measure:
+a spring layout puts a symbol wherever repulsion leaves it, so how far a node
+sits from the subject says nothing about how many hops away it is.
 
 **The hover card** is the Graph page's, and follows the pointer the same way. For
 a symbol that reaches the subject it gives `hops`, the `file` and line of the
 row that reached it, what it `reaches` through and by which edge kind, and the
 edge's `confidence`; the subject itself says it is hop 0.
 
-**It does not move.** Every other canvas in this portal is a force simulation
-that settles; this one is arithmetic, drawn once. That is deliberate, and it is
-the whole reason the picture is worth drawing: hop distance is the only thing
-this page is about, and a spring layout is a machine for destroying it. A
-symbol three hops out would end up wherever repulsion happened to put it, which
-is a picture that looks informative and is not. Drawn this way, the same answer
-produces the same picture twice, and nothing here needs turning off for a
-reader who has asked for less movement.
-
-A ring holds as many labels as fit around it at that radius. When a hop has
-more symbols than its ring can carry, the last label on the ring is followed by
-a small `+N` saying how many are not drawn. They are all in the table on the
-left; the canvas is a shape, and the list is the answer.
+At most 34 nodes are laid out, nearest hops first, so a large answer drops its
+far edge rather than whichever rows arrived last. When some are left out the
+caption says how many: *reverse reachability · 25 beyond the 34 drawn*. Every
+one of them is in the table on the left.
 
 ### The support classes
 

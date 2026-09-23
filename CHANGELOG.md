@@ -73,13 +73,37 @@ apply. A request naming neither is byte-identical to 0.26.x. `semlith report`
 takes `--window`, `--scope` and `--format pdf`.
 
 **Impact draws the canvas its caption promised.** The right column of that page
-was a large empty area. It now carries a 320px reverse-reachability canvas above
-Path finder and Trace: the symbol at the centre, everything that reaches it on a
-ring, and the ring *is* the hop count. It is arithmetic rather than a force
-simulation, deliberately — hop distance is the only thing the page is about, and a
-spring layout is a machine for destroying it. The `Changing` row and the three
-figures move into a card at the head of the left column, where the design has
-them, instead of two unboxed bands across the page.
+was a large empty area. It now carries a reverse-reachability canvas above Path
+finder and Trace, drawn by the same force simulation the Graph page uses: the
+subject selected, everything that reaches it around it, nodes that move, can be
+dragged and carry the Graph page's hover card — hops, file and line, what they
+reach through and with what confidence. The reached set and its files are tables
+now, one group row per hop, instead of columns that wrapped. The `Changing` row
+and the three figures move into a card at the head of the left column, where the
+design has them, instead of two unboxed bands across the page. A label near the
+edge of either canvas no longer runs out of the frame: the bound is half the
+node's own measured width, not a margin sized for a dot.
+
+**Index and Inside the index are two pages**, as the design draws them. Index
+carries the controls that start and watch a run. Inside the index carries what
+the corpus is — lines of code, words, the language mix by line, the shape of the
+code, the indexing span, chunks by month, graph health and the vectors themselves
+— measured from the store each time the page opens, and saying on the page where
+what it can measure differs from what the design prints. Building it found that
+the recorded query time read a column called `ms` where the column is `micros`,
+so a store that had answered hundreds of queries said it had never been asked one.
+
+**Session replay looks like the design in all three places it appears**: a dashed
+panel on the ledger when it is off, with a button that goes to Privacy; a timeline
+of one row per answer when it is on, carrying what the answer cost and what the
+agent did next; and a switch on Privacy whose status line names the state it is
+in rather than the state pressing it would reach.
+
+**One hover card, everywhere.** Every hover in the portal — the Graph and Search
+canvases, the Impact canvas, the language mix, the month chart, the edge tiers —
+is the same card built by one function, in the design's measurements, and it
+follows the pointer as the Graph canvas's always did. Keyboard focus still hangs
+it off the focused element, which has no pointer to follow.
 
 **One unreadable store no longer takes the readable ones down with it.** A store
 whose database could not be read made every route that aggregates across stores
@@ -156,6 +180,27 @@ all three are now expressed. The pass is symmetric: the shapes the design draws
 value, its after value and the design line that sets it; three the plan asked for
 turned out to have no design line behind them and are recorded as not done, with
 what the design actually says.
+
+**Three layouts that fought the page.** The corpus page's new rules redefined
+`.kv`, `.dot` and `.chips` globally: the Agents page's setup steps stacked and
+centred, and the Privacy rule lights turned grey. They carry their own names now.
+On Agents, `This machine` sits under `Tools exposed` and the registration card is
+full width; on Privacy, `What is already stored` sits under `Verify it yourself`
+and `Rules` spans the page, three abreast, instead of a narrow column several
+screens tall. A two-column grid with cards after it no longer grows into a tall
+window's spare height and pushes them a screenful down.
+
+**The Stores page notices a root folder that has gone.** Deleting a store's
+corpus writes nothing to any store, so the counter the page polls stood still and
+the `root missing` badge appeared only on the next navigation. `/api/changes`
+now compares which roots are on disk against the last poll — a `stat` per root, a
+handful a second while a page is open — and moves the counter when one goes or
+comes back.
+
+**A saved limit is called saved on every branch.** The machine-limits panel
+dropped the word from its explanation whenever the saved value sat above what the
+machine would derive, which is exactly when free memory is low and someone is
+trying to work out whether their setting took effect.
 
 **About loses two blocks.** The `MCP revisions` row states a wire contract an
 agent settles in its handshake and a person never acts on. The models table is a

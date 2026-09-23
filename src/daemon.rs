@@ -1274,6 +1274,39 @@ pub mod changes {
         }
     }
 
+    /// Notice a root folder that has gone, or come back.
+    ///
+    /// `/api/stores` says per root whether it is on disk, and the Stores page
+    /// badges a store whose corpus has gone — but only when it reads that
+    /// route, which it does when the stores counter moves. Deleting a folder
+    /// writes nothing to any store, so an open page kept drawing the root as
+    /// present until something unrelated moved the counter.
+    ///
+    /// One `stat` per root on the poll that is already happening, compared
+    /// with the set missing at the last poll. A store has one or two roots, so
+    /// this is a handful of `stat`s a second on a daemon a page is watching,
+    /// and nothing on one nobody is.
+    pub fn notice_roots<'a>(roots: impl Iterator<Item = &'a std::path::Path>) {
+        use std::sync::Mutex;
+        static SEEN: Mutex<Option<Vec<std::path::PathBuf>>> = Mutex::new(None);
+
+        let mut missing: Vec<std::path::PathBuf> = roots
+            .filter(|root| !root.exists())
+            .map(|root| root.to_path_buf())
+            .collect();
+        missing.sort();
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        match seen.as_ref() {
+            // A baseline, as the registry's first poll is.
+            None => *seen = Some(missing),
+            Some(was) if *was != missing => {
+                *seen = Some(missing);
+                bump(Domain::Stores);
+            }
+            Some(_) => {}
+        }
+    }
+
     /// What each counter stands at.
     pub fn read(domain: Domain) -> u64 {
         domain.cell().load(Ordering::Relaxed)

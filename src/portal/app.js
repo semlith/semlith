@@ -6145,6 +6145,12 @@ function settingField(key, label, limit, onSave) {
    */
   function explain() {
     const asked = Number(input.value);
+    // Where the value in force came from, on every branch. A saved value above
+    // the derived one takes the second branch every time, so a branch that did
+    // not say "saved" said nothing about it in exactly the case where a user is
+    // trying to work out whether their setting took effect — while the daemon's
+    // own line calls the same value saved.
+    const held = limit.source === "saved" && asked === limit.value ? `${limit.value} saved. ` : "";
     if (fixed) {
       why.className = "note";
       why.textContent = `Set in this daemon's environment, so the page leaves it alone. This machine would derive ${limit.derived} — ${limit.reason}`;
@@ -6154,12 +6160,12 @@ function settingField(key, label, limit, onSave) {
       // Not red either. It is the top of the range, which is a fact about the
       // machine rather than a mistake by the person.
       why.className = "note";
-      why.textContent = `${limit.ceiling} is as high as this machine goes. ${capped(limit)}`;
+      why.textContent = `${held}${limit.ceiling} is as high as this machine goes. ${capped(limit)}`;
       return;
     }
     if (asked > limit.derived) {
       why.className = "note";
-      why.textContent = `Above the ${limit.derived} this machine would pick on its own, and under the ${limit.ceiling} it will allow — ${limit.reason} Yours to set; it applies to the next run.`;
+      why.textContent = `${held}Above the ${limit.derived} this machine would pick on its own, and under the ${limit.ceiling} it will allow — ${limit.reason} Yours to set; it applies to the next run.`;
       return;
     }
     why.className = "note";

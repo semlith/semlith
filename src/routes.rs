@@ -2783,12 +2783,18 @@ fn folders(dir: &Path) -> Vec<Value> {
 /// this and refetches only what moved, so a quiet daemon with a tab open costs
 /// one small request a second and nothing else.
 fn changes(state: &Arc<State>) -> Response {
-    let _ = state;
     // A store another process just made is a change to the stores domain, and
     // nothing in *this* process bumped the counter for it. One `stat` here is
     // what closes the circle; `/api/stores` does the reconciling, once, when
     // the page comes to ask.
     daemon::changes::notice_registry();
+    // The same for a root folder deleted or restored underneath a store.
+    let stores = state.stores();
+    daemon::changes::notice_roots(
+        stores
+            .iter()
+            .flat_map(|store| store.roots.iter().map(PathBuf::as_path)),
+    );
     let mut out = serde_json::Map::new();
     for domain in daemon::changes::DOMAINS {
         out.insert(
