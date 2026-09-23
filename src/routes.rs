@@ -3017,16 +3017,39 @@ fn adopt_roots(store: &Arc<Store>, paths: &[PathBuf]) {
 /// than two, and it is why `each` calls this per path instead of naming stores
 /// itself.
 fn store_for(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Error> {
-    let choice = home::resolve(&[], path, None)?;
+    use anyhow::Context as _;
+    // One at a time. Two requests for the same new folder otherwise both
+    // resolve it to the same new name, both create it, both rewrite the
+    // registry through the one temporary file this process owns, and the
+    // loser of the daemon's store lock answers 409 (#132).
+    // ponytail: one lock for every store; per-store locks if creating stores
+    // ever becomes frequent enough to queue behind.
+    static CREATING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = CREATING.lock().unwrap_or_else(|e| e.into_inner());
+
+    let choice = home::resolve(&[], path, None)
+        .with_context(|| format!("choosing a store for {}", path.display()))?;
     let dir = choice.one()?;
+
+    // A store this daemon already serves needs nothing made. Opening it again
+    // here was a second connection doing schema work on a store the watcher
+    // and a run may be writing, only to reread a model the registry already
+    // has. It is the only SQLite call on this path, so it is the open whose
+    // short read #132 reported.
+    let canonical = crate::canonical(&dir);
+    if let Some(open) = state.stores().into_iter().find(|s| s.dir == canonical) {
+        return Ok(open);
+    }
 
     // Created before it is opened: `Semlith::open` is what lays the store down,
     // and the daemon can only take a lock on something that exists. The handle
     // is dropped immediately so the watcher thread can take the lock itself.
     {
-        let store = crate::Semlith::open(&dir, None)?;
+        let store = crate::Semlith::open(&dir, None)
+            .with_context(|| format!("creating the store at {}", dir.display()))?;
         let model = store.model().to_string();
-        home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)?;
+        home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)
+            .context("recording it in the registry")?;
     }
 
     // The run that indexes it is submitted by the caller a moment from now, so

@@ -214,7 +214,48 @@ pub struct ChunkRow {
     pub text: String,
 }
 
+/// Open a store's database, laying down or upgrading its schema first.
+///
+/// Retried when SQLite answers busy or a short read. Several connections run
+/// this at once as a matter of course — the daemon's writer, its readers, the
+/// portal's index route and any CLI — and the first of them on a new store is
+/// switching it to WAL while the others read it. The switch answers
+/// `SQLITE_BUSY` at once rather than waiting out the busy timeout, which a
+/// test with six openers hits within a few rounds. A read of a WAL file that
+/// another connection shrank under it comes back short
+/// (`SQLITE_IOERR_SHORT_READ`, the 522 in #132), and SQLite's own WAL recovery
+/// answers that by retrying; the drive's 522 was never reproduced here, so it
+/// is retried on that reasoning rather than on a measurement. Every step below
+/// is idempotent, so running it again is safe. Anything else is a real error
+/// and is returned.
 pub fn open(path: &Path) -> Result<Connection> {
+    // ponytail: a fixed two-second window, measured in time rather than
+    // attempts because a step that waits out the busy timeout already took
+    // five. A store still busy after that is held by something that will not
+    // let go, and saying so beats hanging the caller.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match open_once(path) {
+            Err(e) if transient(&e) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            answer => return answer,
+        }
+    }
+}
+
+/// Whether an error from [`open_once`] is a race another connection will
+/// finish by itself.
+fn transient(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::DatabaseBusy
+                || f.extended_code == rusqlite::ffi::SQLITE_IOERR_SHORT_READ
+    )
+}
+
+fn open_once(path: &Path) -> Result<Connection> {
     let db = Connection::open(path)?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
@@ -438,7 +479,15 @@ fn add_columns(db: &Connection) -> Result<()> {
         if has_column(db, table, column)? {
             continue;
         }
-        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind};"))?;
+        // Asked again under the write lock. Two connections opening the same
+        // new store both see the column missing, and the second `ALTER` then
+        // fails the whole open with "duplicate column name" (#132).
+        let tx =
+            rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+        if !has_column(&tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind};"))?;
+        }
+        tx.commit()?;
     }
     Ok(())
 }
@@ -459,10 +508,16 @@ fn backfill_fts(db: &Connection) -> Result<()> {
     if get_meta(db, FTS_BUILT)?.is_some() {
         return Ok(());
     }
-    // FTS5's own command for external content: discard the index and rebuild
-    // it from the content table.
-    db.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');")?;
-    set_meta(db, FTS_BUILT, "1")?;
+    // Asked again under the write lock, as in `add_columns`: a second
+    // connection opening the store at the same moment would rebuild it again.
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)?;
+    if get_meta(&tx, FTS_BUILT)?.is_none() {
+        // FTS5's own command for external content: discard the index and
+        // rebuild it from the content table.
+        tx.execute_batch("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild');")?;
+        set_meta(&tx, FTS_BUILT, "1")?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -3137,6 +3192,34 @@ pub fn chunks_by_month(db: &Connection) -> Result<Vec<(String, i64)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Several connections opening one new store at the same moment, as the
+    /// daemon's index route, its watcher and a CLI do (#132). Before the open
+    /// was made safe to race, most rounds lost one of them to "duplicate
+    /// column name" or "database is locked".
+    #[test]
+    fn a_new_store_opened_by_several_connections_at_once_opens_for_all() {
+        let root = tempfile::tempdir().unwrap();
+        for round in 0..40 {
+            let db = root.path().join(format!("{round}.db"));
+            let start = std::sync::Arc::new(std::sync::Barrier::new(6));
+            let openers: Vec<_> = (0..6)
+                .map(|_| {
+                    let db = db.clone();
+                    let start = std::sync::Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        start.wait();
+                        open(&db).map(drop).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for opener in openers {
+                if let Err(e) = opener.join().unwrap() {
+                    panic!("round {round}: {e}");
+                }
+            }
+        }
+    }
 
     fn sym(name: &str) -> crate::graph::Symbol {
         crate::graph::Symbol {
