@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329,SC2016,SC1003
+# SC2329: every `c_*` function is called by name through `check`, which the
+# linter cannot follow. SC2016: the conditions handed to `rc_until eval`
+# are single-quoted so they are re-read on every poll. SC1003: '\\?\' is the
+# literal Windows verbatim prefix, not an attempt to escape a quote.
+#
 # Every user-facing command, against an installed binary, on whatever operating
 # system this runs on.
 #
@@ -130,6 +136,10 @@ echo
 #
 # `cksum` rather than a size, because a registration rewritten in place is the
 # failure mode and it is often the same length.
+#
+# SC2088: the `~` is the literal text docs/clients.md spells, expanded below
+# against the real home rather than the redirected HOME.
+# shellcheck disable=SC2088
 client_config_fingerprint() {
   [ -n "$real_home" ] || return 0
   {
@@ -302,9 +312,9 @@ c_files_resolve() {
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -e "$f" ] || { echo "listed but not on disk: $f"; missing=$((missing + 1)); }
-    [ $missing -ge 3 ] && break
+    [ "$missing" -ge 3 ] && break
   done < "$work/files.all"
-  [ $missing -eq 0 ]
+  [ "$missing" -eq 0 ]
 }
 
 c_pipe_survives() {
@@ -653,7 +663,7 @@ c_upgrade_check() {
   semlith upgrade --check > /dev/null 2>&1
   rc=$?
   # 0 is current, 10 is an upgrade available. Anything else is a failure.
-  [ $rc -eq 0 ] || [ $rc -eq 10 ] || { echo "upgrade --check exited $rc"; return 1; }
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 10 ] || { echo "upgrade --check exited $rc"; return 1; }
 }
 c_upgrade_airgap() {
   out=$(semlith upgrade --check --airgap 2>&1)
@@ -693,7 +703,7 @@ c_watch_sigint_whole() {
   # large binary can spend seconds in the kernel before `main` runs at all --
   # which is what made the Rust test's two-second sleep start failing.
   i=0
-  while [ $i -lt 90 ]; do
+  while [ "$i" -lt 90 ]; do
     grep -q '^watching ' "$wdir/watch.out" && break
     kill -0 "$wpid" 2>/dev/null ||
       { echo "the watcher exited before it was ready"; sed 's/^/  /' "$wdir/watch.out"; return 1; }
@@ -709,7 +719,7 @@ c_watch_sigint_whole() {
   # never stops. A check that hangs the job reports nothing; one that fails
   # names the bug.
   i=0
-  while kill -0 "$wpid" 2>/dev/null && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+  while kill -0 "$wpid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done
   if kill -0 "$wpid" 2>/dev/null; then
     kill -KILL "$wpid" 2>/dev/null
     wait "$wpid" 2>/dev/null
@@ -719,7 +729,7 @@ c_watch_sigint_whole() {
   fi
   wait "$wpid"
   rc=$?
-  [ $rc -eq 0 ] ||
+  [ "$rc" -eq 0 ] ||
     { echo "the watcher exited $rc rather than 0 after SIGINT"; sed 's/^/  /' "$wdir/watch.out"; return 1; }
 
   # Nothing half-written left behind, in either store format.
@@ -789,7 +799,7 @@ c_daemon_second_instance() {
   out=$(semlith start --port "$port" 2>&1)
   rc=$?
   echo "$out" | grep -qi 'panic' && { echo "panicked:"; echo "$out"; return 1; }
-  [ $rc -eq 0 ] || { echo "a second start against a held store exited $rc:"; echo "$out" | head -5; return 1; }
+  [ "$rc" -eq 0 ] || { echo "a second start against a held store exited $rc:"; echo "$out" | head -5; return 1; }
   echo "$out" | grep -qE '^(Error|Caused by):' && {
     echo "a second start printed an error chain:"; echo "$out" | head -5; return 1; }
   echo "$out" | grep -q 'already served by a running daemon' || {
@@ -832,6 +842,522 @@ c_daemon_releases_lock() {
   semlith index --quiet "$corpus/src" > /dev/null 2>&1
 }
 check cli/daemon/releases-lock "the lock is free after it stops"    c_daemon_releases_lock
+
+# ------------------------------------------------------------------- 0.28.0
+
+# Run control, the limits, the accelerator lanes and their fallback, driven
+# through the daemon's own routes the way the portal drives them. Each group
+# gets a daemon of its own with a pristine SEMLITH_HOME and a port of its own:
+# a store left behind by one group would start a catch-up run in the next, and
+# a card nobody asked for is exactly what these checks cannot tell apart from a
+# defect. HOME is the harness's, so the model the CLI checks fetched is reused.
+#
+# `check` runs each function in a subshell, so a daemon is started and stopped
+# out here and anything one check hands to the next goes through a file.
+
+runs_root="$work/runs"
+mkdir -p "$runs_root"
+rc_port=""
+rc_pid=""
+rc_token=""
+rc_home=""
+rc_dir=""
+
+# What the daemon is told a path is. Under Git Bash `$work` is an MSYS path
+# that means nothing to a Windows process; the mixed form is a Windows path
+# with forward slashes, which also needs no escaping inside JSON.
+native_path() {
+  if [ "$family" = windows ]; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
+# N `## Section` headings, and so N chunks: Markdown is cut at its headings,
+# and each section is well under the 800-character budget. A run that has to
+# be caught while it is live gets a thousand: four hundred finish in about
+# fifteen seconds on an M1, which is less than a slow poll and a model load.
+rc_markdown() {
+  awk -v n="$2" 'BEGIN {
+    for (i = 0; i < n; i++) {
+      printf "## Section %d\n\n", i
+      for (j = 0; j < 6; j++) printf "This paragraph talks about indexing, embedding and search in section %d. ", i
+      printf "\n\n"
+    }
+  }' > "$1"
+}
+
+# `rc_start <tag> [VAR=value ...]`: a daemon on its own home, up and holding a
+# token, or a non-zero status with its log beside it.
+#
+# The port is whichever of these the daemon manages to bind, and never 7365:
+# that is the port a developer's own daemon holds. Asking the daemon rather
+# than probing first, because a probe that finds a port free says nothing
+# about the moment after it: a second harness took one in exactly that gap
+# while this block was being written.
+rc_start() {
+  rc_dir="$runs_root/$1"
+  shift
+  rc_home="$rc_dir/home"
+  mkdir -p "$rc_home"
+  for rc_port in 7481 7483 7487 7489 7491 7493 7497 7499; do
+    env "$@" SEMLITH_HOME="$rc_home" semlith start --port "$rc_port" > "$rc_dir/daemon.out" 2>&1 &
+    rc_pid=$!
+    rc_token=""
+    i=0
+    while [ $i -lt 450 ]; do
+      rc_token=$(grep -oE 'token=[0-9a-f]+' "$rc_dir/daemon.out" 2>/dev/null | head -1 | cut -d= -f2)
+      if [ -n "$rc_token" ] &&
+         curl -fsS -o /dev/null -m 2 -H "Semlith-Token: $rc_token" "http://127.0.0.1:$rc_port/api/index/runs" 2>/dev/null; then
+        return 0
+      fi
+      kill -0 "$rc_pid" 2>/dev/null || break
+      sleep 0.2
+      i=$((i + 1))
+    done
+    rc_stop
+    grep -q 'already in use' "$rc_dir/daemon.out" || return 1
+  done
+  return 1
+}
+
+rc_stop() {
+  [ -n "$rc_pid" ] || return 0
+  kill "$rc_pid" 2>/dev/null
+  wait "$rc_pid" 2>/dev/null
+  rc_pid=""
+}
+
+rc_get() {
+  curl -sS -m 30 -H "Semlith-Token: $rc_token" "http://127.0.0.1:$rc_port$1"
+}
+
+# Every write needs all three: the token, a JSON content type, and an origin
+# that is the daemon's own. `http::answer` refuses one without them before it
+# looks at the token.
+rc_post() {
+  curl -sS -m 30 -X POST -H "Semlith-Token: $rc_token" -H 'Content-Type: application/json' \
+    -H "Origin: http://127.0.0.1:$rc_port" -d "$2" "http://127.0.0.1:$rc_port$1"
+}
+
+# Index one folder as a store of its own, the way the portal's button does, and
+# print the store's name.
+rc_index() {
+  rc_post /api/index "$(jq -nc --arg p "$(native_path "$1")" '{path: [$p]}')" | jq -r '.runs[0].store // empty'
+}
+
+# The store's newest card.
+rc_run() {
+  rc_get /api/index/runs | jq -c --arg s "$1" '[.runs[] | select(.store == $s)] | last // empty'
+}
+
+rc_field() { rc_run "$1" | jq -r ".$2 // empty"; }
+
+# "files chunks" as the Stores page reads them.
+rc_counts() {
+  rc_get /api/stores | jq -r --arg s "$1" '.stores[] | select(.name == $s) | "\(.files) \(.chunks)"'
+}
+
+# `rc_until <seconds> <command...>`: the command, again and again, until it
+# succeeds or the time is up. Every wait in this block goes through it, so a
+# check that waits on a condition never waits on a clock. Whole seconds, since
+# `date` on macOS has no finer unit: a limit of N gives up somewhere after N-1.
+rc_until() {
+  limit=$1
+  shift
+  end=$(( $(date +%s) + limit ))
+  while :; do
+    "$@" && return 0
+    [ "$(date +%s)" -ge "$end" ] && return 1
+    sleep 0.2
+  done
+}
+
+rc_is() { [ "$(rc_field "$1" status)" = "$2" ]; }
+rc_finished() { case "$(rc_field "$1" status)" in done|stopped|failed) return 0 ;; esac; return 1; }
+rc_embedding() {
+  r=$(rc_run "$1")
+  [ "$(printf '%s' "$r" | jq -r '.status')" = running ] &&
+    [ "$(printf '%s' "$r" | jq -r '.chunks // 0')" -gt 0 ]
+}
+rc_alive() { kill -0 "$rc_pid" 2>/dev/null; }
+
+# The worker process a lane runs in, found by its command line and, where the
+# platform says, by its parent, so no other daemon's worker is ever the one
+# killed. Git Bash's `$!` is an MSYS pid; /proc gives the Windows one.
+rc_worker_pid() {
+  if [ "$family" = windows ]; then
+    parent=$(cat "/proc/$rc_pid/winpid" 2>/dev/null)
+    filter="\$_.CommandLine -like '*__embed-worker worker*'"
+    [ -n "$parent" ] && filter="$filter -and \$_.ParentProcessId -eq $parent"
+    powershell -NoProfile -NonInteractive -Command \
+      "Get-CimInstance Win32_Process | Where-Object { $filter } | Select-Object -First 1 -ExpandProperty ProcessId" \
+      2>/dev/null | tr -d '\r'
+  else
+    pgrep -P "$rc_pid" -f '__embed-worker worker' 2>/dev/null | head -1
+  fi
+}
+rc_worker_up() { [ -n "$(rc_worker_pid)" ]; }
+
+rc_kill_worker() {
+  if [ "$family" = windows ]; then
+    taskkill //F //PID "$1" > /dev/null 2>&1
+  else
+    kill -KILL "$1" 2>/dev/null
+  fi
+}
+
+rc_lane() { rc_get /api/accel | jq -c --arg l "$1" '.lanes[] | select(.lane == $l)'; }
+
+# ----- one run, paused, resumed and stopped; the catch-up card that carries it
+
+# The run is a catch-up: small.md is indexed with no daemon running, big.md is
+# added, and the daemon finds it on start. That is the card this release adds,
+# and it is also the only way to have a run already going the moment a daemon
+# is up, before anything could have raced it.
+#
+# Pinned to the CPU lane, here and below except where a lane is the subject:
+# an Apple silicon runner has a Metal GPU, and the WebGPU lane would fetch its
+# components and change what a rate or a thread count is measuring.
+
+control_store=""
+c_catch_up_card() {
+  rc_until 300 eval '[ -n "$(rc_run "$control_store")" ]' ||
+    { echo "no card appeared for $control_store"; rc_get /api/index/runs; return 1; }
+  kind=$(rc_field "$control_store" kind)
+  [ "$kind" = catch-up ] || { echo "the card's kind is \"$kind\", not catch-up:"; rc_run "$control_store"; return 1; }
+}
+
+c_pause_holds() {
+  s=$control_store
+  rc_until 300 rc_embedding "$s" ||
+    { echo "the run never started embedding:"; rc_run "$s"; return 1; }
+  rc_run "$s" | jq -c '{files_before, chunks_before}' > "$rc_dir/before.json"
+  answer=$(curl -sS -m 30 -o "$rc_dir/pause.json" -w '%{time_total}' -X POST \
+    -H "Semlith-Token: $rc_token" -H 'Content-Type: application/json' \
+    -H "Origin: http://127.0.0.1:$rc_port" \
+    -d "$(jq -nc --arg s "$s" '{store: $s, action: "pause"}')" \
+    "http://127.0.0.1:$rc_port/api/index/control")
+  ms=$(awk -v t="$answer" 'BEGIN { printf "%d", t * 1000 }')
+  awk -v t="$answer" 'BEGIN { printf "%.1f\n", t * 1000 }' > "$rc_dir/pause-ms"
+  # 100 ms is the release's promise: the route answers before the engine has
+  # reached its next batch. Windows gets 300 because Git Bash's curl on a
+  # hosted Windows runner has been seen to spend more than that connecting to
+  # loopback before the daemon sees a byte; it is not a number that has been
+  # measured there for this route, so tighten it if the runner shows it can.
+  limit=100
+  [ "$family" = windows ] && limit=300
+  [ "$(jq -r '.state' "$rc_dir/pause.json")" = pausing ] ||
+    { echo "pause answered:"; cat "$rc_dir/pause.json"; return 1; }
+  [ "$ms" -lt "$limit" ] || { echo "pause took $ms ms, over $limit"; return 1; }
+  # 3, because `rc_until` counts whole seconds and 3 is the first limit that
+  # always allows the full 2.
+  rc_until 3 rc_is "$s" paused ||
+    { echo "not paused within 2 s of the answer:"; rc_run "$s"; return 1; }
+  c1=$(rc_field "$s" chunks)
+  # The one fixed wait in this block: holding still is the property, and only
+  # a stretch of time can show it.
+  sleep 2
+  c2=$(rc_field "$s" chunks)
+  [ "$c1" = "$c2" ] || { echo "paused, and the count still rose: $c1 -> $c2"; return 1; }
+  rc_is "$s" paused || { echo "no longer paused:"; rc_run "$s"; return 1; }
+  [ "$(rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "resume"}')" | jq -r .state)" = running ] ||
+    { echo "resume did not answer running"; return 1; }
+  rc_until 60 eval '[ "$(rc_field "$s" chunks)" -gt "$c2" ]' ||
+    { echo "resumed, and the count did not move from $c2:"; rc_run "$s"; return 1; }
+}
+
+c_stop_restores() {
+  s=$control_store
+  [ -s "$rc_dir/before.json" ] || { echo "the pause check recorded no pre-run counts"; return 1; }
+  rc_is "$s" running || rc_until 30 rc_is "$s" running ||
+    { echo "no live run to stop:"; rc_run "$s"; return 1; }
+  [ "$(rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "stop"}')" | jq -r .state)" = stopping ] ||
+    { echo "stop did not answer stopping"; return 1; }
+  rc_until 300 rc_is "$s" stopped || { echo "never reached stopped:"; rc_run "$s"; return 1; }
+  want=$(jq -r '"\(.files_before) \(.chunks_before)"' "$rc_dir/before.json")
+  cli=$(cat "$rc_dir/cli-counts" 2>/dev/null)
+  got=$(rc_counts "$s")
+  [ "$want" = "$cli" ] ||
+    { echo "the card's pre-run counts ($want) are not what the store held before the daemon started ($cli)"; return 1; }
+  [ "$got" = "$want" ] || { echo "the store holds $got after the stop, not its pre-run $want"; return 1; }
+}
+
+control_ready=0
+cdir="$runs_root/control"
+mkdir -p "$cdir/corpus" "$cdir/home"
+printf '# Small\n\nA small file already in the store.\n' > "$cdir/corpus/small.md"
+if SEMLITH_HOME="$cdir/home" semlith index --quiet "$cdir/corpus" > "$cdir/index.out" 2>&1; then
+  control_store=$(jq -r '.stores | keys[0] // empty' "$cdir/home/registry.json" 2>/dev/null)
+  SEMLITH_HOME="$cdir/home" semlith --store "$cdir/home/stores/$control_store" stats > "$cdir/stats.out" 2>&1
+  awk '$1 == "files" { f = $2 } $1 == "chunks" { c = $2 } END { print f, c }' "$cdir/stats.out" > "$cdir/cli-counts"
+  rc_markdown "$cdir/corpus/big.md" 1000
+  [ -n "$control_store" ] && rc_start control SEMLITH_ACCEL=cpu && control_ready=1
+fi
+if [ $control_ready -eq 1 ]; then
+  check cli/runs/catch-up-card   "a file added offline is a catch-up card" c_catch_up_card
+  check cli/runs/pause-holds     "pause answers at once and holds"     c_pause_holds
+  [ -f "$rc_dir/pause-ms" ] && echo "         pause answered in $(cat "$rc_dir/pause-ms") ms"
+  check cli/runs/stop-restores   "stop puts the store back as it was"  c_stop_restores
+else
+  echo "the run-control daemon did not come up:"
+  sed 's/^/  /' "$runs_root/control/index.out" "$runs_root/control/daemon.out" 2>/dev/null | head -20
+  for id in catch-up-card pause-holds stop-restores; do skip "cli/runs/$id" "the run-control daemon did not start"; done
+fi
+rc_stop
+
+# ----------------------------------------------- delete, rate, a live limit
+
+c_delete_on_stop() {
+  mkdir -p "$rc_dir/delete"
+  rc_markdown "$rc_dir/delete/big.md" 1000
+  s=$(rc_index "$rc_dir/delete")
+  [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+  rc_until 300 rc_embedding "$s" || { echo "the run never started embedding:"; rc_run "$s"; return 1; }
+  [ "$(rc_field "$s" files_before)" = 0 ] ||
+    { echo "a new folder's run did not start from an empty store:"; rc_run "$s"; return 1; }
+  dir="$rc_home/stores/$s"
+  [ -d "$dir" ] || { echo "no store directory at $dir to delete, so this proves nothing"; return 1; }
+  [ "$(rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "stop", delete: true}')" | jq -r .state)" = stopping ] ||
+    { echo "stop did not answer stopping"; return 1; }
+  # No exception for Windows. A file the daemon still holds open is what keeps
+  # a directory there on Windows and nowhere else, and a leftover directory is
+  # a store the user was told was deleted.
+  rc_until 120 eval '[ ! -e "$dir" ]' ||
+    { echo "the store directory is still there after the stop:"; find "$dir" 2>&1 | head -10; rc_run "$s"; return 1; }
+  jq -e --arg s "$s" '.stores | has($s) | not' "$rc_home/registry.json" > /dev/null ||
+    { echo "the registry still names $s:"; jq -c '.stores | keys' "$rc_home/registry.json"; return 1; }
+  [ -z "$(rc_counts "$s")" ] || { echo "/api/stores still lists $s"; return 1; }
+}
+
+# Null only before the first batch is the promise. A rate that blinks out
+# between batches is a card that says "—" for a run that is plainly going.
+c_rate_every_poll() {
+  mkdir -p "$rc_dir/rate"
+  rc_markdown "$rc_dir/rate/big.md" 1000
+  s=$(rc_index "$rc_dir/rate")
+  [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+  seen=0
+  blank=0
+  end=$(( $(date +%s) + 600 ))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    r=$(rc_run "$s")
+    st=$(printf '%s' "$r" | jq -r '.status // empty')
+    case "$st" in done|stopped|failed) break ;; esac
+    if [ "$st" = running ]; then
+      if [ "$(printf '%s' "$r" | jq -r '.rate')" != null ]; then
+        seen=$((seen + 1))
+      elif [ "$seen" -gt 0 ]; then
+        blank=$((blank + 1))
+        [ "$blank" -le 3 ] && echo "no rate after the first batch: $r"
+      fi
+    fi
+    sleep 0.3
+  done
+  [ "$st" = "done" ] || { echo "the run ended \"$st\", not done:"; rc_run "$s"; return 1; }
+  [ "$seen" -ge 3 ] || { echo "only $seen polls saw a live rate, too few to prove anything"; return 1; }
+  [ "$blank" -eq 0 ] || { echo "$blank polls after the first batch had no rate"; return 1; }
+}
+
+c_limit_live() {
+  mkdir -p "$rc_dir/threads"
+  rc_markdown "$rc_dir/threads/big.md" 1000
+  s=$(rc_index "$rc_dir/threads")
+  [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+  rc_until 300 eval 'rc_is "$s" running && [ -n "$(rc_field "$s" threads)" ]' ||
+    { echo "the card never showed a thread count:"; rc_run "$s"; return 1; }
+  before=$(rc_field "$s" threads)
+  [ "$before" != 1 ] || { echo "the run already had one thread, so lowering it to one proves nothing"; return 1; }
+  answer=$(rc_post /api/index/settings '{"embed_threads": 1}')
+  printf '%s' "$answer" | jq -e 'has("applied")' > /dev/null ||
+    { echo "the settings route did not say what it applied: $answer"; return 1; }
+  rc_until 21 eval '[ "$(rc_field "$s" threads)" = 1 ]' ||
+    { echo "threads still $(rc_field "$s" threads) 20 s after saving 1 (was $before):"; rc_run "$s"; return 1; }
+  # Nothing more to learn from this run, and a thousand chunks on one thread
+  # is minutes of runner time.
+  rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "stop"}')" > /dev/null
+  rc_until 120 rc_finished "$s"
+  return 0
+}
+
+if rc_start limits SEMLITH_ACCEL=cpu; then
+  check cli/runs/delete-on-stop  "stop with delete removes the store"  c_delete_on_stop
+  check cli/runs/rate-every-poll "a live run always carries a rate"    c_rate_every_poll
+  check cli/runs/limit-live      "embed_threads reaches a live run"    c_limit_live
+else
+  echo "the limits daemon did not come up:"
+  sed 's/^/  /' "$runs_root/limits/daemon.out" 2>/dev/null | head -20
+  for id in delete-on-stop rate-every-poll limit-live; do skip "cli/runs/$id" "the limits daemon did not start"; done
+fi
+rc_stop
+
+# ----------------------------------------------------- lowering runs at once
+
+hold_stores=""
+# How many of the three cards read `$1`.
+hold_count() {
+  rc_get /api/index/runs |
+    jq --argjson s "$hold_stores" --arg st "$1" '[.runs[] | select(.store as $n | $s | any(. == $n)) | select(.status == $st)] | length'
+}
+hold_all_embedding() {
+  [ "$(rc_get /api/index/runs | jq '.running')" = 3 ] || return 1
+  for s in $(printf '%s' "$hold_stores" | jq -r '.[]'); do rc_embedding "$s" || return 1; done
+}
+
+c_lower_limit_holds() {
+  rc_post /api/index/settings '{"runs_at_once": 3}' | jq -e 'has("applied")' > /dev/null ||
+    { echo "runs_at_once 3 was not applied"; return 1; }
+  for n in a b c; do
+    mkdir -p "$rc_dir/hold-$n"
+    rc_markdown "$rc_dir/hold-$n/big.md" 1000
+  done
+  body=$(jq -nc --arg a "$(native_path "$rc_dir/hold-a")" --arg b "$(native_path "$rc_dir/hold-b")" \
+    --arg c "$(native_path "$rc_dir/hold-c")" '{path: [$a, $b, $c]}')
+  hold_stores=$(rc_post /api/index "$body" | jq -c '[.runs[].store]')
+  [ "$(printf '%s' "$hold_stores" | jq 'length')" = 3 ] || { echo "three folders started $hold_stores"; return 1; }
+  rc_until 300 hold_all_embedding ||
+    { echo "three runs were never embedding at once:"; rc_get /api/index/runs | jq -c '{running, held, limits}'; return 1; }
+  rc_post /api/index/settings '{"runs_at_once": 1}' | jq -e 'has("applied")' > /dev/null ||
+    { echo "runs_at_once 1 was not applied"; return 1; }
+  rc_until 6 eval '[ "$(hold_count running)" = 1 ] && [ "$(hold_count held)" = 2 ]' ||
+    { echo "not one running and two held 5 s after lowering the limit:"
+      rc_get /api/index/runs | jq -c '.runs[] | {store, status, chunks}'; return 1; }
+  rc_until 900 eval '[ "$(hold_count done)" = 3 ]' ||
+    { echo "the three runs did not all finish:"; rc_get /api/index/runs | jq -c '.runs[] | {store, status, chunks}'; return 1; }
+  counts=$(for s in $(printf '%s' "$hold_stores" | jq -r '.[]'); do rc_counts "$s"; done | sort -u)
+  [ "$(printf '%s\n' "$counts" | wc -l | tr -d ' ')" = 1 ] && [ "${counts#* }" != 0 ] ||
+    { echo "three equal corpora, and the stores hold:"; printf '%s\n' "$counts"; return 1; }
+}
+
+if rc_start hold SEMLITH_ACCEL=cpu; then
+  check cli/runs/lower-limit-holds "lowering runs at once holds the rest" c_lower_limit_holds
+else
+  sed 's/^/  /' "$runs_root/hold/daemon.out" 2>/dev/null | head -20
+  skip cli/runs/lower-limit-holds "the hold daemon did not start"
+fi
+rc_stop
+
+# --------------------------------------------------------- the worker lane
+
+# A lane that dies takes nothing with it: its batch is handed back, the run
+# finishes on the CPU with every chunk, the lane says why it failed, and the
+# daemon is still up. `SEMLITH_ACCEL=cpu,worker` adds a lane that runs the
+# same int8 model in a process of its own, so the whole fault path is
+# exercised on runners that have no GPU at all.
+#
+# The clean count is what the CLI makes of the same file, because the CLI
+# never hands a batch to a lane.
+fault_clean=""
+mkdir -p "$runs_root/fault-corpus" "$runs_root/fault-clean"
+rc_markdown "$runs_root/fault-corpus/big.md" 600
+if SEMLITH_HOME="$runs_root/fault-clean/home" semlith --store "$runs_root/fault-clean/store" \
+     index --quiet "$runs_root/fault-corpus" > "$runs_root/fault-clean/index.out" 2>&1; then
+  fault_clean=$(SEMLITH_HOME="$runs_root/fault-clean/home" semlith --store "$runs_root/fault-clean/store" stats 2>/dev/null |
+    awk '$1 == "chunks" { print $2 }')
+fi
+
+c_worker_fault() {
+  mkdir -p "$rc_dir/corpus"
+  cp "$runs_root/fault-corpus/big.md" "$rc_dir/corpus/big.md"
+  s=$(rc_index "$rc_dir/corpus")
+  [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+  if [ "$1" = kill ]; then
+    rc_until 300 eval 'rc_embedding "$s" && rc_worker_up' ||
+      { echo "no worker process appeared while the run was live:"; rc_run "$s"; rc_lane worker; return 1; }
+    # Paused first, so the kill cannot land after the last batch and prove
+    # nothing: the next batch after the resume is the one that meets it.
+    rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "pause"}')" > /dev/null
+    rc_until 30 rc_is "$s" paused || { echo "the run did not pause:"; rc_run "$s"; return 1; }
+    wpid=$(rc_worker_pid)
+    [ -n "$wpid" ] || { echo "the worker was gone before it could be killed"; return 1; }
+    rc_kill_worker "$wpid" || { echo "could not kill worker $wpid"; return 1; }
+    rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "resume"}')" > /dev/null
+  fi
+  rc_until 600 rc_finished "$s" || { echo "the run never finished:"; rc_run "$s"; return 1; }
+  st=$(rc_field "$s" status)
+  [ "$st" = "done" ] || { echo "the run ended \"$st\":"; rc_run "$s"; return 1; }
+  got=$(rc_counts "$s")
+  [ "${got#* }" = "$fault_clean" ] || { echo "$got files and chunks, and a clean run makes $fault_clean chunks"; return 1; }
+  lane=$(rc_lane worker)
+  [ "$(printf '%s' "$lane" | jq -r '.status.state')" = failed ] &&
+    [ -n "$(printf '%s' "$lane" | jq -r '.status.reason // empty')" ] ||
+    { echo "the worker lane does not read failed with a reason: $lane"; return 1; }
+  rc_alive || { echo "the daemon died with its lane"; return 1; }
+}
+c_worker_kill()  { c_worker_fault kill; }
+c_worker_batch() { c_worker_fault batch; }
+c_worker_hang()  { c_worker_fault hang; }
+
+for fault in kill batch hang; do
+  case $fault in
+    kill)  id=worker-kill;        desc="a killed worker fails its lane only";  fn=c_worker_kill;  inject="" ;;
+    batch) id=worker-batch-fault; desc="a failed batch fails its lane only";   fn=c_worker_batch; inject=worker:batch:3 ;;
+    hang)  id=worker-hang;        desc="a hung worker fails its lane only";    fn=c_worker_hang;  inject=worker:hang:60000 ;;
+  esac
+  if [ -z "$fault_clean" ]; then
+    sed 's/^/  /' "$runs_root/fault-clean/index.out" 2>/dev/null | head -10
+    skip "cli/accel/$id" "the clean reference run failed"
+  elif rc_start "fault-$fault" SEMLITH_ACCEL=cpu,worker SEMLITH_ACCEL_DEADLINE_MS=4000 \
+         ${inject:+SEMLITH_FAULT_ACCEL=$inject}; then
+    check "cli/accel/$id" "$desc" "$fn"
+  else
+    sed 's/^/  /' "$runs_root/fault-$fault/daemon.out" 2>/dev/null | head -20
+    skip "cli/accel/$id" "the fault daemon did not start"
+  fi
+  rc_stop
+done
+
+# ---------------------------------------- a panicking reader, and no GPU
+
+# One daemon for both: the panic needs a run, and the GPU lane is only asked,
+# and so only found wanting, when a run hands it a batch.
+#
+# Every Apple silicon Mac has a Metal GPU, the hosted arm64 runner included,
+# so there the WebGPU lane is meant to run and the fallback has no
+# precondition. It is pinned to the CPU there so nothing is fetched.
+apple_gpu=0
+[ "$platform" = macos ] && [ "$(uname -m)" = arm64 ] && apple_gpu=1
+model_cache=${SEMLITH_MODEL_CACHE:-$HOME/.cache/semlith/models}
+panic_store=""
+
+c_panic_isolated() {
+  [ -n "$panic_store" ] || { echo "the index route started no run"; return 1; }
+  r=$(rc_run "$panic_store")
+  [ "$(printf '%s' "$r" | jq -r .status)" = "done" ] || { echo "the run did not finish done:"; echo "$r"; return 1; }
+  printf '%s' "$r" | jq -e '.summary.failed | any((.path | endswith("boom.md")) and (.why | test("panic")))' > /dev/null ||
+    { echo "boom.md is not named as failed by a panic:"; printf '%s' "$r" | jq -c '.summary.failed'; return 1; }
+  [ "$(rc_get /api/stores | jq -r --arg s "$panic_store" '.stores[] | select(.name == $s) | .watching')" = true ] ||
+    { echo "the store stopped watching:"; rc_get /api/stores | jq -c --arg s "$panic_store" '.stores[] | select(.name == $s)'; return 1; }
+  rc_alive || { echo "the daemon died"; return 1; }
+}
+
+c_gpu_fallback() {
+  [ -n "$panic_store" ] || { echo "no run was made to hand the lane a batch"; return 1; }
+  rc_until 30 eval '[ "$(rc_lane gpu | jq -r .status.state)" = unavailable ]' ||
+    { echo "the gpu lane does not read unavailable after a run: $(rc_lane gpu)"; return 1; }
+  if [ -d "$model_cache/accel" ] && [ -n "$(find "$model_cache/accel" -mindepth 1 2>/dev/null | head -1)" ]; then
+    echo "a machine with no GPU fetched components:"
+    find "$model_cache/accel" -mindepth 1 | head -5
+    return 1
+  fi
+}
+
+if [ $apple_gpu -eq 1 ]; then panic_env=SEMLITH_ACCEL=cpu; else panic_env=""; fi
+if rc_start panic SEMLITH_FAULT_PANIC=boom.md ${panic_env:+"$panic_env"}; then
+  mkdir -p "$rc_dir/corpus"
+  printf '# Boom\n\nThis reader panics.\n' > "$rc_dir/corpus/boom.md"
+  rc_markdown "$rc_dir/corpus/fine.md" 200
+  panic_store=$(rc_index "$rc_dir/corpus")
+  [ -n "$panic_store" ] && rc_until 300 rc_finished "$panic_store"
+  check cli/runs/panic-isolated  "a panicking reader fails one file"   c_panic_isolated
+  if [ $apple_gpu -eq 1 ]; then
+    skip cli/accel/gpu-fallback "Apple silicon has a Metal GPU, so the WebGPU lane is meant to run"
+  else
+    check cli/accel/gpu-fallback "no GPU: lane unavailable, nothing fetched" c_gpu_fallback
+  fi
+else
+  sed 's/^/  /' "$runs_root/panic/daemon.out" 2>/dev/null | head -20
+  skip cli/runs/panic-isolated "the panic daemon did not start"
+  skip cli/accel/gpu-fallback "the panic daemon did not start"
+fi
+rc_stop
 
 # ------------------------------------------------------------------- 0.21.0
 
@@ -890,7 +1416,7 @@ c_doctor_exit_code() {
   # Either answer is legitimate on a runner; what is not legitimate is a
   # non-zero exit with nothing naming a fault, which is a doctor nobody can act
   # on.
-  if [ $rc -eq 0 ]; then
+  if [ "$rc" -eq 0 ]; then
     grep -q 'Clients' "$work/doctor.out"
   else
     grep -qE 'FAIL|not registered|OFF HERE|run:' "$work/doctor.out"
@@ -1016,7 +1542,7 @@ c_service_recovers() {
   # Sixty seconds, not forty: launchd throttles a job that exited within ten
   # seconds of starting, and this kills one that has just started.
   i=0
-  while [ $i -lt 30 ]; do
+  while [ "$i" -lt 30 ]; do
     sleep 2
     back=$(pgrep -f 'semlith start' | head -1)
     if [ -n "$back" ] && [ "$back" != "$pid" ]; then
