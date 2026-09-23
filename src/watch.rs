@@ -18,7 +18,8 @@
 
 use crate::{IndexReport, Semlith, canonical, lock, walk};
 use anyhow::{Context, Result};
-use notify::{RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -171,7 +172,14 @@ pub fn run_held(
     let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
 
     let (tx, rx) = mpsc::channel();
-    let mut watcher = notify::recommended_watcher(move |res| {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        // Dropped here, at the source, so every reader of `rx` sees changes
+        // only. See `is_change`.
+        if let Ok(event) = &res
+            && !is_change(&event.kind)
+        {
+            return;
+        }
         // A send failure means the loop is gone, which is a shutdown, not an
         // error worth reporting from inside the backend's thread.
         let _ = tx.send(res);
@@ -337,6 +345,22 @@ fn drain(
     }
 }
 
+/// Whether an event can mean a file's content changed.
+///
+/// Linux's inotify backend also reports opens (`IN_OPEN`), and the watcher's
+/// own reads are opens: hashing a file to see whether it changed, and walking
+/// the tree in `admissible`. Taking those as changes fed the loop its own
+/// reads back forever: an idle 1000-file tree was re-checked ~550 files a
+/// second, 3-6 s of CPU per idle minute on ubuntu against 0.01 s on macOS,
+/// whose FSEvents reports no opens. A close after writing is still a change;
+/// every other access is a read.
+fn is_change(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(access) => *access == AccessKind::Close(AccessMode::Write),
+        _ => true,
+    }
+}
+
 fn collect(batch: &mut BTreeSet<PathBuf>, paths: Vec<PathBuf>) {
     for path in paths {
         batch.insert(resolve(&path));
@@ -380,6 +404,24 @@ fn resolve(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An open is a read, and the watcher's own reads are opens: counting
+    /// them as changes is a loop that never goes idle on Linux.
+    #[test]
+    fn a_read_is_not_a_change() {
+        use notify::event::{CreateKind, ModifyKind};
+        assert!(!is_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Any)));
+        assert!(is_change(&EventKind::Create(CreateKind::File)));
+    }
 
     /// A deleted path must survive canonicalization, or a deletion event names
     /// a key the store has never heard of and the chunks stay forever.
