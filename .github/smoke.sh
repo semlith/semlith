@@ -1243,6 +1243,62 @@ else
 fi
 rc_stop
 
+# ------------------------------------------------ the daemon against the CLI
+
+# The service indexed at a fifth of the terminal's speed before 0.28.0, because
+# launchd ran it on the efficiency cores. The runners cannot supervise a login
+# service, so this is the same corpus through a `semlith start` daemon against
+# `semlith index` in the shell, wall clock both ways, median of three. On
+# Windows the daemon is put below normal priority first, the way the logon task
+# starts it, so what is measured is its own lift.
+now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+median3() { printf '%s\n' "$@" | sort -n | sed -n 2p; }
+
+c_daemon_rate() {
+  for i in 1 2 3; do
+    mkdir -p "$rc_dir/cli-$i" "$rc_dir/served-$i"
+    rc_markdown "$rc_dir/cli-$i/corpus.md" 600
+    rc_markdown "$rc_dir/served-$i/corpus.md" 600
+  done
+  if [ "$family" = windows ]; then
+    winpid=$(cat "/proc/$rc_pid/winpid" 2>/dev/null)
+    powershell -NoProfile -Command "(Get-Process -Id $winpid).PriorityClass = 'BelowNormal'" ||
+      { echo "could not lower the daemon's priority"; return 1; }
+  fi
+  cli="" served=""
+  for i in 1 2 3; do
+    t=$(now_ms)
+    SEMLITH_ACCEL=cpu semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet ||
+      { echo "the CLI index failed"; return 1; }
+    ms=$(( $(now_ms) - t ))
+    chunks=$(semlith --store "$rc_dir/cli-store-$i" stats | awk '$1 == "chunks" {print $2}' | tr -d '\r')
+    cli="$cli $(( chunks * 1000000 / ms ))"
+
+    t=$(now_ms)
+    s=$(rc_index "$rc_dir/served-$i")
+    [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+    rc_until 900 rc_finished "$s" || { echo "the daemon's run did not finish:"; rc_run "$s"; return 1; }
+    ms=$(( $(now_ms) - t ))
+    [ "$(rc_field "$s" status)" = done ] || { echo "the daemon's run did not end done:"; rc_run "$s"; return 1; }
+    got=$(rc_field "$s" chunks)
+    [ "$got" = "$chunks" ] || { echo "the daemon made $got chunks and the CLI $chunks"; return 1; }
+    served="$served $(( got * 1000000 / ms ))"
+  done
+  # Milli-chunks per second, so the integer arithmetic keeps three places.
+  c=$(median3 $cli) d=$(median3 $served)
+  echo "CLI$cli, daemon$served (chunks/s x 1000); medians $c and $d"
+  [ $(( d * 100 )) -ge $(( c * 85 )) ] ||
+    { echo "the daemon ran at $(( d * 100 / c )) % of the CLI, under 85 %"; return 1; }
+}
+
+if rc_start rate SEMLITH_ACCEL=cpu; then
+  check cli/runs/daemon-rate "a daemon run keeps 85 % of the CLI's rate" c_daemon_rate
+else
+  sed 's/^/  /' "$runs_root/rate/daemon.out" 2>/dev/null | head -20
+  skip cli/runs/daemon-rate "the rate daemon did not start"
+fi
+rc_stop
+
 # --------------------------------------------------------- the worker lane
 
 # A lane that dies takes nothing with it: its batch is handed back, the run
