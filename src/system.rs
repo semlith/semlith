@@ -352,7 +352,7 @@ mod threads_tests {
     }
 }
 
-/// The index budget rises in two steps rather than continuously, because a/// The index budget rises in two steps rather than continuously, because a
+/// The index budget rises in two steps rather than continuously, because a
 /// figure a user can recognise is worth more here than a fitted curve.
 fn index_memory_mb(headroom_mb: u64) -> usize {
     let base = crate::index::INDEX_MEMORY_MB;

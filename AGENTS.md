@@ -713,6 +713,9 @@ makes this set reviewable is being able to read the whole of it at once.
 | Where | Call | Why it is sound |
 |---|---|---|
 | `embed::performance_cores` | `libc::sysctlbyname` | A NUL-terminated C string, and an `i32` whose size the call is told and will not exceed. macOS only. |
+| `embed::performance_cores` (windows) | `GetSystemCpuSetInformation`, `ptr::read_unaligned`, a union field read | Called first with a null buffer of length zero, which only writes the size it needs into a live `u32`; then with a `Vec<u8>` of exactly that length, which the call is told and will not exceed. Each entry is read unaligned only while it fits inside the bytes the call wrote, the walk advances by the entry's own `Size` and stops if that is zero, and `CpuSet.EfficiencyClass` is read only when `Type` is `CpuSetInformation`. Every field is an integer, so any bytes are a valid value. Windows only. |
+| `priority::platform::set` (macOS) | `libc::setpriority(PRIO_DARWIN_PROCESS, 0, …)` | Plain integers; `who` 0 names this process. Nothing is read back through a pointer. macOS only. |
+| `priority::platform::set` (windows) | `GetCurrentProcess`, `SetPriorityClass`, `SetProcessInformation(ProcessPowerThrottling)` | The pseudo-handle for this process needs no closing, and the `PROCESS_POWER_THROTTLING_STATE` is passed with its own size, which is the documented contract. A build without power throttling fails the second call, and the class alone is the switch. Windows only. |
 | `embed::check_cache_dir` | `libc::getuid` | Reads this process's own uid and cannot fail. |
 | `system::sysctl` | `libc::sysctlbyname` | A NUL-terminated C string, and a `u64` whose size the call is told and will not exceed. macOS only. |
 | `system::macos_available_mb` | `libc::host_statistics64`, `libc::mach_host_self`, `libc::sysconf`, `mem::zeroed` | The struct is zeroed and its size passed as a count the call will not exceed; the host port is this process's own and is not retained. `mach_host_self` is deprecated in libc 0.2 in favour of the `mach2` crate, which is a dependency this release does not take for three lines — the deprecation is allowed at the call with its reason. macOS only. |
@@ -723,6 +726,8 @@ makes this set reviewable is being able to read the whole of it at once.
 | `watch::on_signal` | `libc::signal` | Installs and restores a handler that only stores into an `AtomicBool`, which is what an async-signal-safe handler may do. |
 | `main::quiet_on_a_closed_pipe` | `libc::signal` | Restores `SIGPIPE` to `SIG_DFL` — the disposition the process would have had if the Rust runtime had not changed it — once, at the top of `main`, before any thread is spawned and before anything is printed. unix only. |
 | `main`'s `--airgap` | `std::env::set_var` | Before any thread is spawned. |
+| `tests/system_reading.rs` (windows) | `GlobalMemoryStatusEx` | As `system::platform`: a zeroed `MEMORYSTATUSEX` with `dwLength` set to its own size. Windows only. |
+| `tests/index_failure.rs`, `tests/priority.rs` | `std::env::set_var` | The fault variable is read only by the index pass the same test runs on its own thread, and removed afterwards. |
 | Test helpers in `embed`, `home`, `setup`, `upgrade` | `std::env::set_var` | Each guarded by a mutex that every test reading the variable also takes, and each restores what was there. |
 
 None of them holds a raw pointer across a call, and none is on a path that runs
