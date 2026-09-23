@@ -4803,55 +4803,101 @@ td.row-end {
 .hops-label .hops {
   width: 4.5rem;
 }
-.impact-block {
-  margin-bottom: var(--sp-5);
-}
+/* The hop label itself: the group's name and how many definitions it holds,
+ * on one baseline. The rule that used to sit under it is gone — the row it
+ * labels already has one. */
 .impact-hop {
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
-  padding-bottom: var(--sp-1);
-  border-bottom: 1px solid var(--line-soft);
-  margin-bottom: var(--sp-2);
 }
 .impact-hop h2 {
-  font-size: var(--t-body);
+  font-size: var(--t-small);
   margin: 0;
 }
-/* One grid for the header and the rows, so a column heading sits over the
- * column it names. As two flex rows they drifted apart the moment a symbol
- * was longer than its heading. */
-.impact-row,
-.impact-head-row {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1.6fr) minmax(0, 1.6fr) 3rem;
-  align-items: baseline;
-  gap: var(--sp-2);
+/* The reached answer, and the files under it, are tables.
+ *
+ * They were `div`s on a shared grid, which is a table only while every row
+ * agrees about its tracks — a symbol longer than its heading pushed that row's
+ * columns out of line with the heading above it and the block stopped reading
+ * as columns at all. A `table` sizes its columns from the whole column, and
+ * the sticky heading, the hover row and the rules all come from the shared
+ * table rules above rather than being drawn again here. */
+.impact-table {
+  /* These sit under the headline in a flowing column rather than in a grid
+   * cell, so the shared 168px floor would stretch a two-row answer. */
+  min-height: 0;
+  margin-bottom: var(--sp-4);
 }
-.impact-row {
-  padding: var(--sp-1) 0;
+.impact-table td {
   font-family: var(--mono);
   font-size: var(--t-small);
+  padding: var(--sp-2) var(--sp-3h);
+}
+/* One line, truncated, with the whole name in the title. Rust test names run
+ * past forty characters and `overflow-wrap: anywhere` turned one of them into
+ * four lines, so a row of a four-line name sat beside rows of one — which is a
+ * list of paragraphs rather than a table. */
+.impact-table .sym {
+  max-width: 26ch;
+}
+.impact-table .sym code {
+  display: block;
+  font: inherit;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* `path:line` on one line. The shared `td.path` breaks anywhere, which is right
+ * for a column of long paths and wrong here: this column is narrow, and
+ * `corpus/daemon.rs:1858` broken over three lines made every row three rows
+ * tall. The cell truncates instead, and the table scrolls if it has to. */
+.impact-table .where {
+  color: var(--ink-2);
+  overflow-wrap: normal;
+  white-space: nowrap;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* The support badge rides with the edge it describes rather than taking a
  * column of its own: it is a property of the via, not a fourth fact. */
-.impact-row .via {
+.impact-table .via {
   display: flex;
   align-items: baseline;
   gap: var(--sp-2);
   min-width: 0;
-}
-.impact-row .sym {
-  color: var(--ink);
-  overflow-wrap: anywhere;
-}
-.impact-row .where,
-.impact-row .kind,
-.impact-row .via {
-  color: var(--ink-2);
-}
-.impact-row .via {
   color: var(--muted);
+}
+
+/* The hop label, on a row that spans the table. `position: static` because the
+ * shared rule makes every `th` sticky, which is right for a column heading and
+ * wrong for a group label — five sticky labels stack on top of one another at
+ * the top of the box as the rows scroll past. */
+.impact-hop-row th {
+  position: static;
+  text-transform: none;
+  letter-spacing: normal;
+  font: inherit;
+  padding: var(--sp-3h) var(--sp-3h) var(--sp-1);
+  background: var(--soft);
+  box-shadow: none;
+}
+/* A group label is not a row of data; it should not light up under the
+ * pointer with the rows. */
+.impact-table tbody tr.impact-hop-row:hover {
+  background: var(--soft);
+}
+
+/* The heading over a table that has one. `Files` needs saying; the reached
+ * table is already introduced by the headline above it. */
+.table-head {
+  padding: var(--sp-3h) var(--sp-3h) 0;
+}
+.table-head h2 {
+  font-size: var(--t-body);
+  margin: 0;
 }
 .headline {
   font-size: var(--t-body);
@@ -4910,12 +4956,6 @@ td.row-end {
   overflow: hidden;
   padding: 0;
 }
-.impact-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
-}
-
 /* The caption floats over the canvas at its top-left, on a plate for the same
  * reason the graph legend and the ego hint have one: a label sat in the same
  * pixels as a node is two labels and no reading. */
@@ -4957,15 +4997,7 @@ td.row-end {
   font-size: 22px;
   color: var(--ink);
 }
-/* The column names, once, above the per-hop blocks rather than repeated in
- * each of them: the blocks are one table split by hop, not five tables. */
-.impact-head-row {
-  padding-bottom: var(--sp-1);
-  border-bottom: 1px solid var(--line);
-  margin-bottom: var(--sp-2);
-}
 .impact-row .hops-n {
-  text-align: right;
   color: var(--muted);
 }
 
@@ -5359,7 +5391,11 @@ td.row-end {
   width: 11%;
 }
 
-/* Session replay: one row per transcript, and the outcomes under it. */
+/* Session replay: one row per transcript, the outcomes under it, and then the
+ * answers themselves as a timeline — which is what the design draws and what
+ * this panel was missing. A transcript summarised to four counts says how the
+ * week went; the timeline says what happened after each question, which is the
+ * thing nobody else can show. */
 .replay-body {
   display: flex;
   flex-direction: column;
@@ -5371,6 +5407,157 @@ td.row-end {
   gap: 2px;
   padding: var(--sp-2) 0;
   border-bottom: 1px solid var(--line-soft);
+}
+
+/* Which transcript, whose, and how much of it: the line the design puts beside
+ * the panel's title. */
+.replay-meta {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+
+/* The off state. One dashed strip rather than a paragraph, because it is an
+ * empty state and not a failure, and the button is the only way from here to
+ * the page that turns it on. */
+.replay-off {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3h);
+  padding: var(--sp-3h);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-2);
+}
+.replay-off p {
+  flex: 1 1 200px;
+  min-width: 200px;
+  margin: 0;
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+/* One answer, and what the agent did after it. The 2px rule down the left is
+ * what makes a list of these read as a timeline rather than as rows. */
+.replay-answer {
+  display: flex;
+  gap: var(--sp-2h);
+  margin-top: var(--sp-2h);
+}
+.replay-answer .at {
+  flex: 0 0 58px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.replay-what {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--line);
+}
+.replay-what .line.one {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2h);
+  font-family: inherit;
+  font-size: var(--t-small);
+}
+.replay-what .q {
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.replay-what .muted {
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+}
+
+/* The badge, coloured by what the agent did: green for an answer that was
+ * enough, amber for a whole-file read semlith should have saved, and a neutral
+ * chip for a grep — a miss is not an error, it is a question this store could
+ * not answer. */
+.replay-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-1);
+  background: var(--chip);
+  color: var(--ink-2);
+}
+.replay-badge.sufficed {
+  background: var(--green-soft);
+  color: var(--green-ink);
+}
+.replay-badge.refund {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+.replay-badge.unknown {
+  color: var(--muted);
+}
+
+/* The Privacy page's control: the whole row is the switch, as the design draws
+ * it, and the square knob is the state. A `button` so the keyboard reaches it,
+ * stripped of the button shape because it is a row. */
+.replay-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  width: 100%;
+  padding: var(--sp-3) 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--d-quick) var(--e-in-out),
+    border-color var(--d-quick) var(--e-in-out);
+}
+.replay-switch:hover:not([disabled]) {
+  border-color: var(--ink-2);
+}
+.replay-switch[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+.replay-switch.on {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+.replay-switch .knob {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--panel);
+}
+.replay-switch.on .knob {
+  border-color: var(--green-ink);
+  background: var(--green-ink);
+}
+.replay-switch-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.replay-state {
+  font-size: var(--t-small);
+  font-weight: 500;
+  color: var(--ink);
+}
+.replay-switch-note {
+  font-size: 12.5px;
+  color: var(--muted);
 }
 .replay-row .line.one {
   display: flex;
@@ -6087,4 +6274,156 @@ pre.report-cli {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: var(--sp-4) var(--sp-5);
   align-items: start;
+}
+
+/* ------------------------------------------------------- inside the index
+ *
+ * The design's CORPUS page. It was the bottom half of the indexing page and is
+ * its own page now, so these are the shapes that page needs and nothing else
+ * reuses: a row of figures, a mix drawn as one bar and as a list, four
+ * key/value panels, and three cards that state a fact rather than a metric.
+ */
+
+/* A row of figures that wraps, unlike `.cards`, which is the indexing page's
+ * column of run cards. */
+.stat-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.stat-cards .stat {
+  flex: 1 1 190px;
+}
+
+/* The whole mix as one bar, above the list that names its parts. The list
+ * alone makes a reader add seven percentages up to see the shape; the bar
+ * alone gives a shape with no numbers on it. */
+.mix-bar {
+  display: flex;
+  gap: 2px;
+  height: 10px;
+  margin: var(--sp-3) 0;
+  border-radius: 5px;
+  overflow: hidden;
+}
+.mix-bar .seg {
+  min-width: 2px;
+  border-radius: 2px;
+  transition: filter var(--d-quick) var(--e-in-out);
+}
+.mix-bar .seg:hover,
+.mix-bar .seg:focus-visible {
+  filter: brightness(1.15);
+}
+
+/* Six tones, in the order the design uses them, so the bar and the swatch
+ * beside a language's name are the same colour. Sixth and beyond repeat,
+ * which is what `tone-${i % 6}` in the page means: past six languages the
+ * bar is a shape rather than a key. */
+.tone-0 {
+  background: var(--accent);
+}
+.tone-1 {
+  background: var(--blue);
+}
+.tone-2 {
+  background: var(--green);
+}
+.tone-3 {
+  background: var(--blue-ink);
+}
+.tone-4 {
+  background: var(--amber-ink);
+}
+.tone-5 {
+  background: var(--muted);
+}
+
+.mix-row .swatch {
+  flex: 0 0 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+/* Every property said here, because the bare `.pct` above is the Reports
+ * page's big headline percentage — 21px and weight 500 — and a legend row that
+ * inherited it drew `100%` larger than the language it belonged to. */
+.mix-row .pct {
+  flex: 0 0 2.5rem;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* The four small panels. A grid rather than a flex row, so a panel with five
+ * rows and one with four still line up along their tops. */
+.kv-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  align-items: start;
+}
+.kv-panel h2 {
+  font-size: var(--t-body);
+  margin: 0 0 var(--sp-3);
+}
+.kv {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.kv-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.kv-row .k {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--t-small);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.kv-row .v {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  color: var(--ink);
+  text-align: right;
+}
+
+/* The three at the foot. A different shape from every other card on the page
+ * on purpose: they are the page's argument rather than its measurements, and
+ * the design draws them filled and borderless so they do not read as another
+ * row of figures. */
+.fact-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.fact-card {
+  flex: 1 1 250px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 15px 17px;
+  border-radius: var(--r-4);
+  background: var(--blue-soft);
+}
+.fact-card h2 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--blue-ink);
+}
+.fact-card p {
+  margin: 0;
+  font-size: var(--t-small);
+  color: var(--ink-2);
 }

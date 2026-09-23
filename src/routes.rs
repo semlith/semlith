@@ -102,6 +102,7 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         // is, what the transcripts say; a POST is the toggle itself.
         (_, _, "/api/ledger/replay") if get || post => replay(request),
         (true, _, "/api/graph") => graph(state, request),
+        (true, _, "/api/corpus") => corpus(state),
         (true, _, "/api/ledger") => ledger(state),
         (true, _, "/api/image") => image_file(state, request),
         (true, _, "/api/setup") => setup(),
@@ -2303,6 +2304,46 @@ fn replay(request: &Request) -> Response {
         })),
         Err(e) => Response::error(500, &e.to_string()),
     }
+}
+
+/// What is inside the index, measured from the stores themselves.
+///
+/// The `Inside the index` page. Every figure here is counted from the store
+/// when this is called — the page's own subtitle promises that, and a cached
+/// number behind that sentence would be a lie the page tells about itself.
+///
+/// Answers per store and totalled, because the reader has several open and
+/// the one question they ask first is how big the whole thing is. An
+/// unreadable store is left out and named, as everywhere else that reads
+/// across the fleet.
+fn corpus(state: &Arc<State>) -> Response {
+    if let Err(e) = state.open_fleet() {
+        return Response::error(500, &format!("{e:#}"));
+    }
+    let mut fleet = state.fleet.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(fleet) = fleet.as_mut() else {
+        return Response::json(&json!({ "stores": [] }));
+    };
+    let mut stores = Vec::new();
+    for (label, opened) in fleet.each() {
+        match crate::store::corpus(opened.db(), |path| {
+            language_of(std::path::Path::new(path)).to_string()
+        }) {
+            Ok(measured) => {
+                let mut row = serde_json::to_value(&measured).unwrap_or_else(|_| json!({}));
+                if let Some(map) = row.as_object_mut() {
+                    map.insert("store".into(), json!(label));
+                }
+                stores.push(row);
+            }
+            // One store that cannot be measured is not the whole page. It is
+            // reported as itself, the way an unreadable store is.
+            Err(e) => stores.push(json!({ "store": label, "error": format!("{e:#}") })),
+        }
+    }
+    let mut answer = json!({ "stores": stores });
+    failures_beside(fleet, &mut answer);
+    Response::json(&answer)
 }
 
 /// One of the five reports, in one of the five formats, over a window and a

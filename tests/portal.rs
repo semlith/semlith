@@ -1008,13 +1008,20 @@ fn the_agents_route_reports_the_service_and_every_client() {
 /// there is no licence page, so the last group is the two pages that describe
 /// the machine this is running on.
 ///
-/// Doctor is the thirteenth and is deliberately not in the design's twelve.
+/// Fourteen, not thirteen: `Index` and `Inside the index` are two pages in the
+/// design and were one here, so the indexing controls and the figures about
+/// what was indexed were stacked on one page. Splitting them is what the
+/// design draws, and the second half — the corpus — is the page nothing else
+/// in this product can show.
+///
+/// Doctor is deliberately not in the design's own list.
 /// It is a page this binary already serves, and `semlith doctor` would
 /// otherwise be the one command with no view — which the parity test above
 /// would fail anyway, from the other direction.
 const SIDEBAR: &[(&str, &str)] = &[
     ("Workspace", "Stores"),
     ("Workspace", "Files"),
+    ("Workspace", "Index"),
     ("Workspace", "Inside the index"),
     ("Explore", "Search"),
     ("Explore", "Graph"),

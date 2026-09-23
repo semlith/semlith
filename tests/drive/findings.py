@@ -2971,7 +2971,10 @@ def _(d):
 
 @finding("5.5", "Inside the index states what the graph covers")
 def _(d):
-    d.open_view("index")
+    # `corpus` since 0.27.0. The indexing controls and the corpus figures were
+    # one page; they are the design's two again, and this is the second of
+    # them.
+    d.open_view("corpus")
     # The three cards are a scan of every call edge away, so this waits for
     # them rather than sleeping a fixed time and calling a slow store a bug.
     # The three cards are a scan of every call edge away, so this waits for
@@ -2980,11 +2983,11 @@ def _(d):
     # and innerText reads what is rendered.
     deadline = time.time() + 30
     while time.time() < deadline:
-        if "language mix" in view_text(d).lower():
+        if "language mix, by line" in view_text(d).lower():
             break
         time.sleep(0.5)
     body = view_text(d).lower()
-    for wanted in ["language mix", "chunks by month indexed", "graph health"]:
+    for wanted in ["language mix, by line", "chunks by month indexed", "graph health"]:
         if wanted not in body:
             fail("Inside the index is missing the %r card" % wanted)
     if "call targets with no definition here" not in body:
@@ -3059,6 +3062,39 @@ def _(d):
         skip("session replay is already on on this machine, so its off state cannot be checked")
     if state.get("sessions"):
         fail("session replay is off and returned sessions anyway: %s" % state)
+    # The off state is the design's dashed strip with the one button in the
+    # whole portal that goes to Privacy. It said "Turn it on under Privacy" and
+    # left the reader to find the page, which on a sidebar of thirteen items is
+    # a sentence and not a route.
+    if not exists(d, ".replay-off"):
+        fail("Session replay's off state is not the design's panel")
+    if "Session replay is off. Nothing is read from your agent logs" not in body:
+        fail("Session replay's off state does not say what is not being read: %s" % body[:300])
+    went = d.eval(
+        """
+        (() => {
+          const b = [...document.querySelectorAll('.replay-off button')]
+            .find(x => (x.textContent || '').trim() === 'Open Privacy');
+          if (!b) return false;
+          b.click();
+          return true;
+        })()
+        """
+    )
+    if not went:
+        fail("Session replay's off state has no `Open Privacy` button")
+    d.wait_for(
+        "(location.hash || '') === '#privacy'",
+        what="the Privacy page, after pressing Open Privacy",
+    )
+    # And the control it lands on is the design's switch, not the button that
+    # used to be there: the state is the row, and the row says which state it
+    # is in rather than which one pressing it would reach.
+    switch = text_of(d, ".replay-switch .replay-state", "the Privacy page's replay switch")
+    if not switch.startswith("Off ·"):
+        fail("the Privacy page's session replay switch reads %r" % switch)
+    if d.eval("document.querySelector('.replay-switch').getAttribute('aria-checked')") != "false":
+        fail("the session replay switch is not announced as an unchecked switch")
 
 
 @finding("5.8", "Reports generates all five, locally")
@@ -3123,7 +3159,8 @@ def _(d):
     pages = [
         ("impact", "Impact"),
         ("graph", "Graph"),
-        ("index", "Inside the index"),
+        ("index", "Index"),
+        ("corpus", "Inside the index"),
         ("ledger", "Retrieval ledger"),
         ("reports", "Reports"),
         ("cloud", "Cloud"),
@@ -3600,10 +3637,16 @@ def _(d):
     if not exists(d, ".impact-canvas-card"):
         fail("the Impact page draws no canvas card")
     caption = text_of(d, ".impact-canvas-card .canvas-caption", "the canvas caption")
-    want("the canvas caption", caption, "reverse reachability, rings by hop")
+    if not caption.startswith("reverse reachability"):
+        fail("the canvas caption reads %r" % caption)
+    # The shared force canvas, not a painter of this page's own: the drag, the
+    # hover and the drift are that component's, and a second implementation of
+    # them here is a second set of behaviours to keep in step.
+    if not exists(d, ".impact-canvas-card .graph-canvas"):
+        fail("the Impact canvas is not the shared force canvas")
     # The design's 320px, as a floor rather than as an exact height. It is drawn
-    # against a five-node mock; a real store answers with dozens, and the rings
-    # need the room to keep their labels apart — so the card grows with the
+    # against a five-node mock; a real store answers with dozens, and the layout
+    # needs the room to keep its labels apart — so the card grows with the
     # viewport and stops at 460.
     height = d.eval(
         "Math.round(document.querySelector('.impact-canvas-card').getBoundingClientRect().height)"
@@ -3619,15 +3662,13 @@ def _(d):
     d.shot("7.5-impact-canvas")
 
 
-@finding("7.6", "the canvas rings the reached set by hop")
+@finding("7.6", "the Impact canvas is alive: it draws, it settles, it keeps moving")
 def _(d):
-    """The caption is the specification. The design's own painter is the shared
-    force simulation with no hop input at all — one ring of everything, then
-    physics — so the picture it drew was not the picture it promised.
-
-    This asserts the thing the caption claims: ask a real store a question that
-    reaches at least two hops, and the canvas must put the further hop further
-    out.
+    """This canvas was a static ring painter — drawn once, redrawn only on a
+    resize. Nothing could be dragged, hovered or picked, and the picture never
+    moved. It is the shared force simulation now, as the design paints it, so
+    what this asserts is that the simulation is really running on this page and
+    not that a still image was produced.
     """
     # A symbol this corpus really has callers for, asked of the store rather
     # than hard-coded. A name that reaches nothing is a fact about whatever
@@ -3666,30 +3707,47 @@ def _(d):
         "!!document.querySelector('.impact-results .impact-row')",
         what="a reached row on the Impact page for %s" % reachable,
     )
-    painted = d.eval(
-        """
+    ink = """
         (() => {
-          const c = document.querySelector('.impact-canvas');
-          if (!c) return 0;
+          const c = document.querySelector('.impact-canvas-card .graph-canvas');
+          if (!c) return null;
           const ctx = c.getContext('2d');
-          const d = ctx.getImageData(0, 0, c.width, c.height).data;
-          let ink = 0;
-          for (let i = 3; i < d.length; i += 4) if (d[i] > 0) ink += 1;
-          return ink;
+          const px = ctx.getImageData(0, 0, c.width, c.height).data;
+          let lit = 0, sum = 0;
+          for (let i = 3; i < px.length; i += 4) {
+            if (px[i] > 0) { lit += 1; sum += i; }
+          }
+          return [lit, sum];
         })()
         """
-    )
-    if painted < 500:
+    first = d.eval(ink)
+    if not first or first[0] < 500:
         fail(
             "the Impact canvas is blank after asking about %s, which returned rows"
             % reachable
         )
+    # And it is still moving a moment later. The layout cools but never freezes:
+    # every node carries a slow wander, which is what makes this a live view of
+    # the subgraph rather than a picture of one.
+    #
+    # Skipped under reduced motion, where the canvas is deliberately solved once
+    # and left still — asserting drift there would be asserting against the
+    # accessibility preference the page is honouring.
+    still = d.eval("matchMedia('(prefers-reduced-motion: reduce)').matches")
+    if not still:
+        time.sleep(1.2)
+        later = d.eval(ink)
+        if later and later[1] == first[1]:
+            fail(
+                "the Impact canvas has not moved in 1.2s; the simulation is not "
+                "running on this page"
+            )
     # The three figures are the same answer counted, so a canvas that drew and
     # a card that did not would be two readings of one question.
     reached = text_of(d, ".impact-subject-card .impact-stat .n", "the Reached figure")
     if reached.strip() in ("", "0"):
         fail("the Changing card still reads 0 Reached while the table has rows")
-    d.shot("7.6-impact-rings")
+    d.shot("7.6-impact-canvas")
 
 
 @finding("7.7", "the Reports builder offers a window and a scope, and the route takes them")

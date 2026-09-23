@@ -326,6 +326,9 @@ const NAV_ICONS = {
   stores: "M12 4l8 4-8 4-8-4 8-4|M4 12l8 4 8-4|M4 16.5l8 4 8-4",
   files: "M6 3h7l5 5v13H6z|M13 3v5h5",
   index: "M4 6h16|M4 12h10|M4 18h13",
+  // The design's own mark for this page: two book spines. What is already on
+  // the shelf, as against `index`, which is the list of what to put there.
+  corpus: "M5 4h6v16H5z|M13 4h6v16h-6",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14z|M16.2 16.2 20 20",
   graph: "M5 6h4v4H5z|M15 14h4v4h-4z|M9 8h4v8h2",
   // v3's mark: a plain ruled page. The folded corner it grew in v4 reads as a
@@ -1109,13 +1112,16 @@ const state = {
  * licence page, so the last group is the two pages that describe the machine
  * this is running on.
  *
- * Every page is in exactly one group, and the thirteen are the thirteen v4
- * draws: the grouping changed, not what there is.
+ * Every page is in exactly one group. The v4 design draws thirteen and this
+ * is fourteen: `Index` and `Inside the index` are two pages there and were
+ * one here, which is why the indexing controls and the corpus figures were
+ * stacked on top of each other.
  */
 const VIEWS = [
   { group: "Workspace", id: "stores", label: "Stores", title: "Stores" },
   { group: "Workspace", id: "files", label: "Files", title: "Files" },
-  { group: "Workspace", id: "index", label: "Inside the index", title: "Inside the index" },
+  { group: "Workspace", id: "index", label: "Index", title: "Index" },
+  { group: "Workspace", id: "corpus", label: "Inside the index", title: "Inside the index" },
   { group: "Explore", id: "search", label: "Search", title: "Search" },
   { group: "Explore", id: "graph", label: "Graph", title: "Graph" },
   { group: "Explore", id: "impact", label: "Impact", title: "Impact" },
@@ -1472,6 +1478,22 @@ function graphCanvas(options) {
   const ALPHA_FLOOR = 0;
   const DRIFT = 0.00003;
 
+  /* The box a node's centre may sit in, in fractions of the canvas.
+   *
+   * It used to be a flat 6% margin, which is a margin for a dot and not for a
+   * label: a box 200px wide on a 570px canvas has 100px of itself outside the
+   * frame at 0.94, so the Impact card sliced its outermost names in half. The
+   * margin is half the node's own measured width, so every label lands inside
+   * whatever canvas it is drawn on. Capped at 0.45 for the case where one
+   * label is wider than the canvas, which has nowhere to be put.
+   */
+  function pen(node, w, h) {
+    return {
+      mx: Math.min(0.45, ((node.w || 80) / 2 + 4) / w),
+      my: Math.min(0.45, ((node.h || 28) / 2 + 4) / h),
+    };
+  }
+
   function step(w, h) {
     const clock = performance.now() * 0.00028;
     for (let i = 0; i < nodes.length; i++) {
@@ -1532,9 +1554,10 @@ function graphCanvas(options) {
       node.vy = Math.max(-MAX_STEP, Math.min(MAX_STEP, node.vy));
       moved += Math.abs(node.vx) + Math.abs(node.vy);
       // Kept inside the frame: a node that drifts off-canvas is a node nobody
-      // can click.
-      node.x = Math.min(0.94, Math.max(0.06, node.x + node.vx));
-      node.y = Math.min(0.92, Math.max(0.08, node.y + node.vy));
+      // can click, and a label half outside it is a name nobody can read.
+      const bound = pen(node, w, h);
+      node.x = Math.min(1 - bound.mx, Math.max(bound.mx, node.x + node.vx));
+      node.y = Math.min(1 - bound.my, Math.max(bound.my, node.y + node.vy));
     }
     alpha = Math.max(ALPHA_FLOOR, alpha * 0.985);
     return moved;
@@ -1578,14 +1601,16 @@ function graphCanvas(options) {
           if (overX <= 0 || overY <= 0) continue;
           // Along whichever axis needs the smaller move, so a label is nudged
           // aside rather than thrown across the canvas.
+          const pa = pen(a, w, h);
+          const pb = pen(b, w, h);
           if (overX / w < overY / h) {
             const push = ((dx >= 0 ? 1 : -1) * overX) / w / 2;
-            a.x = Math.min(0.94, Math.max(0.06, a.x - push));
-            b.x = Math.min(0.94, Math.max(0.06, b.x + push));
+            a.x = Math.min(1 - pa.mx, Math.max(pa.mx, a.x - push));
+            b.x = Math.min(1 - pb.mx, Math.max(pb.mx, b.x + push));
           } else {
             const push = ((dy >= 0 ? 1 : -1) * overY) / h / 2;
-            a.y = Math.min(0.92, Math.max(0.08, a.y - push));
-            b.y = Math.min(0.92, Math.max(0.08, b.y + push));
+            a.y = Math.min(1 - pa.my, Math.max(pa.my, a.y - push));
+            b.y = Math.min(1 - pb.my, Math.max(pb.my, b.y + push));
           }
         }
       }
@@ -1753,8 +1778,9 @@ function graphCanvas(options) {
   canvas.addEventListener("pointermove", (event) => {
     const point = at(event);
     if (dragging) {
-      dragging.x = Math.min(0.94, Math.max(0.06, point.x / point.w));
-      dragging.y = Math.min(0.92, Math.max(0.08, point.y / point.h));
+      const bound = pen(dragging, point.w, point.h);
+      dragging.x = Math.min(1 - bound.mx, Math.max(bound.mx, point.x / point.w));
+      dragging.y = Math.min(1 - bound.my, Math.max(bound.my, point.y / point.h));
       if (!frame) paint();
       return;
     }
@@ -2714,31 +2740,54 @@ async function ledgerView() {
  * Off unless turned on, because what it reads belongs to another program.
  * The row says what would be read and from where before anything is, so the
  * answer to "what does this turn on" is on the page rather than in a doc. */
+/* The Privacy page's session replay control.
+ *
+ * The design draws this as a clickable row rather than as a heading with a
+ * button beside it: a 15px square knob, a status line, and the sentence that
+ * says what turning it on does, all inside one hit target that changes colour
+ * with the state. The button it replaced said `Turn on` and left the reader to
+ * infer the state from a paragraph under it.
+ *
+ * It is not a `checkbox` element because it is not one control in a form; it
+ * is the whole row. The ARIA is `switch`, which is what it behaves like, and
+ * the keyboard reaches it because it is a `button`.
+ */
 function sessionReplayToggle() {
   const state_ = { enabled: false, from: "", client: "" };
-  const note = el("p", { class: "note" });
-  const button = el("button", {
-    class: "button secondary small",
-    type: "button",
-    text: "Loading…",
-    disabled: true,
-  });
+  const knob = el("span", { class: "knob", "aria-hidden": "true" });
+  const status = el("span", { class: "replay-state" });
+  const row = el(
+    "button",
+    { class: "replay-switch", type: "button", role: "switch", "aria-checked": "false", disabled: true },
+    knob,
+    el(
+      "span",
+      { class: "replay-switch-text" },
+      status,
+      el("span", {
+        class: "replay-switch-note",
+        text: "Session replay reads this machine's agent session logs to confirm what an agent did after a semlith answer. Off by default. Local only. Nothing is uploaded.",
+      }),
+    ),
+  );
+  const failure = el("p", { class: "note" });
 
   function paint() {
-    button.disabled = false;
-    button.textContent = state_.enabled ? "Turn off" : "Turn on";
-    // `classList.toggle("on", ...)` stood here and painted nothing: there has
-    // never been a `.button.on` rule. The label is the state, and now that the
-    // button carries the secondary shape rather than the ghost one it is a
-    // control at rest as well.
-    button.setAttribute("aria-pressed", String(state_.enabled));
-    note.textContent = state_.enabled
-      ? `On. The Retrieval ledger's Session replay tab reads ${state_.client} transcripts under ${state_.from} to mark what happened after each answer. Nothing is sent anywhere.`
-      : `Off. Nothing reads ${state_.from || "this machine's agent transcripts"}. Turning this on lets the ledger's Session replay tab mark each answer as a refund, a miss or an edit — locally, and still sent nowhere.`;
+    row.disabled = false;
+    row.classList.toggle("on", state_.enabled);
+    row.setAttribute("aria-checked", String(state_.enabled));
+    /* The design's two status lines, verbatim. Where the transcripts are read
+     * from is appended when this machine has told us, because `no agent log is
+     * opened` is a claim about a directory and a reader may want to know
+     * which. */
+    status.textContent = state_.enabled
+      ? `On · reading local agent logs${state_.from ? ` under ${state_.from}` : ""}`
+      : "Off · no agent log is opened";
   }
 
-  button.addEventListener("click", async () => {
-    button.disabled = true;
+  row.addEventListener("click", async () => {
+    row.disabled = true;
+    failure.textContent = "";
     try {
       const answer = await api("/api/ledger/replay", {
         method: "POST",
@@ -2747,8 +2796,8 @@ function sessionReplayToggle() {
       });
       state_.enabled = !!answer.enabled;
     } catch (e) {
-      note.textContent = e.message;
-      button.disabled = false;
+      failure.textContent = e.message;
+      row.disabled = false;
       return;
     }
     paint();
@@ -2769,14 +2818,9 @@ function sessionReplayToggle() {
   return el(
     "div",
     { class: "card pad" },
-    el(
-      "div",
-      { class: "card-head" },
-      el("h2", { text: "Session replay" }),
-      el("span", { class: "spacer" }),
-      button,
-    ),
-    note,
+    el("div", { class: "card-head" }, el("h2", { text: "Session replay" })),
+    row,
+    failure,
   );
 }
 
@@ -2791,7 +2835,7 @@ function ledgerTabs(data) {
   const panel = el("div", { class: "tab-panel" });
   const views = [
     ["Retrievals", () => ledgerRows(data)],
-    ["Session replay", () => sessionReplay()],
+    ["Session replay", () => sessionReplay(data)],
   ];
   const buttons = views.map(([label], i) =>
     el("button", {
@@ -2812,11 +2856,71 @@ function ledgerTabs(data) {
   return el("div", { class: "rows tight" }, el("div", { class: "tabs" }, buttons), panel);
 }
 
-function sessionReplay() {
+function sessionReplay(ledger) {
   const body = el("div", { class: "replay-body" });
+  // `sess-7f21 · Claude Code · 41 queries` in the design: which transcript, the
+  // client it belongs to, and how much of it this panel is about.
+  const meta = el("span", { class: "replay-meta", text: "reading…" });
+
+  /* The ledger's own row for one question, if it has one.
+   *
+   * The transcript knows what was asked and what the agent did next; it does
+   * not know what the answer cost, because that is semlith's own record. The
+   * design prints both on one line, so they are joined here — on the query
+   * text, over the rows the Retrievals tab already fetched, newest first. No
+   * round trip, and no second reading of the ledger.
+   *
+   * A query asked twice matches the newer row. That is a join on text rather
+   * than on identity: the transcript carries no retrieval id, and minting one
+   * to match against would be a change to the protocol for a subtitle.
+   */
+  const rows = (ledger && ledger.rows) || [];
+  function costOf(query) {
+    if (!query) return "";
+    const row = rows.find((r) => (r.query || "") === query);
+    if (!row) return "";
+    const hits = row.hits === undefined ? null : row.hits;
+    const tokens = row.net_tokens === undefined ? row.tokens : row.net_tokens;
+    const parts = [];
+    if (hits !== null) parts.push(`${hits} hit${hits === 1 ? "" : "s"}`);
+    if (tokens !== undefined && tokens !== null) parts.push(`${n(tokens)} tokens`);
+    return parts.join(" · ");
+  }
+
+  /** `14:22:08` in the reader's own zone, from the transcript's timestamp. */
+  function clockOf(at) {
+    if (!at) return "—";
+    const when = new Date(at);
+    if (Number.isNaN(when.getTime())) return "—";
+    return when.toLocaleTimeString(undefined, { hour12: false });
+  }
+
+  function answerRow(answer) {
+    const cost = costOf(answer.query);
+    return el(
+      "div",
+      { class: "replay-answer" },
+      el("span", { class: "at", text: clockOf(answer.at) }),
+      el(
+        "div",
+        { class: "replay-what" },
+        el(
+          "div",
+          { class: "line one" },
+          // The question, and beside it what it cost. A call whose input this
+          // build does not know how to read has no question, so the tool's own
+          // name stands in — once, not in both slots, which printed
+          // `semlith_stats semlith_stats`.
+          el("span", { class: "q", text: answer.query || answer.tool }),
+          el("span", { class: "muted", text: answer.query ? cost || answer.tool : cost }),
+        ),
+        el("span", { class: `replay-badge ${answer.outcome}`, text: answer.word }),
+      ),
+    );
+  }
 
   function counts(session) {
-    const rows = [
+    const shown = [
       ["read the whole file", session.refund, "refund"],
       ["grepped anyway", session.miss, "miss"],
       ["edited", session.sufficed, "sufficed"],
@@ -2825,11 +2929,29 @@ function sessionReplay() {
     return el(
       "span",
       { class: "replay-counts" },
-      rows.map(([label, count, kind]) =>
-        count
-          ? el("span", { class: `replay-count ${kind}`, text: `${count} ${label}` })
-          : null,
+      shown.map(([label, count, kind]) =>
+        count ? el("span", { class: `replay-count ${kind}`, text: `${count} ${label}` }) : null,
       ),
+    );
+  }
+
+  /* The off state, as the design draws it: one dashed strip, the sentence, and
+   * the one button in the prototype that goes to Privacy. The button is here
+   * rather than a line of prose telling the reader to find the page, because
+   * this panel is where somebody discovers the feature exists. */
+  function offPanel() {
+    return el(
+      "div",
+      { class: "replay-off" },
+      el("p", {
+        text: "Session replay is off. Nothing is read from your agent logs until you turn it on.",
+      }),
+      el("button", {
+        class: "button secondary small",
+        type: "button",
+        text: "Open Privacy",
+        onclick: () => go("privacy"),
+      }),
     );
   }
 
@@ -2838,20 +2960,18 @@ function sessionReplay() {
     try {
       data = await api("/api/ledger/replay");
     } catch (e) {
+      meta.textContent = "";
       fill(body, error(e.message));
       return;
     }
+    const client = data.client === "claude-code" ? "Claude Code" : data.client || "an agent";
     if (!data.enabled) {
-      fill(
-        body,
-        el("p", {
-          class: "subtitle",
-          text: "Off. Turn it on under Privacy and this reads this machine's agent transcripts to mark what happened after each answer. Nothing is sent anywhere.",
-        }),
-      );
+      meta.textContent = `off · ${client}`;
+      fill(body, offPanel());
       return;
     }
     if (!data.sessions.length) {
+      meta.textContent = `on · ${client} · no transcript yet`;
       fill(
         body,
         el("p", {
@@ -2861,15 +2981,18 @@ function sessionReplay() {
       );
       return;
     }
+    const answers = data.sessions.reduce((sum, session) => sum + session.answers, 0);
+    const newest = data.sessions[0];
+    meta.textContent = `${newest.id.slice(0, 12)} · ${client} · ${n(answers)} quer${answers === 1 ? "y" : "ies"}`;
     fill(
       body,
       el("p", {
         class: "note",
-        text: `Read from ${data.client} transcripts under ${data.from}${data.skipped ? `, ${data.skipped} older transcript${data.skipped === 1 ? "" : "s"} not read` : ""}.`,
+        text: `Read from ${client} transcripts under ${data.from}${data.skipped ? `, ${data.skipped} older transcript${data.skipped === 1 ? "" : "s"} not read` : ""}.`,
       }),
       data.sessions.map((session) =>
         el(
-          "div",
+          "section",
           { class: "replay-row" },
           el(
             "span",
@@ -2883,6 +3006,16 @@ function sessionReplay() {
             }),
           ),
           counts(session),
+          // The timeline the design draws. `recent` is capped in the reader, so
+          // a long session says how much of itself is shown rather than
+          // silently ending early.
+          (session.recent || []).map(answerRow),
+          session.answers > (session.recent || []).length
+            ? el("p", {
+                class: "rail-hint",
+                text: `The last ${(session.recent || []).length} of ${session.answers}.`,
+              })
+            : null,
         ),
       ),
     );
@@ -2892,7 +3025,12 @@ function sessionReplay() {
   return el(
     "div",
     { class: "card pad" },
-    el("span", { class: "card-title", text: "Session replay" }),
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Session replay" }),
+      meta,
+    ),
     el("p", {
       class: "subtitle",
       text: "Read from this machine's agent session logs, never sent anywhere. Turn on under Privacy.",
@@ -5350,7 +5488,11 @@ function sized(property, share, attrs) {
   return node;
 }
 
-function healthPanel() {
+function healthPanel(options) {
+  // `languages: false` for a page that draws the mix itself, by line rather
+  // than by file. Two language cards on one page are two answers to one
+  // question, and the reader cannot tell which is which.
+  const withLanguages = !options || options.languages !== false;
   // A placeholder rather than an empty element: the read is a scan of every
   // call edge, so on a large store the three cards are a second or two away,
   // and a gap where a card will be reads as a page that has finished.
@@ -5359,7 +5501,7 @@ function healthPanel() {
     { class: "health" },
     // Three cards are coming, so three cards of skeleton: the read is a
     // scan of every call edge and on a large store it is a second or two.
-    el("section", { class: "health-card" }, skeletonRows(5)),
+    withLanguages ? el("section", { class: "health-card" }, skeletonRows(5)) : null,
     el("section", { class: "health-card" }, skeletonRows(4)),
     el("section", { class: "health-card" }, skeletonRows(6)),
   );
@@ -5466,7 +5608,7 @@ function healthPanel() {
 
     fill(
       node,
-      el(
+      !withLanguages ? null : el(
         "section",
         { class: "health-card" },
         el("span", { class: "eyebrow", text: "Language mix" }),
@@ -6182,6 +6324,15 @@ async function indexView() {
 
     clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
 
+    /* A page with nothing on it says nothing.
+     *
+     * Before the split this page ended in three cards about the corpus, so an
+     * idle machine still had something under the button band. Those moved to
+     * `Inside the index`, and what was left on a machine with no run in flight
+     * was a heading, a text box and four buttons over half a screen of white.
+     * The design draws the run card in both states; this is its idle one. */
+    idle.hidden = runs.length > 0 || (data?.queue || []).length > 0;
+
     const queue = data?.queue || [];
     queueCard.hidden = !queue.length;
     if (queue.length) {
@@ -6440,6 +6591,26 @@ async function indexView() {
     settingsButton.setAttribute("aria-pressed", String(wantSettings));
   }
 
+  const idle = el(
+    "div",
+    { class: "card pad run-idle" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Nothing is being read right now" }),
+      el("span", { class: "spacer" }),
+      el("span", { class: "mono-chip", text: "queued · writer idle" }),
+    ),
+    el("p", {
+      class: "subtitle",
+      text: "Name a folder above and press Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
+    }),
+    el("p", {
+      class: "note",
+      text: "Checkpointed every 30 seconds: vectors are written before the files they cover are marked indexed, so a run that is killed resumes rather than starting again.",
+    }),
+  );
+
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
   const addButton = el("button", {
     // The accent shape, like `Start indexing` beside it. Both of them begin
@@ -6529,27 +6700,18 @@ async function indexView() {
   });
 
   paint(first);
-  const coverage = coveragePanel();
-  const health = healthPanel();
   // The page's only subscription. The shared poll decides when; this decides
   // what with. No timer of this page's own.
   // The poll hands this the runs it just read, and `paint` reads them off it.
   // Calling it with nothing — which an added second painter made easy to do —
   // redraws the page as though every run had ended.
-  state.onRuns = (data) => {
-    paint(data);
-    coverage.paint();
-    health.paint();
-  };
+  state.onRuns = (data) => paint(data);
   watchLive(["runs", "stores"], refreshRuns);
 
   return el(
     "div",
     { class: "view" },
-    pageHead(
-      "Inside the index",
-      "What this machine has read, what the graph made of it, and what is being kept current.",
-    ),
+    pageHead("Index", "What to read, and the run that reads it."),
     says(
       "Each folder becomes its own store, indexed by its own writer. A run lives in the daemon, not in this page — leaving, refreshing or closing the tab changes nothing, and a run ends only on its Stop or when ",
       mono("semlith start"),
@@ -6575,14 +6737,13 @@ async function indexView() {
     el(
       "div",
       { class: "scroller" },
-      /* The design's order, which this page did not have.
+      /* The design's order.
        *
-       * `indexView` is the two design pages merged — `INDEX`, which is the
-       * picked files and the run, and `CORPUS`, which is what the store
-       * already holds. The run cards sat *below* three corpus cards and
-       * above two of this project's own, which was neither page's order:
-       * the whole point of the index half is watching a run, and it was
-       * the fifth thing on the page. */
+       * This page was the design's two merged — `INDEX`, which is the picked
+       * files and the run, and `CORPUS`, which is what the store already
+       * holds. They are two pages again: everything about what the store
+       * already contains moved to `Inside the index`, and what is left here is
+       * the question "read this" and the answer "reading it". */
       /* Every panel the button band opens, in one slot directly under it.
        *
        * They were in four places: the folder picker here, the repository
@@ -6618,13 +6779,362 @@ async function indexView() {
       ),
       queueCard,
       settingsCard,
-      /* Then the run, and then what the store already holds. */
+      /* Then the run itself. */
       cards,
+      idle,
       el("div", { class: "filters" }, el("span", { class: "spacer" }), clearDone),
-      health.node,
-      el("span", { class: "eyebrow", text: "What the graph covers" }),
-      coverage.node,
     ),
+  );
+}
+
+/* Inside the index: what the store already holds, measured.
+ *
+ * The design's CORPUS page, which until now was the bottom half of the
+ * indexing page. Every figure comes from `/api/corpus`, which counts them out
+ * of the store when it is called — the page's own subtitle says "measured, not
+ * estimated", and a cached number under that sentence would make the page a
+ * liar about itself.
+ *
+ * What the design draws and this does not: PDF pages, slides, spreadsheet
+ * cells and notebook cells as *counts of pages and cells*. The store records
+ * the text it extracted, not how many pages it came off, so those are counted
+ * as files here and the panel says `files`. Adding the real figures is a
+ * column in `files` and a change to every extractor, which is a release of its
+ * own rather than a page.
+ */
+
+/** Words a printed page holds, and words a reader gets through in a minute.
+ *
+ * Both are conventions rather than measurements, so they are written down
+ * where the page can point at them: roughly 500 words on a page of A4 set at a
+ * readable size, and 250 words a minute is the figure reading research has
+ * settled on for prose. The word count they multiply is measured. */
+const WORDS_PER_PAGE = 500;
+const WORDS_PER_MINUTE = 250;
+
+/** `26 days`, `4 hours`, `18 minutes` — one unit, the largest that fits. */
+function spellDuration(minutes) {
+  if (minutes < 90) return `${Math.max(1, Math.round(minutes))} minutes`;
+  const hours = minutes / 60;
+  if (hours < 48) return `${Math.round(hours)} hours`;
+  return `${Math.round(hours / 24)} days`;
+}
+
+/** `7 years, 6 months` between two unix seconds. */
+function spellSpan(from, to) {
+  if (!from || !to || to <= from) return "—";
+  const months = Math.max(0, Math.round((to - from) / (86400 * 30.44)));
+  const years = Math.floor(months / 12);
+  const rest = months % 12;
+  if (!years) return `${months} month${months === 1 ? "" : "s"}`;
+  return `${years} year${years === 1 ? "" : "s"}${rest ? `, ${rest} month${rest === 1 ? "" : "s"}` : ""}`;
+}
+
+/** A label over a value, as the design's four small panels list their facts. */
+function factRow(label, value) {
+  return el(
+    "div",
+    { class: "kv-row" },
+    el("span", { class: "k", text: label }),
+    el("span", { class: "v", text: value }),
+  );
+}
+
+function factPanel(title, rows) {
+  return el(
+    "section",
+    { class: "card pad kv-panel" },
+    el("h2", { text: title }),
+    el("div", { class: "kv" }, rows.filter(Boolean)),
+  );
+}
+
+async function corpusView() {
+  await refreshStores();
+  let data;
+  try {
+    data = await api("/api/corpus");
+  } catch (e) {
+    return el("div", { class: "view" }, pageHead("Inside the index"), error(e.message));
+  }
+  // The ledger's own summary, for the last of the three cards at the foot. It
+  // is the one figure on this page that is about what the corpus *saved*
+  // rather than about what it contains, and the ledger is where that is
+  // measured.
+  let ledger = null;
+  try {
+    ledger = await api("/api/ledger");
+  } catch (_) {
+    /* the card says so */
+  }
+
+  const stores = (data.stores || []).filter((row) => !row.error);
+  const broken = (data.stores || []).filter((row) => row.error);
+  const sum = (field) => stores.reduce((total, row) => total + (row[field] || 0), 0);
+
+  const files = sum("files");
+  const chunks = sum("chunks");
+  const lines = sum("lines");
+  const words = sum("words");
+  const characters = sum("characters");
+  const blank = sum("blank_lines");
+  const comments = sum("comment_lines");
+  const symbols = sum("symbols");
+  const dim = stores.length ? stores[0].vector_dim || 384 : 384;
+  const numbers = chunks * dim;
+
+  // Merged across stores, because the reader has several open and the page is
+  // about what this machine holds.
+  const pile = (field, key) => {
+    const into = new Map();
+    for (const store of stores) {
+      for (const row of store[field] || []) {
+        into.set(row[key], (into.get(row[key]) || 0) + (row.count || row.lines || 0));
+      }
+    }
+    return [...into.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const languages = pile("languages", "language");
+  const kinds = pile("kinds", "name");
+  const ambiguousWorst = pile("ambiguous_worst", "name");
+  const languageTotal = languages.reduce((total, [, count]) => total + count, 0) || 1;
+
+  const longest = stores
+    .map((row) => row.longest_file)
+    .filter(Boolean)
+    .sort((a, b) => b.lines - a.lines)[0];
+  const deepest = Math.max(0, ...stores.map((row) => row.deepest_path || 0));
+  const first = Math.min(...stores.map((row) => row.first_indexed || 0).filter(Boolean));
+  const last = Math.max(0, ...stores.map((row) => row.last_indexed || 0));
+  const ms = stores.map((row) => row.median_query_ms || 0).filter(Boolean);
+  const median = ms.length ? Math.round(ms.reduce((a, b) => a + b, 0) / ms.length) : 0;
+
+  const months = new Map();
+  for (const store of stores) {
+    for (const row of store.months || []) {
+      months.set(row.month, (months.get(row.month) || 0) + row.chunks);
+    }
+  }
+  const busiest = [...months.entries()].sort((a, b) => b[1] - a[1])[0];
+
+  const empty = !files;
+  const pages = Math.round(words / WORDS_PER_PAGE);
+
+  /* The language mix, by line rather than by file.
+   *
+   * By file is the wrong denominator for this question: a repository of four
+   * hundred small TypeScript files and thirty large Rust ones is mostly Rust
+   * by every measure that matters to a reader, and mostly TypeScript by file
+   * count. The design measures lines, and this measures lines.
+   *
+   * `.mix-row .meter` deliberately, which is the shape the rest of the portal
+   * draws a proportion in and the shape the drive checks for a CSP-dropped
+   * width. */
+  const mixCard = el(
+    "section",
+    { class: "card pad" },
+    el(
+      "div",
+      { class: "card-head" },
+      el("h2", { text: "Language mix, by line" }),
+      el("span", { class: "spacer" }),
+      el("span", {
+        class: "mono-chip",
+        text: `${n(lines)} lines · ${languages.length} language${languages.length === 1 ? "" : "s"}`,
+      }),
+    ),
+    languages.length
+      ? el(
+          "div",
+          { class: "mix-bar", role: "img", "aria-label": languages.map(([k, v]) => `${k} ${v} lines`).join(", ") },
+          languages.map(([language, count], i) =>
+            sized("width", count / languageTotal, {
+              class: `seg tone-${i % 6}`,
+              tabindex: "0",
+              "data-tip": `${language} · ${n(count)} line${count === 1 ? "" : "s"} · ${share(count, languageTotal)} of ${n(languageTotal)}`,
+            }),
+          ),
+        )
+      : null,
+    languages.length
+      ? el(
+          "div",
+          { class: "mix" },
+          languages.slice(0, 8).map(([language, count], i) =>
+            el(
+              "div",
+              {
+                class: "mix-row",
+                tabindex: "0",
+                "data-tip": `${language} · ${n(count)} line${count === 1 ? "" : "s"} · ${share(count, languageTotal)} of ${n(languageTotal)}`,
+              },
+              el("span", { class: `swatch tone-${i % 6}` }),
+              el("span", { class: "k", text: language }),
+              el("span", { class: "meter" }, sized("width", count / languageTotal)),
+              el("span", { class: "v", text: n(count) }),
+              el("span", { class: "pct", text: share(count, languageTotal) }),
+            ),
+          ),
+        )
+      : el("div", { class: "rail-hint", text: "Nothing indexed yet." }),
+    el("p", { class: "note", text: "Every one of these carries graph edges as well as search." }),
+  );
+
+  const health = healthPanel({ languages: false });
+  const coverage = coveragePanel();
+
+  const ratio = ledger && ledger.ratio ? ledger.ratio : 0;
+
+  return el(
+    "div",
+    { class: "view" },
+    pageHead(
+      "Inside the index",
+      "Measured from the store itself, not estimated. Nobody else can show you this, because nobody else keeps the whole corpus on your machine.",
+      {
+        pill: el("span", {
+          class: "mono-chip",
+          text: `${stores.length} store${stores.length === 1 ? "" : "s"} · recomputed on every read`,
+        }),
+      },
+    ),
+    // Two different failures, said differently. A store the fleet could not
+    // open at all is the shared notice every cross-store page draws; a store
+    // that opened and could not be measured is this page's own problem and is
+    // named here with what it said.
+    unreadableNotice(data.failed),
+    broken.length
+      ? el(
+          "div",
+          { class: "notice bad" },
+          el("div", {
+            class: "what",
+            text: `${broken.length} store${broken.length === 1 ? "" : "s"} could not be measured, so ${
+              broken.length === 1 ? "it is" : "they are"
+            } not in these figures.`,
+          }),
+          el(
+            "div",
+            { class: "rows tight" },
+            broken.map((row) =>
+              el(
+                "details",
+                { class: "unreadable" },
+                el("summary", {}, el("span", { class: "name", text: row.store })),
+                el("pre", { class: "code", text: row.error }),
+              ),
+            ),
+          ),
+        )
+      : null,
+    empty
+      ? el("p", { class: "subtitle", text: "Nothing is indexed yet, so there is nothing to measure." })
+      : null,
+    el(
+      "div",
+      { class: "stat-cards" },
+      stat("Lines of code", n(lines), "counted, not estimated — comments and blanks separated out"),
+      stat("Words indexed", n(words), "code, prose, slides, spreadsheets and notebooks together"),
+      stat(
+        "If it were printed",
+        `${n(pages)} pp`,
+        `a stack of A4 you can search in ${median ? `${median} ms` : "milliseconds"}`,
+      ),
+      stat(
+        "Reading time",
+        spellDuration(words / WORDS_PER_MINUTE),
+        "non-stop at 250 words a minute, no sleep",
+      ),
+    ),
+    mixCard,
+    el(
+      "div",
+      { class: "kv-panels" },
+      factPanel(
+        "What is in the prose",
+        // Files, not pages and cells. The store keeps the text, not the page
+        // it came off — said in the panel rather than in a comment nobody
+        // reading the page can see.
+        kinds.length
+          ? kinds.map(([kind, count]) => factRow(kind, `${n(count)} file${count === 1 ? "" : "s"}`))
+          : [factRow("Nothing indexed", "—")],
+      ),
+      factPanel("Shape of the code", [
+        factRow("Average line", lines ? `${Math.round(characters / lines)} chars` : "—"),
+        factRow("Comment lines", lines ? share(comments, lines) : "—"),
+        factRow("Blank lines", lines ? share(blank, lines) : "—"),
+        factRow("Longest file", longest ? `${shortPath(longest.path)} · ${n(longest.lines)}` : "—"),
+        factRow("Deepest path", `${deepest} folder${deepest === 1 ? "" : "s"}`),
+      ]),
+      factPanel("Time in the corpus", [
+        // Indexed, not written: the store records when it read a file and has
+        // never been told when anybody wrote it.
+        factRow("First read", Number.isFinite(first) && first ? new Date(first * 1000).toLocaleDateString() : "—"),
+        factRow("Newest write", last ? when(last) : "—"),
+        factRow("Span", spellSpan(first, last)),
+        factRow("Busiest month", busiest ? `${busiest[0]} · ${n(busiest[1])} chunks` : "—"),
+      ]),
+      factPanel("The vectors themselves", [
+        factRow("Vectors", n(chunks)),
+        factRow("Numbers stored", n(numbers)),
+        factRow("As float32 it would be", bytes(numbers * 4)),
+        factRow("Quantised to int8", bytes(numbers)),
+        factRow("Query at this size", median ? `${median} ms` : "not measured yet"),
+      ]),
+    ),
+    health.node,
+    /* Which names, not how many.
+     *
+     * Graph health above already counts the names defined more than once and
+     * lists the call targets nothing here defines. The count answers "is this
+     * bad"; the names answer "which of my code is it", and only the second one
+     * can be acted on. The unresolved list is not repeated here — Graph health
+     * draws it, and two lists of one thing on one page is the reader working
+     * out which is which. */
+    ambiguousWorst.length
+      ? el(
+          "div",
+          { class: "kv-panels" },
+          factPanel(
+            "Names with several definitions",
+            ambiguousWorst
+              .slice(0, 5)
+              .map(([name, count]) => factRow(name, `${n(count)} definitions`)),
+          ),
+        )
+      : null,
+    el(
+      "div",
+      { class: "fact-cards" },
+      el(
+        "section",
+        { class: "fact-card" },
+        el("h2", { text: `${n(characters)} characters` }),
+        el("p", { text: "Every keystroke in the corpus, kept on this machine and nowhere else." }),
+      ),
+      el(
+        "section",
+        { class: "fact-card" },
+        el("h2", { text: median ? `${median} ms` : "milliseconds" }),
+        el("p", {
+          text: median
+            ? "The middle of every retrieval this machine has recorded — meaning, not just words."
+            : "Ask this index something and the ledger will start recording how long it took.",
+        }),
+      ),
+      el(
+        "section",
+        { class: "fact-card" },
+        el("h2", { text: ratio ? `${ratio.toFixed(1)}× fewer tokens` : `${n(symbols)} definitions` }),
+        el("p", {
+          text: ratio
+            ? `What your agents read versus reading those files whole · coverage ${ledger.coverage}% · ${ledger.tier}`
+            : "Every definition the graph extracted from this corpus.",
+        }),
+      ),
+    ),
+    el("span", { class: "eyebrow", text: "What the graph covers" }),
+    coverage.node,
   );
 }
 
@@ -8727,226 +9237,79 @@ function statCell(label, value) {
   return el("div", { class: "impact-stat" }, capLabel(label), el("span", { class: "n", text: String(value) }));
 }
 
-/* Reverse reachability, drawn as rings by hop.
+/* Reverse reachability, drawn the way the Graph page draws the graph.
  *
- * The design captions this canvas `reverse reachability, rings by hop` and then
- * paints it with the same force simulation the Graph page uses, which has no
- * hop input at all: one ring of everything, immediately scattered. The caption
- * is the specification and the painter was not, so this is the caption.
+ * This was a static painter: concentric rings, one per hop, drawn once and
+ * redrawn only on a resize or a theme change. It said the hop count clearly and
+ * said nothing else — the nodes could not be moved, hovered or picked, and a
+ * ring with more symbols than fit at its radius simply counted the rest.
  *
- * Deliberately not a simulation. Hop distance is the whole content of this
- * picture, and a spring layout is a machine for destroying it — a node three
- * hops out ends up wherever repulsion puts it. Concentric rings say the one
- * thing the page is about, and they say it the same way twice in a row, which a
- * settling graph does not. There is nothing to animate, so there is nothing for
- * `prefers-reduced-motion` to turn off.
+ * The design paints this canvas with the same force simulation the Graph page
+ * uses, and that is what the page is for: the same picture, the same
+ * interactions, the same drift, on a subgraph instead of on the whole store. So
+ * this is `graphCanvas` with an impact answer converted into its nodes and
+ * edges, rather than a second painter with its own behaviour to keep in step.
  *
- * ponytail: labels are not de-collided. A ring holds what fits at this radius
- * and the rest are counted in the `+N` at its edge; if that count is routinely
- * large, the fix is a bigger canvas or a hop filter, not a label solver.
+ * Hop is not lost by dropping the rings — every row carries it in the table
+ * beside this, and each edge here is one hop, so the distance from the subject
+ * is the number of edges to it.
  */
-function impactRings() {
-  const canvas = el("canvas", { class: "impact-canvas" });
-  const caption = el("span", { class: "canvas-caption", text: "reverse reachability, rings by hop" });
-  const wrap = el("div", { class: "card impact-canvas-card" }, canvas, caption);
-  let subject = "";
-  let rows = [];
 
-  /* How many labels one ring can carry before they overlap. The circumference
-   * grows with the radius, so the ring further out holds more — which is also
-   * the ring with more on it, and is why this is computed rather than fixed. */
-  /* How many labels fit around a ring without touching.
-   *
-   * 74px of arc each was the width of a short name, not of a label: a label is
-   * capped at 150px and most are near it, so a ring "fitting" twelve of them
-   * drew twelve overlapping boxes. The real spacing is the widest label plus a
-   * gap, and a ring that cannot hold four is not drawn as a ring at all — its
-   * symbols are counted instead. */
-  function capacity(radius) {
-    return Math.max(3, Math.floor((2 * Math.PI * radius) / 165));
-  }
+/* The most nodes worth laying out. `graphView` caps at 180 for a whole store;
+ * this card is a third of that one's height, so it takes a third of its
+ * budget. Nearest hops are kept, because a caller two hops away is the one the
+ * reader is looking for. */
+const IMPACT_NODE_CAP = 34;
 
-  function draw() {
-    const ratio = window.devicePixelRatio || 1;
-    const box = wrap.getBoundingClientRect();
-    const w = Math.max(box.width, 240);
-    const h = Math.max(box.height, 200);
-    canvas.width = Math.round(w * ratio);
-    canvas.height = Math.round(h * ratio);
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    if (!subject) return;
+function impactCanvas() {
+  const graph = graphCanvas({});
+  const caption = el("span", { class: "canvas-caption", text: "reverse reachability" });
+  const wrap = el("div", { class: "card impact-canvas-card" }, graph.node, caption);
 
-    const ink = graphInk();
-    const cx = w / 2;
-    const cy = h / 2 + 8;
-    const hops = [...new Set(rows.map((r) => r.hop))].sort((a, b) => a - b);
-    const outer = Math.min(w, h) / 2 - 26;
-    const step = hops.length ? outer / hops.length : outer;
-
-    // The rings themselves, under everything: a hop is a distance here, so the
-    // distance is drawn rather than left to be inferred from where things sat.
-    ctx.save();
-    ctx.strokeStyle = ink.edge;
-    ctx.setLineDash([3, 5]);
-    ctx.lineWidth = 1;
-    for (let i = 1; i <= hops.length; i += 1) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, step * i, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.restore();
-
-    const placed = [];
-    hops.forEach((hop, ring) => {
-      const radius = step * (ring + 1);
-      const onRing = rows.filter((r) => r.hop === hop);
-      const room = capacity(radius);
-      const shown = onRing.slice(0, room);
-      shown.forEach((row, i) => {
-        // Every ring starts at the same angle and steps evenly. Offsetting
-        // alternate rings would read as meaning, and it does not mean anything.
-        const angle = (i / shown.length) * Math.PI * 2 - Math.PI / 2;
-        placed.push({
-          row,
-          x: cx + Math.cos(angle) * radius,
-          y: cy + Math.sin(angle) * radius,
-          hidden: i === shown.length - 1 ? onRing.length - shown.length : 0,
-        });
-      });
-    });
-
-    // Spokes first, so a label always sits on top of the line that reaches it.
-    // Drawn inward — from the caller to what it reaches — because that is the
-    // direction the question is asked in, and an undirected line on a page
-    // about reachability says half of what it could.
-    ctx.strokeStyle = ink.edge;
-    ctx.lineWidth = 1;
-    for (const node of placed) {
-      const inner = placed.find((p) => p.row.name === node.row.via && p.row.hop < node.row.hop);
-      const tx = inner ? inner.x : cx;
-      const ty = inner ? inner.y : cy;
-      ctx.beginPath();
-      ctx.moveTo(node.x, node.y);
-      ctx.lineTo(tx, ty);
-      ctx.stroke();
-      // The head sits short of the target's own label rather than under it.
-      const angle = Math.atan2(ty - node.y, tx - node.x);
-      const hx = tx - Math.cos(angle) * 22;
-      const hy = ty - Math.sin(angle) * 14;
-      ctx.beginPath();
-      ctx.moveTo(hx, hy);
-      ctx.lineTo(hx - Math.cos(angle - 0.4) * 6, hy - Math.sin(angle - 0.4) * 6);
-      ctx.moveTo(hx, hy);
-      ctx.lineTo(hx - Math.cos(angle + 0.4) * 6, hy - Math.sin(angle + 0.4) * 6);
-      ctx.stroke();
-    }
-
-    const label = (x, y, name, fill, line, colour, weight) => {
-      let text = name;
-      ctx.font = `${weight} 11px "IBM Plex Mono", Menlo, monospace`;
-      // Capped, and said to be capped. A symbol in this repository is called
-      // `a_nudge_decides_nothing_and_a_refusal_only_denies`; drawn whole it is
-      // wider than the ring it sits on and covers its neighbours. Clipped with
-      // no mark it read as a rendering fault rather than as a name that
-      // continues, so what is drawn ends in an ellipsis and the whole name is
-      // in the table beside the canvas.
-      const cap = 150;
-      if (ctx.measureText(text).width + 16 > cap) {
-        while (text.length > 1 && ctx.measureText(`${text}…`).width + 16 > cap) {
-          text = text.slice(0, -1);
-        }
-        text = `${text}…`;
-      }
-      const width = Math.min(ctx.measureText(text).width + 16, cap);
-      // Kept inside the frame. A label is drawn centred on its node, and a node
-      // on the outer ring sits close enough to the edge that a long name ran
-      // off the card — `a_nudge_decides_nothing_and_a_refusal_only_denies` is a
-      // real symbol in this repository and it left the canvas mid-word. Nudged
-      // rather than shortened: the whole name is worth more than the exact
-      // position, and the ring it belongs to is still legible.
-      const left = Math.max(4, Math.min(x - width / 2, w - width - 4));
-      const top = y - 11;
-      ctx.fillStyle = fill;
-      ctx.strokeStyle = line;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      // `roundRect` is the one canvas call here a browser might not have. A
-      // square label is a worse label; a thrown TypeError is a blank canvas
-      // and a console error, and "no new console error on any page" is a
-      // criterion this release is measured against.
-      if (ctx.roundRect) ctx.roundRect(left, top, width, 22, 7);
-      else ctx.rect(left, top, width, 22);
-      ctx.fill();
-      ctx.stroke();
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(left, top, width, 22);
-      ctx.clip();
-      ctx.fillStyle = colour;
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, left + 8, y + 1);
-      ctx.restore();
+  /* An impact answer is a list of rows, each naming what it reaches through.
+   * The canvas wants nodes and edges, so `via` becomes the other end: a row is
+   * the edge `name -> via`, and the subject is the node every chain ends at. */
+  function shape(subject, rows) {
+    const index = new Map([[subject, 0]]);
+    const nodes = [{ name: subject, kind: "symbol" }];
+    const edges = [];
+    const add = (name) => {
+      if (index.has(name)) return index.get(name);
+      if (nodes.length >= IMPACT_NODE_CAP) return null;
+      index.set(name, nodes.length);
+      nodes.push({ name, kind: "symbol" });
+      return nodes.length - 1;
     };
-
-    for (const node of placed) {
-      // An unsettled edge is amber here exactly as its badge is in the table
-      // beside it, because a reader who has learned one has learned both.
-      const unsure = node.row.confidence === "inferred" || node.row.confidence === "ambiguous";
-      label(
-        node.x,
-        node.y,
-        node.row.name,
-        unsure ? ink.nearFill : ink.node,
-        unsure ? ink.warn : ink.nodeLine,
-        unsure ? ink.warn : ink.text,
-        "500",
-      );
-      if (node.hidden > 0) {
-        ctx.fillStyle = ink.muted;
-        ctx.font = '400 10px "IBM Plex Mono", Menlo, monospace';
-        ctx.fillText(`+${node.hidden}`, node.x + 14, node.y + 18);
-      }
+    // Nearest first, so the cap drops the far edge of the answer rather than
+    // whichever rows the store happened to return last.
+    for (const row of [...rows].sort((a, b) => a.hop - b.hop)) {
+      const from = add(row.name);
+      const to = add(row.via);
+      if (from === null || to === null) continue;
+      edges.push({ from, to, kind: row.kind || "calls", confidence: row.confidence });
     }
-
-    // The subject last and at the centre, because it is the one node every
-    // other node is measured from.
-    label(cx, cy, subject, ink.sel, ink.selLine, ink.selText, "600");
+    return { nodes, edges, total: rows.length + 1 };
   }
-
-  // The card's own size, not the window's, as the graph canvas does it: the
-  // column this sits in collapses at a width the window never reports.
-  new ResizeObserver(() => draw()).observe(wrap);
-
-  /* Redrawn on a theme switch, for the reason `graphInk` is re-read on every
-   * paint: a canvas holds pixels, not custom properties, so nothing about one
-   * re-themes by itself. The force canvases get this for free by repainting
-   * every frame; this one draws once and has to be told.
-   *
-   * It disconnects itself once the card has left the document. A view here is
-   * replaced rather than torn down, so an observer on `documentElement` would
-   * outlive every page the reader walks through. */
-  const theme = new MutationObserver(() => {
-    if (!wrap.isConnected) {
-      theme.disconnect();
-      return;
-    }
-    draw();
-  });
-  theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
   return {
     node: wrap,
     show(name, reached) {
-      subject = name || "";
-      rows = reached || [];
-      draw();
+      if (!name) return this.clear();
+      const data = shape(name, reached || []);
+      graph.draw(data);
+      // The subject selected, as though it had been clicked: it is the one node
+      // every other node on this canvas is measured from, and selecting it
+      // lights its own edges as well as drawing it in the accent.
+      graph.pick(name);
+      const hidden = data.total - data.nodes.length;
+      caption.textContent = hidden > 0
+        ? `reverse reachability · ${hidden} beyond the ${IMPACT_NODE_CAP} drawn`
+        : "reverse reachability";
+      graph.start();
     },
     clear() {
-      subject = "";
-      rows = [];
-      draw();
+      graph.draw({ nodes: [], edges: [], total: 0 });
+      caption.textContent = "reverse reachability";
     },
   };
 }
@@ -8957,7 +9320,7 @@ async function impactView() {
   const results = el("div", { class: "impact-results" });
   const subject = el("span", { class: "impact-subject", text: "—" });
   const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
-  const rings = impactRings();
+  const rings = impactCanvas();
   const pathCard = pathFinderCard();
   const traceLane = traceCard();
   const reached = statCell("Reached", 0);
@@ -8999,19 +9362,57 @@ async function impactView() {
 
   const go = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
 
+  /* A real table row, in a real table.
+   *
+   * These were `div`s on a grid, and a grid is only a table for as long as
+   * every row agrees about its tracks: a long symbol pushed its own row's
+   * columns out of line with the heading above it, and the whole block read as
+   * loose text rather than as an answer with columns. `table` is the element
+   * for this, its heading sticks, and the browser sizes the columns from the
+   * content instead of from a guess written in `fr` units. */
   function reachedRow(row) {
     return el(
-      "div",
+      "tr",
       { class: "impact-row" },
-      el("span", { class: "sym", text: row.name }),
-      el("span", { class: "where", text: `${shortPath(row.path)}:${row.line}` }),
+      el("td", { class: "sym" }, el("code", { title: row.name, text: row.name })),
+      // The whole path in the title, because the cell truncates it.
+      el("td", {
+        class: "where path",
+        title: `${row.path}:${row.line}`,
+        text: `${shortPath(row.path)}:${row.line}`,
+      }),
       el(
-        "span",
+        "td",
         { class: "via" },
         el("span", { class: "one-line", text: `${row.via} · ${row.kind}` }),
         confidenceBadge(row.confidence),
       ),
-      el("span", { class: "hops-n", text: String(row.hop) }),
+      el("td", { class: "hops-n num", text: String(row.hop) }),
+    );
+  }
+
+  // One table, split into a `tbody` per hop, rather than one table per hop:
+  // the hops are groups of one answer and share its columns, so the heading is
+  // written once and the group label rides a row that spans it.
+  function hopGroup(hop, rows) {
+    return el(
+      "tbody",
+      { class: "impact-block" },
+      el(
+        "tr",
+        { class: "impact-hop-row" },
+        el(
+          "th",
+          { colspan: "4", scope: "rowgroup" },
+          el(
+            "div",
+            { class: "impact-hop" },
+            el("h2", { text: `${hop} hop${hop === 1 ? "" : "s"}` }),
+            el("span", { class: "muted", text: `${rows.length} definition${rows.length === 1 ? "" : "s"}` }),
+          ),
+        ),
+      ),
+      rows.map(reachedRow),
     );
   }
 
@@ -9096,39 +9497,68 @@ async function impactView() {
         : null,
       el(
         "div",
-        { class: "impact-head-row" },
-        capLabel("Reached symbol"),
-        capLabel("Where"),
-        capLabel("Via"),
-        capLabel("Hops"),
-      ),
-      [...byHop.entries()].map(([hop, rows]) =>
+        { class: "card table-card impact-table" },
         el(
-          "section",
-          { class: "impact-block" },
+          "div",
+          { class: "table-wrap" },
           el(
-            "div",
-            { class: "impact-hop" },
-            el("h2", { text: `${hop} hop${hop === 1 ? "" : "s"}` }),
-            el("span", { class: "muted", text: `${rows.length} definition${rows.length === 1 ? "" : "s"}` }),
+            "table",
+            {},
+            el("caption", { class: "sr-only", text: `Everything that reaches ${name}, nearest hop first` }),
+            el(
+              "thead",
+              {},
+              el(
+                "tr",
+                {},
+                el("th", { text: "Reached symbol" }),
+                el("th", { text: "Where" }),
+                el("th", { text: "Via" }),
+                el("th", { class: "num", text: "Hops" }),
+              ),
+            ),
+            [...byHop.entries()].map(([hop, rows]) => hopGroup(hop, rows)),
           ),
-          rows.map(reachedRow),
         ),
       ),
       el(
-        "section",
-        // Its own class: a file is not an edge and carries no support class,
-        // so a check counting unbadged hops must be able to tell the two
-        // blocks apart.
-        { class: "impact-block impact-files" },
-        el("div", { class: "impact-hop" }, el("h2", { text: "Files" })),
-        impact.files.map((file) =>
+        "div",
+        { class: "card table-card impact-table" },
+        el("div", { class: "table-head" }, el("h2", { text: "Files" })),
+        el(
+          "div",
+          { class: "table-wrap" },
           el(
-            "div",
-            { class: "impact-row" },
-            el("span", { class: "sym", text: shortPath(file.path) }),
-            el("span", { class: "where", text: `${file.symbols} definition${file.symbols === 1 ? "" : "s"}` }),
-            el("span", { class: "via", text: `nearest ${file.nearest} hop${file.nearest === 1 ? "" : "s"}` }),
+            "table",
+            {},
+            el("caption", { class: "sr-only", text: "The files those definitions are in" }),
+            el(
+              "thead",
+              {},
+              el(
+                "tr",
+                {},
+                el("th", { text: "File" }),
+                el("th", { class: "num", text: "Definitions" }),
+                el("th", { class: "num", text: "Nearest" }),
+              ),
+            ),
+            el(
+              "tbody",
+              // Its own class: a file is not an edge and carries no support
+              // class, so a check counting unbadged hops must be able to tell
+              // the two blocks apart.
+              { class: "impact-block impact-files" },
+              impact.files.map((file) =>
+                el(
+                  "tr",
+                  { class: "impact-row" },
+                  el("td", { class: "sym path", text: shortPath(file.path) }),
+                  el("td", { class: "num", text: String(file.symbols) }),
+                  el("td", { class: "num", text: `${file.nearest} hop${file.nearest === 1 ? "" : "s"}` }),
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -10569,6 +10999,7 @@ const RENDER = {
   stores: storesView,
   files: filesView,
   index: indexView,
+  corpus: corpusView,
   search: searchView,
   agents: agentsView,
   privacy: privacyView,
