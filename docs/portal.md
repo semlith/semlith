@@ -712,6 +712,11 @@ path inwards to the centre. A name drawn in amber is one whose edge is
 `inferred` or `ambiguous`, which is the same amber its badge carries in the
 table on the left — a reader who has learned one has learned the other.
 
+**The hover card** is the Graph page's, and follows the pointer the same way. For
+a symbol that reaches the subject it gives `hops`, the `file` and line of the
+row that reached it, what it `reaches` through and by which edge kind, and the
+edge's `confidence`; the subject itself says it is hop 0.
+
 **It does not move.** Every other canvas in this portal is a force simulation
 that settles; this one is arithmetic, drawn once. That is deliberate, and it is
 the whole reason the picture is worth drawing: hop distance is the only thing

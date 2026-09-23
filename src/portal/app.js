@@ -451,10 +451,12 @@ function empty(message) {
  * `overflow: auto`, so a scroll container clipped it. The Files page's path
  * tip — the reason the feature exists — was the one that could not be read.
  *
- * `show` takes content and the rectangle to hang it off. It prefers to sit
- * above and left-aligned, and flips or clamps when that would leave the
- * viewport. The Graph canvas uses the same element for its richer card, so
- * there is one implementation rather than two. */
+ * A pointer places it beside the pointer and it follows as the pointer moves,
+ * which is how the Graph canvas's card has always behaved and how the design
+ * draws every hover: one behaviour everywhere, rather than a card that tracks
+ * the mouse on one page and hangs off an element's corner on the next. Focus
+ * has no pointer, so a keyboard-shown tip hangs off the focused element
+ * instead, above it and flipped below when there is no room. */
 const tip = {
   node: null,
   owner: null,
@@ -467,22 +469,30 @@ const tip = {
     return this.node;
   },
 
-  /** `content` is a string or an element; `rect` is a viewport rectangle. */
-  show(content, rect, owner) {
+  /** Fill and open it; the caller places it. */
+  open(content, owner) {
     const node = this.ensure();
     this.owner = owner || null;
     fill(node, content);
     node.setAttribute("aria-hidden", "false");
+    node.dataset.open = "true";
+    return node;
+  },
+
+  /** Hang it off a viewport rectangle: `content` is a string or an element. */
+  show(content, rect, owner) {
+    const node = this.open(content, owner);
     // Measured after filling and before positioning: the size depends on the
     // text, and a stale measurement puts the flip decision on the wrong side.
-    node.dataset.open = "true";
-    const box = node.getBoundingClientRect();
+    // `offset*` rather than the bounding box, which the opening scale shrinks.
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
     const margin = 8;
     let left = rect.left;
-    if (left + box.width > window.innerWidth - margin) {
-      left = Math.max(margin, window.innerWidth - margin - box.width);
+    if (left + width > window.innerWidth - margin) {
+      left = Math.max(margin, window.innerWidth - margin - width);
     }
-    let top = rect.top - box.height - 6;
+    let top = rect.top - height - 6;
     // Above by default, below when there is no room — the flip the criterion
     // asks for, and the reason this is measured against the viewport.
     if (top < margin) top = rect.bottom + 6;
@@ -490,17 +500,37 @@ const tip = {
     node.style.top = `${Math.round(top)}px`;
   },
 
-  /** Hang a tip off an element. */
-  at(target, content) {
-    const own = target.hasAttribute("data-tip-title")
-      ? tipCard(target)
-      : target.getAttribute("data-tip");
-    this.show(content || own, target.getBoundingClientRect(), target);
+  /** Keep an open tip beside the pointer: above and to the right of it,
+   * flipped to the left or below at the viewport's edge, as the design's
+   * `tipMove` places it. */
+  follow(x, y) {
+    const node = this.node;
+    if (!node) return;
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
+    const margin = 10;
+    let left = x + 14;
+    let top = y - height - 14;
+    if (left + width > window.innerWidth - margin) left = Math.max(margin, x - width - 14);
+    if (top < margin) top = y + 20;
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(top)}px`;
   },
 
-  /** Hang a tip off a point, for the canvas, which has no elements to hang on. */
+  /** What an element's own tip says: a card when it carries one, else text. */
+  contentOf(target) {
+    return target.hasAttribute("data-tip-title") ? tipCardOf(target) : target.getAttribute("data-tip");
+  },
+
+  /** Hang a tip off an element, for focus, which has no pointer to follow. */
+  at(target) {
+    this.show(this.contentOf(target), target.getBoundingClientRect(), target);
+  },
+
+  /** Open a tip beside a point: the canvases, and every pointer hover. */
   atPoint(x, y, content, owner) {
-    this.show(content, { left: x + 12, top: y - 8, bottom: y + 18 }, owner);
+    this.open(content, owner);
+    this.follow(x, y);
   },
 
   hide(owner) {
@@ -520,12 +550,20 @@ function wireTips() {
 
   document.addEventListener("pointerover", (e) => {
     const target = find(e.target);
-    if (target) tip.at(target);
-    else if (tip.owner && tip.owner.nodeType) tip.hide();
+    if (target) {
+      // Moving between an element's own children fires this again; the tip
+      // is already showing, and refilling it would only reset its fade.
+      if (tip.owner !== target) tip.atPoint(e.clientX, e.clientY, tip.contentOf(target), target);
+    } else if (tip.owner && tip.owner.nodeType) tip.hide();
+  });
+  // Follows the pointer across the element it describes, as the canvas's does.
+  document.addEventListener("pointermove", (e) => {
+    if (tip.owner && tip.owner.nodeType && tip.owner.contains(e.target)) tip.follow(e.clientX, e.clientY);
   });
   document.addEventListener("pointerout", (e) => {
     const target = find(e.target);
-    if (target) tip.hide(target);
+    // Into one of its own children is not leaving it.
+    if (target && !(e.relatedTarget && target.contains(e.relatedTarget))) tip.hide(target);
   });
   // Keyboard parity: focus shows the same label a hover does.
   document.addEventListener("focusin", (e) => {
@@ -2012,31 +2050,16 @@ async function graphView() {
       tip.atPoint(
         x,
         y,
-        [
-          el(
-            "div",
-            { class: "tip-head" },
-            el("i", {}),
-            node.name,
-          ),
-          row("kind", node.kind),
-          row("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`),
-          row("store", node.store || (state.stores[0] && state.stores[0].name) || "—"),
-          row("calls", `${node.callers} in · ${node.callees} out`),
-        ],
+        tipCard(node.name, "blue", [
+          ["kind", node.kind],
+          ["file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`],
+          ["store", node.store || (state.stores[0] && state.stores[0].name) || "—"],
+          ["calls", `${node.callers} in · ${node.callees} out`],
+        ]),
         "graph",
       );
     },
   });
-
-  function row(key, value) {
-    return el(
-      "div",
-      { class: "tip-row" },
-      el("span", { class: "k", text: key }),
-      el("span", { class: "v", text: String(value) }),
-    );
-  }
 
   const pause = el("button", {
     class: "button secondary small",
@@ -4633,13 +4656,14 @@ async function searchView() {
       tip.atPoint(
         x,
         y,
-        [
-          el("div", { class: "tip-head" }, el("i", {}), node.name),
-          node.kind ? egoRow("kind", node.kind) : null,
-          node.path
-            ? egoRow("file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`)
-            : null,
-        ].filter(Boolean),
+        tipCard(
+          node.name,
+          "blue",
+          [
+            node.kind ? ["kind", node.kind] : null,
+            node.path ? ["file", `${shortPath(node.path)}:${node.start_line}-${node.end_line}`] : null,
+          ].filter(Boolean),
+        ),
         "ego",
       );
     },
@@ -5404,16 +5428,6 @@ async function searchView() {
  * A caller or callee row is an `EdgeEnd`, which flattens the symbol it
  * reached into itself: the name is on the row, not under a `symbol` key, and
  * `kind` is the edge's kind rather than the symbol's. */
-/** One `key  value` line in the ego panel's hover card. */
-function egoRow(key, value) {
-  return el(
-    "div",
-    { class: "tip-row" },
-    el("span", { class: "k", text: key }),
-    el("span", { class: "v", text: String(value) }),
-  );
-}
-
 function egoGraph(name, data) {
   const centre = (data.symbols || [])[0] || {};
   const nodes = [
@@ -6848,43 +6862,47 @@ function factPanel(title, rows) {
     "section",
     { class: "card pad kv-panel" },
     el("h2", { text: title }),
-    el("div", { class: "kv" }, rows.filter(Boolean)),
+    el("div", { class: "kv-list" }, rows.filter(Boolean)),
   );
 }
 
-/** A hover card in the design's shape: a title with its colour, then rows.
- *
- * Carried on the element as `data-tip-title`, `data-tip-tone` and a JSON
- * `data-tip-rows`, so it goes through the one delegated tooltip every other
- * hover in the portal goes through rather than being a second implementation.
- */
-function tipCard(target) {
-  let rows = [];
-  try {
-    rows = JSON.parse(target.getAttribute("data-tip-rows") || "[]");
-  } catch (_) {
-    rows = [];
-  }
-  const tone = target.getAttribute("data-tip-tone");
+/** The hover card, in the design's shape: a title with its colour, then
+ * label and value rows. Every card in the portal is built here — the canvases
+ * and the elements that carry one alike — so they cannot drift apart.
+ * `tone` is a class that colours the dot: `tone-N`, an edge tier, `blue` or
+ * `accent`. */
+function tipCard(title, tone, rows) {
   return el(
     "div",
     { class: "tip-card" },
     el(
       "div",
       { class: "tip-head" },
-      tone ? el("span", { class: `dot ${tone}` }) : null,
-      el("span", { class: "name", text: target.getAttribute("data-tip-title") || "" }),
+      el("span", { class: `legend-dot ${tone || "blue"}` }),
+      el("span", { class: "name", text: title }),
     ),
     rows.length
       ? el(
           "div",
           { class: "tip-rows" },
           rows.map(([label, value]) =>
-            el("div", { class: "tip-row" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: value })),
+            el("div", { class: "tip-row" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: String(value) })),
           ),
         )
       : null,
   );
+}
+
+/** An element's own card, carried as `data-tip-title`, `data-tip-tone` and a
+ * JSON `data-tip-rows`, so it goes through the one delegated tooltip. */
+function tipCardOf(target) {
+  let rows = [];
+  try {
+    rows = JSON.parse(target.getAttribute("data-tip-rows") || "[]");
+  } catch (_) {
+    rows = [];
+  }
+  return tipCard(target.getAttribute("data-tip-title") || "", target.getAttribute("data-tip-tone"), rows);
 }
 
 /** The twelve months ending at the newest one the store holds.
@@ -7024,7 +7042,7 @@ function graphHealthCard(corpus) {
         el(
           "span",
           { class: "tier-key" },
-          el("span", { class: `dot ${tier}` }),
+          el("span", { class: `legend-dot ${tier}` }),
           el("span", { text: `${tier} ${n(tiers.get(tier) || 0)}` }),
         ),
       ),
@@ -7072,7 +7090,7 @@ function graphHealthCard(corpus) {
         el("span", { class: "health-figure", text: n(corpus.ambiguousNames) }),
         el(
           "div",
-          { class: "kv" },
+          { class: "kv-list" },
           corpus.ambiguousWorst.length
             ? corpus.ambiguousWorst.slice(0, 5).map(([name, count]) => factRow(name, n(count)))
             : factRow("None", "—"),
@@ -7230,7 +7248,7 @@ async function corpusView() {
               },
               el("span", { class: `swatch tone-${i % 6}` }),
               el("span", { class: "k", text: language }),
-              el("span", { class: "meter" }, sized("width", count / languageTotal)),
+              el("span", { class: "meter" }, sized("width", count / languageTotal, { class: `tone-${i % 6}` })),
               el("span", { class: "v", text: n(count) }),
               el("span", { class: "pct", text: share(count, languageTotal) }),
             ),
@@ -7313,45 +7331,49 @@ async function corpusView() {
         "non-stop at 250 words a minute, no sleep",
       ),
     ),
-    /* The design's arrangement: the mix on the left, at the height of the four
-     * panels beside it, and those four as a two-by-two rather than as a row of
-     * four under it. A row of four put the mix in a band of its own with a
+    /* The design's arrangement: two equal columns, the mix on the left and the
+     * four panels as a two-by-two on the right, each card as tall as what it
+     * holds. A row of four put the mix in a band of its own with a
      * quarter-width column of facts under each end of it. */
     el(
       "div",
       { class: "corpus-top" },
       mixCard,
-      factPanel(
-        "What is in the prose",
-        // Files, not pages and cells. The store keeps the text, not the page
-        // it came off — said in the panel rather than in a comment nobody
-        // reading the page can see.
-        kinds.length
-          ? kinds.map(([kind, count]) => factRow(kind, `${n(count)} file${count === 1 ? "" : "s"}`))
-          : [factRow("Nothing indexed", "—")],
+      el(
+        "div",
+        { class: "corpus-panels" },
+        factPanel(
+          "What is in the prose",
+          // Files, not pages and cells. The store keeps the text, not the page
+          // it came off — said in the panel rather than in a comment nobody
+          // reading the page can see.
+          kinds.length
+            ? kinds.map(([kind, count]) => factRow(kind, `${n(count)} file${count === 1 ? "" : "s"}`))
+            : [factRow("Nothing indexed", "—")],
+        ),
+        factPanel("Shape of the code", [
+          factRow("Average line", lines ? `${Math.round(characters / lines)} chars` : "—"),
+          factRow("Comment lines", lines ? share(comments, lines) : "—"),
+          factRow("Blank lines", lines ? share(blank, lines) : "—"),
+          factRow("Longest file", longest ? `${shortPath(longest.path)} · ${n(longest.lines)}` : "—"),
+          factRow("Deepest path", `${deepest} folder${deepest === 1 ? "" : "s"}`),
+        ]),
+        factPanel("Time in the corpus", [
+          // Indexed, not written: the store records when it read a file and has
+          // never been told when anybody wrote it.
+          factRow("First read", Number.isFinite(first) && first ? new Date(first * 1000).toLocaleDateString() : "—"),
+          factRow("Newest write", last ? when(last) : "—"),
+          factRow("Span", spellSpan(first, last)),
+          factRow("Busiest month", busiest ? `${busiest[0]} · ${n(busiest[1])} chunks` : "—"),
+        ]),
+        factPanel("The vectors themselves", [
+          factRow("Vectors", n(chunks)),
+          factRow("Numbers stored", n(numbers)),
+          factRow("As float32 it would be", bytes(numbers * 4)),
+          factRow("Quantised to int8", bytes(numbers)),
+          factRow("Query at this size", median ? `${median} ms` : "not measured yet"),
+        ]),
       ),
-      factPanel("Shape of the code", [
-        factRow("Average line", lines ? `${Math.round(characters / lines)} chars` : "—"),
-        factRow("Comment lines", lines ? share(comments, lines) : "—"),
-        factRow("Blank lines", lines ? share(blank, lines) : "—"),
-        factRow("Longest file", longest ? `${shortPath(longest.path)} · ${n(longest.lines)}` : "—"),
-        factRow("Deepest path", `${deepest} folder${deepest === 1 ? "" : "s"}`),
-      ]),
-      factPanel("Time in the corpus", [
-        // Indexed, not written: the store records when it read a file and has
-        // never been told when anybody wrote it.
-        factRow("First read", Number.isFinite(first) && first ? new Date(first * 1000).toLocaleDateString() : "—"),
-        factRow("Newest write", last ? when(last) : "—"),
-        factRow("Span", spellSpan(first, last)),
-        factRow("Busiest month", busiest ? `${busiest[0]} · ${n(busiest[1])} chunks` : "—"),
-      ]),
-      factPanel("The vectors themselves", [
-        factRow("Vectors", n(chunks)),
-        factRow("Numbers stored", n(numbers)),
-        factRow("As float32 it would be", bytes(numbers * 4)),
-        factRow("Quantised to int8", bytes(numbers)),
-        factRow("Query at this size", median ? `${median} ms` : "not measured yet"),
-      ]),
     ),
     monthsCard(months, spanLabel),
     graphHealthCard({
@@ -8605,6 +8627,10 @@ async function agentsView() {
             ]),
           ),
         ),
+        // Under the tools rather than beside the registration card: it is a
+        // short card about this machine, and paired with a wide one it was
+        // stretched to that card's height and centred in it.
+        installPanel(),
       ),
       el("div", { class: "card pad stanzas" }, tabs, chips, body),
     ),
@@ -8640,7 +8666,7 @@ async function agentsView() {
     ),
     ),
     keyNote,
-    el("div", { class: "grid two agent-extras" }, registerAll, installPanel()),
+    registerAll,
     inUseCard,
   );
 }
@@ -8974,37 +9000,62 @@ async function privacyView() {
     el(
       "div",
       { class: "grid scroller" },
+      /* How to check the promise, and what the stores already hold: both are
+       * things a reader does rather than reads, so they share a column. */
       el(
         "div",
-        { class: "card pad" },
-        el("span", { class: "card-title", text: "Verify it yourself" }),
+        { class: "rows" },
         el(
           "div",
-          { class: "steps-list" },
-          step(
-            "1",
-            "Ask the operating system what this process has open. Only loopback should appear.",
-            "lsof -nP -p $(pgrep -f 'semlith start') -i",
+          { class: "card pad" },
+          el("span", { class: "card-title", text: "Verify it yourself" }),
+          el(
+            "div",
+            { class: "steps-list" },
+            step(
+              "1",
+              "Ask the operating system what this process has open. Only loopback should appear.",
+              "lsof -nP -p $(pgrep -f 'semlith start') -i",
+            ),
+            step(
+              "2",
+              "Watch every interface but loopback while you search. Nothing should appear.",
+              "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
+            ),
+            step(
+              "3",
+              "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
+              "semlith start --airgap",
+            ),
+            step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
+            // The fifth step the design ends on, and the one that settles the
+            // ledger: it is a table in a file on this disk, readable by anything
+            // that reads SQLite, and countable without asking semlith.
+            step(
+              "5",
+              "See the ledger for what it is: one local table, written by this machine and nothing else.",
+              `sqlite3 ${data.store_home || "~/.semlith"}/stores/<name>/store.db 'select count(*) from retrievals'`,
+            ),
           ),
-          step(
-            "2",
-            "Watch every interface but loopback while you search. Nothing should appear.",
-            "sudo tcpdump -i any -n 'not host 127.0.0.1 and not host ::1'",
+        ),
+        el(
+          "div",
+          { class: "card pad" },
+          el(
+            "div",
+            { class: "head" },
+            // The heading said "Scan" and the button beside it said "Scan",
+            // which rendered as the word twice.
+            el("span", { class: "card-title", text: "What is already stored" }),
+            el("span", { class: "spacer" }),
+            scanButton,
           ),
-          step(
-            "3",
-            "Arm the refusal. Anything that would reach the network exits instead, naming what it refused.",
-            "semlith start --airgap",
-          ),
-          step("4", "Or pull the cable: the portal loads and searches with no network at all.", "ifconfig en0 down"),
-          // The fifth step the design ends on, and the one that settles the
-          // ledger: it is a table in a file on this disk, readable by anything
-          // that reads SQLite, and countable without asking semlith.
-          step(
-            "5",
-            "See the ledger for what it is: one local table, written by this machine and nothing else.",
-            `sqlite3 ${data.store_home || "~/.semlith"}/stores/<name>/store.db 'select count(*) from retrievals'`,
-          ),
+          el("p", {
+            class: "subtitle",
+            text: "The rules below decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
+          }),
+          scanBox,
+          scanNote,
         ),
       ),
       el(
@@ -9064,62 +9115,37 @@ async function privacyView() {
             text: `Host headers answered: ${(data.host_allowed || []).join(", ")}. Everything else gets 400.`,
           }),
         ),
-        /* The two cards this project added, after the five the design
-         * draws. They sat between `Verify it yourself` and the outbound
-         * card, so a reader walking the design's own argument — here is
-         * what we promise, here is how you check it, here is the single
-         * connection that exists — met two pages of rules in the middle
-         * of it. */
-        /* Full width across the grid. In one auto-fit column this card is a
-         * narrow strip holding eight rules of prose, so it ran several screens
-         * tall on its own and the page scrolled almost entirely because of it.
-         * Across the whole row its rules sit two abreast and the page ends. */
-        el(
-          "div",
-          { class: "card pad span-row rules-card" },
-          el(
-            "div",
-            { class: "head" },
-            el("span", { class: "card-title", text: "Rules" }),
-            el("span", { class: "spacer" }),
-            pill(
-              // What the badge is actually about. "All holding" read as a
-              // statement about everything semlith is storing, three lines
-              // above a scan that had found a private key in a store — the
-              // rules are forward-looking, and this now says so.
-              (data.rules || []).every((r) => r.ok)
-                ? "holding for new writes"
-                : "check the rows",
-              (data.rules || []).every((r) => r.ok) ? "good" : "warn",
-            ),
-          ),
-          el("p", {
-            class: "subtitle",
-            text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
-          }),
-          rulesBox,
-          fixNote,
-        ),
-        el(
-          "div",
-          { class: "card pad" },
-          el(
-            "div",
-            { class: "head" },
-            // The heading said "Scan" and the button beside it said "Scan",
-            // which rendered as the word twice.
-            el("span", { class: "card-title", text: "What is already stored" }),
-            el("span", { class: "spacer" }),
-            scanButton,
-          ),
-          el("p", {
-            class: "subtitle",
-            text: "The rules above decide what semlith will take in from now on. This checks what the stores are already holding: every file that semlith would refuse today — indexed before a rule widened, or before the credential content scan existed.",
-          }),
-          scanBox,
-          scanNote,
+      ),
+    ),
+    /* After the grid, at the page's full width. Inside either column it is a
+     * narrow strip holding eight rules of prose, several screens tall on its
+     * own, and the page scrolled almost entirely because of it. Across the
+     * page its rules sit two or three abreast. */
+    el(
+      "div",
+      { class: "card pad rules-card" },
+      el(
+        "div",
+        { class: "head" },
+        el("span", { class: "card-title", text: "Rules" }),
+        el("span", { class: "spacer" }),
+        pill(
+          // What the badge is actually about. "All holding" read as a
+          // statement about everything semlith is storing, three lines
+          // above a scan that had found a private key in a store — the
+          // rules are forward-looking, and this now says so.
+          (data.rules || []).every((r) => r.ok)
+            ? "holding for new writes"
+            : "check the rows",
+          (data.rules || []).every((r) => r.ok) ? "good" : "warn",
         ),
       ),
+      el("p", {
+        class: "subtitle",
+        text: "What semlith refuses, and what this daemon found when it checked. Every row is a rule the binary enforces and a test that fails if it stops.",
+      }),
+      rulesBox,
+      fixNote,
     ),
   );
 }
@@ -9522,7 +9548,26 @@ function statCell(label, value) {
 const IMPACT_NODE_CAP = 34;
 
 function impactCanvas() {
-  const graph = graphCanvas({});
+  /* The Graph page's hover card, with what this answer knows about the node:
+   * how far it is from the subject, where it lives, and which edge reached it. */
+  const graph = graphCanvas({
+    onHover: (node, x, y) => {
+      if (!node) return tip.hide("impact");
+      tip.atPoint(
+        x,
+        y,
+        node.hop
+          ? tipCard(node.name, "blue", [
+              ["hops", node.hop],
+              ["file", node.path ? `${shortPath(node.path)}:${node.line}` : "—"],
+              ["reaches", `${node.via} · ${node.edge}`],
+              ["confidence", node.confidence || "—"],
+            ])
+          : tipCard(node.name, "accent", [["hops", "0 · the subject"]]),
+        "impact",
+      );
+    },
+  });
   const caption = el("span", { class: "canvas-caption", text: "reverse reachability" });
   const wrap = el("div", { class: "card impact-canvas-card" }, graph.node, caption);
 
@@ -9544,6 +9589,18 @@ function impactCanvas() {
     // whichever rows the store happened to return last.
     for (const row of [...rows].sort((a, b) => a.hop - b.hop)) {
       const from = add(row.name);
+      // The first row to reach a node is its nearest, and the one the card
+      // describes. The subject is never a row's `name`, so it keeps no hop.
+      if (from !== null && from !== 0 && !nodes[from].hop) {
+        Object.assign(nodes[from], {
+          hop: row.hop,
+          path: row.path,
+          line: row.line,
+          via: row.via,
+          edge: row.kind || "calls",
+          confidence: row.confidence,
+        });
+      }
       const to = add(row.via);
       if (from === null || to === null) continue;
       edges.push({ from, to, kind: row.kind || "calls", confidence: row.confidence });

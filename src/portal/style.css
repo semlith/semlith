@@ -815,6 +815,13 @@ main {
   display: grid;
 }
 
+/* Growing into the window's spare height is for the last thing on a page. A
+ * grid with cards after it grew on a tall screen and pushed them a screenful
+ * down, below an empty band — Agents' registration card, Privacy's rules. */
+.view > .scroller.grid:not(:last-child) {
+  flex-grow: 0;
+}
+
 /* Cards in a row fill the row rather than leaving the shorter one short. */
 .grid.fill {
   flex: 1 1 auto;
@@ -2748,14 +2755,14 @@ pre.code::-webkit-scrollbar-thumb {
  * was the one place it could not be read. A scroll container clips any
  * positioned descendant, so the fix is to stop being a descendant.
  *
- * The same element carries the Graph canvas's richer card, so there is one
- * tooltip implementation rather than two. */
+ * The same element carries every hover card — the canvases' and the corpus
+ * charts' alike — so there is one tooltip implementation rather than two. */
 .tip {
   position: fixed;
   top: 0;
   left: 0;
   z-index: 80;
-  max-width: 320px;
+  max-width: 260px;
   width: max-content;
   padding: 9px 11px;
   border-radius: var(--r-3);
@@ -2803,42 +2810,6 @@ pre.code::-webkit-scrollbar-thumb {
   outline: 2px solid var(--blue);
   outline-offset: 2px;
   border-radius: var(--r-1);
-}
-
-/* The Graph card: a coloured dot and a title, then label/value rows. */
-.tip .tip-head {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.tip .tip-head i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent-edge);
-  flex-shrink: 0;
-}
-
-.tip .tip-row {
-  display: flex;
-  gap: var(--sp-3);
-  margin-top: var(--sp-1);
-  font-size: var(--t-tiny);
-}
-
-.tip .tip-row .k {
-  color: var(--muted);
-  width: 52px;
-  flex-shrink: 0;
-}
-
-.tip .tip-row .v {
-  color: var(--ink-2);
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 
 /* ------------------------------------------------------- layout utilities */
@@ -6262,18 +6233,19 @@ pre.report-cli {
   gap: var(--sp-3);
 }
 
-/* A card that takes the whole grid row rather than one auto-fit track. */
-.span-row {
-  grid-column: 1 / -1;
-}
-
 /* The Privacy page's rule list, two abreast once there is room. Eight rules of
  * prose in a single narrow column is a page that scrolls for one card. */
 .rules-card .rules {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   gap: var(--sp-4) var(--sp-5);
   align-items: start;
+}
+/* Every rule opens on its rule line: in a grid the first row holds two or
+ * three rules, and only the first of them had one. */
+.rules-card .rule-row:first-child {
+  border-top: 1px solid var(--line);
+  padding-top: var(--sp-3);
 }
 
 /* ------------------------------------------------------- inside the index
@@ -6320,30 +6292,90 @@ pre.report-cli {
 /* Six tones, in the order the design uses them, so the bar and the swatch
  * beside a language's name are the same colour. Sixth and beyond repeat,
  * which is what `tone-${i % 6}` in the page means: past six languages the
- * bar is a shape rather than a key. */
+ * bar is a shape rather than a key. The colour is also a property, so a rule
+ * more specific than these — a meter's fill, a legend dot — can still take it. */
 .tone-0 {
-  background: var(--accent);
+  --tone: var(--accent);
 }
 .tone-1 {
-  background: var(--blue);
+  --tone: var(--blue);
 }
 .tone-2 {
-  background: var(--green);
+  --tone: var(--green);
 }
 .tone-3 {
-  background: var(--blue-ink);
+  --tone: var(--blue-ink);
 }
 .tone-4 {
-  background: var(--amber-ink);
+  --tone: var(--amber-ink);
 }
 .tone-5 {
-  background: var(--muted);
+  --tone: var(--muted);
+}
+.tone-0,
+.tone-1,
+.tone-2,
+.tone-3,
+.tone-4,
+.tone-5 {
+  background: var(--tone);
 }
 
 .mix-row .swatch {
   flex: 0 0 9px;
   height: 9px;
   border-radius: 3px;
+}
+/* The corpus card's rows, as the design draws them: packed under the bar
+ * rather than spread down the card, each meter filled in its language's
+ * colour, the figures in fixed columns so they line up down the list. */
+.mix-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.mix-card .card-head {
+  flex-wrap: wrap;
+  margin: 0;
+}
+.mix-card .mix-bar {
+  margin: 0;
+}
+.mix-card .mix {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+  gap: 9px;
+}
+.mix-card .mix-row {
+  gap: 10px;
+  margin: 0 -6px;
+  padding: 0 6px;
+  border-radius: 5px;
+}
+.mix-card .mix-row .k {
+  flex: 0 0 96px;
+  font-size: var(--t-small-h);
+  color: var(--ink);
+}
+.mix-card .mix-row .meter {
+  min-width: 40px;
+  background: var(--chip);
+  border-radius: 3px;
+}
+.mix-card .mix-row .meter span {
+  background: var(--tone, var(--blue-ink));
+}
+.mix-card .mix-row .v {
+  flex: 0 0 74px;
+  text-align: right;
+  font-size: var(--t-small);
+  color: var(--ink-2);
+}
+.mix-card .mix-row .pct {
+  flex: 0 0 36px;
+}
+.mix-card .note {
+  margin: 0;
 }
 /* Every property said here, because the bare `.pct` above is the Reports
  * page's big headline percentage — 21px and weight 500 — and a legend row that
@@ -6370,7 +6402,10 @@ pre.report-cli {
   font-size: var(--t-body);
   margin: 0 0 var(--sp-3);
 }
-.kv {
+/* Not `.kv`: that is the row every other page draws a label and value in,
+ * and a column rule under the same name stacked the Agents page's setup steps
+ * and centred them. */
+.kv-list {
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -6378,19 +6413,22 @@ pre.report-cli {
 .kv-row {
   display: flex;
   align-items: baseline;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
 }
+/* The label keeps its line and the value wraps under itself: `Longest file`
+ * broken over two lines against a path on one read as two rows. */
 .kv-row .k {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: var(--t-small);
+  flex: 0 0 auto;
+  font-size: var(--t-body-sm);
   color: var(--muted);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 .kv-row .v {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-family: var(--mono);
-  font-size: var(--t-small);
+  font-size: var(--t-body-sm);
   color: var(--ink);
   text-align: right;
 }
@@ -6436,33 +6474,22 @@ pre.report-cli {
  * page — the two shapes the design does not have. */
 .corpus-top {
   display: grid;
-  grid-template-columns: 1.25fr 1fr 1fr;
-  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  gap: var(--sp-4);
   margin-bottom: var(--sp-4);
   align-items: start;
 }
-.corpus-top > .mix-card {
-  grid-row: span 2;
-  align-self: stretch;
+/* The four panels wrap two abreast in their half, one abreast once it is
+ * narrower than two of them, and the two on a line share its height. */
+.corpus-panels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  min-width: 0;
 }
-/* Two columns, the mix across the top of them: three columns of a 320px-wide
- * page is three columns of nothing. */
-@media (max-width: 1180px) {
-  .corpus-top {
-    grid-template-columns: 1fr 1fr;
-  }
-  .corpus-top > .mix-card {
-    grid-column: span 2;
-    grid-row: auto;
-  }
-}
-@media (max-width: 720px) {
-  .corpus-top {
-    grid-template-columns: 1fr;
-  }
-  .corpus-top > .mix-card {
-    grid-column: auto;
-  }
+.corpus-panels > .kv-panel {
+  flex: 1 1 260px;
+  min-width: 0;
 }
 
 /* Chunks added per month: twelve columns across the card, bottom-aligned, the
@@ -6554,33 +6581,36 @@ pre.report-cli {
   align-items: center;
   gap: var(--sp-2);
 }
-.dot {
+/* A series' key: the rounded square the legends and the hover card draw.
+ * Not `.dot`, which is the round status light every other page uses — a rule
+ * under that name turned the Privacy page's green rule lights grey. */
+.legend-dot {
   width: 9px;
   height: 9px;
   border-radius: 3px;
   flex: 0 0 auto;
-  background: var(--muted);
+  background: var(--tone, var(--muted));
 }
-.dot.extracted,
+.legend-dot.extracted,
 .seg.extracted {
   background: var(--blue-ink);
 }
-.dot.resolved,
+.legend-dot.resolved,
 .tier-bar .seg.resolved {
   background: var(--green);
 }
-.dot.unresolved,
+.legend-dot.unresolved,
 .tier-bar .seg.unresolved {
   background: var(--line);
 }
-.dot.ambiguous,
+.legend-dot.ambiguous,
 .tier-bar .seg.ambiguous {
   background: var(--accent);
 }
-.dot.blue {
+.legend-dot.blue {
   background: var(--blue);
 }
-.dot.accent {
+.legend-dot.accent {
   background: var(--accent);
 }
 
@@ -6602,11 +6632,6 @@ pre.report-cli {
   font-size: 18px;
   color: var(--ink);
 }
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-}
 /* A name, not a control: the design draws these as flat chips and nothing
  * happens when one is pressed, so they are not buttons. */
 .chip-flat {
@@ -6621,23 +6646,29 @@ pre.report-cli {
 }
 
 /* The hover card the design draws: a title with the series' own colour, then
- * label and value rows. The plain string tip stays for everything that is one
+ * label and value rows, sized off the design's own tip. Every card in the
+ * portal is this one; the plain string tip stays for everything that is one
  * sentence rather than a reading. */
 .tip-card {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  min-width: 200px;
+  gap: 6px;
+  min-width: 128px;
 }
 .tip-head {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  font-size: var(--t-small);
+  gap: 7px;
   color: var(--ink);
+}
+.tip-head .legend-dot {
+  width: 8px;
+  height: 8px;
 }
 .tip-head .name {
   font-family: var(--mono);
+  font-size: var(--t-small-h);
+  font-weight: 500;
   overflow-wrap: anywhere;
 }
 .tip-rows {
@@ -6654,14 +6685,18 @@ pre.report-cli {
 .tip-row .k {
   color: var(--muted);
   font-family: var(--sans);
-  font-size: var(--t-small);
+  font-size: var(--t-tiny-h);
   /* One line. `chunks added` broken over two lines against a figure on the
    * first of them reads as two rows with one number between them. */
   white-space: nowrap;
 }
 .tip-row .v {
+  min-width: 0;
   font-family: var(--mono);
-  font-size: var(--t-small);
+  font-size: var(--t-tiny-h);
   color: var(--ink);
+  text-align: right;
+  /* A file path is the one value that can outrun the card. */
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
