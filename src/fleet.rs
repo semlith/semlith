@@ -19,6 +19,7 @@ use fastembed::TextEmbedding;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub struct Fleet {
     members: Vec<Member>,
@@ -32,7 +33,6 @@ pub struct Fleet {
     unreadable: RefCell<Vec<Unreadable>>,
     /// One loaded model per distinct model, shared by every store using it.
     /// Three stores built with the same model cost one copy of the weights.
-    embedders: Vec<(Model, TextEmbedding)>,
     /// The tokenizer of the first model this fleet loaded, for counting the
     /// ledger's tokens rather than estimating them.
     ///
@@ -135,7 +135,6 @@ impl Fleet {
             members: Vec::new(),
             broken: Vec::new(),
             unreadable: RefCell::new(Vec::new()),
-            embedders: Vec::new(),
             tokenizer: None,
             embeds: 0,
             quiet: true,
@@ -239,7 +238,6 @@ impl Fleet {
             members,
             broken,
             unreadable: RefCell::new(Vec::new()),
-            embedders: Vec::new(),
             tokenizer: None,
             embeds: 0,
             quiet: false,
@@ -371,6 +369,14 @@ impl Fleet {
             self.embedder(&model)?;
         }
         Ok(())
+    }
+
+    /// Fit every member's indexes to the `MiB per store` in force, shedding
+    /// resident shards above it now rather than at the next search.
+    pub fn follow_budget(&mut self) {
+        for member in &mut self.members {
+            member.store.follow_budget();
+        }
     }
 
     /// How many indexed files `filter` selects across every store.
@@ -997,10 +1003,11 @@ impl Fleet {
 
     fn embed_query(&mut self, model: &Model, query: &str) -> Result<Vec<f32>> {
         let text = model.query_text(query);
-        let i = self.embedder(model)?;
+        let session = self.embedder(model)?;
         let _lifted = crate::priority::embedding();
-        let mut out = self.embedders[i]
-            .1
+        let mut out = session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .embed(vec![text], Some(1))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         self.embeds += 1;
@@ -1009,21 +1016,42 @@ impl Fleet {
         Ok(vector)
     }
 
-    /// Index into `embedders` for `model`, loading it the first time.
-    fn embedder(&mut self, model: &Model) -> Result<usize> {
-        if let Some(i) = self.embedders.iter().position(|(m, _)| m == model) {
-            return Ok(i);
-        }
+    /// The query session for `model`, shared by every reader in the process
+    /// and loaded the first time any of them asks.
+    ///
+    /// Shared since 0.28.0. The daemon holds two readers — the portal's and
+    /// the forwarded MCP calls' — and each held its own session and its own
+    /// arena, which is memory a daemon pays for doing nothing. One session,
+    /// kept loaded, so search is never charged a model load.
+    fn embedder(&mut self, model: &Model) -> Result<Arc<Mutex<TextEmbedding>>> {
         let cache = model_cache_dir()?;
         // Read from the same cache in the same breath as the weights, so the
         // count and the model's own segmentation are the same arithmetic.
         if self.tokenizer.is_none() {
             self.tokenizer = model.tokenizer(&cache);
         }
-        let loaded = model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?;
-        self.embedders.push((model.clone(), loaded));
-        Ok(self.embedders.len() - 1)
+        let mut shared = QUERY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, session)) = shared.iter().find(|(m, _)| m == model) {
+            return Ok(Arc::clone(session));
+        }
+        let loaded = Arc::new(Mutex::new(model.load(
+            cache,
+            chunk::MAX_CHARS / 2,
+            self.quiet,
+        )?));
+        shared.push((model.clone(), Arc::clone(&loaded)));
+        Ok(loaded)
     }
+}
+
+type QuerySessions = Vec<(Model, Arc<Mutex<TextEmbedding>>)>;
+
+/// Query sessions, one per model, shared by every reader in the process.
+static QUERY_SESSIONS: Mutex<QuerySessions> = Mutex::new(Vec::new());
+
+/// How many query sessions are loaded, for `/api/about`.
+pub fn query_sessions() -> usize {
+    QUERY_SESSIONS.lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 /// Take the best `k` hits from per-store rankings, best first.

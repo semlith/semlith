@@ -123,6 +123,20 @@ impl Model {
         max_length: usize,
         quiet: bool,
     ) -> Result<TextEmbedding> {
+        self.load_with_threads(cache_dir, max_length, quiet, embed_threads())
+    }
+
+    /// [`Self::load`] with the intra-op thread count named, for a writer that
+    /// builds its session with the `threads each` value in force rather than
+    /// with the derived one.
+    pub fn load_with_threads(
+        &self,
+        cache_dir: PathBuf,
+        max_length: usize,
+        quiet: bool,
+        threads: usize,
+    ) -> Result<TextEmbedding> {
+        let threads = threads.max(1);
         // Checked here, in the one place weights are ever fetched, rather than
         // at each call site: an airgapped machine's whole claim is that this
         // process cannot have been the one that reached the network, and a
@@ -141,11 +155,11 @@ impl Model {
                 let opts = TextInitOptions::new(m.clone())
                     .with_show_download_progress(!quiet)
                     .with_max_length(max_length)
-                    .with_intra_threads(embed_threads())
+                    .with_intra_threads(threads)
                     .with_cache_dir(cache_dir);
                 TextEmbedding::try_new(opts).map_err(|e| anyhow::anyhow!("{e}"))
             }
-            Model::Granite => load_granite(cache_dir, max_length, quiet),
+            Model::Granite => load_granite(cache_dir, max_length, quiet, threads),
         }
     }
 }
@@ -215,7 +229,12 @@ const RUNTIME_FILE: &str = if cfg!(target_os = "macos") {
     "libonnxruntime.so"
 };
 
-fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<TextEmbedding> {
+fn load_granite(
+    cache_dir: PathBuf,
+    max_length: usize,
+    quiet: bool,
+    threads: usize,
+) -> Result<TextEmbedding> {
     link_runtime()?;
     check_cache_dir(&cache_dir)?;
     let cache = cache_dir.clone();
@@ -289,7 +308,7 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
 
     let opts = InitOptionsUserDefined::new()
         .with_max_length(max_length)
-        .with_intra_threads(embed_threads());
+        .with_intra_threads(threads);
 
     TextEmbedding::try_new_from_user_defined(model, opts)
         .map_err(|e| anyhow::anyhow!("loading {GRANITE_NAME}: {e}"))
@@ -492,6 +511,30 @@ pub fn verify_cached(
         }
     }
     Ok(())
+}
+
+/// The `threads each` value the daemon has in force, or 0 outside one.
+static THREADS_IN_FORCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Set the value an index run's session is built with. The daemon calls this
+/// at start and on every save of the setting; a writer whose session was built
+/// with a different count rebuilds it at its next batch.
+pub fn set_threads_in_force(threads: usize) {
+    THREADS_IN_FORCE.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What an index run's session is built with: the daemon's value in force,
+/// or the derived count everywhere else.
+///
+/// Before 0.28.0 every session was built with [`embed_threads`], so the
+/// saved setting was shown on the page and never reached a session, and
+/// `semlith start` printed "1 embedder thread(s) each" while every session ran
+/// four.
+pub fn threads_in_force() -> usize {
+    match THREADS_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => embed_threads(),
+        n => n,
+    }
 }
 
 pub fn embed_threads() -> usize {

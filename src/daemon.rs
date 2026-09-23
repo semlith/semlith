@@ -270,6 +270,9 @@ impl Tally {
 
 struct Indexing {
     work: Work,
+    /// The first slice of this run, which announces it and records what the
+    /// store held before it.
+    first: bool,
     /// Every file this run has embedded, across every slice, so a stop undoes
     /// the run rather than the slice that happened to be going.
     already: Vec<String>,
@@ -321,7 +324,12 @@ pub struct Event {
 pub enum RunStatus {
     Queued,
     Running,
+    /// Asked to pause; the engine has not reached its next batch yet.
+    Pausing,
     Paused,
+    /// Admitted once, and held again because `runs at once` was lowered below
+    /// the number running. It resumes, in submission order, as slots free.
+    Held,
     Stopping,
     Done,
     Stopped,
@@ -336,6 +344,28 @@ impl RunStatus {
     }
 }
 
+/// What started a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunKind {
+    /// Asked for, from the portal, the CLI's daemon path or an agent.
+    Run,
+    /// The watcher catching a store up with what changed while nothing was
+    /// watching. Admitted like a run since 0.28.0: it used to bypass the
+    /// limit, so "runs at once" bounded nothing on a daemon's first minute.
+    CatchUp,
+    /// A burst of filesystem events too large to run straight away.
+    Batch,
+}
+
+/// How far back the rate a run card shows looks.
+const RATE_WINDOW_MS: u64 = 10_000;
+
+/// Watcher event batches up to this many files run straight away; a larger
+/// one is admitted like a run. A saved file must reach search in seconds, and
+/// thirty-two files is bounded work; a `git checkout` of thousands is not.
+pub const BATCH_ADMIT_OVER: usize = 32;
+
 /// One index run, as the daemon knows it and a page reads it.
 ///
 /// This is the whole of what 0.20.0 changes about a run's lifetime. Until now
@@ -347,6 +377,23 @@ impl RunStatus {
 pub struct RunState {
     pub id: u64,
     pub paths: Vec<PathBuf>,
+    pub kind: RunKind,
+    /// Files and chunks the store held when the run started, read by the
+    /// daemon rather than guessed by the page. Stop's "Also delete the store"
+    /// is ticked by default only when this is zero.
+    pub files_before: Option<u64>,
+    pub chunks_before: Option<u64>,
+    /// The intra-op thread count the run's session was built with.
+    pub threads: u64,
+    /// `(active milliseconds, chunks)` since embedding began, trimmed to the
+    /// rate window. Active time, so a paused or held stretch is not in it.
+    samples: VecDeque<(u64, u64)>,
+    /// The first sample, which the average is taken from: queued time and a
+    /// walk of unchanged files before it do not dilute the figure.
+    first_sample: Option<(u64, u64)>,
+    /// Whether "Also delete the store" was ticked on this run's stop, and what
+    /// became of the delete.
+    pub delete: Option<String>,
     pub status: RunStatus,
     /// Unix seconds the run was submitted.
     pub submitted: u64,
@@ -388,10 +435,17 @@ pub struct RunState {
 }
 
 impl RunState {
-    fn new(id: u64, paths: Vec<PathBuf>) -> Self {
+    fn new(id: u64, paths: Vec<PathBuf>, kind: RunKind) -> Self {
         Self {
             id,
             paths,
+            kind,
+            files_before: None,
+            chunks_before: None,
+            threads: 0,
+            samples: VecDeque::new(),
+            first_sample: None,
+            delete: None,
             status: RunStatus::Queued,
             submitted: now(),
             // From submission, not from the writer taking it: the wait for a
@@ -450,16 +504,75 @@ impl RunState {
         }
     }
 
+    /// Chunks per second over the last [`RATE_WINDOW_MS`] of active time, and
+    /// over the whole of it since embedding began. `None` before the first
+    /// batch, which the card shows as a dash rather than dropping the field.
+    fn rates(&self) -> (Option<f64>, Option<f64>) {
+        let Some((t0, c0)) = self.first_sample else {
+            return (None, None);
+        };
+        if self.chunks == 0 {
+            return (None, None);
+        }
+        let now = self.elapsed().as_millis() as u64;
+        let per_second = |from: (u64, u64)| {
+            let span = now.saturating_sub(from.0);
+            (span > 0).then(|| {
+                ((self.chunks.saturating_sub(from.1)) as f64 * 1000.0 / span as f64 * 10.0).round()
+                    / 10.0
+            })
+        };
+        // The newest sample at least a window old, or the first one while the
+        // run is younger than a window: the chunks since then over the time
+        // since then, measured to now, so a stall shows as a falling rate
+        // rather than as the last good figure frozen in place.
+        let start = now.saturating_sub(RATE_WINDOW_MS);
+        let base = self
+            .samples
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= start)
+            .copied()
+            .unwrap_or((t0, c0));
+        (per_second(base), per_second((t0, c0)))
+    }
+
+    fn sample(&mut self) {
+        let now = self.elapsed().as_millis() as u64;
+        if self.first_sample.is_none() {
+            self.first_sample = Some((now, self.chunks));
+        }
+        self.samples.push_back((now, self.chunks));
+        // One sample older than the window is kept as its base.
+        let start = now.saturating_sub(RATE_WINDOW_MS);
+        while self.samples.len() > 2 && self.samples.get(1).is_some_and(|(at, _)| *at <= start) {
+            self.samples.pop_front();
+        }
+        while self.samples.len() > 1024 {
+            self.samples.pop_front();
+        }
+    }
+
     /// Fold one event into the run and put it on the log ring.
     fn absorb(&mut self, event: &serde_json::Value) {
         let num = |key: &str| event.get(key).and_then(serde_json::Value::as_u64);
         match event.get("event").and_then(serde_json::Value::as_str) {
             Some("started") => {
                 self.status = RunStatus::Running;
+                self.files_before = num("files_before").or(self.files_before);
+                self.chunks_before = num("chunks_before").or(self.chunks_before);
                 self.unhold();
             }
+            Some("held") => {
+                self.status = RunStatus::Held;
+                self.hold();
+            }
             Some("file") => {
-                self.status = RunStatus::Running;
+                // A card asked to pause or stop keeps saying so until the
+                // engine answers; a file line is not that answer.
+                if !matches!(self.status, RunStatus::Pausing | RunStatus::Stopping) {
+                    self.status = RunStatus::Running;
+                }
                 // A `writing` line is the run saying it has stopped reading
                 // files for a moment; the next line of any other outcome ends
                 // the phase.
@@ -479,14 +592,31 @@ impl RunState {
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.symbols = num("symbols").unwrap_or(self.symbols);
+                self.threads = num("threads").filter(|n| *n > 0).unwrap_or(self.threads);
+                // From the first file embedding starts on, so the walk of
+                // unchanged files before it is not part of either rate.
+                let embedding = self.first_sample.is_some()
+                    || self.chunks > 0
+                    || event.get("outcome").and_then(serde_json::Value::as_str) == Some("indexing");
+                if embedding {
+                    self.sample();
+                }
             }
             Some("paused") => {
                 self.status = RunStatus::Paused;
                 self.hold();
             }
             Some("resumed" | "slice") => {
-                self.status = RunStatus::Running;
+                if self.status != RunStatus::Stopping {
+                    self.status = RunStatus::Running;
+                }
                 self.unhold();
+            }
+            Some("deleted" | "delete-failed") => {
+                self.delete = event
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
             }
             Some("done") => {
                 let stopped = event
@@ -628,9 +758,9 @@ impl Store {
     /// dropped once there are more than [`RUN_HISTORY`] of them, so a daemon
     /// left up for a week does not accumulate cards forever; a run that has
     /// not finished is never dropped.
-    fn begin_run(&self, id: u64, paths: Vec<PathBuf>) {
+    fn begin_run(&self, id: u64, paths: Vec<PathBuf>, kind: RunKind) {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
-        runs.push(RunState::new(id, paths));
+        runs.push(RunState::new(id, paths, kind));
         while runs.len() > RUN_HISTORY {
             match runs.iter().position(|run| run.status.finished()) {
                 Some(at) => {
@@ -692,6 +822,50 @@ impl Store {
     /// arrived late did not stop anything.
     pub fn mark_stopping(&self) {
         self.with_live(|run| run.status = RunStatus::Stopping);
+        self.runs_changed();
+    }
+
+    /// Say that a pause has been asked for, so the card answers on the click
+    /// and moves to `paused` when the engine reaches its next batch.
+    pub fn mark_pausing(&self) {
+        self.with_live(|run| {
+            if matches!(run.status, RunStatus::Running) {
+                run.status = RunStatus::Pausing;
+            }
+        });
+        self.runs_changed();
+    }
+
+    /// Resume, as the card shows it at once. A held run stays held: the
+    /// queue, not the button, decides when it goes on.
+    pub fn mark_resuming(&self) {
+        self.with_live(|run| {
+            if matches!(run.status, RunStatus::Paused | RunStatus::Pausing) {
+                run.status = RunStatus::Running;
+            }
+        });
+        self.runs_changed();
+    }
+
+    /// The files the store held before its live run started, if it has one
+    /// that has started.
+    pub fn live_files_before(&self) -> Option<u64> {
+        self.with_live(|run| run.files_before).flatten()
+    }
+
+    /// Put an event on one run's record from outside the writer, such as
+    /// the outcome of a delete that followed its stop.
+    pub fn note_run(&self, id: u64, event: &serde_json::Value) {
+        self.record(id, event);
+    }
+
+    /// The id of the run a stop just ended, or is ending.
+    pub fn last_run(&self) -> Option<u64> {
+        self.runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .map(|run| run.id)
     }
 
     /// How long a run has been going, in milliseconds.
@@ -781,9 +955,20 @@ impl Store {
     }
 
     fn snapshot_of(&self, run: &RunState, position: Option<usize>) -> serde_json::Value {
+        let (rate, average) = run.rates();
         serde_json::json!({
             "id": run.id,
             "store": self.name,
+            "kind": run.kind,
+            "files_before": run.files_before,
+            "chunks_before": run.chunks_before,
+            // What the session was built with, not what was asked for.
+            "threads": (run.threads > 0).then_some(run.threads),
+            // Chunks/s over the last ten seconds of active time, and since the
+            // first batch. Null only before the first batch.
+            "rate": if run.status.finished() { None } else { rate },
+            "rate_average": average,
+            "delete": run.delete,
             "paths": run.paths.iter()
                 .map(|p| crate::plain(&p.display().to_string()))
                 .collect::<Vec<_>>(),
@@ -794,7 +979,7 @@ impl Store {
             // Whether the clock should be ticking in the page between polls.
             // A finished or held run keeps its reading; nothing else should
             // make a page decide that for itself.
-            "ticking": matches!(run.status, RunStatus::Running | RunStatus::Queued | RunStatus::Stopping),
+            "ticking": matches!(run.status, RunStatus::Running | RunStatus::Queued | RunStatus::Stopping | RunStatus::Pausing),
             "scanned": run.scanned,
             "total": run.total,
             "indexed": run.indexed,
@@ -901,6 +1086,7 @@ impl Store {
         &self,
         run: u64,
         paths: Vec<PathBuf>,
+        kind: RunKind,
         report: mpsc::Sender<serde_json::Value>,
         mut notice: serde_json::Value,
     ) {
@@ -916,7 +1102,14 @@ impl Store {
         queue.push_back(Queued {
             run,
             job: Job::Index(Indexing {
-                work: Work::Roots(paths),
+                // A burst of events names files, some of them deleted, and a
+                // walk would drop the deleted ones; it is indexed as the list
+                // it is.
+                work: match kind {
+                    RunKind::Batch => Work::Rest(paths),
+                    RunKind::Run | RunKind::CatchUp => Work::Roots(paths),
+                },
+                first: true,
                 already: Vec::new(),
                 scanned: 0,
                 total: 0,
@@ -1005,6 +1198,7 @@ struct Pending {
     run: u64,
     store: Arc<Store>,
     paths: Vec<PathBuf>,
+    kind: RunKind,
     report: mpsc::Sender<serde_json::Value>,
 }
 
@@ -1027,6 +1221,10 @@ pub struct Admission {
     /// arriving for a run that was already removed would decrement the next
     /// run's place in the world.
     running: Mutex<Vec<u64>>,
+    /// Runs admitted once and held again because the limit was lowered below
+    /// the number running. Ahead of everything still queued, oldest first:
+    /// they have work in hand, and their written list rides with them.
+    held: Mutex<Vec<u64>>,
     limit: AtomicUsize,
     next: AtomicU64,
 }
@@ -1036,6 +1234,7 @@ impl Admission {
         Self {
             queue: Mutex::new(VecDeque::new()),
             running: Mutex::new(Vec::new()),
+            held: Mutex::new(Vec::new()),
             limit: AtomicUsize::new(limit.max(1)),
             next: AtomicU64::new(1),
         }
@@ -1047,14 +1246,41 @@ impl Admission {
 
     /// Change how many runs may be on at once.
     ///
-    /// Lowering it admits nothing new and stops nothing that is already going:
-    /// a run holds the writer and undoing it would cost the work it has done,
-    /// so the running ones finish and the queue simply waits longer. Raising it
-    /// admits the head immediately, which is what makes the field feel like a
-    /// control rather than a preference.
+    /// Raising it admits at once. Lowering it holds the newest runs over the
+    /// limit at their next batch — before 0.28.0 it stopped nothing, so a
+    /// machine asked to do less went on doing as much until runs finished.
+    /// A held run keeps its place on its writer, its progress and its written
+    /// list, and goes on in submission order as slots free.
     pub fn set_limit(&self, limit: usize) {
-        self.limit.store(limit.max(1), Ordering::Relaxed);
+        let limit = limit.max(1);
+        self.limit.store(limit, Ordering::Relaxed);
+        {
+            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            while running.len() > limit {
+                // Newest first: the oldest runs are furthest along.
+                let Some(newest) = running.iter().copied().max() else {
+                    break;
+                };
+                running.retain(|id| *id != newest);
+                held.push(newest);
+            }
+            held.sort_unstable();
+        }
         self.pump();
+    }
+
+    /// Whether this run is held by a lowered limit.
+    pub fn is_held(&self, run: u64) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&run)
+    }
+
+    /// Runs held by a lowered limit, oldest first.
+    pub fn held(&self) -> Vec<u64> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn running(&self) -> usize {
@@ -1069,10 +1295,11 @@ impl Admission {
         &self,
         store: &Arc<Store>,
         paths: Vec<PathBuf>,
+        kind: RunKind,
     ) -> (u64, mpsc::Receiver<serde_json::Value>) {
         let run = self.next.fetch_add(1, Ordering::Relaxed);
         let (report, progress) = mpsc::channel();
-        store.begin_run(run, paths.clone());
+        store.begin_run(run, paths.clone(), kind);
         {
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             store.record(
@@ -1087,6 +1314,7 @@ impl Admission {
                 run,
                 store: Arc::clone(store),
                 paths,
+                kind,
                 report,
             });
         }
@@ -1105,6 +1333,16 @@ impl Admission {
             if running.len() >= self.limit() {
                 return;
             }
+            // A held run goes on before anything new starts: it is already
+            // on its writer, part-way through.
+            {
+                let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+                if !held.is_empty() {
+                    let oldest = held.remove(0);
+                    running.push(oldest);
+                    continue;
+                }
+            }
             let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
             let Some(next) = queue.pop_front() else {
                 return;
@@ -1122,6 +1360,7 @@ impl Admission {
             next.store.submit_index(
                 next.run,
                 next.paths,
+                next.kind,
                 next.report,
                 serde_json::json!({ "event": "queued" }),
             );
@@ -1131,6 +1370,10 @@ impl Admission {
     /// Release a run's place and admit whatever was waiting behind it.
     pub fn finish(&self, run: u64) {
         self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id| *id != run);
+        self.held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|id| *id != run);
@@ -1150,12 +1393,15 @@ impl Admission {
     /// This store's place in the queue, counted from 1, or `None` when it is
     /// not waiting.
     pub fn position_of(&self, store: &str) -> Option<usize> {
+        // Held runs are at the front of the line, so everything queued is
+        // behind them.
+        let ahead = self.held.lock().unwrap_or_else(|e| e.into_inner()).len();
         self.queue
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .position(|p| p.store.name == store)
-            .map(|at| at + 1)
+            .map(|at| ahead + at + 1)
     }
 
     /// Take a waiting run out of the queue.
@@ -1501,6 +1747,14 @@ impl Limits {
         }
     }
 
+    /// Hand the values in force to the engine: the thread count every writer
+    /// builds its session with, and the budget every open index fits inside.
+    /// Before 0.28.0 two of the three were saved, shown and never applied.
+    pub fn apply(&self) {
+        crate::embed::set_threads_in_force(self.embed_threads.value);
+        crate::index::set_budget_mb(self.index_memory_mb.value);
+    }
+
     /// The line `semlith start` prints: all three values with their source.
     pub fn line(&self) -> String {
         format!(
@@ -1589,6 +1843,9 @@ pub struct State {
     /// changed `schedules.json` calls `state.schedules.wake()` and the timer
     /// re-reads it at once instead of waiting out its sleep.
     pub schedules: Arc<crate::schedule::Runner>,
+    /// The final cards of runs whose store was deleted by their own stop, so
+    /// the page can say the store went rather than the card vanishing.
+    pub gone: Mutex<Vec<serde_json::Value>>,
 }
 
 /// How recently a proxy must have called to count as connected.
@@ -1760,7 +2017,7 @@ impl State {
         paths: Vec<PathBuf>,
     ) -> Result<(u64, mpsc::Receiver<serde_json::Value>)> {
         Self::writer_alive(store)?;
-        Ok(self.admission.submit(store, paths))
+        Ok(self.admission.submit(store, paths, RunKind::Run))
     }
 
     pub fn forget(
@@ -1813,6 +2070,57 @@ impl State {
 
         changes::bump(changes::Domain::Stores);
         crate::home::delete_store(name)
+    }
+
+    /// Stop a store's run and, once its undo has finished, delete the store.
+    ///
+    /// On its own thread, because the undo runs on the store's writer and the
+    /// delete has to wait for that writer to stop. The card keeps its record
+    /// in `gone`, so it says the store was deleted rather than vanishing.
+    pub fn delete_after_stop(self: &Arc<Self>, store: Arc<Store>) {
+        let state = Arc::clone(self);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(600);
+            while store.run_live() || state.admission.position_of(&store.name).is_some() {
+                if std::time::Instant::now() > deadline {
+                    store.note("the stop did not finish in ten minutes; the store was not deleted".into());
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let run = store.last_run();
+            let outcome = state.delete_store(&store.name);
+            let (event, text) = match &outcome {
+                Ok(dir) => (
+                    "deleted",
+                    format!(
+                        "the store was deleted ({})",
+                        crate::plain(&dir.display().to_string())
+                    ),
+                ),
+                Err(e) => ("delete-failed", format!("the store was not deleted: {e:#}")),
+            };
+            (state.report)(&format!("{}: {text}", store.name));
+            if let Some(run) = run {
+                store.note_run(run, &serde_json::json!({ "event": event, "text": text }));
+                let snapshots = store.run_snapshots(None);
+                if outcome.is_ok() {
+                    state.gone_changed(|gone| {
+                        gone.extend(snapshots.into_iter().filter(|s| {
+                            s.get("id").and_then(serde_json::Value::as_u64) == Some(run)
+                        }))
+                    });
+                }
+            }
+        });
+    }
+
+    /// Change the cards of runs whose store is gone, and say the runs domain
+    /// moved. The one place those cards are written.
+    pub fn gone_changed<T>(&self, change: impl FnOnce(&mut Vec<serde_json::Value>) -> T) -> T {
+        let out = change(&mut self.gone.lock().unwrap_or_else(|e| e.into_inner()));
+        changes::bump(changes::Domain::Runs);
+        out
     }
 
     /// Refuse to queue work for a store whose writer is gone.
@@ -2309,6 +2617,7 @@ pub fn run(
     // moves.
     let limits = Limits::in_force();
     report_line(&limits.line());
+    limits.apply();
 
     // Background while idle, normal while embedding. Before the watchers
     // start, so the catch-up they run is the first thing that lifts it.
@@ -2332,6 +2641,7 @@ pub fn run(
         mcp_fleet: Mutex::new(None),
         ledger,
         schedules: crate::schedule::Runner::new(),
+        gone: Mutex::new(Vec::new()),
     });
 
     // The timer, over whatever `~/.semlith/schedules.json` holds. A home with
@@ -2486,6 +2796,21 @@ fn keep_writing(
     changes::bump(changes::Domain::Stores);
 }
 
+/// How long a writer keeps its embedding session with nothing to embed.
+const SESSION_IDLE: Duration = Duration::from_secs(60);
+
+/// Override for [`SESSION_IDLE`], in seconds, so a test can see a session go
+/// without waiting a minute. Not part of the documented environment.
+const SESSION_IDLE_ENV: &str = "SEMLITH_SESSION_IDLE_SECS";
+
+fn session_idle() -> Duration {
+    std::env::var(SESSION_IDLE_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(SESSION_IDLE)
+}
+
 /// One store's watcher thread: the same loop `semlith watch` runs, plus the
 /// queue the HTTP routes and the MCP proxy put work on.
 fn tend(
@@ -2523,28 +2848,35 @@ fn tend(
     // nothing to watch yet.
     let roots = store.watched.clone();
 
+    // The catch-up is a run, admitted like any other. It used to be the
+    // watcher's own walk, which the admission queue could not see: three
+    // stores catching up at startup were three sessions embedding at once
+    // whatever `runs at once` said, and stopping a run let the watcher take
+    // the same walk up again on its own. A store the portal has just made
+    // skips it, because the run on its way covers the same roots.
+    let expecting = (now() as usize) < store.expecting_run_until.load(Ordering::Relaxed);
+    if !roots.is_empty() && !expecting {
+        let _ = admission.submit(store, roots.clone(), RunKind::CatchUp);
+    }
+
     watch::run_held(
         &mut writer,
         &roots,
         debounce,
         stop,
-        // A queued job is what the catch-up steps aside for — and a run
-        // waiting for admission counts, though it is on no queue of this
-        // store's yet.
-        //
-        // Without the second half, the admission queue bounds nothing. A run
-        // that has not been admitted is invisible here, so this store's
-        // watcher sees an idle store and indexes the whole root itself: three
-        // folders submitted with runs-at-once at 1 became one admitted run and
-        // two watcher catch-ups, all three indexing at once. The work was done
-        // and the store was correct, which is why it took a measurement to
-        // notice — the run that was finally admitted then reported nothing
-        // indexed, because its watcher had already done it.
-        &|| {
-            store.queue_depth() > 0
-                || admission.position_of(&store.name).is_some()
-                // A store the portal has just made, whose run is on its way.
-                || (now() as usize) < store.expecting_run_until.load(Ordering::Relaxed)
+        watch::Held {
+            catch_up: false,
+            waiting: &|| false,
+            // A burst larger than a save is admitted like a run, so a `git
+            // checkout` of thousands of files waits its turn and shows as a
+            // card rather than embedding beside every admitted run.
+            defer: &|paths| {
+                if paths.len() <= BATCH_ADMIT_OVER {
+                    return false;
+                }
+                let _ = admission.submit(store, paths.to_vec(), RunKind::Batch);
+                true
+            },
         },
         |progress| {
             use watch::Progress;
@@ -2593,6 +2925,11 @@ fn tend(
             }
         },
         |writer| {
+            // Between batches, on the writer's own thread: fit the indexes to
+            // the budget in force, and let go of a session nothing has used
+            // for a minute.
+            writer.follow_budget();
+            writer.release_if_idle(session_idle());
             // The writer is this thread, so a queued job runs here or nowhere.
             loop {
                 let Some(next) = store
@@ -2630,6 +2967,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
     match job {
         Job::Index(Indexing {
             work,
+            first,
             already,
             scanned: scanned_before,
             total: total_before,
@@ -2637,10 +2975,22 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
         }) => {
             // Only the first slice announces itself; the rest are the same run
             // continuing, and a second "started" would read as a second run.
-            if let Work::Roots(roots) = &work {
-                let names: Vec<String> = roots.iter().map(|p| p.display().to_string()).collect();
-                say(serde_json::json!({ "event": "started", "paths": names }));
+            // It carries what the store held before, which is what decides
+            // whether Stop's "Also delete the store" starts ticked.
+            if first {
+                let names: Vec<String> = match &work {
+                    Work::Roots(roots) => roots.iter().map(|p| p.display().to_string()).collect(),
+                    Work::Rest(files) => files.iter().map(|p| p.display().to_string()).collect(),
+                };
+                let (files, chunks, _) = writer.stats().unwrap_or((0, 0, 0));
+                say(serde_json::json!({
+                    "event": "started",
+                    "paths": names,
+                    "files_before": files.max(0),
+                    "chunks_before": chunks.max(0),
+                }));
             }
+            writer.follow_budget();
             // Every queued job arrived through the portal or through a
             // forwarded `semlith_index`, so both are held to the boundary: this
             // store's registered roots and the home directory, and never a
@@ -2654,10 +3004,24 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
             store.paused.store(false, Ordering::Relaxed);
             let control = {
                 let store = Arc::clone(store);
+                let admission = Arc::clone(admission);
                 let told = std::sync::atomic::AtomicBool::new(false);
+                let held = std::sync::atomic::AtomicBool::new(false);
                 move || {
                     if store.cancelled.load(Ordering::Relaxed) {
                         return crate::Flow::Stop;
+                    }
+                    // A lowered limit holds the newest runs at their next
+                    // batch. Asked before the pause, because a held run that
+                    // is also paused is still waiting for a slot first.
+                    if admission.is_held(run) {
+                        if !held.swap(true, Ordering::Relaxed) {
+                            say(serde_json::json!({ "event": "held" }));
+                        }
+                        return crate::Flow::Pause;
+                    }
+                    if held.swap(false, Ordering::Relaxed) {
+                        say(serde_json::json!({ "event": "resumed" }));
                     }
                     if store.paused.load(Ordering::Relaxed) {
                         // Once per pause, not once per tick.
@@ -2707,6 +3071,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                     "indexed": indexed_before + progress.indexed as u64,
                     "chunks": chunks_before + progress.chunks as u64,
                     "symbols": symbols_before + progress.symbols as u64,
+                    "threads": progress.threads,
                     "elapsed_ms": store.run_elapsed_ms(run),
                 }));
             };
@@ -2731,12 +3096,12 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                         // files this run wrote. Done here rather than inside
                         // the index pass because only this loop knows how many
                         // slices the run has had.
-                        let mut undone = 0;
-                        for key in &written {
-                            if writer.forget_held(Path::new(key)).is_ok() {
-                                undone += 1;
-                            }
-                        }
+                        // One eviction pass and one save for the whole run.
+                        // Per file, each forget rewrote the index.
+                        let undone = writer.undo_held(&written).unwrap_or_else(|e| {
+                            store.note(format!("the undo failed: {e:#}"));
+                            0
+                        });
                         store.note(format!(
                             "an index run was stopped; {undone} file(s) it had embedded were undone"
                         ));
@@ -2780,6 +3145,7 @@ fn perform(store: &Arc<Store>, writer: &mut Semlith, queued: Queued, admission: 
                             run,
                             job: Job::Index(Indexing {
                                 work: Work::Rest(std::mem::take(&mut done.pending)),
+                                first: false,
                                 already: written,
                                 scanned: scanned_before + done.scanned as u64,
                                 total,
@@ -3225,7 +3591,7 @@ mod tests {
         // module asserts the isolation of. Same guard, or they race.
         let _held = counters();
         let store = bare_store("api");
-        store.begin_run(1, vec![PathBuf::from("/work/api")]);
+        store.begin_run(1, vec![PathBuf::from("/work/api")], RunKind::Run);
         store.record(
             1,
             &serde_json::json!({ "event": "started", "paths": ["/work/api"] }),
@@ -3249,7 +3615,7 @@ mod tests {
         // module asserts the isolation of. Same guard, or they race.
         let _held = counters();
         let store = bare_store("api");
-        store.begin_run(1, Vec::new());
+        store.begin_run(1, Vec::new(), RunKind::Run);
         store.record(1, &serde_json::json!({ "event": "started", "paths": [] }));
         store.record(1, &serde_json::json!({ "event": "paused" }));
         let held = store.run_elapsed_ms(1);
@@ -3283,7 +3649,7 @@ mod tests {
         // module asserts the isolation of. Same guard, or they race.
         let _held = counters();
         let store = bare_store("api");
-        store.begin_run(1, Vec::new());
+        store.begin_run(1, Vec::new(), RunKind::Run);
         for scanned in 0..5 {
             store.record(
                 1,
@@ -3319,7 +3685,7 @@ mod tests {
         let admission = Admission::new(2);
         let stores: Vec<Arc<Store>> = ["a", "b", "c", "d"].into_iter().map(bare_store).collect();
         for store in &stores {
-            admission.submit(store, vec![PathBuf::from("/work").join(&store.name)]);
+            admission.submit(store, vec![PathBuf::from("/work").join(&store.name)], RunKind::Run);
         }
 
         assert_eq!(admission.running(), 2, "the limit admitted more than two");
@@ -3361,7 +3727,7 @@ mod tests {
         let stores: Vec<Arc<Store>> = ["a", "b", "c"].into_iter().map(bare_store).collect();
         let mut ids = Vec::new();
         for store in &stores {
-            let (id, _) = admission.submit(store, Vec::new());
+            let (id, _) = admission.submit(store, Vec::new(), RunKind::Run);
             ids.push(id);
         }
         assert_eq!(admission.running(), 2);
@@ -3398,8 +3764,8 @@ mod tests {
         let _held = counters();
         let admission = Admission::new(1);
         let (a, b) = (bare_store("a"), bare_store("b"));
-        admission.submit(&a, Vec::new());
-        let (_, waiting) = admission.submit(&b, Vec::new());
+        admission.submit(&a, Vec::new(), RunKind::Run);
+        let (_, waiting) = admission.submit(&b, Vec::new(), RunKind::Run);
 
         assert_eq!(admission.position_of("b"), Some(1));
         assert_eq!(admission.dequeue("b"), 1);
@@ -3445,14 +3811,17 @@ mod tests {
 
     /// How many places may write each domain.
     ///
-    /// One, except `stores`: a store joining and a store being deleted are two
-    /// writes of one domain and there is no single function both go through —
-    /// `open_store` takes a lock and spawns a watcher, `delete_store` stops one
-    /// and removes the directory. Every other domain has exactly one writer and
-    /// a second site would be a second source of truth.
+    /// One, except two. `stores`: a store joining, a store being deleted and
+    /// a store's writer ending are three writes of one domain, and there is no
+    /// single function they go through — `open_store` takes a lock and spawns
+    /// a watcher, `delete_store` stops one and removes the directory, and
+    /// `keep_writing` is the thread itself ending. `runs`: a store's own runs,
+    /// and the cards of runs whose stop deleted their store, which no store is
+    /// left to hold. Every other domain has exactly one writer and a second
+    /// site would be a second source of truth.
     const BUMP_SITES: &[(&str, usize)] = &[
-        ("stores", 2),
-        ("runs", 1),
+        ("stores", 3),
+        ("runs", 2),
         ("clients", 1),
         ("ledger", 1),
         ("events", 1),
@@ -3528,6 +3897,56 @@ mod tests {
         assert!(roots[0].ends_with("api") || roots[0] == Path::new("/work/api"));
     }
 
+    /// Lowering the limit holds the newest runs, which keep their place ahead
+    /// of anything queued and go on oldest first as slots free.
+    #[test]
+    fn a_lowered_limit_holds_the_newest_runs_and_releases_them_in_order() {
+        let _held = counters();
+        let admission = Admission::new(3);
+        let stores: Vec<Arc<Store>> = ["a", "b", "c", "d"].into_iter().map(bare_store).collect();
+        let ids: Vec<u64> = stores
+            .iter()
+            .map(|store| admission.submit(store, Vec::new(), RunKind::Run).0)
+            .collect();
+        assert_eq!(admission.running(), 3);
+
+        admission.set_limit(1);
+        assert_eq!(admission.running(), 1, "one left running");
+        assert_eq!(admission.held(), vec![ids[1], ids[2]], "held oldest first");
+        assert!(!admission.is_held(ids[0]), "the oldest keeps going");
+        assert_eq!(
+            admission.position_of("d"),
+            Some(3),
+            "a queued run waits behind the held ones"
+        );
+
+        admission.finish(ids[0]);
+        assert_eq!(admission.held(), vec![ids[2]], "the older held run went on");
+        assert!(!admission.is_held(ids[1]));
+        admission.finish(ids[1]);
+        assert!(admission.held().is_empty());
+        admission.finish(ids[2]);
+        assert_eq!(admission.running(), 1, "then the queue moves");
+    }
+
+    /// The card's rate is the chunks of the last ten active seconds over
+    /// their time, blank before the first batch, and the average leaves out
+    /// the time before embedding began.
+    #[test]
+    fn the_rate_is_rolling_and_blank_before_the_first_batch() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        assert_eq!(run.rates(), (None, None), "nothing embedded yet");
+        run.first_sample = Some((0, 0));
+        run.samples = VecDeque::from(vec![(0, 0), (20_000, 400), (25_000, 500)]);
+        run.chunks = 600;
+        // Frozen at 30 s of active time.
+        run.ended = Some(Duration::from_secs(30));
+        let (rate, average) = run.rates();
+        // Base is the newest sample at or before 20 s: 200 chunks in 10 s.
+        assert_eq!(rate, Some(20.0));
+        assert_eq!(average, Some(20.0));
+    }
+
     /// A write with several stores open has no "the" store, and guessing one
     /// writes into somebody's other repository.
     #[test]
@@ -3561,6 +3980,7 @@ mod tests {
             mcp_fleet: Mutex::new(None),
             ledger: false,
             schedules: crate::schedule::Runner::new(),
+            gone: Mutex::new(Vec::new()),
         };
 
         // An `Arc` because the reconciliation a miss triggers opens stores,

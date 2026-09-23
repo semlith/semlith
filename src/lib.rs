@@ -80,6 +80,23 @@ const BIT_WIDTH: usize = 4;
 /// chunks/sec), because a smaller batch also wastes less of itself on padding.
 const EMBED_BATCH: usize = 8;
 
+/// Embedding sessions writers hold in this process, for `/api/about`.
+static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many writer embedding sessions are loaded in this process.
+pub fn writer_sessions() -> usize {
+    SESSIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Chunks an index pass holds before it embeds them, sorted by length.
+///
+/// A batch pads every text to its longest, and the pass used to flush eight
+/// chunks in file order — so one long chunk made seven short ones pay for its
+/// length. Holding sixty-four and embedding them shortest first measured 19.5
+/// to 29.1 chunks/s on the reference M1, CPU alone, median of three. Formed in
+/// walk order and sorted stably, so a corpus always produces the same batches.
+const SORT_WINDOW: usize = 64;
+
 /// Default model: 384-dim, ~52 MB on disk. Measured against the previous
 /// default (BGE-small) on a 6260-chunk corpus it scored 16.00 code MRR@10
 /// against 14.84, at a third of the download.
@@ -862,6 +879,10 @@ pub struct IndexProgress {
     /// message and the decoder's own message are the useful part and neither
     /// is drawn from a set semlith controls.
     pub why: Option<String>,
+    /// The intra-op thread count the run's session was built with, once it
+    /// has one. What the run card shows, because a saved setting is a request
+    /// and this is what the engine is doing.
+    pub threads: usize,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -932,6 +953,9 @@ pub struct IndexReport {
     pub images: usize,
     /// Whether the run was stopped rather than finished.
     pub stopped: bool,
+    /// The intra-op thread count the session ran with at the end of this
+    /// call, or 0 when nothing was embedded.
+    pub threads: usize,
     /// Every file this call embedded, in order. The caller keeps these across
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
@@ -974,6 +998,7 @@ fn say_file(
             total,
             symbols: report.symbols,
             why,
+            threads: report.threads,
         },
     );
 }
@@ -1007,6 +1032,12 @@ fn fault_panic(path: &Path) {
             .is_some_and(|n| n.to_string_lossy() == name)
     {
         panic!("{FAULT_PANIC_ENV} names {name}");
+    }
+}
+
+impl Drop for Semlith {
+    fn drop(&mut self) {
+        self.release_embedder();
     }
 }
 
@@ -1069,6 +1100,18 @@ pub enum Flow {
 /// resuming feels immediate, long enough that a paused run costs nothing.
 const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// Ask `control` until it says to go on. `false` for a stop. Inside a window a
+/// yield is a go: stepping aside happens between files, never inside one.
+fn hold(control: &dyn Fn() -> Flow) -> bool {
+    loop {
+        match control() {
+            Flow::Run | Flow::Yield => return true,
+            Flow::Pause => std::thread::sleep(PAUSE_TICK),
+            Flow::Stop => return false,
+        }
+    }
+}
+
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
@@ -1085,6 +1128,14 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// The intra-op thread count `embedder` was built with. A different value
+    /// in force rebuilds it at the next batch.
+    embedder_threads: usize,
+    /// When this store last embedded anything, so a daemon can drop an idle
+    /// writer's session and the arena that comes with it.
+    last_embed: Option<std::time::Instant>,
+    /// The budget generation this store's indexes were last fitted to.
+    budget_generation: u64,
     /// The embedder's own tokenizer, for counting rather than estimating.
     tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
@@ -1174,6 +1225,9 @@ impl Semlith {
             model,
             dim,
             embedder: None,
+            embedder_threads: 0,
+            last_embed: None,
+            budget_generation: index::budget_generation(),
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
@@ -1301,6 +1355,13 @@ impl Semlith {
     /// Loading the ONNX model costs a second or so, so it is deferred until a
     /// command actually needs to embed something.
     fn embedder(&mut self) -> Result<&mut TextEmbedding> {
+        // A session built with a thread count other than the one in force is
+        // rebuilt here, at a batch boundary, which is the only point a count
+        // saved on the page can reach a run already going.
+        let threads = embed::threads_in_force();
+        if self.embedder.is_some() && self.embedder_threads != threads {
+            self.release_embedder();
+        }
         if self.embedder.is_none() {
             // Cap the sequence length to what a chunk can actually produce.
             // The default 512-token window would let a pathologically dense
@@ -1312,9 +1373,64 @@ impl Semlith {
             // tokens with it, so it is loaded exactly when the model is and
             // never fetched on its own.
             self.tokenizer = self.model.tokenizer(&cache);
-            self.embedder = Some(self.model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?);
+            self.embedder = Some(self.model.load_with_threads(
+                cache,
+                chunk::MAX_CHARS / 2,
+                self.quiet,
+                threads,
+            )?);
+            self.embedder_threads = threads;
+            SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(self.embedder.as_mut().unwrap())
+    }
+
+    /// Drop the embedding session, its arena and its worker threads. The next
+    /// embed loads it again.
+    fn release_embedder(&mut self) {
+        if self.embedder.take().is_some() {
+            SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.clip = image::Clip::default();
+    }
+
+    /// Release the session if nothing has been embedded for `idle`.
+    ///
+    /// ONNX Runtime's arenas grow to the largest batch a session ever ran and
+    /// never shrink, so a writer that indexed once held its peak for the life
+    /// of the daemon: 5 392 MB across seven stores on an 8 GB machine,
+    /// measured 2026-09-23. A reload costs about a second, on a batch nobody
+    /// is waiting on.
+    pub fn release_if_idle(&mut self, idle: std::time::Duration) -> bool {
+        match self.last_embed {
+            Some(at) if self.embedder.is_some() && at.elapsed() >= idle => {
+                self.release_embedder();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The thread count this store's session was built with, or `None` while
+    /// no session is loaded.
+    pub fn embedder_threads(&self) -> Option<usize> {
+        self.embedder.as_ref().map(|_| self.embedder_threads)
+    }
+
+    /// Fit this store's indexes to the `MiB per store` in force, if it has
+    /// changed since they were last fitted. Cheap when it has not.
+    pub fn follow_budget(&mut self) {
+        let now = index::budget_generation();
+        if now != self.budget_generation {
+            self.budget_generation = now;
+            self.index.apply_budget();
+            self.images.apply_budget();
+        }
+    }
+
+    /// Shards of this store's text vectors in memory right now.
+    pub fn resident_shards(&self) -> usize {
+        self.index.resident_shards()
     }
 
     /// Pay the model-load and index-warmup cost up front, so the first query
@@ -1333,6 +1449,7 @@ impl Semlith {
 
     fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
         let _lifted = priority::embedding();
+        self.last_embed = Some(std::time::Instant::now());
         let mut out = self
             .embedder()?
             .embed(texts, Some(EMBED_BATCH))
@@ -1883,10 +2000,10 @@ impl Semlith {
                 }
                 let file_id =
                     store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+                written.push(key.clone());
                 let image_id = store::insert_image(&self.db, file_id, width, height)?;
                 self.images.add(&vector, &[image_id as u64])?;
                 completed.push((file_id, hash));
-                written.push(key.clone());
                 report.indexed += 1;
                 report.images += 1;
                 continue;
@@ -2043,6 +2160,10 @@ impl Semlith {
             }
 
             let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+            // Written down the moment it has a row, not when it is finished:
+            // a stop can now land inside a file, and the undo has to take the
+            // half-embedded file out along with the finished ones.
+            written.push(key.clone());
             // What the parser made of this file, recorded now because it
             // cannot be told afterwards: a file whose parse expired and a file
             // whose language has no grammar both leave no symbols behind, and
@@ -2054,6 +2175,7 @@ impl Semlith {
             };
             store::set_file_graph(&self.db, file_id, parsed)?;
             let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
+            let mut halted = false;
             for (ord, c) in chunks.iter().enumerate() {
                 let id =
                     store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
@@ -2061,13 +2183,23 @@ impl Semlith {
                 pending.ids.push(id as u64);
                 pending.texts.push(c.embedded());
 
-                // Flush per chunk, not per file. One 8 MB file chunks into
-                // thousands of pieces, and holding them all to embed in a
-                // single call makes peak memory a function of the largest file
-                // in the corpus rather than of the batch size.
-                if pending.ids.len() >= EMBED_BATCH {
-                    self.flush(&mut pending)?;
+                // Flushed by the window, not per file. One 8 MB file chunks
+                // into thousands of pieces, and holding them all to embed in a
+                // single call makes peak memory a function of the largest
+                // file in the corpus rather than of the window.
+                if pending.ids.len() >= SORT_WINDOW && !self.flush(&mut pending, control)? {
+                    halted = true;
+                    break;
                 }
+            }
+            report.threads = self.embedder_threads;
+            if halted {
+                // Stopped inside this file. Its rows are in `written`, so the
+                // caller's undo takes it out with everything else; nothing of
+                // it is finished, so nothing of it is counted or committed.
+                report.remaining = total - seen;
+                report.stopped = true;
+                break;
             }
 
             // The structure half, on the same changed-file path and inside the
@@ -2080,7 +2212,6 @@ impl Semlith {
             report.edges += edges;
 
             completed.push((file_id, hash));
-            written.push(key.clone());
             report.indexed += 1;
             report.chunks += chunks.len();
 
@@ -2105,7 +2236,11 @@ impl Semlith {
                     FileOutcome::Writing,
                     Some("writing the index to disk".to_string()),
                 );
-                self.flush(&mut pending)?;
+                if !self.flush(&mut pending, control)? {
+                    report.remaining = total - seen - 1;
+                    report.stopped = true;
+                    break;
+                }
                 self.checkpoint(&mut completed)?;
                 since_checkpoint = 0;
                 say_file(
@@ -2119,7 +2254,10 @@ impl Semlith {
             }
         }
 
-        self.flush(&mut pending)?;
+        if !report.stopped && !self.flush(&mut pending, control)? {
+            report.stopped = true;
+        }
+        report.threads = self.embedder_threads;
 
         // A stopped slice still commits what it embedded. Undoing is the
         // caller's, because one logical run is several slices and a stop has
@@ -2457,14 +2595,38 @@ impl Semlith {
         Ok(())
     }
 
-    fn flush(&mut self, batch: &mut Batch) -> Result<()> {
+    /// Embed the window, shortest first, asking `control` before every
+    /// batch. `false` when a stop was asked for, and then nothing of the
+    /// window reaches the index: its rows are the undo's to remove.
+    ///
+    /// Asked per batch rather than per file, because one file can be thousands
+    /// of chunks and a pause or stop that waited for the file's end took a
+    /// minute. A pause holds here with the window in memory; nothing is
+    /// half-committed, because a file's hash is written only after its last
+    /// chunk is durable, whichever batch that is.
+    fn flush(&mut self, batch: &mut Batch, control: Option<&dyn Fn() -> Flow>) -> Result<bool> {
         if batch.ids.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         let ids = std::mem::take(&mut batch.ids);
         let texts = std::mem::take(&mut batch.texts);
 
-        let vectors = self.embed(texts)?;
+        // Loaded first so the tokenizer is there to sort by: the same count
+        // the model pads by, on every window including the first.
+        self.embedder()?;
+        let order = self.length_order(&texts);
+        let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); ids.len()];
+        for group in order.chunks(EMBED_BATCH) {
+            if let Some(ask) = control
+                && !hold(ask)
+            {
+                return Ok(false);
+            }
+            let slice: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
+            for (at, vector) in group.iter().zip(self.embed(slice)?) {
+                vectors[*at] = vector;
+            }
+        }
         let flat: Vec<f32> = vectors.into_iter().flatten().collect();
         self.index.add(&flat, &ids)?;
         // The sidecar is written in the same breath as the codes, from the same
@@ -2472,7 +2634,41 @@ impl Semlith {
         // write it fails the index pass rather than leaving a store whose
         // rescoring silently reorders by a stale vector.
         self.exact.append(&flat, &ids)?;
-        Ok(())
+        Ok(true)
+    }
+
+    /// Positions of `texts`, shortest first by the model's own token count.
+    /// Stable, so equal lengths keep their walk order and a corpus always
+    /// produces the same batches.
+    fn length_order(&self, texts: &[String]) -> Vec<usize> {
+        let lengths: Vec<usize> = texts
+            .iter()
+            .map(|text| match &self.tokenizer {
+                Some(tokenizer) => tokenizer
+                    .encode(text.as_str(), false)
+                    .map(|e| e.len())
+                    .unwrap_or(text.len() / 4),
+                None => text.len() / 4,
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        order.sort_by_key(|i| lengths[*i]);
+        order
+    }
+
+    /// Take a stopped run's files out of the store, and write the index once.
+    ///
+    /// Before 0.28.0 the undo called `forget_held` per file, and each call
+    /// rewrote the whole index, so undoing a large run took as long as making
+    /// it. Returns how many files were taken out.
+    pub(crate) fn undo_held(&mut self, keys: &[String]) -> Result<usize> {
+        self.writing(|me| {
+            for key in keys {
+                me.evict(key)?;
+            }
+            me.save()?;
+            Ok(keys.len())
+        })
     }
 
     /// Remove a single file from the store. Returns `(chunks, images)`.

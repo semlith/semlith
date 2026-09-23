@@ -1096,7 +1096,46 @@ pub fn delete_store(name: &str) -> Result<PathBuf> {
     }
     let dir = Registry::dir_of(name)?;
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+        // Renamed out of the way first, then removed. On Windows a directory
+        // with any handle still open inside it — a SQLite connection, a mapped
+        // shard — refuses the rename, and a refused rename has deleted
+        // nothing; `remove_dir_all` straight away would have taken whatever it
+        // reached first and left half a store. The retries cover handles that
+        // close a moment after their owner drops them.
+        let doomed = dir.with_file_name(format!(
+            ".{}.deleting-{}",
+            dir.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
+        let mut moved = std::fs::rename(&dir, &doomed);
+        for _ in 0..20 {
+            if moved.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            moved = std::fs::rename(&dir, &doomed);
+        }
+        moved.with_context(|| {
+            format!(
+                "{} is still in use, so nothing of it was deleted; stop whatever \
+                 else has it open and delete it again",
+                crate::plain(&dir.display().to_string())
+            )
+        })?;
+        // The store is gone from its name the moment the rename lands, so the
+        // registry follows it before the slow part.
+        registry.stores.remove(name);
+        registry.save()?;
+        std::fs::remove_dir_all(&doomed).with_context(|| {
+            format!(
+                "{} was taken out of the store home but could not be removed; \
+                 delete it by hand",
+                crate::plain(&doomed.display().to_string())
+            )
+        })?;
+        return Ok(dir);
     }
     registry.stores.remove(name);
     registry.save()?;

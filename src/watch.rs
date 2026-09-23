@@ -126,10 +126,30 @@ pub fn run(
         roots,
         debounce,
         stop,
-        &|| false,
+        Held {
+            catch_up: true,
+            waiting: &|| false,
+            defer: &|_| false,
+        },
         progress,
         |_| Ok(()),
     )
+}
+
+/// What a caller that owns the writer decides about the watcher's own work.
+pub struct Held<'a> {
+    /// Whether the watcher catches the store up itself when it starts.
+    /// `semlith watch` does; the daemon admits its catch-up as a run instead,
+    /// so the concurrency limit bounds it and the page shows it.
+    pub catch_up: bool,
+    /// Asked between files during the catch-up, so a request that arrives
+    /// while a cold store is being walked waits milliseconds rather than
+    /// minutes.
+    pub waiting: &'a dyn Fn() -> bool,
+    /// Offered each batch of events before it is indexed. `true` means the
+    /// caller has taken it — the daemon admits a large batch like a run — and
+    /// the watcher leaves it alone.
+    pub defer: &'a dyn Fn(&[PathBuf]) -> bool,
 }
 
 /// [`run`] for a caller that already holds the store's write lock and has work
@@ -144,9 +164,7 @@ pub fn run_held(
     roots: &[PathBuf],
     debounce: Duration,
     stop: &AtomicBool,
-    // Asked between files during the catch-up, so a request that arrives while
-    // a cold store is being walked waits milliseconds rather than minutes.
-    waiting: &dyn Fn() -> bool,
+    held: Held<'_>,
     mut progress: impl FnMut(Progress),
     mut pump: impl FnMut(&mut Semlith) -> Result<()>,
 ) -> Result<()> {
@@ -171,6 +189,7 @@ pub fn run_held(
     // and a hash per file, and nothing else.
     // Yielding keeps everything the pass already did: the loop below walks
     // again once the queue is empty, and an unchanged file costs a hash.
+    let waiting = held.waiting;
     let step_aside = || {
         // Shutdown counts as something waiting: a catch-up that only looked at
         // the queue kept the process alive until it had walked the whole tree.
@@ -180,9 +199,13 @@ pub fn run_held(
             crate::Flow::Run
         }
     };
-    let catch_up = store.index_walk_under(&roots, &step_aside, |path, _| {
-        progress(Progress::File(path))
-    })?;
+    let catch_up = if held.catch_up {
+        store.index_walk_under(&roots, &step_aside, |path, _| {
+            progress(Progress::File(path))
+        })?
+    } else {
+        IndexReport::default()
+    };
     let (files, chunks, _) = store.stats()?;
     let mut behind = catch_up.remaining > 0;
     progress(Progress::Ready {
@@ -203,12 +226,15 @@ pub fn run_held(
         // Without this a store that was interrupted would only finish catching
         // up when a file happened to change.
         if behind && !waiting() {
+            let started = Instant::now();
             let more = store.index_walk_under(&roots, &step_aside, |path, p| {
                 progress(file_progress(path, &p))
             })?;
             behind = more.remaining > 0;
             if more.indexed > 0 || more.removed > 0 {
-                progress(Progress::Batch(more, Duration::ZERO));
+                // Its real elapsed time. `Duration::ZERO` here printed every
+                // catch-up as "in 0.0s".
+                progress(Progress::Batch(more, started.elapsed()));
             }
             continue;
         }
@@ -228,7 +254,7 @@ pub fn run_held(
         drain(&rx, &mut batch, debounce, &mut progress);
 
         let paths = admissible(&roots, batch);
-        if paths.is_empty() {
+        if paths.is_empty() || (held.defer)(&paths) {
             continue;
         }
 

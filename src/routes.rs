@@ -1812,6 +1812,12 @@ fn about(state: &Arc<State>) -> Response {
         // switch cost. Read by the About page and by the acceptance check that
         // times each transition.
         "priority": crate::priority::snapshot(),
+        // Embedding sessions loaded now: one per writer that has embedded in
+        // the last minute, and the one query session every reader shares.
+        "sessions": {
+            "writers": crate::writer_sessions(),
+            "query": crate::fleet::query_sessions(),
+        },
     }))
 }
 
@@ -2629,11 +2635,20 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
 /// opened it could read. It holds a worker for one request and returns.
 fn index_runs(state: &Arc<State>) -> Response {
     let admission = &state.admission;
-    let runs: Vec<Value> = state
+    let mut runs: Vec<Value> = state
         .stores()
         .iter()
         .flat_map(|store| store.run_snapshots(admission.position_of(&store.name)))
         .collect();
+    // Cards of runs whose stop deleted their store, after the live stores'.
+    runs.extend(
+        state
+            .gone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned(),
+    );
     let queue: Vec<Value> = admission
         .waiting()
         .into_iter()
@@ -2656,6 +2671,7 @@ fn index_runs(state: &Arc<State>) -> Response {
         "runs": runs,
         "queue": queue,
         "running": admission.running(),
+        "held": admission.held(),
         "limits": limits,
     }))
 }
@@ -2876,9 +2892,22 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     // Runs-at-once is the one of the three that means something to a queue
     // already waiting, so it takes effect now rather than at the next start:
     // raising it admits the head immediately.
+    // All three take effect now. Threads reach every writer at its next
+    // batch, the budget reaches the readers here and every writer at its next
+    // tick, and runs-at-once admits or holds at once.
     let limits = daemon::Limits::in_force();
+    limits.apply();
+    for fleet in [&state.fleet, &state.mcp_fleet] {
+        if let Some(fleet) = fleet.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            fleet.follow_budget();
+        }
+    }
     state.admission.set_limit(limits.runs_at_once.value);
-    Response::json(&json!({ "limits": limits }))
+    let applied = format!(
+        "now running with {} run(s) at once, {} thread(s) each, and {} MiB of vectors per store",
+        limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
+    );
+    Response::json(&json!({ "limits": limits, "applied": applied }))
 }
 
 /// Pause, resume or stop the index run a store is working on.
@@ -2891,20 +2920,47 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
+    let run = body.get("run").and_then(Value::as_u64);
+    let action = body.get("action").and_then(Value::as_str);
+    // A card whose store its own stop deleted has no store to name. Removing
+    // it, or clearing finished cards, is answered from the list it lives in.
+    if matches!(action, Some("remove") | Some("clear")) {
+        let dropped = state.gone_changed(|gone| {
+            let before = gone.len();
+            match (action, run) {
+                (Some("remove"), Some(id)) => {
+                    gone.retain(|card| card.get("id").and_then(Value::as_u64) != Some(id))
+                }
+                _ => gone.clear(),
+            }
+            before - gone.len()
+        });
+        if dropped > 0 && action == Some("remove") {
+            return Response::json(&json!({ "removed": dropped }));
+        }
+    }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
     let mut dequeued = 0;
     let mut removed = 0;
-    let run = body.get("run").and_then(Value::as_u64);
-    match body.get("action").and_then(Value::as_str) {
-        Some("pause") => store
-            .paused
-            .store(true, std::sync::atomic::Ordering::Relaxed),
-        Some("resume") => store
-            .paused
-            .store(false, std::sync::atomic::Ordering::Relaxed),
+    let mut deleting = false;
+    match action {
+        // Answered with the state asked for, at once: the engine reaches it
+        // at its next batch, and the card moves on when it does.
+        Some("pause") => {
+            store
+                .paused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            store.mark_pausing();
+        }
+        Some("resume") => {
+            store
+                .paused
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            store.mark_resuming();
+        }
         Some("stop") => {
             // A run that has already finished is not one a stop can act on.
             // It used to be accepted: the confirm dialog promised to undo
@@ -2943,6 +2999,14 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
                 .paused
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             store.mark_stopping();
+            // "Also delete the store", ticked in the dialog. Only ever on the
+            // user's explicit word: the page ticks it by default for a store
+            // that held nothing before the run, and the route does what the
+            // box says rather than guessing.
+            if body.get("delete").and_then(Value::as_bool) == Some(true) {
+                deleting = true;
+                state.delete_after_stop(Arc::clone(&store));
+            }
         }
         // Taking a folder out of the queue before it starts. Told apart from
         // `stop` because it costs nothing and undoes nothing: there is no run
@@ -2984,6 +3048,13 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         "store": store.name,
         "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
         "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "state": match action {
+            Some("pause") => "pausing",
+            Some("resume") => "running",
+            Some("stop") => "stopping",
+            _ => "",
+        },
+        "deleting": deleting,
         "dequeued": dequeued,
         "removed": removed,
     }))
