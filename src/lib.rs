@@ -1482,7 +1482,7 @@ impl Semlith {
         // A `mix` run alternates variants by batch, deterministically, so a
         // store holds both and the harness can measure what that costs.
         let (main, alt) = embed::index_variant();
-        let use_alt = alt.is_some() && self.batches % 2 == 0;
+        let use_alt = alt.is_some() && self.batches.is_multiple_of(2);
         let session = if let (true, Some(variant)) = (use_alt, alt) {
             if self.embedder_alt.is_none() {
                 self.embedder_alt = Some(self.model.load_variant(
