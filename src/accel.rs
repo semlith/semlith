@@ -829,15 +829,18 @@ fn decode_vectors(frame: &[u8], expected: usize) -> Result<Vec<Vec<f32>>> {
             body.len()
         );
     }
-    Ok(body
-        .chunks_exact(DIM * 4)
-        .map(|vector| {
-            vector
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect()
-        })
-        .collect())
+    Ok(vectors_of(body))
+}
+
+/// Little-endian `f32`s, `DIM` to a vector. The caller has checked the length.
+fn vectors_of(bytes: &[u8]) -> Vec<Vec<f32>> {
+    let values: Vec<f32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
+        .collect();
+    values.chunks(DIM).map(<[f32]>::to_vec).collect()
 }
 
 // ------------------------------------------------------------ known answers
@@ -854,15 +857,7 @@ pub fn fixture() -> (Vec<String>, Vec<Vec<f32>>) {
             })
         })
         .unwrap_or_default();
-    let vectors = FIXTURE_VECTORS
-        .chunks_exact(DIM * 4)
-        .map(|vector| {
-            vector
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect()
-        })
-        .collect();
+    let vectors = vectors_of(FIXTURE_VECTORS);
     (texts, vectors)
 }
 
