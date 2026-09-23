@@ -603,8 +603,7 @@ fn a_deleted_root_moves_the_stores_counter() {
     // failure: a root the watcher kept open would read as a counter that did
     // not move rather than as a folder that was never deleted.
     let root = corpus.path().to_path_buf();
-    std::fs::remove_dir_all(&root)
-        .unwrap_or_else(|e| panic!("removing {}: {e}", root.display()));
+    std::fs::remove_dir_all(&root).unwrap_or_else(|e| panic!("removing {}: {e}", root.display()));
     assert_ne!(
         counter(),
         before,
