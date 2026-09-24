@@ -1690,6 +1690,7 @@ impl Semlith {
         // between batches is the run's work too, and dropping to background
         // for it would put the next batch behind the efficiency cores again.
         let _lifted = priority::embedding();
+        let _writer = embed::writer();
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.

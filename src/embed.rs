@@ -707,18 +707,54 @@ pub fn set_threads_in_force(threads: usize) {
     THREADS_IN_FORCE.store(threads, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// What an index run's session is built with: the daemon's value in force,
-/// or the derived count everywhere else.
+/// Index passes embedding in this process right now.
+static WRITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held for the length of an index pass, so a derived thread count can be
+/// split between the passes actually running rather than the most there
+/// could be.
+pub struct Writer(());
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        WRITERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn writer() -> Writer {
+    WRITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Writer(())
+}
+
+/// What an index run's session is built with: a count saved or set in the
+/// environment, else the derived count split between the passes running now.
 ///
 /// Before 0.28.0 every session was built with [`embed_threads`], so the
 /// saved setting was shown on the page and never reached a session, and
 /// `semlith start` printed "1 embedder thread(s) each" while every session ran
-/// four.
+/// four. The first 0.28.0 build then split the derived count by `runs at
+/// once` whether or not the other runs existed, and a lone run in the daemon
+/// indexed at 54 % of the same run in a terminal on a four-core runner.
 pub fn threads_in_force() -> usize {
     match THREADS_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => embed_threads(),
+        0 => split_threads(WRITERS.load(std::sync::atomic::Ordering::Relaxed)),
         n => n,
     }
+}
+
+/// The derived count for `writers` passes at once: all of it for one, and for
+/// more, an equal share held inside the cores less one kept free.
+pub fn split_threads(writers: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    split(embed_threads(), writers, cores)
+}
+
+fn split(all: usize, writers: usize, cores: usize) -> usize {
+    if writers <= 1 {
+        return all;
+    }
+    let budget = cores.saturating_sub(1).max(1);
+    (all / writers).clamp(1, (budget / writers).max(1))
 }
 
 /// How many threads ONNX Runtime should use inside one operator.
@@ -1141,6 +1177,20 @@ mod tests {
         assert_eq!(embed_threads(), 3);
         unsafe { std::env::remove_var(THREADS_ENV) };
         assert!(embed_threads() >= 1);
+    }
+
+    /// A run going alone gets every derived thread, as in a terminal; only
+    /// runs embedding at the same time share them.
+    #[test]
+    fn a_lone_writer_gets_every_derived_thread() {
+        assert_eq!(split(4, 0, 4), 4);
+        assert_eq!(split(4, 1, 4), 4, "a four-core runner, one run");
+        assert_eq!(split(4, 3, 8), 1, "the M1, three runs");
+        assert_eq!(split(4, 2, 8), 2);
+        for writers in 2..=8 {
+            let each = split(4, writers, 2);
+            assert!((1..=4).contains(&each), "{writers} writers got {each}");
+        }
     }
 
     /// The digest a store's content hashes and the upgrade checksum are built

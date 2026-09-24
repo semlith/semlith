@@ -1839,7 +1839,12 @@ impl Limits {
     /// builds its session with, and the budget every open index fits inside.
     /// Before 0.28.0 two of the three were saved, shown and never applied.
     pub fn apply(&self) {
-        crate::embed::set_threads_in_force(self.embed_threads.value);
+        // A derived count is left to follow the runs actually going; see
+        // `embed::threads_in_force`.
+        crate::embed::set_threads_in_force(match self.embed_threads.source {
+            Source::Derived => 0,
+            _ => self.embed_threads.value,
+        });
         crate::index::set_budget_mb(self.index_memory_mb.value);
     }
 

@@ -311,10 +311,20 @@ pub fn threads_for(machine: &Machine, runs: usize) -> Derivation {
     let runs = runs.max(1);
     let per_run = (core_budget / runs).max(1);
     let threads = (crate::embed::embed_threads() / runs).clamp(1, per_run);
+    // The split applies only while that many runs are embedding at once; a
+    // run going alone gets all of them, as it would in a terminal.
+    let alone = if runs > 1 {
+        format!(
+            ", and all {} for a run going alone",
+            crate::embed::embed_threads()
+        )
+    } else {
+        String::new()
+    };
     Derivation {
         value: threads,
         reason: format!(
-            "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each",
+            "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each{alone}",
             crate::embed::embed_threads(),
             runs_phrase(runs),
         ),
