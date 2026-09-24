@@ -10726,13 +10726,14 @@ async function impactView() {
         el(
           "div",
           { class: "card pad impact-subject-card" },
-          el("div", { class: "impact-band" }, nameInput, storeChip, reach),
+          el("div", { class: "impact-band" }, nameInput, reach),
           options,
           el(
             "div",
             { class: "impact-subject-row" },
             capLabel("Changing"),
             subject,
+            storeChip,
             el("span", { class: "spacer" }),
             depthPill,
           ),
@@ -10745,10 +10746,12 @@ async function impactView() {
             el("li", {}, el("b", { text: "Hops" }), " — edges away from the symbol. 1 is a direct caller."),
           ),
         ),
-        results,
       ),
       el("div", { class: "impact-col" }, rings.node),
     ),
+    // Under both columns: the reached table has four columns and a symbol
+    // name, and in half the width it scrolled its VIA column out of sight.
+    results,
     el(
       "details",
       { class: "impact-between" },

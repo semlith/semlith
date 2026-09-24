@@ -4795,7 +4795,7 @@ td.row-end {
 }
 
 .impact-band input[type="search"] {
-  flex: 1 1 18rem;
+  flex: 1 1 12rem;
   min-width: 0;
 }
 /* Hops and prefer-verified, folded under the symbol field. */
@@ -4993,6 +4993,14 @@ td.row-end {
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: var(--sp-4);
   align-items: start;
+  min-width: 0;
+}
+
+/* The answer's tables, full width under the two columns. */
+.impact-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
   min-width: 0;
 }
 
