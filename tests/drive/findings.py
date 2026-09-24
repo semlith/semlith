@@ -4768,7 +4768,7 @@ def _(d):
     said = d.eval("document.querySelector('dialog.modal[open]').innerText")
     d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
            ".find(b => b.textContent.trim() === 'Cancel').click()")
-    if not re.search(r"\d+(\.\d)? (MB|GB)", said):
+    if not re.search(r"\d+(\.\d)? (MiB|GiB)", said):
         fail("turning CUDA on did not say its download size first: %r" % said[:300])
     still = next(lane for lane in d.api("/api/accel")["lanes"] if lane["lane"] == "cuda")
     if still.get("enabled"):
