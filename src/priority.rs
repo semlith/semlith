@@ -40,6 +40,10 @@ struct Inner {
     idle_since: Option<Instant>,
     switches: u64,
     last_switch_us: u64,
+    /// The lift came from a request that has not embedded anything, so
+    /// neither it nor the drop after it is logged. The portal polls about once
+    /// a second, and two log lines a poll buried everything else in the log.
+    quiet: bool,
 }
 
 struct Manager {
@@ -56,7 +60,7 @@ impl Manager {
     }
 
     /// Flip the process and say so, with how long the flip itself took.
-    fn switch(&self, inner: &mut Inner, background: bool, why: &str) {
+    fn switch(&self, inner: &mut Inner, background: bool, why: &str, say: bool) {
         let started = Instant::now();
         let result = platform::set(background);
         let took = started.elapsed().as_micros() as u64;
@@ -65,6 +69,7 @@ impl Manager {
         inner.last_switch_us = took;
         let to = if background { "background" } else { "normal" };
         match result {
+            Ok(()) if !say => {}
             Ok(()) => (self.log)(&format!("priority: {to} ({why}) in {took} µs")),
             // Never fatal. An older Windows build without power throttling, or
             // a sandbox that refuses the call, leaves a daemon that runs at one
@@ -91,6 +96,7 @@ pub fn manage(log: impl Fn(&str) + Send + Sync + 'static) -> bool {
             idle_since: Some(Instant::now()),
             switches: 0,
             last_switch_us: 0,
+            quiet: false,
         }),
         wake: Condvar::new(),
         log: Box::new(log),
@@ -101,7 +107,7 @@ pub fn manage(log: impl Fn(&str) + Send + Sync + 'static) -> bool {
     let manager = MANAGER.get().expect("just set");
     {
         let mut inner = manager.lock();
-        manager.switch(&mut inner, true, "idle at start");
+        manager.switch(&mut inner, true, "idle at start", true);
     }
     std::thread::Builder::new()
         .name("semlith-priority".to_string())
@@ -118,7 +124,9 @@ fn settle(manager: &'static Manager) {
             (0, false, Some(at)) => {
                 let left = GRACE.saturating_sub(at.elapsed());
                 if left.is_zero() {
-                    manager.switch(&mut inner, true, "idle");
+                    let say = !inner.quiet;
+                    inner.quiet = false;
+                    manager.switch(&mut inner, true, "idle", say);
                 } else {
                     inner = manager
                         .wake
@@ -140,6 +148,17 @@ pub struct Embedding(bool);
 
 /// Say that an embed pass has started.
 pub fn embedding() -> Embedding {
+    hold(false)
+}
+
+/// Say that an HTTP request is being served: lifted like an embed pass, so a
+/// control route answers at once whatever the machine is doing, but logged
+/// only if the request goes on to embed something.
+pub fn request() -> Embedding {
+    hold(true)
+}
+
+fn hold(request: bool) -> Embedding {
     let Some(manager) = MANAGER.get() else {
         return Embedding(false);
     };
@@ -147,7 +166,16 @@ pub fn embedding() -> Embedding {
     inner.active += 1;
     inner.idle_since = None;
     if inner.background {
-        manager.switch(&mut inner, false, "embedding");
+        inner.quiet = request;
+        manager.switch(&mut inner, false, "embedding", !request);
+    } else if !request && inner.quiet {
+        // Lifted quietly by the request this embed is serving: say so now,
+        // so a search still reads as a lift and a drop in the log.
+        inner.quiet = false;
+        (manager.log)(&format!(
+            "priority: normal (embedding) in {} µs",
+            inner.last_switch_us
+        ));
     }
     Embedding(true)
 }

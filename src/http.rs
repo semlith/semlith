@@ -600,7 +600,7 @@ impl Server {
                     // holding open, and the flood that matters never reaches a
                     // worker at all.
                     let taken = live.fetch_add(1, Ordering::Relaxed);
-                    let in_flight = InFlight(Arc::clone(&live), crate::priority::embedding());
+                    let in_flight = InFlight(Arc::clone(&live), crate::priority::request());
                     if taken >= MAX_CONNECTIONS {
                         let _ = write_response(
                             &mut stream,
