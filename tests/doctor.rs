@@ -8,6 +8,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -50,12 +52,7 @@ impl Machine {
             "semlith"
         });
         std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
-        std::fs::copy(env!("CARGO_BIN_EXE_semlith"), &installed).expect("copying the binary");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        common::copy_executable(Path::new(env!("CARGO_BIN_EXE_semlith")), &installed);
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&store_home).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
@@ -89,10 +86,7 @@ impl Machine {
     /// it finds on `PATH` with `--version`, so a shim standing in for an older
     /// install has to answer like one.
     fn install_in(&self, dir: &Path, program: &str, body: &str) {
-        let path = dir.join(program);
-        std::fs::write(&path, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_executable(&dir.join(program), body);
     }
 
     fn path(&self) -> String {

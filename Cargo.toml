@@ -1,6 +1,6 @@
 [package]
 name = "semlith"
-version = "0.27.0"
+version = "0.28.0"
 edition = "2024"
 rust-version = "1.90"
 description = "A fast local vector store for AI agents — index files once, keep it current as you save, and answer questions across all of it in milliseconds without leaving the machine."
@@ -23,7 +23,7 @@ libc = "0.2.189"
 fastembed = { version = "6.0.3", default-features = false, features = ["hf-hub", "image-models"] }
 # ONNX Runtime, named here so it can be linked two ways. `ort` is fastembed's
 # dependency and is pinned to the exact version fastembed pins.
-ort = { version = "=2.0.0-rc.13", default-features = false, optional = true }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-22"] }
 # Already in the tree under fastembed's image feature; named here to read an
 # image's pixel size out of its header without decoding the whole thing.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
@@ -128,7 +128,7 @@ pdf-writer = "0.15.0"
 # `GlobalMemoryStatusEx` how much memory this machine has, which Windows
 # exposes nowhere else.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [features]
 # How ONNX Runtime is linked, and the one thing that differs between the binary
@@ -147,7 +147,7 @@ windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation"] 
 # no runtime at all and no tarball to have got one from.
 default = ["static-ort"]
 static-ort = ["fastembed/ort-download-binaries-rustls-tls"]
-dynamic-ort = ["fastembed/ort-load-dynamic", "dep:ort"]
+dynamic-ort = ["fastembed/ort-load-dynamic"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

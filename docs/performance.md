@@ -20,6 +20,16 @@ table is a fixture — building a hundred-thousand-chunk store takes over an hou
 of embedding — and is re-taken when the indexing or scan path changes rather
 than every release; the recipe is in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+**Every indexing figure on this page before the section on the service was
+taken in a terminal**, by the test binary or by `semlith index`, running at the
+priority the terminal gave it. None of them measured the login service, which is
+how most users index, and until 0.28.0 the service ran slower. The macOS plist
+asked for `ProcessType Background`, which keeps a process on the efficiency
+cores. On the reference machine it indexed at 3.3 chunks/s against 28 in a
+terminal, measured on 2026-09-23. [The service, and the CPU and GPU
+together](#the-service-and-the-cpu-and-gpu-together) has the figures for the
+path most users are on.
+
 ## Query latency
 
 Warm, server-side, as the daemon reports it. A query is embedded once per vector
@@ -141,12 +151,108 @@ whether int8 wins depends on the model's graph, not on the architecture alone.
 
 Thread count is chosen rather than left to ONNX Runtime. Its threads
 synchronise at every operator, so on a CPU with performance and efficiency
-cores a thread on a slow core paces the whole batch; Semlith uses the
-performance-core count on Apple silicon and the full count elsewhere. Override
+cores a thread on a slow core paces the whole batch. Semlith uses the
+performance-core count on Apple silicon, on Intel hybrid CPUs under Linux (from
+`/sys/devices/cpu_core/cpus`) and on Windows (the cores in the highest
+`EfficiencyClass`), and the full count everywhere else. Override
 with `SEMLITH_EMBED_THREADS` if your machine disagrees. It is also what makes
 embedding reproducible: ONNX Runtime reduces across its threads in whatever
 order they finish, so the same text embedded twice differs in the last bits, and
 under int8 quantisation that is enough to swap two near-equal chunks.
+
+## The service, and the CPU and GPU together
+
+Taken for 0.28.0 on the reference machine: an M1 Air with 4 performance and 4
+efficiency cores and 8 GB, with nothing else measuring, after `df -h`. Each
+figure is the median of three runs over one pinned corpus whose hash is
+recorded in the release record.
+
+**Priority.** The daemon puts itself in background state while nothing is
+embedding and returns to normal priority when an embed pass starts. On the M1,
+each switch took under 100 µs in both directions, read from the daemon's own
+log, which records every switch with its latency. It returns to background 300
+ms after the last embed ends. Read with `ps -o pri` on the service: 4 while
+idle, 20 while embedding, and 4 again 0.35 s after the run ended.
+
+| path | chunks/s |
+|---|---|
+| `semlith index` in a terminal | 27.6 |
+| a portal run through the launchd service, CPU lane alone | 15.1, against 24.7 for the CLI in the same rounds (61 %) |
+| the same service before 0.28.0 (`ProcessType Background`) | 3.3, against 28 in a terminal, 2026-09-23 |
+
+Three interleaved rounds on 2026-09-24, median, over the pinned corpus (the `src/`
+of v0.27.0, 3 746 chunks). The service is 4.6× faster than it was, but it still
+runs at 61 % of the same binary in a terminal. The gap belongs to launchd: the
+same binary started with `semlith start` from a terminal ran at 89 % of the CLI,
+and in a launchd agent its embedding threads sit at scheduler priority 20
+against 31 from a terminal. Neither a user-initiated QoS request nor
+`ProcessType Interactive` closed it. The M1 Air is fanless, and single runs
+moved between 12 and 27 chunks/s over a day of load, so only figures taken in
+interleaved pairs are quoted here.
+
+**Length-sorted batching.** The index pass sorts a window of up to 64 chunks by
+length before embedding it, so a batch no longer pads short chunks to the
+length of a long one. A standalone script over 512 real chunks measured 19.5
+against 29.1 chunks/s before it was built. Inside the release binary the gain
+is smaller, because the unsorted path already embeds eight neighbouring chunks
+of one file at a time, and those are close in length. Against unsorted batches
+of 32, sorting gives 1.31×. Windows of 128 to 2 048 chunks measured within
+run-to-run spread of the window of 64.
+
+| CPU lane alone, int8 | chunks/s |
+|---|---|
+| unsorted, file order | 23.5 |
+| sorted, window of 64 | 27.6 (1.17×; a second interleaved round gave 23.4 against 20.6, 1.14×) |
+
+**Lanes.** A GPU lane is a worker process running the fp16 export of the model.
+The CPU lane runs int8 in the daemon. Both take batches from one sorted queue,
+so the faster device takes the larger share. The figures below come from a
+portal run through the service with default settings, where CPU and WebGPU are
+both on. The per-lane rates are the ones the run card showed.
+
+| lanes | chunks/s | per lane |
+|---|---|---|
+| CPU alone, sorted | 15.1 | |
+| WebGPU on Metal alone, batch 16 | 50.6, measured on its own on 2026-09-23 | |
+| CPU and WebGPU (the default) | 36.8, 1.52× the unsorted CPU path (24.1) | GPU 22.4/s · CPU 11.6/s |
+
+**Agreement.** `semlith doctor --gpu` embeds 32 fixed chunks on every lane and
+compares them with CPU fp32 vectors committed under `tests/fixtures/gpu/`. On the
+M1, WebGPU on Metal scored cosine 1.0000 on all 32 chunks, and the CPU int8
+lane scored 0.9851. An fp16 lane below 0.999 on any chunk is refused before
+its first real batch. Tested on the 2026-09-23 corpus, int8 and fp16 vectors of
+the same text agree at cosine 0.987. That is why a store embedded by both lanes
+was measured against an all-int8 store before hybrid became the default. On the
+sealed split of 30 questions, CPU lane alone, median of three:
+
+| store | hit@1 | hit@3 | hit@8 |
+|---|---|---|---|
+| all int8 | 24/30 | 27/30 | 29/30 |
+| all fp16 | 25/30 | 27/30 | 28/30 |
+| half and half, int8 queries | 25/30 | 27/30 | 28/30 |
+| half and half, fp16 queries | 25/30 | 26/30 | 28/30 |
+
+The mix is within one question of all-int8 at every k, so a store may hold
+both, and queries stay int8. All 11 identifier questions stay in the top
+three in every arrangement.
+
+**Memory.** ONNX Runtime's arenas never shrink, so in 0.27.0 each writer kept its
+peak until the daemon exited: 5 392 MB across seven stores on the M1, read with
+`footprint` on 2026-09-23. A writer now releases its session after 60 seconds
+without embedding, and a GPU worker exits after 60 idle seconds. All readers
+share one query session.
+
+| daemon, seven stores open, GPU lane on | footprint |
+|---|---|
+| idle | 452 MB |
+| during a run | 888 MB |
+| 60 s after the last run ends | 465 MB, no writer session loaded |
+| 0.27.0, after indexing | 5 392 MB |
+
+Only the daemon uses GPU lanes. `semlith index` in a terminal and
+`tests/retrieval.rs` run on the CPU alone. A single lane is deterministic, but
+which lane embeds a given chunk depends on timing. Two hybrid runs over the same
+corpus therefore produce the same chunks but not bit-identical vectors.
 
 ## The binary, and what a Linux machine needs
 

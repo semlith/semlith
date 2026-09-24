@@ -102,6 +102,9 @@ const VIEWS: &[(&str, &str)] = &[
     // client -- which is what `doctor` reports and what the Agents page draws
     // from the same source. The view of a hook is its state, not its output.
     ("hook", "/api/doctor"),
+    // `semlith accel` is the Index page's Machine limits card, under
+    // "Accelerators": a switch per lane with its device, state and share.
+    ("accel", "/api/accel"),
 ];
 
 /// And the same for the MCP tool surface.

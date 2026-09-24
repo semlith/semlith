@@ -41,6 +41,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use turbovec::IdMapIndex;
 
 /// Vectors per shard.
@@ -89,11 +90,33 @@ pub fn budget_mb() -> usize {
     index_budget_bytes() / 1024 / 1024
 }
 
+/// The `MiB per store` the daemon has in force, or 0 outside one.
+static BUDGET_IN_FORCE: AtomicUsize = AtomicUsize::new(0);
+
+/// Moves every time the value in force changes, so an open index can tell
+/// cheaply whether it has to re-derive its shard allowance.
+static BUDGET_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Set the budget every open index lives within. Applied by each index the
+/// next time it is asked, and at once by the readers the settings route holds.
+pub fn set_budget_mb(mb: usize) {
+    if BUDGET_IN_FORCE.swap(mb, Ordering::Relaxed) != mb {
+        BUDGET_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn budget_generation() -> u64 {
+    BUDGET_GENERATION.load(Ordering::Relaxed)
+}
+
 fn index_budget_bytes() -> usize {
+    // The environment first, as before: an exported variable is the machine's
+    // owner speaking and outranks what was typed into a page.
     std::env::var(INDEX_MEMORY_ENV)
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n > 0)
+        .or_else(|| Some(BUDGET_IN_FORCE.load(Ordering::Relaxed)).filter(|n| *n > 0))
         .unwrap_or(INDEX_MEMORY_MB)
         * 1024
         * 1024
@@ -271,6 +294,25 @@ impl VectorIndex {
         match self {
             VectorIndex::Single(_) => None,
             VectorIndex::Sharded(s) => Some(s.max_resident()),
+        }
+    }
+
+    /// Re-derive how many shards may be resident from the budget in force,
+    /// and put down whatever is now over it. A shard with unwritten changes is
+    /// kept, as it always is.
+    pub fn apply_budget(&mut self) {
+        if let VectorIndex::Sharded(s) = self {
+            let full = resident_bytes(s.capacity, s.dim, s.bit_width).max(1);
+            s.max_resident = (index_budget_bytes() / full).max(1);
+            s.shed();
+        }
+    }
+
+    /// How many shards are in memory now.
+    pub fn resident_shards(&self) -> usize {
+        match self {
+            VectorIndex::Single(s) => usize::from(s.resident.is_some()),
+            VectorIndex::Sharded(s) => s.shards.iter().filter(|s| s.resident.is_some()).count(),
         }
     }
 
@@ -477,6 +519,28 @@ impl Sharded {
                 // Everything resident is dirty or is the shard being asked for.
                 // Exceeding the budget beats losing vectors or refusing to
                 // answer; the count says it happened.
+                return;
+            };
+            self.shards[coldest].resident = None;
+            self.evictions += 1;
+        }
+    }
+
+    /// Put down the coldest clean shards until no more than the allowance
+    /// is resident.
+    fn shed(&mut self) {
+        loop {
+            let resident: Vec<usize> = (0..self.shards.len())
+                .filter(|i| self.shards[*i].resident.is_some())
+                .collect();
+            if resident.len() <= self.max_resident {
+                return;
+            }
+            let Some(&coldest) = resident
+                .iter()
+                .filter(|i| !self.shards[**i].dirty)
+                .min_by_key(|i| self.shards[**i].last_used)
+            else {
                 return;
             };
             self.shards[coldest].resident = None;

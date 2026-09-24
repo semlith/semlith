@@ -161,7 +161,8 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith models` | List available embedding models. See [docs/models.md](docs/models.md). |
 | `semlith languages` | List the language names `--lang` accepts. |
 | `semlith setup [--yes] [--register-all] [--no-hooks] [--strict]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key — install the semlith Agent Skill and link it into every user-level skill directory a client reads, and write the `PreToolUse` steering hook into the clients that document one. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, and the rules file of the clients that document one, listing every path first and backing each file up beside itself. `--no-hooks` removes the hook; `--strict` writes its refusing form; `--airgap` skips the model. |
-| `semlith doctor [--fix]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns. |
+| `semlith doctor [--fix] [--gpu]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns. `--gpu` embeds 32 fixed chunks on every lane and prints each lane's cosine against committed vectors, its rate and its device. |
+| `semlith accel [status\|on\|off\|remove] [cpu\|gpu\|cuda]` | Which devices embed. The CPU and a GPU through WebGPU are on by default; CUDA on Linux is off until you turn it on. A switch reaches every running run at its next batch; `remove` deletes a lane's downloads. |
 | `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
 `semlith add` fetches over https only, refuses redirects that leave https, caps
@@ -227,10 +228,19 @@ empty body without it. The agent key is the other credential and it opens `/mcp`
 and nothing else, so a key sitting in a client's configuration file cannot
 rotate a token, adopt a store or start an upgrade. Every response carries a
 `Content-Security-Policy` allowing only `'self'`, no CORS header is sent, and
-every byte the page loads is compiled into the binary. `--airgap` makes that
-falsifiable: it refuses to download model weights at all and exits naming the
-cache path. [docs/security.md](docs/security.md) is the full account, and the
+every byte the page loads is compiled into the binary. The only downloads are
+pinned by digest: model weights, the WebGPU plugin on a machine with a hardware
+GPU, and the CUDA pack after you turn CUDA on. `--airgap` makes that
+falsifiable: it refuses all of them unless they are already cached, and exits
+naming the cache path. [docs/security.md](docs/security.md) is the full account, and the
 Privacy page checks each claim on the running daemon rather than restating it.
+
+The Index page is the daemon's control room. Every run, watcher catch-up and
+large batch of saves is a card with a live rate, its thread count and a rate per
+device. Pause and Stop act at the next embedding batch, Stop can delete the
+store it was filling, and the machine limits (runs at once, threads each, memory
+per store) apply to running work the moment they are saved. While nothing
+embeds, the daemon drops to background priority and releases its sessions.
 
 The daemon also ends the one-writer trade-off without weakening the rule: it
 *is* the writer, and while it runs `semlith mcp` finds it and forwards each call
@@ -436,7 +446,11 @@ search hold part of the corpus, a save rewrite one shard, and a long run
 checkpoint as it goes.
 Embeddings default to `granite-embedding-small-english-r2` at int8, 384
 dimensions, ~52 MB, on CPU via ONNX Runtime; the model is fixed when the store
-is created, because vectors from two models are not comparable.
+is created, because vectors from two models are not comparable. The daemon adds
+a GPU beside the CPU: a worker process runs the same model at fp16 through
+Microsoft's WebGPU plugin (Metal, Vulkan or DirectX 12), or through CUDA on
+Linux, checked against known answers before its first batch. Chunks are sorted
+by length before they are batched, so a batch pads less.
 [docs/architecture.md](docs/architecture.md) is the full account.
 
 ## The numbers
@@ -452,7 +466,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **31** |
+| CLI commands | **32** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 
@@ -462,6 +476,8 @@ of these drifts from its source:
 |---|---|---|
 | warm search at 700 / 7 000 / 70 000 chunks, peak RSS under 240 MB | **16.2 / 37.9 / 159.1 ms**, against the previous release's 20.5 / 46.9 / 362.4 measured beside it | `cargo test --release --test measure -- --ignored --nocapture` |
 | edit on disk to searchable | **under 5 s** | the same |
+| indexing through the login service, CPU alone / CPU and WebGPU | **15.1 / 36.8 chunks/s**, against 24.7 for `semlith index` in a terminal | `docs/performance.md` |
+| daemon memory 60 s after a run, seven stores open | **465 MB** | `footprint -p <pid>` |
 | idle watcher CPU, over 60 s | **under 1.0 s** | the same |
 | one changed file | **1 shard rewritten** | `cargo test --release --test shards -- --ignored --nocapture` |
 | `tools/list` | **5 840 bytes**, ~1 460 tokens, sixteen tools | `cargo test --release --test retrieval -- --ignored` |
@@ -481,8 +497,14 @@ at. Query latency does grow: the index scan is linear.
 
 - One writer per store. A second `index` run against a store already being
   indexed exits with an error naming the process that holds it.
-- First-time indexing is bound by transformer speed on CPU, at roughly 23
-  chunks/sec. Later runs touch only what changed.
+- First-time indexing is bound by transformer speed: roughly 24 chunks/sec on
+  the CPU, and about 37 with the GPU beside it on an M1. Later runs touch only
+  what changed. On macOS the login service indexes at about 60 % of the same
+  binary in a terminal, because of how launchd schedules an agent's threads.
+- CUDA runs on Linux x86_64 only; an NVIDIA card on Windows embeds through
+  WebGPU. A GPU lane is never a software renderer.
+- A new binary on macOS asks again for access to folders such as Documents, and
+  a store there waits, showing `running`, until the prompt is answered.
 - A store larger than `SEMLITH_INDEX_MEMORY` reads shards back from disk on
   every query. The bound is the point — a corpus larger than memory is
   searchable at all — but if your store fits, raising the budget is free speed.
@@ -548,4 +570,6 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Note that semlith downloads embedding model weights at runtime; those are
 covered by their own licenses. The default,
 ibm-granite/granite-embedding-small-english-r2, is Apache-2.0, and the CLIP
-ViT-B/32 pair a store fetches once it holds an image carries its own too.
+ViT-B/32 pair a store fetches once it holds an image carries its own too. The
+WebGPU plugin is MIT, and the NVIDIA libraries the CUDA pack fetches from PyPI
+carry NVIDIA's licence; see [docs/models.md](docs/models.md).

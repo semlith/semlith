@@ -118,6 +118,10 @@ Module responsibilities:
 | `src/chunk.rs` | File bytes → text → chunks. Cut at definitions where tree-sitter found them and at headings in Markdown; 800 chars and 2 overlap lines are the fallback and the budget; 8 MiB cap |
 | `src/formats.rs` | Readers for the thirteen non-plain-text formats. Private on purpose |
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
+| `src/accel.rs` | The lanes: which are on, the per-lane dispatcher and its worker process (`semlith __embed-worker`), the length-framed protocol, fault injection, and the known-answer check behind `doctor --gpu` |
+| `src/gpu.rs` | GPU detection per platform, the software-renderer refusal, the pinned WebGPU plugin and fp16 downloads, and the WebGPU session a worker runs |
+| `src/cuda.rs` | NVML detection, the pinned CUDA pack (Linux x86_64) and the CUDA session a worker runs |
+| `src/priority.rs` | The daemon's priority following its work: background while idle, normal while anything embeds or a request is served |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
@@ -637,10 +641,23 @@ relaxation without an issue like
   GitHub, but only in the second a user asks: there is no startup check, no
   timer, and no banner that appears without a click. `semlith add` is the same
   shape from 0.11.0 — one request, for one URL, because somebody asked for it,
-  with no crawling and no re-fetching. The other downloads are all model
-  weights: the embedding model, once, on first index; `semlith setup`'s
-  pre-fetch of the same file; and CLIP's two halves, on the first image a store
-  indexes and never at start — `--airgap` refuses all of it, naming the model it
+  with no crawling and no re-fetching. The other downloads are model weights
+  and the pinned components the accelerator lanes run on:
+  - the embedding model, once, on the first index, and `semlith setup`'s
+    pre-fetch of the same file;
+  - CLIP's two halves, on the first image a store indexes and never at start;
+  - from 0.28.0, the WebGPU plugin (Microsoft's `onnxruntime-ep-webgpu` wheel,
+    from PyPI's `files.pythonhosted.org`) and the fp16 export of the embedding
+    model (Hugging Face, at the same pinned commit). They are fetched on the
+    first run in a daemon that has found a hardware GPU with the GPU lane on,
+    and never on a machine whose only adapter is a software renderer;
+  - from 0.28.0, the CUDA pack (ONNX Runtime's GPU build from GitHub, and
+    NVIDIA's CUDA libraries from their PyPI wheels). It is fetched only after
+    somebody turns CUDA on with `semlith accel on cuda` or the switch on the
+    page, and its size is stated before the download starts.
+
+  Every one of them is pinned by digest in `docs/models.md`. `--airgap` refuses
+  all of them unless they were pre-seeded into the model cache, naming what it
   would have fetched.
 
 Discuss in an issue before building: any other bind address, hosted embedding
@@ -671,6 +688,24 @@ computed: it renders the stanzas `src/clients.rs` parses out of
 `docs/clients.md`, so a change to that page is usually a change to that file.
 `docs/portal.md` documents every page, and a new one belongs there in the same
 release.
+
+## What CI runs, and when
+
+`ci.yml` runs `check` (fmt, clippy, the offline suite, on three OSes), `msrv`
+and `scripts` on every push. Everything slower waits on the `changes` job,
+which runs `.github/changes.sh`: a push that touched only prose (top-level or
+`.github/` Markdown, `docs/`, `assets/`, the licence files) skips `gpu`, `cuda`,
+`release-suites` and `mixed-vectors`, and so does a draft pull request until it
+is marked ready. A push is compared with the previous head only when this
+workflow's run on that head finished green; otherwise the whole pull request is
+compared with its base, so a cancelled run never lets code through untested.
+`release-suites` runs each slow test on its own macOS runner and
+`mixed-vectors` each of its three runs on its own runner, with
+`mixed-vectors-median` writing the table. `native-smoke.yml` builds the binary
+once per OS, then runs the portal check, the smoke harness and the browser drive
+as three jobs side by side, each installing that build through
+`.github/actions/install-semlith`. The models are cached per digest; the GPU
+lane's downloads never are, because a no-GPU runner asserts it fetched none.
 
 ## Release
 
@@ -713,6 +748,14 @@ makes this set reviewable is being able to read the whole of it at once.
 | Where | Call | Why it is sound |
 |---|---|---|
 | `embed::performance_cores` | `libc::sysctlbyname` | A NUL-terminated C string, and an `i32` whose size the call is told and will not exceed. macOS only. |
+| `embed::performance_cores` (windows) | `GetSystemCpuSetInformation`, `ptr::read_unaligned`, a union field read | Called first with a null buffer of length zero, which only writes the size it needs into a live `u32`; then with a `Vec<u8>` of exactly that length, which the call is told and will not exceed. Each entry is read unaligned only while it fits inside the bytes the call wrote, the walk advances by the entry's own `Size` and stops if that is zero, and `CpuSet.EfficiencyClass` is read only when `Type` is `CpuSetInformation`. Every field is an integer, so any bytes are a valid value. Windows only. |
+| `priority::platform::set` (macOS) | `libc::setpriority(PRIO_DARWIN_PROCESS, 0, …)` | Plain integers; `who` 0 names this process. Nothing is read back through a pointer. macOS only. |
+| `priority::platform::set` (windows) | `GetCurrentProcess`, `SetPriorityClass`, `SetProcessInformation(ProcessPowerThrottling)` | The pseudo-handle for this process needs no closing, and the `PROCESS_POWER_THROTTLING_STATE` is passed with its own size, which is the documented contract. A build without power throttling fails the second call, and the class alone is the switch. Windows only. |
+| `cuda::record` (Linux) | `libc::dlopen`/`dlsym`/`dlclose`, `mem::transmute_copy`, `nvmlInit_v2`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`, `nvmlDeviceGetName`, `nvmlDeviceGetMemoryInfo`, `nvmlSystemGetDriverVersion`, `nvmlShutdown` | Each symbol is looked up by a NUL-terminated name and transmuted to the signature in nvml.h only when it is non-null; a size assert checks it is pointer-sized. Every out-parameter is a live local of the size NVML is told: 96 bytes for the name, 80 for the driver version, three `u64`s for `nvmlMemory_t`. The device handle is used only between init and shutdown, and the library is closed after shutdown. The strings are read with `CStr::from_bytes_until_nul`, so nothing reads past the buffer. |
+| `cuda::load` (Linux) | `libc::dlopen(RTLD_NOW\|RTLD_GLOBAL)`, `libc::dlerror` | Each path is a `CString` that outlives the call. Handles are deliberately never closed, because the libraries must live as long as the worker process. `dlerror` is read on the same thread straight after the failure, null-checked, and copied. |
+| `cuda::append_cuda` | `CreateCUDAProviderOptions`, `SessionOptionsAppendExecutionProvider_CUDA_V2`, `ReleaseCUDAProviderOptions`, `GetErrorMessage`, `ReleaseStatus` | The options pointer is a live out-pointer that ORT fills and owns. It is released exactly once, whatever the append answered. The session-options pointer is the builder's own and is valid while the builder is. A non-null status has its message copied before it is released once. |
+| `gpu::GpuSession::open` | `ort::api().HardwareDevice_VendorId` | The device pointer is one ORT handed out for this environment, alive as long as the environment, and the call only reads it. |
+| `gpu::platform::detect` (Linux) | `libc::dlopen`/`dlclose` of `libvulkan.so.1` | A NUL-terminated name; the handle is closed straight away and nothing is looked up through it. |
 | `embed::check_cache_dir` | `libc::getuid` | Reads this process's own uid and cannot fail. |
 | `system::sysctl` | `libc::sysctlbyname` | A NUL-terminated C string, and a `u64` whose size the call is told and will not exceed. macOS only. |
 | `system::macos_available_mb` | `libc::host_statistics64`, `libc::mach_host_self`, `libc::sysconf`, `mem::zeroed` | The struct is zeroed and its size passed as a count the call will not exceed; the host port is this process's own and is not retained. `mach_host_self` is deprecated in libc 0.2 in favour of the `mach2` crate, which is a dependency this release does not take for three lines — the deprecation is allowed at the call with its reason. macOS only. |
@@ -723,6 +766,9 @@ makes this set reviewable is being able to read the whole of it at once.
 | `watch::on_signal` | `libc::signal` | Installs and restores a handler that only stores into an `AtomicBool`, which is what an async-signal-safe handler may do. |
 | `main::quiet_on_a_closed_pipe` | `libc::signal` | Restores `SIGPIPE` to `SIG_DFL` — the disposition the process would have had if the Rust runtime had not changed it — once, at the top of `main`, before any thread is spawned and before anything is printed. unix only. |
 | `main`'s `--airgap` | `std::env::set_var` | Before any thread is spawned. |
+| `tests/system_reading.rs` (windows) | `GlobalMemoryStatusEx` | As `system::platform`: a zeroed `MEMORYSTATUSEX` with `dwLength` set to its own size. Windows only. |
+| `tests/cuda.rs` (Linux x86_64), `accel::tests` | `std::env::set_var`/`remove_var` | Only that test in its binary reads the variable, and it is removed straight after. |
+| `tests/index_failure.rs`, `tests/priority.rs` | `std::env::set_var` | The fault variable is read only by the index pass the same test runs on its own thread, and removed afterwards. |
 | Test helpers in `embed`, `home`, `setup`, `upgrade` | `std::env::set_var` | Each guarded by a mutex that every test reading the variable also takes, and each restores what was there. |
 
 None of them holds a raw pointer across a call, and none is on a path that runs

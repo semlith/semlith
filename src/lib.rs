@@ -15,6 +15,7 @@
 //! A search quantizes the query, gets ids back from the index, then resolves
 //! them to text with one SQLite lookup each.
 
+pub mod accel;
 pub mod add;
 pub mod agentfiles;
 pub mod brief;
@@ -22,6 +23,7 @@ pub mod chunk;
 pub mod clientfile;
 pub mod clients;
 pub mod clock;
+pub mod cuda;
 pub mod daemon;
 pub mod doctor;
 pub mod embed;
@@ -30,6 +32,7 @@ pub mod fleet;
 /// Readers for the formats that are not plain text. Private: what semlith
 /// extracts from a given document is documented behaviour, not an API.
 mod formats;
+pub mod gpu;
 pub mod graph;
 pub mod home;
 pub mod hook;
@@ -41,6 +44,7 @@ pub mod lock;
 pub mod mcp;
 pub mod pattern;
 pub mod portal;
+pub mod priority;
 pub mod proxy;
 pub mod replay;
 pub mod report;
@@ -78,6 +82,38 @@ const BIT_WIDTH: usize = 4;
 /// 1799 MB — 2.9x the memory for no throughput at all (23.2 against 23.3
 /// chunks/sec), because a smaller batch also wastes less of itself on padding.
 const EMBED_BATCH: usize = 8;
+
+/// Batches a GPU lane holds queued at once, so its device never waits on the
+/// writer's own CPU batch to be handed the next one.
+const LANE_DEPTH: usize = 2;
+
+/// Told after every embedding batch: chunks embedded, the session's thread
+/// count, and each lane's running total for the store.
+type Tick<'a> = dyn FnMut(usize, usize, &std::collections::BTreeMap<String, usize>) + 'a;
+
+/// Embed each window in walk order rather than by length: the unsorted path
+/// the length-sorted window is measured against.
+const UNSORTED_ENV: &str = "SEMLITH_UNSORTED";
+
+/// The meta row counting a store's chunks per vector variant.
+const VARIANTS_KEY: &str = "variants";
+
+/// Embedding sessions writers hold in this process, for `/api/about`.
+static SESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many writer embedding sessions are loaded in this process.
+pub fn writer_sessions() -> usize {
+    SESSIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Chunks an index pass holds before it embeds them, sorted by length.
+///
+/// A batch pads every text to its longest, and the pass used to flush eight
+/// chunks in file order — so one long chunk made seven short ones pay for its
+/// length. Holding sixty-four and embedding them shortest first measured 19.5
+/// to 29.1 chunks/s on the reference M1, CPU alone, median of three. Formed in
+/// walk order and sorted stably, so a corpus always produces the same batches.
+const SORT_WINDOW: usize = 64;
 
 /// Default model: 384-dim, ~52 MB on disk. Measured against the previous
 /// default (BGE-small) on a 6260-chunk corpus it scored 16.00 code MRR@10
@@ -652,6 +688,10 @@ pub enum FileOutcome {
     /// one corrupt PNG in a tree of ten thousand files used to end the whole
     /// run, which is the defect this release exists to fix.
     Failed,
+    /// Not a verdict: a batch of the file in hand has been embedded. Said per
+    /// batch so a file of thousands of chunks moves the counters, the rate
+    /// and the thread count as it goes rather than all at once at its end.
+    Progress,
 }
 
 impl FileOutcome {
@@ -665,6 +705,7 @@ impl FileOutcome {
             Self::Removed => "removed",
             Self::Refused => "refused",
             Self::Failed => "failed",
+            Self::Progress => "progress",
         }
     }
 }
@@ -861,6 +902,12 @@ pub struct IndexProgress {
     /// message and the decoder's own message are the useful part and neither
     /// is drawn from a set semlith controls.
     pub why: Option<String>,
+    /// The intra-op thread count the run's session was built with, once it
+    /// has one. What the run card shows, because a saved setting is a request
+    /// and this is what the engine is doing.
+    pub threads: usize,
+    /// Chunks each lane has embedded for this store: `cpu`, `gpu`, `cuda`.
+    pub lanes: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -931,6 +978,15 @@ pub struct IndexReport {
     pub images: usize,
     /// Whether the run was stopped rather than finished.
     pub stopped: bool,
+    /// The intra-op thread count the session ran with at the end of this
+    /// call, or 0 when nothing was embedded.
+    pub threads: usize,
+    /// Chunks embedded so far in this call, counted per batch. `chunks` counts
+    /// finished files, so it stands still through a large one; this does not.
+    pub embedded: usize,
+    /// Chunks each lane has embedded for this store, since it was opened.
+    #[serde(skip)]
+    pub lanes: std::collections::BTreeMap<String, usize>,
     /// Every file this call embedded, in order. The caller keeps these across
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
@@ -969,10 +1025,12 @@ fn say_file(
             outcome,
             scanned: report.scanned,
             indexed: report.indexed,
-            chunks: report.chunks,
+            chunks: report.embedded.max(report.chunks),
             total,
             symbols: report.symbols,
             why,
+            threads: report.threads,
+            lanes: report.lanes.clone(),
         },
     );
 }
@@ -995,6 +1053,42 @@ fn skip(report: &mut IndexReport, why: &SkipReason) {
 /// `{e:#}` rather than `{e}` so the decoder's own message survives the
 /// `anyhow` context above it. "failed to embed image" alone is not a reason,
 /// and the reason is the point of the line.
+/// Names a file whose reader should panic, so the containment below can be
+/// proved on every runner without a real reader bug to lean on. Read only here.
+pub const FAULT_PANIC_ENV: &str = "SEMLITH_FAULT_PANIC";
+
+fn fault_panic(path: &Path) {
+    if let Ok(name) = std::env::var(FAULT_PANIC_ENV)
+        && path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == name)
+    {
+        panic!("{FAULT_PANIC_ENV} names {name}");
+    }
+}
+
+impl Drop for Semlith {
+    fn drop(&mut self) {
+        self.release_embedder();
+    }
+}
+
+/// Run one file's reading, parsing or chunking with a panic caught.
+///
+/// Only work that has not written a row yet goes through here, so a panic
+/// leaves nothing half-done: the file is reported as failed, with the message,
+/// and the pass moves to the next one.
+fn contained<T>(work: impl FnOnce() -> T) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).map_err(|panic| {
+        let message = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        anyhow::anyhow!("the reader panicked on this file: {message}")
+    })
+}
+
 fn failed(report: &mut IndexReport, path: &Path, e: &anyhow::Error) {
     report
         .failed
@@ -1038,6 +1132,18 @@ pub enum Flow {
 /// resuming feels immediate, long enough that a paused run costs nothing.
 const PAUSE_TICK: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// Ask `control` until it says to go on. `false` for a stop. Inside a window a
+/// yield is a go: stepping aside happens between files, never inside one.
+fn hold(control: &dyn Fn() -> Flow) -> bool {
+    loop {
+        match control() {
+            Flow::Run | Flow::Yield => return true,
+            Flow::Pause => std::thread::sleep(PAUSE_TICK),
+            Flow::Stop => return false,
+        }
+    }
+}
+
 pub struct Semlith {
     dir: PathBuf,
     db: Connection,
@@ -1054,6 +1160,26 @@ pub struct Semlith {
     model: Model,
     dim: usize,
     embedder: Option<TextEmbedding>,
+    /// The intra-op thread count `embedder` was built with. A different value
+    /// in force rebuilds it at the next batch.
+    embedder_threads: usize,
+    /// The second session a `mix` harness run alternates with, batch by batch.
+    embedder_alt: Option<TextEmbedding>,
+    /// A query session of a variant other than the index pass's, for the
+    /// harness's mixed runs.
+    query_embedder: Option<TextEmbedding>,
+    /// Batches this store has embedded, which is what the alternation counts.
+    batches: u64,
+    /// The variant the last batch was embedded with.
+    last_variant: &'static str,
+    /// When this store last embedded anything, so a daemon can drop an idle
+    /// writer's session and the arena that comes with it.
+    last_embed: Option<std::time::Instant>,
+    /// The budget generation this store's indexes were last fitted to.
+    budget_generation: u64,
+    /// Chunks each lane embedded for this store since it was opened, which a
+    /// run card turns into a rate per lane.
+    lane_chunks: std::collections::BTreeMap<String, usize>,
     /// The embedder's own tokenizer, for counting rather than estimating.
     tokenizer: Option<tokenizers::Tokenizer>,
     /// CLIP's two encoders, loaded on the first image indexed or searched for.
@@ -1143,6 +1269,14 @@ impl Semlith {
             model,
             dim,
             embedder: None,
+            embedder_threads: 0,
+            embedder_alt: None,
+            query_embedder: None,
+            batches: 0,
+            last_variant: embed::Variant::Int8.name(),
+            last_embed: None,
+            budget_generation: index::budget_generation(),
+            lane_chunks: std::collections::BTreeMap::new(),
             tokenizer: None,
             clip: image::Clip::default(),
             generation,
@@ -1270,6 +1404,13 @@ impl Semlith {
     /// Loading the ONNX model costs a second or so, so it is deferred until a
     /// command actually needs to embed something.
     fn embedder(&mut self) -> Result<&mut TextEmbedding> {
+        // A session built with a thread count other than the one in force is
+        // rebuilt here, at a batch boundary, which is the only point a count
+        // saved on the page can reach a run already going.
+        let threads = embed::threads_in_force();
+        if self.embedder.is_some() && self.embedder_threads != threads {
+            self.release_embedder();
+        }
         if self.embedder.is_none() {
             // Cap the sequence length to what a chunk can actually produce.
             // The default 512-token window would let a pathologically dense
@@ -1281,9 +1422,68 @@ impl Semlith {
             // tokens with it, so it is loaded exactly when the model is and
             // never fetched on its own.
             self.tokenizer = self.model.tokenizer(&cache);
-            self.embedder = Some(self.model.load(cache, chunk::MAX_CHARS / 2, self.quiet)?);
+            let (variant, _) = embed::index_variant();
+            self.embedder = Some(self.model.load_variant(
+                cache,
+                chunk::MAX_CHARS / 2,
+                self.quiet,
+                threads,
+                variant,
+            )?);
+            self.embedder_threads = threads;
+            SESSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(self.embedder.as_mut().unwrap())
+    }
+
+    /// Drop the embedding session, its arena and its worker threads. The next
+    /// embed loads it again.
+    fn release_embedder(&mut self) {
+        if self.embedder.take().is_some() {
+            SESSIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.embedder_alt = None;
+        self.query_embedder = None;
+        self.clip = image::Clip::default();
+    }
+
+    /// Release the session if nothing has been embedded for `idle`.
+    ///
+    /// ONNX Runtime's arenas grow to the largest batch a session ever ran and
+    /// never shrink, so a writer that indexed once held its peak for the life
+    /// of the daemon: 5 392 MB across seven stores on an 8 GB machine,
+    /// measured 2026-09-23. A reload costs about a second, on a batch nobody
+    /// is waiting on.
+    pub fn release_if_idle(&mut self, idle: std::time::Duration) -> bool {
+        match self.last_embed {
+            Some(at) if self.embedder.is_some() && at.elapsed() >= idle => {
+                self.release_embedder();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The thread count this store's session was built with, or `None` while
+    /// no session is loaded.
+    pub fn embedder_threads(&self) -> Option<usize> {
+        self.embedder.as_ref().map(|_| self.embedder_threads)
+    }
+
+    /// Fit this store's indexes to the `MiB per store` in force, if it has
+    /// changed since they were last fitted. Cheap when it has not.
+    pub fn follow_budget(&mut self) {
+        let now = index::budget_generation();
+        if now != self.budget_generation {
+            self.budget_generation = now;
+            self.index.apply_budget();
+            self.images.apply_budget();
+        }
+    }
+
+    /// Shards of this store's text vectors in memory right now.
+    pub fn resident_shards(&self) -> usize {
+        self.index.resident_shards()
     }
 
     /// Pay the model-load and index-warmup cost up front, so the first query
@@ -1301,8 +1501,31 @@ impl Semlith {
     }
 
     fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        let mut out = self
-            .embedder()?
+        let _lifted = priority::embedding();
+        self.last_embed = Some(std::time::Instant::now());
+        self.embedder()?;
+        self.batches += 1;
+        // A `mix` run alternates variants by batch, deterministically, so a
+        // store holds both and the harness can measure what that costs.
+        let (main, alt) = embed::index_variant();
+        let use_alt = alt.is_some() && self.batches.is_multiple_of(2);
+        let session = if let (true, Some(variant)) = (use_alt, alt) {
+            if self.embedder_alt.is_none() {
+                self.embedder_alt = Some(self.model.load_variant(
+                    model_cache_dir()?,
+                    chunk::MAX_CHARS / 2,
+                    self.quiet,
+                    self.embedder_threads,
+                    variant,
+                )?);
+            }
+            self.last_variant = variant.name();
+            self.embedder_alt.as_mut().expect("loaded above")
+        } else {
+            self.last_variant = main.name();
+            self.embedder.as_mut().expect("loaded above")
+        };
+        let mut out = session
             .embed(texts, Some(EMBED_BATCH))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         for v in &mut out {
@@ -1467,6 +1690,11 @@ impl Semlith {
         control: Option<&dyn Fn() -> Flow>,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
+        // The whole pass, not only its embeds: reading, hashing and chunking
+        // between batches is the run's work too, and dropping to background
+        // for it would put the next batch behind the efficiency cores again.
+        let _lifted = priority::embedding();
+        let _writer = embed::writer();
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.
@@ -1847,10 +2075,10 @@ impl Semlith {
                 }
                 let file_id =
                     store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+                written.push(key.clone());
                 let image_id = store::insert_image(&self.db, file_id, width, height)?;
                 self.images.add(&vector, &[image_id as u64])?;
                 completed.push((file_id, hash));
-                written.push(key.clone());
                 report.indexed += 1;
                 report.images += 1;
                 continue;
@@ -1860,9 +2088,28 @@ impl Semlith {
             // no reason, no counter movement — so a tree of binaries left the
             // portal's progress bar short of its own total with no line
             // saying why.
-            let text = match chunk::extract(&path, &bytes) {
-                Ok(text) => text,
-                Err(why) => {
+            // A reader that panics on one file's bytes is that file's failure.
+            // Before 0.28.0 the panic unwound the store's writer thread, the
+            // store stopped being kept current, and `/api/stores` went on
+            // saying it was watched.
+            let text = match contained(|| {
+                fault_panic(&path);
+                chunk::extract(&path, &bytes)
+            }) {
+                Err(e) => {
+                    failed(&mut report, &path, &e);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Failed,
+                        Some(format!("{e:#}")),
+                    );
+                    continue;
+                }
+                Ok(Ok(text)) => text,
+                Ok(Err(why)) => {
                     skip(&mut report, &why);
                     say_file(
                         &mut on_file,
@@ -1922,7 +2169,7 @@ impl Semlith {
             // nothing to undo and the shared pending batch is never left
             // holding an id whose row was rolled back.
             //
-            let extraction = match graph::extract(&path, &text) {
+            let extraction = match contained(|| graph::extract(&path, &text)).and_then(|r| r) {
                 Ok(extraction) => extraction,
                 Err(e) => {
                     failed(&mut report, &path, &e);
@@ -1938,11 +2185,27 @@ impl Semlith {
                 }
             };
 
-            let chunks = chunk::chunk_file(
-                &path,
-                &text,
-                extraction.as_ref().map_or(&[][..], |e| &e.symbols),
-            );
+            let chunks = match contained(|| {
+                chunk::chunk_file(
+                    &path,
+                    &text,
+                    extraction.as_ref().map_or(&[][..], |e| &e.symbols),
+                )
+            }) {
+                Ok(chunks) => chunks,
+                Err(e) => {
+                    failed(&mut report, &path, &e);
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Failed,
+                        Some(format!("{e:#}")),
+                    );
+                    continue;
+                }
+            };
             if chunks.is_empty() {
                 let why = SkipReason::NoText;
                 skip(&mut report, &why);
@@ -1972,6 +2235,10 @@ impl Semlith {
             }
 
             let file_id = store::insert_file(&self.db, &key, PENDING, bytes.len() as u64, now())?;
+            // Written down the moment it has a row, not when it is finished:
+            // a stop can now land inside a file, and the undo has to take the
+            // half-embedded file out along with the finished ones.
+            written.push(key.clone());
             // What the parser made of this file, recorded now because it
             // cannot be told afterwards: a file whose parse expired and a file
             // whose language has no grammar both leave no symbols behind, and
@@ -1983,6 +2250,7 @@ impl Semlith {
             };
             store::set_file_graph(&self.db, file_id, parsed)?;
             let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
+            let mut halted = false;
             for (ord, c) in chunks.iter().enumerate() {
                 let id =
                     store::insert_chunk(&self.db, file_id, ord, c.start_line, c.end_line, &c.text)?;
@@ -1990,13 +2258,38 @@ impl Semlith {
                 pending.ids.push(id as u64);
                 pending.texts.push(c.embedded());
 
-                // Flush per chunk, not per file. One 8 MB file chunks into
-                // thousands of pieces, and holding them all to embed in a
-                // single call makes peak memory a function of the largest file
-                // in the corpus rather than of the batch size.
-                if pending.ids.len() >= EMBED_BATCH {
-                    self.flush(&mut pending)?;
+                // Flushed by the window, not per file. One 8 MB file chunks
+                // into thousands of pieces, and holding them all to embed in a
+                // single call makes peak memory a function of the largest
+                // file in the corpus rather than of the window.
+                if pending.ids.len() >= SORT_WINDOW
+                    && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
+                        report.embedded += n;
+                        report.threads = threads;
+                        report.lanes = lanes.clone();
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Progress,
+                            None,
+                        );
+                    })?
+                {
+                    halted = true;
+                    break;
                 }
+            }
+            report.threads = self.embedder_threads;
+            report.lanes = self.lane_chunks.clone();
+            if halted {
+                // Stopped inside this file. Its rows are in `written`, so the
+                // caller's undo takes it out with everything else; nothing of
+                // it is finished, so nothing of it is counted or committed.
+                report.remaining = total - seen;
+                report.stopped = true;
+                break;
             }
 
             // The structure half, on the same changed-file path and inside the
@@ -2009,7 +2302,6 @@ impl Semlith {
             report.edges += edges;
 
             completed.push((file_id, hash));
-            written.push(key.clone());
             report.indexed += 1;
             report.chunks += chunks.len();
 
@@ -2034,7 +2326,23 @@ impl Semlith {
                     FileOutcome::Writing,
                     Some("writing the index to disk".to_string()),
                 );
-                self.flush(&mut pending)?;
+                if !self.flush(&mut pending, control, &mut |n, threads, lanes| {
+                    report.embedded += n;
+                    report.threads = threads;
+                    report.lanes = lanes.clone();
+                    say_file(
+                        &mut on_file,
+                        &report,
+                        total,
+                        &path,
+                        FileOutcome::Progress,
+                        None,
+                    );
+                })? {
+                    report.remaining = total - seen - 1;
+                    report.stopped = true;
+                    break;
+                }
                 self.checkpoint(&mut completed)?;
                 since_checkpoint = 0;
                 say_file(
@@ -2048,7 +2356,16 @@ impl Semlith {
             }
         }
 
-        self.flush(&mut pending)?;
+        if !report.stopped
+            && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
+                report.embedded += n;
+                report.threads = threads;
+                report.lanes = lanes.clone();
+            })?
+        {
+            report.stopped = true;
+        }
+        report.threads = self.embedder_threads;
 
         // A stopped slice still commits what it embedded. Undoing is the
         // caller's, because one logical run is several slices and a stop has
@@ -2386,14 +2703,35 @@ impl Semlith {
         Ok(())
     }
 
-    fn flush(&mut self, batch: &mut Batch) -> Result<()> {
+    /// Embed the window, shortest first, asking `control` before every
+    /// batch. `false` when a stop was asked for, and then nothing of the
+    /// window reaches the index: its rows are the undo's to remove.
+    ///
+    /// Asked per batch rather than per file, because one file can be thousands
+    /// of chunks and a pause or stop that waited for the file's end took a
+    /// minute. A pause holds here with the window in memory; nothing is
+    /// half-committed, because a file's hash is written only after its last
+    /// chunk is durable, whichever batch that is.
+    fn flush(
+        &mut self,
+        batch: &mut Batch,
+        control: Option<&dyn Fn() -> Flow>,
+        tick: &mut Tick<'_>,
+    ) -> Result<bool> {
         if batch.ids.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         let ids = std::mem::take(&mut batch.ids);
         let texts = std::mem::take(&mut batch.texts);
 
-        let vectors = self.embed(texts)?;
+        // Loaded first so the tokenizer is there to sort by: the same count
+        // the model pads by, on every window including the first.
+        self.embedder()?;
+        self.follow_budget();
+        let order = self.length_order(&texts);
+        let Some(vectors) = self.embed_window(&texts, order, control, tick)? else {
+            return Ok(false);
+        };
         let flat: Vec<f32> = vectors.into_iter().flatten().collect();
         self.index.add(&flat, &ids)?;
         // The sidecar is written in the same breath as the codes, from the same
@@ -2401,7 +2739,194 @@ impl Semlith {
         // write it fails the index pass rather than leaving a store whose
         // rescoring silently reorders by a stale vector.
         self.exact.append(&flat, &ids)?;
-        Ok(())
+        Ok(true)
+    }
+
+    /// Embed a sorted window across every lane a run may use, asking
+    /// `control` before each batch. `None` when a stop was asked for.
+    ///
+    /// The CPU takes the shortest chunks from the front of the window and each
+    /// GPU lane the longest from the back, whenever it is free, so a faster
+    /// device ends up with a larger share without anything being tuned. A
+    /// batch a lane fails, or loses with its worker, goes back on the window
+    /// for another lane; the lane is marked failed with its reason and the
+    /// window completes with the same vectors a CPU-only pass would have
+    /// counted. With no lane but the CPU this is the loop it always was.
+    fn embed_window(
+        &mut self,
+        texts: &[String],
+        order: Vec<usize>,
+        control: Option<&dyn Fn() -> Flow>,
+        tick: &mut Tick<'_>,
+    ) -> Result<Option<Vec<Vec<f32>>>> {
+        let (mut lanes, mut cpu_on): (Vec<std::sync::Arc<accel::Lane>>, bool);
+        let mut vectors: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+        let mut waiting: std::collections::VecDeque<usize> = order.into();
+        type Answer = std::sync::mpsc::Receiver<std::result::Result<Vec<Vec<f32>>, String>>;
+        let mut flying: Vec<(std::sync::Arc<accel::Lane>, Vec<usize>, Answer)> = Vec::new();
+        let mut counts: Vec<(&'static str, usize)> = Vec::new();
+
+        loop {
+            if let Some(ask) = control
+                && !hold(ask)
+            {
+                return Ok(None);
+            }
+            // Read before every batch, so a switch reaches a run already
+            // going at its next batch rather than at its next window.
+            (lanes, cpu_on) = accel::for_run();
+            // Every lane with room takes the longest chunks left. A lane keeps
+            // [`LANE_DEPTH`] batches queued: the writer refills lanes only
+            // between its own CPU batches, and a GPU that had to wait for the
+            // CPU's batch to end before getting its next one sat idle for most
+            // of every CPU batch.
+            for lane in &lanes {
+                while !waiting.is_empty()
+                    && lane.usable()
+                    && flying
+                        .iter()
+                        .filter(|(l, _, _)| std::sync::Arc::ptr_eq(l, lane))
+                        .count()
+                        < LANE_DEPTH
+                {
+                    let take = lane.batch().min(waiting.len());
+                    let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_back()).collect();
+                    let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
+                    let answer = lane.submit(batch);
+                    flying.push((std::sync::Arc::clone(lane), group, answer));
+                }
+            }
+            // Whatever has come back.
+            let mut still = Vec::with_capacity(flying.len());
+            for (lane, group, answer) in flying.drain(..) {
+                match answer.try_recv() {
+                    Ok(Ok(got)) if got.len() == group.len() => {
+                        for (at, vector) in group.iter().zip(got) {
+                            vectors[*at] = vector;
+                        }
+                        counts.push((lane.variant(), group.len()));
+                        self.note_lane(lane.id, group.len());
+                        tick(group.len(), self.embedder_threads, &self.lane_chunks);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => still.push((lane, group, answer)),
+                    // Failed, lost, or the wrong shape: back on the window.
+                    _ => waiting.extend(group),
+                }
+            }
+            flying = still;
+
+            // The CPU's switch is honoured only while a GPU lane can carry the
+            // run; with none, the CPU is the fallback whatever it says.
+            let cpu = cpu_on || !lanes.iter().any(|lane| lane.usable());
+            if cpu && !waiting.is_empty() {
+                let take = EMBED_BATCH.min(waiting.len());
+                let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_front()).collect();
+                let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
+                for (at, vector) in group.iter().zip(self.embed(batch)?) {
+                    vectors[*at] = vector;
+                }
+                accel::count_cpu(group.len());
+                counts.push((self.last_variant, group.len()));
+                self.note_lane("cpu", group.len());
+                tick(group.len(), self.embedder_threads, &self.lane_chunks);
+                continue;
+            }
+            if waiting.is_empty() && flying.is_empty() {
+                break;
+            }
+            // Nothing for the CPU to do: wait a moment on the oldest batch out.
+            if !flying.is_empty() {
+                let (lane, group, answer) = flying.remove(0);
+                match answer.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(Ok(got)) if got.len() == group.len() => {
+                        for (at, vector) in group.iter().zip(got) {
+                            vectors[*at] = vector;
+                        }
+                        counts.push((lane.variant(), group.len()));
+                        self.note_lane(lane.id, group.len());
+                        tick(group.len(), self.embedder_threads, &self.lane_chunks);
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        flying.insert(0, (lane, group, answer))
+                    }
+                    _ => waiting.extend(group),
+                }
+            }
+        }
+        self.record_variants(&counts)?;
+        Ok(Some(vectors))
+    }
+
+    /// Count chunks one lane embedded in this pass, for the run card's rate
+    /// per lane.
+    fn note_lane(&mut self, lane: &'static str, chunks: usize) {
+        *self.lane_chunks.entry(lane.to_string()).or_default() += chunks;
+    }
+
+    /// Add this window's chunks to the store's count per vector variant.
+    ///
+    /// int8 on the CPU and fp16 on a GPU are two variants of one model, which
+    /// agree at cosine 0.987; a store holding both says how many of each, and
+    /// `stats` prints it. One meta row, which an older binary ignores.
+    fn record_variants(&self, counts: &[(&'static str, usize)]) -> Result<()> {
+        if counts.is_empty() {
+            return Ok(());
+        }
+        let mut variants: std::collections::BTreeMap<String, u64> =
+            store::get_meta(&self.db, VARIANTS_KEY)?
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+        for (variant, n) in counts {
+            *variants.entry((*variant).to_string()).or_default() += *n as u64;
+        }
+        store::set_meta(&self.db, VARIANTS_KEY, &serde_json::to_string(&variants)?)
+    }
+
+    /// Chunks this store holds per vector variant, where it has counted them.
+    pub fn variants(&self) -> std::collections::BTreeMap<String, u64> {
+        store::get_meta(&self.db, VARIANTS_KEY)
+            .ok()
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Positions of `texts`, shortest first by the model's own token count.
+    /// Stable, so equal lengths keep their walk order and a corpus always
+    /// produces the same batches.
+    fn length_order(&self, texts: &[String]) -> Vec<usize> {
+        let lengths: Vec<usize> = texts
+            .iter()
+            .map(|text| match &self.tokenizer {
+                Some(tokenizer) => tokenizer
+                    .encode(text.as_str(), false)
+                    .map(|e| e.len())
+                    .unwrap_or(text.len() / 4),
+                None => text.len() / 4,
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..texts.len()).collect();
+        // The comparison the sorted window was measured against. Not part of
+        // the documented environment.
+        if std::env::var_os(UNSORTED_ENV).is_none() {
+            order.sort_by_key(|i| lengths[*i]);
+        }
+        order
+    }
+
+    /// Take a stopped run's files out of the store, and write the index once.
+    ///
+    /// Before 0.28.0 the undo called `forget_held` per file, and each call
+    /// rewrote the whole index, so undoing a large run took as long as making
+    /// it. Returns how many files were taken out.
+    pub(crate) fn undo_held(&mut self, keys: &[String]) -> Result<usize> {
+        self.writing(|me| {
+            for key in keys {
+                me.evict(key)?;
+            }
+            me.save()?;
+            Ok(keys.len())
+        })
     }
 
     /// Remove a single file from the store. Returns `(chunks, images)`.
@@ -2639,7 +3164,33 @@ impl Semlith {
     /// finish — and under int8 quantisation that moves a ranking, which is
     /// noise in a measurement that is about something else.
     pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
-        Ok(self.embed(vec![self.model.query_text(query)])?.remove(0))
+        let text = self.model.query_text(query);
+        let wanted = embed::query_variant();
+        // A query is always embedded by the query variant, never by an index
+        // pass's alternation: a mixed store is searched with int8 queries
+        // unless the harness asks for another, which is item 1.16's design.
+        if embed::index_variant() == (wanted, None) {
+            return Ok(self.embed(vec![text])?.remove(0));
+        }
+        let _lifted = priority::embedding();
+        if self.query_embedder.is_none() {
+            self.query_embedder = Some(self.model.load_variant(
+                model_cache_dir()?,
+                chunk::MAX_CHARS / 2,
+                self.quiet,
+                embed::embed_threads(),
+                wanted,
+            )?);
+        }
+        let mut out = self
+            .query_embedder
+            .as_mut()
+            .expect("loaded above")
+            .embed(vec![text], Some(1))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut vector = out.remove(0);
+        normalize(&mut vector);
+        Ok(vector)
     }
 
     /// [`Semlith::search_filtered`] with the query already embedded.

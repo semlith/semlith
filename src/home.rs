@@ -230,6 +230,9 @@ pub struct Settings {
     /// so nothing reads them until somebody says so on the Privacy page.
     #[serde(default)]
     pub session_replay: Option<bool>,
+    /// The CPU, GPU and CUDA switches. Absent means CPU and GPU on, CUDA off.
+    #[serde(default)]
+    pub accelerators: crate::accel::Switches,
 }
 
 impl Settings {
@@ -257,7 +260,7 @@ impl Settings {
         let path = settings_path()?;
         let dir = path.parent().unwrap_or(Path::new("."));
         secure_dir(dir).with_context(|| format!("creating the store home {}", dir.display()))?;
-        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
+        let temp = path.with_extension(unique_temp_suffix());
         let body = serde_json::to_string_pretty(self)? + "\n";
         write_private(&temp, body.as_bytes())
             .with_context(|| format!("writing {}", temp.display()))?;
@@ -267,6 +270,19 @@ impl Settings {
         }
         Ok(())
     }
+}
+
+/// A temporary file suffix no other writer in this process or any other is
+/// using. The pid alone was shared by every thread of a daemon, so two routes
+/// saving at once wrote one temporary file and renamed each other's half
+/// (issue #132).
+fn unique_temp_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "json.{}.{}.new",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 /// Where the agent key lives.
@@ -566,7 +582,7 @@ impl Registry {
         // for every process on the machine, so two semliths saving at once
         // wrote the same temporary file and one of them renamed the other's
         // half-written bytes into place.
-        let temp = path.with_extension(format!("json.{}.new", std::process::id()));
+        let temp = path.with_extension(unique_temp_suffix());
         let body = serde_json::to_string_pretty(self)? + "\n";
         write_private(&temp, body.as_bytes())
             .with_context(|| format!("writing {}", temp.display()))?;
@@ -1096,7 +1112,46 @@ pub fn delete_store(name: &str) -> Result<PathBuf> {
     }
     let dir = Registry::dir_of(name)?;
     if dir.exists() {
-        std::fs::remove_dir_all(&dir).with_context(|| format!("deleting {}", dir.display()))?;
+        // Renamed out of the way first, then removed. On Windows a directory
+        // with any handle still open inside it — a SQLite connection, a mapped
+        // shard — refuses the rename, and a refused rename has deleted
+        // nothing; `remove_dir_all` straight away would have taken whatever it
+        // reached first and left half a store. The retries cover handles that
+        // close a moment after their owner drops them.
+        let doomed = dir.with_file_name(format!(
+            ".{}.deleting-{}",
+            dir.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            std::process::id()
+        ));
+        let mut moved = std::fs::rename(&dir, &doomed);
+        for _ in 0..20 {
+            if moved.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            moved = std::fs::rename(&dir, &doomed);
+        }
+        moved.with_context(|| {
+            format!(
+                "{} is still in use, so nothing of it was deleted; stop whatever \
+                 else has it open and delete it again",
+                crate::plain(&dir.display().to_string())
+            )
+        })?;
+        // The store is gone from its name the moment the rename lands, so the
+        // registry follows it before the slow part.
+        registry.stores.remove(name);
+        registry.save()?;
+        std::fs::remove_dir_all(&doomed).with_context(|| {
+            format!(
+                "{} was taken out of the store home but could not be removed; \
+                 delete it by hand",
+                crate::plain(&doomed.display().to_string())
+            )
+        })?;
+        return Ok(dir);
     }
     registry.stores.remove(name);
     registry.save()?;

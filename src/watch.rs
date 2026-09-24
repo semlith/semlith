@@ -18,7 +18,8 @@
 
 use crate::{IndexReport, Semlith, canonical, lock, walk};
 use anyhow::{Context, Result};
-use notify::{RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,10 +127,30 @@ pub fn run(
         roots,
         debounce,
         stop,
-        &|| false,
+        Held {
+            catch_up: true,
+            waiting: &|| false,
+            defer: &|_| false,
+        },
         progress,
-        |_| Ok(()),
+        |_| Ok(Vec::new()),
     )
+}
+
+/// What a caller that owns the writer decides about the watcher's own work.
+pub struct Held<'a> {
+    /// Whether the watcher catches the store up itself when it starts.
+    /// `semlith watch` does; the daemon admits its catch-up as a run instead,
+    /// so the concurrency limit bounds it and the page shows it.
+    pub catch_up: bool,
+    /// Asked between files during the catch-up, so a request that arrives
+    /// while a cold store is being walked waits milliseconds rather than
+    /// minutes.
+    pub waiting: &'a dyn Fn() -> bool,
+    /// Offered each batch of events before it is indexed. `true` means the
+    /// caller has taken it — the daemon admits a large batch like a run — and
+    /// the watcher leaves it alone.
+    pub defer: &'a dyn Fn(&[PathBuf]) -> bool,
 }
 
 /// [`run`] for a caller that already holds the store's write lock and has work
@@ -144,16 +165,21 @@ pub fn run_held(
     roots: &[PathBuf],
     debounce: Duration,
     stop: &AtomicBool,
-    // Asked between files during the catch-up, so a request that arrives while
-    // a cold store is being walked waits milliseconds rather than minutes.
-    waiting: &dyn Fn() -> bool,
+    held: Held<'_>,
     mut progress: impl FnMut(Progress),
-    mut pump: impl FnMut(&mut Semlith) -> Result<()>,
+    mut pump: impl FnMut(&mut Semlith) -> Result<Vec<PathBuf>>,
 ) -> Result<()> {
     let roots: Vec<PathBuf> = roots.iter().map(|r| canonical(r)).collect();
 
     let (tx, rx) = mpsc::channel();
-    let mut watcher = notify::recommended_watcher(move |res| {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        // Dropped here, at the source, so every reader of `rx` sees changes
+        // only. See `is_change`.
+        if let Ok(event) = &res
+            && !is_change(&event.kind)
+        {
+            return;
+        }
         // A send failure means the loop is gone, which is a shutdown, not an
         // error worth reporting from inside the backend's thread.
         let _ = tx.send(res);
@@ -171,6 +197,7 @@ pub fn run_held(
     // and a hash per file, and nothing else.
     // Yielding keeps everything the pass already did: the loop below walks
     // again once the queue is empty, and an unchanged file costs a hash.
+    let waiting = held.waiting;
     let step_aside = || {
         // Shutdown counts as something waiting: a catch-up that only looked at
         // the queue kept the process alive until it had walked the whole tree.
@@ -180,9 +207,13 @@ pub fn run_held(
             crate::Flow::Run
         }
     };
-    let catch_up = store.index_walk_under(&roots, &step_aside, |path, _| {
-        progress(Progress::File(path))
-    })?;
+    let catch_up = if held.catch_up {
+        store.index_walk_under(&roots, &step_aside, |path, _| {
+            progress(Progress::File(path))
+        })?
+    } else {
+        IndexReport::default()
+    };
     let (files, chunks, _) = store.stats()?;
     let mut behind = catch_up.remaining > 0;
     progress(Progress::Ready {
@@ -195,20 +226,54 @@ pub fn run_held(
         // Before waiting on the filesystem, not after: a request that arrived
         // while the last batch was embedding should not sit for another idle
         // tick behind a tree nobody is editing.
-        if let Err(e) = pump(store) {
-            progress(Progress::Error(e.to_string()));
+        let stopped = match pump(store) {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                progress(Progress::Error(e.to_string()));
+                Vec::new()
+            }
+        };
+
+        // A run that was stopped owns the events that queued up while it held
+        // the writer: they are mostly its own corpus being written, and a stop
+        // means "leave it". Indexing them here re-embedded the very files the
+        // stop had just undone. Events already waiting for paths under the
+        // stopped run's roots are dropped; the rest are indexed as usual.
+        if !stopped.is_empty() {
+            let stopped: Vec<PathBuf> = stopped.iter().map(|r| canonical(r)).collect();
+            let mut waiting_events: BTreeSet<PathBuf> = BTreeSet::new();
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    Ok(event) => collect(&mut waiting_events, event.paths),
+                    Err(e) => progress(Progress::Error(e.to_string())),
+                }
+            }
+            waiting_events.retain(|path| !stopped.iter().any(|root| path.starts_with(root)));
+            let paths = admissible(&roots, waiting_events);
+            if !paths.is_empty() && !(held.defer)(&paths) {
+                let started = Instant::now();
+                let report =
+                    store.index_changed(paths, |path, p| progress(file_progress(path, &p)))?;
+                if report.indexed > 0 || report.removed > 0 {
+                    progress(Progress::Batch(report, started.elapsed()));
+                }
+            }
+            continue;
         }
 
         // Whatever the catch-up stepped aside from, once the queue is clear.
         // Without this a store that was interrupted would only finish catching
         // up when a file happened to change.
         if behind && !waiting() {
+            let started = Instant::now();
             let more = store.index_walk_under(&roots, &step_aside, |path, p| {
                 progress(file_progress(path, &p))
             })?;
             behind = more.remaining > 0;
             if more.indexed > 0 || more.removed > 0 {
-                progress(Progress::Batch(more, Duration::ZERO));
+                // Its real elapsed time. `Duration::ZERO` here printed every
+                // catch-up as "in 0.0s".
+                progress(Progress::Batch(more, started.elapsed()));
             }
             continue;
         }
@@ -228,7 +293,7 @@ pub fn run_held(
         drain(&rx, &mut batch, debounce, &mut progress);
 
         let paths = admissible(&roots, batch);
-        if paths.is_empty() {
+        if paths.is_empty() || (held.defer)(&paths) {
             continue;
         }
 
@@ -280,6 +345,22 @@ fn drain(
     }
 }
 
+/// Whether an event can mean a file's content changed.
+///
+/// Linux's inotify backend also reports opens (`IN_OPEN`), and the watcher's
+/// own reads are opens: hashing a file to see whether it changed, and walking
+/// the tree in `admissible`. Taking those as changes fed the loop its own
+/// reads back forever: an idle 1000-file tree was re-checked ~550 files a
+/// second, 3-6 s of CPU per idle minute on ubuntu against 0.01 s on macOS,
+/// whose FSEvents reports no opens. A close after writing is still a change;
+/// every other access is a read.
+fn is_change(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Access(access) => *access == AccessKind::Close(AccessMode::Write),
+        _ => true,
+    }
+}
+
 fn collect(batch: &mut BTreeSet<PathBuf>, paths: Vec<PathBuf>) {
     for path in paths {
         batch.insert(resolve(&path));
@@ -323,6 +404,24 @@ fn resolve(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An open is a read, and the watcher's own reads are opens: counting
+    /// them as changes is a loop that never goes idle on Linux.
+    #[test]
+    fn a_read_is_not_a_change() {
+        use notify::event::{CreateKind, ModifyKind};
+        assert!(!is_change(&EventKind::Access(AccessKind::Open(
+            AccessMode::Any
+        ))));
+        assert!(!is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Read
+        ))));
+        assert!(is_change(&EventKind::Access(AccessKind::Close(
+            AccessMode::Write
+        ))));
+        assert!(is_change(&EventKind::Modify(ModifyKind::Any)));
+        assert!(is_change(&EventKind::Create(CreateKind::File)));
+    }
 
     /// A deleted path must survive canonicalization, or a deletion event names
     /// a key the store has never heard of and the chunks stay forever.

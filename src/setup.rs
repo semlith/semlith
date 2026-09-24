@@ -1233,7 +1233,13 @@ fn step_service(wanted: bool) -> Result<Step> {
     // a service still pointing at a binary an upgrade moved is one that has to
     // be rewritten, which is the case this check must not swallow.
     let installed = crate::service::status();
-    if installed.installed && names_the_binary(&installed, binary.as_deref()) {
+    // A definition from before 0.28.0 names the right binary and still has to
+    // be rewritten: it asks for background priority, which the daemon cannot
+    // lift itself out of.
+    if installed.installed
+        && names_the_binary(&installed, binary.as_deref())
+        && crate::service::stale_definition().is_none()
+    {
         return Ok(Step {
             name: "service",
             state: State::AlreadyDone,

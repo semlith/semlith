@@ -123,6 +123,33 @@ impl Model {
         max_length: usize,
         quiet: bool,
     ) -> Result<TextEmbedding> {
+        self.load_with_threads(cache_dir, max_length, quiet, embed_threads())
+    }
+
+    /// [`Self::load`] with the intra-op thread count named, for a writer that
+    /// builds its session with the `threads each` value in force rather than
+    /// with the derived one.
+    pub fn load_with_threads(
+        &self,
+        cache_dir: PathBuf,
+        max_length: usize,
+        quiet: bool,
+        threads: usize,
+    ) -> Result<TextEmbedding> {
+        self.load_variant(cache_dir, max_length, quiet, threads, Variant::Int8)
+    }
+
+    /// [`Self::load_with_threads`] for one of granite's variants. A builtin
+    /// model has one and ignores the argument.
+    pub fn load_variant(
+        &self,
+        cache_dir: PathBuf,
+        max_length: usize,
+        quiet: bool,
+        threads: usize,
+        variant: Variant,
+    ) -> Result<TextEmbedding> {
+        let threads = threads.max(1);
         // Checked here, in the one place weights are ever fetched, rather than
         // at each call site: an airgapped machine's whole claim is that this
         // process cannot have been the one that reached the network, and a
@@ -141,13 +168,179 @@ impl Model {
                 let opts = TextInitOptions::new(m.clone())
                     .with_show_download_progress(!quiet)
                     .with_max_length(max_length)
-                    .with_intra_threads(embed_threads())
+                    .with_intra_threads(threads)
                     .with_cache_dir(cache_dir);
                 TextEmbedding::try_new(opts).map_err(|e| anyhow::anyhow!("{e}"))
             }
-            Model::Granite => load_granite(cache_dir, max_length, quiet),
+            Model::Granite => load_granite(cache_dir, max_length, quiet, threads, variant),
         }
     }
+}
+
+/// Which of granite's pinned exports a CPU session loads.
+///
+/// int8 is the default and the only one a store is built with unless asked:
+/// a quarter of fp32's download and faster on ARM. fp16 is what the GPU lanes
+/// run, and fp32 is what the known-answer fixture was made with. The CPU can
+/// load all three, which is how the retrieval harness measures a store holding
+/// a mix of them (item 1.16) on a machine with no GPU in the loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Variant {
+    Int8,
+    Fp16,
+    Fp32,
+}
+
+impl Variant {
+    /// The graph and its weights, each with the SHA-256 at [`GRANITE_REVISION`].
+    fn files(self) -> [(&'static str, &'static str); 2] {
+        match self {
+            Variant::Int8 => [GRANITE_FILES[4], GRANITE_FILES[5]],
+            Variant::Fp16 => [
+                (
+                    "onnx/model_fp16.onnx",
+                    "ee200de55cb2f94e858aabca54be7697a9c0805a14c858ee26ad0922b05f57d7",
+                ),
+                (
+                    "onnx/model_fp16.onnx_data",
+                    "28d16e29cd623f25cc6fa0968700c5bc31036466091a5fa06d1353c1777f050e",
+                ),
+            ],
+            Variant::Fp32 => [
+                (
+                    "onnx/model.onnx",
+                    "cddb145cd1147ec24a3908b2ca2602b98b20a3d198365cff270b7cb26c98179e",
+                ),
+                (
+                    "onnx/model.onnx_data",
+                    "86a3a705d4598615894d89540ea71a3d9bbdb17a315e79edcd5dfc737222834b",
+                ),
+            ],
+        }
+    }
+
+    /// What a store's variant counts call vectors this session made.
+    pub fn name(self) -> &'static str {
+        match self {
+            Variant::Int8 => "int8-cpu",
+            Variant::Fp16 => "fp16-cpu",
+            Variant::Fp32 => "fp32-cpu",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "int8" => Some(Variant::Int8),
+            "fp16" => Some(Variant::Fp16),
+            "fp32" => Some(Variant::Fp32),
+            _ => None,
+        }
+    }
+}
+
+/// The variant an index pass embeds with, and the second one a `mix`
+/// alternates with batch by batch. A harness knob, not part of the documented
+/// environment: `int8` (the default), `fp16`, `fp32` or `mix`.
+pub const VARIANT_ENV: &str = "SEMLITH_EMBED_VARIANT";
+
+/// The variant a query is embedded with. Also a harness knob.
+pub const QUERY_VARIANT_ENV: &str = "SEMLITH_QUERY_VARIANT";
+
+pub fn index_variant() -> (Variant, Option<Variant>) {
+    match std::env::var(VARIANT_ENV).ok().as_deref() {
+        Some("mix") => (Variant::Int8, Some(Variant::Fp16)),
+        Some(other) => (Variant::parse(other).unwrap_or(Variant::Int8), None),
+        None => (Variant::Int8, None),
+    }
+}
+
+pub fn query_variant() -> Variant {
+    std::env::var(QUERY_VARIANT_ENV)
+        .ok()
+        .and_then(|v| Variant::parse(&v))
+        .unwrap_or(Variant::Int8)
+}
+
+/// granite's tokenizer, prepared exactly as fastembed prepares it for the
+/// CPU session: padding to the batch's longest with the model's pad token,
+/// truncation at `max_length`, and the special tokens registered. The GPU
+/// lanes run ONNX Runtime directly, and a tokenizer set up any other way
+/// would give their vectors a different input from the CPU lane's.
+pub fn granite_tokenizer(cache_dir: &Path, max_length: usize) -> Result<tokenizers::Tokenizer> {
+    use tokenizers::{AddedToken, PaddingParams, PaddingStrategy, TruncationParams};
+    let dir = snapshot_dir(cache_dir, GRANITE_REPO, GRANITE_REVISION)
+        .context("granite is not cached yet; the CPU lane fetches it first")?;
+    let read = |name: &str| -> Result<Vec<u8>> {
+        let bytes = std::fs::read(dir.join(name)).with_context(|| format!("reading {name}"))?;
+        let expected = GRANITE_FILES
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, digest)| *digest)
+            .with_context(|| format!("{name} is not a file semlith pins"))?;
+        verify(name, &bytes, expected)?;
+        Ok(bytes)
+    };
+    let config: serde_json::Value = serde_json::from_slice(&read("config.json")?)?;
+    let special: serde_json::Value = serde_json::from_slice(&read("special_tokens_map.json")?)?;
+    let tokenizer_config: serde_json::Value =
+        serde_json::from_slice(&read("tokenizer_config.json")?)?;
+    let mut tokenizer = tokenizers::Tokenizer::from_bytes(read("tokenizer.json")?)
+        .map_err(|e| anyhow::anyhow!("reading the tokenizer: {e}"))?;
+    let model_max = tokenizer_config["model_max_length"]
+        .as_f64()
+        .unwrap_or(max_length as f64) as usize;
+    tokenizer
+        .with_padding(Some(PaddingParams {
+            strategy: PaddingStrategy::BatchLongest,
+            pad_token: tokenizer_config["pad_token"]
+                .as_str()
+                .unwrap_or("[PAD]")
+                .to_string(),
+            pad_id: config["pad_token_id"].as_u64().unwrap_or(0) as u32,
+            ..Default::default()
+        }))
+        .with_truncation(Some(TruncationParams {
+            max_length: max_length.min(model_max),
+            ..Default::default()
+        }))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if let serde_json::Value::Object(map) = special {
+        for value in map.values() {
+            let token = match value {
+                serde_json::Value::String(content) => AddedToken {
+                    content: content.clone(),
+                    special: true,
+                    ..Default::default()
+                },
+                serde_json::Value::Object(_) => match (
+                    value["content"].as_str(),
+                    value["single_word"].as_bool(),
+                    value["lstrip"].as_bool(),
+                    value["rstrip"].as_bool(),
+                    value["normalized"].as_bool(),
+                ) {
+                    (
+                        Some(content),
+                        Some(single_word),
+                        Some(lstrip),
+                        Some(rstrip),
+                        Some(normalized),
+                    ) => AddedToken {
+                        content: content.into(),
+                        special: true,
+                        single_word,
+                        lstrip,
+                        rstrip,
+                        normalized,
+                    },
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let _ = tokenizer.add_special_tokens([token]);
+        }
+    }
+    Ok(tokenizer)
 }
 
 /// Point ONNX Runtime at the library shipped beside this binary.
@@ -215,16 +408,34 @@ const RUNTIME_FILE: &str = if cfg!(target_os = "macos") {
     "libonnxruntime.so"
 };
 
-fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<TextEmbedding> {
+fn load_granite(
+    cache_dir: PathBuf,
+    max_length: usize,
+    quiet: bool,
+    threads: usize,
+    variant: Variant,
+) -> Result<TextEmbedding> {
     link_runtime()?;
     check_cache_dir(&cache_dir)?;
     let cache = cache_dir.clone();
+    // The tokenizer's four files and this variant's two. int8 keeps the stamp
+    // it always had, so no cache written before 0.28.0 is checked again.
+    let [graph, weights] = variant.files();
+    let files: Vec<(&str, &str)> = GRANITE_FILES[..4]
+        .iter()
+        .copied()
+        .chain([graph, weights])
+        .collect();
+    let stamp = match variant {
+        Variant::Int8 => STAMP.to_string(),
+        other => format!("{STAMP}-{}", other.name()),
+    };
 
     // Whether this cache has already been checked against this pin, with every
     // file still the size and age it was. Asked once here rather than per file,
     // because the answer is about the set.
     let checked = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION)
-        .is_some_and(|dir| already_verified(&dir, GRANITE_REVISION, GRANITE_FILES));
+        .is_some_and(|dir| already_verified_as(&dir, &stamp, GRANITE_REVISION, &files));
 
     // A revision rather than a branch. `main` is a name somebody else controls;
     // a commit is the bytes this release was built against.
@@ -250,7 +461,7 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
         // Verified whether it was just fetched or was already in the cache: a
         // cache is a directory on disk, and the point of a digest is that it
         // does not matter how the bytes got there.
-        let expected = GRANITE_FILES
+        let expected = files
             .iter()
             .find(|(file, _)| *file == name)
             .map(|(_, digest)| *digest)
@@ -268,41 +479,33 @@ fn load_granite(cache_dir: PathBuf, max_length: usize, quiet: bool) -> Result<Te
 
     // fastembed does not export ExternalInitializerFile, so the weights can
     // only be attached through this builder — a struct literal will not compile.
-    let model = UserDefinedEmbeddingModel::new(fetch(GRANITE_ONNX)?, tokenizer_files)
+    let model = UserDefinedEmbeddingModel::new(fetch(graph.0)?, tokenizer_files)
         // 1_Pooling/config.json in the source repo sets pooling_mode_cls_token.
         .with_pooling(Pooling::Cls)
         .with_external_initializer(
-            Path::new(GRANITE_WEIGHTS)
+            Path::new(weights.0)
                 .file_name()
                 .expect("weights constant has a file name")
                 .to_string_lossy()
                 .into_owned(),
-            fetch(GRANITE_WEIGHTS)?,
+            fetch(weights.0)?,
         );
 
     // Recorded after every file has been read and checked, and only when this
     // run did the checking — the fetch above may have created the snapshot
     // directory that did not exist when `checked` was read.
     if !checked && let Some(dir) = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION) {
-        record_verified(&dir, GRANITE_REVISION, GRANITE_FILES);
+        record_verified_as(&dir, &stamp, GRANITE_REVISION, &files);
     }
 
     let opts = InitOptionsUserDefined::new()
         .with_max_length(max_length)
-        .with_intra_threads(embed_threads());
+        .with_intra_threads(threads);
 
     TextEmbedding::try_new_from_user_defined(model, opts)
         .map_err(|e| anyhow::anyhow!("loading {GRANITE_NAME}: {e}"))
 }
 
-/// How many threads ONNX Runtime should use inside one operator.
-///
-/// ORT synchronises its threads at every operator boundary, so the slowest
-/// thread paces the whole batch. On a CPU with both performance and efficiency
-/// cores, a thread scheduled onto an efficiency core drags everything with it:
-/// measured on a 4P+4E M1, four threads indexed at 16.5 chunks/s while eight
-/// managed only 13.9, and one managed 5.1. Undersubscribing costs far more than
-/// oversubscribing, so only heterogeneous machines get a reduced count.
 /// Refuse to download model weights, so an air-gapped machine can prove this
 /// process never reached the network. Set by `--airgap` and readable directly.
 pub const AIRGAP_ENV: &str = "SEMLITH_AIRGAP";
@@ -494,6 +697,74 @@ pub fn verify_cached(
     Ok(())
 }
 
+/// The `threads each` value the daemon has in force, or 0 outside one.
+static THREADS_IN_FORCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Set the value an index run's session is built with. The daemon calls this
+/// at start and on every save of the setting; a writer whose session was built
+/// with a different count rebuilds it at its next batch.
+pub fn set_threads_in_force(threads: usize) {
+    THREADS_IN_FORCE.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Index passes embedding in this process right now.
+static WRITERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held for the length of an index pass, so a derived thread count can be
+/// split between the passes actually running rather than the most there
+/// could be.
+pub struct Writer(());
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        WRITERS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn writer() -> Writer {
+    WRITERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Writer(())
+}
+
+/// What an index run's session is built with: a count saved or set in the
+/// environment, else the derived count split between the passes running now.
+///
+/// Before 0.28.0 every session was built with [`embed_threads`], so the
+/// saved setting was shown on the page and never reached a session, and
+/// `semlith start` printed "1 embedder thread(s) each" while every session ran
+/// four. The first 0.28.0 build then split the derived count by `runs at
+/// once` whether or not the other runs existed, and a lone run in the daemon
+/// indexed at 54 % of the same run in a terminal on a four-core runner.
+pub fn threads_in_force() -> usize {
+    match THREADS_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => split_threads(WRITERS.load(std::sync::atomic::Ordering::Relaxed)),
+        n => n,
+    }
+}
+
+/// The derived count for `writers` passes at once: all of it for one, and for
+/// more, an equal share held inside the cores less one kept free.
+pub fn split_threads(writers: usize) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    split(embed_threads(), writers, cores)
+}
+
+fn split(all: usize, writers: usize, cores: usize) -> usize {
+    if writers <= 1 {
+        return all;
+    }
+    let budget = cores.saturating_sub(1).max(1);
+    (all / writers).clamp(1, (budget / writers).max(1))
+}
+
+/// How many threads ONNX Runtime should use inside one operator.
+///
+/// ORT synchronises its threads at every operator boundary, so the slowest
+/// thread paces the whole batch. On a CPU with both performance and efficiency
+/// cores, a thread scheduled onto an efficiency core drags everything with it:
+/// measured on a 4P+4E M1, four threads indexed at 16.5 chunks/s while eight
+/// managed only 13.9, and one managed 5.1. Undersubscribing costs far more than
+/// oversubscribing, so only heterogeneous machines get a reduced count.
 pub fn embed_threads() -> usize {
     if let Ok(raw) = std::env::var(THREADS_ENV)
         && let Ok(n) = raw.parse::<usize>()
@@ -508,8 +779,10 @@ pub fn embed_threads() -> usize {
     })
 }
 
-/// Performance-core count on Apple silicon. `None` everywhere else, where all
-/// cores are equal and the total is the right answer.
+/// Performance-core count on a hybrid CPU: Apple silicon's P-cores, and
+/// Intel's P-cores on Linux and Windows. `None` where every core is equal, or
+/// where the platform's answer is not one this recognises, and the caller then
+/// uses the total, which is the right answer on a symmetric machine.
 #[cfg(target_os = "macos")]
 fn performance_cores() -> Option<usize> {
     let mut out: i32 = 0;
@@ -529,9 +802,133 @@ fn performance_cores() -> Option<usize> {
     (rc == 0 && out > 0).then_some(out as usize)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The kernel registers a `cpu_core` PMU beside `cpu_atom` only on Intel hybrid
+/// parts, so the file existing is itself the test for a hybrid CPU; a symmetric
+/// machine has a plain `cpu` PMU and no such directory.
+#[cfg(target_os = "linux")]
+fn performance_cores() -> Option<usize> {
+    cpulist_len(&std::fs::read_to_string("/sys/devices/cpu_core/cpus").ok()?)
+}
+
+/// How many CPUs a kernel cpulist names: `0-15` is 16, `0-7,16-19` is 12.
+///
+/// Strict on purpose. A shape this does not know (a stride, a reversed range,
+/// an empty list) is `None`, and a wrong P-core count is worse than none: none
+/// falls back to every core, a wrong one starves or oversubscribes the pool.
+#[cfg(any(target_os = "linux", test))]
+fn cpulist_len(list: &str) -> Option<usize> {
+    let mut count = 0;
+    for part in list.trim().split(',') {
+        let (first, last) = part.split_once('-').unwrap_or((part, part));
+        let (first, last) = (first.parse::<usize>().ok()?, last.parse::<usize>().ok()?);
+        count += last.checked_sub(first)? + 1;
+    }
+    (count > 0).then_some(count)
+}
+
+/// Windows ranks cores by `EfficiencyClass`, higher meaning faster, and gives
+/// every core the same class on a symmetric CPU.
+#[cfg(windows)]
+fn performance_cores() -> Option<usize> {
+    use windows_sys::Win32::System::SystemInformation::{
+        CpuSetInformation, GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION,
+    };
+
+    let mut len = 0u32;
+    // SAFETY: a null buffer of length zero only asks for the size needed, which
+    // the call writes to len, a live u32. It fails by design here.
+    unsafe {
+        GetSystemCpuSetInformation(std::ptr::null_mut(), 0, &mut len, std::ptr::null_mut(), 0)
+    };
+    let mut buf = vec![0u8; len as usize];
+    // SAFETY: buf is live and exactly len bytes long, which is what the call is
+    // told; it writes no more than that and reports what it wrote in len.
+    let ok = unsafe {
+        GetSystemCpuSetInformation(
+            buf.as_mut_ptr().cast(),
+            len,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0;
+    if !ok || len as usize > buf.len() {
+        return None;
+    }
+
+    // Entries are variable-length, each led by its own size, so the walk goes by
+    // that field rather than by the struct's size.
+    let mut classes = Vec::new();
+    let mut at = 0;
+    let whole = std::mem::size_of::<SYSTEM_CPU_SET_INFORMATION>();
+    while at + whole <= len as usize {
+        // SAFETY: at + whole is inside the bytes the call wrote, read_unaligned
+        // needs no alignment, and every field is an integer, so any bytes are a
+        // valid value; the union is read as the CpuSet variant only when Type
+        // says that is what it holds.
+        let entry: SYSTEM_CPU_SET_INFORMATION =
+            unsafe { std::ptr::read_unaligned(buf.as_ptr().add(at).cast()) };
+        if entry.Size == 0 {
+            return None;
+        }
+        if entry.Type == CpuSetInformation {
+            // SAFETY: Type says the union holds CpuSet, and a u8 has no
+            // invalid values.
+            classes.push(unsafe { entry.Anonymous.CpuSet.EfficiencyClass });
+        }
+        at += entry.Size as usize;
+    }
+    fastest_class_len(&classes)
+}
+
+/// How many cores sit in the highest efficiency class, when there is more than
+/// one class. One class is a symmetric CPU, where the total is the answer.
+#[cfg(any(windows, test))]
+fn fastest_class_len(classes: &[u8]) -> Option<usize> {
+    let fastest = *classes.iter().max()?;
+    let count = classes.iter().filter(|c| **c == fastest).count();
+    (count < classes.len()).then_some(count)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn performance_cores() -> Option<usize> {
     None
+}
+
+#[cfg(test)]
+mod performance_cores_tests {
+    use super::*;
+
+    /// A 12th-gen Core i9-12900K as Linux lists it: 8 P-cores with two threads
+    /// each, then 8 E-cores in `cpu_atom`.
+    #[test]
+    fn a_hybrid_intel_cpulist_counts_its_performance_threads() {
+        assert_eq!(cpulist_len("0-15\n"), Some(16));
+        assert_eq!(cpulist_len("16-23\n"), Some(8));
+        assert_eq!(cpulist_len("0-7,16-19"), Some(12));
+        assert_eq!(cpulist_len("3"), Some(1));
+    }
+
+    #[test]
+    fn a_cpulist_this_does_not_know_is_none() {
+        for list in ["", "\n", "0-15:2/4", "15-0", "0-", "a-b", "0,,2"] {
+            assert_eq!(cpulist_len(list), None, "{list:?}");
+        }
+    }
+
+    /// Eight cores at class 1 and eight at class 0, as `GetSystemCpuSetInformation`
+    /// lists a hybrid part.
+    #[test]
+    fn two_efficiency_classes_count_the_higher() {
+        let classes = [[1u8; 8], [0u8; 8]].concat();
+        assert_eq!(fastest_class_len(&classes), Some(8));
+    }
+
+    #[test]
+    fn one_efficiency_class_is_a_symmetric_cpu() {
+        assert_eq!(fastest_class_len(&[0; 16]), None);
+        assert_eq!(fastest_class_len(&[]), None);
+    }
 }
 
 // ---------------------------------------------------------------- pinned weights
@@ -616,7 +1013,11 @@ fn fingerprint(path: &Path) -> Option<(u64, u128)> {
 
 /// Whether every pinned file was verified at this revision and has not moved.
 fn already_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) -> bool {
-    let Ok(text) = std::fs::read_to_string(dir.join(STAMP)) else {
+    already_verified_as(dir, STAMP, revision, files)
+}
+
+fn already_verified_as(dir: &Path, stamp: &str, revision: &str, files: &[(&str, &str)]) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join(stamp)) else {
         return false;
     };
     let Ok(stamp) = serde_json::from_str::<Verified>(&text) else {
@@ -638,6 +1039,10 @@ fn already_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) -> bool 
 
 /// Record that every pinned file has been checked, so the next process need not.
 fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
+    record_verified_as(dir, STAMP, revision, files)
+}
+
+fn record_verified_as(dir: &Path, stamp_name: &str, revision: &str, files: &[(&str, &str)]) {
     let mut stamp = Verified {
         revision: revision.to_string(),
         files: std::collections::BTreeMap::new(),
@@ -657,7 +1062,7 @@ fn record_verified(dir: &Path, revision: &str, files: &[(&str, &str)]) {
     };
     // Best effort: a cache that cannot be written to is one that gets verified
     // every time, which is slower and not wrong.
-    let _ = crate::home::write_private(&dir.join(STAMP), &body);
+    let _ = crate::home::write_private(&dir.join(stamp_name), &body);
 }
 
 /// The SHA-256 of some bytes, as lowercase hex.
@@ -772,6 +1177,20 @@ mod tests {
         assert_eq!(embed_threads(), 3);
         unsafe { std::env::remove_var(THREADS_ENV) };
         assert!(embed_threads() >= 1);
+    }
+
+    /// A run going alone gets every derived thread, as in a terminal; only
+    /// runs embedding at the same time share them.
+    #[test]
+    fn a_lone_writer_gets_every_derived_thread() {
+        assert_eq!(split(4, 0, 4), 4);
+        assert_eq!(split(4, 1, 4), 4, "a four-core runner, one run");
+        assert_eq!(split(4, 3, 8), 1, "the M1, three runs");
+        assert_eq!(split(4, 2, 8), 2);
+        for writers in 2..=8 {
+            let each = split(4, writers, 2);
+            assert!((1..=4).contains(&each), "{writers} writers got {each}");
+        }
     }
 
     /// The digest a store's content hashes and the upgrade checksum are built

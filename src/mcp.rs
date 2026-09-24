@@ -942,6 +942,12 @@ fn call_tool(
                     }
                     Err(e) => return Ok(tool_error(&format!("stats failed: {e}"))),
                 }
+                let variants = store.variants();
+                if !variants.is_empty() {
+                    let parts: Vec<String> =
+                        variants.iter().map(|(v, n)| format!("{n} {v}")).collect();
+                    body.push_str(&format!("\n  variants: {}", parts.join(", ")));
+                }
                 // One store answers exactly as it did before stores could be
                 // combined; a name in front of it would only cost tokens.
                 lines.push(if many {
@@ -950,6 +956,14 @@ fn call_tool(
                     body
                 });
             }
+            // The lanes that embed, once for the whole answer.
+            let on = crate::accel::enabled();
+            let lanes: Vec<&str> = [("cpu", on.cpu), ("gpu", on.gpu), ("cuda", on.cuda)]
+                .into_iter()
+                .filter(|(_, on)| *on)
+                .map(|(lane, _)| lane)
+                .collect();
+            lines.push(format!("embedding lanes on: {}", lanes.join(", ")));
             lines.join("\n")
         }
         "semlith_files" => {

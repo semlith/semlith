@@ -311,10 +311,20 @@ pub fn threads_for(machine: &Machine, runs: usize) -> Derivation {
     let runs = runs.max(1);
     let per_run = (core_budget / runs).max(1);
     let threads = (crate::embed::embed_threads() / runs).clamp(1, per_run);
+    // The split applies only while that many runs are embedding at once; a
+    // run going alone gets all of them, as it would in a terminal.
+    let alone = if runs > 1 {
+        format!(
+            ", and all {} for a run going alone",
+            crate::embed::embed_threads()
+        )
+    } else {
+        String::new()
+    };
     Derivation {
         value: threads,
         reason: format!(
-            "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each",
+            "{} embedding threads split between {} and held inside {core_budget} cores, so {threads} each{alone}",
             crate::embed::embed_threads(),
             runs_phrase(runs),
         ),
@@ -352,7 +362,7 @@ mod threads_tests {
     }
 }
 
-/// The index budget rises in two steps rather than continuously, because a/// The index budget rises in two steps rather than continuously, because a
+/// The index budget rises in two steps rather than continuously, because a
 /// figure a user can recognise is worth more here than a fitted curve.
 fn index_memory_mb(headroom_mb: u64) -> usize {
     let base = crate::index::INDEX_MEMORY_MB;
@@ -529,4 +539,40 @@ mod tests {
             meminfo_kb(&meminfo, "MemTotal") / 1024
         );
     }
+}
+
+/// This machine's processor, by name, for the CPU lane's row on the Machine
+/// limits card. A generic answer where the platform will not say.
+pub fn cpu_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+        {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(info) = std::fs::read_to_string("/proc/cpuinfo")
+            && let Some(name) = info
+                .lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+        {
+            return name;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(name) = std::env::var("PROCESSOR_IDENTIFIER") {
+            return name;
+        }
+    }
+    format!("{} CPU", std::env::consts::ARCH)
 }

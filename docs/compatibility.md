@@ -28,6 +28,8 @@ break, and is treated as one.
 | MCP tool arguments added in 0.19.0 | `semlith_pattern` takes `path`, an array of globs, and `offset`, an integer. Both are optional and both default to what 0.18.0 did, so a client that passes neither sees no change. |
 | `/api/report` arguments added in 0.27.0 | `window` — one of `all`, `day`, `week`, `month`, `quarter` — and `scope`, a repeatable store label. Both are optional. A request that names neither gets exactly what 0.26.x returned: every open store, and each report's own span (seven days for the change brief, everything for the rest). An unknown `window` is 400 and names the five; a `scope` no open store answers to is 400 and names the stores that are open. `semlith report` takes `--window` and `--scope` with the same meanings. |
 | Report formats from 0.27.0 | `markdown`, `csv`, `json`, `html` and `pdf`. The first four are unchanged, and `GET /api/report?format=<one of them>` still answers with the JSON envelope carrying the rendering as `text`. `format=pdf` answers with the PDF itself, `Content-Type: application/pdf`, because bytes cannot ride inside a JSON string; `semlith report --format pdf` needs `--out` for the same reason. The PDF is typeset from the same block structure the other four render, not a print of the HTML. |
+| CLI commands added in 0.28.0 | `accel [status \| on <lane> \| off <lane> \| remove <lane>]`, with `--json`, over the lanes `cpu`, `gpu` and `cuda`. `status` is the default. Refusals exit non-zero: the CPU turned off with no usable GPU lane, CUDA on a platform without it, or any switch while `SEMLITH_ACCEL` is set. `doctor --gpu`, with `--json`, which conflicts with `--fix` and `--brief`. It exits non-zero when any lane fails the known-answer check, and not for a lane that is unavailable. `__embed-worker` is hidden and is not part of the interface. |
+| Environment added in 0.28.0 | `SEMLITH_ACCEL` is a comma list of lanes, such as `cpu,gpu`. It sets which lanes are on and takes precedence over the saved switches, the same way the other limit variables do. A lane the list omits is off. `SEMLITH_SESSION_IDLE_SECS` sets how long a writer keeps an unused session, 60 by default. |
 | `~/.semlith/schedules.json` from 0.27.0 | Tool-written state, like `registry.json` and the lock file — not a configuration file, and not a promise. It is absent until a schedule is added, and its absence is the normal state rather than an error. A 0.26.x binary reads no such file and ignores one left behind. |
 | The portal's session credential | From 0.14.0, a `Semlith-Token` request header. A write additionally needs a JSON content type, and `Sec-Fetch-Site: same-origin` from any client that sends fetch metadata. The cookie is gone; see the break below. |
 | The MCP endpoint over HTTP | From 0.13.0, `POST /mcp` on the daemon's port, authenticated by an `Authorization: Bearer` header carrying the agent key from `~/.semlith/agent.key`. The path, the header and the key's location are a contract, because a client's configuration file names all three. The key opens `/mcp` and nothing else. |
@@ -1135,6 +1137,101 @@ a different chunk fourth and fifth, plus the graph list derived from them. An
 agent that already knows a term and is handed eight chunks that are not its
 definition goes back to grep, which is the behaviour this release exists to
 stop.
+
+## 0.28.0
+
+**Nothing that was covered breaks.** No command, flag, MCP tool or schema is
+removed or changes meaning. `FORMAT_VERSION` does not move. A 0.27.x store opens
+under 0.28.0, and a 0.27.x binary opens a store 0.28.0 wrote. What changes is
+additive, apart from two behaviours a script may have depended on, described
+below.
+
+### A new command, a new flag and a new variable
+
+`semlith accel` shows and sets the accelerator lanes, and `semlith doctor --gpu`
+checks them. Both are in the table above. Before checking a lane, `doctor --gpu`
+downloads the components the lane needs, as a run would. The command prints one
+row per lane: the device, the variant, the lowest cosine of the 32 fixture
+chunks against CPU fp32, and chunks/s. A lane with nothing to run on is printed
+as `n/a` with the reason. `--json` returns the same rows as an array of objects
+with the fields `lane`, `device`, `variant`, `cosine`, `chunks_per_s`, `passed`
+and `reason`.
+
+`SEMLITH_ACCEL` joins the three limit variables and takes precedence in the same
+way:
+
+| Setting | Variable | Field in `settings.json` |
+|---|---|---|
+| Which lanes embed | `SEMLITH_ACCEL` (new) | `accelerators`, an object with the optional booleans `cpu`, `gpu` and `cuda` |
+
+A missing field means the default: CPU on, GPU on, CUDA off. A 0.27.x binary
+reading a `settings.json` that contains `accelerators` ignores the key. The
+file is still tool-written state and is [not covered](#what-is-not-covered).
+
+### Two behaviours that changed
+
+**Saved limits are applied.** In 0.27.0 `embed_threads` and `index_memory_mb`
+were saved in `settings.json` and then not applied. In 0.28.0 they take effect:
+threads at each writer's next batch, and the memory budget on every open index
+at once. A value saved under 0.27.0 is therefore in force after the upgrade. A
+saved `embed_threads` of 1 limits every writer to one thread. `POST
+/api/index/settings` now replies with `applied`, a sentence giving the values
+the engine runs with.
+
+**Watcher catch-ups and large event batches are admitted.** Since 0.20.0 the
+watcher's own work bypassed *runs at once*. A catch-up, which walks every root
+when a store is opened, is now admitted like a run and appears in
+`/api/index/runs`. So does an event batch of more than 32 files. Batches of 32
+files or fewer still run straight away. A script that counted runs in that
+route sees runs it did not start. They have a `kind` other than `run`.
+
+### Route changes
+
+The daemon's routes are [not a contract](#what-is-not-covered). They are listed
+here because scripts read them anyway.
+
+| Route | What changes |
+|---|---|
+| `GET /api/accel` (new) | `lanes`: one object per lane with `lane`, `enabled`, `status` (an object whose `state` is `idle`, `starting`, `active`, `downloading` with a `percent`, or `unavailable` or `failed` with a `reason`), `device`, `variant`, `rate` in chunks/s over the last 10 s, and `share` as a percentage of the total rate. Also `source` (`default`, `saved` or `set by the environment`), `cpu_fallback` (true when the CPU is carrying the work although its switch is off), and `bytes`: what the `gpu` and `cuda` components take on disk, plus `cuda_download`, the size of the pack. |
+| `POST /api/accel` (new) | `{"lane": "cpu" \| "gpu" \| "cuda", "action": "on" \| "off" \| "remove"}`. Answers with the same body as the GET, plus `said`. A refusal is 409 with the reason. |
+| `POST /api/doctor/gpu` (new) | No body. Runs `semlith doctor --gpu`'s check on the daemon, and may download a lane's components first: `checks`, one object per lane with `lane`, `device`, `variant`, `cosine` (the minimum over the 32 fixture chunks), `chunks_per_s` and `passed`, or `lane`, `passed: false` and `reason` when the lane cannot run or is off. |
+| `GET /api/index/runs`, per run | `kind`: `run`, `catch-up` or `batch`. `files_before` and `chunks_before`: what the store held when the run started. `threads`: the intra-op thread count the run's session was built with, null until it has one. `rate`: chunks/s over the last 10 s of active time, null before the first batch and once the run has finished. `rate_average`: chunks/s since the first batch. `lane_rates`: chunks/s per lane, for example `{"cpu": 25.0, "gpu": 48.1}`. `delete`: null, or the sentence saying what became of the store when a stop was confirmed with the delete box ticked. `status` gains `pausing` and `held`. |
+| `GET /api/index/runs`, top level | `held`: the ids of runs held by a lowered *runs at once*, oldest first. A run whose stop deleted its store stays in the list after the live stores' runs until it is removed. |
+| `POST /api/index/control` | `stop` takes `"delete": true`, which removes the store after the undo, the same way `semlith drop` does. The reply carries `state` (`pausing`, `running` or `stopping`) and `deleting`. `pause` and `resume` answer with the requested state at once. The engine reaches that state at its next batch. |
+| `GET /api/about` | `priority`: `managed`, `state` (`background` or `normal`), `embedding` (the number of embed passes in progress), `switches` and `last_switch_us`. `sessions`: `writers`, the writer embedding sessions loaded, and `query`, the shared query sessions loaded. |
+| `GET /api/stores`, per store | `stopped_because`: why the store's writer ended, beside `watching: false`. |
+| `GET /api/privacy` | `downloads`: every download this binary can make, each with `what`, `source`, `bytes`, `when` and `cached`. |
+
+`held` and `pausing` are new values of a status field. A reader that switches
+on the values it knows and passes anything else through is unaffected.
+
+### `stats` gains a `variants` line, and the store gains one meta row
+
+A store now keeps, in a `variants` row of its `meta` table, how many chunks each
+variant of the model has embedded into it. The row is a JSON object such as
+`{"fp16-webgpu": 2210, "int8-cpu": 1904}`. It counts what was embedded, so a
+file that is later forgotten does not reduce it. `semlith stats` prints it as
+`variants 1904 int8-cpu, 2210 fp16-webgpu` when the row exists. `semlith_stats`
+prints the same per store, plus one `embedding lanes on:` line for the whole
+answer. A store that nothing has embedded into since the upgrade has no row,
+and neither line appears for it.
+
+An older binary does not read the `meta` keys it does not know, so a 0.27.x
+binary opening a store with this row ignores it. Its int8 queries search the
+fp16 vectors in that store, which agree with int8 vectors of the same text at
+cosine 0.987 (tested on the 2026-09-23 corpus). That is the only store change in
+this release.
+
+### The login service definition
+
+`semlith setup` and `semlith upgrade` rewrite a login service registered by an
+earlier release. On macOS the plist's `ProcessType` goes from `Background` to
+`Standard`. On Windows the logon task is registered with `-Priority 5`. The
+Linux unit is unchanged. `semlith doctor` prints `FAIL service priority` for a
+definition that has not been rewritten. An older binary started by a rewritten
+plist runs at normal priority the whole time. That is safe, but it does not
+drop to background when idle. Running that version's `setup` restores its own
+plist.
 
 ## What a break would look like
 
