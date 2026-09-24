@@ -1204,7 +1204,7 @@ hold_all_embedding() {
   # when they were not all embedding.
   rc_get /api/index/runs | jq -c '{running, r: [.runs[] | [.store, .kind, .status, .chunks]]}' >> "$rc_dir/hold-trace"
   [ "$(rc_get /api/index/runs | jq '.running' | tr -d '\r')" = 3 ] || return 1
-  for s in $(printf '%s' "$hold_stores" | jq -r '.[]'); do rc_embedding "$s" || return 1; done
+  for s in $(printf '%s' "$hold_stores" | jq -r '.[]' | tr -d '\r'); do rc_embedding "$s" || return 1; done
 }
 
 c_lower_limit_holds() {
@@ -1230,7 +1230,7 @@ c_lower_limit_holds() {
       rc_get /api/index/runs | jq -c '.runs[] | {store, status, chunks}'; return 1; }
   rc_until 900 eval '[ "$(hold_count done)" = 3 ]' ||
     { echo "the three runs did not all finish:"; rc_get /api/index/runs | jq -c '.runs[] | {store, status, chunks}'; return 1; }
-  counts=$(for s in $(printf '%s' "$hold_stores" | jq -r '.[]'); do rc_counts "$s"; done | sort -u)
+  counts=$(for s in $(printf '%s' "$hold_stores" | jq -r '.[]' | tr -d '\r'); do rc_counts "$s"; done | sort -u)
   [ "$(printf '%s\n' "$counts" | wc -l | tr -d ' ')" = 1 ] && [ "${counts#* }" != 0 ] ||
     { echo "three equal corpora, and the stores hold:"; printf '%s\n' "$counts"; return 1; }
 }
@@ -1248,7 +1248,10 @@ rc_stop
 # The service indexed at a fifth of the terminal's speed before 0.28.0, because
 # launchd ran it on the efficiency cores. The runners cannot supervise a login
 # service, so this is the same corpus through a `semlith start` daemon against
-# `semlith index` in the shell, wall clock both ways, median of three. On
+# `semlith index` in the shell, wall clock both ways. Each daemon run is paired
+# with the CLI run just before it and the median of the three ratios is what
+# is judged: a runner's speed drifts by a quarter between runs, which a
+# comparison of two medians taken minutes apart reads as the daemon. On
 # Windows the daemon is put below normal priority first, the way the logon task
 # starts it, so what is measured is its own lift.
 now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
@@ -1257,22 +1260,23 @@ median3() { printf '%s\n' "$@" | sort -n | sed -n 2p; }
 c_daemon_rate() {
   for i in 1 2 3; do
     mkdir -p "$rc_dir/cli-$i" "$rc_dir/served-$i"
-    rc_markdown "$rc_dir/cli-$i/corpus.md" 600
-    rc_markdown "$rc_dir/served-$i/corpus.md" 600
+    rc_markdown "$rc_dir/cli-$i/corpus.md" 1200
+    rc_markdown "$rc_dir/served-$i/corpus.md" 1200
   done
   if [ "$family" = windows ]; then
     winpid=$(cat "/proc/$rc_pid/winpid" 2>/dev/null)
     powershell -NoProfile -Command "(Get-Process -Id $winpid).PriorityClass = 'BelowNormal'" ||
       { echo "could not lower the daemon's priority"; return 1; }
   fi
-  cli="" served=""
+  cli="" served="" ratios=""
   for i in 1 2 3; do
     t=$(now_ms)
     SEMLITH_ACCEL=cpu semlith --store "$rc_dir/cli-store-$i" index "$(native_path "$rc_dir/cli-$i")" --quiet ||
       { echo "the CLI index failed"; return 1; }
     ms=$(( $(now_ms) - t ))
     chunks=$(semlith --store "$rc_dir/cli-store-$i" stats | awk '$1 == "chunks" {print $2}' | tr -d '\r')
-    cli="$cli $(( chunks * 1000000 / ms ))"
+    c=$(( chunks * 1000000 / ms ))
+    cli="$cli $c"
 
     t=$(now_ms)
     s=$(rc_index "$rc_dir/served-$i")
@@ -1282,13 +1286,14 @@ c_daemon_rate() {
     [ "$(rc_field "$s" status)" = done ] || { echo "the daemon's run did not end done:"; rc_run "$s"; return 1; }
     got=$(rc_field "$s" chunks)
     [ "$got" = "$chunks" ] || { echo "the daemon made $got chunks and the CLI $chunks"; return 1; }
-    served="$served $(( got * 1000000 / ms ))"
+    d=$(( got * 1000000 / ms ))
+    served="$served $d"
+    ratios="$ratios $(( d * 100 / c ))"
   done
   # Milli-chunks per second, so the integer arithmetic keeps three places.
-  c=$(median3 $cli) d=$(median3 $served)
-  echo "CLI$cli, daemon$served (chunks/s x 1000); medians $c and $d"
-  [ $(( d * 100 )) -ge $(( c * 85 )) ] ||
-    { echo "the daemon ran at $(( d * 100 / c )) % of the CLI, under 85 %"; return 1; }
+  r=$(median3 $ratios)
+  echo "CLI$cli, daemon$served (chunks/s x 1000); daemon as % of the CLI run beside it:$ratios"
+  [ "$r" -ge 85 ] || { echo "the daemon ran at a median $r % of the CLI, under 85 %"; return 1; }
 }
 
 if rc_start rate SEMLITH_ACCEL=cpu; then
