@@ -32,7 +32,15 @@ switches. Every HTTP request lifts the daemon too, so Pause, Stop and a limit
 save answer at once on a machine that is busy with something else. Only a
 request that goes on to embed is logged; a portal page polling once a second
 would otherwise write two lines a second to the log.
-<!-- MEASURE: pinned corpus (≥ 400 chunks, hash recorded) on the reference M1, median of three — CLI in a terminal vs a portal run through the launchd service (chunks/s, both in one unit; acceptance: service ≥ 85 % of terminal), against 3.3 of 28 chunks/s on 2026-09-23 -->
+Measured on the M1 over the pinned corpus (the `src/` of v0.27.0, 3 746
+chunks), three interleaved rounds, median: a portal run through the service on
+the CPU alone ran at 15.1 chunks/s, 4.6× the 3.3 of 0.27.0's service, against
+24.7 for `semlith index` in a terminal in the same rounds. That is 61 %, short
+of the 85 % this release aimed at. The same binary started with `semlith start`
+from a terminal reached 89 %, so the rest is how launchd schedules an agent's
+threads on Apple silicon: they sit at priority 20 against 31 from a terminal,
+and neither a QoS request nor `ProcessType Interactive` changed the rate. The
+release record keeps it as an open question.
 
 This trades some battery for speed. While it embeds, the daemon runs at full
 priority on the performance cores, where before it ran on the efficiency cores
@@ -128,7 +136,9 @@ next embed, which takes about a second. The portal's reader and the MCP reader
 used to hold one query session each. They now share one per model, and it stays
 loaded, so a search never waits for a model load. `/api/about` reports
 `sessions.writers` and `sessions.query`.
-<!-- MEASURE: daemon footprint on the reference M1, seven stores open, GPU lane on — idle, during a run, and 60 s after the last run ends (MB, `footprint`), against 5 392 MB on 2026-09-23 -->
+Measured with `footprint` on the M1, seven stores open, with GPU on: 452 MB
+idle, 888 MB during a portal run of the pinned corpus, and 465 MB 60 seconds
+after it ended, with no writer session loaded. 0.27.0 held 5 392 MB.
 
 **Chunks are batched by length.** A batch pads every text to the length of its
 longest one. The index pass used to embed chunks in file order, eight at a
@@ -203,7 +213,13 @@ freed when it does.
   retrieval harness run on the CPU alone, which keeps their results
   reproducible (#88).
 
-<!-- MEASURE: portal run through the launchd service, default settings (CPU + WebGPU), pinned corpus on the reference M1, median of three (chunks/s), against the unsorted CPU-only path of the same binary (acceptance ≥ 2.5×), with the per-lane rates the card showed -->
+With the default settings, CPU and WebGPU, a portal run through the service
+indexed the pinned corpus at 36.8 chunks/s, median of three interleaved rounds:
+1.52× the unsorted CPU path of the same binary, with the card showing `GPU
+22.4/s · CPU 11.6/s`. The two lanes share the M1's four performance cores, so
+neither reaches the rate it has alone (50.6 and 29.1). A GPU lane now keeps two
+batches queued, because the writer used to hand it the next one only between
+its own CPU batches; that alone took a hybrid run from 25.8 to 31.6 chunks/s.
 A store embedded by both lanes holds int8 and fp16 vectors side by side, which
 agree at cosine 0.987. The sealed split of 30 questions, CPU lane alone, median
 of three: all int8 24/27/29 at hit@1/3/8, the 0.25.0 figures exactly; all fp16

@@ -171,13 +171,24 @@ recorded in the release record.
 embedding and returns to normal priority when an embed pass starts. On the M1,
 each switch took under 100 µs in both directions, read from the daemon's own
 log, which records every switch with its latency. It returns to background 300
-ms after the last embed ends.
+ms after the last embed ends. Read with `ps -o pri` on the service: 4 while
+idle, 20 while embedding, and 4 again 0.35 s after the run ended.
 
 | path | chunks/s |
 |---|---|
 | `semlith index` in a terminal | 27.6 |
-| a portal run through the launchd service, CPU lane alone | <!-- MEASURE: portal run through the service with `semlith accel off gpu`, same corpus, median of three; acceptance ≥ 85 % of the terminal figure --> |
+| a portal run through the launchd service, CPU lane alone | 15.1, against 24.7 for the CLI in the same rounds (61 %) |
 | the same service before 0.28.0 (`ProcessType Background`) | 3.3, against 28 in a terminal, 2026-09-23 |
+
+Three interleaved rounds on 2026-09-24, median, over the pinned corpus (the `src/`
+of v0.27.0, 3 746 chunks). The service is 4.6× faster than it was, but it still
+runs at 61 % of the same binary in a terminal. The gap belongs to launchd: the
+same binary started with `semlith start` from a terminal ran at 89 % of the CLI,
+and in a launchd agent its embedding threads sit at scheduler priority 20
+against 31 from a terminal. Neither a user-initiated QoS request nor
+`ProcessType Interactive` closed it. The M1 Air is fanless, and single runs
+moved between 12 and 27 chunks/s over a day of load, so only figures taken in
+interleaved pairs are quoted here.
 
 **Length-sorted batching.** The index pass sorts a window of up to 64 chunks by
 length before embedding it, so a batch no longer pads short chunks to the
@@ -201,9 +212,9 @@ both on. The per-lane rates are the ones the run card showed.
 
 | lanes | chunks/s | per lane |
 |---|---|---|
-| CPU alone, sorted | <!-- MEASURE: portal run with `semlith accel off gpu`, median of three --> | |
-| WebGPU on Metal alone, batch 16 | 50.6 measured on its own on 2026-09-23. <!-- MEASURE: portal run with `semlith accel off cpu`, median of three --> | |
-| CPU and WebGPU (the default) | <!-- MEASURE: portal run, default settings, median of three; acceptance ≥ 2.5× the unsorted CPU-only path --> | <!-- MEASURE: the card's `GPU n/s · CPU n/s` at steady state --> |
+| CPU alone, sorted | 15.1 | |
+| WebGPU on Metal alone, batch 16 | 50.6, measured on its own on 2026-09-23 | |
+| CPU and WebGPU (the default) | 36.8, 1.52× the unsorted CPU path (24.1) | GPU 22.4/s · CPU 11.6/s |
 
 **Agreement.** `semlith doctor --gpu` embeds 32 fixed chunks on every lane and
 compares them with CPU fp32 vectors committed under `tests/fixtures/gpu/`. On the
@@ -233,9 +244,9 @@ share one query session.
 
 | daemon, seven stores open, GPU lane on | footprint |
 |---|---|
-| idle | <!-- MEASURE: `footprint` of the daemon, idle, MB --> |
-| during a run | <!-- MEASURE: `footprint` during a portal run, MB --> |
-| 60 s after the last run ends | <!-- MEASURE: `footprint` 60 s after, MB; acceptance < 1 GB, `/api/about` sessions.writers 0 --> |
+| idle | 452 MB |
+| during a run | 888 MB |
+| 60 s after the last run ends | 465 MB, no writer session loaded |
 | 0.27.0, after indexing | 5 392 MB |
 
 Only the daemon uses GPU lanes. `semlith index` in a terminal and
