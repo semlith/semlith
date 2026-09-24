@@ -6604,7 +6604,11 @@ async function indexView() {
   await refreshStores();
   const first = await refreshRuns();
 
-  const note = el("div", { class: "note" });
+  // Beside Start indexing, in the button row, rather than on a line of its
+  // own: a line reserved for an answer that is usually not there held a blank
+  // row above the cards, and emptying it pulled every card up a line at the
+  // moment a run finished.
+  const note = el("span", { class: "note index-note" });
   const cards = el("div", { class: "cards" });
   const queueList = el("div", { class: "queue" });
   /** Waiting runs' rows, by run id. */
@@ -6809,12 +6813,11 @@ async function indexView() {
     arrange(cards, order);
 
     // "N runs queued." is an answer to a button, and it stopped being true the
-    // moment the last run finished. Its words go and its line stays: emptied,
-    // the note collapsed and pulled every card under it up by a line at the
-    // moment a run finished — the moment somebody is watching the cards.
+    // moment the last run finished. It sits in the button row, so its going
+    // moves nothing under it.
     if (transient && !runs.some((run) => TICKING.has(run.status)) && !(data?.queue || []).length) {
       transient = false;
-      say("\u00a0");
+      say("");
     }
 
     clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
@@ -7283,8 +7286,8 @@ async function indexView() {
       settingsButton,
       target,
       start,
+      note,
     ),
-    note,
     el(
       "div",
       { class: "scroller" },

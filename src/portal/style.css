@@ -1751,6 +1751,13 @@ select.field:focus-visible {
 .note:empty {
   display: none;
 }
+/* The Index page's answer to Start indexing, in the button row. It takes the
+ * rest of the row and wraps under the buttons when it is long, rather than
+ * owning a line above the cards. */
+.filters .index-note {
+  flex: 1 1 240px;
+  min-height: 0;
+}
 .note.bad {
   color: var(--red-ink);
 }
