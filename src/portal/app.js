@@ -682,7 +682,7 @@ function dataTable(spec) {
   const columns = spec.columns;
   const view = {
     page: 1,
-    perPage: spec.perPage || 10,
+    perPage: spec.perPage || 5,
     sort: spec.sort || null,
     dir: spec.dir || "asc",
   };
@@ -3246,7 +3246,6 @@ function ledgerSessions(data) {
     className: "w-sessions",
     sort: "last",
     dir: "desc",
-    perPage: 12,
     rows: [],
     caption: "Every agent session this machine recorded, newest first.",
     columns: [
@@ -3398,7 +3397,6 @@ function ledgerRows(data) {
     className: "w-ledger",
     sort: "at",
     dir: "desc",
-    perPage: 15,
     rows,
     caption: "Every retrieval recorded on this machine, newest first.",
     columns: [
@@ -3815,7 +3813,6 @@ async function storesView() {
     className: "w-stores",
     caption: "Every store on this machine: where it is, what it holds, and when it was last written to.",
     sort: "name",
-    perPage: 10,
     rows: stores,
     columns: [
       {
@@ -5886,7 +5883,6 @@ function coveragePanel() {
               "What the graph covers, per language: files indexed, files the parser gave up on, definitions, and call edges by how firmly each one landed.",
             sort: "files",
             dir: "desc",
-            perPage: 10,
             rows: coverage,
             columns: [
               { key: "store", label: "Store", className: "meta narrow-drop", value: (r) => r.store, render: (r) => r.store },
@@ -8307,7 +8303,6 @@ async function doctorView() {
     caption:
       "Every documented client, whether it is on this machine, whether it is registered, whether the skill and the steering hook are installed, and what would fix it.",
     rows: data.clients || [],
-    perPage: 25,
     columns: [
       { key: "name", label: "Client", sortable: true, value: (r) => r.name },
       {
@@ -8426,7 +8421,6 @@ async function doctorView() {
     caption:
       "Each accelerator lane's check: whether its vectors match the CPU's, on which device and variant, the lowest cosine over the known answers, and its rate.",
     rows: [],
-    perPage: 10,
     columns: [
       { key: "lane", label: "Lane", value: (r) => LANE_NAMES[r.lane] || r.lane },
       {
@@ -8692,7 +8686,6 @@ async function agentsView() {
     caption: "Every documented client, whether it is on this machine, and whether it is registered.",
     sort: "name",
     grow: false,
-    perPage: 10,
     rows: live,
     columns: [
       {
@@ -9118,7 +9111,6 @@ async function agentsView() {
           "Every agent client installed on this machine, whether it is registered with semlith, and what to run for the ones that are not.",
         sort: "name",
         grow: false,
-        perPage: 10,
         rows: inUse,
         columns: [
           { key: "name", label: "Client", sortable: true, value: (c) => c.name },
@@ -9633,7 +9625,6 @@ async function privacyView() {
         caption:
           "Every file semlith can download: what it is, where it comes from, its size, when the download happens, and whether it is on this machine already.",
         rows: data.downloads || [],
-        perPage: 10,
         columns: [
           { key: "what", label: "What", value: (r) => r.what },
           { key: "source", label: "From", value: (r) => r.source },
