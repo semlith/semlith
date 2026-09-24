@@ -9,7 +9,7 @@ a day. This is the standing gate that would have caught all of them, and it
 takes minutes.
 
 The findings document it encodes lives outside this repository, at
-`live-project-files/semlith/full-regression-drive/17-09-2026/findings.md`. Read
+`live-project-files/semlith/repos/semlith/full-regression-drive/17-09-2026/findings.md`. Read
 it before touching `findings.py`: it describes the *buggy* behaviour, and every
 check here asserts the *fixed* behaviour instead.
 
