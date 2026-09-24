@@ -655,7 +655,11 @@ fn the_ledger_page_can_filter_sort_page_and_export_its_sessions() {
         block.contains("dataTable({"),
         "the table is not a dataTable"
     );
-    assert!(block.contains("perPage:"), "the table does not page");
+    // Pages at `dataTable`'s default, which every table opens at from 0.29.0.
+    assert!(
+        APP_JS.contains("perPage: spec.perPage || 5,"),
+        "dataTable does not page at 5 by default"
+    );
     assert!(block.contains("sort:"), "the table does not sort");
     // Export writes what is on screen: the same filter, the same rows.
     assert!(

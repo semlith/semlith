@@ -1751,6 +1751,13 @@ select.field:focus-visible {
 .note:empty {
   display: none;
 }
+/* The Index page's answer to Start indexing, in the button row. It takes the
+ * rest of the row and wraps under the buttons when it is long, rather than
+ * owning a line above the cards. */
+.filters .index-note {
+  flex: 1 1 240px;
+  min-height: 0;
+}
 .note.bad {
   color: var(--red-ink);
 }
@@ -2432,7 +2439,9 @@ pre.code::-webkit-scrollbar-thumb {
   font-family: var(--mono);
   font-size: var(--t-small);
   color: var(--muted);
-  white-space: nowrap;
+}
+.search-meta:empty {
+  display: none;
 }
 
 .results {
@@ -2832,6 +2841,13 @@ pre.code::-webkit-scrollbar-thumb {
 .w-stores {
   min-width: 640px;
 }
+/* The roots column shares what is left rather than asking for its longest
+ * path: at 1280px it pushed LAST WRITE past the card's edge. Its paths already
+ * truncate from the front with the whole path on hover. */
+.w-stores td.meta {
+  max-width: 0;
+  width: 30%;
+}
 .w-files {
   min-width: 680px;
 }
@@ -3053,7 +3069,6 @@ td.why .copyfield {
   padding: var(--sp-2h) var(--sp-5);
   min-width: 0;
 }
-.brief-span,
 .brief-symbol {
   display: flex;
   flex-direction: column;
@@ -3084,13 +3099,32 @@ td.why .copyfield {
   gap: var(--sp-1);
   margin-left: auto;
 }
-.brief-text {
-  margin: 0;
-  font-family: var(--mono);
-  font-size: var(--t-tiny-h);
-  line-height: var(--lh-code);
+.brief-row {
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+/* The budget's reading, as one strip of facts rather than a sentence. */
+.brief-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  width: 100%;
+  padding: var(--sp-2h) var(--sp-3h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--soft);
+}
+.brief-fact {
+  display: inline-flex;
+  gap: var(--sp-1);
+  align-items: baseline;
+  min-width: 0;
+}
+.brief-fact .k {
   color: var(--muted);
-  white-space: pre-wrap;
+}
+.brief-fact .v {
+  color: var(--ink);
   overflow-wrap: anywhere;
 }
 .brief-edge {
@@ -3735,7 +3769,11 @@ td.why .copyfield {
   font-size: var(--t-lead);
   font-weight: 500;
   line-height: var(--lh-heading);
-  overflow-wrap: anywhere;
+  /* One line, ending in an ellipsis with the whole name on hover. Broken
+   * anywhere, `index_set_writing` wrapped as `index_set_wri` / `ting`. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .graph-selected .loc {
@@ -3847,10 +3885,42 @@ td.why .copyfield {
   border-color: var(--blue);
 }
 
-.rail-list a {
+.rail-list a,
+.rail-list .link-button {
   font-family: var(--mono);
   min-width: 0;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Inside the Graph rail a list is the rail's width, whatever its rows hold.
+ * `.rail-group` centres its children, which is right for the sidebar's icon
+ * rail it was written for; here it sized a list to its widest row and centred
+ * it, so a long caller spilled off both sides of the panel and the panel
+ * scrolled sideways. Every part of a row may shrink, and names truncate. */
+.graph-rail .rail-group {
+  align-items: stretch;
+  min-width: 0;
+}
+.graph-rail .rail-group > .chip {
+  align-self: flex-start;
+}
+.rail-list,
+.rail-list li > * {
+  min-width: 0;
+}
+.rail-list li > span:not(.conf):not(.via) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-list .via,
+.rail-list .conf {
+  flex-shrink: 0;
+}
+.graph-scroll {
+  overflow-x: hidden;
 }
 
 .rail-list .via {
@@ -3870,16 +3940,12 @@ td.why .copyfield {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  /* Pinned to the foot of the rail while the callers and callees above it
-   * scroll: a symbol with thirty callers used to bury this button under them.
-   * The negative offset cancels the rail's own bottom padding, so the strip
-   * sits flush with the bottom edge. */
-  position: sticky;
-  bottom: calc(var(--sp-4h) * -1);
-  margin-top: auto;
-  padding: var(--sp-3) 0;
+  /* The side column's footer: outside its scroller, so a symbol with thirty
+   * callers cannot bury these, and nothing can scroll them half out of view. */
+  flex-shrink: 0;
+  padding: var(--sp-3) var(--sp-4h);
   background: var(--panel);
-  box-shadow: 0 -1px 0 var(--line-soft);
+  border-top: 1px solid var(--line-soft);
 }
 
 /* Confidence, everywhere it appears — and it appears everywhere, because a
@@ -4758,8 +4824,24 @@ td.row-end {
 }
 
 .impact-band input[type="search"] {
-  flex: 1 1 18rem;
+  flex: 1 1 12rem;
   min-width: 0;
+}
+/* What the three figures mean, once, under them. */
+.impact-guide {
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
+  color: var(--muted);
+}
+.impact-guide b {
+  color: var(--ink-2);
+  font-weight: 500;
 }
 .hops-label {
   display: inline-flex;
@@ -4904,6 +4986,26 @@ td.row-end {
   gap: var(--sp-4);
   align-items: start;
   min-width: 0;
+}
+
+/* The answer's headline and its two tables, spaced like the column they
+ * sit in. The Where column shares what is left rather than asking for its
+ * longest path, so Via and Hops stay in view in half the page's width. */
+.impact-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.impact-table td.where {
+  max-width: 0;
+  width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.impact-table td.via .one-line {
+  white-space: normal;
 }
 
 /* One column of the pair. Both are a plain stack; the grid above decides
@@ -5115,8 +5217,16 @@ td.row-end {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
   border-left: 1px solid var(--line);
+}
+/* The part of the side column that scrolls: the rail and the Map. The
+ * selected symbol's actions sit under it, outside. */
+.graph-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 /* Both panels keep their own height and the column scrolls past them.
  *
@@ -5181,6 +5291,8 @@ td.row-end {
   .graph-side {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+  .graph-scroll {
     overflow: visible;
   }
 }
@@ -5510,6 +5622,22 @@ td.row-end {
   border: 1px solid var(--line);
   border-radius: var(--r-1);
   background: var(--panel);
+}
+/* The accelerator lanes: a lane and its one action close together, lanes
+ * further apart, and the action under the lane's words rather than under its
+ * switch. At 2px under its lane and 8px over the next, the Remove button read
+ * as belonging to neither. */
+.accel-lanes {
+  gap: var(--sp-3);
+}
+.accel-lane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.accel-remove {
+  /* The switch's border, padding, knob and gap: where its words start. */
+  padding-left: calc(1px + 13px + 15px + 11px);
 }
 .replay-switch.on .knob {
   border-color: var(--green-ink);
@@ -6214,6 +6342,19 @@ pre.report-cli {
 /* The Agents page's own cards, in pairs rather than as a column of full-width
  * bands. Equal height, because two cards side by side at two different heights
  * read as a layout that failed rather than as two things. */
+/* Both rows of the Agents page on one column grid, so their cards line up
+ * and collapse at the same width. The top row was auto-fit at 1fr/1fr and
+ * went to one column near 600px; the bottom was 1fr/1.1fr and went at 900px,
+ * so between the two the page had one row in columns and one not, and at
+ * every width the two rows' middle edges were out of line. */
+.grid.agent-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 899px) {
+  .grid.agent-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .agent-extras {
   align-items: stretch;
 }

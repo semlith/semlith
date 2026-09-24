@@ -678,14 +678,20 @@ function wireTips() {
  */
 const PER_PAGE = [5, 10, 25, 50];
 
+/* A table's page, page size and sort, by `spec.remember`, for a page that is
+ * redrawn whole on a live update. The Stores page is: every watcher write
+ * redraws it, and each redraw put the reader back on page 1 at 5 a page. */
+const TABLE_VIEWS = new Map();
+
 function dataTable(spec) {
   const columns = spec.columns;
-  const view = {
+  const view = TABLE_VIEWS.get(spec.remember) || {
     page: 1,
-    perPage: spec.perPage || 10,
+    perPage: spec.perPage || 5,
     sort: spec.sort || null,
     dir: spec.dir || "asc",
   };
+  if (spec.remember) TABLE_VIEWS.set(spec.remember, view);
   let rows = spec.rows || [];
   let total = spec.total === undefined ? rows.length : spec.total;
 
@@ -861,6 +867,8 @@ function dataTable(spec) {
   }
 
   function paint() {
+    // A remembered page can be past the end once rows have gone.
+    view.page = Math.min(view.page, pages());
     paintHead();
     paintBody();
     paintFoot();
@@ -1201,6 +1209,9 @@ const state = {
   /** The symbol the Impact page is about, so the Graph page's "Blast radius"
    * link has somewhere to put it and coming back does not clear the answer. */
   impactSymbol: "",
+  /** The store that symbol was picked in, so Impact answers about the same
+   * store the Graph was showing rather than every open one. */
+  impactStore: "",
   pendingQuery: "",
   /** The last search, kept so leaving the page and coming back does not throw
    * the question away along with its answers. */
@@ -2149,6 +2160,11 @@ async function graphView() {
   const chosen = new Set();
   const meta = el("span", { class: "graph-count" });
   const rail = el("div", { class: "graph-rail" });
+  /* The selected symbol's two actions, in a footer of the side column that
+   * does not scroll with it. Inside the rail they were sticky against a
+   * padding the rail stopped having when the column became the scroller, so
+   * they sat pinned just below the visible edge, cut in half. */
+  const actions = el("div", { class: "rail-actions", hidden: true });
   const unreadable = el("div", { class: "unreadable-slot" });
 
   const canvas = graphCanvas({
@@ -2212,6 +2228,7 @@ async function graphView() {
   }
 
   function blank(message) {
+    actions.hidden = true;
     return fill(
       rail,
       el("div", { class: "graph-selected" }, el("div", { class: "rail-hint", text: message })),
@@ -2292,6 +2309,7 @@ async function graphView() {
       el("a", {
         href: `#graph?name=${encodeURIComponent(end.name)}`,
         text: end.name,
+        title: end.name,
         onclick: (e) => {
           e.preventDefault();
           focus(end.name);
@@ -2320,6 +2338,7 @@ async function graphView() {
   }
 
   async function select(node) {
+    actions.hidden = true;
     fill(rail, skeletonRows(6));
     let data;
     try {
@@ -2343,7 +2362,7 @@ async function graphView() {
         "div",
         { class: "graph-selected" },
         el("span", { class: "eyebrow", text: "Selected symbol" }),
-        el("h2", { class: "sym", text: node.name }),
+        el("h2", { class: "sym", text: node.name, title: node.name }),
         el("div", {
           class: "loc",
           "data-tip": node.path,
@@ -2413,17 +2432,17 @@ async function graphView() {
           : null,
       ),
       confidenceLegend(),
-      // The two readings of a selected symbol, side by side as the v4 rail has
-      // them: the chunks it lives in, and what reaches it.
-      //
-      // The first of these used to read "Ask the index a question", which is
-      // the top bar's wording for the search box — so the rail and the top bar
-      // gave one destination two names, which is what finding 3.24 is about.
-      // It is the same journey with a name that says what you get.
-      el(
-        "div",
-        { class: "rail-actions" },
-        el("button", {
+    );
+    // The two readings of a selected symbol, side by side as the v4 rail has
+    // them: the chunks it lives in, and what reaches it.
+    //
+    // The first of these used to read "Ask the index a question", which is
+    // the top bar's wording for the search box — so the rail and the top bar
+    // gave one destination two names, which is what finding 3.24 is about.
+    // It is the same journey with a name that says what you get.
+    fill(
+      actions,
+      el("button", {
           class: "button secondary small",
           type: "button",
           text: "Chunks it lives in",
@@ -2438,11 +2457,14 @@ async function graphView() {
           text: "Blast radius",
           onclick: () => {
             state.impactSymbol = node.name;
+            // The store the symbol was picked in: the same name in another
+            // open store is a different symbol with a different reach.
+            state.impactStore = node.store || (chosen.size === 1 ? [...chosen][0] : "");
             go("impact");
           },
         }),
-      ),
     );
+    actions.hidden = false;
   }
 
   /* The store chips scope the canvas, and until 0.24.0 they did not scope the
@@ -2465,6 +2487,7 @@ async function graphView() {
       data = await api(`/api/graph?${query}`);
     } catch (e) {
       meta.textContent = "";
+      actions.hidden = true;
       return fill(rail, error(e.message));
     }
     // Stores that did not answer, over the graph the rest of them drew. This
@@ -2622,7 +2645,7 @@ async function graphView() {
         ),
         meta,
       ),
-      el("div", { class: "graph-side" }, rail, mapPanel()),
+      el("div", { class: "graph-side" }, el("div", { class: "graph-scroll" }, rail, mapPanel()), actions),
     ),
   );
 
@@ -3246,7 +3269,6 @@ function ledgerSessions(data) {
     className: "w-sessions",
     sort: "last",
     dir: "desc",
-    perPage: 12,
     rows: [],
     caption: "Every agent session this machine recorded, newest first.",
     columns: [
@@ -3398,7 +3420,6 @@ function ledgerRows(data) {
     className: "w-ledger",
     sort: "at",
     dir: "desc",
-    perPage: 15,
     rows,
     caption: "Every retrieval recorded on this machine, newest first.",
     columns: [
@@ -3688,8 +3709,17 @@ function note(text, bad) {
   holder.textContent = text;
 }
 
+/* The stores ticked for a bulk delete, by name. Outside the view, because the
+ * view is redrawn whenever a store's counters move, and a selection that
+ * vanished under a watcher's re-embed would be one nobody could trust. */
+const storesPicked = new Set();
+
 async function storesView() {
   const stores = await refreshStores();
+  // A store deleted elsewhere is no longer selectable.
+  for (const name of storesPicked) {
+    if (!stores.some((s) => s.name === name)) storesPicked.delete(name);
+  }
   /* Live. A store the CLI just made, a watcher re-embed, a run's own note —
    * each moves a counter the shared poll is watching, and this page redraws
    * from the route it already reads rather than from a timer of its own.
@@ -3806,18 +3836,94 @@ async function storesView() {
    * reads as belonging to the next block. */
   const insideLink = el(
     "button",
-    { class: "table-follow", type: "button", onclick: () => go("index") },
+    { class: "table-follow", type: "button", onclick: () => go("corpus") },
     el("span", { text: "See what is actually inside the index" }),
     icon(ICONS.arrowRight, 15),
   );
 
+  // The Files page's bulk bar, for stores: one confirm that names each one.
+  const bulkBar = el("div", { class: "bulk", hidden: true });
+  function paintBulk() {
+    bulkBar.hidden = storesPicked.size === 0;
+    if (!storesPicked.size) return;
+    const names = [...storesPicked].sort();
+    const many = `${n(names.length)} store${names.length === 1 ? "" : "s"}`;
+    fill(
+      bulkBar,
+      el("span", { class: "meta", text: `${many} selected` }),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button secondary small",
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          storesPicked.clear();
+          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
+          paintBulk();
+        },
+      }),
+      el("button", {
+        class: "button danger small",
+        type: "button",
+        text: `Delete ${many}`,
+        onclick: () =>
+          ask({
+            title: `Delete ${many}?`,
+            body: `${names.join(", ")}: their vectors, chunks, graph and ledger are deleted, and the registry stops listing them. The files they indexed are untouched.`,
+            confirm: `Delete ${many}`,
+            tone: "bad",
+            run: async () => {
+              const done = await post("/api/store/delete", { stores: names });
+              for (const name of done.deleted || []) storesPicked.delete(name);
+              await refreshStores();
+              await render();
+              note(done.message, (done.failed || []).length > 0);
+            },
+          }),
+      }),
+    );
+  }
+
   const table = dataTable({
     className: "w-stores",
+    remember: "stores",
     caption: "Every store on this machine: where it is, what it holds, and when it was last written to.",
     sort: "name",
-    perPage: 10,
     rows: stores,
     columns: [
+      {
+        key: "pick",
+        label: "",
+        className: "pick",
+        sortable: false,
+        head: () => {
+          const all = el("input", {
+            type: "checkbox",
+            class: "pick all",
+            "aria-label": "Select every store on this page",
+            onchange: () => {
+              for (const box of table.node.querySelectorAll("tbody input.pick")) {
+                if (box.checked !== all.checked) box.click();
+              }
+            },
+          });
+          return all;
+        },
+        render: (s) => {
+          const box = el("input", {
+            type: "checkbox",
+            class: "pick",
+            "aria-label": `Select ${s.name}`,
+            onchange: () => {
+              if (box.checked) storesPicked.add(s.name);
+              else storesPicked.delete(s.name);
+              paintBulk();
+            },
+          });
+          box.checked = storesPicked.has(s.name);
+          return box;
+        },
+      },
       {
         key: "name",
         label: "Store",
@@ -4043,6 +4149,7 @@ async function storesView() {
     .sort((a, b) => b.at - a.at)
     .slice(0, 40);
 
+  paintBulk();
   return el(
     "div",
     { class: "view" },
@@ -4064,6 +4171,10 @@ async function storesView() {
       ),
       stat("On disk", bytes(totals.bytes), "int8 quantised"),
     ),
+    bulkBar,
+    // Above the table, so what a delete did is said where the reader is
+    // looking; at the foot of the page it was below the fold.
+    el("div", { class: "note page-note", role: "status", "aria-live": "polite" }),
     el(
       "div",
       { class: "scroller" },
@@ -4120,7 +4231,6 @@ async function storesView() {
     adoptNote,
     rootPicker.node,
     rootNote,
-    el("div", { class: "note page-note" }),
   );
 }
 
@@ -4634,8 +4744,9 @@ function codeGutter(text, startLine) {
   );
 }
 
-/** One span, as `/api/read` returns it. */
-function spanCard(span) {
+/** One span, as `/api/read` returns it. `badges` go in its header, before the
+ * freshness mark: the Brief view says which lists found each span there. */
+function spanCard(span, badges) {
   const named = span.symbol ? `${span.symbol_kind || ""} ${span.symbol}`.trim() : "";
   return el(
     "div",
@@ -4647,6 +4758,7 @@ function spanCard(span) {
       el("span", { class: "lines", text: `${span.start_line}-${span.end_line}` }),
       span.store ? el("span", { class: "from", text: span.store }) : null,
       el("span", { class: "spacer" }),
+      badges || null,
       freshMark(span.fresh),
     ),
     named ? el("div", { class: "sig", text: named }) : null,
@@ -5255,27 +5367,23 @@ async function searchView() {
       return;
     }
 
+    /* A span with its text is drawn the way the results view draws a hit:
+     * the same card, path header and numbered lines, so the two views of one
+     * question look like one product. A span the budget left without text is
+     * a compact row that says so, not an empty card. */
     const rows = [];
     for (const span of spans) {
       rows.push(
-        el(
-          "div",
-          { class: "brief-span" },
-          el(
-            "div",
-            { class: "brief-head" },
-            el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
-            span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
-            el(
-              "span",
-              { class: "brief-lists" },
-              ...(span.lists || []).map((list) => el("span", { class: "tag", text: list })),
+        span.text
+          ? spanCard(span, fusionBadges(span.lists))
+          : el(
+              "div",
+              { class: "brief-head brief-row" },
+              el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
+              span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
+              el("span", { class: "brief-dropped", text: "text left out for the budget" }),
+              el("span", { class: "brief-lists" }, fusionBadges(span.lists)),
             ),
-          ),
-          span.text
-            ? el("pre", { class: "brief-text", text: span.text })
-            : el("div", { class: "brief-dropped", text: "text left out for the budget" }),
-        ),
       );
     }
     for (const symbol of brief.symbols || []) {
@@ -5326,13 +5434,18 @@ async function searchView() {
     if (cut.spans) dropped.push(`${cut.spans} spans not located`);
     if (cut.span_text) dropped.push(`${cut.span_text} left without text`);
     if (cut.symbols) dropped.push(`${cut.symbols} symbols' edges`);
+    const fact = (label, value) =>
+      el("span", { class: "brief-fact" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: value }));
     fill(
       footer,
-      el("span", {
-        text:
-          `${brief.tokens} of ${brief.budget} tokens · counted with ${brief.counted_with}` +
-          (dropped.length ? ` · dropped ${dropped.join(", ")}` : ""),
-      }),
+      el(
+        "div",
+        { class: "brief-summary" },
+        fact("tokens", `${n(brief.tokens)} of ${n(brief.budget)}`),
+        fact("spans", n(spans.length)),
+        fact("counted with", brief.counted_with || "—"),
+        fact("dropped", dropped.length ? dropped.join(", ") : "nothing"),
+      ),
     );
   }
 
@@ -5520,8 +5633,10 @@ async function searchView() {
         { class: "search-field" },
         icon(ICONS.search, 18),
         labelled("search-query", "Search the index", input),
-        meta,
       ),
+      // Under the box rather than inside it: inside, the count and timing
+      // took the input's width and crowded the question being typed.
+      meta,
       shapeHint,
       el(
         "div",
@@ -5886,7 +6001,6 @@ function coveragePanel() {
               "What the graph covers, per language: files indexed, files the parser gave up on, definitions, and call edges by how firmly each one landed.",
             sort: "files",
             dir: "desc",
-            perPage: 10,
             rows: coverage,
             columns: [
               { key: "store", label: "Store", className: "meta narrow-drop", value: (r) => r.store, render: (r) => r.store },
@@ -5947,6 +6061,27 @@ function coveragePanel() {
  * refreshing, or closing the tab for the length of a run changes nothing the
  * page shows when it comes back.
  */
+
+/** How long something took: `0.4s`, `42s`, `5m 18s`, `1h 02m`. */
+function spellTook(ms) {
+  if (ms < 100) return "under 0.1s";
+  if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
+  const all = Math.round(ms / 1000);
+  if (all < 60) return `${all}s`;
+  if (all < 3600) return `${Math.floor(all / 60)}m ${String(all % 60).padStart(2, "0")}s`;
+  return `${Math.floor(all / 3600)}h ${String(Math.floor(all / 60) % 60).padStart(2, "0")}m`;
+}
+
+/** What is left of an estimate, in the rounded words a guess deserves:
+ * `about 3 min left`, `about 40 s left`, `almost done`. */
+function spellLeft(ms) {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 10) return "almost done";
+  if (seconds < 60) return `about ${Math.round(seconds / 5) * 5} s left`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `about ${minutes} min left`;
+  return `about ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min left`;
+}
 
 /** How long a run has taken, as `12:34` or `1:02:03`. */
 /** Chunks a second, to one decimal under ten so a slow lane reads as "2.4"
@@ -6038,22 +6173,36 @@ function runCard(run, controls) {
   });
   let open = true;
 
-  /* The clock the daemon measured, ticked forward locally between polls.
-   *
-   * The daemon's number is the authority and it only ever goes forward — it
-   * runs from the moment the run was submitted, spans every slice, and stops
-   * while the run is held — so correcting to it can never make the reading
-   * jump backwards. The local tick exists only so the seconds move between
-   * one poll and the next. */
+  /* What the clock says depends on where the run is. Running: the time
+   * left, which the daemon estimates from the bytes still to go and counts
+   * down here between polls; `estimating…` until its rate settles. Queued:
+   * how long it has waited. Finished: how long the work took, from its start
+   * rather than its submission, and when it ended, with any wait named apart.
+   * The person watching a run wants to know when it will be done, and a clock
+   * counting up from the moment they pressed the button answered a different
+   * question. */
   let shown = 0;
   let readAt = 0;
   let ticking = false;
 
   function paintClock() {
-    const ms = ticking ? shown + (Date.now() - readAt) : shown;
-    // Under a second, tenths. `spell` counts in whole seconds, so every short
-    // run read `00:01` whatever it had actually taken.
-    setText(elapsed, ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : spell(ms));
+    const since = Date.now() - readAt;
+    const next = last;
+    let text = "";
+    if (next.status === "queued") {
+      text = `waiting ${spellTook(ticking ? shown + since : shown)}`;
+    } else if (next.status === "running") {
+      text = next.eta_ms === null || next.eta_ms === undefined ? "estimating…" : spellLeft(next.eta_ms - since);
+    } else if (next.finished_at && next.started_at) {
+      // The run's own clock, which excludes time held, minus its wait in the
+      // queue: the work, to the millisecond.
+      const queued = next.queued_ms || 0;
+      text = `took ${spellTook(Math.max(0, shown - queued))} · finished ${new Date(next.finished_at * 1000)
+        .toTimeString()
+        .slice(0, 5)}${queued >= 1000 ? ` · queued ${spellTook(queued)}` : ""}`;
+    }
+    setText(elapsed, text);
+    elapsed.hidden = !text;
   }
 
   function absorb(next) {
@@ -6449,7 +6598,7 @@ function laneState(status) {
 }
 
 function accelSection() {
-  const rows = el("div", { class: "rows" });
+  const rows = el("div", { class: "rows accel-lanes" });
   const fallback = el("p", { class: "note" });
   const problem = el("div", { class: "note" });
   const drawn = new Map();
@@ -6486,7 +6635,7 @@ function accelSection() {
       share,
     );
     const remove = el("button", { class: "button secondary small", type: "button" });
-    const removeRow = el("div", { class: "filters" }, remove);
+    const removeRow = el("div", { class: "filters accel-remove" }, remove);
     const drawnRow = { title, where, share, toggle, remove, removeRow, enabled: false, node: null };
     toggle.addEventListener("click", () => {
       const on = !drawnRow.enabled;
@@ -6503,7 +6652,7 @@ function accelSection() {
       change(lane, on ? "on" : "off");
     });
     remove.addEventListener("click", () => change(lane, "remove"));
-    drawnRow.node = el("div", { class: "rows tight" }, toggle, removeRow);
+    drawnRow.node = el("div", { class: "accel-lane" }, toggle, removeRow);
     return drawnRow;
   }
 
@@ -6570,7 +6719,11 @@ async function indexView() {
   await refreshStores();
   const first = await refreshRuns();
 
-  const note = el("div", { class: "note" });
+  // Beside Start indexing, in the button row, rather than on a line of its
+  // own: a line reserved for an answer that is usually not there held a blank
+  // row above the cards, and emptying it pulled every card up a line at the
+  // moment a run finished.
+  const note = el("span", { class: "note index-note" });
   const cards = el("div", { class: "cards" });
   const queueList = el("div", { class: "queue" });
   /** Waiting runs' rows, by run id. */
@@ -6775,12 +6928,11 @@ async function indexView() {
     arrange(cards, order);
 
     // "N runs queued." is an answer to a button, and it stopped being true the
-    // moment the last run finished. Its words go and its line stays: emptied,
-    // the note collapsed and pulled every card under it up by a line at the
-    // moment a run finished — the moment somebody is watching the cards.
+    // moment the last run finished. It sits in the button row, so its going
+    // moves nothing under it.
     if (transient && !runs.some((run) => TICKING.has(run.status)) && !(data?.queue || []).length) {
       transient = false;
-      say("\u00a0");
+      say("");
     }
 
     clearDone.hidden = !runs.some((run) => !TICKING.has(run.status));
@@ -7249,8 +7401,8 @@ async function indexView() {
       settingsButton,
       target,
       start,
+      note,
     ),
-    note,
     el(
       "div",
       { class: "scroller" },
@@ -8270,7 +8422,6 @@ async function doctorView() {
     caption:
       "Every documented client, whether it is on this machine, whether it is registered, whether the skill and the steering hook are installed, and what would fix it.",
     rows: data.clients || [],
-    perPage: 25,
     columns: [
       { key: "name", label: "Client", sortable: true, value: (r) => r.name },
       {
@@ -8389,7 +8540,6 @@ async function doctorView() {
     caption:
       "Each accelerator lane's check: whether its vectors match the CPU's, on which device and variant, the lowest cosine over the known answers, and its rate.",
     rows: [],
-    perPage: 10,
     columns: [
       { key: "lane", label: "Lane", value: (r) => LANE_NAMES[r.lane] || r.lane },
       {
@@ -8655,7 +8805,6 @@ async function agentsView() {
     caption: "Every documented client, whether it is on this machine, and whether it is registered.",
     sort: "name",
     grow: false,
-    perPage: 10,
     rows: live,
     columns: [
       {
@@ -9081,7 +9230,6 @@ async function agentsView() {
           "Every agent client installed on this machine, whether it is registered with semlith, and what to run for the ones that are not.",
         sort: "name",
         grow: false,
-        perPage: 10,
         rows: inUse,
         columns: [
           { key: "name", label: "Client", sortable: true, value: (c) => c.name },
@@ -9142,7 +9290,7 @@ async function agentsView() {
     endpointNote,
     el(
       "div",
-      { class: "grid scroller" },
+      { class: "grid scroller agent-row" },
       el(
         "div",
         { class: "rows" },
@@ -9225,7 +9373,7 @@ async function agentsView() {
      * agent authenticates with — and the two registration cards are another. */
     el(
       "div",
-      { class: "grid two agent-extras" },
+      { class: "grid agent-row agent-extras" },
       serviceCard(),
       el(
       "div",
@@ -9596,7 +9744,6 @@ async function privacyView() {
         caption:
           "Every file semlith can download: what it is, where it comes from, its size, when the download happens, and whether it is on this machine already.",
         rows: data.downloads || [],
-        perPage: 10,
         columns: [
           { key: "what", label: "What", value: (r) => r.what },
           { key: "source", label: "From", value: (r) => r.source },
@@ -10252,8 +10399,13 @@ async function impactView() {
   const subject = el("span", { class: "impact-subject", text: "—" });
   const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
   const rings = impactCanvas();
-  const pathCard = pathFinderCard();
-  const traceLane = traceCard();
+  /* The store the question is about. Carried from the Graph page's Blast
+   * radius, which knows which store the symbol was picked in; the same name in
+   * another open store is another symbol with another reach. */
+  let store = state.impactStore || "";
+  const scope = () => store;
+  const pathCard = pathFinderCard(scope);
+  const traceLane = traceCard(scope);
   const reached = statCell("Reached", 0);
   const files = statCell("Files", 0);
   const inferredCell = statCell("Inferred", 0);
@@ -10291,7 +10443,44 @@ async function impactView() {
     if (nameInput.value.trim()) run();
   });
 
-  const go = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
+  const reach = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
+  const storeChip = el("span", { class: "chips" });
+  function paintStore() {
+    fill(
+      storeChip,
+      store
+        ? el("button", {
+            class: "chip sm",
+            type: "button",
+            "aria-pressed": "true",
+            title: "Answering about this store only. Press to ask every open store.",
+            text: `in ${store} ×`,
+            onclick: () => {
+              store = "";
+              state.impactStore = "";
+              paintStore();
+              if (nameInput.value.trim()) run();
+            },
+          })
+        : null,
+    );
+  }
+  paintStore();
+
+  /* Where to start, for a page opened with no question: the Graph is where a
+   * symbol is usually found, and its Blast radius button lands here with the
+   * symbol and its store already filled in. */
+  function emptyImpact() {
+    return el(
+      "div",
+      { class: "rows" },
+      el("p", {
+        class: "subtitle",
+        text: "Type a symbol's exact name above and press Reach, or find it on the Graph page, pick it, and press Blast radius.",
+      }),
+      el("div", {}, el("button", { class: "button secondary small", type: "button", text: "Open Graph", onclick: () => go("graph") })),
+    );
+  }
 
   /* A real table row, in a real table.
    *
@@ -10354,7 +10543,7 @@ async function impactView() {
       subject.textContent = "—";
       setStats(0, 0, 0);
       rings.clear();
-      fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
+      fill(results, emptyImpact());
       return;
     }
     const depth = Math.min(10, Math.max(1, Number(depthInput.value) || 3));
@@ -10366,6 +10555,7 @@ async function impactView() {
     try {
       const query = new URLSearchParams({ name, depth: String(depth) });
       if (allEdges) query.set("all_edges", "1");
+      if (store) query.set("store", store);
       data = await api(`/api/impact?${query}`);
     } catch (e) {
       rings.clear();
@@ -10499,7 +10689,7 @@ async function impactView() {
     );
   }
 
-  fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
+  fill(results, emptyImpact());
   if (state.impactSymbol) run();
 
   return el(
@@ -10538,17 +10728,26 @@ async function impactView() {
             nameInput,
             el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
             verified,
-            go,
+            reach,
           ),
           el(
             "div",
             { class: "impact-subject-row" },
             capLabel("Changing"),
             subject,
+            storeChip,
             el("span", { class: "spacer" }),
             depthPill,
           ),
           stats,
+          // What the figures and the controls above them mean, once.
+          el(
+            "ul",
+            { class: "impact-guide" },
+            el("li", {}, el("b", { text: "Reached" }), " — every definition that calls, references or imports this one, directly or through others."),
+            el("li", {}, el("b", { text: "Inferred" }), " — linked by a bare name match only. Corroborate before relying on it."),
+            el("li", {}, el("b", { text: "Hops" }), " — how far back to read: 1 is direct callers only. Prefer verified edges leaves out names with several definitions."),
+          ),
         ),
         results,
       ),
@@ -10572,7 +10771,7 @@ const TRACE_EMPTY = "Two names, and this writes the chain out with the lines tha
  * `Prefer verified edges` is the default and `Strict` says it out loud — the
  * same pair the CLI takes, and `Strict` wins over the other for the same
  * reason it does there. */
-function pathFinderCard() {
+function pathFinderCard(scope) {
   const from = el("input", { type: "text", placeholder: "from", "aria-label": "Path from" });
   const to = el("input", { type: "text", placeholder: "to", "aria-label": "Path to" });
   const body = el("div", { class: "path-body" });
@@ -10612,6 +10811,7 @@ function pathFinderCard() {
     try {
       const q = new URLSearchParams({ from: a, to: b, depth: "6" });
       if (allEdges) q.set("all_edges", "1");
+      if (scope && scope()) q.set("store", scope());
       data = await api(`/api/path?${q}`);
     } catch (e) {
       fill(body, error(e.message));
@@ -10742,7 +10942,7 @@ function chainBlock(steps, summary) {
  * The sentence, the hops, and one line of source per hop — each marked a
  * supporting fact or a candidate, from the hop's own support class. Nothing
  * here re-walks the graph: `/api/trace` reads the chain the finder produced. */
-function traceCard() {
+function traceCard(scope) {
   const from = el("input", { type: "text", placeholder: "from", "aria-label": "Trace from" });
   const to = el("input", { type: "text", placeholder: "to", "aria-label": "Trace to" });
   const body = el("div", { class: "trace-body" });
@@ -10760,7 +10960,9 @@ function traceCard() {
     fill(body, el("p", { class: "subtitle", text: "Reading…" }));
     let data;
     try {
-      data = await api(`/api/trace?${new URLSearchParams({ from: a, to: b, depth: "6" })}`);
+      const q = new URLSearchParams({ from: a, to: b, depth: "6" });
+      if (scope && scope()) q.set("store", scope());
+      data = await api(`/api/trace?${q}`);
     } catch (e) {
       fill(body, error(e.message));
       return;

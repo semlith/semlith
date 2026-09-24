@@ -181,6 +181,14 @@ its next start.
 **Delete store…** is behind the row's menu rather than beside the ordinary
 actions, so a destructive click is not one pixel away from a harmless one.
 
+**Several stores go at once** from the checkbox column. The box in its heading
+ticks every row on the page, and ticking anything shows a bar above the table
+with **Delete N stores**. The confirmation names each store, so what is about to
+go is read before it goes rather than counted. Each store goes through the same
+removal as one deleted from its menu. A store that could not be deleted is named
+with the reason and the others still go. What happened is said above the table,
+where the bar was, rather than at the foot of the page.
+
 The **Watcher** card is a live feed of what has changed on disk since the daemon
 started, most recent first. The card beside it summarises connected agents; the
 Agents page has the whole of it.
@@ -612,6 +620,11 @@ claims, once, in place. A badge whose meaning a reader has to guess is a badge
 that gets read as decoration.
 
 **Chunks it lives in** takes the symbol's name to the Search page as a query.
+**Blast radius** takes it to [Impact](#impact), together with the store it was
+picked in, so the answer comes from that store. The two buttons sit in a footer
+of the rail that does not scroll, so they stay in view however long the lists
+above them are. A symbol name too long for the rail ends in an ellipsis, and
+hovering it shows the whole name.
 
 ## Impact
 
@@ -628,8 +641,9 @@ difference is what the answer is made of: a hundred callers is a hairball on a
 canvas and a hundred rows on a page, so this one is rows.
 
 **The shape of the page.** Two columns. On the left, a card carrying the
-controls, the `Changing` line and three figures, and under it the reached
-symbols themselves. On the right, the canvas, then [Path finder](#path-finder),
+controls, the `Changing` line, three figures and a three-line guide to what
+*reached*, *inferred* and *hops* mean, and under it the reached symbols
+themselves. On the right, the canvas, then [Path finder](#path-finder),
 then [Trace](#trace) — the answer on one side and the two questions that follow
 from it on the other. Below about 716 pixels of content width the two become
 one column and the order above is the order you read down the page; there is no
@@ -639,6 +653,10 @@ breakpoint involved, the columns simply stop fitting.
 
 - **the name field** — one symbol, matched exactly, as the placeholder says: *A
   symbol's name, matched exactly*. Enter runs it; so does **Reach** beside it.
+- **the store chip** — present when the page was opened from the Graph's
+  **Blast radius**. It reads `in <store> ×`, and the question is answered in
+  the store the symbol was picked in rather than across every open store.
+  Pressing it clears the scope. The path finder and trace use the same scope.
 - **hops** — how far back to walk, 1 to 10, 3 to begin with. A value outside
   that is clamped into it and the field is corrected to what was actually used,
   rather than the page walking one depth and displaying another.
@@ -651,14 +669,15 @@ breakpoint involved, the columns simply stop fitting.
 
 Under the band a row states what the answer is about: **Changing**, then the
 symbol, then a pill reading `depth 3 · reverse` for whatever depth was used.
-Before anything is typed the page says *Name a symbol to read the graph
-backwards from it.* rather than showing an empty table.
+Before anything is typed the page says *Type a symbol's exact name above and
+press Reach, or find it on the Graph page, pick it, and press Blast radius.*,
+with an **Open Graph** button, rather than showing an empty table.
 
 **The answer opens with a sentence**, not a number: `N definitions in N files
 reach <name> within N hops`. The sentence is composed by the same function that
 prints it in the terminal, so the page and `semlith impact` cannot describe one
 walk two ways. Three counts sit under it — **Reached**, the definitions that get
-there; **Files**, the files they are written in; and **Unsettled**, how many of
+there; **Files**, the files they are written in; and **Inferred**, how many of
 those rows were reached across an edge marked `inferred` or `ambiguous`. That
 third figure is the one worth reading first: it is the part of the answer that
 has not been settled, stated beside the part that has, rather than left for a
@@ -751,7 +770,7 @@ else's callers mixed into yours.
 
 ### Path finder
 
-The card under the results answers the forward question: is there a chain from
+The card under the canvas answers the forward question: is there a chain from
 one symbol to another, and what is it made of. Until this release it answered
 only from a terminal.
 
@@ -879,8 +898,10 @@ screen saying it had happened.
   large, nothing here reads that content type — are what the card has to show.
 - **the target** — where the paths go. Three answers, below.
 - **Start indexing** — queues the runs and answers at once with how many were
-  queued. The cards are what happens next; the button does not become a control
-  for them, because there is more than one run.
+  queued, in a note beside the button. The note empties once there is nothing to
+  say, so no blank line is left above the cards. The cards are what happens
+  next; the button does not become a control for them, because there is more
+  than one run.
 
 The three pickers are mutually exclusive: two of them open at once is two answers
 to one question.
@@ -916,8 +937,7 @@ here" and "all of it is already done" are different answers. **All**, **None** a
 last one that finished, kept afterwards so a page opened later says what it did
 rather than showing nothing. Each card carries its store's name, a status pill, a
 percentage and bar, files scanned over files found, chunks written, a
-chunks-per-second rate, the thread count, the elapsed clock, the paths, and the
-log.
+chunks-per-second rate, the thread count, the clock, the paths, and the log.
 
 **The rate is the last ten seconds.** The chunks/s figure is what the daemon
 reports as `rate`: chunks embedded over the last 10 seconds of active time.
@@ -1000,21 +1020,31 @@ coloured and counted apart for that reason. Every failed path is named again on
 the closing line rather than only counted, because a run that ends with "eleven
 failed" and no names is a run whose eleven files nobody goes and looks at.
 
-**The elapsed clock** sits beside the counts, because files, chunks, rate and
-elapsed are one reading of one run. It starts when the run is submitted rather
-than when a writer picks it up: the wait for a writer is time you are waiting.
-The daemon measures it, the card ticks between polls so the seconds move, and
-every poll corrects to the daemon's figure — which only ever goes forward, so a
-correction never makes the reading jump backwards. It is the run's time and not
-the tab's, which matters because a browser throttles a background tab's timers to
-about once a minute. It stops while a run is held, because held time is not time
-anything is happening, and it freezes on `done`, `stopped` or `failed`, holding
-the total.
+**The clock counts down.** Someone watching a run wants to know when it will be
+done, and a clock counting up from the button press answered a different
+question. What the clock says depends on where the run is:
 
-It also spans the whole run rather than the slice. A run hands the writer back to
-the watcher every 45 seconds and returns as a fresh job, so a clock measured
-around that work restarted from zero every 45 seconds and the page faithfully
-redrew a run that had just begun. The clock belongs to the run now.
+| Status | The clock reads |
+|---|---|
+| `queued` | `waiting 12s`: how long the run has been waiting since it was submitted. |
+| `running` | `about 3 min left`, `about 40 s left` or `almost done`, and `estimating…` until the rate has settled. |
+| finished | `took 5m 18s · finished 21:35`, counted from the run's start rather than its submission and leaving out time paused or held, followed by `· queued 1m 02s` when it waited first. |
+
+The estimate is the daemon's. Once the run has walked its folders, it measures
+each file it will open, one `stat` per file, and counts bytes done against
+bytes total; a file
+being embedded counts in proportion to its chunks. The daemon keeps a bytes/s
+rate over the last 10 seconds of active time, so paused and held time do not
+count, and divides what is left by it. It reports no estimate until it has seen
+5 seconds of embedding, which is when the card stops saying `estimating…`.
+The card counts down between polls and every poll corrects to the daemon's
+figure. It is the run's time and not the tab's, which matters because a browser
+throttles a background tab's timers to about once a minute.
+
+The run's clock spans the whole run rather than the slice. A run hands the
+writer back to the watcher every 45 seconds and returns as a fresh job, so a
+clock measured around that work restarted from zero every 45 seconds. The clock
+belongs to the run now.
 
 **What Stop does that Pause does not, and what Remove does that neither does.**
 
