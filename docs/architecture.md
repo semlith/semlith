@@ -423,9 +423,14 @@ Measured on a 4P+4E Apple M1, indexing the same corpus:
 | 4 | **16.5** |
 | 8 | 13.9 |
 
-So the default is the performance-core count on Apple silicon, and the total
-core count everywhere else, where the cores are interchangeable and the whole
-machine is the right answer. Undersubscribing costs far more than
+So the default is the performance-core count on a hybrid CPU (Apple silicon, and
+Intel's P-cores read from `/sys/devices/cpu_core/cpus` on Linux and from the
+highest `EfficiencyClass` on Windows), and the total core count everywhere else,
+where the cores are interchangeable and the whole machine is the right answer.
+In the daemon that count is split only between the runs embedding at that
+moment: a run going alone gets all of it, as it would in a terminal, and each
+run rebuilds its session at its next batch when another starts or ends. A saved
+*threads each* is used as given. Undersubscribing costs far more than
 oversubscribing — 1 thread is three times worse than 8 — so nothing else gets a
 reduced count on a guess. `SEMLITH_EMBED_THREADS` overrides it, because this was
 measured on exactly one machine.
@@ -978,3 +983,55 @@ not own, so it is off unless the Privacy page turns it on, it reads Claude
 Code's transcripts and no others — the format on the reference machine, because
 a parser nobody here can run is not evidence — and nothing it reads is sent
 anywhere.
+
+## The daemon's embedding path (0.28.0)
+
+**Priority follows the work.** A launchd agent started as `ProcessType
+Background` runs on the efficiency cores and cannot lift itself out, which held
+the service to 3.3 chunks/s against 28 in a terminal. The plist now asks for
+`Standard`, and one process-wide count covers every embed pass, every query
+embedding and every HTTP request. On its 0→1 edge the daemon clears its darwin
+background state (`setpriority(PRIO_DARWIN_PROCESS, 0, 0)`); 300 ms after it
+returns to 0 it sets it again. Windows does the same with `SetPriorityClass` and
+EcoQoS power throttling; Linux is left alone, because an unprivileged process
+cannot lower its nice value once it has raised it. A launchd agent still runs its
+threads at priority 20 against 31 from a terminal, which is why the service
+indexes at about 60 % of a terminal on a Mac.
+
+**One queue for everything that embeds.** A portal run, a watcher catch-up and a
+watcher batch of more than 32 files are admitted through the same daemon-wide
+queue, so *runs at once* is a real ceiling. Lowering it holds the newest runs at
+their next batch as `held`; they keep their progress and their list of written
+files, and resume oldest first. A batch of 32 files or fewer still runs at once,
+because a saved file has to be searchable within seconds.
+
+**Control at every batch.** The index pass asks its control before every
+embedding batch, inside a file as well as between files, so pause and stop act
+within one batch. Stop undoes what the run wrote and saves the index once; with
+its delete box, the store's writer, watcher and readers close before the
+directory is renamed aside and removed.
+
+**Sorted windows.** Pending chunks gather into a window of 64, sorted by the
+model's own token count and embedded in batches of 8 on the CPU, 16 on WebGPU
+and 64 on CUDA, so a batch pads less. The window forms in walk order and sorts
+stably, so one corpus on one lane always makes the same batches and the same
+vectors.
+
+**Lanes.** The CPU embeds in the daemon; each GPU lane is a worker process
+(`semlith __embed-worker <lane>`) that loads the fp16 export through Microsoft's
+WebGPU plugin or ONNX Runtime's CUDA build, and speaks length-framed batches on
+its stdin and stdout. The CPU takes the shortest chunks from the front of the
+window and each GPU lane the longest from the back, two batches queued so the
+device never waits on the writer. A worker that exits, errs or passes its
+per-batch deadline fails its own lane; its batch goes back on the window and the
+run finishes on what is left. Before its first batch a lane embeds 32 committed
+chunks and must agree with their fp32 vectors at cosine 0.999 or better. A
+software renderer (lavapipe, WARP, SwiftShader) is refused by vendor and name
+before anything is downloaded. Which lane embedded a chunk depends on timing, so
+two hybrid runs make the same chunks but not bit-identical vectors; the store
+counts its chunks per variant in the meta row `variants`.
+
+**Memory that follows the work.** ONNX Runtime's arenas never shrink, so a
+writer drops its session after 60 seconds without embedding and a GPU worker
+exits after 60 idle seconds. Readers share one query session per model. A
+reader panic during extraction fails that file rather than the store's writer.

@@ -262,12 +262,18 @@ fn the_readme_credits_the_work_the_index_is_built_on() {
 /// on the front page — `impact`, `trace` and `report`. Three table rows and
 /// the sentence that they are free is what the ten bought; prose was reflowed
 /// rather than cut to pay for the rest.
+///
+/// Moved from 560 to 580 in 0.28.0, which put the GPU on the front page: a row
+/// for `semlith accel`, one paragraph on the Index page's live controls and
+/// one on the lanes, two measured rows for the service's rate and the daemon's
+/// memory, and the three limits a reader meets first on a Mac or a Windows
+/// NVIDIA card.
 #[test]
 fn the_readme_is_short() {
     let lines = README.lines().count();
     assert!(
-        lines < 560,
-        "the README is {lines} lines; the ceiling is 560"
+        lines < 580,
+        "the README is {lines} lines; the ceiling is 580"
     );
 }
 

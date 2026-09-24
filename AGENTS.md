@@ -118,6 +118,10 @@ Module responsibilities:
 | `src/chunk.rs` | File bytes → text → chunks. Cut at definitions where tree-sitter found them and at headings in Markdown; 800 chars and 2 overlap lines are the fallback and the budget; 8 MiB cap |
 | `src/formats.rs` | Readers for the thirteen non-plain-text formats. Private on purpose |
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
+| `src/accel.rs` | The lanes: which are on, the per-lane dispatcher and its worker process (`semlith __embed-worker`), the length-framed protocol, fault injection, and the known-answer check behind `doctor --gpu` |
+| `src/gpu.rs` | GPU detection per platform, the software-renderer refusal, the pinned WebGPU plugin and fp16 downloads, and the WebGPU session a worker runs |
+| `src/cuda.rs` | NVML detection, the pinned CUDA pack (Linux x86_64) and the CUDA session a worker runs |
+| `src/priority.rs` | The daemon's priority following its work: background while idle, normal while anything embeds or a request is served |
 | `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
