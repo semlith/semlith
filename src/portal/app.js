@@ -10389,8 +10389,13 @@ async function impactView() {
   const subject = el("span", { class: "impact-subject", text: "—" });
   const depthPill = el("span", { class: "pill warn", text: "depth 3 · reverse" });
   const rings = impactCanvas();
-  const pathCard = pathFinderCard();
-  const traceLane = traceCard();
+  /* The store the question is about. Carried from the Graph page's Blast
+   * radius, which knows which store the symbol was picked in; the same name in
+   * another open store is another symbol with another reach. */
+  let store = state.impactStore || "";
+  const scope = () => store;
+  const pathCard = pathFinderCard(scope);
+  const traceLane = traceCard(scope);
   const reached = statCell("Reached", 0);
   const files = statCell("Files", 0);
   const inferredCell = statCell("Inferred", 0);
@@ -10428,7 +10433,29 @@ async function impactView() {
     if (nameInput.value.trim()) run();
   });
 
-  const go = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
+  const reach = el("button", { class: "button small", type: "button", text: "Reach", onclick: () => run() });
+  const storeChip = el("span", { class: "chips" });
+  function paintStore() {
+    fill(
+      storeChip,
+      store
+        ? el("button", {
+            class: "chip sm",
+            type: "button",
+            "aria-pressed": "true",
+            title: "Answering about this store only. Press to ask every open store.",
+            text: `in ${store} ×`,
+            onclick: () => {
+              store = "";
+              state.impactStore = "";
+              paintStore();
+              if (nameInput.value.trim()) run();
+            },
+          })
+        : null,
+    );
+  }
+  paintStore();
 
   /* A real table row, in a real table.
    *
@@ -10491,7 +10518,7 @@ async function impactView() {
       subject.textContent = "—";
       setStats(0, 0, 0);
       rings.clear();
-      fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
+      fill(results, emptyImpact());
       return;
     }
     const depth = Math.min(10, Math.max(1, Number(depthInput.value) || 3));
@@ -10503,6 +10530,7 @@ async function impactView() {
     try {
       const query = new URLSearchParams({ name, depth: String(depth) });
       if (allEdges) query.set("all_edges", "1");
+      if (store) query.set("store", store);
       data = await api(`/api/impact?${query}`);
     } catch (e) {
       rings.clear();
@@ -10636,30 +10664,50 @@ async function impactView() {
     );
   }
 
-  fill(results, el("p", { class: "subtitle", text: "Name a symbol to read the graph backwards from it." }));
+  /* Where to start, for a page opened with no question: the Graph is where a
+   * symbol is usually found, and its Blast radius button lands here with the
+   * symbol and its store already filled in. */
+  function emptyImpact() {
+    return el(
+      "div",
+      { class: "rows tight" },
+      el("p", {
+        class: "subtitle",
+        text: "Name a symbol above, or find it on the Graph page, pick it, and press Blast radius.",
+      }),
+      el("div", {}, el("button", { class: "button secondary small", type: "button", text: "Open Graph", onclick: () => go("graph") })),
+    );
+  }
+
+  fill(results, emptyImpact());
   if (state.impactSymbol) run();
+
+  /* Hops and prefer-verified, folded: the defaults answer the question most
+   * people ask, and five controls in front of the answer made the page read as
+   * a form to fill in rather than as an answer. */
+  const options = el(
+    "details",
+    { class: "impact-options" },
+    el("summary", { text: "Options" }),
+    el(
+      "div",
+      { class: "impact-band" },
+      el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
+      verified,
+    ),
+  );
 
   return el(
     "div",
     { class: "view" },
-    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
+    pageHead("Impact", "Reverse reachability: what breaks if this changes — before the edit, not after the test run.", {
       pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
     }),
-    /* Two columns, as the design lays the page out: the answer on the left,
-     * the two questions that follow from it on the right, and the canvas at
-     * the top of the right column rather than spanning.
-     *
-     * The `Changing` row and the three figures were two unboxed page-wide
-     * bands across the top; they are one card at the head of the left column,
-     * which is where the design has them and is why the right column used to
-     * read as a large empty area beside them.
-     *
-     * The search band is this project's own addition -- the design is a
-     * prototype with one fixed subject and no way to ask about another -- and
-     * it sits at the head of that same card rather than after it. Against a
-     * real store there is nothing on this page until a name is typed, so a
-     * control placed below the answer it produces would be a control nobody
-     * finds. Recorded as a deliberate departure. */
+    /* One question, answered first. The symbol and its three figures, the
+     * reached list by hop, and the canvas beside them. The path finder and the
+     * trace answer a different question, about two symbols, so they are one
+     * folded section under the answer rather than two cards competing with it;
+     * they stay on this page because every tool has a portal view. */
     el(
       "div",
       { class: "impact-columns" },
@@ -10669,14 +10717,8 @@ async function impactView() {
         el(
           "div",
           { class: "card pad impact-subject-card" },
-          el(
-            "div",
-            { class: "impact-band" },
-            nameInput,
-            el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
-            verified,
-            go,
-          ),
+          el("div", { class: "impact-band" }, nameInput, storeChip, reach),
+          options,
           el(
             "div",
             { class: "impact-subject-row" },
@@ -10686,10 +10728,28 @@ async function impactView() {
             depthPill,
           ),
           stats,
+          el(
+            "ul",
+            { class: "impact-guide" },
+            el("li", {}, el("b", { text: "Reached" }), " — every definition that calls, references or imports this one, directly or through others."),
+            el("li", {}, el("b", { text: "Inferred" }), " — linked by a bare name match only. Corroborate before relying on it."),
+            el("li", {}, el("b", { text: "Hops" }), " — edges away from the symbol. 1 is a direct caller."),
+          ),
         ),
         results,
       ),
-      el("div", { class: "impact-col" }, rings.node, pathCard, traceLane),
+      el("div", { class: "impact-col" }, rings.node),
+    ),
+    el(
+      "details",
+      { class: "impact-between" },
+      el(
+        "summary",
+        {},
+        el("h2", { text: "Between two symbols" }),
+        el("span", { class: "meta", text: "path finder and trace" }),
+      ),
+      el("div", { class: "impact-columns" }, pathCard, traceLane),
     ),
   );
 }
@@ -10709,7 +10769,7 @@ const TRACE_EMPTY = "Two names, and this writes the chain out with the lines tha
  * `Prefer verified edges` is the default and `Strict` says it out loud — the
  * same pair the CLI takes, and `Strict` wins over the other for the same
  * reason it does there. */
-function pathFinderCard() {
+function pathFinderCard(scope) {
   const from = el("input", { type: "text", placeholder: "from", "aria-label": "Path from" });
   const to = el("input", { type: "text", placeholder: "to", "aria-label": "Path to" });
   const body = el("div", { class: "path-body" });
@@ -10749,6 +10809,7 @@ function pathFinderCard() {
     try {
       const q = new URLSearchParams({ from: a, to: b, depth: "6" });
       if (allEdges) q.set("all_edges", "1");
+      if (scope && scope()) q.set("store", scope());
       data = await api(`/api/path?${q}`);
     } catch (e) {
       fill(body, error(e.message));
@@ -10879,7 +10940,7 @@ function chainBlock(steps, summary) {
  * The sentence, the hops, and one line of source per hop — each marked a
  * supporting fact or a candidate, from the hop's own support class. Nothing
  * here re-walks the graph: `/api/trace` reads the chain the finder produced. */
-function traceCard() {
+function traceCard(scope) {
   const from = el("input", { type: "text", placeholder: "from", "aria-label": "Trace from" });
   const to = el("input", { type: "text", placeholder: "to", "aria-label": "Trace to" });
   const body = el("div", { class: "trace-body" });
@@ -10897,7 +10958,9 @@ function traceCard() {
     fill(body, el("p", { class: "subtitle", text: "Reading…" }));
     let data;
     try {
-      data = await api(`/api/trace?${new URLSearchParams({ from: a, to: b, depth: "6" })}`);
+      const q = new URLSearchParams({ from: a, to: b, depth: "6" });
+      if (scope && scope()) q.set("store", scope());
+      data = await api(`/api/trace?${q}`);
     } catch (e) {
       fill(body, error(e.message));
       return;

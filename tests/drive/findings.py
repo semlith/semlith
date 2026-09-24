@@ -2974,6 +2974,9 @@ def _(d):
 @finding("5.3", "the path finder and Trace render on the Impact page")
 def _(d):
     d.open_view("impact")
+    # Folded since 0.29.0 (options, and the two-symbol section) so the answer
+    # comes first. Opened here, because folded is still on the page.
+    d.eval("document.querySelectorAll('.impact-options, .impact-between').forEach(e => e.open = true)")
     body = view_text(d)
     for wanted in ["Path finder", "Prefer verified edges", "Strict", "Trace", "Copy as evidence"]:
         if wanted not in body:

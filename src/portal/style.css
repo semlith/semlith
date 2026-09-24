@@ -4791,6 +4791,59 @@ td.row-end {
   flex: 1 1 18rem;
   min-width: 0;
 }
+/* Hops and prefer-verified, folded under the symbol field. */
+.impact-options {
+  margin: calc(var(--sp-2) * -1) 0 var(--sp-3);
+}
+.impact-options > summary,
+.impact-between > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--t-small);
+}
+.impact-options > summary::marker,
+.impact-between > summary::marker {
+  color: var(--muted);
+}
+.impact-options[open] > .impact-band {
+  margin: var(--sp-2) 0 0;
+}
+/* What the three figures mean, once, under them. */
+.impact-guide {
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--t-body-sm);
+  line-height: var(--lh-prose);
+  color: var(--muted);
+}
+.impact-guide b {
+  color: var(--ink-2);
+  font-weight: 500;
+}
+/* The path finder and the trace: a second question, about two symbols,
+ * folded under the answer to the first. */
+.impact-between {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+.impact-between > summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.impact-between > summary h2 {
+  margin: 0;
+  font-size: var(--t-body);
+  color: var(--ink);
+}
+.impact-between[open] > .impact-columns {
+  margin-top: var(--sp-4);
+}
 .hops-label {
   display: inline-flex;
   align-items: center;
