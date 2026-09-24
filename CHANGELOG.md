@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### The service indexes at the machine's speed, the GPU works beside the CPU, and the run controls act at once
+### The service indexes 4.6× faster, the GPU works beside the CPU, and the run controls act at once
 
 On the reference M1 (4 performance and 4 efficiency cores, 8 GB), the login
 service indexed at 3.3 chunks/s while the same binary in a terminal did 28,
