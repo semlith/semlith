@@ -28,7 +28,10 @@ its darwin background state. When it returns to 0, the daemon waits 300 ms and
 sets the state again, so a burst of searches does not toggle it. Each switch is
 logged with its direction and how long it took, which was under 100 µs in both
 directions on the M1. `/api/about` reports the current state and the number of
-switches.
+switches. Every HTTP request lifts the daemon too, so Pause, Stop and a limit
+save answer at once on a machine that is busy with something else. Only a
+request that goes on to embed is logged; a portal page polling once a second
+would otherwise write two lines a second to the log.
 <!-- MEASURE: pinned corpus (≥ 400 chunks, hash recorded) on the reference M1, median of three — CLI in a terminal vs a portal run through the launchd service (chunks/s, both in one unit; acceptance: service ≥ 85 % of terminal), against 3.3 of 28 chunks/s on 2026-09-23 -->
 
 This trades some battery for speed. While it embeds, the daemon runs at full
@@ -61,7 +64,11 @@ of written files, so a later Stop still undoes everything they embedded, and
 they resume in submission order as slots free. The environment variables keep
 their precedence. The route's reply states the values the engine now runs with.
 The limits line `semlith start` prints shows the values in force, so it no
-longer says "1 embedder thread(s) each" while every session runs 4.
+longer says "1 embedder thread(s) each" while every session runs 4. A derived
+*threads each* is split between the runs embedding at that moment rather than
+the most that could be: a run going alone gets every thread, as it would in a
+terminal, and each run rebuilds its session at its next batch when another
+starts or ends. A saved or environment value is used as given.
 
 **Values saved under 0.27.0 take effect now.** In 0.27.0, *threads each* and
 *MiB per store* were written to `~/.semlith/settings.json` and then ignored.
