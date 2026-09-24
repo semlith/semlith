@@ -83,6 +83,10 @@ const BIT_WIDTH: usize = 4;
 /// chunks/sec), because a smaller batch also wastes less of itself on padding.
 const EMBED_BATCH: usize = 8;
 
+/// Batches a GPU lane holds queued at once, so its device never waits on the
+/// writer's own CPU batch to be handed the next one.
+const LANE_DEPTH: usize = 2;
+
 /// Told after every embedding batch: chunks embedded, the session's thread
 /// count, and each lane's running total for the store.
 type Tick<'a> = dyn FnMut(usize, usize, &std::collections::BTreeMap<String, usize>) + 'a;
@@ -2771,23 +2775,26 @@ impl Semlith {
             // Read before every batch, so a switch reaches a run already
             // going at its next batch rather than at its next window.
             (lanes, cpu_on) = accel::for_run();
-            // Every free lane takes the longest chunks left.
+            // Every lane with room takes the longest chunks left. A lane keeps
+            // [`LANE_DEPTH`] batches queued: the writer refills lanes only
+            // between its own CPU batches, and a GPU that had to wait for the
+            // CPU's batch to end before getting its next one sat idle for most
+            // of every CPU batch.
             for lane in &lanes {
-                if waiting.is_empty() {
-                    break;
-                }
-                if !lane.usable()
-                    || flying
+                while !waiting.is_empty()
+                    && lane.usable()
+                    && flying
                         .iter()
-                        .any(|(l, _, _)| std::sync::Arc::ptr_eq(l, lane))
+                        .filter(|(l, _, _)| std::sync::Arc::ptr_eq(l, lane))
+                        .count()
+                        < LANE_DEPTH
                 {
-                    continue;
+                    let take = lane.batch().min(waiting.len());
+                    let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_back()).collect();
+                    let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
+                    let answer = lane.submit(batch);
+                    flying.push((std::sync::Arc::clone(lane), group, answer));
                 }
-                let take = lane.batch().min(waiting.len());
-                let group: Vec<usize> = (0..take).filter_map(|_| waiting.pop_back()).collect();
-                let batch: Vec<String> = group.iter().map(|i| texts[*i].clone()).collect();
-                let answer = lane.submit(batch);
-                flying.push((std::sync::Arc::clone(lane), group, answer));
             }
             // Whatever has come back.
             let mut still = Vec::with_capacity(flying.len());
