@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Eleven portal fixes found using 0.28.0
+
+Using 0.28.0 day to day turned up eleven places where the portal said the wrong
+thing, hid a control or made a common task slow. This release fixes those and
+nothing else. Nothing in ranking, chunking or embedding changed. Stores and
+settings are unchanged, so upgrading and downgrading need nothing.
+
+**Index run cards count down.** A clock counting up from the button press told
+someone watching a run how long they had waited, not when it would be done. The
+index pass now measures each file it will open, one `stat` per file, and reports
+bytes done against bytes total; a file being embedded counts in proportion to
+its chunks. The daemon keeps a bytes/s rate over the last 10 s of active time,
+and `/api/index/runs` carries `eta_ms`, `bytes`, `bytes_total`, `started_at` and
+`finished_at` beside `submitted`. `eta_ms` is null until 5 s of embedding has
+been seen and whenever the run is not running. A running card reads `about 3
+min left`, `about 40 s left` or `almost done`, and `estimating…` until the rate
+settles. A queued card reads `waiting 12s`. A finished card reads `took 5m 18s ·
+finished 21:35`, timed from the run's start rather than its submission, and
+names any time spent queued separately (`· queued 1m 02s`). The "N runs queued."
+note moved into the button row beside Start indexing and empties to nothing, so
+a finished run no longer leaves a blank line above the cards.
+
+**Stores can be deleted together.** The Stores table has a checkbox column, a
+select-all per page, and a bar with **Delete N stores** whose confirmation names
+each store. `POST /api/store/delete` takes `{"stores": ["a", "b"]}` as well as
+`{"store": "a"}`. Each store goes through the same removal, and a store that
+could not be deleted is named with its reason while the others still go. The
+list form answers `{deleted, failed: [{store, error}], message}`: 200 if any
+store went, and 409 with an `error` naming why when none did. The result note
+shows above the table rather than at the foot of the page. The table's "See
+what is actually inside the index" link opens Inside the index again; it had
+pointed at Index since 0.27.0 split the page.
+
+**Impact answers one question.** The page opens on what breaks if this changes:
+one symbol field, the `Changing` line, the figures Reached, Files and Inferred, a
+three-line guide to reached, inferred and hops, the reached list by hop, and the
+canvas. Hops and prefer-verified sit behind an **Options** disclosure. The path
+finder and trace moved into one collapsed **Between two symbols** section on the
+same page. An empty page says how to get there from Graph and has an **Open
+Graph** button. Arriving from Graph's **Blast radius**, the page answers in the
+store the symbol was picked in, shown as an `in <store> ×` chip that clears the
+scope, and the path finder and trace use the same scope.
+
+**Graph's rail keeps its buttons in view.** "Chunks it lives in" and "Blast
+radius" were sticky at an offset that left them 18 px below the visible edge
+once the side column became the scroller. They now sit in a footer of the side
+column that does not scroll. A long symbol name ends in an ellipsis, with the
+full name on hover, rather than breaking mid-word.
+
+**Smaller fixes.** Every paginated table opens at 5 rows per page; tables used
+10, 12, 15 or 25, and the ledger's 12 and 15 matched no page-size button. The
+Stores table keeps its page, page size and sort when a watcher write redraws the
+page; each redraw used to put the reader back on page 1. On
+Search, the hit count and timing moved out of the query box to the line under
+it. In the Brief view, each span with text is drawn as the results view draws a
+hit: a span card with a path header, line-numbered code and the lists that
+found it. Spans the budget left without text are compact rows, and the token
+footer is a strip of facts: tokens of budget, spans, counted with, and dropped.
+On Agents, both rows of cards share one two-column grid and collapse to one
+column at the same width, 899 px.
+
 ## [0.28.0] - 2026-09-24
 
 ### The service indexes 4.6× faster, the GPU works beside the CPU, and the run controls act at once

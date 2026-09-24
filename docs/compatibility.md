@@ -1233,6 +1233,20 @@ plist runs at normal priority the whole time. That is safe, but it does not
 drop to background when idle. Running that version's `setup` restores its own
 plist.
 
+## 0.29.0
+
+**Nothing that was covered changes.** No command, flag, MCP tool or schema
+changes, `FORMAT_VERSION` does not move, and stores and `settings.json` are
+untouched, so a 0.28.x binary and a 0.29.0 binary open each other's stores.
+Two routes gain fields. The daemon's routes are
+[not a contract](#what-is-not-covered); they are listed because scripts read
+them anyway.
+
+| Route | What changes |
+|---|---|
+| `GET /api/index/runs`, per run | `bytes` and `bytes_total`: the bytes of the files the run will open, done and in all, with a file being embedded counted in proportion to its chunks. `eta_ms`: milliseconds left at the bytes/s rate over the last 10 s of active time, null until 5 s of embedding has been seen and whenever the run is not `running`. `started_at` and `finished_at`: unix seconds, beside the `submitted` that was already there. |
+| `POST /api/store/delete` | Takes `{"stores": ["a", "b"]}` as well as `{"store": "a"}`. Each store in the list goes through the same removal as a single one, and a store that cannot be deleted does not stop the others. The list form answers `{deleted: [...], failed: [{store, error}], message}`: 200 when any store was deleted, and 409 with an `error` naming why when none was. The single form and its answer are unchanged. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:
