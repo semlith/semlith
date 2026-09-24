@@ -1563,6 +1563,46 @@ fn a_store_is_deleted_without_stopping_the_daemon() {
     assert_eq!(daemon.get("/api/privacy").status, 200);
 }
 
+/// Several stores go in one request, each through the single delete's path,
+/// and one that cannot go is named without holding the others back.
+#[test]
+#[ignore = "indexes, so it downloads an embedding model on first run"]
+fn several_stores_are_deleted_in_one_request() {
+    let (dir, home, work) = sandbox("delete-stores");
+    corpus(&home, &work, "api", &[("fleet.rs", RUST)]);
+    corpus(&home, &work, "cli", &[("fleet.rs", RUST)]);
+    let daemon = Daemon::start_in(dir, home.clone(), work.join("api"), &[]);
+
+    let answer = daemon.post(
+        "/api/store/delete",
+        "{\"stores\":[\"api\",\"cli\",\"nowhere\"]}",
+    );
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    let done = answer.json();
+    assert_eq!(done["deleted"], serde_json::json!(["api", "cli"]), "{done}");
+    assert_eq!(done["failed"][0]["store"], "nowhere", "{done}");
+    assert!(
+        done["message"]
+            .as_str()
+            .unwrap()
+            .contains("nowhere was not deleted"),
+        "{done}"
+    );
+    assert!(!home.join("stores/api").exists());
+    assert!(!home.join("stores/cli").exists());
+    assert!(work.join("cli/fleet.rs").exists(), "the corpus was deleted");
+
+    // Nothing left to delete: refused, with the reason as the error.
+    let answer = daemon.post("/api/store/delete", "{\"stores\":[\"api\"]}");
+    assert_eq!(answer.status, 409, "{}", answer.body);
+    assert!(
+        answer.json()["error"]
+            .as_str()
+            .unwrap()
+            .contains("api was not deleted")
+    );
+}
+
 // ---------------------------------------------------------------- T13
 
 /// A run can be stopped, and stopping undoes it. A half-indexed corpus is

@@ -3384,11 +3384,56 @@ fn forget(state: &Arc<State>, request: &Request) -> Response {
 ///
 /// The files that were indexed are not touched, which is the line the portal
 /// says out loud before it asks for confirmation.
+///
+/// `stores`, a list, deletes each through the same path as one `store` and
+/// answers for each: a store that could not go is named with why, and the
+/// others still go. A bulk delete that stopped at its first refusal would leave
+/// the reader to work out which half had happened.
 fn delete_store(state: &Arc<State>, request: &Request) -> Response {
     let body = match request.json() {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
+    if let Some(list) = body.get("stores").and_then(Value::as_array) {
+        let names: Vec<&str> = list.iter().filter_map(Value::as_str).collect();
+        if names.is_empty() {
+            return Response::error(400, "no store given");
+        }
+        let mut deleted = Vec::new();
+        let mut failed = Vec::new();
+        for name in names {
+            match state.delete_store(name) {
+                Ok(_) => deleted.push(name),
+                Err(e) => failed.push(json!({ "store": name, "error": format!("{e:#}") })),
+            }
+        }
+        let reasons: Vec<String> = failed
+            .iter()
+            .map(|f| {
+                format!(
+                    "{} was not deleted: {}.",
+                    f["store"].as_str().unwrap_or_default(),
+                    f["error"].as_str().unwrap_or_default()
+                )
+            })
+            .collect();
+        // Nothing went: the same refusal a single delete answers with, the
+        // reasons as its error.
+        if deleted.is_empty() {
+            let body = json!({ "deleted": deleted, "failed": failed, "error": reasons.join(" ") });
+            return Response::new(409, "application/json", body.to_string().into_bytes());
+        }
+        let message = format!(
+            "{} store{} deleted: {}. The files they indexed are untouched.{}",
+            deleted.len(),
+            if deleted.len() == 1 { "" } else { "s" },
+            deleted.join(", "),
+            reasons.iter().map(|r| format!(" {r}")).collect::<String>(),
+        );
+        return Response::json(
+            &json!({ "deleted": deleted, "failed": failed, "message": message }),
+        );
+    }
     let Some(name) = body.get("store").and_then(Value::as_str) else {
         return Response::error(400, "no store given");
     };

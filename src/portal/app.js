@@ -3686,8 +3686,17 @@ function note(text, bad) {
   holder.textContent = text;
 }
 
+/* The stores ticked for a bulk delete, by name. Outside the view, because the
+ * view is redrawn whenever a store's counters move, and a selection that
+ * vanished under a watcher's re-embed would be one nobody could trust. */
+const storesPicked = new Set();
+
 async function storesView() {
   const stores = await refreshStores();
+  // A store deleted elsewhere is no longer selectable.
+  for (const name of storesPicked) {
+    if (!stores.some((s) => s.name === name)) storesPicked.delete(name);
+  }
   /* Live. A store the CLI just made, a watcher re-embed, a run's own note —
    * each moves a counter the shared poll is watching, and this page redraws
    * from the route it already reads rather than from a timer of its own.
@@ -3804,10 +3813,53 @@ async function storesView() {
    * reads as belonging to the next block. */
   const insideLink = el(
     "button",
-    { class: "table-follow", type: "button", onclick: () => go("index") },
+    { class: "table-follow", type: "button", onclick: () => go("corpus") },
     el("span", { text: "See what is actually inside the index" }),
     icon(ICONS.arrowRight, 15),
   );
+
+  // The Files page's bulk bar, for stores: one confirm that names each one.
+  const bulkBar = el("div", { class: "bulk", hidden: true });
+  function paintBulk() {
+    bulkBar.hidden = storesPicked.size === 0;
+    if (!storesPicked.size) return;
+    const names = [...storesPicked].sort();
+    const many = `${n(names.length)} store${names.length === 1 ? "" : "s"}`;
+    fill(
+      bulkBar,
+      el("span", { class: "meta", text: `${many} selected` }),
+      el("span", { class: "spacer" }),
+      el("button", {
+        class: "button secondary small",
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          storesPicked.clear();
+          for (const box of table.node.querySelectorAll("input.pick")) box.checked = false;
+          paintBulk();
+        },
+      }),
+      el("button", {
+        class: "button danger small",
+        type: "button",
+        text: `Delete ${many}`,
+        onclick: () =>
+          ask({
+            title: `Delete ${many}?`,
+            body: `${names.join(", ")}: their vectors, chunks, graph and ledger are deleted, and the registry stops listing them. The files they indexed are untouched.`,
+            confirm: `Delete ${many}`,
+            tone: "bad",
+            run: async () => {
+              const done = await post("/api/store/delete", { stores: names });
+              for (const name of done.deleted || []) storesPicked.delete(name);
+              await refreshStores();
+              await render();
+              note(done.message, (done.failed || []).length > 0);
+            },
+          }),
+      }),
+    );
+  }
 
   const table = dataTable({
     className: "w-stores",
@@ -3815,6 +3867,39 @@ async function storesView() {
     sort: "name",
     rows: stores,
     columns: [
+      {
+        key: "pick",
+        label: "",
+        className: "pick",
+        sortable: false,
+        head: () => {
+          const all = el("input", {
+            type: "checkbox",
+            class: "pick all",
+            "aria-label": "Select every store on this page",
+            onchange: () => {
+              for (const box of table.node.querySelectorAll("tbody input.pick")) {
+                if (box.checked !== all.checked) box.click();
+              }
+            },
+          });
+          return all;
+        },
+        render: (s) => {
+          const box = el("input", {
+            type: "checkbox",
+            class: "pick",
+            "aria-label": `Select ${s.name}`,
+            onchange: () => {
+              if (box.checked) storesPicked.add(s.name);
+              else storesPicked.delete(s.name);
+              paintBulk();
+            },
+          });
+          box.checked = storesPicked.has(s.name);
+          return box;
+        },
+      },
       {
         key: "name",
         label: "Store",
@@ -4040,6 +4125,7 @@ async function storesView() {
     .sort((a, b) => b.at - a.at)
     .slice(0, 40);
 
+  paintBulk();
   return el(
     "div",
     { class: "view" },
@@ -4061,6 +4147,10 @@ async function storesView() {
       ),
       stat("On disk", bytes(totals.bytes), "int8 quantised"),
     ),
+    bulkBar,
+    // Above the table, so what a delete did is said where the reader is
+    // looking; at the foot of the page it was below the fold.
+    el("div", { class: "note page-note", role: "status", "aria-live": "polite" }),
     el(
       "div",
       { class: "scroller" },
@@ -4117,7 +4207,6 @@ async function storesView() {
     adoptNote,
     rootPicker.node,
     rootNote,
-    el("div", { class: "note page-note" }),
   );
 }
 
