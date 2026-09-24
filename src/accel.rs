@@ -646,7 +646,7 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
             if id != "worker" {
                 out.push(serde_json::json!({
                     "lane": id,
-                    "reason": format!("off — `semlith accel on {id}` turns it on"),
+                    "reason": format!("off — semlith accel on {id} turns it on"),
                 }));
             }
             continue;
