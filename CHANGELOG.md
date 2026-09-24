@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-24
+
 ### The service indexes 4.6× faster, the GPU works beside the CPU, and the run controls act at once
 
 On the reference M1 (4 performance and 4 efficiency cores, 8 GB), the login
@@ -3456,7 +3458,8 @@ files (1.5 MB, 2375 chunks):
 - Indexing: ~13 chunks/sec, ~1.7 GB peak RSS
 - Re-index with nothing changed: 17 ms
 
-[Unreleased]: https://github.com/semlith/semlith/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/semlith/semlith/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/semlith/semlith/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/semlith/semlith/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/semlith/semlith/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/semlith/semlith/compare/v0.25.0...v0.26.0
