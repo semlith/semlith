@@ -3325,7 +3325,9 @@ def _(d):
     if label not in view_text(d):
         fail("the Stores table has no route into Inside the index")
     d.click_text(".table-follow", label)
-    d.wait_for("(location.hash || '') === '#index'", what="the route into Inside the index")
+    # `#corpus` from 0.29.0: this asserted `#index`, the page the link was left
+    # pointing at when 0.27.0 split Inside the index out of it.
+    d.wait_for("(location.hash || '') === '#corpus'", what="the route into Inside the index")
 
 
 @finding("6.4", "the Retrieval ledger offers the way into Reports")
@@ -5074,10 +5076,3 @@ def _(d):
             fail("at %dpx the Agents rows' cards start at %r and %r" % (width, edges[0], edges[1]))
     d.set_viewport(1280, 900)
 
-
-@finding("9.11", "the Stores table's inside-the-index link opens Inside the index")
-def _(d):
-    d.open_view("stores", fresh=True)
-    d.click_text("button", "See what is actually inside the index")
-    d.wait_for("(document.querySelector('#root h1') || {}).textContent === 'Inside the index'",
-               what="Inside the index")
