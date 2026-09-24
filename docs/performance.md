@@ -175,19 +175,23 @@ ms after the last embed ends.
 
 | path | chunks/s |
 |---|---|
-| `semlith index` in a terminal | <!-- MEASURE: CLI in a terminal, pinned corpus, median of three --> |
+| `semlith index` in a terminal | 27.6 |
 | a portal run through the launchd service, CPU lane alone | <!-- MEASURE: portal run through the service with `semlith accel off gpu`, same corpus, median of three; acceptance ≥ 85 % of the terminal figure --> |
 | the same service before 0.28.0 (`ProcessType Background`) | 3.3, against 28 in a terminal, 2026-09-23 |
 
 **Length-sorted batching.** The index pass sorts a window of up to 64 chunks by
 length before embedding it, so a batch no longer pads short chunks to the
-length of a long one. On the M1, over 512 real chunks on the CPU alone with
-int8, throughput went from 19.5 to 29.1 chunks/s.
+length of a long one. A standalone script over 512 real chunks measured 19.5
+against 29.1 chunks/s before it was built. Inside the release binary the gain
+is smaller, because the unsorted path already embeds eight neighbouring chunks
+of one file at a time, and those are close in length. Against unsorted batches
+of 32, sorting gives 1.31×. Windows of 128 to 2 048 chunks measured within
+run-to-run spread of the window of 64.
 
 | CPU lane alone, int8 | chunks/s |
 |---|---|
-| unsorted, file order | <!-- MEASURE: pinned corpus, unsorted path of the release binary, median of three --> |
-| sorted, window of 64 | <!-- MEASURE: pinned corpus, sorted, same binary, median of three; acceptance ≥ 1.3× unsorted --> |
+| unsorted, file order | 23.5 |
+| sorted, window of 64 | 27.6 (1.17×; a second interleaved round gave 23.4 against 20.6, 1.14×) |
 
 **Lanes.** A GPU lane is a worker process running the fp16 export of the model.
 The CPU lane runs int8 in the daemon. Both take batches from one sorted queue,
@@ -207,8 +211,19 @@ M1, WebGPU on Metal scored cosine 1.0000 on all 32 chunks, and the CPU int8
 lane scored 0.9851. An fp16 lane below 0.999 on any chunk is refused before
 its first real batch. Tested on the 2026-09-23 corpus, int8 and fp16 vectors of
 the same text agree at cosine 0.987. That is why a store embedded by both lanes
-was measured against an all-int8 store before hybrid became the default:
-<!-- MEASURE: item 1.16's four-way harness on the sealed split (all int8, all fp16, 50/50 mix, mix with fp16 queries), median of three, hit@1/3/8 as counts of 30, and the rule it selected -->
+was measured against an all-int8 store before hybrid became the default. On the
+sealed split of 30 questions, CPU lane alone, median of three:
+
+| store | hit@1 | hit@3 | hit@8 |
+|---|---|---|---|
+| all int8 | 24/30 | 27/30 | 29/30 |
+| all fp16 | 25/30 | 27/30 | 28/30 |
+| half and half, int8 queries | 25/30 | 27/30 | 28/30 |
+| half and half, fp16 queries | 25/30 | 26/30 | 28/30 |
+
+The mix is within one question of all-int8 at every k, so a store may hold
+both, and queries stay int8. All 11 identifier questions stay in the top
+three in every arrangement.
 
 **Memory.** ONNX Runtime's arenas never shrink, so in 0.27.0 each writer kept its
 peak until the daemon exited: 5 392 MB across seven stores on the M1, read with

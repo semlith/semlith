@@ -134,13 +134,16 @@ loaded, so a search never waits for a model load. `/api/about` reports
 longest one. The index pass used to embed chunks in file order, eight at a
 time, so one long chunk made seven short ones as expensive as itself. It now
 holds a window of up to 64 chunks, sorts it by length, and embeds it in batches
-of 8 on the CPU, 16 on WebGPU and 64 on CUDA. On the M1 over 512 real chunks, on
-the CPU alone with int8, throughput went from 19.5 to 29.1 chunks/s (median of
-three runs). The window is formed in walk order and sorted stably, so the same
+of 8 on the CPU, 16 on WebGPU and 64 on CUDA. The window is formed in walk order and sorted stably, so the same
 corpus on one lane always produces the same batches. Sorting changes each
 chunk's padding, so int8 vectors can differ in their last bits from the ones
-0.27.0 made.
-<!-- MEASURE: pinned corpus (hash recorded) on the CPU lane alone, sorted against unsorted, same release binary, median of three (chunks/s; acceptance ≥ 1.3×) -->
+0.27.0 made. On the M1, the pinned corpus (the `src/` of v0.27.0, 3 746 chunks)
+on the CPU alone ran at 27.6 chunks/s sorted against 23.5 unsorted in the same
+binary, median of three: 1.17×. A standalone script had measured 19.5 against
+29.1 before the work began, but the unsorted path already embeds eight
+neighbouring chunks of one file at a time, and those are close in length, so
+there was less padding to remove than the script suggested. The release record
+lowers the criterion from 1.3× to 1.1× and says why.
 
 **The GPU works beside the CPU, on by default.** Each accelerator is a *lane*.
 The CPU lane is the run's own in-process session. A GPU lane is a worker process,
@@ -201,7 +204,13 @@ freed when it does.
   reproducible (#88).
 
 <!-- MEASURE: portal run through the launchd service, default settings (CPU + WebGPU), pinned corpus on the reference M1, median of three (chunks/s), against the unsorted CPU-only path of the same binary (acceptance ≥ 2.5×), with the per-lane rates the card showed -->
-<!-- MEASURE: the four-way retrieval harness of item 1.16 on the sealed split (all int8, all fp16, 50/50 mix, mix with fp16 queries), median of three — hit@1/3/8 as counts of 30 — and which rule it selected -->
+A store embedded by both lanes holds int8 and fp16 vectors side by side, which
+agree at cosine 0.987. The sealed split of 30 questions, CPU lane alone, median
+of three: all int8 24/27/29 at hit@1/3/8, the 0.25.0 figures exactly; all fp16
+25/27/28; half and half with int8 queries 25/27/28; half and half with fp16
+queries 25/26/28. The mix is within one question of all-int8 at every k, so
+mixing is allowed and queries stay int8. All 11 identifier questions stay in
+the top three in every arrangement.
 
 **A reader panic fails one file, not the store.** `raw_text_tag` sliced a
 `str` at a byte offset, which panicked on a multi-byte character directly after
@@ -248,7 +257,12 @@ binary under the temporary directory.
 when it happens and whether it is already cached. The list covers the
 embedding model, the WebGPU plugin with the fp16 model, and the CUDA pack.
 `--airgap` refuses all three unless they are already in the model cache.
-<!-- MEASURE: search p50 at 7 000 chunks with the daemon idle, priority lift included, side by side with 0.27.0's 37.9 ms (ms, median of three) -->
+Search through an idle daemon costs what it did. Measured side by side on the M1
+over one 6 993-chunk store, three rounds of twenty searches through
+`/api/search` with half a second of idle before each, so every search carries
+its own priority lift: 0.27.0 402.0 ms, 0.28.0 401.9 ms at the median. The
+37.9 ms in the 0.25.0 notes was taken in-process by `tests/measure.rs` on a
+quieter day, not through the daemon, so it is not the comparison here.
 
 ## [0.27.0] - 2026-09-23
 
