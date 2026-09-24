@@ -1,4 +1,5 @@
-/target
+# Every build directory: target/, and the target-* dirs parallel builds use.
+/target*/
 .semlith/
 .DS_Store
 
