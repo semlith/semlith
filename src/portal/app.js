@@ -5948,6 +5948,26 @@ function coveragePanel() {
  * page shows when it comes back.
  */
 
+/** How long something took: `0.4s`, `42s`, `5m 18s`, `1h 02m`. */
+function spellTook(ms) {
+  if (ms < 1000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+  const all = Math.round(ms / 1000);
+  if (all < 60) return `${all}s`;
+  if (all < 3600) return `${Math.floor(all / 60)}m ${String(all % 60).padStart(2, "0")}s`;
+  return `${Math.floor(all / 3600)}h ${String(Math.floor(all / 60) % 60).padStart(2, "0")}m`;
+}
+
+/** What is left of an estimate, in the rounded words a guess deserves:
+ * `about 3 min left`, `about 40 s left`, `almost done`. */
+function spellLeft(ms) {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 10) return "almost done";
+  if (seconds < 60) return `about ${Math.round(seconds / 5) * 5} s left`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `about ${minutes} min left`;
+  return `about ${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} min left`;
+}
+
 /** How long a run has taken, as `12:34` or `1:02:03`. */
 /** Chunks a second, to one decimal under ten so a slow lane reads as "2.4"
  * rather than rounding to nothing. */
@@ -6038,22 +6058,36 @@ function runCard(run, controls) {
   });
   let open = true;
 
-  /* The clock the daemon measured, ticked forward locally between polls.
-   *
-   * The daemon's number is the authority and it only ever goes forward — it
-   * runs from the moment the run was submitted, spans every slice, and stops
-   * while the run is held — so correcting to it can never make the reading
-   * jump backwards. The local tick exists only so the seconds move between
-   * one poll and the next. */
+  /* What the clock says depends on where the run is. Running: the time
+   * left, which the daemon estimates from the bytes still to go and counts
+   * down here between polls; `estimating…` until its rate settles. Queued:
+   * how long it has waited. Finished: how long the work took, from its start
+   * rather than its submission, and when it ended, with any wait named apart.
+   * The person watching a run wants to know when it will be done, and a clock
+   * counting up from the moment they pressed the button answered a different
+   * question. */
   let shown = 0;
   let readAt = 0;
   let ticking = false;
 
   function paintClock() {
-    const ms = ticking ? shown + (Date.now() - readAt) : shown;
-    // Under a second, tenths. `spell` counts in whole seconds, so every short
-    // run read `00:01` whatever it had actually taken.
-    setText(elapsed, ms < 1000 ? `${(ms / 1000).toFixed(1)}s` : spell(ms));
+    const since = Date.now() - readAt;
+    const next = last;
+    let text = "";
+    if (next.status === "queued") {
+      text = `waiting ${spellTook(ticking ? shown + since : shown)}`;
+    } else if (next.status === "running") {
+      text = next.eta_ms === null || next.eta_ms === undefined ? "estimating…" : spellLeft(next.eta_ms - since);
+    } else if (next.finished_at && next.started_at) {
+      const queued = next.started_at - (next.submitted || next.started_at);
+      text = `took ${spellTook((next.finished_at - next.started_at) * 1000)} · finished ${new Date(
+        next.finished_at * 1000,
+      )
+        .toTimeString()
+        .slice(0, 5)}${queued >= 1 ? ` · queued ${spellTook(queued * 1000)}` : ""}`;
+    }
+    setText(elapsed, text);
+    elapsed.hidden = !text;
   }
 
   function absorb(next) {

@@ -282,6 +282,9 @@ struct Indexing {
     /// a run that had begun again.
     scanned: u64,
     total: u64,
+    /// The same pair in bytes, which the remaining-time estimate is taken from.
+    bytes: u64,
+    bytes_total: u64,
     /// What the earlier slices of this run got through.
     tally: Tally,
 }
@@ -361,6 +364,9 @@ pub enum RunKind {
 /// How far back the rate a run card shows looks.
 const RATE_WINDOW_MS: u64 = 10_000;
 
+/// Active embedding time before a remaining-time estimate is offered.
+const ETA_SETTLE_MS: u64 = 5_000;
+
 /// Watcher event batches up to this many files run straight away; a larger
 /// one is admitted like a run. A saved file must reach search in seconds, and
 /// thirty-two files is bounded work; a `git checkout` of thousands is not.
@@ -385,20 +391,25 @@ pub struct RunState {
     pub chunks_before: Option<u64>,
     /// The intra-op thread count the run's session was built with.
     pub threads: u64,
-    /// `(active milliseconds, chunks)` since embedding began, trimmed to the
-    /// rate window. Active time, so a paused or held stretch is not in it.
-    samples: VecDeque<(u64, u64)>,
+    /// `(active milliseconds, chunks, bytes)` since embedding began, trimmed
+    /// to the rate window. Active time, so a paused or held stretch is not in
+    /// it.
+    samples: VecDeque<(u64, u64, u64)>,
     /// Each lane's chunk count at the same moments, for the rate per lane.
     lane_samples: VecDeque<(u64, BTreeMap<String, u64>)>,
     /// The first sample, which the average is taken from: queued time and a
     /// walk of unchanged files before it do not dilute the figure.
-    first_sample: Option<(u64, u64)>,
+    first_sample: Option<(u64, u64, u64)>,
     /// Whether "Also delete the store" was ticked on this run's stop, and what
     /// became of the delete.
     pub delete: Option<String>,
     pub status: RunStatus,
-    /// Unix seconds the run was submitted.
+    /// Unix seconds the run was submitted, first began, and ended. A finished
+    /// card says how long the work took, from `started` to `finished`, and
+    /// names any wait before it apart, rather than folding the queue into it.
     pub submitted: u64,
+    pub started: Option<u64>,
+    pub finished: Option<u64>,
     /// Where this run's clock started, and what it has spent held.
     ///
     /// The clock belongs to the run, not to the slice. A run yields the writer
@@ -416,6 +427,9 @@ pub struct RunState {
     ended: Option<Duration>,
     pub scanned: u64,
     pub total: u64,
+    /// Bytes of the walk got through, and found. See `crate::IndexProgress`.
+    pub bytes: u64,
+    pub bytes_total: u64,
     pub indexed: u64,
     pub chunks: u64,
     pub symbols: u64,
@@ -451,6 +465,8 @@ impl RunState {
             delete: None,
             status: RunStatus::Queued,
             submitted: now(),
+            started: None,
+            finished: None,
             // From submission, not from the writer taking it: the wait for a
             // writer is time the person is waiting.
             origin: std::time::Instant::now(),
@@ -459,6 +475,8 @@ impl RunState {
             ended: None,
             scanned: 0,
             total: 0,
+            bytes: 0,
+            bytes_total: 0,
             indexed: 0,
             chunks: 0,
             symbols: 0,
@@ -511,14 +529,14 @@ impl RunState {
     /// over the whole of it since embedding began. `None` before the first
     /// batch, which the card shows as a dash rather than dropping the field.
     fn rates(&self) -> (Option<f64>, Option<f64>) {
-        let Some((t0, c0)) = self.first_sample else {
+        let Some((t0, c0, _)) = self.first_sample else {
             return (None, None);
         };
         if self.chunks == 0 {
             return (None, None);
         }
         let now = self.elapsed().as_millis() as u64;
-        let per_second = |from: (u64, u64)| {
+        let per_second = |from: (u64, u64, u64)| {
             let span = now.saturating_sub(from.0);
             (span > 0).then(|| {
                 ((self.chunks.saturating_sub(from.1)) as f64 * 1000.0 / span as f64 * 10.0).round()
@@ -534,10 +552,43 @@ impl RunState {
             .samples
             .iter()
             .rev()
-            .find(|(at, _)| *at <= start)
+            .find(|(at, _, _)| *at <= start)
             .copied()
-            .unwrap_or((t0, c0));
-        (per_second(base), per_second((t0, c0)))
+            .unwrap_or((t0, c0, 0));
+        (per_second(base), per_second((t0, c0, 0)))
+    }
+
+    /// Milliseconds of work left, from the bytes still to go over the bytes
+    /// per second of the last [`RATE_WINDOW_MS`] of active time.
+    ///
+    /// `None` until at least [`ETA_SETTLE_MS`] of embedding has been seen, and
+    /// whenever the run is not moving: the first seconds of a run carry the
+    /// model load and whichever file happened to come first, and a figure
+    /// taken from them swings by minutes between polls.
+    fn eta_ms(&self) -> Option<u64> {
+        if !matches!(self.status, RunStatus::Running) || self.bytes_total == 0 {
+            return None;
+        }
+        let (t0, _, b0) = self.first_sample?;
+        let now = self.elapsed().as_millis() as u64;
+        if now.saturating_sub(t0) < ETA_SETTLE_MS {
+            return None;
+        }
+        let start = now.saturating_sub(RATE_WINDOW_MS);
+        let (at, _, was) = self
+            .samples
+            .iter()
+            .rev()
+            .find(|(at, _, _)| *at <= start)
+            .copied()
+            .unwrap_or((t0, 0, b0));
+        let moved = self.bytes.saturating_sub(was);
+        let span = now.saturating_sub(at);
+        if moved == 0 || span == 0 {
+            return None;
+        }
+        let left = self.bytes_total.saturating_sub(self.bytes);
+        Some((left as u128 * span as u128 / moved as u128) as u64)
     }
 
     /// Chunks per second per lane over the same window as [`Self::rates`].
@@ -586,12 +637,12 @@ impl RunState {
     fn sample(&mut self) {
         let now = self.elapsed().as_millis() as u64;
         if self.first_sample.is_none() {
-            self.first_sample = Some((now, self.chunks));
+            self.first_sample = Some((now, self.chunks, self.bytes));
         }
-        self.samples.push_back((now, self.chunks));
+        self.samples.push_back((now, self.chunks, self.bytes));
         // One sample older than the window is kept as its base.
         let start = now.saturating_sub(RATE_WINDOW_MS);
-        while self.samples.len() > 2 && self.samples.get(1).is_some_and(|(at, _)| *at <= start) {
+        while self.samples.len() > 2 && self.samples.get(1).is_some_and(|(at, _, _)| *at <= start) {
             self.samples.pop_front();
         }
         while self.samples.len() > 1024 {
@@ -605,6 +656,7 @@ impl RunState {
         match event.get("event").and_then(serde_json::Value::as_str) {
             Some("started") => {
                 self.status = RunStatus::Running;
+                self.started.get_or_insert_with(now);
                 self.files_before = num("files_before").or(self.files_before);
                 self.chunks_before = num("chunks_before").or(self.chunks_before);
                 self.unhold();
@@ -639,6 +691,8 @@ impl RunState {
                 // once per event it appeared in.
                 self.scanned = num("scanned").unwrap_or(self.scanned);
                 self.total = num("total").unwrap_or(self.total);
+                self.bytes = num("bytes").unwrap_or(self.bytes);
+                self.bytes_total = num("bytes_total").unwrap_or(self.bytes_total);
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.symbols = num("symbols").unwrap_or(self.symbols);
@@ -693,12 +747,14 @@ impl RunState {
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.unhold();
                 self.ended = Some(self.elapsed());
+                self.finished = Some(now());
                 self.summary = Some(event.clone());
             }
             Some("error") => {
                 self.status = RunStatus::Failed;
                 self.unhold();
                 self.ended = Some(self.elapsed());
+                self.finished = Some(now());
             }
             _ => {}
         }
@@ -1063,7 +1119,14 @@ impl Store {
             "status": run.status,
             "position": position,
             "submitted": run.submitted,
+            "started_at": run.started,
+            "finished_at": run.finished,
             "elapsed_ms": run.elapsed().as_millis() as u64,
+            // Null until the rate has settled, and whenever the run is not
+            // running: the card says `estimating…` rather than guessing.
+            "eta_ms": run.eta_ms(),
+            "bytes": run.bytes,
+            "bytes_total": run.bytes_total,
             // Whether the clock should be ticking in the page between polls.
             // A finished or held run keeps its reading; nothing else should
             // make a page decide that for itself.
@@ -1201,6 +1264,8 @@ impl Store {
                 already: Vec::new(),
                 scanned: 0,
                 total: 0,
+                bytes: 0,
+                bytes_total: 0,
                 tally: Tally::default(),
             }),
             report,
@@ -3091,6 +3156,8 @@ fn perform(
             already,
             scanned: scanned_before,
             total: total_before,
+            bytes: bytes_before,
+            bytes_total: bytes_total_before,
             mut tally,
         }) => {
             // Only the first slice announces itself; the rest are the same run
@@ -3190,6 +3257,8 @@ fn perform(
                     // The walk's total, settled on the first slice. A later
                     // slice only knows how many it was handed.
                     "total": if total_before > 0 { total_before } else { progress.total as u64 },
+                    "bytes": bytes_before + progress.bytes,
+                    "bytes_total": if bytes_total_before > 0 { bytes_total_before } else { progress.bytes_total },
                     "indexed": indexed_before + progress.indexed as u64,
                     "chunks": chunks_before + progress.chunks as u64,
                     "symbols": symbols_before + progress.symbols as u64,
@@ -3272,6 +3341,12 @@ fn perform(
                                 already: written,
                                 scanned: scanned_before + done.scanned as u64,
                                 total,
+                                bytes: bytes_before + done.bytes,
+                                bytes_total: if bytes_total_before > 0 {
+                                    bytes_total_before
+                                } else {
+                                    done.bytes_total
+                                },
                                 tally,
                             }),
                             report: back,
@@ -4076,8 +4151,8 @@ mod tests {
     fn the_rate_is_rolling_and_blank_before_the_first_batch() {
         let mut run = RunState::new(1, Vec::new(), RunKind::Run);
         assert_eq!(run.rates(), (None, None), "nothing embedded yet");
-        run.first_sample = Some((0, 0));
-        run.samples = VecDeque::from(vec![(0, 0), (20_000, 400), (25_000, 500)]);
+        run.first_sample = Some((0, 0, 0));
+        run.samples = VecDeque::from(vec![(0, 0, 0), (20_000, 400, 0), (25_000, 500, 0)]);
         run.chunks = 600;
         // Frozen at 30 s of active time.
         run.ended = Some(Duration::from_secs(30));
@@ -4085,6 +4160,43 @@ mod tests {
         // Base is the newest sample at or before 20 s: 200 chunks in 10 s.
         assert_eq!(rate, Some(20.0));
         assert_eq!(average, Some(20.0));
+    }
+
+    /// The time left is the bytes still to go over the bytes per second of
+    /// the last ten active seconds, and there is none until the rate settles
+    /// or while the run is not running.
+    #[test]
+    fn the_estimate_is_bytes_left_over_the_rolling_byte_rate() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        run.bytes_total = 10_000_000;
+        run.first_sample = Some((0, 0, 0));
+        run.samples = VecDeque::from(vec![(0, 0, 0), (2_000, 40, 200_000)]);
+        run.bytes = 300_000;
+        run.ended = Some(Duration::from_secs(3));
+        assert_eq!(
+            run.eta_ms(),
+            None,
+            "three seconds in, the rate has not settled"
+        );
+
+        // 20 s in; the newest sample at or before 10 s is the base: 3 MB in
+        // 10 s is 300 KB/s, and 6 MB left is 20 s.
+        run.samples = VecDeque::from(vec![
+            (0, 0, 0),
+            (10_000, 200, 1_000_000),
+            (15_000, 300, 2_500_000),
+        ]);
+        run.bytes = 4_000_000;
+        run.ended = Some(Duration::from_secs(20));
+        assert_eq!(run.eta_ms(), Some(20_000));
+
+        run.status = RunStatus::Paused;
+        assert_eq!(
+            run.eta_ms(),
+            None,
+            "a paused run has no time left to count down"
+        );
     }
 
     /// A write with several stores open has no "the" store, and guessing one

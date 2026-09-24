@@ -908,6 +908,13 @@ pub struct IndexProgress {
     pub threads: usize,
     /// Chunks each lane has embedded for this store: `cpu`, `gpu`, `cuda`.
     pub lanes: std::collections::BTreeMap<String, usize>,
+    /// Bytes of the walk's files this run has got through, a file being
+    /// embedded counted in proportion to its chunks, and the bytes the walk
+    /// found. What the daemon's remaining-time estimate is taken from: files
+    /// vary in size by orders of magnitude, so a count of them says little
+    /// about how much work is left.
+    pub bytes: u64,
+    pub bytes_total: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -987,10 +994,22 @@ pub struct IndexReport {
     /// Chunks each lane has embedded for this store, since it was opened.
     #[serde(skip)]
     pub lanes: std::collections::BTreeMap<String, usize>,
+    /// See [`IndexProgress::bytes`].
+    #[serde(skip)]
+    pub bytes: u64,
+    #[serde(skip)]
+    pub bytes_total: u64,
     /// Every file this call embedded, in order. The caller keeps these across
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
     pub written: Vec<String>,
+}
+
+/// The size a file counts for in a run's byte totals: its length, or nothing
+/// when it cannot be read or is over the cap and will be skipped unread.
+fn embeddable_bytes(meta: Option<std::fs::Metadata>) -> u64 {
+    meta.filter(|m| m.is_file() && m.len() <= chunk::MAX_FILE_BYTES)
+        .map_or(0, |m| m.len())
 }
 
 /// Hand one file's verdict to the caller's callback.
@@ -1031,6 +1050,8 @@ fn say_file(
             why,
             threads: report.threads,
             lanes: report.lanes.clone(),
+            bytes: report.bytes,
+            bytes_total: report.bytes_total,
         },
     );
 }
@@ -1785,6 +1806,13 @@ impl Semlith {
             (allowed, refused)
         };
         let total = paths.len() + refused.len() + unwalkable.len();
+        // One `stat` per file the run will open, which is microseconds against
+        // the read, hash and embed that follow it. A file over the cap is
+        // skipped without being read, so it counts for nothing here either.
+        report.bytes_total = paths
+            .iter()
+            .map(|p| embeddable_bytes(p.metadata().ok()))
+            .sum();
         for (path, refusal) in &refused {
             // A file semlith has decided it will not hold is a file it does
             // not keep holding. A rule that widens — this release widened two
@@ -1895,6 +1923,9 @@ impl Semlith {
             // and the read was read in full anyway, so the cap was advisory.
             let opened = std::fs::File::open(&path);
             let measured = opened.as_ref().ok().and_then(|f| f.metadata().ok());
+            let bytes_before = report.bytes;
+            let file_bytes = embeddable_bytes(measured.clone());
+            report.bytes += file_bytes;
             // Named, not just detected. Every one of these used to be the same
             // silent `skipped`, and a person looking at two thousand of them
             // could not tell an empty `__init__.py` from a file the operating
@@ -2220,6 +2251,9 @@ impl Semlith {
                 continue;
             }
 
+            // Not yet through it: its bytes are counted as its chunks embed.
+            let file_end = report.bytes;
+            report.bytes = bytes_before;
             say_file(
                 &mut on_file,
                 &report,
@@ -2262,6 +2296,10 @@ impl Semlith {
                 // into thousands of pieces, and holding them all to embed in a
                 // single call makes peak memory a function of the largest
                 // file in the corpus rather than of the window.
+                if pending.ids.len() >= SORT_WINDOW {
+                    report.bytes =
+                        bytes_before + file_bytes * (ord as u64 + 1) / chunks.len() as u64;
+                }
                 if pending.ids.len() >= SORT_WINDOW
                     && !self.flush(&mut pending, control, &mut |n, threads, lanes| {
                         report.embedded += n;
@@ -2283,6 +2321,7 @@ impl Semlith {
             }
             report.threads = self.embedder_threads;
             report.lanes = self.lane_chunks.clone();
+            report.bytes = file_end;
             if halted {
                 // Stopped inside this file. Its rows are in `written`, so the
                 // caller's undo takes it out with everything else; nothing of
