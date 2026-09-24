@@ -2439,7 +2439,9 @@ pre.code::-webkit-scrollbar-thumb {
   font-family: var(--mono);
   font-size: var(--t-small);
   color: var(--muted);
-  white-space: nowrap;
+}
+.search-meta:empty {
+  display: none;
 }
 
 .results {
@@ -3060,7 +3062,6 @@ td.why .copyfield {
   padding: var(--sp-2h) var(--sp-5);
   min-width: 0;
 }
-.brief-span,
 .brief-symbol {
   display: flex;
   flex-direction: column;
@@ -3091,13 +3092,32 @@ td.why .copyfield {
   gap: var(--sp-1);
   margin-left: auto;
 }
-.brief-text {
-  margin: 0;
-  font-family: var(--mono);
-  font-size: var(--t-tiny-h);
-  line-height: var(--lh-code);
+.brief-row {
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+/* The budget's reading, as one strip of facts rather than a sentence. */
+.brief-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  width: 100%;
+  padding: var(--sp-2h) var(--sp-3h);
+  border: 1px solid var(--line);
+  border-radius: var(--r-3);
+  background: var(--soft);
+}
+.brief-fact {
+  display: inline-flex;
+  gap: var(--sp-1);
+  align-items: baseline;
+  min-width: 0;
+}
+.brief-fact .k {
   color: var(--muted);
-  white-space: pre-wrap;
+}
+.brief-fact .v {
+  color: var(--ink);
   overflow-wrap: anywhere;
 }
 .brief-edge {

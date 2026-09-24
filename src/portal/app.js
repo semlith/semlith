@@ -4735,8 +4735,9 @@ function codeGutter(text, startLine) {
   );
 }
 
-/** One span, as `/api/read` returns it. */
-function spanCard(span) {
+/** One span, as `/api/read` returns it. `badges` go in its header, before the
+ * freshness mark: the Brief view says which lists found each span there. */
+function spanCard(span, badges) {
   const named = span.symbol ? `${span.symbol_kind || ""} ${span.symbol}`.trim() : "";
   return el(
     "div",
@@ -4748,6 +4749,7 @@ function spanCard(span) {
       el("span", { class: "lines", text: `${span.start_line}-${span.end_line}` }),
       span.store ? el("span", { class: "from", text: span.store }) : null,
       el("span", { class: "spacer" }),
+      badges || null,
       freshMark(span.fresh),
     ),
     named ? el("div", { class: "sig", text: named }) : null,
@@ -5356,27 +5358,23 @@ async function searchView() {
       return;
     }
 
+    /* A span with its text is drawn the way the results view draws a hit:
+     * the same card, path header and numbered lines, so the two views of one
+     * question look like one product. A span the budget left without text is
+     * a compact row that says so, not an empty card. */
     const rows = [];
     for (const span of spans) {
       rows.push(
-        el(
-          "div",
-          { class: "brief-span" },
-          el(
-            "div",
-            { class: "brief-head" },
-            el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
-            span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
-            el(
-              "span",
-              { class: "brief-lists" },
-              ...(span.lists || []).map((list) => el("span", { class: "tag", text: list })),
+        span.text
+          ? spanCard(span, fusionBadges(span.lists))
+          : el(
+              "div",
+              { class: "brief-head brief-row" },
+              el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
+              span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
+              el("span", { class: "brief-dropped", text: "text left out for the budget" }),
+              el("span", { class: "brief-lists" }, fusionBadges(span.lists)),
             ),
-          ),
-          span.text
-            ? el("pre", { class: "brief-text", text: span.text })
-            : el("div", { class: "brief-dropped", text: "text left out for the budget" }),
-        ),
       );
     }
     for (const symbol of brief.symbols || []) {
@@ -5427,13 +5425,18 @@ async function searchView() {
     if (cut.spans) dropped.push(`${cut.spans} spans not located`);
     if (cut.span_text) dropped.push(`${cut.span_text} left without text`);
     if (cut.symbols) dropped.push(`${cut.symbols} symbols' edges`);
+    const fact = (label, value) =>
+      el("span", { class: "brief-fact" }, el("span", { class: "k", text: label }), el("span", { class: "v", text: value }));
     fill(
       footer,
-      el("span", {
-        text:
-          `${brief.tokens} of ${brief.budget} tokens · counted with ${brief.counted_with}` +
-          (dropped.length ? ` · dropped ${dropped.join(", ")}` : ""),
-      }),
+      el(
+        "div",
+        { class: "brief-summary" },
+        fact("tokens", `${n(brief.tokens)} of ${n(brief.budget)}`),
+        fact("spans", n(spans.length)),
+        fact("counted with", brief.counted_with || "—"),
+        fact("dropped", dropped.length ? dropped.join(", ") : "nothing"),
+      ),
     );
   }
 
@@ -5621,8 +5624,10 @@ async function searchView() {
         { class: "search-field" },
         icon(ICONS.search, 18),
         labelled("search-query", "Search the index", input),
-        meta,
       ),
+      // Under the box rather than inside it: inside, the count and timing
+      // took the input's width and crowded the question being typed.
+      meta,
       shapeHint,
       el(
         "div",
