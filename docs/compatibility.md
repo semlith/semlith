@@ -1244,7 +1244,7 @@ them anyway.
 
 | Route | What changes |
 |---|---|
-| `GET /api/index/runs`, per run | `bytes` and `bytes_total`: the bytes of the files the run will open, done and in all, with a file being embedded counted in proportion to its chunks. `eta_ms`: milliseconds left at the bytes/s rate over the last 10 s of active time, null until 5 s of embedding has been seen and whenever the run is not `running`. `started_at` and `finished_at`: unix seconds, beside the `submitted` that was already there. |
+| `GET /api/index/runs`, per run | `bytes` and `bytes_total`: the bytes of the files the run will open, done and in all, with a file being embedded counted in proportion to its chunks. `eta_ms`: milliseconds left at the bytes/s rate over the last 10 s of active time, null until 5 s of embedding has been seen and whenever the run is not `running`. `started_at` and `finished_at`: unix seconds, beside the `submitted` that was already there. `queued_ms`: milliseconds on the run's clock before it started. |
 | `POST /api/store/delete` | Takes `{"stores": ["a", "b"]}` as well as `{"store": "a"}`. Each store in the list goes through the same removal as a single one, and a store that cannot be deleted does not stop the others. The list form answers `{deleted: [...], failed: [{store, error}], message}`: 200 when any store was deleted, and 409 with an `error` naming why when none was. The single form and its answer are unchanged. |
 
 ## What a break would look like

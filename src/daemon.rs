@@ -410,6 +410,10 @@ pub struct RunState {
     pub submitted: u64,
     pub started: Option<u64>,
     pub finished: Option<u64>,
+    /// Milliseconds on the run's clock before it started: its wait in the
+    /// queue. The run's clock minus this is how long the work took, to the
+    /// millisecond, which two unix seconds cannot say for a short run.
+    queued_ms: Option<u64>,
     /// Where this run's clock started, and what it has spent held.
     ///
     /// The clock belongs to the run, not to the slice. A run yields the writer
@@ -467,6 +471,7 @@ impl RunState {
             submitted: now(),
             started: None,
             finished: None,
+            queued_ms: None,
             // From submission, not from the writer taking it: the wait for a
             // writer is time the person is waiting.
             origin: std::time::Instant::now(),
@@ -657,6 +662,8 @@ impl RunState {
             Some("started") => {
                 self.status = RunStatus::Running;
                 self.started.get_or_insert_with(now);
+                let waited = self.elapsed().as_millis() as u64;
+                self.queued_ms.get_or_insert(waited);
                 self.files_before = num("files_before").or(self.files_before);
                 self.chunks_before = num("chunks_before").or(self.chunks_before);
                 self.unhold();
@@ -1121,6 +1128,7 @@ impl Store {
             "submitted": run.submitted,
             "started_at": run.started,
             "finished_at": run.finished,
+            "queued_ms": run.queued_ms,
             "elapsed_ms": run.elapsed().as_millis() as u64,
             // Null until the rate has settled, and whenever the run is not
             // running: the card says `estimating…` rather than guessing.

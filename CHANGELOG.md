@@ -24,7 +24,7 @@ and `/api/index/runs` carries `eta_ms`, `bytes`, `bytes_total`, `started_at` and
 been seen and whenever the run is not running. A running card reads `about 3
 min left`, `about 40 s left` or `almost done`, and `estimating…` until the rate
 settles. A queued card reads `waiting 12s`. A finished card reads `took 5m 18s ·
-finished 21:35`, timed from the run's start rather than its submission, and
+finished 21:35`, timed from the run's start rather than its submission, without time paused, and
 names any time spent queued separately (`· queued 1m 02s`). The "N runs queued."
 note moved into the button row beside Start indexing and empties to nothing, so
 a finished run no longer leaves a blank line above the cards.

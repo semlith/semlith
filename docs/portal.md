@@ -1034,7 +1034,7 @@ question. What the clock says depends on where the run is:
 |---|---|
 | `queued` | `waiting 12s`: how long the run has been waiting since it was submitted. |
 | `running` | `about 3 min left`, `about 40 s left` or `almost done`, and `estimating…` until the rate has settled. |
-| finished | `took 5m 18s · finished 21:35`, counted from the run's start rather than its submission, followed by `· queued 1m 02s` when it waited first. |
+| finished | `took 5m 18s · finished 21:35`, counted from the run's start rather than its submission and leaving out time paused or held, followed by `· queued 1m 02s` when it waited first. |
 
 The estimate is the daemon's. Once the run has walked its folders, it measures
 each file it will open, one `stat` per file, and counts bytes done against

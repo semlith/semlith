@@ -6193,12 +6193,12 @@ function runCard(run, controls) {
     } else if (next.status === "running") {
       text = next.eta_ms === null || next.eta_ms === undefined ? "estimating…" : spellLeft(next.eta_ms - since);
     } else if (next.finished_at && next.started_at) {
-      const queued = next.started_at - (next.submitted || next.started_at);
-      text = `took ${spellTook((next.finished_at - next.started_at) * 1000)} · finished ${new Date(
-        next.finished_at * 1000,
-      )
+      // The run's own clock, which excludes time held, minus its wait in the
+      // queue: the work, to the millisecond.
+      const queued = next.queued_ms || 0;
+      text = `took ${spellTook(Math.max(0, shown - queued))} · finished ${new Date(next.finished_at * 1000)
         .toTimeString()
-        .slice(0, 5)}${queued >= 1 ? ` · queued ${spellTook(queued * 1000)}` : ""}`;
+        .slice(0, 5)}${queued >= 1000 ? ` · queued ${spellTook(queued)}` : ""}`;
     }
     setText(elapsed, text);
     elapsed.hidden = !text;

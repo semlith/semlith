@@ -2841,6 +2841,13 @@ pre.code::-webkit-scrollbar-thumb {
 .w-stores {
   min-width: 640px;
 }
+/* The roots column shares what is left rather than asking for its longest
+ * path: at 1280px it pushed LAST WRITE past the card's edge. Its paths already
+ * truncate from the front with the whole path on hover. */
+.w-stores td.meta {
+  max-width: 0;
+  width: 30%;
+}
 .w-files {
   min-width: 680px;
 }
