@@ -2986,9 +2986,6 @@ def _(d):
 @finding("5.3", "the path finder and Trace render on the Impact page")
 def _(d):
     d.open_view("impact")
-    # Folded since 0.29.0 (options, and the two-symbol section) so the answer
-    # comes first. Opened here, because folded is still on the page.
-    d.eval("document.querySelectorAll('.impact-options, .impact-between').forEach(e => e.open = true)")
     body = view_text(d)
     for wanted in ["Path finder", "Prefer verified edges", "Strict", "Trace", "Copy as evidence"]:
         if wanted not in body:
@@ -5036,25 +5033,24 @@ def _(d):
         fail("the Brief view is not drawn as span cards with a summary strip: %r" % shape)
 
 
-@finding("9.9", "Impact opens on the answer, with options and the two-symbol section folded")
+@finding("9.9", "Impact says what its figures mean and where to start")
 def _(d):
     d.open_view("impact", fresh=True)
     seen = d.eval(
         """
-        ({options: !!document.querySelector('details.impact-options:not([open])'),
-          between: !!document.querySelector('details.impact-between:not([open])'),
-          hopsFolded: !!document.querySelector('details.impact-options .hops'),
-          guide: document.querySelectorAll('.impact-guide li').length,
+        ({guide: document.querySelectorAll('.impact-subject-card .impact-guide li').length,
           toGraph: [...document.querySelectorAll('#root button')].some(b => b.textContent.trim() === 'Open Graph'),
-          stats: !!document.querySelector('.impact-subject-card .impact-stats')})
+          finder: !!document.querySelector('.path-card'), trace: !!document.querySelector('.trace-card')})
         """
     )
-    for key, wanted in (("options", True), ("between", True), ("hopsFolded", True),
-                        ("toGraph", True), ("stats", True)):
-        if seen[key] != wanted:
-            fail("Impact's first view is not answer-first: %r" % seen)
     if seen["guide"] != 3:
-        fail("Impact's guide has %d lines, not 3" % seen["guide"])
+        fail("Impact's guide has %d lines, not 3: %r" % (seen["guide"], seen))
+    if not seen["toGraph"]:
+        fail("an empty Impact page does not say how to get there from Graph")
+    if not (seen["finder"] and seen["trace"]):
+        fail("the path finder or the trace is no longer on the page: %r" % seen)
+    d.click_text("button", "Open Graph")
+    d.wait_for("(document.querySelector('#root h1') || {}).textContent === 'Graph'", what="the Graph page")
 
 
 @finding("9.10", "the Agents page's two card rows line up and collapse together")

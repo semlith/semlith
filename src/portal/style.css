@@ -3894,6 +3894,35 @@ td.why .copyfield {
   text-overflow: ellipsis;
 }
 
+/* Inside the Graph rail a list is the rail's width, whatever its rows hold.
+ * `.rail-group` centres its children, which is right for the sidebar's icon
+ * rail it was written for; here it sized a list to its widest row and centred
+ * it, so a long caller spilled off both sides of the panel and the panel
+ * scrolled sideways. Every part of a row may shrink, and names truncate. */
+.graph-rail .rail-group {
+  align-items: stretch;
+  min-width: 0;
+}
+.graph-rail .rail-group > .chip {
+  align-self: flex-start;
+}
+.rail-list,
+.rail-list li > * {
+  min-width: 0;
+}
+.rail-list li > span:not(.conf):not(.via) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rail-list .via,
+.rail-list .conf {
+  flex-shrink: 0;
+}
+.graph-scroll {
+  overflow-x: hidden;
+}
+
 .rail-list .via {
   margin-left: auto;
   font-size: var(--t-micro);
@@ -4798,23 +4827,6 @@ td.row-end {
   flex: 1 1 12rem;
   min-width: 0;
 }
-/* Hops and prefer-verified, folded under the symbol field. */
-.impact-options {
-  margin: calc(var(--sp-2) * -1) 0 var(--sp-3);
-}
-.impact-options > summary,
-.impact-between > summary {
-  cursor: pointer;
-  color: var(--muted);
-  font-size: var(--t-small);
-}
-.impact-options > summary::marker,
-.impact-between > summary::marker {
-  color: var(--muted);
-}
-.impact-options[open] > .impact-band {
-  margin: var(--sp-2) 0 0;
-}
 /* What the three figures mean, once, under them. */
 .impact-guide {
   margin: var(--sp-3) 0 0;
@@ -4830,26 +4842,6 @@ td.row-end {
 .impact-guide b {
   color: var(--ink-2);
   font-weight: 500;
-}
-/* The path finder and the trace: a second question, about two symbols,
- * folded under the answer to the first. */
-.impact-between {
-  margin-top: var(--sp-4);
-  padding-top: var(--sp-4);
-  border-top: 1px solid var(--line);
-}
-.impact-between > summary {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-2);
-}
-.impact-between > summary h2 {
-  margin: 0;
-  font-size: var(--t-body);
-  color: var(--ink);
-}
-.impact-between[open] > .impact-columns {
-  margin-top: var(--sp-4);
 }
 .hops-label {
   display: inline-flex;
@@ -4996,12 +4988,24 @@ td.row-end {
   min-width: 0;
 }
 
-/* The answer's tables, full width under the two columns. */
+/* The answer's headline and its two tables, spaced like the column they
+ * sit in. The Where column shares what is left rather than asking for its
+ * longest path, so Via and Hops stay in view in half the page's width. */
 .impact-results {
   display: flex;
   flex-direction: column;
   gap: var(--sp-4);
   min-width: 0;
+}
+.impact-table td.where {
+  max-width: 0;
+  width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.impact-table td.via .one-line {
+  white-space: normal;
 }
 
 /* One column of the pair. Both are a plain stack; the grid above decides
@@ -5618,6 +5622,22 @@ td.row-end {
   border: 1px solid var(--line);
   border-radius: var(--r-1);
   background: var(--panel);
+}
+/* The accelerator lanes: a lane and its one action close together, lanes
+ * further apart, and the action under the lane's words rather than under its
+ * switch. At 2px under its lane and 8px over the next, the Remove button read
+ * as belonging to neither. */
+.accel-lanes {
+  gap: var(--sp-3);
+}
+.accel-lane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.accel-remove {
+  /* The switch's border, padding, knob and gap: where its words start. */
+  padding-left: calc(1px + 13px + 15px + 11px);
 }
 .replay-switch.on .knob {
   border-color: var(--green-ink);

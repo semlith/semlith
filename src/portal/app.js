@@ -6064,7 +6064,8 @@ function coveragePanel() {
 
 /** How long something took: `0.4s`, `42s`, `5m 18s`, `1h 02m`. */
 function spellTook(ms) {
-  if (ms < 1000) return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
+  if (ms < 100) return "under 0.1s";
+  if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`;
   const all = Math.round(ms / 1000);
   if (all < 60) return `${all}s`;
   if (all < 3600) return `${Math.floor(all / 60)}m ${String(all % 60).padStart(2, "0")}s`;
@@ -6597,7 +6598,7 @@ function laneState(status) {
 }
 
 function accelSection() {
-  const rows = el("div", { class: "rows" });
+  const rows = el("div", { class: "rows accel-lanes" });
   const fallback = el("p", { class: "note" });
   const problem = el("div", { class: "note" });
   const drawn = new Map();
@@ -6634,7 +6635,7 @@ function accelSection() {
       share,
     );
     const remove = el("button", { class: "button secondary small", type: "button" });
-    const removeRow = el("div", { class: "filters" }, remove);
+    const removeRow = el("div", { class: "filters accel-remove" }, remove);
     const drawnRow = { title, where, share, toggle, remove, removeRow, enabled: false, node: null };
     toggle.addEventListener("click", () => {
       const on = !drawnRow.enabled;
@@ -6651,7 +6652,7 @@ function accelSection() {
       change(lane, on ? "on" : "off");
     });
     remove.addEventListener("click", () => change(lane, "remove"));
-    drawnRow.node = el("div", { class: "rows tight" }, toggle, removeRow);
+    drawnRow.node = el("div", { class: "accel-lane" }, toggle, removeRow);
     return drawnRow;
   }
 
@@ -10466,6 +10467,21 @@ async function impactView() {
   }
   paintStore();
 
+  /* Where to start, for a page opened with no question: the Graph is where a
+   * symbol is usually found, and its Blast radius button lands here with the
+   * symbol and its store already filled in. */
+  function emptyImpact() {
+    return el(
+      "div",
+      { class: "rows" },
+      el("p", {
+        class: "subtitle",
+        text: "Type a symbol's exact name above and press Reach, or find it on the Graph page, pick it, and press Blast radius.",
+      }),
+      el("div", {}, el("button", { class: "button secondary small", type: "button", text: "Open Graph", onclick: () => go("graph") })),
+    );
+  }
+
   /* A real table row, in a real table.
    *
    * These were `div`s on a grid, and a grid is only a table for as long as
@@ -10673,50 +10689,30 @@ async function impactView() {
     );
   }
 
-  /* Where to start, for a page opened with no question: the Graph is where a
-   * symbol is usually found, and its Blast radius button lands here with the
-   * symbol and its store already filled in. */
-  function emptyImpact() {
-    return el(
-      "div",
-      { class: "rows tight" },
-      el("p", {
-        class: "subtitle",
-        text: "Name a symbol above, or find it on the Graph page, pick it, and press Blast radius.",
-      }),
-      el("div", {}, el("button", { class: "button secondary small", type: "button", text: "Open Graph", onclick: () => go("graph") })),
-    );
-  }
-
   fill(results, emptyImpact());
   if (state.impactSymbol) run();
-
-  /* Hops and prefer-verified, folded: the defaults answer the question most
-   * people ask, and five controls in front of the answer made the page read as
-   * a form to fill in rather than as an answer. */
-  const options = el(
-    "details",
-    { class: "impact-options" },
-    el("summary", { text: "Options" }),
-    el(
-      "div",
-      { class: "impact-band" },
-      el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
-      verified,
-    ),
-  );
 
   return el(
     "div",
     { class: "view" },
-    pageHead("Impact", "Reverse reachability: what breaks if this changes — before the edit, not after the test run.", {
+    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
       pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
     }),
-    /* One question, answered first. The symbol and its three figures, the
-     * reached list by hop, and the canvas beside them. The path finder and the
-     * trace answer a different question, about two symbols, so they are one
-     * folded section under the answer rather than two cards competing with it;
-     * they stay on this page because every tool has a portal view. */
+    /* Two columns, as the design lays the page out: the answer on the left,
+     * the two questions that follow from it on the right, and the canvas at
+     * the top of the right column rather than spanning.
+     *
+     * The `Changing` row and the three figures were two unboxed page-wide
+     * bands across the top; they are one card at the head of the left column,
+     * which is where the design has them and is why the right column used to
+     * read as a large empty area beside them.
+     *
+     * The search band is this project's own addition -- the design is a
+     * prototype with one fixed subject and no way to ask about another -- and
+     * it sits at the head of that same card rather than after it. Against a
+     * real store there is nothing on this page until a name is typed, so a
+     * control placed below the answer it produces would be a control nobody
+     * finds. Recorded as a deliberate departure. */
     el(
       "div",
       { class: "impact-columns" },
@@ -10726,8 +10722,14 @@ async function impactView() {
         el(
           "div",
           { class: "card pad impact-subject-card" },
-          el("div", { class: "impact-band" }, nameInput, reach),
-          options,
+          el(
+            "div",
+            { class: "impact-band" },
+            nameInput,
+            el("label", { class: "hops-label" }, el("span", { text: "hops" }), depthInput),
+            verified,
+            reach,
+          ),
           el(
             "div",
             { class: "impact-subject-row" },
@@ -10738,30 +10740,18 @@ async function impactView() {
             depthPill,
           ),
           stats,
+          // What the figures and the controls above them mean, once.
           el(
             "ul",
             { class: "impact-guide" },
             el("li", {}, el("b", { text: "Reached" }), " — every definition that calls, references or imports this one, directly or through others."),
             el("li", {}, el("b", { text: "Inferred" }), " — linked by a bare name match only. Corroborate before relying on it."),
-            el("li", {}, el("b", { text: "Hops" }), " — edges away from the symbol. 1 is a direct caller."),
+            el("li", {}, el("b", { text: "Hops" }), " — how far back to read: 1 is direct callers only. Prefer verified edges leaves out names with several definitions."),
           ),
         ),
+        results,
       ),
-      el("div", { class: "impact-col" }, rings.node),
-    ),
-    // Under both columns: the reached table has four columns and a symbol
-    // name, and in half the width it scrolled its VIA column out of sight.
-    results,
-    el(
-      "details",
-      { class: "impact-between" },
-      el(
-        "summary",
-        {},
-        el("h2", { text: "Between two symbols" }),
-        el("span", { class: "meta", text: "path finder and trace" }),
-      ),
-      el("div", { class: "impact-columns" }, pathCard, traceLane),
+      el("div", { class: "impact-col" }, rings.node, pathCard, traceLane),
     ),
   );
 }
