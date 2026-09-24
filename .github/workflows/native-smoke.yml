@@ -28,6 +28,9 @@ on:
   # rather than here because `pull_request` can only filter the base branch.
   pull_request:
     branches: [develop]
+    # `ready_for_review` so a draft, which skips this workflow, gets it the
+    # moment it is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       version:
@@ -50,15 +53,46 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request makes the older run redundant. A
+# dispatch is grouped apart, so a push never cancels an SSH session.
+concurrency:
+  group: native-smoke-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   plan:
     # A release pull request, or a hand-dispatched run. Everything else skips
-    # the whole workflow, `smoke` included, because it needs this job's output.
+    # the whole workflow, because every job below needs this one's output.
     if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/')
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
     outputs:
       os: ${{ steps.pick.outputs.os }}
+      heavy: ${{ steps.diff.outputs.heavy }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      # A push that changed only prose cannot change what the shipped binary
+      # does, and a draft is not yet the commit under review; see
+      # .github/changes.sh. A dispatch always runs.
+      - id: diff
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: native-smoke.yml
+          ACTION: ${{ github.event.action }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: bash .github/changes.sh
+
       - id: pick
         shell: bash
         run: |
@@ -68,11 +102,52 @@ jobs:
             echo 'os=["${{ inputs.os }}"]' >> "$GITHUB_OUTPUT"
           fi
 
-  smoke:
+  # On a pull request the checks are about the code under review, so this
+  # branch is what gets installed. Without it the harness re-measured the last
+  # published release on every pull request -- a run that cannot fail for
+  # anything in the diff, while `known-failures.txt` says a fix cannot land
+  # without its row coming out in the same breath, which only means something
+  # if the fix is what ran.
+  #
+  # Built once per operating system and handed to the three check jobs below,
+  # which run side by side on their own runners: one runner running all three
+  # in a row took forty minutes on macOS.
+  build:
     needs: plan
+    if: github.event_name == 'pull_request' && needs.plan.outputs.heavy == 'true'
     runs-on: ${{ matrix.os }}
-    # Six hours is the hosted-runner ceiling; the SSH session lives inside it.
-    timeout-minutes: ${{ inputs.ssh && 360 || 60 }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - run: cargo build --release --locked
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: semlith-${{ matrix.os }}
+          path: target/release/semlith${{ runner.os == 'Windows' && '.exe' || '' }}
+          retention-days: 1
+
+  # Under PowerShell on every operating system. Git Bash sets HOME and Windows
+  # does not, so a check that only ever runs under bash cannot see what a
+  # person launching the daemon from PowerShell hits. On its own runner, so
+  # the store home is empty and the portal's first-run path is the one
+  # exercised.
+  portal:
+    needs: [plan, build]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name != 'pull_request' || (needs.plan.outputs.heavy == 'true' && needs.build.result == 'success'))
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -80,182 +155,64 @@ jobs:
     env:
       SEMLITH_VERSION: ${{ inputs.version }}
       SEMLITH_YES: "1"
-      # The install step runs the real installer, and from 0.21.0 that installs
-      # the daemon as a login service and starts it. That is the feature working
-      # — and it takes port 7365 before `cli/daemon/*` can bind it, so every
-      # daemon check fails on a port the harness took from itself. The harness
-      # installs without one and tests the service in its own block, where
-      # installing a login service is the explicit subject rather than a side
-      # effect of getting semlith onto the runner.
+      # The real installer installs the daemon as a login service and starts
+      # it, which takes port 7365 before the daemon checks can bind it. The
+      # harness installs without one and tests the service in its own block.
       SEMLITH_NO_SERVICE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # On a pull request the checks are about the code under review, so this
-      # branch is what gets installed. Without it the harness re-measured the
-      # last published release on every pull request -- a run that cannot fail
-      # for anything in the diff, while `known-failures.txt` says a fix cannot
-      # land without its row coming out in the same breath, which only means
-      # something if the fix is what ran.
-      #
-      # It happens before the installer rather than after it, because the
-      # installer hands off to `semlith setup`, which downloads the model *with
-      # the binary it just installed*. A released binary running first is a
-      # released binary writing wherever its bugs write.
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        if: github.event_name == 'pull_request'
+      - uses: ./.github/actions/install-semlith
+        with:
+          os: ${{ matrix.os }}
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
-        if: github.event_name == 'pull_request'
-
-      - name: Install this branch the way the installer installs a release
-        if: github.event_name == 'pull_request'
-        shell: bash
-        run: |
-          cargo build --release --locked
-          if [ "$RUNNER_OS" = Windows ]; then
-            built=target/release/semlith.exe
-            # `semlith setup` writes into PowerShell's $HOME, which is
-            # USERPROFILE; cygpath turns that into the form this shell copies to.
-            home=$(cygpath -u "$USERPROFILE")
-            name=semlith.exe
-          else
-            built=target/release/semlith
-            home=$HOME
-            name=semlith
-          fi
-          mkdir -p "$home/.semlith/bin"
-          cp "$built" "$home/.semlith/bin/$name"
-          # PATH in the Windows form, because the next step is PowerShell and a
-          # `/c/users/...` entry means nothing to it -- `semlith is not on PATH`
-          # is how that reads from the portal check.
-          if [ "$RUNNER_OS" = Windows ]; then
-            cygpath -w "$home/.semlith/bin" >> "$GITHUB_PATH"
-          else
-            echo "$home/.semlith/bin" >> "$GITHUB_PATH"
-          fi
-          "$home/.semlith/bin/$name" --version
-          # The rest of what the installer does -- PATH, the model, the client
-          # registration -- run by the binary under test. Explicitly without the
-          # login service: `SEMLITH_NO_SERVICE` above covers it, and saying so
-          # here as well means this line does not depend on a variable set
-          # sixty lines away to avoid taking the port the daemon checks need.
-          "$home/.semlith/bin/$name" setup --yes --no-service
-
-      - name: Install the release the way a user does
-        if: github.event_name != 'pull_request' && runner.os != 'Windows'
-        shell: bash
-        run: |
-          sh install.sh
-          # Twice. A runner is a new machine, so installing once only ever
-          # tests a first install -- and the installer's hard case is the
-          # second one, where the binary it is replacing is already there.
-          sh install.sh
-          echo "$HOME/.semlith/bin" >> "$GITHUB_PATH"
-
-      - name: Install the release the way a user does
-        if: github.event_name != 'pull_request' && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          .\install.ps1
-          # Twice, and on Windows this is the one that matters: a single
-          # Move-Item cannot replace an executable that is already there, so
-          # every re-install failed with "Cannot create a file when that file
-          # already exists" while every clean install passed.
-          .\install.ps1
-          Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')
-
-      # First, and under PowerShell on every operating system. Git Bash sets
-      # HOME and Windows does not, so a check that only ever runs under bash
-      # cannot see what a person launching the daemon from PowerShell hits.
-      # Run before the CLI smoke so the store home is still empty and the
-      # portal's first-run path is the one exercised.
       - name: Portal check
-        id: portal
-        continue-on-error: true
         shell: pwsh
         run: |
           pwsh -File .github/portal-check.ps1 2>&1 | Tee-Object -FilePath "portal-${{ matrix.os }}.log"
           exit $LASTEXITCODE
 
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: portal-${{ matrix.os }}
+          path: portal-${{ matrix.os }}.log
+
+  smoke:
+    needs: [plan, build]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name != 'pull_request' || (needs.plan.outputs.heavy == 'true' && needs.build.result == 'success'))
+    runs-on: ${{ matrix.os }}
+    # Six hours is the hosted-runner ceiling; the SSH session lives inside it.
+    timeout-minutes: ${{ inputs.ssh && 360 || 45 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    env:
+      SEMLITH_VERSION: ${{ inputs.version }}
+      SEMLITH_YES: "1"
+      SEMLITH_NO_SERVICE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/install-semlith
+        with:
+          os: ${{ matrix.os }}
+
       - name: Smoke
         id: smoke
-        continue-on-error: true
-        shell: bash
-        run: bash .github/smoke.sh 2>&1 | tee "smoke-${{ matrix.os }}.log"
-
-      # The browser drive: every reproduction the 2026-09-17 manual drive
-      # recorded, replayed against a real portal in a real Chrome. The two
-      # checks above reach the routes; this is the only thing that reaches the
-      # page, which is where forty-seven of those sixty-two defects lived.
-      #
-      # Here rather than in `ci.yml` because this is the job that already has
-      # a released binary, a Chrome and three operating systems. A runner image
-      # ships Chrome on all three.
-      - name: Browser drive
-        id: drive
-        continue-on-error: true
         shell: bash
         run: |
-          # `python3` on a Windows runner is a stub that opens the Microsoft
-          # Store, so the name is resolved rather than assumed.
-          PY=python3
-          command -v python3 >/dev/null 2>&1 || PY=python
-
-          # Into a virtual environment, not into the runner's Python. A macOS
-          # image's system Python is externally managed (PEP 668) and refuses
-          # `pip install` outright, which killed this step before the daemon
-          # was ever started — and the failure read as "no portal URL".
-          "$PY" -m venv drive-venv
-          VPY=drive-venv/bin/python
-          [ -x "$VPY" ] || VPY=drive-venv/Scripts/python
-          "$VPY" -m pip install --quiet --disable-pip-version-check websocket-client
-          PY="$VPY"
-
-          # Its own store home and its own port, so this cannot collide with
-          # whatever the two steps above left behind — a daemon still holding a
-          # store's write lock is a daemon this one cannot start beside, and
-          # the failure reads as "no portal URL" rather than as what it is.
-          # Starting from an empty home is also the honest test: the drive
-          # builds every corpus it asserts on.
-          export SEMLITH_HOME="$PWD/drive-home"
-          export SEMLITH_PORTAL_URL=http://127.0.0.1:7466
-          mkdir -p "$SEMLITH_HOME"
-          semlith start --port 7466 > drive-daemon.log 2>&1 &
-          for _ in $(seq 1 90); do
-            grep -q 'token=' drive-daemon.log && break
-            sleep 1
-          done
-          grep -q 'token=' drive-daemon.log || {
-            echo "the daemon never printed a portal URL:"; cat drive-daemon.log; exit 1;
-          }
-          SEMLITH_TOKEN="$(grep -o 'token=[0-9a-f]*' drive-daemon.log | head -1 | cut -d= -f2)" \
-          SEMLITH_BIN="$(command -v semlith)" \
-            "$PY" tests/drive/drive.py --out "drive-${{ matrix.os }}" \
-              2>&1 | tee "drive-${{ matrix.os }}.log"
+          set -o pipefail
+          bash .github/smoke.sh 2>&1 | tee "smoke-${{ matrix.os }}.log"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: logs-${{ matrix.os }}
-          path: |
-            portal-${{ matrix.os }}.log
-            smoke-${{ matrix.os }}.log
-            drive-${{ matrix.os }}.log
-            drive-${{ matrix.os }}/
-            drive-daemon.log
-
-      # Both checks ran and both logs are uploaded; now say whether the job
-      # passed. Without this the `continue-on-error` above would make a run
-      # with real failures look green.
-      - name: Gate
-        shell: bash
-        run: |
-          fail=0
-          [ "${{ steps.portal.outcome }}" = success ] || { echo "portal check failed"; fail=1; }
-          [ "${{ steps.smoke.outcome }}" = success ] || { echo "smoke failed"; fail=1; }
-          [ "${{ steps.drive.outcome }}" = success ] || { echo "browser drive failed"; fail=1; }
-          exit $fail
+          name: smoke-${{ matrix.os }}
+          path: smoke-${{ matrix.os }}.log
 
       - name: Bug hunt
         if: inputs.hunt && always()
@@ -276,10 +233,82 @@ jobs:
           path: hunt-${{ matrix.os }}.md
 
       # Last, so a failed smoke still hands over a shell with the failure in
-      # place. Ends when you `touch continue` (or `sudo touch /continue`),
-      # or ten minutes after the last client disconnects.
+      # place. Ends when you `touch continue` (or `sudo touch /continue`), or
+      # ten minutes after the last client disconnects.
       - name: SSH shell
         if: inputs.ssh && always()
         uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113 # v3.24
         with:
           limit-access-to-actor: true
+
+  # The browser drive: every reproduction the 2026-09-17 manual drive
+  # recorded, replayed against a real portal in a real Chrome. The two jobs
+  # above reach the routes; this is the only thing that reaches the page,
+  # which is where forty-seven of those sixty-two defects lived. A runner
+  # image ships Chrome on all three operating systems.
+  drive:
+    needs: [plan, build]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      (github.event_name != 'pull_request' || (needs.plan.outputs.heavy == 'true' && needs.build.result == 'success'))
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    env:
+      SEMLITH_VERSION: ${{ inputs.version }}
+      SEMLITH_YES: "1"
+      SEMLITH_NO_SERVICE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: ./.github/actions/install-semlith
+        with:
+          os: ${{ matrix.os }}
+
+      - name: Browser drive
+        shell: bash
+        run: |
+          set -o pipefail
+          # `python3` on a Windows runner is a stub that opens the Microsoft
+          # Store, so the name is resolved rather than assumed.
+          PY=python3
+          command -v python3 >/dev/null 2>&1 || PY=python
+
+          # Into a virtual environment, not into the runner's Python. A macOS
+          # image's system Python is externally managed (PEP 668) and refuses
+          # `pip install` outright.
+          "$PY" -m venv drive-venv
+          VPY=drive-venv/bin/python
+          [ -x "$VPY" ] || VPY=drive-venv/Scripts/python
+          "$VPY" -m pip install --quiet --disable-pip-version-check websocket-client
+          PY="$VPY"
+
+          # Its own store home and its own port. Starting from an empty home is
+          # the honest test: the drive builds every corpus it asserts on.
+          export SEMLITH_HOME="$PWD/drive-home"
+          export SEMLITH_PORTAL_URL=http://127.0.0.1:7466
+          mkdir -p "$SEMLITH_HOME"
+          semlith start --port 7466 > drive-daemon.log 2>&1 &
+          for _ in $(seq 1 90); do
+            grep -q 'token=' drive-daemon.log && break
+            sleep 1
+          done
+          grep -q 'token=' drive-daemon.log || {
+            echo "the daemon never printed a portal URL:"; cat drive-daemon.log; exit 1;
+          }
+          SEMLITH_TOKEN="$(grep -o 'token=[0-9a-f]*' drive-daemon.log | head -1 | cut -d= -f2)" \
+          SEMLITH_BIN="$(command -v semlith)" \
+            "$PY" tests/drive/drive.py --out "drive-${{ matrix.os }}" \
+              2>&1 | tee "drive-${{ matrix.os }}.log"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: drive-${{ matrix.os }}
+          path: |
+            drive-${{ matrix.os }}.log
+            drive-${{ matrix.os }}/
+            drive-daemon.log

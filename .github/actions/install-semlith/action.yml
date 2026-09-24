@@ -1,0 +1,80 @@
+name: Install semlith
+description: >
+  Put the binary under test on PATH the way the installer does, and run its
+  setup. On a pull request that is this branch's build, from the `build` job;
+  on a dispatch it is the release, through the real installer, twice.
+
+inputs:
+  os:
+    description: The matrix OS, which names the build artifact.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The models, fetched once per digest rather than on every runner. The GPU
+    # lane's downloads stay out: a runner with no GPU asserts it fetched none.
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: |
+          ~/.cache/semlith/models
+          !~/.cache/semlith/models/accel
+        key: models-${{ runner.os }}-${{ hashFiles('src/embed.rs', 'src/image.rs') }}
+
+    - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      if: github.event_name == 'pull_request'
+      with:
+        name: semlith-${{ inputs.os }}
+        path: built
+
+    # It happens before the installer's setup rather than after it, because
+    # setup downloads the model *with the binary it just installed*. A released
+    # binary running first is a released binary writing wherever its bugs write.
+    - name: Install this branch the way the installer installs a release
+      if: github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Windows ]; then
+          # `semlith setup` writes into PowerShell's $HOME, which is
+          # USERPROFILE; cygpath turns that into the form this shell copies to.
+          home=$(cygpath -u "$USERPROFILE")
+          name=semlith.exe
+        else
+          home=$HOME
+          name=semlith
+        fi
+        mkdir -p "$home/.semlith/bin"
+        cp "built/$name" "$home/.semlith/bin/$name"
+        chmod +x "$home/.semlith/bin/$name"
+        # PATH in the Windows form, because the portal check is PowerShell and
+        # a `/c/users/...` entry means nothing to it.
+        if [ "$RUNNER_OS" = Windows ]; then
+          cygpath -w "$home/.semlith/bin" >> "$GITHUB_PATH"
+        else
+          echo "$home/.semlith/bin" >> "$GITHUB_PATH"
+        fi
+        "$home/.semlith/bin/$name" --version
+        # The rest of what the installer does -- PATH, the model, the client
+        # registration -- run by the binary under test, and without the login
+        # service, which would take port 7365 before the daemon checks bind it.
+        "$home/.semlith/bin/$name" setup --yes --no-service
+
+    - name: Install the release the way a user does
+      if: github.event_name != 'pull_request' && runner.os != 'Windows'
+      shell: bash
+      run: |
+        sh install.sh
+        # Twice. A runner is a new machine, so installing once only ever tests
+        # a first install -- and the installer's hard case is the second one.
+        sh install.sh
+        echo "$HOME/.semlith/bin" >> "$GITHUB_PATH"
+
+    - name: Install the release the way a user does
+      if: github.event_name != 'pull_request' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        .\install.ps1
+        # Twice, and on Windows this is the one that matters: a single
+        # Move-Item cannot replace an executable that is already there.
+        .\install.ps1
+        Add-Content $env:GITHUB_PATH (Join-Path $HOME '.semlith\bin')

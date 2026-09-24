@@ -689,6 +689,24 @@ computed: it renders the stanzas `src/clients.rs` parses out of
 `docs/portal.md` documents every page, and a new one belongs there in the same
 release.
 
+## What CI runs, and when
+
+`ci.yml` runs `check` (fmt, clippy, the offline suite, on three OSes), `msrv`
+and `scripts` on every push. Everything slower waits on the `changes` job,
+which runs `.github/changes.sh`: a push that touched only prose (top-level or
+`.github/` Markdown, `docs/`, `assets/`, the licence files) skips `gpu`, `cuda`,
+`release-suites` and `mixed-vectors`, and so does a draft pull request until it
+is marked ready. A push is compared with the previous head only when this
+workflow's run on that head finished green; otherwise the whole pull request is
+compared with its base, so a cancelled run never lets code through untested.
+`release-suites` runs each slow test on its own macOS runner and
+`mixed-vectors` each of its three runs on its own runner, with
+`mixed-vectors-median` writing the table. `native-smoke.yml` builds the binary
+once per OS, then runs the portal check, the smoke harness and the browser drive
+as three jobs side by side, each installing that build through
+`.github/actions/install-semlith`. The models are cached per digest; the GPU
+lane's downloads never are, because a no-GPU runner asserts it fetched none.
+
 ## Release
 
 Tags `v*` trigger `.github/workflows/release.yml`, which first verifies the tag
