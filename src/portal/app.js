@@ -678,14 +678,20 @@ function wireTips() {
  */
 const PER_PAGE = [5, 10, 25, 50];
 
+/* A table's page, page size and sort, by `spec.remember`, for a page that is
+ * redrawn whole on a live update. The Stores page is: every watcher write
+ * redraws it, and each redraw put the reader back on page 1 at 5 a page. */
+const TABLE_VIEWS = new Map();
+
 function dataTable(spec) {
   const columns = spec.columns;
-  const view = {
+  const view = TABLE_VIEWS.get(spec.remember) || {
     page: 1,
     perPage: spec.perPage || 5,
     sort: spec.sort || null,
     dir: spec.dir || "asc",
   };
+  if (spec.remember) TABLE_VIEWS.set(spec.remember, view);
   let rows = spec.rows || [];
   let total = spec.total === undefined ? rows.length : spec.total;
 
@@ -861,6 +867,8 @@ function dataTable(spec) {
   }
 
   function paint() {
+    // A remembered page can be past the end once rows have gone.
+    view.page = Math.min(view.page, pages());
     paintHead();
     paintBody();
     paintFoot();
@@ -3878,6 +3886,7 @@ async function storesView() {
 
   const table = dataTable({
     className: "w-stores",
+    remember: "stores",
     caption: "Every store on this machine: where it is, what it holds, and when it was last written to.",
     sort: "name",
     rows: stores,
