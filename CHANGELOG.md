@@ -40,21 +40,22 @@ shows above the table rather than at the foot of the page. The table's "See
 what is actually inside the index" link opens Inside the index again; it had
 pointed at Index since 0.27.0 split the page.
 
-**Impact answers one question.** The page opens on what breaks if this changes:
-one symbol field, the `Changing` line, the figures Reached, Files and Inferred, a
-three-line guide to reached, inferred and hops, the reached list by hop, and the
-canvas. Hops and prefer-verified sit behind an **Options** disclosure. The path
-finder and trace moved into one collapsed **Between two symbols** section on the
-same page. An empty page says how to get there from Graph and has an **Open
-Graph** button. Arriving from Graph's **Blast radius**, the page answers in the
-store the symbol was picked in, shown as an `in <store> ×` chip that clears the
-scope, and the path finder and trace use the same scope.
+**Impact says what it shows and where to start.** The page keeps its layout. A
+three-line guide under the figures says what reached, inferred and hops mean. An
+empty page says how to get there from Graph and has an **Open Graph** button.
+Arriving from Graph's **Blast radius**, the page answers in the store the symbol
+was picked in, shown as an `in <store> ×` chip that clears the scope, and the
+path finder and trace use the same scope. The Where column truncates, so Via
+and Hops stay in view.
 
 **Graph's rail keeps its buttons in view.** "Chunks it lives in" and "Blast
 radius" were sticky at an offset that left them 18 px below the visible edge
 once the side column became the scroller. They now sit in a footer of the side
 column that does not scroll. A long symbol name ends in an ellipsis, with the
-full name on hover, rather than breaking mid-word.
+full name on hover, rather than breaking mid-word. The rail's lists were
+centred at the width of their longest row, so a long caller spilled off both
+sides of the panel and it scrolled sideways; they now fill the rail and every
+row truncates.
 
 **Smaller fixes.** Every paginated table opens at 5 rows per page; tables used
 10, 12, 15 or 25, and the ledger's 12 and 15 matched no page-size button. The
@@ -66,7 +67,9 @@ hit: a span card with a path header, line-numbered code and the lists that
 found it. Spans the budget left without text are compact rows, and the token
 footer is a strip of facts: tokens of budget, spans, counted with, and dropped.
 On Agents, both rows of cards share one two-column grid and collapse to one
-column at the same width, 899 px.
+column at the same width, 899 px. On the Machine limits card, a lane's Remove
+downloaded files button sits under the lane's name, closer to its lane than to
+the next.
 
 ## [0.28.0] - 2026-09-24
 

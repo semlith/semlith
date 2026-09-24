@@ -640,22 +640,16 @@ The Graph page draws a neighbourhood and this page answers a question. The
 difference is what the answer is made of: a hundred callers is a hairball on a
 canvas and a hundred rows on a page, so this one is rows.
 
-**The shape of the page.** The page opens on the answer to one question, what
-breaks if this changes. Two columns: on the left, a card carrying the symbol
-field, the `Changing` line, three figures and a three-line guide to what
+**The shape of the page.** Two columns. On the left, a card carrying the
+controls, the `Changing` line, three figures and a three-line guide to what
 *reached*, *inferred* and *hops* mean, and under it the reached symbols
-themselves; on the right, the canvas. Below about 716 pixels of content width
-the two become one column and the order above is the order you read down the
-page; there is no breakpoint involved, the columns simply stop fitting. Under
-both, a collapsed section, **Between two symbols**, holds
-[Path finder](#path-finder) and [Trace](#trace). They answer a different
-question, about two symbols rather than one, so they are folded under the
-answer rather than competing with it.
+themselves. On the right, the canvas, then [Path finder](#path-finder),
+then [Trace](#trace) — the answer on one side and the two questions that follow
+from it on the other. Below about 716 pixels of content width the two become
+one column and the order above is the order you read down the page; there is no
+breakpoint involved, the columns simply stop fitting.
 
-**Controls.** The name field and **Reach** are in the card at the head of the
-left column. Hops and **Prefer verified edges** are behind the **Options**
-disclosure under them, because their defaults answer the question most people
-ask.
+**Controls.** Four of them, in the card at the head of the left column.
 
 - **the name field** — one symbol, matched exactly, as the placeholder says: *A
   symbol's name, matched exactly*. Enter runs it; so does **Reach** beside it.
@@ -675,9 +669,9 @@ ask.
 
 Under the band a row states what the answer is about: **Changing**, then the
 symbol, then a pill reading `depth 3 · reverse` for whatever depth was used.
-Before anything is typed the page says *Name a symbol above, or find it on the
-Graph page, pick it, and press Blast radius.*, with an **Open Graph** button,
-rather than showing an empty table.
+Before anything is typed the page says *Type a symbol's exact name above and
+press Reach, or find it on the Graph page, pick it, and press Blast radius.*,
+with an **Open Graph** button, rather than showing an empty table.
 
 **The answer opens with a sentence**, not a number: `N definitions in N files
 reach <name> within N hops`. The sentence is composed by the same function that
@@ -776,8 +770,8 @@ else's callers mixed into yours.
 
 ### Path finder
 
-The first card under **Between two symbols** answers the forward question: is
-there a chain from one symbol to another, and what is it made of. Until this release it answered
+The card under the canvas answers the forward question: is there a chain from
+one symbol to another, and what is it made of. Until this release it answered
 only from a terminal.
 
 **Controls.** A **from** field, a **to** field, two chips and **Walk**. The
@@ -814,8 +808,8 @@ Read the seam before you rely on it.*
 
 ### Trace
 
-The second card under **Between two symbols** is the same chain written as
-something a person can paste into a review. Its heading carries the chip `evidence view` and, on the right, **Copy
+The last card is the same chain written as something a person can paste into a
+review. Its heading carries the chip `evidence view` and, on the right, **Copy
 as evidence**.
 
 **Controls.** **from**, **to**, and **Trace**. There is deliberately no depth
