@@ -118,6 +118,24 @@ mod platform {
 
     pub const MECHANISM: &str = "launchd";
 
+    /// What the plist asks launchd for. See `install`.
+    pub const PROCESS_TYPE: &str = "Standard";
+
+    /// Whether an installed plist still asks for the efficiency cores, which
+    /// every release before 0.28.0 wrote. `setup` and `upgrade` rewrite it;
+    /// `doctor` names it until they have.
+    pub fn stale_definition() -> Option<String> {
+        let path = plist_path().ok()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        text.contains("<string>Background</string>").then(|| {
+            format!(
+                "{} asks launchd for ProcessType Background, which holds the daemon on the \
+                 efficiency cores; run `semlith setup` (or `semlith start --service`) to rewrite it",
+                path.display()
+            )
+        })
+    }
+
     fn plist_path() -> Result<PathBuf> {
         Ok(crate::home::user_home()?
             .join("Library")
@@ -176,6 +194,13 @@ mod platform {
 
         // KeepAlive, not RunAtLoad alone: the whole claim is that a daemon
         // which exits comes back without a person present.
+        //
+        // `Standard`, not `Background`. A job launchd starts as `Background`
+        // is held on the efficiency cores and cannot lift itself out: on the
+        // reference M1 it indexed at 3.3 chunks/s against 28 in a terminal,
+        // and `setpriority` from inside it returned 0 and changed nothing.
+        // The daemon puts itself in background state while it is idle
+        // instead (`priority::manage`), which it can undo in microseconds.
         let plist = format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -186,12 +211,13 @@ mod platform {
              <key>ProgramArguments</key>\n  <array>\n{program}  </array>\n\
              <key>RunAtLoad</key>\n  <true/>\n\
              <key>KeepAlive</key>\n  <true/>\n\
-             <key>ProcessType</key>\n  <string>Background</string>\n\
+             <key>ProcessType</key>\n  <string>{process_type}</string>\n\
              <key>StandardOutPath</key>\n  <string>{log}</string>\n\
              <key>StandardErrorPath</key>\n  <string>{log}</string>\n\
              </dict>\n\
              </plist>\n",
             label = LABEL,
+            process_type = PROCESS_TYPE,
             log = escape(&log.display().to_string()),
         );
         std::fs::write(&path, plist).with_context(|| format!("writing {}", path.display()))?;
@@ -245,6 +271,11 @@ mod platform {
 
     pub const MECHANISM: &str = "systemd";
     const UNIT: &str = "semlith.service";
+
+    /// Nothing to rewrite: the unit has always run at normal priority.
+    pub fn stale_definition() -> Option<String> {
+        None
+    }
 
     fn unit_path() -> Result<PathBuf> {
         Ok(crate::home::user_home()?
@@ -324,6 +355,23 @@ mod platform {
     pub const MECHANISM: &str = "schtasks";
     const TASK: &str = "semlith";
 
+    /// Whether the logon task still runs at Task Scheduler's default of 7
+    /// (below normal), which every release before 0.28.0 registered, and at
+    /// which Windows 11 may apply EcoQoS to the whole process.
+    pub fn stale_definition() -> Option<String> {
+        let priority = powershell(&format!(
+            "(Get-ScheduledTask -TaskName '{TASK}' -ErrorAction Stop).Settings.Priority"
+        ))
+        .ok()?;
+        let priority = priority.trim();
+        (priority != "5").then(|| {
+            format!(
+                "the {TASK} logon task runs at priority {priority} (below normal); run \
+                 `semlith setup` (or `semlith start --service`) to register it at 5"
+            )
+        })
+    }
+
     pub fn status() -> Status {
         let installed = run("schtasks", &["/Query", "/TN", TASK]).is_ok();
         Status {
@@ -340,6 +388,11 @@ mod platform {
 
     pub fn install(exe: &Path, port: Option<u16>) -> Result<Status> {
         let port = port.map(|p| format!(" --port {p}")).unwrap_or_default();
+        // `-Priority 5` is normal. Without it Task Scheduler starts the task at
+        // 7, below normal, and Windows 11 may then apply EcoQoS, which on a
+        // hybrid CPU means the efficiency cores. The daemon lowers itself while
+        // idle (`priority::manage`), so asking for normal here costs nothing.
+        //
         // PowerShell rather than `schtasks /Create`, for one reason: the
         // restart settings. `schtasks` has no flag for "try again if this
         // fails", and a logon task without one is a service that gives up the
@@ -349,7 +402,7 @@ mod platform {
              $action = New-ScheduledTaskAction -Execute '{exe}' -Argument 'start{port}'; \
              $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME; \
              $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries \
-             -DontStopIfGoingOnBatteries -RestartCount 3 \
+             -DontStopIfGoingOnBatteries -Priority 5 -RestartCount 3 \
              -RestartInterval (New-TimeSpan -Minutes 1) \
              -ExecutionTimeLimit (New-TimeSpan -Seconds 0); \
              Register-ScheduledTask -TaskName '{task}' -Action $action -Trigger $trigger \
@@ -389,6 +442,10 @@ mod platform {
 
     pub const MECHANISM: &str = "none";
 
+    pub fn stale_definition() -> Option<String> {
+        None
+    }
+
     pub fn status() -> Status {
         Status::absent(MECHANISM)
     }
@@ -427,6 +484,17 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Why the installed login service needs rewriting, if it does.
+///
+/// Every release before 0.28.0 asked for background priority — launchd's
+/// `ProcessType Background` on macOS, Task Scheduler's default of 7 on
+/// Windows — and a daemon started that way runs its whole index on the
+/// efficiency cores. `setup` and `upgrade` rewrite such a definition, and
+/// `doctor` names it until one of them has.
+pub fn stale_definition() -> Option<String> {
+    platform::stale_definition()
+}
+
 /// Whether a login service is installed for this user, and where to look.
 pub fn status() -> Status {
     platform::status()
@@ -445,6 +513,19 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
         Some(path) => plain(path.canonicalize().unwrap_or_else(|_| path.to_path_buf())),
         None => exe()?,
     };
+    // A service pointing into the temp directory is one the next cleanup
+    // breaks, and it is what a test that forgot `--no-service` produces: HOME
+    // is redirected, but launchd and systemd register into the real session,
+    // and on 2026-09-23 a test run replaced the developer's own login service
+    // with a binary under /var/folders.
+    if under_temp(&exe) {
+        anyhow::bail!(
+            "{} is under the temporary directory, and a login service pointing there stops \
+             working when it is cleaned up. Install semlith first (`semlith setup`) and \
+             register the installed binary.",
+            exe.display()
+        );
+    }
     if let Some(guarded) = tcc_guarded(&exe) {
         anyhow::bail!(
             "this binary is at {} — macOS gates {} for a background login agent, and a launchd job pointing there hangs inside the dynamic linker before it can write a word to its own log. Install semlith outside that directory and run `semlith start --service` from there; `semlith setup` puts it in {}.",
@@ -478,6 +559,16 @@ pub fn install(binary: Option<&Path>, port: Option<u16>) -> Result<Status> {
     // is the whole of what this release is about.
     status.started_now = status.installed && waits_for(answering);
     Ok(status)
+}
+
+/// Whether a binary lives under the system's temporary directory.
+fn under_temp(exe: &Path) -> bool {
+    let temp = std::env::temp_dir();
+    let temp = temp.canonicalize().unwrap_or(temp);
+    let exe = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    exe.starts_with(&temp)
+        || exe.starts_with("/private/var/folders")
+        || exe.starts_with("/var/folders")
 }
 
 /// Whether something answers on the port within a few seconds of being asked to.

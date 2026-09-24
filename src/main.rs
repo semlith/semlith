@@ -487,7 +487,35 @@ enum Command {
         /// not a place to edit configuration files from.
         #[arg(long, conflicts_with_all = ["json", "fix"])]
         brief: bool,
+
+        /// Embed 32 fixed chunks on every accelerator lane this machine has
+        /// and compare them with CPU fp32 vectors committed to the
+        /// repository: the cosine, the rate and the device, per lane. How an
+        /// owner of a GPU checks it gives the right answers.
+        #[arg(long, conflicts_with_all = ["fix", "brief"])]
+        gpu: bool,
     },
+
+    /// Which devices embed: the CPU, a GPU through WebGPU, and NVIDIA's CUDA.
+    ///
+    /// `status` names each lane, its device and whether it is on. `on` and
+    /// `off` take effect at the next batch of every run. `remove` deletes a
+    /// lane's downloaded components; turning a lane off never does.
+    Accel {
+        /// status, on, off or remove.
+        #[arg(default_value = "status")]
+        action: String,
+        /// cpu, gpu or cuda.
+        lane: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// An accelerator lane's worker: embeds batches on stdin for the daemon.
+    /// Started by the daemon and nothing else; not part of the interface.
+    #[command(name = "__embed-worker", hide = true)]
+    EmbedWorker { lane: String, dir: Option<PathBuf> },
 
     /// Replace this binary with the newest release for this machine. Runs only
     /// when asked: semlith never checks for an update on its own.
@@ -799,7 +827,26 @@ fn run() -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     match cli.command {
-        Command::Doctor { json, fix, brief } => {
+        Command::Doctor {
+            json, gpu: true, ..
+        } => {
+            let checks = semlith::accel::check_all(|line| eprintln!("{line}"));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&checks)?);
+            } else {
+                print_gpu_checks(&checks);
+            }
+            if checks
+                .iter()
+                .any(|c| c.get("passed") == Some(&serde_json::json!(false)))
+            {
+                std::process::exit(1);
+            }
+        }
+
+        Command::Doctor {
+            json, fix, brief, ..
+        } => {
             let stores: Vec<(String, std::path::PathBuf)> = home::Registry::load()
                 .unwrap_or_default()
                 .stores
@@ -886,6 +933,51 @@ fn run() -> Result<()> {
             let no_service =
                 no_service || std::env::var(semlith::setup::NO_SERVICE_ENV).is_ok_and(|v| v == "1");
             semlith::setup::run(yes, airgap, register_all, !no_service, !no_hooks, strict)?;
+        }
+
+        Command::Accel { action, lane, json } => match (action.as_str(), lane.as_deref()) {
+            ("status", _) => {
+                let status = semlith::accel::snapshot();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                } else {
+                    for row in status["lanes"].as_array().into_iter().flatten() {
+                        let state = &row["status"];
+                        let detail = state["reason"]
+                            .as_str()
+                            .map(|r| format!("{} — {r}", state["state"].as_str().unwrap_or("")))
+                            .unwrap_or_else(|| state["state"].as_str().unwrap_or("").to_string());
+                        println!(
+                            "{:<5} {:<4} {:<28} {detail}",
+                            row["lane"].as_str().unwrap_or("?"),
+                            if row["enabled"].as_bool() == Some(true) {
+                                "on"
+                            } else {
+                                "off"
+                            },
+                            row["device"].as_str().unwrap_or("not asked for yet"),
+                        );
+                    }
+                    println!("switches: {}", status["source"].as_str().unwrap_or(""));
+                }
+            }
+            ("on" | "off", Some(lane)) => {
+                println!("{}", semlith::accel::set(lane, action == "on")?)
+            }
+            ("remove", Some(lane)) => {
+                let freed = semlith::accel::remove(lane)?;
+                println!(
+                    "{lane}: components removed, {} freed",
+                    semlith::human_bytes(freed as i64)
+                );
+            }
+            _ => anyhow::bail!(
+                "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>], lanes cpu, gpu, cuda"
+            ),
+        },
+
+        Command::EmbedWorker { lane, dir } => {
+            std::process::exit(semlith::accel::worker_main(&lane, dir.as_deref()));
         }
 
         Command::Upgrade {
@@ -2008,6 +2100,22 @@ fn run() -> Result<()> {
                     "chunks   {chunks} (cut at {})",
                     semlith::store::chunking(store.db())?
                 );
+                // Which variant of the model embedded them, where the store
+                // has counted: int8 on the CPU and fp16 on a GPU are two
+                // variants of one model that agree at cosine 0.987.
+                let variants = store.variants();
+                if !variants.is_empty() {
+                    let parts: Vec<String> =
+                        variants.iter().map(|(v, n)| format!("{n} {v}")).collect();
+                    println!("variants {}", parts.join(", "));
+                }
+                let on = semlith::accel::enabled();
+                let lanes: Vec<&str> = [("cpu", on.cpu), ("gpu", on.gpu), ("cuda", on.cuda)]
+                    .into_iter()
+                    .filter(|(_, on)| *on)
+                    .map(|(lane, _)| lane)
+                    .collect();
+                println!("lanes    {} ({})", lanes.join(", "), on.source);
                 let images = store.image_count()?;
                 if images > 0 {
                     println!("images   {images}");
@@ -2970,6 +3078,18 @@ fn print_proof(proof: &semlith::doctor::Proof) {
             "not installed — `semlith start --service`".to_string()
         },
     );
+    // A definition from before 0.28.0 asks for background priority, which a
+    // daemon cannot lift itself out of: the service runs, and indexes on the
+    // efficiency cores. Named until `setup` or `upgrade` has rewritten it.
+    if service.installed {
+        match semlith::service::stale_definition() {
+            Some(why) => println!("  {:<4} {:<20} {why}", "FAIL", "service priority"),
+            None => println!(
+                "  {:<4} {:<20} normal while embedding, background while idle",
+                "ok  ", "service priority"
+            ),
+        }
+    }
     println!(
         "  {:<4} {:<20} {}",
         "ok  ", "a client would run", proof.command
@@ -3064,6 +3184,29 @@ fn print_brief(clients: &[semlith::doctor::ClientReport], rules: &[semlith::doct
             "no login service — `semlith start --service`".to_string()
         },
     );
+}
+
+/// One row per lane: whether its vectors match the committed fp32 answers.
+fn print_gpu_checks(checks: &[serde_json::Value]) {
+    println!("{}Accelerators{}", bold(), reset());
+    for check in checks {
+        let lane = check["lane"].as_str().unwrap_or("?");
+        match check.get("reason").and_then(|r| r.as_str()) {
+            Some(reason) => println!("  {:<4} {lane:<7} {reason}", "n/a "),
+            None => println!(
+                "  {:<4} {lane:<7} {} · {} · cosine {:.4} (min over 32) · {} chunks/s",
+                if check["passed"].as_bool() == Some(true) {
+                    "ok  "
+                } else {
+                    "FAIL"
+                },
+                check["device"].as_str().unwrap_or("?"),
+                check["variant"].as_str().unwrap_or("?"),
+                check["cosine"].as_f64().unwrap_or(0.0),
+                check["chunks_per_s"].as_f64().unwrap_or(0.0),
+            ),
+        }
+    }
 }
 
 /// What `--service` installed, and where to look when it misbehaves.

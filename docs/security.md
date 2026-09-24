@@ -240,6 +240,25 @@ stat -f '%Sp %N' ~/.semlith ~/.semlith/agent.key   # macOS
 stat -c '%A %n' ~/.semlith ~/.semlith/agent.key    # Linux
 ```
 
+## What semlith downloads, and when
+
+Every download is pinned by URL and SHA-256 and checked while it streams; a
+file whose digest does not match is deleted and refused. There are three, and
+the Privacy page lists each with its source, size, when it happens and whether
+it is already cached:
+
+- **The embedding model** (~52 MB, `huggingface.co`), on the first index.
+- **The WebGPU plugin and the fp16 model**, on the first run with GPU on and a
+  hardware GPU found. The plugin is Microsoft's `onnxruntime-ep-webgpu` wheel
+  from `files.pythonhosted.org`. A software renderer is never offered one.
+- **The CUDA pack** (1.89 GB: ONNX Runtime's GPU build and NVIDIA's CUDA 12
+  wheels), on Linux only, and only after `semlith accel on cuda` or the page's
+  switch, which states the size first.
+
+`--airgap` refuses all three unless they are already in the model cache. A GPU
+lane runs in its own worker process, so a driver crash ends that worker and its
+lane, not the daemon.
+
 ## What is still true, and what is not covered
 
 **The store is not encrypted.** It holds the plain text of everything you

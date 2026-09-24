@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+    # `ready_for_review` so the heavy lane, which a draft skips, runs the
+    # moment a draft is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -17,6 +20,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # What the push touched, decided once for every job below. A commit that
+  # changes only prose (Markdown, `docs/`, the licence files, `assets/`) cannot
+  # change a measured number, a GPU lane or the retrieval harness, so the
+  # hour of release suites it used to wait for is skipped; `check` still runs,
+  # because `tests/readme.rs` and `tests/portal.rs` read the README and the docs.
+  # `heavy` also waits for a draft pull request to be marked ready: drafts get
+  # the fast lane, and the release suites run on the commit that is reviewed.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+      heavy: ${{ steps.diff.outputs.heavy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: ci.yml
+          ACTION: ${{ github.event.action }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BEFORE: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          DRAFT: ${{ github.event.pull_request.draft || false }}
+        run: bash .github/changes.sh
+
   check:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -45,7 +81,9 @@ jobs:
       # embedding model, so it is opt-in via `-- --ignored`.
       - run: cargo test
 
-      - run: cargo build --release
+      # No `cargo build --release` here: the `gpu` job builds the release
+      # binary on all three operating systems whenever code changed, and a
+      # second release link per OS bought nothing but minutes.
 
   # The minimum Rust version the crate declares, built. `rust-version` in
   # Cargo.toml is a promise to anybody on an older toolchain, and nothing ever
@@ -112,3 +150,243 @@ jobs:
           $found = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Warning,Error
           $found | Format-Table -AutoSize
           if ($found) { throw "PSScriptAnalyzer reported $($found.Count) finding(s)" }
+
+  # 0.28.0 item 1.17: every GPU claim checked somewhere real. The macOS arm64
+  # runner exposes a Metal device, so the WebGPU lane is run there for
+  # correctness -- the known-answer check, cosine against the committed fp32
+  # fixture -- on every pull request. Linux and Windows runners have no
+  # hardware GPU, so there the same command must say so and fall back, and
+  # must never abort: Linux with Mesa's lavapipe forced as the only Vulkan
+  # device, Windows with only the Basic Render Driver (WARP) it already has.
+  gpu:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - run: cargo build --release
+
+      - name: A software Vulkan device, and nothing else
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mesa-vulkan-drivers libvulkan1 vulkan-tools
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -1)
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+
+      - name: doctor --gpu
+        shell: bash
+        run: |
+          set -o pipefail
+          target/release/semlith doctor --gpu --json | tee gpu.json
+          gpu=$(jq -c '.[] | select(.lane == "gpu")' gpu.json)
+          echo "gpu lane: $gpu"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # Real Metal: the lane must run and match the fixture.
+            echo "$gpu" | jq -e '.passed == true and .cosine >= 0.999' > /dev/null
+          else
+            # No hardware GPU: named as unavailable, nothing downloaded.
+            echo "$gpu" | jq -e '.reason | startswith("unavailable")' > /dev/null
+            cache="${SEMLITH_MODEL_CACHE:-$HOME/.cache/semlith/models}"
+            if [ -d "$cache/accel" ] && find "$cache/accel" -type f | grep -q .; then
+              echo "::error::a machine with no hardware GPU downloaded GPU components"
+              find "$cache/accel" -type f
+              exit 1
+            fi
+          fi
+
+  # Item 1.14 without a card: the pinned CUDA pack downloads, every digest
+  # verifies, the lane loads it, and says there is no NVIDIA device. Linux
+  # only in this release; the Windows leg checks the refusal says why.
+  cuda:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - name: The pack, fetched and loaded on a machine with no card
+        if: runner.os == 'Linux'
+        run: |
+          df -h .
+          cargo test --release --no-default-features --features dynamic-ort --test cuda -- --ignored --nocapture
+
+      - name: Turning CUDA on is refused with the reason
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --release
+          if target/release/semlith accel on cuda 2> out.txt; then
+            echo "::error::CUDA was turned on on Windows"; exit 1
+          fi
+          cat out.txt
+          grep -q "Linux-only" out.txt
+
+  # The --release suites: measured claims and the retrieval harness. Hours on
+  # the reference laptop, so a release pull request's CI is their gate, and
+  # the record says so. Only on release branches. macOS arm64, because that is
+  # the platform the thresholds were set on and `measure.rs` reads peak memory
+  # with BSD `time -l`.
+  release-suites:
+    needs: changes
+    if: >-
+      needs.changes.outputs.heavy == 'true' &&
+      (github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/'))
+    runs-on: macos-latest
+    timeout-minutes: 90
+    # One runner per slow test rather than one runner for all of them, which
+    # took 68 minutes end to end: the watcher measure is 26 of them, the store
+    # at scale 15, the retrieval harness 24, and the rest together about 3.
+    # Each still runs with one test thread, alone on its runner, which is what
+    # `measure.rs` needs to hold its numbers still.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: shards and the quick measures
+            run: |
+              cargo test --release --test shards -- --ignored --nocapture --test-threads=1
+              cargo test --release --test measure -- --ignored --nocapture --test-threads=1 \
+                measure_multi_store_search measure_the_tool_list_and_what_an_idle_server_holds \
+                measure_what_sharding_costs_recall
+          - suite: the store at scale
+            run: cargo test --release --test measure -- --ignored --nocapture --test-threads=1 measure_the_store_at_scale
+          - suite: the watcher
+            run: cargo test --release --test measure -- --ignored --nocapture --test-threads=1 measure_the_watcher
+          - suite: retrieval
+            run: cargo test --release --test retrieval -- --ignored --nocapture --test-threads=1
+    name: release-suites (${{ matrix.suite }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      # The models, fetched once per digest rather than once per job. The GPU
+      # lane's downloads stay out: a no-GPU runner asserts it fetched none.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cache/semlith/models
+            !~/.cache/semlith/models/accel
+          key: models-${{ runner.os }}-${{ hashFiles('src/embed.rs', 'src/image.rs') }}
+
+      - name: ${{ matrix.suite }}
+        shell: bash
+        run: |
+          set -eo pipefail
+          ${{ matrix.run }}
+
+  # Item 1.16: a store embedded by the CPU and a GPU together holds int8 and
+  # fp16 vectors of one model, which agree at cosine 0.987. Before hybrid ships
+  # as the default the sealed split is scored four ways, median of three, on
+  # the CPU alone so each leg is reproducible: all int8, all fp16, a
+  # deterministic 50/50 mix, and the mix searched with fp16 queries. Mixing is
+  # allowed if the mix is within one question of all-int8 at every k.
+  mixed-vectors:
+    needs: changes
+    if: >-
+      needs.changes.outputs.heavy == 'true' &&
+      (github.event_name != 'pull_request' || startsWith(github.head_ref, 'feat/'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Each of the three runs on its own runner: a run is an index and a
+    # scoring, independent of the others (see `tests/retrieval.rs`), so three
+    # in parallel are the same three runs as three in a row, in a third of the
+    # time. `mixed-vectors-median` reads them back and takes the median.
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [int8, fp16, mix, mix-fp16-queries]
+        run: [1, 2, 3]
+        include:
+          - leg: int8
+            embed: int8
+            query: int8
+          - leg: fp16
+            embed: fp16
+            query: fp16
+          - leg: mix
+            embed: mix
+            query: int8
+          - leg: mix-fp16-queries
+            embed: mix
+            query: fp16
+    env:
+      SEMLITH_RETRIEVAL_SEALED: "1"
+      SEMLITH_RETRIEVAL_RUNS: "1"
+      SEMLITH_EMBED_VARIANT: ${{ matrix.embed }}
+      SEMLITH_QUERY_VARIANT: ${{ matrix.query }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cache/semlith/models
+            !~/.cache/semlith/models/accel
+          key: models-${{ runner.os }}-${{ hashFiles('src/embed.rs', 'src/image.rs') }}
+
+      - name: sealed split, ${{ matrix.leg }}, run ${{ matrix.run }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --release --test retrieval -- --ignored --nocapture --test-threads=1 \
+            the_retrieval_metrics_are_measured 2>&1 | tee harness.log
+          grep -E "run [0-9]+/[0-9]+ +hit@1" harness.log | sed "s/^/${{ matrix.leg }} /" > "mixed-${{ matrix.leg }}-${{ matrix.run }}.txt"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mixed-${{ matrix.leg }}-${{ matrix.run }}
+          path: mixed-${{ matrix.leg }}-${{ matrix.run }}.txt
+
+  # Item 1.16's table, median of the three runs per leg, in the run summary.
+  mixed-vectors-median:
+    needs: mixed-vectors
+    if: always() && needs.mixed-vectors.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: mixed-*
+          merge-multiple: true
+
+      - shell: bash
+        run: |
+          {
+            echo "| leg | runs | hit@1 | hit@3 | hit@8 (median) |"
+            echo "|---|---|---|---|---|"
+            for leg in int8 fp16 mix mix-fp16-queries; do
+              cat mixed-$leg-[0-9].txt 2>/dev/null | sed -E 's/.*hit@1 ([0-9]+), hit@3 ([0-9]+), hit@8 ([0-9]+) of ([0-9]+).*/\1 \2 \3 \4/' > $leg.rows || true
+              n=$(wc -l < $leg.rows | tr -d ' ')
+              med() { cut -d' ' -f"$1" $leg.rows | sort -n | awk '{a[NR]=$1} END {print (NR ? a[int((NR+1)/2)] : "-")}'; }
+              echo "| $leg | $n | $(med 1) | $(med 2) | $(med 3) of $(cut -d' ' -f4 $leg.rows | head -1) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"

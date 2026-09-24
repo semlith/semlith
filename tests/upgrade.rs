@@ -13,6 +13,8 @@
 
 #![cfg(unix)]
 
+mod common;
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -211,14 +213,9 @@ fn install() -> Installed {
     let bin = home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let binary = bin.join("semlith");
-    // Copied to a neighbouring name and renamed into place. Linux refuses to
-    // exec a file any process still holds open for writing — ETXTBSY, "Text
-    // file busy" — and `copy` straight onto the path these tests then run is
-    // that race with the window left open. A rename has no writer to close.
-    let staged = bin.join("semlith.staging");
-    std::fs::copy(env!("CARGO_BIN_EXE_semlith"), &staged).unwrap();
-    chmod_755(&staged);
-    std::fs::rename(&staged, &binary).unwrap();
+    // Not `fs::copy`: see `common::copy_executable` for why this process must
+    // never hold a file it will exec open for writing.
+    common::copy_executable(Path::new(env!("CARGO_BIN_EXE_semlith")), &binary);
     Installed {
         _dir: dir,
         home,
@@ -236,11 +233,10 @@ fn run(installed: &Installed, origin: &str, args: &[&str], airgap: bool) -> Outp
     if airgap {
         command.env("SEMLITH_AIRGAP", "1");
     }
-    // Retried on ETXTBSY. The rename above closes the window this file is
-    // written through, but these tests run in parallel and `upgrade` itself
-    // replaces the binary by rename — so a spawn can still land in the moment
-    // between another test's two renames. Bounded, and only for that error:
-    // anything else is the failure the test is about.
+    // Retried on ETXTBSY, as a backstop: `install` keeps this process from
+    // ever holding the binary open for writing, so this should not fire.
+    // Bounded, and only for that error: anything else is the failure the test
+    // is about.
     for _ in 0..20 {
         match command.output() {
             Ok(out) => return out,

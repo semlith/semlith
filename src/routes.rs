@@ -134,6 +134,13 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (_, true, "/api/store/delete") => delete_store(state, request),
         (_, true, "/api/index/control") => index_control(state, request),
         (_, true, "/api/index/settings") => index_settings(state, request),
+        (true, _, "/api/accel") => accel_status(),
+        (_, true, "/api/doctor/gpu") => Response::json(&json!({
+            // The same checks `semlith doctor --gpu` prints, lane by lane. A
+            // POST because the first one may download a lane's components.
+            "checks": crate::accel::check_all(|_| {}),
+        })),
+        (_, true, "/api/accel") => accel_change(request),
         (_, true, "/api/schedules") => schedule_write(state, request),
         (_, true, "/api/upgrade") => upgrade(request),
 
@@ -490,6 +497,9 @@ fn stores(state: &Arc<State>, request: &Request) -> Response {
             "formats": facets.extensions.len(),
             "readers": readers.len(),
             "watching": handle.watching.load(Ordering::Relaxed),
+            // Why the writer ended, beside `watching: false`, so a store that
+            // stopped being kept current says what stopped it.
+            "stopped_because": handle.stopped_because.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "queue": handle.queue_depth(),
             "last_write": last_write,
             // Rows this store held for files outside its roots, dropped when
@@ -1480,7 +1490,41 @@ fn privacy(state: &Arc<State>) -> Response {
         // a page; a page that states a policy and the reading behind it is
         // something a reader can disagree with.
         "rules": rules(state),
+        // Every download this binary can make, with where from, how large and
+        // when. The GPU components are fetched only when a hardware GPU was
+        // found with the GPU lane on, and the CUDA pack only after an explicit
+        // turn-on; `--airgap` refuses all of them unless they were pre-seeded.
+        "downloads": downloads(&cache),
     }))
+}
+
+/// The downloads the Privacy page lists, each with whether it is here already.
+fn downloads(cache: &Path) -> Value {
+    let webgpu =
+        crate::accel::component_dir(cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION));
+    json!([
+        {
+            "what": "the embedding model (granite-embedding-small-english-r2, int8)",
+            "source": "huggingface.co",
+            "bytes": 51_885_568 + 598_902,
+            "when": "the first time anything is indexed or searched",
+            "cached": crate::embed::is_cached(cache),
+        },
+        {
+            "what": format!("the WebGPU plugin {} and the fp16 model", crate::gpu::WEBGPU_VERSION),
+            "source": "files.pythonhosted.org (Microsoft's wheel) and huggingface.co",
+            "bytes": crate::gpu::FP16_FILES.iter().map(|(_, _, size)| size).sum::<u64>() + crate::gpu::plugin_bytes(),
+            "when": "the first index run on a machine with a hardware GPU, with the GPU lane on",
+            "cached": webgpu.join(crate::gpu::plugin_file()).exists(),
+        },
+        {
+            "what": format!("the CUDA pack {}", crate::cuda::PACK_VERSION),
+            "source": "github.com (ONNX Runtime GPU) and files.pythonhosted.org (NVIDIA's CUDA wheels)",
+            "bytes": crate::cuda::PACK_BYTES,
+            "when": "only after CUDA is turned on, on Linux",
+            "cached": crate::cuda::pack_installed(cache).is_some(),
+        },
+    ])
 }
 
 /// Every rule 0.14.0 added, and the daemon's own check of it.
@@ -1805,6 +1849,16 @@ fn about(state: &Arc<State>) -> Response {
         "graph_languages": crate::graph::languages(),
         "edge_kinds": crate::graph::KINDS,
         "stores": state.stores().len(),
+        // Background while idle, normal while embedding, and what the last
+        // switch cost. Read by the About page and by the acceptance check that
+        // times each transition.
+        "priority": crate::priority::snapshot(),
+        // Embedding sessions loaded now: one per writer that has embedded in
+        // the last minute, and the one query session every reader shares.
+        "sessions": {
+            "writers": crate::writer_sessions(),
+            "query": crate::fleet::query_sessions(),
+        },
     }))
 }
 
@@ -2622,11 +2676,20 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
 /// opened it could read. It holds a worker for one request and returns.
 fn index_runs(state: &Arc<State>) -> Response {
     let admission = &state.admission;
-    let runs: Vec<Value> = state
+    let mut runs: Vec<Value> = state
         .stores()
         .iter()
         .flat_map(|store| store.run_snapshots(admission.position_of(&store.name)))
         .collect();
+    // Cards of runs whose stop deleted their store, after the live stores'.
+    runs.extend(
+        state
+            .gone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned(),
+    );
     let queue: Vec<Value> = admission
         .waiting()
         .into_iter()
@@ -2649,6 +2712,7 @@ fn index_runs(state: &Arc<State>) -> Response {
         "runs": runs,
         "queue": queue,
         "running": admission.running(),
+        "held": admission.held(),
         "limits": limits,
     }))
 }
@@ -2869,9 +2933,61 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
     // Runs-at-once is the one of the three that means something to a queue
     // already waiting, so it takes effect now rather than at the next start:
     // raising it admits the head immediately.
+    // All three take effect now. Threads reach every writer at its next
+    // batch, the budget reaches the readers here and every writer at its next
+    // tick, and runs-at-once admits or holds at once.
     let limits = daemon::Limits::in_force();
+    limits.apply();
+    for fleet in [&state.fleet, &state.mcp_fleet] {
+        if let Some(fleet) = fleet.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            fleet.follow_budget();
+        }
+    }
     state.admission.set_limit(limits.runs_at_once.value);
-    Response::json(&json!({ "limits": limits }))
+    let applied = format!(
+        "now running with {} run(s) at once, {} thread(s) each, and {} MiB of vectors per store",
+        limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
+    );
+    Response::json(&json!({ "limits": limits, "applied": applied }))
+}
+
+/// The accelerator lanes: each one's switch, state, device and share of the
+/// rate, and what its components take on disk.
+fn accel_status() -> Response {
+    let mut body = crate::accel::snapshot();
+    body["bytes"] = crate::accel::component_bytes();
+    Response::json(&body)
+}
+
+/// Turn a lane on or off, or remove its components. The same functions
+/// `semlith accel` calls, so the page and the terminal refuse the same things.
+fn accel_change(request: &Request) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    let Some(lane) = body.get("lane").and_then(Value::as_str) else {
+        return Response::error(400, "name the lane: cpu, gpu or cuda");
+    };
+    let outcome = match body.get("action").and_then(Value::as_str) {
+        Some("on") => crate::accel::set(lane, true),
+        Some("off") => crate::accel::set(lane, false),
+        Some("remove") => crate::accel::remove(lane).map(|bytes| {
+            format!(
+                "{lane}'s components removed, {} freed",
+                crate::human_bytes(bytes as i64)
+            )
+        }),
+        _ => return Response::error(400, "action must be \"on\", \"off\" or \"remove\""),
+    };
+    match outcome {
+        Ok(said) => {
+            let mut answer = crate::accel::snapshot();
+            answer["said"] = json!(said);
+            Response::json(&answer)
+        }
+        Err(e) => Response::error(409, &format!("{e:#}")),
+    }
 }
 
 /// Pause, resume or stop the index run a store is working on.
@@ -2884,20 +3000,47 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Ok(b) => b,
         Err(e) => return Response::error(400, &e.to_string()),
     };
+    let run = body.get("run").and_then(Value::as_u64);
+    let action = body.get("action").and_then(Value::as_str);
+    // A card whose store its own stop deleted has no store to name. Removing
+    // it, or clearing finished cards, is answered from the list it lives in.
+    if matches!(action, Some("remove") | Some("clear")) {
+        let dropped = state.gone_changed(|gone| {
+            let before = gone.len();
+            match (action, run) {
+                (Some("remove"), Some(id)) => {
+                    gone.retain(|card| card.get("id").and_then(Value::as_u64) != Some(id))
+                }
+                _ => gone.clear(),
+            }
+            before - gone.len()
+        });
+        if dropped > 0 && action == Some("remove") {
+            return Response::json(&json!({ "removed": dropped }));
+        }
+    }
     let store = match state.writable(body.get("store").and_then(Value::as_str)) {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
     let mut dequeued = 0;
     let mut removed = 0;
-    let run = body.get("run").and_then(Value::as_u64);
-    match body.get("action").and_then(Value::as_str) {
-        Some("pause") => store
-            .paused
-            .store(true, std::sync::atomic::Ordering::Relaxed),
-        Some("resume") => store
-            .paused
-            .store(false, std::sync::atomic::Ordering::Relaxed),
+    let mut deleting = false;
+    match action {
+        // Answered with the state asked for, at once: the engine reaches it
+        // at its next batch, and the card moves on when it does.
+        Some("pause") => {
+            store
+                .paused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            store.mark_pausing();
+        }
+        Some("resume") => {
+            store
+                .paused
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            store.mark_resuming();
+        }
         Some("stop") => {
             // A run that has already finished is not one a stop can act on.
             // It used to be accepted: the confirm dialog promised to undo
@@ -2936,6 +3079,14 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
                 .paused
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             store.mark_stopping();
+            // "Also delete the store", ticked in the dialog. Only ever on the
+            // user's explicit word: the page ticks it by default for a store
+            // that held nothing before the run, and the route does what the
+            // box says rather than guessing.
+            if body.get("delete").and_then(Value::as_bool) == Some(true) {
+                deleting = true;
+                state.delete_after_stop(Arc::clone(&store));
+            }
         }
         // Taking a folder out of the queue before it starts. Told apart from
         // `stop` because it costs nothing and undoes nothing: there is no run
@@ -2977,6 +3128,13 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         "store": store.name,
         "paused": store.paused.load(std::sync::atomic::Ordering::Relaxed),
         "stopping": store.cancelled.load(std::sync::atomic::Ordering::Relaxed),
+        "state": match action {
+            Some("pause") => "pausing",
+            Some("resume") => "running",
+            Some("stop") => "stopping",
+            _ => "",
+        },
+        "deleting": deleting,
         "dequeued": dequeued,
         "removed": removed,
     }))
@@ -3017,16 +3175,39 @@ fn adopt_roots(store: &Arc<Store>, paths: &[PathBuf]) {
 /// than two, and it is why `each` calls this per path instead of naming stores
 /// itself.
 fn store_for(state: &Arc<State>, path: &Path) -> Result<Arc<Store>, anyhow::Error> {
-    let choice = home::resolve(&[], path, None)?;
+    use anyhow::Context as _;
+    // One at a time. Two requests for the same new folder otherwise both
+    // resolve it to the same new name, both create it, both rewrite the
+    // registry through the one temporary file this process owns, and the
+    // loser of the daemon's store lock answers 409 (#132).
+    // ponytail: one lock for every store; per-store locks if creating stores
+    // ever becomes frequent enough to queue behind.
+    static CREATING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = CREATING.lock().unwrap_or_else(|e| e.into_inner());
+
+    let choice = home::resolve(&[], path, None)
+        .with_context(|| format!("choosing a store for {}", path.display()))?;
     let dir = choice.one()?;
+
+    // A store this daemon already serves needs nothing made. Opening it again
+    // here was a second connection doing schema work on a store the watcher
+    // and a run may be writing, only to reread a model the registry already
+    // has. It is the only SQLite call on this path, so it is the open whose
+    // short read #132 reported.
+    let canonical = crate::canonical(&dir);
+    if let Some(open) = state.stores().into_iter().find(|s| s.dir == canonical) {
+        return Ok(open);
+    }
 
     // Created before it is opened: `Semlith::open` is what lays the store down,
     // and the daemon can only take a lock on something that exists. The handle
     // is dropped immediately so the watcher thread can take the lock itself.
     {
-        let store = crate::Semlith::open(&dir, None)?;
+        let store = crate::Semlith::open(&dir, None)
+            .with_context(|| format!("creating the store at {}", dir.display()))?;
         let model = store.model().to_string();
-        home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)?;
+        home::record(&choice, std::slice::from_ref(&path.to_path_buf()), &model)
+            .context("recording it in the registry")?;
     }
 
     // The run that indexes it is submitted by the caller a moment from now, so

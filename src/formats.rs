@@ -203,14 +203,14 @@ fn skip_to(s: &str, needle: &str) -> usize {
 
 /// `Some("script")` or `Some("style")` when `s` opens one of them.
 fn raw_text_tag(s: &str) -> Option<&'static str> {
+    // Bytes, not `str` slices: `open.len()` can land inside a multi-byte
+    // character (`<abbré` against `<style`), and slicing a `str` there panics.
+    let s = s.as_bytes();
     for tag in ["script", "style"] {
         let open = format!("<{tag}");
-        if s.len() > open.len()
-            && s[..open.len()].eq_ignore_ascii_case(&open)
-            && matches!(
-                s.as_bytes()[open.len()],
-                b'>' | b' ' | b'\t' | b'\n' | b'\r'
-            )
+        if s.get(..open.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(open.as_bytes()))
+            && matches!(s.get(open.len()), Some(b'>' | b' ' | b'\t' | b'\n' | b'\r'))
         {
             return Some(tag);
         }
@@ -1646,6 +1646,17 @@ mod tests {
     fn an_unknown_entity_is_left_alone() {
         assert_eq!(decode_entities("a &b; &amp; c"), "a &b; & c");
         assert_eq!(decode_entities("&#x41;&#66;"), "AB");
+    }
+
+    /// `<abbr` is five bytes and `<style` six, so the sixth byte of `<abbré` is
+    /// the middle of the `é`. Slicing the `str` there panicked the indexer on
+    /// any page with an accented letter against a four-letter tag.
+    #[test]
+    fn a_multi_byte_character_straight_after_a_four_letter_tag_does_not_panic() {
+        assert_eq!(raw_text_tag("<abbré>x</abbr>"), None);
+        assert_eq!(raw_text_tag("<styl€"), None);
+        let text = html("<p><abbré>déjà vu</abbré></p>".as_bytes()).unwrap();
+        assert!(text.contains("déjà vu"), "{text:?}");
     }
 
     /// A truncated tag must end the scan, not spin in it.
