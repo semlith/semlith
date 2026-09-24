@@ -282,6 +282,20 @@ its own priority lift: 0.27.0 402.0 ms, 0.28.0 401.9 ms at the median. The
 37.9 ms in the 0.25.0 notes was taken in-process by `tests/measure.rs` on a
 quieter day, not through the daemon, so it is not the comparison here.
 
+### CI
+
+A push that changes only prose, and a draft pull request, skip the slow lane:
+the GPU and CUDA jobs, the release suites and the mixed-vector harness. A push
+is compared with the previous head only when that head's run finished green, so
+a run cancelled by the next push never lets code through untested. The slow
+lane itself runs in parallel. Each release suite has its own macOS runner and
+each harness run its own Linux runner, which cuts the longest job from 68
+minutes to the longest single suite. `native-smoke` builds the binary once per
+operating system and runs the portal check, the smoke harness and the browser
+drive side by side, down from forty minutes in a row. The models are cached per
+digest, `check` no longer links a second release binary, and `native-smoke`
+cancels a run a newer push has replaced.
+
 ## [0.27.0] - 2026-09-23
 
 ### The portal drawn the way the design draws it, and reports that write themselves
