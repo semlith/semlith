@@ -6307,6 +6307,19 @@ pre.report-cli {
 /* The Agents page's own cards, in pairs rather than as a column of full-width
  * bands. Equal height, because two cards side by side at two different heights
  * read as a layout that failed rather than as two things. */
+/* Both rows of the Agents page on one column grid, so their cards line up
+ * and collapse at the same width. The top row was auto-fit at 1fr/1fr and
+ * went to one column near 600px; the bottom was 1fr/1.1fr and went at 900px,
+ * so between the two the page had one row in columns and one not, and at
+ * every width the two rows' middle edges were out of line. */
+.grid.agent-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (max-width: 899px) {
+  .grid.agent-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .agent-extras {
   align-items: stretch;
 }

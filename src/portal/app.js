@@ -9280,7 +9280,7 @@ async function agentsView() {
     endpointNote,
     el(
       "div",
-      { class: "grid scroller" },
+      { class: "grid scroller agent-row" },
       el(
         "div",
         { class: "rows" },
@@ -9363,7 +9363,7 @@ async function agentsView() {
      * agent authenticates with — and the two registration cards are another. */
     el(
       "div",
-      { class: "grid two agent-extras" },
+      { class: "grid agent-row agent-extras" },
       serviceCard(),
       el(
       "div",
