@@ -3742,7 +3742,11 @@ td.why .copyfield {
   font-size: var(--t-lead);
   font-weight: 500;
   line-height: var(--lh-heading);
-  overflow-wrap: anywhere;
+  /* One line, ending in an ellipsis with the whole name on hover. Broken
+   * anywhere, `index_set_writing` wrapped as `index_set_wri` / `ting`. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .graph-selected .loc {
@@ -3854,10 +3858,13 @@ td.why .copyfield {
   border-color: var(--blue);
 }
 
-.rail-list a {
+.rail-list a,
+.rail-list .link-button {
   font-family: var(--mono);
   min-width: 0;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .rail-list .via {
@@ -3877,16 +3884,12 @@ td.why .copyfield {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
-  /* Pinned to the foot of the rail while the callers and callees above it
-   * scroll: a symbol with thirty callers used to bury this button under them.
-   * The negative offset cancels the rail's own bottom padding, so the strip
-   * sits flush with the bottom edge. */
-  position: sticky;
-  bottom: calc(var(--sp-4h) * -1);
-  margin-top: auto;
-  padding: var(--sp-3) 0;
+  /* The side column's footer: outside its scroller, so a symbol with thirty
+   * callers cannot bury these, and nothing can scroll them half out of view. */
+  flex-shrink: 0;
+  padding: var(--sp-3) var(--sp-4h);
   background: var(--panel);
-  box-shadow: 0 -1px 0 var(--line-soft);
+  border-top: 1px solid var(--line-soft);
 }
 
 /* Confidence, everywhere it appears — and it appears everywhere, because a
@@ -5122,8 +5125,16 @@ td.row-end {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  overflow-y: auto;
   border-left: 1px solid var(--line);
+}
+/* The part of the side column that scrolls: the rail and the Map. The
+ * selected symbol's actions sit under it, outside. */
+.graph-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 /* Both panels keep their own height and the column scrolls past them.
  *
@@ -5188,6 +5199,8 @@ td.row-end {
   .graph-side {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+  .graph-scroll {
     overflow: visible;
   }
 }

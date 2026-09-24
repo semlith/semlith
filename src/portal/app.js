@@ -1201,6 +1201,9 @@ const state = {
   /** The symbol the Impact page is about, so the Graph page's "Blast radius"
    * link has somewhere to put it and coming back does not clear the answer. */
   impactSymbol: "",
+  /** The store that symbol was picked in, so Impact answers about the same
+   * store the Graph was showing rather than every open one. */
+  impactStore: "",
   pendingQuery: "",
   /** The last search, kept so leaving the page and coming back does not throw
    * the question away along with its answers. */
@@ -2149,6 +2152,11 @@ async function graphView() {
   const chosen = new Set();
   const meta = el("span", { class: "graph-count" });
   const rail = el("div", { class: "graph-rail" });
+  /* The selected symbol's two actions, in a footer of the side column that
+   * does not scroll with it. Inside the rail they were sticky against a
+   * padding the rail stopped having when the column became the scroller, so
+   * they sat pinned just below the visible edge, cut in half. */
+  const actions = el("div", { class: "rail-actions", hidden: true });
   const unreadable = el("div", { class: "unreadable-slot" });
 
   const canvas = graphCanvas({
@@ -2212,6 +2220,7 @@ async function graphView() {
   }
 
   function blank(message) {
+    actions.hidden = true;
     return fill(
       rail,
       el("div", { class: "graph-selected" }, el("div", { class: "rail-hint", text: message })),
@@ -2292,6 +2301,7 @@ async function graphView() {
       el("a", {
         href: `#graph?name=${encodeURIComponent(end.name)}`,
         text: end.name,
+        title: end.name,
         onclick: (e) => {
           e.preventDefault();
           focus(end.name);
@@ -2320,6 +2330,7 @@ async function graphView() {
   }
 
   async function select(node) {
+    actions.hidden = true;
     fill(rail, skeletonRows(6));
     let data;
     try {
@@ -2343,7 +2354,7 @@ async function graphView() {
         "div",
         { class: "graph-selected" },
         el("span", { class: "eyebrow", text: "Selected symbol" }),
-        el("h2", { class: "sym", text: node.name }),
+        el("h2", { class: "sym", text: node.name, title: node.name }),
         el("div", {
           class: "loc",
           "data-tip": node.path,
@@ -2413,17 +2424,17 @@ async function graphView() {
           : null,
       ),
       confidenceLegend(),
-      // The two readings of a selected symbol, side by side as the v4 rail has
-      // them: the chunks it lives in, and what reaches it.
-      //
-      // The first of these used to read "Ask the index a question", which is
-      // the top bar's wording for the search box — so the rail and the top bar
-      // gave one destination two names, which is what finding 3.24 is about.
-      // It is the same journey with a name that says what you get.
-      el(
-        "div",
-        { class: "rail-actions" },
-        el("button", {
+    );
+    // The two readings of a selected symbol, side by side as the v4 rail has
+    // them: the chunks it lives in, and what reaches it.
+    //
+    // The first of these used to read "Ask the index a question", which is
+    // the top bar's wording for the search box — so the rail and the top bar
+    // gave one destination two names, which is what finding 3.24 is about.
+    // It is the same journey with a name that says what you get.
+    fill(
+      actions,
+      el("button", {
           class: "button secondary small",
           type: "button",
           text: "Chunks it lives in",
@@ -2438,11 +2449,14 @@ async function graphView() {
           text: "Blast radius",
           onclick: () => {
             state.impactSymbol = node.name;
+            // The store the symbol was picked in: the same name in another
+            // open store is a different symbol with a different reach.
+            state.impactStore = node.store || (chosen.size === 1 ? [...chosen][0] : "");
             go("impact");
           },
         }),
-      ),
     );
+    actions.hidden = false;
   }
 
   /* The store chips scope the canvas, and until 0.24.0 they did not scope the
@@ -2465,6 +2479,7 @@ async function graphView() {
       data = await api(`/api/graph?${query}`);
     } catch (e) {
       meta.textContent = "";
+      actions.hidden = true;
       return fill(rail, error(e.message));
     }
     // Stores that did not answer, over the graph the rest of them drew. This
@@ -2622,7 +2637,7 @@ async function graphView() {
         ),
         meta,
       ),
-      el("div", { class: "graph-side" }, rail, mapPanel()),
+      el("div", { class: "graph-side" }, el("div", { class: "graph-scroll" }, rail, mapPanel()), actions),
     ),
   );
 
