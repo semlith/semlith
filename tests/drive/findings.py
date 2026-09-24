@@ -1032,6 +1032,18 @@ def _(d):
     d.close_index_panel("Projects under a folder…")
 
 
+def widest_page(d):
+    """Show the most rows the open table offers per page.
+
+    Tables open at 5 a page from 0.29.0, so a check looking for one row among
+    the drive's many stores asks for the widest page first.
+    """
+    d.eval(
+        "(() => { const chips = [...document.querySelectorAll('#root .table-foot .chips .chip')];"
+        " const last = chips[chips.length - 1]; if (last) last.click(); })()"
+    )
+
+
 def sidebar_stores(d):
     """The sidebar's store count, as the daemon card says it."""
     text = text_of(d, "#daemon-stores", "the sidebar's daemon card")
@@ -2183,7 +2195,7 @@ def _(d):
           // on every view, matches the same words, and comes first in document
           // order — so an unscoped search read the top bar twice and reported
           // it as disagreeing with itself.
-          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button')]
+          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button, .rail-actions button')]
             .find(e => /chunks it lives in|ask (the index|it)/i.test(e.innerText || ''));
           return el ? (el.innerText || '').trim() : null;
         })()
@@ -2762,7 +2774,7 @@ def _(d):
           // The wording moved when finding 3.24 gave the destination one
           // name; what this check is about is the element type, so it finds
           // the control by either phrasing.
-          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button')]
+          const el = [...document.querySelectorAll('.graph-rail a, .graph-rail button, .rail-actions button')]
             .find(e => /chunks it lives in|ask the index/i.test(e.innerText || ''));
           return el ? el.tagName : null;
         })()
@@ -3310,7 +3322,9 @@ def _(d):
     if label not in view_text(d):
         fail("the Stores table has no route into Inside the index")
     d.click_text(".table-follow", label)
-    d.wait_for("(location.hash || '') === '#index'", what="the route into Inside the index")
+    # `#corpus` from 0.29.0: this asserted `#index`, the page the link was left
+    # pointing at when 0.27.0 split Inside the index out of it.
+    d.wait_for("(location.hash || '') === '#corpus'", what="the route into Inside the index")
 
 
 @finding("6.4", "the Retrieval ledger offers the way into Reports")
@@ -4678,12 +4692,13 @@ def _(d):
         control_run(d, store, "pause", run_id)
         wait_status(d, run_id, {"paused"}, "pausing %s" % store)
         d.open_view("stores", fresh=True)
+        widest_page(d)
         # A row whose first line is the store's name. Not any row mentioning
         # it: the page's events table says "deleted-N: the store was deleted",
         # which is the delete being reported, not the store still listed.
         listed = (
-            "[...document.querySelectorAll('#root tbody tr')].some(r => r.cells.length"
-            " && (r.cells[0].innerText || '').split('\\n')[0].trim() === %s)" % json.dumps(store)
+            "[...document.querySelectorAll('#root tbody tr')].some(r =>"
+            " ((r.querySelector('.one-line.name') || {}).textContent || '').trim() === %s)" % json.dumps(store)
         )
         d.wait_for(listed, what="%s in the Stores table" % store)
         before = sidebar_stores(d)
@@ -4705,7 +4720,7 @@ def _(d):
                 "({same: window.__sameDocument === true,"
                 " sidebar: (document.getElementById('daemon-stores') || {}).textContent,"
                 " rows: [...document.querySelectorAll('#root tbody tr')].map(r =>"
-                " r.cells.length ? (r.cells[0].innerText || '').split('\\n')[0].trim() : '')})"
+                " ((r.querySelector('.one-line.name') || {}).textContent || '').trim())})"
             )
             fail(
                 "a minute after %s's stop deleted it, the Stores page %s: the sidebar "
@@ -4807,3 +4822,253 @@ def _(d):
         here = "here" if download["cached"] else "not downloaded"
         if row[4] != here:
             fail("%r reads %r; the route says it is %s" % (download["what"], row[4], here))
+
+
+# ---------------------------------------------------------------- 0.29.0
+#
+# The eleven portal fixes the owner found using 0.28.0, one check each.
+
+
+@finding("9.1", "a running card counts down from the daemon's estimate, not up from submission")
+def _(d):
+    """The snapshot carries `bytes`, `bytes_total` and `eta_ms`; the card says
+    `estimating…` until the estimate exists and then the time left, and never
+    a clock counting up."""
+    quiet(d)
+    run_id, store = start_index(d, d.fixtures.unique("countdown", count=400))
+    try:
+        running(d, run_id, store)
+        deadline = time.time() + 90
+        run = None
+        while time.time() < deadline:
+            run = run_by_id(d, run_id)
+            if not run or run.get("status") in TERMINAL or run.get("eta_ms") is not None:
+                break
+            time.sleep(0.5)
+        if not run or run.get("status") in TERMINAL:
+            skip("the run finished before its rate settled; the machine is faster than the corpus")
+        if run.get("eta_ms") is None:
+            fail("90 seconds into a live run the snapshot still has no eta_ms: %s"
+                 % json.dumps({k: run.get(k) for k in ("status", "bytes", "bytes_total", "chunks")}))
+        if not run.get("bytes_total") or not (0 < run.get("bytes", 0) <= run["bytes_total"]):
+            fail("the snapshot's bytes are %r of %r" % (run.get("bytes"), run.get("bytes_total")))
+        d.open_view("index")
+        d.wait_for(
+            "(() => { const c = %s; return !!c && /left|almost done|estimating/.test(c.innerText); })()"
+            % live_card(store),
+            timeout=20,
+            what="%s's card to show the time left" % store,
+        )
+        text = d.eval("(%s).innerText" % live_card(store))
+        if re.search(r"\b\d{2}:\d{2}\b", text):
+            fail("the running card still shows a clock: %r" % text[:200])
+    finally:
+        stop_quietly(d, store)
+
+
+@finding("9.2", "a finished card says how long the work took and when it finished")
+def _(d):
+    store = indexed_fixture(d, d.fixtures.unique("finished"))
+    run = next((r for r in d.api("/api/index/runs")["runs"] if r.get("store") == store), None)
+    if not run or not run.get("started_at") or not run.get("finished_at"):
+        fail("the finished run's snapshot has no started_at/finished_at: %s" % json.dumps(run)[:300])
+    if run["started_at"] < run["submitted"] or run["finished_at"] < run["started_at"]:
+        fail("submitted %s, started %s, finished %s are out of order"
+             % (run["submitted"], run["started_at"], run["finished_at"]))
+    d.open_view("index", fresh=True)
+    card = still_card(store)
+    d.wait_for("!!(%s)" % card, what="%s's finished card" % store)
+    text = d.eval("(%s).innerText" % card)
+    hhmm = d.eval("new Date(%d * 1000).toTimeString().slice(0, 5)" % run["finished_at"])
+    if "took " not in text or ("finished " + hhmm) not in text:
+        fail("the finished card reads %r; it should say 'took …' and 'finished %s'" % (text[:200], hhmm))
+
+
+@finding("9.3", "no line is held above the run cards")
+def _(d):
+    d.open_view("index", fresh=True)
+    seen = d.eval(
+        """
+        (() => {
+          const view = document.querySelector('#root .view');
+          const note = view.querySelector('.index-note');
+          return {stray: !!view.querySelector(':scope > .note'),
+                  inRow: !!note && !!note.closest('.filters'),
+                  text: note ? note.textContent : null,
+                  shown: note ? getComputedStyle(note).display !== 'none' : null};
+        })()
+        """
+    )
+    if seen["stray"]:
+        fail("the Index view still has a note on a line of its own above the cards")
+    if not seen["inRow"]:
+        fail("the Index page's answer to Start indexing is not in the button row")
+    if not seen["text"] and seen["shown"]:
+        fail("the empty note still takes up room in the button row")
+
+
+@finding("9.4", "every paginated table opens at 5 per page")
+def _(d):
+    for view in ("stores", "files", "ledger", "agents"):
+        d.open_view(view, fresh=True)
+        time.sleep(1)
+        pressed = d.eval(
+            "[...document.querySelectorAll('#root .table-foot')].map(f =>"
+            " ((f.querySelector('.chip[aria-pressed=true]') || {}).textContent || '').trim())"
+        )
+        wrong = [p for p in pressed if p != "5"]
+        if wrong:
+            fail("on %s a table opens at %r per page, not 5" % (view, wrong))
+        rows = d.eval(
+            "[...document.querySelectorAll('#root table')].filter(t => t.closest('.table-card'))"
+            ".map(t => t.querySelectorAll('tbody tr').length)"
+        )
+        if any(n > 5 for n in rows):
+            fail("on %s a table shows %s rows on its first page" % (view, rows))
+
+
+@finding("9.5", "several stores are deleted in one confirm that names each")
+def _(d):
+    names = [indexed_fixture(d, d.fixtures.unique("bulk")) for _ in range(2)]
+    d.open_view("stores", fresh=True)
+    widest_page(d)
+    for name in names:
+        box = ("[...document.querySelectorAll('#root tbody tr')].find(r =>"
+               " ((r.querySelector('.one-line.name') || {}).textContent || '').trim() === %s)"
+               % json.dumps(name))
+        d.wait_for("!!(%s)" % box, what="%s in the Stores table" % name)
+        d.eval("(%s).querySelector('input.pick').click()" % box)
+    d.wait_for("/Delete 2 stores/.test((document.querySelector('#root .bulk') || {}).innerText || '')",
+               what="the bulk bar to offer 'Delete 2 stores'")
+    d.eval("[...document.querySelectorAll('#root .bulk button')].find(b => /Delete 2 stores/.test(b.textContent)).click()")
+    d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the confirm")
+    body = d.eval("document.querySelector('dialog.modal[open]').innerText")
+    for name in names:
+        if name not in body:
+            fail("the confirm does not name %s: %r" % (name, body[:300]))
+    d.eval("[...document.querySelectorAll('dialog.modal[open] button')]"
+           ".find(b => /Delete 2 stores/.test(b.textContent)).click()")
+    d.wait_for(
+        "(() => { const t = document.querySelector('#root').innerText; return %s.every(n => "
+        "![...document.querySelectorAll('#root tbody .one-line.name')].some(e => e.textContent.trim() === n)); })()"
+        % json.dumps(names),
+        timeout=60,
+        what="both stores to leave the table",
+    )
+    left = {s["name"] for s in d.api("/api/stores")["stores"]}
+    if left & set(names):
+        fail("the daemon still lists %s" % sorted(left & set(names)))
+
+
+@finding("9.6", "the Graph rail's two actions are whole and on screen, and names end in an ellipsis")
+def _(d):
+    d.open_view("graph")
+    d.wait_for("!!document.querySelector('.rail-actions:not([hidden]) button')", timeout=30,
+               what="a selected symbol's actions")
+    for scrolled in ("top", "bottom"):
+        d.eval(
+            "(() => { const s = document.querySelector('.graph-scroll');"
+            " if (s) s.scrollTop = %s; })()" % ("0" if scrolled == "top" else "s.scrollHeight")
+        )
+        clipped = d.eval(
+            """
+            [...document.querySelectorAll('.rail-actions button')].filter(b => {
+              const r = b.getBoundingClientRect();
+              return r.height === 0 || r.top < 0 || r.bottom > innerHeight + 0.5
+                || r.right > innerWidth + 0.5;
+            }).map(b => b.textContent.trim())
+            """
+        )
+        if clipped:
+            fail("with the side column scrolled to its %s, %s is cut off" % (scrolled, clipped))
+    sym = d.eval(
+        "(() => { const h = document.querySelector('.graph-selected .sym'); const s = getComputedStyle(h);"
+        " return {ws: s.whiteSpace, to: s.textOverflow, title: h.title, text: h.textContent}; })()"
+    )
+    if sym["ws"] != "nowrap" or sym["to"] != "ellipsis" or sym["title"] != sym["text"]:
+        fail("the selected symbol's name wraps or has no full name on hover: %r" % sym)
+
+
+@finding("9.7", "Blast radius opens Impact on the Graph's symbol and its store")
+def _(d):
+    d.open_view("graph")
+    d.wait_for("!!document.querySelector('.rail-actions:not([hidden]) button')", timeout=30,
+               what="a selected symbol's actions")
+    picked = d.eval(
+        "(() => { const c = [...document.querySelectorAll('.graph-selected .chip.static')];"
+        " return {name: document.querySelector('.graph-selected .sym').textContent,"
+        " chips: c.map(e => e.textContent)}; })()"
+    )
+    d.eval("[...document.querySelectorAll('.rail-actions button')].find(b => b.textContent.trim() === 'Blast radius').click()")
+    d.wait_for("(document.querySelector('#root h1') || {}).textContent === 'Impact'", what="the Impact page")
+    d.wait_for("!/Reading/.test(document.querySelector('#root').innerText)", timeout=30, what="the answer")
+    subject = text_of(d, ".impact-subject", "the symbol Impact is about")
+    want("Impact's subject", subject, picked["name"])
+    scope = d.eval("((document.querySelector('.impact-subject-card .chips .chip') || {}).textContent || '')")
+    if not any(("in %s ×" % c) == scope.strip() for c in picked["chips"]):
+        fail("Impact is not scoped to the store the symbol was picked in: chip %r, graph chips %r"
+             % (scope, picked["chips"]))
+
+
+@finding("9.8", "the Brief view draws spans as cards, and search meta sits under the box")
+def _(d):
+    d.open_view("search")
+    d.eval(
+        "(() => { const i = document.querySelector('#search-query');"
+        " i.value = 'index run'; i.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()"
+    )
+    d.wait_for("/\\d/.test((document.querySelector('.search-meta') || {}).textContent || '')",
+               timeout=60, what="the search's count and timing")
+    inside = d.eval("!!document.querySelector('.search-field .search-meta')")
+    if inside:
+        fail("the hit count and timing are still inside the query box")
+    d.eval("[...document.querySelectorAll('#root .dial .seg')].find(b => b.textContent.trim() === 'brief').click()")
+    d.wait_for("!!document.querySelector('.brief-view')", timeout=60, what="the Brief view")
+    shape = d.eval(
+        "({cards: document.querySelectorAll('.brief-view .span-card .gutter-code').length,"
+        " bare: document.querySelectorAll('.brief-view pre.brief-text').length,"
+        " strip: !!document.querySelector('.brief-summary')})"
+    )
+    if not shape["cards"] or shape["bare"] or not shape["strip"]:
+        fail("the Brief view is not drawn as span cards with a summary strip: %r" % shape)
+
+
+@finding("9.9", "Impact says what its figures mean and where to start")
+def _(d):
+    d.open_view("impact", fresh=True)
+    seen = d.eval(
+        """
+        ({guide: document.querySelectorAll('.impact-subject-card .impact-guide li').length,
+          toGraph: [...document.querySelectorAll('#root button')].some(b => b.textContent.trim() === 'Open Graph'),
+          finder: !!document.querySelector('.path-card'), trace: !!document.querySelector('.trace-card')})
+        """
+    )
+    if seen["guide"] != 3:
+        fail("Impact's guide has %d lines, not 3: %r" % (seen["guide"], seen))
+    if not seen["toGraph"]:
+        fail("an empty Impact page does not say how to get there from Graph")
+    if not (seen["finder"] and seen["trace"]):
+        fail("the path finder or the trace is no longer on the page: %r" % seen)
+    d.click_text("button", "Open Graph")
+    d.wait_for("(document.querySelector('#root h1') || {}).textContent === 'Graph'", what="the Graph page")
+
+
+@finding("9.10", "the Agents page's two card rows line up and collapse together")
+def _(d):
+    for width in (1280, 820):
+        d.set_viewport(width, 900)
+        d.open_view("agents", fresh=True)
+        cols = d.eval(
+            "[...document.querySelectorAll('#root .agent-row')].map(g =>"
+            " getComputedStyle(g).gridTemplateColumns.split(' ').length)"
+        )
+        if len(cols) != 2 or cols[0] != cols[1]:
+            fail("at %dpx the Agents rows have %r columns" % (width, cols))
+        edges = d.eval(
+            "[...document.querySelectorAll('#root .agent-row')].map(g =>"
+            " [...g.children].map(c => Math.round(c.getBoundingClientRect().left)))"
+        )
+        if edges[0] != edges[1]:
+            fail("at %dpx the Agents rows' cards start at %r and %r" % (width, edges[0], edges[1]))
+    d.set_viewport(1280, 900)
+
