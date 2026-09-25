@@ -122,7 +122,9 @@ Module responsibilities:
 | `src/gpu.rs` | GPU detection per platform, the software-renderer refusal, the pinned WebGPU plugin and fp16 downloads, and the WebGPU session a worker runs |
 | `src/cuda.rs` | NVML detection, the pinned CUDA pack (Linux x86_64) and the CUDA session a worker runs |
 | `src/priority.rs` | The daemon's priority following its work: background while idle, normal while anything embeds or a request is served |
-| `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set |
+| `src/filter.rs` | `--path`/`--ext`/`--lang` → GLOB patterns → one chunk id set; the deny-list and the credential shapes |
+| `src/keyscan.rs` | The verdict on each secret-shaped match: live or declared test dummy, a 0-100 % confidence with its signals, the mask, the salted fingerprint, redaction, and the one accept/refuse decision every pass applies |
+| `src/tree.rs` | `semlith files --tree` / `semlith_files {tree: true}`: directories with counts, files with symbols, and what is on disk but not indexed |
 | `src/fleet.rs` | Several stores, one query, merged ranking |
 | `src/graph.rs` | tree-sitter extraction, the bounded traversals over the edges, and the ranked walk search expands through |
 | `src/pattern.rs` | `semlith pattern`: one tree-sitter query over the indexed files of one language |
@@ -306,7 +308,17 @@ Module responsibilities:
   the kind joins `DEPENDENCY_KINDS` so a walk can cross it — a walk that would
   not answered "not connected" about code that is connected. A re-export that
   does not rename emits nothing; there is no name change to cross.
-- **`read` answers from chunks, never from disk.** `Semlith::read` returns a span
+- **The not-indexed list and acceptances are two additive tables.** `refusals`
+  and `acceptances`, `IF NOT EXISTS`, so `FORMAT_VERSION` does not move. Every
+  pass that decides not to index something writes a row; a person — never an
+  agent, never in bulk — accepts one file at a time through the session-token
+  routes or `semlith refused`. An acceptance holds salted blake3 fingerprints,
+  never values, and `keyscan::decide` is the one function every pass (index,
+  watcher, catch-up, read from disk) asks. A credential file is never accepted.
+- **`read` answers from chunks, never from disk — except for a file it indexed
+  that has changed since.** Then (0.30.0) it reads the current lines, through
+  the same secret scan and the same acceptance a pass applies, and marks the
+  answer read from disk. `Semlith::read` returns a span
   stitched from the store's own rows, by line number rather than by
   concatenation, because chunks overlap by two lines and concatenating repeats
   the seam. Reading the file off disk would answer for content semlith was never

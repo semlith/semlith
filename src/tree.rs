@@ -114,7 +114,9 @@ pub fn render(
         for row in rows {
             let rel = relative(&row.path, &roots);
             let parts: Vec<String> = rel.iter().map(|c| c.to_string()).collect();
-            let Some((name, dirs)) = parts.split_last() else { continue };
+            let Some((name, dirs)) = parts.split_last() else {
+                continue;
+            };
             let defs = symbols.get(&row.path).cloned().unwrap_or_default();
             let stale = stamps.get(&row.path).is_some_and(|(bytes, at)| {
                 std::fs::metadata(&row.path).is_ok_and(|m| {
@@ -224,11 +226,19 @@ fn write_dir(
     let (files, chunks, langs) = dir.totals();
     let mut mix: Vec<(String, usize)> = langs.into_iter().collect();
     mix.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    let mix: Vec<String> = mix.iter().take(3).map(|(l, n)| format!("{l} {n}")).collect();
+    let mix: Vec<String> = mix
+        .iter()
+        .take(3)
+        .map(|(l, n)| format!("{l} {n}"))
+        .collect();
     let header = format!(
         "{indent}{label} · {files} file{} · {chunks} chunks{}\n",
         if files == 1 { "" } else { "s" },
-        if mix.is_empty() { String::new() } else { format!(" · {}", mix.join(", ")) }
+        if mix.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", mix.join(", "))
+        }
     );
     if !push(out, &header, cut) {
         return;
@@ -309,7 +319,15 @@ fn write_dir(
         if hidden_dirs > 0 {
             parts.insert(0, format!("{hidden_dirs} folders"));
         }
-        if !push(out, &format!("{inner}+ {} more: {}\n", rest.values().sum::<usize>() + hidden_dirs, parts.join(", ")), cut) {
+        if !push(
+            out,
+            &format!(
+                "{inner}+ {} more: {}\n",
+                rest.values().sum::<usize>() + hidden_dirs,
+                parts.join(", ")
+            ),
+            cut,
+        ) {
             return;
         }
     }
@@ -318,7 +336,11 @@ fn write_dir(
         if !missing.is_empty() {
             let total: usize = missing.values().sum();
             let why: Vec<String> = missing.iter().map(|(w, n)| format!("{n} {w}")).collect();
-            push(out, &format!("{inner}+ {total} on disk not indexed: {}\n", why.join(", ")), cut);
+            push(
+                out,
+                &format!("{inner}+ {total} on disk not indexed: {}\n", why.join(", ")),
+                cut,
+            );
         }
     }
 }
@@ -387,12 +409,18 @@ fn not_indexed(
                 store::class::CREDENTIAL => "credential file".to_string(),
                 store::class::POLICY if is_dir => "generated folder".to_string(),
                 store::class::POLICY => "over the size cap".to_string(),
-                store::class::UNINDEXABLE => row.rule.split(':').next().unwrap_or("unindexable").to_string(),
+                store::class::UNINDEXABLE => row
+                    .rule
+                    .split(':')
+                    .next()
+                    .unwrap_or("unindexable")
+                    .to_string(),
                 _ => row.rule.clone(),
             },
             None if is_dir && crate::is_generated_dir(&path) => "generated folder".to_string(),
             None if !walked.contains(&crate::canonical(&path)) => {
-                if ignore.is_some_and(|i| i.matched_path_or_any_parents(&path, is_dir).is_ignore()) {
+                if ignore.is_some_and(|i| i.matched_path_or_any_parents(&path, is_dir).is_ignore())
+                {
                     crate::IGNORE_FILE.to_string()
                 } else {
                     ".gitignore".to_string()
@@ -401,7 +429,11 @@ fn not_indexed(
             None if is_dir => continue,
             None => "not indexed yet".to_string(),
         };
-        let reason = if is_dir { format!("{reason} (folder)") } else { reason };
+        let reason = if is_dir {
+            format!("{reason} (folder)")
+        } else {
+            reason
+        };
         *out.entry(reason).or_insert(0) += 1;
     }
     out
@@ -435,7 +467,10 @@ fn relative(path: &str, roots: &[PathBuf]) -> Vec<String> {
         }
     }
     let rel = best.unwrap_or(plain.trim_start_matches(['/', '\\']));
-    rel.split(['/', '\\']).filter(|p| !p.is_empty()).map(String::from).collect()
+    rel.split(['/', '\\'])
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// A file's first few definitions by name: types before functions, in the

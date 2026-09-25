@@ -143,12 +143,13 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
 | `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required; `--path` narrows it and `--offset` continues a listing the cap cut short. |
 | `semlith stats` | File count, chunk count, image count, model, shard count and memory budget, index size. |
-| `semlith files` | List indexed files. |
+| `semlith files` | List indexed files. `--tree` for directories with counts, languages, each file's symbols, and what is on disk but not indexed, and why. |
+| `semlith refused` | Every file that was not indexed, and why. `accept <path> --redact\|--as-is` and `revoke <path>` act on one file at a time; a credential file is never accepted. |
 | `semlith add <URL>` | Fetch one https URL into the store and index it: a page, a PDF, a file on GitHub. One request, no crawling, no credentials. |
 | `semlith forget <PATH>` | Drop one file from the store. The file on disk is untouched. |
 | `semlith scan [STORE]` | List every file the store holds that semlith would refuse today — a credential the name does not admit to, a rule that has widened. Exits non-zero while any remain; `--forget` evicts them. |
 | `semlith drop <STORE>` | Delete a store outright — its vectors, chunks, graph and ledger, and the registry entry naming it. The indexed files are untouched. |
-| `semlith symbol <NAME>` | The definition, its callers and callees, and the ring two hops out, in one answer. From the parsed syntax tree rather than a grep for `fn name`. `--history` gives what the name used to be: the definitions a re-index replaced, each with the content hash of the file version it was true for. |
+| `semlith symbol <NAME>...` | The definition, its callers and callees, and the ring two hops out, in one answer; several names give one row per definition. From the parsed syntax tree rather than a grep for `fn name`. `--history` gives what the name used to be: the definitions a re-index replaced, each with the content hash of the file version it was true for. |
 | `semlith neighbors <NAME>` | What calls it and what it calls, one hop each way. `--kind` to follow one edge kind, `--all` to expand collapsed rows. |
 | `semlith path <FROM> <TO>` | The shortest chain of edges between two symbols, or nothing if they are unconnected. `--depth` to search further. |
 | `semlith ledger` | Print what agents retrieved from this store, newest first. `--last N`, `--verify`. Needs no key. |
@@ -157,11 +158,11 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 | `semlith adopt <DIR>` | Move an existing store directory into the store home and register it. `--root` re-points one whose corpus moved. |
 | `semlith trust <DIR>` | Say that a store outside the store home may be opened, once. Nothing is moved. `--list` prints what is trusted. |
 | `semlith mcp` | Run as an MCP server over stdio. Forwards to a running `semlith start` when there is one. |
-| `semlith hook` | Answer one `PreToolUse` event on stdin. When a store holds the file a client is about to read whole, it adds one line naming the semlith call that answers the same question, and records the read in the ledger. Never blocks; `--strict` refuses the first such read of a session. Written for you by `semlith setup`. |
+| `semlith hook` | Answer one hook event on stdin. When an agent is about to grep, find, cat or read inside an indexed folder, it adds one line naming the semlith call that answers the same question, and records a whole-file read in the ledger. `--mode soft` never blocks; `gate` and `hard` are opt-in. Written for you by `semlith setup`. |
 | `semlith models` | List available embedding models. See [docs/models.md](docs/models.md). |
 | `semlith languages` | List the language names `--lang` accepts. |
-| `semlith setup [--yes] [--register-all] [--no-hooks] [--strict]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key — install the semlith Agent Skill and link it into every user-level skill directory a client reads, and write the `PreToolUse` steering hook into the clients that document one. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, and the rules file of the clients that document one, listing every path first and backing each file up beside itself. `--no-hooks` removes the hook; `--strict` writes its refusing form; `--airgap` skips the model. |
-| `semlith doctor [--fix] [--gpu]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns. `--gpu` embeds 32 fixed chunks on every lane and prints each lane's cosine against committed vectors, its rate and its device. |
+| `semlith setup [--yes] [--register-all] [--no-hooks] [--hook-mode M] [--no-agents]` | Put `~/.semlith/bin` on `PATH`, pre-fetch the model, register semlith in every agent client on the machine that has a registration command — at the scope that means every project, launching `semlith mcp`, so no configuration file carries the key — install the semlith Agent Skill and link it into every user-level skill directory a client reads, write the steering hook into the clients that document one, set Claude Code's `alwaysLoad` so the tools are there from the first turn, and write a read-only `semlith-explorer` research agent. Idempotent, so it is also the repair command. `--register-all` also writes the configuration file of the clients that have no command, and the rules file of the clients that document one, listing every path first and backing each file up beside itself. `--no-hooks` removes the hook; `--hook-mode gate\|hard` writes a refusing form; `--no-agents` removes the research agent; `--airgap` skips the model. |
+| `semlith doctor [--fix] [--gpu]` | Per client: installed, registered, at what scope, and what to run otherwise. Plus the Privacy rules that are readings of this machine. `--fix` applies the repairs that narrow access to a path semlith owns, and clears a per-project disable of semlith for the current directory. `--gpu` embeds 32 fixed chunks on every lane and prints each lane's cosine against committed vectors, its rate and its device. |
 | `semlith accel [status\|on\|off\|remove] [cpu\|gpu\|cuda]` | Which devices embed. The CPU and a GPU through WebGPU are on by default; CUDA on Linux is off until you turn it on. A switch reaches every running run at its next batch; `remove` deletes a lane's downloads. |
 | `semlith upgrade` | Replace this binary with the newest release, checksum-verified. `--check` only says whether one exists (exit 10 when it does). `--version <TAG>` pins one. Never runs on its own. |
 
@@ -466,7 +467,7 @@ of these drifts from its source:
 | document formats with a reader | **13** |
 | image types | **5** |
 | MCP tools | **16** |
-| CLI commands | **32** |
+| CLI commands | **33** |
 | agent clients, each launched and answered in `tests/clients.rs` | **27** |
 | prebuilt targets | **4** |
 

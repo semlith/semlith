@@ -2007,14 +2007,18 @@ pub fn signatures(db: &rusqlite::Connection, names: &[String]) -> Result<Vec<Sig
             rows.retain(|r| owned_by(r, q));
         }
         for symbol in rows {
-            let signature =
-                crate::store::chunks_overlapping(db, &symbol.path, symbol.start_line, symbol.start_line)?
-                    .iter()
-                    .find_map(|c| {
-                        let offset = symbol.start_line.checked_sub(c.start_line)? as usize;
-                        c.text.lines().nth(offset).map(|l| l.trim().to_string())
-                    })
-                    .unwrap_or_default();
+            let signature = crate::store::chunks_overlapping(
+                db,
+                &symbol.path,
+                symbol.start_line,
+                symbol.start_line,
+            )?
+            .iter()
+            .find_map(|c| {
+                let offset = symbol.start_line.checked_sub(c.start_line)? as usize;
+                c.text.lines().nth(offset).map(|l| l.trim().to_string())
+            })
+            .unwrap_or_default();
             out.push(Signature {
                 asked: asked.clone(),
                 symbol,
@@ -2993,7 +2997,12 @@ impl Impact {
                 Some(at) => format!("{}:{at} in {}", shorten(&row.path), row.name),
                 None => {
                     undated += 1;
-                    format!("{}:{} {} (definition)", shorten(&row.path), row.line, row.name)
+                    format!(
+                        "{}:{} {} (definition)",
+                        shorten(&row.path),
+                        row.line,
+                        row.name
+                    )
                 }
             };
             chunk.push_str(&format!(
@@ -3751,7 +3760,10 @@ mod tests {
                 .find(|x| x.from == from && x.to == to && x.kind == "calls")
                 .and_then(|x| x.hint.clone())
         };
-        assert_eq!(hint("search_in", "search_preferring").as_deref(), Some("Fleet"));
+        assert_eq!(
+            hint("search_in", "search_preferring").as_deref(),
+            Some("Fleet")
+        );
         // Not recursion: the same name, on a field declared `store: Semlith`.
         assert_eq!(
             hint("search_preferring", "search_preferring").as_deref(),
@@ -3767,7 +3779,10 @@ mod tests {
     /// Recursion still adds no edge.
     #[test]
     fn rust_recursion_on_self_adds_no_edge() {
-        let e = run("a.rs", "struct A;\nimpl A { fn go(&self) { self.go(); } }\n");
+        let e = run(
+            "a.rs",
+            "struct A;\nimpl A { fn go(&self) { self.go(); } }\n",
+        );
         assert!(!has_edge(&e, "go", "go", "calls"), "{:?}", e.edges);
     }
 

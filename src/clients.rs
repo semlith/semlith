@@ -58,6 +58,11 @@ pub const RULES: &str = include_str!("../docs/skill/RULES.md");
 /// The Agent Skill `semlith setup` installs, embedded once.
 pub const SKILL: &str = include_str!("../docs/skill/SKILL.md");
 
+/// The semlith-explorer research subagent `setup` writes for Claude Code
+/// (4.8): the skill's routing table in a read-only agent Claude chooses over
+/// `Explore` for code research in an indexed folder.
+pub const EXPLORER: &str = include_str!("../docs/skill/semlith-explorer.md");
+
 /// One pasteable block.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Stanza {

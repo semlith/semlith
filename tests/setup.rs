@@ -1130,7 +1130,8 @@ fn no_hooks_removes_the_entry_and_leaves_the_rest_of_the_file_alone() {
     );
 }
 
-/// `--strict` is a different command in the same entry, not a second entry.
+/// `--strict` is a different command in the same entry, not a second entry:
+/// one `PreToolUse` hook in gate mode, beside the one `PostToolUse` entry.
 #[test]
 fn strict_writes_one_hook_rather_than_a_second_one() {
     let machine = Machine::new();
@@ -1143,12 +1144,27 @@ fn strict_writes_one_hook_rather_than_a_second_one() {
     );
 
     let after = std::fs::read_to_string(machine.home.join(".claude/settings.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let ours = |event: &str| {
+        json["hooks"][event]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter(|e| {
+                        e.to_string().contains("semlith") && e.to_string().contains(" hook")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
     assert_eq!(
-        after.matches(" hook").count(),
+        ours("PreToolUse"),
         1,
         "strict left two semlith hooks behind:\n{after}"
     );
-    assert!(after.contains("--strict"), "{after}");
+    assert_eq!(ours("PostToolUse"), 1, "{after}");
+    assert!(after.contains("--mode gate"), "{after}");
+    assert!(after.contains("Bash|Read|Grep|Glob"), "{after}");
 }
 
 /// The rule block is prose in somebody's file, so it waits to be asked for.

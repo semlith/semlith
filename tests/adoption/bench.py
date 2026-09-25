@@ -177,7 +177,10 @@ def lift(binary: Path, extra: list[str], plugin: Path) -> tuple[dict, dict, list
         agent = home / ".claude/agents/semlith-explorer.md"
         if agent.exists():
             (plugin / "agents").mkdir(parents=True)
-            shutil.copy2(agent.resolve(), plugin / "agents/semlith-explorer.md")
+            # The agent's tools name the server key `semlith`; the bench's
+            # server is registered under another key, so the names follow it.
+            text = agent.read_text(encoding="utf-8").replace("mcp__semlith__", "mcp__" + SERVER_KEY + "__")
+            (plugin / "agents/semlith-explorer.md").write_text(text, encoding="utf-8")
         else:
             notes.append("WARNING setup wrote no ~/.claude/agents/semlith-explorer.md")
         write_json(plugin / ".claude-plugin/plugin.json",

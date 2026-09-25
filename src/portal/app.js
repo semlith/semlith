@@ -1435,7 +1435,7 @@ function paintRunCount() {
 }
 
 /** The statuses a run is still in. */
-const TICKING = new Set(["queued", "running", "pausing", "paused", "held", "stopping"]);
+const TICKING = new Set(["queued", "review", "running", "pausing", "paused", "held", "stopping"]);
 
 /** Draw the view on screen again, keeping where the reader had scrolled to.
  *
@@ -4719,15 +4719,9 @@ async function filesView() {
 
   load();
 
-  return el(
+  const indexedPane = el(
     "div",
-    { class: "view" },
-    unreadable,
-    pageHead(
-      "Files",
-      "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
-      { pill: summary },
-    ),
+    { class: "rows tight" },
     el(
       "div",
       { class: "filters" },
@@ -4744,8 +4738,338 @@ async function filesView() {
     bulkNote,
     holder,
     footnote,
+  );
+  const treePane = filesTree(pathInput, storeFilter);
+  const refusedPane = notIndexed();
+  const panes = [
+    ["Indexed", indexedPane, null],
+    ["Tree", treePane.node, treePane.load],
+    ["Not indexed", refusedPane.node, refusedPane.load],
+  ];
+  const panel = el("div", { class: "tab-panel" });
+  const tabButtons = panes.map(([label], i) =>
+    el("button", {
+      class: "tab",
+      type: "button",
+      text: label,
+      "data-tab": label,
+      "aria-pressed": String(i === 0),
+      onclick: () => showPane(i),
+    }),
+  );
+  function showPane(index) {
+    tabButtons.forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
+    fill(panel, panes[index][1]);
+    if (panes[index][2]) panes[index][2]();
+  }
+  showPane(state.filesTab === "not-indexed" ? 2 : 0);
+  state.filesTab = "";
+
+  return el(
+    "div",
+    { class: "view" },
+    unreadable,
+    pageHead(
+      "Files",
+      "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
+      { pill: summary },
+    ),
+    el("div", { class: "tabs" }, tabButtons),
+    panel,
     announcer,
   );
+}
+
+/* The tree view: the same answer `semlith_files {tree: true}` gives an agent,
+ * drawn as it reads. Directories with their counts and languages, files with
+ * their lines, symbols and first definitions, and what is on disk but not
+ * indexed, and why. */
+function filesTree(pathInput, storeFilter) {
+  let depth = 2;
+  let sort = "name";
+  const out = el("pre", { class: "tree-view" });
+  const depthChips = [1, 2, 3].map((d) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": String(d === depth),
+      text: `depth ${d}`,
+      onclick: () => {
+        depth = d;
+        depthChips.forEach((c, i) => c.setAttribute("aria-pressed", String(i + 1 === d)));
+        load();
+      },
+    }),
+  );
+  const sortChips = ["name", "size", "symbols", "recent"].map((k) =>
+    el("button", {
+      class: "chip",
+      type: "button",
+      "aria-pressed": String(k === sort),
+      text: k,
+      onclick: () => {
+        sort = k;
+        sortChips.forEach((c) => c.setAttribute("aria-pressed", String(c.textContent === k)));
+        load();
+      },
+    }),
+  );
+  async function load() {
+    const params = new URLSearchParams({ tree: "1", depth: String(depth), sort });
+    const glob = pathInput.value.trim();
+    if (glob) params.append("path", glob);
+    for (const store of storeFilter.stores()) params.append("store", store);
+    out.textContent = "Reading…";
+    try {
+      const data = await api(`/api/files?${params}`);
+      out.textContent = data.tree || "Nothing indexed matches that.";
+    } catch (e) {
+      out.textContent = e.message;
+    }
+  }
+  const node = el(
+    "div",
+    { class: "rows tight" },
+    el("div", { class: "filters" }, depthChips, el("span", { class: "rule" }), sortChips),
+    el("div", { class: "card pad" }, out),
+  );
+  return { node, load };
+}
+
+/* What was not indexed, and why (2.3), with a person's per-file decision
+ * (2.5). One file at a time, never in bulk: there is no select-all, no bulk
+ * bar, and every action names one path. A credential file is listed with its
+ * rule and no action at all. */
+const CLASS_LABELS = {
+  content: "secret-shaped value",
+  credential: "credential file",
+  policy: "policy limit",
+  unindexable: "not indexable",
+  excluded: "your exclusions",
+  dummy: "test dummies",
+};
+
+function notIndexed() {
+  const node = el("div", { class: "rows tight not-indexed" });
+  const signals = (m) =>
+    (m.signals || []).map((s) => `${s.name} ${s.effect === "up" ? "↑" : "↓"} ${s.detail}`).join("; ");
+  const findings = (row) =>
+    el(
+      "ul",
+      { class: "matches" },
+      (row.matches || []).map((m) =>
+        el(
+          "li",
+          {},
+          el("code", { text: m.masked }),
+          el("span", { text: ` ${m.kind} · line ${m.line} · ` }),
+          el("strong", { text: `${m.confidence} % likely real` }),
+          el("span", { class: "muted signals", text: ` — ${signals(m)}` }),
+        ),
+      ),
+    );
+
+  function decide(store, row) {
+    const content = row.class === "content";
+    const dummy = row.class === "dummy";
+    let mode = dummy ? "refused" : content ? "redacted" : "as-is";
+    const reviewed = el("input", { type: "checkbox", id: "reviewed-file" });
+    const choices = content
+      ? el(
+          "div",
+          { class: "choices", role: "radiogroup", "aria-label": "How to accept it" },
+          [
+            ["redacted", "Accept with redaction", "Each detected value is replaced by [REDACTED:…] before anything is stored. Redaction covers only what the scanner detected."],
+            ["as-is", "Accept as-is", "The file's full text is indexed, values included."],
+          ].map(([value, label, help]) =>
+            el(
+              "label",
+              { class: "choice" },
+              el("input", {
+                type: "radio",
+                name: "accept-mode",
+                value,
+                checked: value === mode ? "" : null,
+                onchange: () => (mode = value),
+              }),
+              el("span", {}, el("strong", { text: label }), el("span", { class: "muted", text: ` ${help}` })),
+            ),
+          ),
+        )
+      : null;
+    ask({
+      title: dummy ? `Refuse ${shortPath(row.path)}?` : `Accept ${shortPath(row.path)}?`,
+      body: dummy
+        ? "Every match in it is a declared test dummy, so it was indexed. Refusing keeps it out of this store until you revoke the decision."
+        : content
+          ? "semlith found what looks like a secret in this file. The confidence is an estimate, never a guarantee; the signals say why."
+          : `${row.rule}. Accepting indexes it anyway.`,
+      extra: el(
+        "div",
+        { class: "rows tight" },
+        el("p", { class: "path", text: row.path }),
+        row.matches && row.matches.length ? findings(row) : null,
+        choices,
+        el("label", { class: "choice", for: "reviewed-file" }, reviewed, el("span", { text: " I have reviewed this file" })),
+      ),
+      confirm: dummy ? "Refuse this file" : "Accept this file",
+      tone: dummy ? "bad" : null,
+      run: async () => {
+        if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
+        await post("/api/refused/accept", { store, path: row.path, mode, reviewed: true });
+        await load();
+      },
+    });
+  }
+
+  function revoke(store, row) {
+    ask({
+      title: `Revoke ${shortPath(row.path)}?`,
+      body: "The file leaves the store and returns to this list, refused again with today's reasons.",
+      confirm: "Revoke",
+      tone: "bad",
+      run: async () => {
+        await post("/api/refused/revoke", { store, path: row.path });
+        await load();
+      },
+    });
+  }
+
+  function action(store, row) {
+    if (row.accepted) {
+      return el(
+        "span",
+        { class: "one-line" },
+        el("span", { class: "pill", text: `accepted ${row.accepted}` }),
+        " ",
+        el("button", { class: "button secondary small", type: "button", text: "Revoke", onclick: () => revoke(store, row) }),
+      );
+    }
+    if (row.class === "dummy")
+      return el("button", { class: "button secondary small", type: "button", text: "Refuse instead", onclick: () => decide(store, row) });
+    if (row.reviewable)
+      return el("button", { class: "button small", type: "button", text: "Review…", onclick: () => decide(store, row) });
+    if (row.class === "credential") return el("span", { class: "muted", text: "never acceptable" });
+    if (row.class === "excluded") return el("span", { class: "muted", text: "change the rule, not the file" });
+    return el("span", { class: "muted", text: "—" });
+  }
+
+  function table(store, rows, caption) {
+    return dataTable({
+      className: "w-refused",
+      rows,
+      caption,
+      columns: [
+        {
+          key: "path",
+          label: "Path",
+          value: (r) => r.path,
+          render: (r) => el("span", { class: "path one-line", title: r.path, text: shortPath(r.path) + (r.files > 1 ? ` (${r.files} files)` : r.files === 0 ? " (folder)" : "") }),
+        },
+        { key: "class", label: "Class", value: (r) => r.class, render: (r) => el("span", { class: `pill class-${r.class}`, text: CLASS_LABELS[r.class] || r.class }) },
+        { key: "rule", label: "Why", render: (r) => el("span", { class: "one-line", title: r.rule, text: r.rule }) },
+        {
+          key: "confidence",
+          label: "Likely real",
+          className: "num",
+          value: (r) => (r.confidence == null ? -1 : r.confidence),
+          render: (r) =>
+            r.confidence == null
+              ? "—"
+              : el("span", { title: (r.matches || []).map(signals).join("\n"), text: `${r.confidence} %` }),
+        },
+        { key: "action", label: "", render: (r) => action(store, r) },
+      ],
+    }).node;
+  }
+
+  async function load() {
+    fill(node, el("p", { class: "subtitle", text: "Reading…" }));
+    let data;
+    try {
+      data = await api("/api/refused");
+    } catch (e) {
+      fill(node, error(e.message));
+      return;
+    }
+    const blocks = [];
+    blocks.push(
+      el("p", {
+        class: "subtitle",
+        text: `${n(data.total || 0)} not indexed · ${n(data.review || 0)} need review. Credential files are never accepted, and nothing here accepts in bulk.`,
+      }),
+    );
+    for (const store of data.stores || []) {
+      const rows = store.rows || [];
+      if (!rows.length) continue;
+      const refused = rows.filter((r) => r.class !== "dummy");
+      const dummies = rows.filter((r) => r.class === "dummy");
+      blocks.push(el("h2", { class: "section-title", text: store.store }));
+      if (refused.length) blocks.push(table(store.store, refused, `Files ${store.store} did not index, and why`));
+      if (dummies.length) {
+        blocks.push(el("h3", { class: "eyebrow", text: "Let through as test dummies" }));
+        blocks.push(table(store.store, dummies, `Files ${store.store} indexed because every match is a test dummy`));
+      }
+    }
+    if (blocks.length === 1) blocks.push(el("p", { class: "muted", text: "Everything on disk under the store's roots is indexed." }));
+    fill(node, ...blocks);
+    refreshNotIndexedBadge(data.review || 0);
+  }
+  return { node, load };
+}
+
+/* One file's decision from a run card's review step: the same confirm the
+ * Not indexed tab uses, with its tick, for one path. */
+function reviewOne(store, item, mode, done) {
+  const reviewed = el("input", { type: "checkbox", id: "reviewed-inline" });
+  ask({
+    title: `Accept ${shortPath(item.path)} ${mode === "redacted" ? "with redaction" : "as-is"}?`,
+    body:
+      mode === "redacted"
+        ? "Each detected value is replaced by [REDACTED:…] before anything is stored. Redaction covers only what the scanner detected."
+        : item.class === "content"
+          ? "The file's full text is indexed, values included."
+          : `${item.rule}. Accepting indexes it anyway.`,
+    extra: el(
+      "div",
+      { class: "rows tight" },
+      el("p", { class: "path", text: item.path }),
+      el(
+        "ul",
+        { class: "matches" },
+        (item.matches || []).map((m) =>
+          el("li", {}, el("code", { text: m.masked }), ` ${m.kind} · line ${m.line} · ${m.confidence} % likely real`),
+        ),
+      ),
+      el("label", { class: "choice", for: "reviewed-inline" }, reviewed, el("span", { text: " I have reviewed this file" })),
+    ),
+    confirm: "Accept this file",
+    run: async () => {
+      if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
+      await post("/api/refused/accept", { store, path: item.path, mode, reviewed: true });
+      done();
+    },
+  });
+}
+
+/* The sidebar's count of files waiting for a person's review. */
+function refreshNotIndexedBadge(count) {
+  for (const link of document.querySelectorAll('.sidebar .nav-item[data-view="files"]')) {
+    paintNavCount(link, count);
+  }
+}
+
+function paintNavCount(link, count) {
+  let badge = link.querySelector(".nav-count");
+  if (!count) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = el("span", { class: "nav-count", title: "files waiting for your review" });
+    link.append(badge);
+  }
+  badge.textContent = String(count);
 }
 
 // ------------------------------------------------------- read and pattern
@@ -6177,6 +6501,7 @@ function spell(ms) {
 
 const RUN_TONE = {
   queued: "warn",
+  review: "warn",
   running: "good",
   pausing: "warn",
   paused: "warn",
@@ -6189,6 +6514,8 @@ const RUN_TONE = {
 
 const RUN_WORD = {
   queued: "queued",
+  // Scanned, and waiting for a person before anything is embedded (2.7).
+  review: "waiting for review",
   running: "indexing",
   // Said the moment Pause is pressed: the engine stops at its next batch, and
   // a button that answers nothing until then reads as a button that failed.
@@ -6224,6 +6551,107 @@ function runCard(run, controls) {
   const problem = el("div", { class: "note bad" }, "");
   // What the run's stop did to its store, when it was asked to delete it.
   const outcome = el("div", { class: "note" }, "");
+  /* The scan phase's plan (2.7), and the review step when the scan found
+   * something that is a person's to decide. */
+  const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
+  const reviewBox = el("div", { class: "review-box rows tight", hidden: "" });
+  let reviewDrawn = false;
+  const kept = new Set();
+  function paintPlan(next) {
+    const plan = next.plan;
+    planLine.hidden = !plan;
+    if (!plan) return;
+    const not = Object.values(plan.not_indexed || {}).reduce((a, b) => a + b, 0);
+    const review = (plan.review || []).length;
+    const tail =
+      next.status === "done" && (not || review)
+        ? el("a", {
+            href: "#files",
+            text: `${n(not)} not indexed · ${n(review)} need review`,
+            onclick: (e) => {
+              e.preventDefault();
+              state.filesTab = "not-indexed";
+              go("files");
+            },
+          })
+        : `${n(not)} not indexed · ${n(review)} need review`;
+    fill(
+      planLine,
+      `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · `,
+      tail,
+    );
+    reviewBox.hidden = next.status !== "review";
+    if (next.status !== "review" || reviewDrawn) return;
+    reviewDrawn = true;
+    const items = plan.review || [];
+    const left = el("span", {});
+    const paintLeft = () =>
+      setText(left, `Start indexing — ${n(items.filter((i) => !kept.has(i.path) && !i.accepted).length)} stay refused until reviewed`);
+    const starter = el("button", {
+      class: "button",
+      type: "button",
+      onclick: async () => {
+        starter.disabled = true;
+        try {
+          await post("/api/index/control", { store: next.store, run: next.id, action: "start" });
+          await refreshRuns();
+        } catch (e) {
+          setText(problem, e.message);
+          starter.disabled = false;
+        }
+      },
+    }, left);
+    const rows = items.map((item) => {
+      const decided = el("span", { class: "muted" }, "");
+      const row = el(
+        "div",
+        { class: "review-row" },
+        el("span", { class: "path one-line", title: item.path, text: shortPath(item.path) }),
+        el("span", { class: "muted one-line", title: item.rule, text: item.rule }),
+        item.confidence == null ? null : el("strong", { text: `${item.confidence} % likely real` }),
+        decided,
+      );
+      const choose = (label, mode) =>
+        el("button", {
+          class: mode === "keep" ? "button secondary small" : "button small",
+          type: "button",
+          text: label,
+          onclick: () => {
+            if (mode === "keep") {
+              kept.add(item.path);
+              setText(decided, "kept refused");
+              paintLeft();
+              return;
+            }
+            reviewOne(next.store, item, mode, () => {
+              item.accepted = mode;
+              setText(decided, `accepted (${mode})`);
+              paintLeft();
+            });
+          },
+        });
+      row.append(
+        item.class === "content" ? choose("Accept with redaction", "redacted") : null,
+        choose(item.class === "content" ? "Accept as-is" : "Accept", "as-is"),
+        choose("Keep refused", "keep"),
+      );
+      return row;
+    });
+    paintLeft();
+    fill(
+      reviewBox,
+      el("h3", { class: "eyebrow", text: `Review ${n(items.length)} file${items.length === 1 ? "" : "s"} before indexing` }),
+      ...rows,
+      (plan.credential || []).length
+        ? el("p", {
+            class: "note",
+            text: `${n(plan.credential.length)} credential file${plan.credential.length === 1 ? "" : "s"} listed and never offered: ${plan.credential.map(shortPath).join(", ")}`,
+          })
+        : null,
+      el("div", { class: "actions" }, starter),
+    );
+  }
+
   /** The last reading, so a control's answer can move the card before the
    * next poll does. */
   let last = run;
@@ -6284,6 +6712,7 @@ function runCard(run, controls) {
 
   function absorb(next) {
     last = next;
+    paintPlan(next);
     shown = next.elapsed_ms || 0;
     readAt = Date.now();
     ticking = !!next.ticking;
@@ -6426,6 +6855,8 @@ function runCard(run, controls) {
       el("span", { class: "spacer" }),
       pct,
     ),
+    planLine,
+    reviewBox,
     track,
     el(
       "div",
@@ -7344,6 +7775,41 @@ async function indexView() {
   );
 
   const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  /* The scan phase alone (2.7): what a run would embed, keep and refuse, with
+   * no model loaded and nothing written. */
+  const scanOnly = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Scan only",
+    onclick: async () => {
+      const paths = field.value
+        .split("\n")
+        .map((path) => path.trim())
+        .filter(Boolean);
+      if (!paths.length) {
+        complain("Give a path to scan, or choose a folder.", field);
+        return;
+      }
+      scanOnly.disabled = true;
+      try {
+        const answer = await post("/api/index", { path: paths, store: target.value, scan_only: true });
+        say(
+          (answer.runs || [])
+            .map((r) => {
+              if (r.error) return `${r.path || r.store}: ${r.error}`;
+              const p = r.plan;
+              const not = Object.values(p.not_indexed || {}).reduce((a, b) => a + b, 0);
+              return `${r.store}: ${n(p.embed)} to embed (${bytes(p.embed_bytes)}) · ${n(p.unchanged)} unchanged · ${n(not)} not indexed · ${n((p.review || []).length)} need review · scanned in ${p.seconds.toFixed(2)} s`;
+            })
+            .join("; "),
+        );
+      } catch (e) {
+        complain(e.message);
+      } finally {
+        scanOnly.disabled = false;
+      }
+    },
+  });
   const addButton = el("button", {
     // The accent shape, like `Start indexing` beside it. Both of them begin
     // work on the machine, and one of the two reading as a quiet secondary
@@ -7391,7 +7857,7 @@ async function indexView() {
       complain("Give a path to index, or choose a folder.", field);
       return;
     }
-    begin("/api/index", { path: paths, store: target.value });
+    begin("/api/index", { path: paths, store: target.value, review: true });
   });
 
   addButton.addEventListener("click", async () => {
@@ -7477,6 +7943,7 @@ async function indexView() {
       urlButton,
       settingsButton,
       target,
+      scanOnly,
       start,
       note,
     ),
@@ -8490,7 +8957,9 @@ async function doctorView() {
   const steering = (r) => {
     const parts = [];
     if (r.skill && r.skill !== "paste") parts.push(`skill ${r.skill === "present" ? "linked" : r.skill}`);
-    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}`);
+    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}${r.hook_mode ? ` (${r.hook_mode})` : ""}`);
+    if (r.always_load !== undefined) parts.push(r.always_load ? "always loaded" : "alwaysLoad missing");
+    if (r.explorer !== undefined) parts.push(r.explorer ? "research agent" : "no research agent");
     if (r.rules && r.rules !== "paste") parts.push(`rule ${r.rules}`);
     return parts;
   };
@@ -12591,6 +13060,11 @@ async function boot() {
   // so, and the number is not worth holding the first paint for.
   refreshRuns().catch(() => {});
   await render();
+  // The sidebar's count of files waiting for review, after the first paint so
+  // the nav it sits in exists. Refreshed when the Not indexed tab loads.
+  api("/api/refused")
+    .then((data) => refreshNotIndexedBadge(data.review || 0))
+    .catch(() => {});
 
   // One clock, started once, for the life of the tab. Every live view hangs
   // off it; no view starts a timer of its own.

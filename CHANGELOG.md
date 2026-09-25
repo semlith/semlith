@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Agents use semlith, and it answers them well
+
+A benchmark of 216 headless Claude Code sessions on 2026-09-25 found that the
+setup `semlith setup` wrote got 7 % of an agent's lookups, and that forcing the
+agent onto semlith cost answer quality, because the tools failed on exactly the
+questions agents ask. This release fixes the tools first, then the levers that
+bring the agent to them.
+
+**What breaks if this changes.** `semlith_impact` walks from a definition, not a
+name: `Fleet::search_preferring`, `module::function` and `Type.method` resolve to
+the definition that owner holds, each reaching row carries the call-site line,
+and the answer stays under 16 000 characters at any depth — past the cap, rows
+collapse into per-file counts with a `more:` line. The same question at the
+default depth was 75 012 characters on 0.29.0, over Claude Code's MCP limit.
+The Rust extractor now records a method's owner and a receiver's declared type
+(`self` in `impl T`, `x: T`, `T::new()`, a field `store: T`), so the two
+`search_preferring` methods are told apart; callers of a name with several
+definitions say which one they mean (`→ Fleet::search_preferring`).
+`semlith_neighbors` and `semlith_symbol` take the same cap.
+
+**Answers an agent can act on.** Paths in answers are relative to the store
+root, named once at the top, and `semlith_read` resolves them — `src/lib.rs`
+no longer matches the fixture copy. A locate row is one line and names the
+definition a chunk is about with its start line (`search_preferring method
+@3295`). `semlith_read` with a symbol name returns each definition whole, and
+serves an edited file's current lines from disk, marked, through the same
+secret scan. `semlith_symbol` takes up to 20 names and answers with one row per
+definition. `semlith_files {tree: true}` gives a directory view with counts,
+languages, per-file lines, symbols and first definitions, and what is on disk
+but not indexed, and why. `brief` gives its one text span to code for a code
+question, labels the others honestly, and leaves Markdown headings out of its
+graph lines. Tests rank below product code unless the question names tests,
+identical copies collapse into one hit, and `semlith_stats` collapses its long
+tail. A `git checkout` no longer marks unchanged files stale. A `.semlithignore`
+leaves paths out of a store; this repository's leaves the retrieval corpus copy
+out.
+
+**Bringing the agent to them.** `semlith setup` sets `alwaysLoad` on Claude
+Code's entry, writes a hook that reads `Bash` as well as `Read`, `Grep` and
+`Glob` and names one concrete semlith call (soft by default; `--hook-mode gate`
+or `hard` opt-in), a rewritten skill, and a read-only `semlith-explorer`
+research agent. The server instructions name the indexed folders and route by
+question. `semlith doctor` reports all of it, and `doctor --fix` clears a
+per-project disable for the current directory.
+
+### The secret scan tells test dummies from keys, and says what it did not index
+
+A match that a declared rule says is a test dummy — a published documentation
+example, a body saying `EXAMPLE` or `FAKE` or one character repeated, a
+private-key header with no key — no longer refuses its file; one live-looking
+match anywhere still does. A secret-sounding name assigned a random literal,
+quoted or not, now refuses its file too, which catches an AWS secret access key
+beside its id. Every file that was not indexed is listed, per store, in five
+classes, and a secret carries a 0–100 % estimate that it is real with the
+signals behind it. A person — never an agent, never in bulk — can accept one
+file at a time, redacted or as-is, from `semlith refused accept` or the portal's
+Files ▸ Not indexed tab; the acceptance remembers salted fingerprints, never
+values, and a new secret refuses the file again. A credential file is never
+acceptable. Every run opens with a model-free scan phase and, when a person
+started it, stops for review only when something is theirs to decide.
+
+### Fixed
+
+- The remaining-time estimate no longer jumps to minutes while a run writes its
+  index, and never more than doubles between polls. Closes #143.
+- `a_port_something_already_holds_is_seen_as_held` no longer races the rest of
+  the suite. Closes #141.
+- The daemon's watcher said `0 indexed at startup` for a catch-up it had only
+  queued; it now says the catch-up was deferred, then what it found.
+
 ## [0.29.0] - 2026-09-25
 
 ### Eleven portal fixes found using 0.28.0

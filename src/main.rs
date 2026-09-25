@@ -449,10 +449,13 @@ enum Command {
     /// `semlith setup` writes this into the clients that support it, so it is
     /// rarely typed by hand.
     Hook {
-        /// Refuse the first qualifying read of each session instead of adding a
-        /// line to it, and revert to the line for the rest of that session.
-        ///
-        /// Opt-in. The default never refuses anything.
+        /// soft (the default) only adds a line; gate refuses raw lookups until
+        /// the session has made one semlith call, twice at most; hard always
+        /// refuses grep, rg and find in an indexed folder.
+        #[arg(long, default_value = "soft")]
+        mode: String,
+
+        /// The same as `--mode gate`, kept for hooks written before 0.30.0.
         #[arg(long)]
         strict: bool,
 
@@ -500,11 +503,21 @@ enum Command {
         #[arg(long)]
         no_hooks: bool,
 
-        /// Write the hook in its refusing form: the first whole-file read of
-        /// each session is denied with the line that explains it, and every
-        /// later one in that session is only the line.
+        /// How the hook steers: soft (the default) only adds a line; gate
+        /// refuses raw lookups until the session has made one semlith call,
+        /// at most twice; hard always refuses grep, rg and find in an indexed
+        /// folder.
+        #[arg(long, default_value = "soft")]
+        hook_mode: String,
+
+        /// The same as `--hook-mode gate`.
         #[arg(long)]
         strict: bool,
+
+        /// Do not write the semlith-explorer research agent, and remove it if
+        /// it is already there.
+        #[arg(long)]
+        no_agents: bool,
     },
 
     /// Report whether each agent client on this machine can reach semlith, and
@@ -935,6 +948,14 @@ fn run() -> Result<()> {
             } else {
                 Vec::new()
             };
+            // The one repair that edits a client's file, and only for the
+            // directory doctor runs in: the disable was the user's choice there.
+            if fix && let Some((dir, key)) = semlith::doctor::clear_disable_here(&cwd)? {
+                eprintln!(
+                    "cleared: semlith was switched off for {dir} under {key} in ~/.claude.json; \
+                     a backup is beside it"
+                );
+            }
             // `--brief` takes the read-only report. It is the one flag that
             // may run on every session a person opens, and a check that
             // rewrites a configuration file as a side effect of being asked
@@ -999,7 +1020,9 @@ fn run() -> Result<()> {
             register_all,
             no_service,
             no_hooks,
+            hook_mode,
             strict,
+            no_agents,
         } => {
             arm_airgap(airgap);
             // The flag or the variable. The installers translate their own
@@ -1009,7 +1032,20 @@ fn run() -> Result<()> {
             // entry points is a knob somebody will set and watch do nothing.
             let no_service =
                 no_service || std::env::var(semlith::setup::NO_SERVICE_ENV).is_ok_and(|v| v == "1");
-            semlith::setup::run(yes, airgap, register_all, !no_service, !no_hooks, strict)?;
+            let mode = if strict {
+                semlith::hook::Mode::Gate
+            } else {
+                semlith::hook::Mode::parse(&hook_mode)?
+            };
+            semlith::setup::run(
+                yes,
+                airgap,
+                register_all,
+                !no_service,
+                !no_hooks,
+                mode,
+                !no_agents,
+            )?;
         }
 
         Command::Accel { action, lane, json } => match (action.as_str(), lane.as_deref()) {
@@ -1392,7 +1428,10 @@ fn run() -> Result<()> {
                     .filter(|r| r.class != semlith::store::class::DUMMY)
                     .map(|r| r.files.max(1) as usize)
                     .sum();
-                let review = rows.iter().filter(|r| r.reviewable && r.accepted.is_none()).count();
+                let review = rows
+                    .iter()
+                    .filter(|r| r.reviewable && r.accepted.is_none())
+                    .count();
                 if not > 0 {
                     eprintln!("{not} not indexed · {review} need review · semlith refused");
                 }
@@ -1750,9 +1789,9 @@ fn run() -> Result<()> {
                 } else {
                     println!(
                         "{}",
-                        semlith::graph::render_signatures(&rows, &|p| display(std::path::Path::new(
-                            p
-                        )))
+                        semlith::graph::render_signatures(&rows, &|p| display(
+                            std::path::Path::new(p)
+                        ))
                     );
                 }
                 return Ok(());
@@ -2379,7 +2418,10 @@ fn run() -> Result<()> {
             if tree {
                 let filter = Filter::new(&path, &[], &[])?;
                 let sort = semlith::tree::Sort::parse(&sort)?;
-                println!("{}", semlith::tree::render(&fleet, None, &filter, depth.max(1), sort)?);
+                println!(
+                    "{}",
+                    semlith::tree::render(&fleet, None, &filter, depth.max(1), sort)?
+                );
                 return Ok(());
             }
             let many = fleet.len() > 1;
@@ -2523,7 +2565,8 @@ fn run() -> Result<()> {
                 }
                 Some(RefusedCommand::Revoke { path }) => {
                     let key = semlith::canonical(&path).to_string_lossy().into_owned();
-                    let body = serde_json::json!({ "path": key, "store": store_of(&cli.store, &path)? });
+                    let body =
+                        serde_json::json!({ "path": key, "store": store_of(&cli.store, &path)? });
                     match &upstream {
                         Some(daemon) => {
                             daemon.post("/api/refused/revoke", &body)?;
@@ -2539,8 +2582,19 @@ fn run() -> Result<()> {
                     }
                     eprintln!("revoked {}; it is refused again and listed", path.display());
                 }
-                Some(RefusedCommand::Accept { path, redact, as_is: _, yes }) => {
-                    decide_refused(&cli.store, upstream.as_ref(), &path, if redact { "redacted" } else { "as-is" }, yes)?;
+                Some(RefusedCommand::Accept {
+                    path,
+                    redact,
+                    as_is: _,
+                    yes,
+                }) => {
+                    decide_refused(
+                        &cli.store,
+                        upstream.as_ref(),
+                        &path,
+                        if redact { "redacted" } else { "as-is" },
+                        yes,
+                    )?;
                 }
                 Some(RefusedCommand::Refuse { path, yes }) => {
                     decide_refused(&cli.store, upstream.as_ref(), &path, "refused", yes)?;
@@ -2850,13 +2904,22 @@ fn run() -> Result<()> {
             }
         }
 
-        Command::Hook { strict, client } => {
+        Command::Hook {
+            mode,
+            strict,
+            client,
+        } => {
             // Everything here is best-effort and silent. This runs inside
             // another program's tool call, where stderr is noise in somebody's
             // terminal and a non-zero exit is a client reporting a broken hook.
             let mut input = String::new();
             let _ = std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut input);
-            let answer = semlith::hook::run(&input, strict, &client);
+            let mode = if strict {
+                semlith::hook::Mode::Gate
+            } else {
+                semlith::hook::Mode::parse(&mode).unwrap_or(semlith::hook::Mode::Soft)
+            };
+            let answer = semlith::hook::run(&input, mode, &client);
             if !answer.is_empty() {
                 println!("{answer}");
             }
@@ -3034,7 +3097,11 @@ fn decide_refused(
                     .map(|x| format!(
                         "{} {}",
                         x.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                        if x.get("effect").and_then(|v| v.as_str()) == Some("up") { "↑" } else { "↓" }
+                        if x.get("effect").and_then(|v| v.as_str()) == Some("up") {
+                            "↑"
+                        } else {
+                            "↓"
+                        }
                     ))
                     .collect::<Vec<_>>()
                     .join(", "))
@@ -3047,7 +3114,9 @@ fn decide_refused(
              what the scanner detected."
         ),
         "as-is" => eprintln!("Accepting as-is indexes the file's full text, values included."),
-        _ => eprintln!("Refusing keeps this file out of the store although every match is a test dummy."),
+        _ => eprintln!(
+            "Refusing keeps this file out of the store although every match is a test dummy."
+        ),
     }
     if !yes {
         let name = path
@@ -3082,7 +3151,11 @@ fn decide_refused(
     }
     eprintln!(
         "{} {}",
-        if mode == "refused" { "kept out" } else { "accepted and indexed" },
+        if mode == "refused" {
+            "kept out"
+        } else {
+            "accepted and indexed"
+        },
         path.display()
     );
     Ok(())
@@ -3093,9 +3166,18 @@ fn print_refused(listing: &serde_json::Value) {
     let total = listing.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
     let review = listing.get("review").and_then(|v| v.as_u64()).unwrap_or(0);
     println!("{total} not indexed · {review} need review");
-    for store in listing.get("stores").and_then(|v| v.as_array()).into_iter().flatten() {
+    for store in listing
+        .get("stores")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         let name = store.get("store").and_then(|v| v.as_str()).unwrap_or("");
-        let rows = store.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let rows = store
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         if rows.is_empty() {
             continue;
         }
@@ -3156,18 +3238,32 @@ fn print_plan(plan: &semlith::Plan) {
         "plan: {} to embed ({}{}) · {} unchanged · {not} not indexed · {} need review{eta} · scanned in {:.2}s",
         plan.embed,
         semlith::human_bytes(plan.embed_bytes as i64),
-        if langs.is_empty() { String::new() } else { format!(": {}", langs.join(", ")) },
+        if langs.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", langs.join(", "))
+        },
         plan.unchanged,
         plan.review.len(),
         plan.seconds,
     );
     for path in &plan.credential {
-        eprintln!("  credential file, never indexed: {}", display(Path::new(path)));
+        eprintln!(
+            "  credential file, never indexed: {}",
+            display(Path::new(path))
+        );
     }
     for item in &plan.review {
-        eprintln!("  needs review: {} — {}", display(Path::new(&item.path)), item.rule);
+        eprintln!(
+            "  needs review: {} — {}",
+            display(Path::new(&item.path)),
+            item.rule
+        );
         for m in &item.matches {
-            eprintln!("      line {} · {} {} · {} % likely real", m.line, m.kind, m.masked, m.confidence);
+            eprintln!(
+                "      line {} · {} {} · {} % likely real",
+                m.line, m.kind, m.masked, m.confidence
+            );
         }
     }
 }

@@ -580,7 +580,10 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
 
     // The tree view: the same text `semlith_files {tree: true}` answers with,
     // so the page and the agent read one answer (portal parity).
-    if request.query("tree").is_some_and(|v| v == "1" || v == "true") {
+    if request
+        .query("tree")
+        .is_some_and(|v| v == "1" || v == "true")
+    {
         let depth = request
             .query("depth")
             .and_then(|v| v.parse::<usize>().ok())
@@ -592,7 +595,9 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
         };
         return with_fleet(state, json!({ "tree": "" }), move |fleet| {
             let only = (!only.is_empty()).then_some(only);
-            Ok(json!({ "tree": crate::tree::render(fleet, only.as_deref(), &filter, depth, sort)? }))
+            Ok(
+                json!({ "tree": crate::tree::render(fleet, only.as_deref(), &filter, depth, sort)? }),
+            )
         });
     }
 
@@ -1586,6 +1591,12 @@ fn rules(state: &Arc<State>) -> Value {
             "id": "same-origin writes",
             "rule": "Every request that is not a GET carries Sec-Fetch-Site: same-origin —                      or, from a client that sends no fetch metadata, an Origin that matches                      or none at all — and a JSON content type. Both are checked before the                      token, so a cross-origin page cannot tell a right guess from a wrong                      one.",
             "check": "enforced in http::answer before any route runs",
+            "ok": true,
+        },
+        {
+            "id": "refused-file acceptance",
+            "rule": "A person accepts a refused file one at a time, from this page or the command                      line, never in bulk and never by an agent: the routes need this session's                      token and no MCP tool accepts. An acceptance keeps the path, the class, the                      mode, the confidence and a salted fingerprint of each accepted match —                      never the value — in the store's own database, on this machine.",
+            "check": "the accept route takes one path and refuses a list; the agent key opens /mcp alone",
             "ok": true,
         },
         {
@@ -2601,6 +2612,29 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &format!("cannot index {named}"));
     }
 
+    // The portal's Start indexing asks for the review stop; Scan only asks for
+    // the plan and nothing else (2.7). Neither changes what a run from an
+    // agent or a script does: those never wait.
+    let review = body.get("review").and_then(Value::as_bool).unwrap_or(false);
+    let scan_only = body
+        .get("scan_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let start = |store: &Arc<crate::daemon::Store>, paths: Vec<PathBuf>| -> Result<Value, String> {
+        if scan_only {
+            return state
+                .plan(store, &paths)
+                .map(|plan| json!({ "plan": plan, "store": store.name }))
+                .map_err(|e| format!("{e:#}"));
+        }
+        let run = if review {
+            state.index_reviewed(store, paths)
+        } else {
+            state.index(store, paths).map(|(run, _)| run)
+        };
+        run.map(|run| json!({ "run": run, "store": store.name }))
+            .map_err(|e| e.to_string())
+    };
     let asked = body.get("store").and_then(Value::as_str);
     let each = match asked {
         Some("each") => true,
@@ -2626,19 +2660,18 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
                 Ok(store) => store,
                 Err(e) => return Response::error(409, &format!("{}: {e:#}", path.display())),
             };
-            match state.index(&store, vec![path.clone()]) {
-                Ok((run, _progress)) => started.push(json!({
-                    "run": run,
-                    "store": store.name,
-                    "path": crate::plain(&path.display().to_string()),
-                })),
+            match start(&store, vec![path.clone()]) {
+                Ok(mut answer) => {
+                    answer["path"] = json!(crate::plain(&path.display().to_string()));
+                    started.push(answer);
+                }
                 // Named, and the ones already started are in the answer: a
                 // folder that could not be queued should not take the two that
                 // were with it.
                 Err(e) => started.push(json!({
                     "store": store.name,
                     "path": crate::plain(&path.display().to_string()),
-                    "error": e.to_string(),
+                    "error": e,
                 })),
             }
         }
@@ -2694,14 +2727,13 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     // later index into it is allowed. Without this the folder is indexed once
     // and then silently stops being watched, which is the shape of a bug
     // nobody reports for a month.
-    adopt_roots(&store, &paths);
+    if !scan_only {
+        adopt_roots(&store, &paths);
+    }
 
-    match state.index(&store, paths) {
-        Ok((run, _progress)) => Response::json(&json!({
-            "runs": [{ "run": run, "store": store.name }],
-            "target": "store",
-        })),
-        Err(e) => Response::error(409, &e.to_string()),
+    match start(&store, paths) {
+        Ok(answer) => Response::json(&json!({ "runs": [answer], "target": "store" })),
+        Err(e) => Response::error(409, &e),
     }
 }
 
@@ -3059,6 +3091,22 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
+    // A run held for review: Start indexing queues it, Stop drops it. Neither
+    // touches the store's writer, which never saw it.
+    if let Some(id) = run {
+        match action {
+            Some("start") => {
+                return match state.start_reviewed(id) {
+                    Ok(()) => Response::json(&json!({ "started": id })),
+                    Err(e) => Response::error(409, &e.to_string()),
+                };
+            }
+            Some("stop") if state.drop_reviewed(id) => {
+                return Response::json(&json!({ "dequeued": 1 }));
+            }
+            _ => {}
+        }
+    }
     let mut dequeued = 0;
     let mut removed = 0;
     let mut deleting = false;
@@ -3416,10 +3464,15 @@ fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Respon
         Err(e) => return Response::error(409, &e.to_string()),
     };
     match progress.recv() {
-        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => Response::error(
-            409,
-            value.get("error").and_then(Value::as_str).unwrap_or("refused"),
-        ),
+        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => {
+            Response::error(
+                409,
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused"),
+            )
+        }
         Ok(value) => Response::json(&value),
         Err(_) => Response::error(500, "the writer stopped before answering"),
     }

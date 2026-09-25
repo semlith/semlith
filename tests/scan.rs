@@ -306,7 +306,10 @@ fn a_file_that_gains_a_token_is_evicted_on_the_next_run() {
     write(
         corpus.path(),
         "deploy.md",
-        &format!("Deployment runs on Tuesdays.\ntoken = \"{}\"\n", live("GitHub token")),
+        &format!(
+            "Deployment runs on Tuesdays.\ntoken = \"{}\"\n",
+            live("GitHub token")
+        ),
     );
     let (second, _) = run(store.path(), corpus.path(), false);
 
@@ -611,7 +614,12 @@ fn each_dummy_rule_passes_its_case_and_a_live_neighbour_still_refuses() {
     let key = live("AWS");
     assert!(semlith::filter::scan_text(&format!("# FAKE test key\n{key}")).is_some());
     // (c) a private-key header with no body, and one with a real body.
-    assert!(semlith::filter::scan_text("-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----").is_none());
+    assert!(
+        semlith::filter::scan_text(
+            "-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----"
+        )
+        .is_none()
+    );
     assert!(semlith::filter::scan_text(&live("private key")).is_some());
     // One dummy and one live id: refused.
     assert!(semlith::filter::scan_text(&format!("{example}\n{key}\n")).is_some());
@@ -627,10 +635,14 @@ fn a_secret_with_no_prefix_is_refused_by_its_name_and_randomness() {
     assert!(semlith::filter::scan_text(&format!("AWS_SECRET_ACCESS_KEY={value}\n")).is_some());
     assert!(semlith::filter::scan_text(&format!("export DB_TOKEN={value}\n")).is_some());
     assert!(
-        semlith::filter::scan_text("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n")
-            .is_none()
+        semlith::filter::scan_text(
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+        )
+        .is_none()
     );
     assert!(semlith::filter::scan_text("PASSWORD=changeme\n").is_none());
     // Code is not an assignment of a literal.
-    assert!(semlith::filter::scan_text("let token = compute_the_session_token(input);\n").is_none());
+    assert!(
+        semlith::filter::scan_text("let token = compute_the_session_token(input);\n").is_none()
+    );
 }

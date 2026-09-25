@@ -27,7 +27,7 @@
 //! page's button calls is what `semlith doctor --fix` calls.
 
 use crate::home;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// A repair the daemon may apply to a path it owns.
@@ -698,6 +698,18 @@ pub struct ClientReport {
     /// Whether the always-on rule block is in this client's rules file, or
     /// `paste` when semlith knows of no rules file to write for it.
     pub rules: crate::agentfiles::State,
+    /// Claude Code only: whether the user-scope entry carries `alwaysLoad`,
+    /// which puts the tools in context from the first turn instead of behind
+    /// ToolSearch. `None` for every other client, or with no entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub always_load: Option<bool>,
+    /// The steering hook's mode, when one is installed: soft, gate or hard.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_mode: Option<String>,
+    /// Claude Code only: whether the semlith-explorer research agent is
+    /// written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explorer: Option<bool>,
     /// Whether this client is on this machine at all.
     ///
     /// Wider than `present`, which is only about a CLI on `PATH`: a client
@@ -758,17 +770,21 @@ fn hook_state_for(client: &crate::clients::Client) -> crate::agentfiles::State {
     if client.hook_stanza().is_none() {
         return State::Paste;
     }
-    let found = |strict: bool| {
-        crate::agentfiles::hook_state(strict)
+    use crate::hook::Mode;
+    let found = |mode: Mode| {
+        crate::agentfiles::hook_state(mode)
             .into_iter()
             .find(|(name, _, _)| name == &client.name)
             .map(|(_, _, state)| state)
             .unwrap_or(State::Absent)
     };
-    match (found(false), found(true)) {
-        (State::Present, _) | (_, State::Present) => State::Present,
-        (State::Stale, _) | (_, State::Stale) => State::Stale,
-        _ => State::Absent,
+    let states = [found(Mode::Soft), found(Mode::Gate), found(Mode::Hard)];
+    if states.contains(&State::Present) {
+        State::Present
+    } else if states.contains(&State::Stale) {
+        State::Stale
+    } else {
+        State::Absent
     }
 }
 
@@ -1095,7 +1111,7 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 // key, which directory — is the `explain` field, because it is
                 // what a person needs and `run:` is what a script copies.
                 Some(
-                    "claude mcp reset-project-choices  # or turn semlith back on from inside the client with /mcp"
+                    "semlith doctor --fix  # clears the per-project disable for this directory only"
                         .to_string(),
                 )
             } else if let Some((_, _, path, ..)) = bare {
@@ -1124,11 +1140,22 @@ fn report(rewritten: &[Rewritten]) -> Vec<ClientReport> {
                 ))
             } else if !registered && present {
                 Some("semlith setup".to_string())
+            } else if client.name == "Claude Code" && claude_always_load() == Some(false) {
+                Some("semlith setup  # adds alwaysLoad, so the tools load on the first turn".to_string())
             } else {
                 None
             };
 
+            let claude = client.name == "Claude Code";
             ClientReport {
+                always_load: if claude { claude_always_load() } else { None },
+                hook_mode: crate::agentfiles::hook_clients()
+                    .into_iter()
+                    .find(|(c, _, _)| c.name == client.name)
+                    .and_then(|(_, _, path)| std::fs::read_to_string(path).ok())
+                    .and_then(|text| crate::agentfiles::installed_mode(&text))
+                    .map(|m| m.as_str().to_string()),
+                explorer: claude.then(crate::agentfiles::explorer_installed),
                 skill: skill_state_for(client),
                 hook: hook_state_for(client),
                 rules: rules_state_for(client),
@@ -1276,6 +1303,61 @@ fn same_place(written: &str, actual: &Path) -> bool {
 
 fn claude_config_path() -> Option<PathBuf> {
     Some(home::user_home().ok()?.join(".claude.json"))
+}
+
+/// Whether the user-scope semlith entry carries `"alwaysLoad": true`.
+fn claude_always_load() -> Option<bool> {
+    let config = claude_config()?;
+    let entry = config.get("mcpServers")?.get("semlith")?;
+    Some(entry.get("alwaysLoad").and_then(|v| v.as_bool()) == Some(true))
+}
+
+/// Take semlith off the per-project disable list for the directory doctor is
+/// run from, and nothing else (4.1).
+///
+/// Only when asked, with `doctor --fix`, and never from `setup`: the disable
+/// was the user's own choice in that project, made with `/mcp`. The file is
+/// backed up beside itself first, and only the one array loses one string.
+/// Returns the directory and the key it was listed under, or `None` when
+/// semlith was not disabled here.
+pub fn clear_disable_here(cwd: &Path) -> Result<Option<(String, &'static str)>> {
+    let Some(path) = claude_config_path() else {
+        return Ok(None);
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let mut config: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not valid JSON; left as it was", path.display()))?;
+    let Some(projects) = config.get_mut("projects").and_then(|p| p.as_object_mut()) else {
+        return Ok(None);
+    };
+    let mut cleared = None;
+    for (dir, value) in projects.iter_mut() {
+        if !same_place(dir, cwd) {
+            continue;
+        }
+        for key in DISABLED_KEYS {
+            if let Some(list) = value.get_mut(key).and_then(|v| v.as_array_mut()) {
+                let before = list.len();
+                list.retain(|name| name.as_str() != Some("semlith"));
+                if list.len() != before {
+                    cleared = Some((dir.clone(), key));
+                }
+            }
+        }
+    }
+    if cleared.is_some() {
+        crate::clientfile::back_up(&path)?;
+        // Claude Code writes this file as two-space JSON, and so does this,
+        // so every byte outside the one array reads back as it was.
+        let mut next = serde_json::to_string_pretty(&config)?;
+        if text.ends_with('\n') {
+            next.push('\n');
+        }
+        std::fs::write(&path, next).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(cleared)
 }
 
 fn claude_user_entry() -> bool {

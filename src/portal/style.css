@@ -6841,3 +6841,73 @@ pre.report-cli {
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
+
+/* 0.30.0: the Files page's tree view and Not indexed tab, the run card's
+   review step, and the sidebar's count of files waiting for review. Every
+   value is a token the rest of the page already uses. */
+.tree-view {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--ink);
+}
+.not-indexed .matches,
+.modal .matches {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.not-indexed .signals {
+  font-size: 11px;
+}
+.modal .choices {
+  display: grid;
+  gap: 8px;
+}
+.modal .choice {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+}
+.run-card .run-plan {
+  margin: 4px 0 8px;
+}
+.run-card .review-box {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-bottom: 10px;
+}
+.run-card .review-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+}
+.run-card .review-row .path {
+  max-width: 320px;
+}
+.nav-item .nav-count {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.pill.class-credential {
+  background: var(--red-soft);
+  color: var(--red-ink);
+}
+.pill.class-content {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}

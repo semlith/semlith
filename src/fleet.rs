@@ -667,7 +667,12 @@ impl Fleet {
         }
         // Grouped by the name asked, in the order asked, so the table reads
         // as answers to the question rather than as one store after another.
-        out.sort_by_key(|r| names.iter().position(|n| *n == r.asked).unwrap_or(usize::MAX));
+        out.sort_by_key(|r| {
+            names
+                .iter()
+                .position(|n| *n == r.asked)
+                .unwrap_or(usize::MAX)
+        });
         Ok(out)
     }
 

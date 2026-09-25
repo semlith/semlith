@@ -198,10 +198,11 @@ pub fn decide(
         )));
     };
     let salt = crate::store::salt_if_any(db)?.unwrap_or([0; 32]);
-    if let Some(new) = live
-        .iter()
-        .find(|m| !acceptance.fingerprints.contains(&fingerprint(&salt, text, m)))
-    {
+    if let Some(new) = live.iter().find(|m| {
+        !acceptance
+            .fingerprints
+            .contains(&fingerprint(&salt, text, m))
+    }) {
         return Ok(Decision::Refuse(format!(
             "new match since accepted, line {}: what looks like {}",
             new.line, new.kind
@@ -251,17 +252,33 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
     match format_fits(shape.provider, value, body) {
         Some(true) => {
             score += 15;
-            signals.push(signal("format", true, "the provider's documented length and characters"));
+            signals.push(signal(
+                "format",
+                true,
+                "the provider's documented length and characters",
+            ));
         }
         Some(false) => {
             score -= 25;
-            signals.push(signal("format", false, "off the provider's documented length"));
+            signals.push(signal(
+                "format",
+                false,
+                "off the provider's documented length",
+            ));
         }
-        None => signals.push(signal("format", true, "matches the provider's prefix and pattern")),
+        None => signals.push(signal(
+            "format",
+            true,
+            "matches the provider's prefix and pattern",
+        )),
     }
 
     // Randomness, against what the generator produces.
-    let pem = if shape.provider == "pem" { pem_body(value) } else { String::new() };
+    let pem = if shape.provider == "pem" {
+        pem_body(value)
+    } else {
+        String::new()
+    };
     let (random, why) = randomness(if shape.provider == "pem" { &pem } else { body });
     score += random;
     if random != 0 {
@@ -305,7 +322,11 @@ fn judge(path: &str, text: &str, index: usize, range: std::ops::Range<usize>) ->
             signals.push(signal("checksum", true, "its CRC32 checksum is valid"));
         } else {
             score = score.min(10);
-            signals.push(signal("checksum", false, "its CRC32 checksum is invalid, so it cannot be a real token"));
+            signals.push(signal(
+                "checksum",
+                false,
+                "its CRC32 checksum is invalid, so it cannot be a real token",
+            ));
         }
     }
 
@@ -415,7 +436,10 @@ fn randomness(body: &str) -> (i32, String) {
         return (0, String::new());
     }
     if sequential(&chars) {
-        return (-20, "a sequential run such as abcdefgh or 12345678".to_string());
+        return (
+            -20,
+            "a sequential run such as abcdefgh or 12345678".to_string(),
+        );
     }
     let bits = filter::entropy(&chars.iter().collect::<String>());
     // What a uniformly random body of this length over its own alphabet
@@ -428,7 +452,10 @@ fn randomness(body: &str) -> (i32, String) {
     };
     let alphabet = if chars.iter().all(|c| c.is_ascii_hexdigit()) {
         16.0f64
-    } else if distinct > 36 || chars.iter().any(|c| c.is_ascii_lowercase()) && chars.iter().any(|c| c.is_ascii_uppercase()) {
+    } else if distinct > 36
+        || chars.iter().any(|c| c.is_ascii_lowercase())
+            && chars.iter().any(|c| c.is_ascii_uppercase())
+    {
         62.0
     } else {
         36.0
@@ -436,9 +463,15 @@ fn randomness(body: &str) -> (i32, String) {
     let ceiling = alphabet.log2().min((chars.len() as f64).log2());
     let ratio = bits / ceiling;
     if ratio >= 0.8 {
-        (10, format!("{bits:.1} bits a character, near what a generator produces"))
+        (
+            10,
+            format!("{bits:.1} bits a character, near what a generator produces"),
+        )
     } else if ratio < 0.6 {
-        (-20, format!("{bits:.1} bits a character, far below a generated key"))
+        (
+            -20,
+            format!("{bits:.1} bits a character, far below a generated key"),
+        )
     } else {
         (0, String::new())
     }
@@ -466,9 +499,22 @@ fn sequential(chars: &[char]) -> bool {
 fn location(path: &str, text: &str, at: usize, signals: &mut Vec<Signal>) -> i32 {
     let lower = path.replace('\\', "/").to_ascii_lowercase();
     let segments: Vec<&str> = lower.split('/').collect();
-    let quiet = ["tests", "test", "fixtures", "examples", "example", "docs", "__tests__", "spec"];
+    let quiet = [
+        "tests",
+        "test",
+        "fixtures",
+        "examples",
+        "example",
+        "docs",
+        "__tests__",
+        "spec",
+    ];
     if segments.iter().any(|s| quiet.contains(s)) || lower.ends_with(".md") {
-        signals.push(signal("location", false, "under tests, fixtures, examples or docs, or in Markdown"));
+        signals.push(signal(
+            "location",
+            false,
+            "under tests, fixtures, examples or docs, or in Markdown",
+        ));
         return -20;
     }
     if in_test_function(text, at) {
@@ -476,14 +522,30 @@ fn location(path: &str, text: &str, at: usize, signals: &mut Vec<Signal>) -> i32
         return -20;
     }
     let name = segments.last().copied().unwrap_or("");
-    let config = [".env", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".json", ".properties"];
+    let config = [
+        ".env",
+        ".yml",
+        ".yaml",
+        ".toml",
+        ".ini",
+        ".cfg",
+        ".conf",
+        ".json",
+        ".properties",
+    ];
     if name.starts_with(".env")
         || config.iter().any(|e| name.ends_with(e))
-        || segments.iter().any(|s| matches!(*s, ".github" | "deploy" | "k8s" | "helm" | "terraform"))
+        || segments
+            .iter()
+            .any(|s| matches!(*s, ".github" | "deploy" | "k8s" | "helm" | "terraform"))
         || name == "dockerfile"
         || name.starts_with("docker-compose")
     {
-        signals.push(signal("location", true, "in a configuration, CI or deploy file"));
+        signals.push(signal(
+            "location",
+            true,
+            "in a configuration, CI or deploy file",
+        ));
         return 10;
     }
     0
@@ -512,7 +574,11 @@ fn aws_secret_nearby(text: &str, range: std::ops::Range<usize>) -> bool {
         .filter(|(i, _)| i + 1 + 5 >= line && *i < line + 5)
         .any(|(_, l)| {
             l.split(|c: char| !(c.is_ascii_alphanumeric() || c == '/' || c == '+'))
-                .any(|w| w.len() == 40 && w.chars().any(|c| c.is_ascii_digit()) && w.chars().any(|c| c.is_ascii_lowercase()))
+                .any(|w| {
+                    w.len() == 40
+                        && w.chars().any(|c| c.is_ascii_digit())
+                        && w.chars().any(|c| c.is_ascii_lowercase())
+                })
         })
 }
 
@@ -522,12 +588,17 @@ fn pem_block(text: &str, header: std::ops::Range<usize>) -> std::ops::Range<usiz
     let rest = &text[header.end..];
     if let Some(end) = rest.find("-----END") {
         let tail = &rest[end..];
-        let close = tail[8..].find("-----").map(|i| i + 8 + 5).unwrap_or(tail.len());
+        let close = tail[8..]
+            .find("-----")
+            .map(|i| i + 8 + 5)
+            .unwrap_or(tail.len());
         return header.start..header.end + end + close;
     }
     let body: usize = rest
         .char_indices()
-        .take_while(|(_, c)| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '\n' | '\r' | ' ' | '\t'))
+        .take_while(|(_, c)| {
+            c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '\n' | '\r' | ' ' | '\t')
+        })
         .map(|(i, c)| i + c.len_utf8())
         .last()
         .unwrap_or(0);
@@ -536,7 +607,10 @@ fn pem_block(text: &str, header: std::ops::Range<usize>) -> std::ops::Range<usiz
 
 /// The base64 characters of a PEM block's body.
 fn pem_body(block: &str) -> String {
-    let after = block.find("-----\n").or_else(|| block.find("-----\r\n")).map(|i| i + 5);
+    let after = block
+        .find("-----\n")
+        .or_else(|| block.find("-----\r\n"))
+        .map(|i| i + 5);
     let Some(start) = after.or_else(|| block.rfind("-----").map(|i| i + 5)) else {
         return String::new();
     };
@@ -588,7 +662,8 @@ fn jwt_exp(value: &str) -> Option<i64> {
 /// characters, base62-encoded into the last six. A token whose checksum does
 /// not hold was never issued.
 fn checksum(provider: &str, value: &str, body: &str) -> Option<bool> {
-    if !matches!(provider, "github" | "npm") || value.starts_with("github_pat_") || body.len() != 36 {
+    if !matches!(provider, "github" | "npm") || value.starts_with("github_pat_") || body.len() != 36
+    {
         return None;
     }
     let (random, check) = body.split_at(30);
@@ -659,7 +734,10 @@ fn mask(value: &str, prefix_len: usize) -> String {
     let chars: Vec<char> = value.chars().collect();
     let prefix: String = chars.iter().take(prefix_len.min(8)).collect();
     if value.starts_with("-----BEGIN") {
-        let header = value.lines().next().unwrap_or("-----BEGIN PRIVATE KEY-----");
+        let header = value
+            .lines()
+            .next()
+            .unwrap_or("-----BEGIN PRIVATE KEY-----");
         return format!("{header}…");
     }
     if chars.len() < prefix_len + 12 {
@@ -698,7 +776,10 @@ pub fn forge(index: usize) -> String {
     let pick = |alphabet: &[u8], n: usize| -> String {
         let mut bytes = vec![0u8; n];
         let _ = getrandom::fill(&mut bytes);
-        bytes.iter().map(|b| alphabet[*b as usize % alphabet.len()] as char).collect()
+        bytes
+            .iter()
+            .map(|b| alphabet[*b as usize % alphabet.len()] as char)
+            .collect()
     };
     match shape.provider {
         "anthropic" => format!("sk-ant-api03-{}", pick(alnum, 93)),
@@ -710,10 +791,19 @@ pub fn forge(index: usize) -> String {
         "github" | "npm" => {
             let random = pick(alnum, 30);
             let check = base62(crc32(random.as_bytes()), BASE62_UPPER_FIRST);
-            let prefix = if shape.provider == "npm" { "npm_" } else { "ghp_" };
+            let prefix = if shape.provider == "npm" {
+                "npm_"
+            } else {
+                "ghp_"
+            };
             format!("{prefix}{random}{check}")
         }
-        "slack" => format!("xoxb-{}-{}-{}", pick(b"0123456789", 12), pick(b"0123456789", 13), pick(alnum, 24)),
+        "slack" => format!(
+            "xoxb-{}-{}-{}",
+            pick(b"0123456789", 12),
+            pick(b"0123456789", 13),
+            pick(alnum, 24)
+        ),
         "stripe" => format!("sk_live_{}", pick(alnum, 24)),
         "google" => format!("AIza{}", pick(alnum, 35)),
         "twilio" => format!("SK{}", pick(hex, 32)),
@@ -726,13 +816,28 @@ pub fn forge(index: usize) -> String {
             let _ = getrandom::fill(&mut rest);
             der.extend(rest);
             let b64 = base64_encode(&der);
-            let lines: Vec<String> = b64.as_bytes().chunks(64).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
-            format!("-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----", lines.join("\n"))
+            let lines: Vec<String> = b64
+                .as_bytes()
+                .chunks(64)
+                .map(|c| String::from_utf8_lossy(c).into_owned())
+                .collect();
+            format!(
+                "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----",
+                lines.join("\n")
+            )
         }
         "jwt" => {
             let header = base64_url(br#"{"alg":"HS256","typ":"JWT"}"#);
-            let claims = format!(r#"{{"sub":"{}","exp":{}}}"#, pick(alnum, 12), now() + 86_400);
-            format!("{header}.{}.{}", base64_url(claims.as_bytes()), pick(alnum, 43))
+            let claims = format!(
+                r#"{{"sub":"{}","exp":{}}}"#,
+                pick(alnum, 12),
+                now() + 86_400
+            );
+            format!(
+                "{header}.{}.{}",
+                base64_url(claims.as_bytes()),
+                pick(alnum, 43)
+            )
         }
         _ => pick(alnum, 40),
     }
@@ -776,11 +881,23 @@ mod tests {
     fn every_row_example_is_a_dummy_and_every_forged_value_is_live() {
         for (i, shape) in SHAPES.iter().enumerate() {
             let example = scan("", shape.example);
-            assert!(!example.is_empty(), "{} example matched nothing", shape.kind);
-            assert!(!refuses(&example), "{} example is not a dummy: {example:?}", shape.kind);
+            assert!(
+                !example.is_empty(),
+                "{} example matched nothing",
+                shape.kind
+            );
+            assert!(
+                !refuses(&example),
+                "{} example is not a dummy: {example:?}",
+                shape.kind
+            );
             let live = forge(i);
             let found = scan("src/config.rs", &live);
-            assert!(refuses(&found), "{} forged value let through: {found:?}", shape.kind);
+            assert!(
+                refuses(&found),
+                "{} forged value let through: {found:?}",
+                shape.kind
+            );
             assert!(found[0].confidence >= 70, "{}: {:?}", shape.kind, found[0]);
             // A mask shows the prefix and four characters, never the body.
             let masked = &found[0].masked;
@@ -794,7 +911,10 @@ mod tests {
 
     #[test]
     fn a_bad_checksum_cannot_be_a_real_token() {
-        let github = SHAPES.iter().position(|s| s.kind == "a GitHub token").unwrap();
+        let github = SHAPES
+            .iter()
+            .position(|s| s.kind == "a GitHub token")
+            .unwrap();
         let mut live = forge(github);
         let last = live.pop().unwrap();
         live.push(if last == 'a' { 'b' } else { 'a' });

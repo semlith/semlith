@@ -729,7 +729,10 @@ mod tests {
             drop(probe);
             !already_answering(port)
         });
-        assert!(free, "a freed port was still seen as bound, twenty times over");
+        assert!(
+            free,
+            "a freed port was still seen as bound, twenty times over"
+        );
     }
 
     /// `remove` on a machine that never had a service is an end state, not a

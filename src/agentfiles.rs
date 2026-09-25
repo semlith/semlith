@@ -248,6 +248,93 @@ fn link(canonical: &Path, at: &Path) -> Result<()> {
     }
 }
 
+/// Where Claude Code reads user-level subagents, and semlith's file there.
+fn explorer_path() -> Option<PathBuf> {
+    crate::home::user_home()
+        .ok()
+        .map(|h| h.join(".claude/agents/semlith-explorer.md"))
+}
+
+/// Whether the semlith-explorer agent is written and current.
+pub fn explorer_installed() -> bool {
+    explorer_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|text| text == clients::EXPLORER)
+}
+
+/// Write the semlith-explorer agent for Claude Code, when Claude Code is on
+/// this machine (its `~/.claude` exists). `None` when there was nothing to do.
+pub fn install_explorer() -> Result<Option<PathBuf>> {
+    let Some(path) = explorer_path() else {
+        return Ok(None);
+    };
+    let claude = path.parent().and_then(Path::parent);
+    if !claude.is_some_and(Path::exists) || explorer_installed() {
+        return Ok(None);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    if path.exists() {
+        clientfile::back_up(&path)?;
+    }
+    std::fs::write(&path, clients::EXPLORER)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(path))
+}
+
+/// Take the agent out again. Only a file that is semlith's: one naming
+/// itself `semlith-explorer` in its frontmatter.
+pub fn remove_explorer() -> Result<Option<PathBuf>> {
+    let Some(path) = explorer_path() else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) if text.contains("name: semlith-explorer") => {
+            std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            Ok(Some(path))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Set `"alwaysLoad": true` on Claude Code's user-scope semlith entry (4.1).
+///
+/// `claude mcp add` has no flag for it, so the entry it wrote is upgraded in
+/// place, backed up first; an entry that already carries it is left alone.
+/// `None` when there is no user-scope entry to upgrade.
+pub fn set_always_load() -> Result<Option<(PathBuf, bool)>> {
+    let Some(path) = crate::home::user_home()
+        .ok()
+        .map(|h| h.join(".claude.json"))
+    else {
+        return Ok(None);
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let mut config: serde_json::Value =
+        serde_json::from_str(&text).context("~/.claude.json is not valid JSON; left as it was")?;
+    let Some(entry) = config
+        .get_mut("mcpServers")
+        .and_then(|s| s.get_mut("semlith"))
+        .and_then(|e| e.as_object_mut())
+    else {
+        return Ok(None);
+    };
+    if entry.get("alwaysLoad").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some((path, false)));
+    }
+    entry.insert("alwaysLoad".into(), serde_json::Value::Bool(true));
+    clientfile::back_up(&path)?;
+    let mut next = serde_json::to_string_pretty(&config)?;
+    if text.ends_with('\n') {
+        next.push('\n');
+    }
+    std::fs::write(&path, next).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some((path, true)))
+}
+
 /// Every client that documents a `PreToolUse` hook, with the file it goes in.
 pub fn hook_clients() -> Vec<(&'static Client, &'static Stanza, PathBuf)> {
     clients::clients()
@@ -260,14 +347,18 @@ pub fn hook_clients() -> Vec<(&'static Client, &'static Stanza, PathBuf)> {
         .collect()
 }
 
+/// The hook events semlith writes an entry under.
+const HOOK_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
+
 /// Merge the hook into every client that documents one.
 ///
-/// `strict` writes `semlith hook --strict`, which is a different command and so
-/// a different entry: a machine switching between them has one hook, not two.
-pub fn install_hooks(strict: bool) -> Result<Vec<PathBuf>> {
+/// A mode other than soft writes `semlith hook --mode <mode>` on the
+/// `PreToolUse` entry, which is a different command and so a different
+/// entry: a machine switching between them has one hook, not two.
+pub fn install_hooks(mode: crate::hook::Mode) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for (_, stanza, path) in hook_clients() {
-        let wanted = entry(stanza, strict)?;
+        let wanted = entry(stanza, mode)?;
         let existing = std::fs::read_to_string(&path).ok();
         let next = with_entry(existing.as_deref().unwrap_or(""), &wanted)?;
         if existing.as_deref() == Some(next.as_str()) {
@@ -296,12 +387,12 @@ pub fn remove_hooks() -> Result<Vec<PathBuf>> {
     Ok(changed)
 }
 
-/// Where the hook is, per client.
-pub fn hook_state(strict: bool) -> Vec<(String, PathBuf, State)> {
+/// Where the hook is, per client, for one mode.
+pub fn hook_state(mode: crate::hook::Mode) -> Vec<(String, PathBuf, State)> {
     hook_clients()
         .into_iter()
         .map(|(client, stanza, path)| {
-            let state = match (entry(stanza, strict), std::fs::read_to_string(&path)) {
+            let state = match (entry(stanza, mode), std::fs::read_to_string(&path)) {
                 (Ok(wanted), Ok(text)) => match with_entry(&text, &wanted) {
                     Ok(next) if next == text => State::Present,
                     // Present under a different command — the other strictness,
@@ -316,22 +407,37 @@ pub fn hook_state(strict: bool) -> Vec<(String, PathBuf, State)> {
         .collect()
 }
 
-/// The one `PreToolUse` entry semlith owns, from the documented fence.
-fn entry(stanza: &Stanza, strict: bool) -> Result<serde_json::Value> {
+/// The hook entries semlith owns, from the documented fence.
+fn entry(stanza: &Stanza, mode: crate::hook::Mode) -> Result<serde_json::Value> {
     let mut block: serde_json::Value = serde_json::from_str(&stanza.text)
         .context("the documented hook stanza is not valid JSON")?;
-    if strict {
-        // `--strict` on the command the fence already names, rather than a
-        // second command assembled here.
-        if let Some(hooks) = block
-            .pointer_mut("/hooks/PreToolUse/0/hooks/0/command")
+    if mode != crate::hook::Mode::Soft {
+        // The mode on the command the fence already names, rather than a
+        // second command assembled here. Only the `PreToolUse` entry decides.
+        if let Some(command) = block
+            .pointer("/hooks/PreToolUse/0/hooks/0/command")
             .and_then(|v| v.as_str().map(str::to_string))
         {
             block["hooks"]["PreToolUse"][0]["hooks"][0]["command"] =
-                serde_json::Value::String(format!("{hooks} --strict"));
+                serde_json::Value::String(format!("{command} --mode {}", mode.as_str()));
         }
     }
     Ok(block)
+}
+
+/// The mode a settings file's semlith hook runs in, if it has one.
+pub fn installed_mode(text: &str) -> Option<crate::hook::Mode> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let list = value.pointer("/hooks/PreToolUse")?.as_array()?;
+    let ours = list.iter().find(|item| is_ours(item))?;
+    let command = ours["hooks"][0]["command"].as_str()?;
+    Some(if command.contains("--mode hard") {
+        crate::hook::Mode::Hard
+    } else if command.contains("--mode gate") || command.contains("--strict") {
+        crate::hook::Mode::Gate
+    } else {
+        crate::hook::Mode::Soft
+    })
 }
 
 /// Whether a settings file already holds a semlith hook, whatever its flags.
@@ -345,10 +451,12 @@ fn entry(stanza: &Stanza, strict: bool) -> Result<serde_json::Value> {
 fn names_our_hook(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
-        .and_then(|v| {
-            v.pointer("/hooks/PreToolUse")
-                .and_then(|list| list.as_array())
-                .map(|list| list.iter().any(is_ours))
+        .map(|v| {
+            HOOK_EVENTS.iter().any(|event| {
+                v.pointer(&format!("/hooks/{event}"))
+                    .and_then(|list| list.as_array())
+                    .is_some_and(|list| list.iter().any(is_ours))
+            })
         })
         .unwrap_or(false)
 }
@@ -365,42 +473,51 @@ fn with_entry(text: &str, wanted: &serde_json::Value) -> Result<String> {
     } else {
         serde_json::from_str(text).context("the file is not valid JSON")?
     };
-    let ours = wanted["hooks"]["PreToolUse"][0].clone();
-
-    let list = base
-        .as_object_mut()
-        .context("the file is not a JSON object")?
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}))
-        .as_object_mut()
-        .context("`hooks` is not an object")?
-        .entry("PreToolUse")
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-        .as_array_mut()
-        .context("`hooks.PreToolUse` is not an array")?;
-
-    list.retain(|item| !is_ours(item));
-    list.push(ours);
+    for event in HOOK_EVENTS {
+        let Some(ours) = wanted["hooks"][event].get(0).cloned() else {
+            continue;
+        };
+        let list = base
+            .as_object_mut()
+            .context("the file is not a JSON object")?
+            .entry("hooks")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .context("`hooks` is not an object")?
+            .entry(event)
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| format!("`hooks.{event}` is not an array"))?;
+        list.retain(|item| !is_ours(item));
+        list.push(ours);
+    }
     Ok(serialize(&base))
 }
 
-/// `text` with semlith's entry taken out and nothing else changed.
+/// `text` with semlith's entries taken out and nothing else changed.
 fn without_entry(text: &str) -> Result<String> {
     let mut base: serde_json::Value =
         serde_json::from_str(text).context("the file is not valid JSON")?;
-    if let Some(list) = base
-        .pointer_mut("/hooks/PreToolUse")
-        .and_then(|v| v.as_array_mut())
-    {
-        list.retain(|item| !is_ours(item));
-        let empty = list.is_empty();
-        // An empty array semlith created is noise in somebody's settings file.
-        if empty && let Some(hooks) = base.pointer_mut("/hooks").and_then(|v| v.as_object_mut()) {
-            hooks.remove("PreToolUse");
-            if hooks.is_empty() {
-                base.as_object_mut().map(|o| o.remove("hooks"));
+    for event in HOOK_EVENTS {
+        if let Some(list) = base
+            .pointer_mut(&format!("/hooks/{event}"))
+            .and_then(|v| v.as_array_mut())
+        {
+            list.retain(|item| !is_ours(item));
+            let empty = list.is_empty();
+            // An empty array semlith created is noise in somebody's settings file.
+            if empty && let Some(hooks) = base.pointer_mut("/hooks").and_then(|v| v.as_object_mut())
+            {
+                hooks.remove(event);
             }
         }
+    }
+    if base
+        .pointer("/hooks")
+        .and_then(|v| v.as_object())
+        .is_some_and(|h| h.is_empty())
+    {
+        base.as_object_mut().map(|o| o.remove("hooks"));
     }
     Ok(serialize(&base))
 }

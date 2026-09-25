@@ -196,7 +196,10 @@ pub fn instructions(roots: &[std::path::PathBuf]) -> String {
     }
     if left > 0 {
         let sep = if named.is_empty() { "" } else { " and " };
-        named.push_str(&format!("{sep}{left} more folder{}", if left == 1 { "" } else { "s" }));
+        named.push_str(&format!(
+            "{sep}{left} more folder{}",
+            if left == 1 { "" } else { "s" }
+        ));
     }
     format!("{lead}{named}.{ROUTES}")
 }
@@ -514,7 +517,7 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Semantic + keyword search. format excerpt adds text.",
+            "description": "Where is X: ranked spans with file:line and their definition. format excerpt adds text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -534,7 +537,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_brief",
-            "description": "One call: spans, their text, and one-hop callers/callees, under a token budget.",
+            "description": "How does X work: spans, the best code span's text and one-hop callers/callees, in one call.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -548,7 +551,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_read",
-            "description": "One span or one symbol, nothing around it.",
+            "description": "Show me this: a path:start-end span, or a symbol name (Type::method) read whole.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -561,7 +564,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_pattern",
-            "description": "Tree-sitter pattern over indexed files of one language.",
+            "description": "What shape does X take: a tree-sitter query over one language's indexed files.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -577,19 +580,19 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_stats",
-            "description": "What each open store holds.",
+            "description": "What is indexed: files, chunks, languages and graph coverage per store.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_languages",
-            "description": "The languages lang accepts, and which carry edges.",
+            "description": "Which languages the lang filter accepts, and which carry a graph.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true }
         },
         {
             "name": "semlith_files",
-            "description": "List indexed files: \"not indexed\" is not \"not discussed\".",
+            "description": "What is in this folder: files, or tree: true for a directory view with symbols.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -598,7 +601,7 @@ fn tool_defs(open: &str) -> Value {
                     "lang": { "type": "array" },
                     "store": { "type": "array" },
                     "limit": { "type": "integer" },
-                    "tree": { "type": "boolean", "description": "Directories with counts, languages, symbols and what is not indexed." },
+                    "tree": { "type": "boolean", "description": "Directory view: counts, symbols, not indexed." },
                     "depth": { "type": "integer", "description": "Tree depth. Default 2." },
                     "sort": { "type": "string", "description": "name, size, symbols or recent." }
                 }
@@ -607,7 +610,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_index",
-            "description": "Index paths. Only changes are re-embedded.",
+            "description": "Index paths, only when the user asks. Only changes re-embed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -632,7 +635,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_forget",
-            "description": "Drop one file from a store.",
+            "description": "Drop one file from a store, only when the user asks.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -645,12 +648,12 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "A symbol's definition, callers, callees and the ring beyond.",
+            "description": "Where is X defined, and what touches it: definition, callers, callees. names: up to 20 at once.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
-                    "names": { "type": "array", "items": { "type": "string" }, "description": "Up to 20: one row per definition, no rings." },
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Up to 20; a row each." },
                     "k": { "type": "integer", "description": "Default 20." },
                     "history": { "type": "boolean", "description": "What it used to be." },
                     "store": { "type": "string" }
@@ -660,7 +663,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_neighbors",
-            "description": "What calls a symbol and what it calls. Only resolved edges are certain.",
+            "description": "Who calls X and what does X call. Only resolved edges are certain.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -690,7 +693,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_impact",
-            "description": "Everything that reaches a symbol; who would notice a change.",
+            "description": "What breaks if X changes: every caller and call site. Type::method narrows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -707,7 +710,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_trace",
-            "description": "A chain between two symbols as evidence: answer, hops, a source line each.",
+            "description": "How does A reach B: the chain, a source line per hop.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -725,7 +728,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_path",
-            "description": "The shortest chain between two symbols, or none.",
+            "description": "Is A connected to B: the shortest chain, or none.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -880,7 +883,8 @@ fn call_tool(
                     span.text
                 )
             };
-            let body = match stores.read_in(Some(&only), &target, &crate::filter::Filter::default()) {
+            let body = match stores.read_in(Some(&only), &target, &crate::filter::Filter::default())
+            {
                 Ok(None) => {
                     format!("Nothing indexed at {raw:?}. semlith_files says what is indexed.")
                 }
@@ -916,7 +920,10 @@ fn call_tool(
                         out.push_str(&text);
                         left -= 1;
                     }
-                    format!("{} definitions of this name, each whole:\n{out}", rows.len())
+                    format!(
+                        "{} definitions of this name, each whole:\n{out}",
+                        rows.len()
+                    )
                 }
                 Ok(Some(crate::Read::Choose(rows))) => {
                     let mut out = format!("{} definitions of this name:\n", rows.len());
@@ -937,7 +944,9 @@ fn call_tool(
                     let text = one(&span);
                     if text.len() > READ_CHARS {
                         let cut: String = text.chars().take(READ_CHARS).collect();
-                        let cut = cut.rsplit_once('\n').map_or(cut.clone(), |(a, _)| a.to_string());
+                        let cut = cut
+                            .rsplit_once('\n')
+                            .map_or(cut.clone(), |(a, _)| a.to_string());
                         let shown = cut.lines().count().saturating_sub(1) as u32;
                         format!(
                             "{cut}\n\nstopped at the {READ_CHARS}-character cap, at line {}; ask for a line range to read on.",
@@ -1106,8 +1115,14 @@ fn call_tool(
                 .unwrap_or(FILE_LIMIT)
                 .max(1);
             if args.get("tree").and_then(Value::as_bool).unwrap_or(false) {
-                let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(2).clamp(1, 8) as usize;
-                let sort = match crate::tree::Sort::parse(args.get("sort").and_then(Value::as_str).unwrap_or("")) {
+                let depth = args
+                    .get("depth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(2)
+                    .clamp(1, 8) as usize;
+                let sort = match crate::tree::Sort::parse(
+                    args.get("sort").and_then(Value::as_str).unwrap_or(""),
+                ) {
                     Ok(s) => s,
                     Err(e) => return Ok(tool_error(&e.to_string())),
                 };
@@ -1120,30 +1135,29 @@ fn call_tool(
                     Err(e) => return Ok(tool_error(&e.to_string())),
                 }
             } else {
-
-            match stores.paths_in(Some(&only), &filter, limit) {
-                Ok((paths, _)) if paths.is_empty() => {
-                    "No file in the semlith store matches that.".to_string()
-                }
-                Ok((paths, left_out)) => {
-                    // Plain, like every other path an agent is handed. This
-                    // one was still verbatim after 0.17.1 fixed the rest.
-                    let mut out = paths
-                        .iter()
-                        .map(|p| crate::plain(p))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    // A truncated list that does not say so is how an agent
-                    // decides a file it cannot see was never indexed.
-                    if left_out > 0 {
-                        out.push_str(&format!(
+                match stores.paths_in(Some(&only), &filter, limit) {
+                    Ok((paths, _)) if paths.is_empty() => {
+                        "No file in the semlith store matches that.".to_string()
+                    }
+                    Ok((paths, left_out)) => {
+                        // Plain, like every other path an agent is handed. This
+                        // one was still verbatim after 0.17.1 fixed the rest.
+                        let mut out = paths
+                            .iter()
+                            .map(|p| crate::plain(p))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        // A truncated list that does not say so is how an agent
+                        // decides a file it cannot see was never indexed.
+                        if left_out > 0 {
+                            out.push_str(&format!(
                             "\n… and {left_out} more. Narrow with path/ext/lang, or raise limit."
                         ));
+                        }
+                        out
                     }
-                    out
+                    Err(e) => return Ok(tool_error(&e.to_string())),
                 }
-                Err(e) => return Ok(tool_error(&e.to_string())),
-            }
             }
         }
         "semlith_index" => {
@@ -1241,6 +1255,22 @@ fn call_tool(
                     // agent back to re-run it.
                     for (path, why) in &report.failed {
                         out.push_str(&format!("\nfailed: {} — {why}", crate::plain(path)));
+                    }
+                    // Never waits for a person, and says what is theirs to
+                    // decide. An agent cannot accept a file: no tool does.
+                    let waiting = crate::store::refusals(store.db())
+                        .map(|rows| {
+                            rows.iter()
+                                .filter(|r| r.reviewable && r.accepted.is_none())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    if waiting > 0 {
+                        out.push_str(&format!(
+                            "\n{waiting} file{} await{} the owner's review (semlith refused, or the portal's Files ▸ Not indexed).",
+                            if waiting == 1 { "" } else { "s" },
+                            if waiting == 1 { "s" } else { "" }
+                        ));
                     }
                     out
                 }
@@ -1343,7 +1373,11 @@ fn call_tool(
                 names.insert(0, name.to_string());
             }
             let Some(name) = names.first().cloned() else {
-                return Err((-32602, "missing required argument: name or names".into(), None));
+                return Err((
+                    -32602,
+                    "missing required argument: name or names".into(),
+                    None,
+                ));
             };
             let name = name.as_str();
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
@@ -1370,7 +1404,11 @@ fn call_tool(
                         } else {
                             format!(
                                 "{text}\nno definition: {}",
-                                missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
+                                missing
+                                    .iter()
+                                    .map(|m| m.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             )
                         };
                         paths.with_header(crate::graph::fit(text, "ask for fewer names"))

@@ -240,6 +240,40 @@ every row behind the filter, because ten thousand files behind one tick is a
 mistake nobody meant to make. A selection made across two stores becomes two
 writes, because a write names the store it is for.
 
+### Tree
+
+The same answer `semlith_files {tree: true}` gives an agent and `semlith files
+--tree` prints, drawn as it reads: each directory with its file and chunk counts
+and its languages, each file with its length in lines, its symbol count and its
+first definitions, a `changed since indexed` mark on a file edited since, and at
+the end of each directory what is on disk but not in the store, and why — `+ 4
+on disk not indexed: 2 binary, 1 refused as a secret, 1 .semlithignore`. Depth
+chips choose how many levels show, and sort chips order by name, size, symbols
+or `recent` (newest indexed first). The path filter above narrows it. The answer
+stops at 8 000 characters with a line naming the depth or path that would show
+the rest.
+
+### Not indexed
+
+Every file the store did not index, and why, in five classes: a secret-shaped
+value (reviewable), a credential file (never acceptable, listed with its rule
+and no action), a policy limit such as the size cap or a pruned generated folder
+(reviewable), a file no reader can take (a fact, with no action), and your own
+exclusions (change the rule, not the file). A secret row carries its masked
+matches, their lines and a **likely real** percentage with the signals behind
+it; the percentage is an estimate, never a guarantee. Files let through because
+every match in them is a declared test dummy are listed below, with **Refuse
+instead**.
+
+**Review…** opens one file's confirm: the path, each masked match with its line
+and confidence, the choice between **Accept with redaction** (each value
+replaced by `[REDACTED:…]` before anything is stored; covers only what the scan
+detected) and **Accept as-is**, and a per-file **I have reviewed this file**
+tick. The file is indexed at once. An accepted row shows its mode and
+**Revoke**. There is no select-all and no bulk bar, and the route takes one
+path. The sidebar's Files item carries the count waiting for review, and a
+finished run card links here with `N not indexed · M need review`.
+
 ## Search
 
 **What it is for.** Asking the corpus a question, and reading the answer the way
@@ -897,11 +931,24 @@ screen saying it had happened.
   synchronous part, because its refusals — the URL was `http`, the body was too
   large, nothing here reads that content type — are what the card has to show.
 - **the target** — where the paths go. Three answers, below.
-- **Start indexing** — queues the runs and answers at once with how many were
-  queued, in a note beside the button. The note empties once there is nothing to
-  say, so no blank line is left above the cards. The cards are what happens
-  next; the button does not become a control for them, because there is more
-  than one run.
+- **Scan only** — the scan phase and nothing else: for each path, how many
+  files would be embedded and their bytes, how many are unchanged, how many are
+  not indexed and how many need a person's review, and how long the scan took.
+  No model is loaded and nothing is written.
+- **Start indexing** — scans first (0.30.0), then queues the runs and answers at
+  once with how many were queued, in a note beside the button. Each card opens
+  with its plan line: files to embed, unchanged, not indexed, need review. When
+  the scan found something that is a person's to decide, the card stops at
+  **Review N files before indexing** instead of queuing: each file has **Accept
+  with redaction**, **Accept as-is** (or **Accept** for a policy limit) and
+  **Keep refused**, each accept behind the same confirm as the Files page's Not
+  indexed tab, and credential files are listed with no action. **Start indexing
+  — N stay refused until reviewed** is always enabled: it queues the run and
+  whatever was not accepted stays on the Not indexed list. A card waiting for
+  review holds nothing — no slot, no writer — so other runs and the watcher go
+  on. A run started by an agent, the watcher or the catch-up never waits. The
+  note empties once there is nothing to say, so no blank line is left above the
+  cards.
 
 The three pickers are mutually exclusive: two of them open at once is two answers
 to one question.

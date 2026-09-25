@@ -335,6 +335,10 @@ pub struct Event {
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     Queued,
+    /// Scanned, and waiting for a person to review what the scan refused
+    /// before it is queued at all (2.7). Holds nothing: not a slot, not the
+    /// writer.
+    Review,
     Running,
     /// Asked to pause; the engine has not reached its next batch yet.
     Pausing,
@@ -454,6 +458,11 @@ pub struct RunState {
     /// snapshot rather than only on the log, so a page opened during one of
     /// those twenty seconds sees it too.
     pub phase: Option<String>,
+    /// The scan phase's plan, as the card shows it before anything embeds.
+    pub plan: Option<serde_json::Value>,
+    /// The plan's own estimate, which stands until the measured rate settles:
+    /// the first remaining time appears when embedding starts (2.7).
+    plan_eta_ms: Option<u64>,
     /// The last estimate a poll was given, and when (ms of the run's clock).
     /// What a stall holds on to, and what a jump is measured against (#143).
     shown_eta: std::cell::Cell<Option<(u64, u64)>>,
@@ -499,6 +508,8 @@ impl RunState {
             symbols: 0,
             phase: None,
             shown_eta: std::cell::Cell::new(None),
+            plan: None,
+            plan_eta_ms: None,
             summary: None,
             log: VecDeque::new(),
             next_seq: 0,
@@ -587,10 +598,13 @@ impl RunState {
         if !matches!(self.status, RunStatus::Running) || self.bytes_total == 0 {
             return None;
         }
-        let (t0, _, b0) = self.first_sample?;
         let now = self.elapsed().as_millis() as u64;
+        let from_plan = self.plan_eta_ms.map(|eta| eta.saturating_sub(now));
+        let Some((t0, _, b0)) = self.first_sample else {
+            return from_plan;
+        };
         if now.saturating_sub(t0) < ETA_SETTLE_MS {
-            return None;
+            return from_plan;
         }
         let start = now.saturating_sub(RATE_WINDOW_MS);
         let (at, _, was) = self
@@ -931,6 +945,35 @@ impl Store {
         self.runs_changed();
     }
 
+    /// Put the scan phase's plan on a run, and hold it for review when asked.
+    fn set_plan(&self, id: u64, plan: &crate::Plan, review: bool) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
+            run.plan = serde_json::to_value(plan).ok();
+            run.plan_eta_ms = plan.eta_ms;
+            if review {
+                run.status = RunStatus::Review;
+            }
+        }
+        drop(runs);
+        self.runs_changed();
+    }
+
+    /// A run held for review, moved to the queue or ended.
+    fn leave_review(&self, id: u64, to: RunStatus) -> bool {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(run) = runs
+            .iter_mut()
+            .find(|r| r.id == id && r.status == RunStatus::Review)
+        else {
+            return false;
+        };
+        run.status = to;
+        drop(runs);
+        self.runs_changed();
+        true
+    }
+
     /// The one place the runs counter moves.
     ///
     /// Four things change what `/api/index/runs` would answer — a run begins,
@@ -1154,6 +1197,7 @@ impl Store {
                 .map(|p| crate::plain(&p.display().to_string()))
                 .collect::<Vec<_>>(),
             "status": run.status,
+            "plan": run.plan,
             "position": position,
             "submitted": run.submitted,
             "started_at": run.started,
@@ -1488,6 +1532,33 @@ impl Admission {
 
     pub fn running(&self) -> usize {
         self.running.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// A fresh run id, for a run that is scanned and held for review before
+    /// it is queued.
+    pub fn mint(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Queue a run whose card already exists — one a person has just
+    /// reviewed.
+    pub fn enqueue(&self, run: u64, store: &Arc<Store>, paths: Vec<PathBuf>, kind: RunKind) {
+        let (report, _progress) = mpsc::channel();
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            store.record(
+                run,
+                &serde_json::json!({ "event": "submitted", "run": run, "ahead": queue.len() }),
+            );
+            queue.push_back(Pending {
+                run,
+                store: Arc::clone(store),
+                paths,
+                kind,
+                report,
+            });
+        }
+        self.pump();
     }
 
     /// Queue a run and hand back its id and the channel it reports on.
@@ -2007,6 +2078,8 @@ pub struct State {
     report: Arc<dyn Fn(&str) + Send + Sync>,
     /// Refusals by class, for the line the daemon logs on shutdown.
     pub refusals: Mutex<BTreeMap<&'static str, u64>>,
+    /// Runs scanned and held for a person's review, by run id (2.7).
+    awaiting: Mutex<BTreeMap<u64, (Arc<Store>, Vec<PathBuf>)>>,
     /// `semlith mcp` processes forwarding here: pid to the unix second it was
     /// last heard from. A proxy has no disconnect to observe — its client may
     /// simply stop asking — so recency is the only honest answer to "how many
@@ -2228,6 +2301,66 @@ impl State {
         Ok(self.admission.submit(store, paths, RunKind::Run))
     }
 
+    /// The scan phase for `paths` into `store`, without the writer or the
+    /// model: a read-only open of the store beside the writer's.
+    pub fn plan(&self, store: &Arc<Store>, paths: &[PathBuf]) -> Result<crate::Plan> {
+        let mut reader = crate::Semlith::open_existing(&store.dir)?;
+        reader.plan(paths)
+    }
+
+    /// Start a run the way the portal's Start indexing does (2.7): scan
+    /// first, and when something is a person's to decide, hold the card at
+    /// "Review N files before indexing" rather than queue it. Nothing else
+    /// waits: other runs and the watcher go on.
+    pub fn index_reviewed(&self, store: &Arc<Store>, paths: Vec<PathBuf>) -> Result<u64> {
+        Self::writer_alive(store)?;
+        let plan = self.plan(store, &paths).ok();
+        if let Some(plan) = plan.as_ref().filter(|p| !p.review.is_empty()) {
+            let run = self.admission.mint();
+            store.begin_run(run, paths.clone(), RunKind::Run);
+            store.set_plan(run, plan, true);
+            self.awaiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(run, (Arc::clone(store), paths));
+            return Ok(run);
+        }
+        let (run, _progress) = self.admission.submit(store, paths, RunKind::Run);
+        if let Some(plan) = &plan {
+            store.set_plan(run, plan, false);
+        }
+        Ok(run)
+    }
+
+    /// Queue a run a person has reviewed. Whatever they left undecided stays
+    /// refused and on the Not indexed list.
+    pub fn start_reviewed(&self, run: u64) -> Result<()> {
+        let Some((store, paths)) = self
+            .awaiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&run)
+        else {
+            anyhow::bail!("run {run} is not waiting for review");
+        };
+        store.leave_review(run, RunStatus::Queued);
+        self.admission.enqueue(run, &store, paths, RunKind::Run);
+        Ok(())
+    }
+
+    /// Drop a run that was waiting for review, as a stop of it.
+    pub fn drop_reviewed(&self, run: u64) -> bool {
+        let taken = self
+            .awaiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&run);
+        match taken {
+            Some((store, _)) => store.leave_review(run, RunStatus::Stopped),
+            None => false,
+        }
+    }
+
     pub fn forget(
         &self,
         store: &Arc<Store>,
@@ -2256,7 +2389,11 @@ impl State {
     }
 
     /// Undo an acceptance: the file leaves the store and returns to the list.
-    pub fn revoke(&self, store: &Arc<Store>, path: PathBuf) -> Result<mpsc::Receiver<serde_json::Value>> {
+    pub fn revoke(
+        &self,
+        store: &Arc<Store>,
+        path: PathBuf,
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
         Self::writer_alive(store)?;
         Ok(store.submit_front(Job::Revoke(path)))
     }
@@ -2883,6 +3020,7 @@ pub fn run(
         debounce,
         report: Arc::clone(&report_line),
         refusals: Mutex::new(BTreeMap::new()),
+        awaiting: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
         clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
@@ -3523,14 +3661,25 @@ fn perform(
                             .map(|r| r.indexed)
                     };
                     store.last_write.store(now() as usize, Ordering::Relaxed);
-                    store.note(format!("{} {} ({})", if mode == "refused" { "refused" } else { "accepted" }, path.display(), mode));
+                    store.note(format!(
+                        "{} {} ({})",
+                        if mode == "refused" {
+                            "refused"
+                        } else {
+                            "accepted"
+                        },
+                        path.display(),
+                        mode
+                    ));
                     match indexed {
                         Ok(n) => say(serde_json::json!({
                             "event": "done",
                             "accepted": accepted,
                             "indexed": n,
                         })),
-                        Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+                        Err(e) => {
+                            say(serde_json::json!({ "event": "error", "error": format!("{e:#}") }))
+                        }
                     }
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
@@ -4343,7 +4492,11 @@ mod tests {
         run.status = RunStatus::Running;
         run.bytes_total = 10_000_000;
         run.first_sample = Some((0, 0, 0));
-        run.samples = VecDeque::from(vec![(0, 0, 0), (10_000, 200, 1_000_000), (15_000, 300, 2_500_000)]);
+        run.samples = VecDeque::from(vec![
+            (0, 0, 0),
+            (10_000, 200, 1_000_000),
+            (15_000, 300, 2_500_000),
+        ]);
         run.bytes = 4_000_000;
         run.ended = Some(Duration::from_secs(20));
         let before = run.eta_ms().expect("settled");
@@ -4393,6 +4546,7 @@ mod tests {
             debounce: Duration::from_millis(500),
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
+            awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),

@@ -39,6 +39,7 @@ pub mod hook;
 pub mod http;
 pub mod image;
 pub mod index;
+pub mod keyscan;
 pub mod ledger;
 pub mod lock;
 pub mod mcp;
@@ -51,13 +52,12 @@ pub mod report;
 pub mod rerank;
 pub mod routes;
 pub mod schedule;
-pub mod keyscan;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
 pub mod setup;
 pub mod store;
-pub mod tree;
 pub mod system;
+pub mod tree;
 pub mod upgrade;
 pub mod watch;
 
@@ -320,17 +320,36 @@ pub fn shape_of(query: &str) -> Shape {
 /// `run()`, `searchPreferring`) or asks about a function, a caller or a type.
 pub fn code_shaped(query: &str) -> bool {
     const CODE_WORDS: [&str; 22] = [
-        "function", "functions", "method", "methods", "call", "calls", "called", "caller",
-        "callers", "callee", "struct", "class", "impl", "trait", "enum", "type", "field",
-        "variable", "signature", "parameter", "return", "returns",
+        "function",
+        "functions",
+        "method",
+        "methods",
+        "call",
+        "calls",
+        "called",
+        "caller",
+        "callers",
+        "callee",
+        "struct",
+        "class",
+        "impl",
+        "trait",
+        "enum",
+        "type",
+        "field",
+        "variable",
+        "signature",
+        "parameter",
+        "return",
+        "returns",
     ];
     if shape_of(query) == Shape::Identifier {
         return true;
     }
     query.split_whitespace().any(|word| {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
-        let inner_capital = word.chars().skip(1).any(char::is_uppercase)
-            && word.chars().any(char::is_lowercase);
+        let inner_capital =
+            word.chars().skip(1).any(char::is_uppercase) && word.chars().any(char::is_lowercase);
         word.contains('_')
             || word.contains("::")
             || inner_capital
@@ -1735,6 +1754,10 @@ impl Semlith {
         for _ in &walked.unreadable {
             not(&mut plan, store::class::UNINDEXABLE);
         }
+        for path in &walked.credentials {
+            plan.credential.push(path.to_string_lossy().into_owned());
+            not(&mut plan, store::class::CREDENTIAL);
+        }
         for (path, walked) in all {
             let key = path.to_string_lossy().into_owned();
             if let Some(refusal) = self.boundary.refuses(&path, walked, home.as_deref()) {
@@ -1756,7 +1779,9 @@ impl Semlith {
             }
             let accepted = store::acceptance(&self.db, &key)?;
             if meta.len() > chunk::MAX_FILE_BYTES
-                && !accepted.as_ref().is_some_and(|a| a.class == store::class::POLICY)
+                && !accepted
+                    .as_ref()
+                    .is_some_and(|a| a.class == store::class::POLICY)
             {
                 plan.review.push(Review {
                     path: key,
@@ -1879,9 +1904,15 @@ impl Semlith {
             anyhow::bail!("mode is redacted, as-is or refused, not {mode:?}");
         }
         let row = store::refusal(&self.db, &key)?;
-        let class = row.as_ref().map_or(store::class::CONTENT, |r| r.class.as_str()).to_string();
+        let class = row
+            .as_ref()
+            .map_or(store::class::CONTENT, |r| r.class.as_str())
+            .to_string();
         if !(store::class::reviewable(&class) || class == store::class::DUMMY) {
-            anyhow::bail!("{key} is not indexable ({}); accepting cannot change that", class);
+            anyhow::bail!(
+                "{key} is not indexable ({}); accepting cannot change that",
+                class
+            );
         }
         if mode == "refused" && class != store::class::DUMMY {
             anyhow::bail!("only a file let through as test dummies can be refused instead");
@@ -2026,7 +2057,13 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
-        self.index_set(self.walk(roots), true, Some(deadline), Some(control), on_file)
+        self.index_set(
+            self.walk(roots),
+            true,
+            Some(deadline),
+            Some(control),
+            on_file,
+        )
     }
 
     /// Carry on a run from exactly where its last slice stopped.
@@ -2056,6 +2093,7 @@ impl Semlith {
                 named: Vec::new(),
                 unreadable: Vec::new(),
                 generated: Vec::new(),
+                credentials: Vec::new(),
             },
             true,
             Some(deadline),
@@ -2093,6 +2131,7 @@ impl Semlith {
                 named: Vec::new(),
                 unreadable: Vec::new(),
                 generated: Vec::new(),
+                credentials: Vec::new(),
             },
             false,
             None,
@@ -2188,6 +2227,7 @@ impl Semlith {
             named,
             unreadable: unwalkable,
             generated,
+            credentials: hidden_credentials,
         } = walked;
         let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = {
             let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
@@ -2248,7 +2288,15 @@ impl Semlith {
             } else {
                 store::class::EXCLUDED
             };
-            store::refuse(&self.db, &path.to_string_lossy(), class, &refusal.why, &[], 1, now())?;
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                class,
+                &refusal.why,
+                &[],
+                1,
+                now(),
+            )?;
             say_file(
                 &mut on_file,
                 &report,
@@ -2259,6 +2307,18 @@ impl Semlith {
             );
         }
         report.generated = generated.iter().map(|p| p.display().to_string()).collect();
+        for path in &hidden_credentials {
+            let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::CREDENTIAL,
+                &why,
+                &[],
+                1,
+                now(),
+            )?;
+        }
         for dir in &generated {
             store::refuse(
                 &self.db,
@@ -2377,7 +2437,14 @@ impl Semlith {
             {
                 store::heal_stamps(&self.db, &key, size as i64, mtime, now())?;
                 report.unchanged += 1;
-                say_file(&mut on_file, &report, total, &path, FileOutcome::Unchanged, None);
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Unchanged,
+                    None,
+                );
                 continue;
             }
             // A file over the cap that a person accepted is read whole.
@@ -2438,9 +2505,7 @@ impl Semlith {
             let read = opened.and_then(|file| {
                 use std::io::Read;
                 let mut bytes = Vec::new();
-                file.take(cap + 1)
-                    .read_to_end(&mut bytes)
-                    .map(|_| bytes)
+                file.take(cap + 1).read_to_end(&mut bytes).map(|_| bytes)
             });
             let bytes = match read {
                 Ok(bytes) if bytes.len() as u64 <= cap => bytes,
@@ -2450,7 +2515,7 @@ impl Semlith {
                 Ok(_) => {
                     let why = SkipReason::TooLarge;
                     skip(&mut report, &why);
-                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2464,7 +2529,7 @@ impl Semlith {
                 Err(e) => {
                     let why = SkipReason::Unreadable(e.to_string());
                     skip(&mut report, &why);
-                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2478,7 +2543,8 @@ impl Semlith {
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
-            let same = !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str());
+            let same =
+                !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str());
             // The upgrade pass (2.7): an unchanged file is scanned again under
             // the new rules, and one they now refuse leaves the store.
             if same
@@ -2487,15 +2553,25 @@ impl Semlith {
                 && !image::is_image(&path)
                 && let Ok(text) = chunk::extract(&path, &bytes)
                 && let found = keyscan::scan(&key, &text)
-                && let keyscan::Decision::Refuse(why) = keyscan::decide(&self.db, &key, &text, &found)?
+                && let keyscan::Decision::Refuse(why) =
+                    keyscan::decide(&self.db, &key, &text, &found)?
             {
                 let live: Vec<keyscan::Match> =
                     found.into_iter().filter(|m| m.dummy.is_none()).collect();
                 store::refuse(&self.db, &key, store::class::CONTENT, &why, &live, 1, now())?;
                 let (gone, images) = self.evict(&key)?;
                 report.removed += usize::from(gone + images > 0);
-                report.refused.push((path.display().to_string(), why.clone()));
-                say_file(&mut on_file, &report, total, &path, FileOutcome::Refused, Some(why));
+                report
+                    .refused
+                    .push((path.display().to_string(), why.clone()));
+                say_file(
+                    &mut on_file,
+                    &report,
+                    total,
+                    &path,
+                    FileOutcome::Refused,
+                    Some(why),
+                );
                 continue;
             }
             if same {
@@ -2550,7 +2626,7 @@ impl Semlith {
                 let Some((width, height)) = image::dimensions(&bytes) else {
                     let why = SkipReason::NotDecodableImage;
                     skip(&mut report, &why);
-                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2636,7 +2712,7 @@ impl Semlith {
                 Ok(Ok(text)) => text,
                 Ok(Err(why)) => {
                     skip(&mut report, &why);
-                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                    store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2687,8 +2763,11 @@ impl Semlith {
                         text
                     }
                     keyscan::Decision::Refuse(why) => {
-                        let live: Vec<keyscan::Match> =
-                            found.iter().filter(|m| m.dummy.is_none()).cloned().collect();
+                        let live: Vec<keyscan::Match> = found
+                            .iter()
+                            .filter(|m| m.dummy.is_none())
+                            .cloned()
+                            .collect();
                         store::refuse(
                             &self.db,
                             &key,
@@ -2704,7 +2783,9 @@ impl Semlith {
                         let evicted = gone + images;
                         report.removed += usize::from(evicted > 0);
                         let why = if evicted > 0 {
-                            format!("{why}. Its earlier contents have been removed from this store.")
+                            format!(
+                                "{why}. Its earlier contents have been removed from this store."
+                            )
                         } else {
                             why
                         };
@@ -2981,7 +3062,11 @@ impl Semlith {
         // estimate: a plan can say how long before the model has loaded.
         let secs = run_started.elapsed().as_secs_f64();
         if report.indexed > 0 && report.bytes > 1_000_000 && secs > 1.0 {
-            store::set_meta(&self.db, "embed_bytes_per_sec", &format!("{:.0}", report.bytes as f64 / secs))?;
+            store::set_meta(
+                &self.db,
+                "embed_bytes_per_sec",
+                &format!("{:.0}", report.bytes as f64 / secs),
+            )?;
         }
 
         // The chunking rule this store is now on, recorded only when a pass
@@ -4460,7 +4545,8 @@ impl Semlith {
         };
         // The same rule search uses, for the same reason: a span that begins
         // in a function's doc comment is that function's.
-        if let Some((_, name, kind)) = enclosing_definition(symbols, span.start_line, span.end_line) {
+        if let Some((_, name, kind)) = enclosing_definition(symbols, span.start_line, span.end_line)
+        {
             span.symbol = Some(name);
             span.symbol_kind = Some(kind);
         }
@@ -4504,7 +4590,9 @@ impl Semlith {
             let Some(symbols) = by_file.get(&hit.path) else {
                 continue;
             };
-            if let Some((start, name, kind)) = enclosing_definition(symbols, hit.start_line, hit.end_line) {
+            if let Some((start, name, kind)) =
+                enclosing_definition(symbols, hit.start_line, hit.end_line)
+            {
                 hit.symbol = Some(name);
                 hit.symbol_kind = Some(kind);
                 hit.symbol_line = Some(start);
@@ -4998,6 +5086,9 @@ pub(crate) struct Walked {
     /// looking for a file that is not in their store needs the directory's name,
     /// not an integer.
     pub generated: Vec<PathBuf>,
+    /// Credential files by name that the hidden-file rule stepped over, so
+    /// they can be listed rather than silently absent.
+    pub credentials: Vec<PathBuf>,
 }
 
 /// Directories that are generated or vendored rather than written.
@@ -5151,6 +5242,7 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     let mut named = Vec::new();
     let mut unreadable = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut dirs: Vec<PathBuf> = Vec::new();
     // Written from inside `filter_entry`, which the walker may call from
     // several threads even on the single-threaded builder it is handed here,
     // and which must outlive the borrow the builder takes.
@@ -5221,6 +5313,9 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
                     continue;
                 }
             };
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
+                dirs.push(entry.path().to_path_buf());
+            }
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
@@ -5230,6 +5325,27 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
             }
         }
     }
+    // Credential files the hidden rule stepped over — a `.env`, a `.npmrc` —
+    // named so the not-indexed list can say so (2.3, class b). One `read_dir`
+    // of each directory the walk entered; nothing under them is read.
+    let mut credentials = Vec::new();
+    for dir in &dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+            if is_file
+                && name.to_string_lossy().starts_with('.')
+                && matches!(filter::denied(&entry.path()), Some(filter::Denied::Name(_)))
+            {
+                credentials.push(canonical(&entry.path()));
+            }
+        }
+    }
+    credentials.sort();
+    credentials.dedup();
     // Sorted, and this is issue #88's index-time half. `ignore::Walk` yields
     // entries in whatever order the filesystem hands the directory over, which
     // is not stable between two walks of two byte-identical trees. Indexing in
@@ -5252,6 +5368,7 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
         named,
         unreadable,
         generated,
+        credentials,
     }
 }
 
