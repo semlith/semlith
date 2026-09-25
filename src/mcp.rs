@@ -597,7 +597,10 @@ fn tool_defs(open: &str) -> Value {
                     "ext": { "type": "array" },
                     "lang": { "type": "array" },
                     "store": { "type": "array" },
-                    "limit": { "type": "integer" }
+                    "limit": { "type": "integer" },
+                    "tree": { "type": "boolean", "description": "Directories with counts, languages, symbols and what is not indexed." },
+                    "depth": { "type": "integer", "description": "Tree depth. Default 2." },
+                    "sort": { "type": "string", "description": "name, size, symbols or recent." }
                 }
             },
             "annotations": { "readOnlyHint": true }
@@ -854,19 +857,76 @@ fn call_tool(
             };
             let target = crate::Target::parse(raw);
             let only = strings(&args, "store");
-            match stores.read_in(Some(&only), &target, &crate::filter::Filter::default()) {
+            let paths = stores.shortener();
+            let one = |span: &crate::Span| {
+                let named = match (&span.symbol, &span.symbol_kind) {
+                    (Some(name), Some(kind)) => format!(" · {name} {kind}"),
+                    (Some(name), None) => format!(" · {name}"),
+                    _ => String::new(),
+                };
+                let state = if span.from_disk {
+                    " · read from disk, not yet re-indexed"
+                } else if !span.fresh {
+                    " · stale"
+                } else {
+                    ""
+                };
+                format!(
+                    "{}{}:{}-{}{named}{state}\n{}",
+                    label_of(&span.store),
+                    paths.short(&span.path),
+                    span.start_line,
+                    span.end_line,
+                    span.text
+                )
+            };
+            let body = match stores.read_in(Some(&only), &target, &crate::filter::Filter::default()) {
                 Ok(None) => {
                     format!("Nothing indexed at {raw:?}. semlith_files says what is indexed.")
+                }
+                // A name with a few definitions: each one whole, which is what
+                // an agent reading a symbol wanted, up to the cap (1.9).
+                Ok(Some(crate::Read::Choose(rows))) if rows.len() <= READ_WHOLE => {
+                    let mut out = String::new();
+                    let mut left = rows.len();
+                    for row in &rows {
+                        let span = crate::Target::Span {
+                            path: row.path.clone(),
+                            start: row.start_line,
+                            end: row.end_line,
+                        };
+                        let text = match stores.read_in(
+                            row.store.as_ref().map(std::slice::from_ref),
+                            &span,
+                            &crate::filter::Filter::default(),
+                        ) {
+                            Ok(Some(crate::Read::One(span))) => one(&span),
+                            _ => continue,
+                        };
+                        if !out.is_empty() && out.len() + text.len() > READ_CHARS {
+                            out.push_str(&format!(
+                                "\n\nstopped at the {READ_CHARS}-character cap; {left} more definition{} of this name. Ask for Type::name to read one.",
+                                if left == 1 { "" } else { "s" }
+                            ));
+                            break;
+                        }
+                        if !out.is_empty() {
+                            out.push_str("\n\n");
+                        }
+                        out.push_str(&text);
+                        left -= 1;
+                    }
+                    format!("{} definitions of this name, each whole:\n{out}", rows.len())
                 }
                 Ok(Some(crate::Read::Choose(rows))) => {
                     let mut out = format!("{} definitions of this name:\n", rows.len());
                     for row in &rows {
                         out.push_str(&format!(
                             "  {} ({}) {}{}:{}-{}\n",
-                            row.name,
+                            row.qualified,
                             row.kind,
                             label_of(&row.store),
-                            crate::plain(&row.path),
+                            paths.short(&row.path),
                             row.start_line,
                             row.end_line
                         ));
@@ -874,23 +934,22 @@ fn call_tool(
                     out.trim_end().to_string()
                 }
                 Ok(Some(crate::Read::One(span))) => {
-                    let named = match (&span.symbol, &span.symbol_kind) {
-                        (Some(name), Some(kind)) => format!(" · {name} {kind}"),
-                        (Some(name), None) => format!(" · {name}"),
-                        _ => String::new(),
-                    };
-                    format!(
-                        "{}{}:{}-{}{named}{}\n{}",
-                        label_of(&span.store),
-                        crate::plain(&span.path),
-                        span.start_line,
-                        span.end_line,
-                        if span.fresh { "" } else { " · stale" },
-                        span.text
-                    )
+                    let text = one(&span);
+                    if text.len() > READ_CHARS {
+                        let cut: String = text.chars().take(READ_CHARS).collect();
+                        let cut = cut.rsplit_once('\n').map_or(cut.clone(), |(a, _)| a.to_string());
+                        let shown = cut.lines().count().saturating_sub(1) as u32;
+                        format!(
+                            "{cut}\n\nstopped at the {READ_CHARS}-character cap, at line {}; ask for a line range to read on.",
+                            span.start_line + shown.saturating_sub(1)
+                        )
+                    } else {
+                        text
+                    }
                 }
                 Err(e) => return Ok(tool_error(&e.to_string())),
-            }
+            };
+            paths.with_header(body)
         }
         "semlith_pattern" => {
             let Some(query) = args.get("query").and_then(Value::as_str) else {
@@ -1046,6 +1105,21 @@ fn call_tool(
                 .map(|n| n as usize)
                 .unwrap_or(FILE_LIMIT)
                 .max(1);
+            if args.get("tree").and_then(Value::as_bool).unwrap_or(false) {
+                let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(2).clamp(1, 8) as usize;
+                let sort = match crate::tree::Sort::parse(args.get("sort").and_then(Value::as_str).unwrap_or("")) {
+                    Ok(s) => s,
+                    Err(e) => return Ok(tool_error(&e.to_string())),
+                };
+                match crate::tree::render(stores, Some(&only), &filter, depth, sort) {
+                    // Relative to the root the tree sits under, named once.
+                    Ok(text) => match stores.roots().as_slice() {
+                        [one] => format!("root {}\n{text}", crate::plain(&one.to_string_lossy())),
+                        _ => text,
+                    },
+                    Err(e) => return Ok(tool_error(&e.to_string())),
+                }
+            } else {
 
             match stores.paths_in(Some(&only), &filter, limit) {
                 Ok((paths, _)) if paths.is_empty() => {
@@ -1069,6 +1143,7 @@ fn call_tool(
                     out
                 }
                 Err(e) => return Ok(tool_error(&e.to_string())),
+            }
             }
         }
         "semlith_index" => {
@@ -1900,6 +1975,14 @@ fn best_line(text: &str, terms: &[String]) -> String {
     let cut: String = line.chars().take(WIDTH).collect();
     format!("{cut}\u{2026}")
 }
+
+/// The most a read answers with. Larger than the graph tools' cap, because a
+/// whole definition is the point of a read by name: `Semlith::search_preferring`
+/// alone is 21 000 characters, and cutting it is the failure 1.9 fixes.
+const READ_CHARS: usize = 32_000;
+
+/// How many definitions of one name a read by name returns whole.
+const READ_WHOLE: usize = 4;
 
 /// The floor under `max_tokens`.
 ///

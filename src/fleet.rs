@@ -263,6 +263,15 @@ impl Fleet {
         self.members.len()
     }
 
+    /// `(label, store)` for each chosen store that can be read.
+    pub fn chosen_each(&self, only: Option<&[String]>) -> Result<Vec<(&str, &Semlith)>> {
+        Ok(self
+            .chosen(only)?
+            .into_iter()
+            .map(|i| (self.members[i].label.as_str(), &self.members[i].store))
+            .collect())
+    }
+
     /// Every root the open stores index, from the registry.
     pub fn roots(&self) -> Vec<PathBuf> {
         let mut roots: Vec<PathBuf> = self

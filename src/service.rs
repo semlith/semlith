@@ -718,10 +718,18 @@ mod tests {
             "a bound port was not seen as bound"
         );
         drop(held);
-        assert!(
-            !already_answering(port),
-            "a freed port was still seen as bound"
-        );
+        // The negative half against a port this test has just proved free by
+        // binding it itself (#141). Checking the port it had held raced every
+        // other test in the binary: one that bound an ephemeral port in the
+        // gap made "a freed port" answer. A port some other test takes between
+        // our bind and our check is retried, within a bound, never excused.
+        let free = (0..20).any(|_| {
+            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+            let port = probe.local_addr().expect("an address").port();
+            drop(probe);
+            !already_answering(port)
+        });
+        assert!(free, "a freed port was still seen as bound, twenty times over");
     }
 
     /// `remove` on a machine that never had a service is an end state, not a

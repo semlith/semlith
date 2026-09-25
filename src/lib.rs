@@ -56,6 +56,7 @@ pub mod keyscan;
 pub mod service;
 pub mod setup;
 pub mod store;
+pub mod tree;
 pub mod system;
 pub mod upgrade;
 pub mod watch;

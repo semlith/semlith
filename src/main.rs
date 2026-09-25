@@ -338,7 +338,25 @@ enum Command {
     Stats,
 
     /// List the files currently indexed.
-    Files,
+    Files {
+        /// Directories with their file and chunk counts and languages, each
+        /// file with its lines, symbols and first definitions, and what is on
+        /// disk but not indexed, and why.
+        #[arg(long)]
+        tree: bool,
+
+        /// How many directory levels the tree shows.
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+
+        /// name, size, symbols, or recent (newest indexed first).
+        #[arg(long, default_value = "name")]
+        sort: String,
+
+        /// Only paths matching these globs, as `semlith search --path` takes.
+        #[arg(long)]
+        path: Vec<String>,
+    },
 
     /// Remove a file from the store.
     Forget { path: PathBuf },
@@ -1432,6 +1450,16 @@ fn run() -> Result<()> {
                             catch_up,
                             files,
                             chunks,
+                        } if catch_up.remaining > 0 => eprintln!(
+                            "watching {} — {files} files, {chunks} chunks \
+                             (catch-up deferred: {} files queued)",
+                            shown.join(", "),
+                            catch_up.remaining,
+                        ),
+                        Progress::Ready {
+                            catch_up,
+                            files,
+                            chunks,
                         } => eprintln!(
                             "watching {} — {files} files, {chunks} chunks \
                              ({} indexed at startup, {} unchanged)",
@@ -2341,8 +2369,19 @@ fn run() -> Result<()> {
             }
         }
 
-        Command::Files => {
+        Command::Files {
+            tree,
+            depth,
+            sort,
+            path,
+        } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
+            if tree {
+                let filter = Filter::new(&path, &[], &[])?;
+                let sort = semlith::tree::Sort::parse(&sort)?;
+                println!("{}", semlith::tree::render(&fleet, None, &filter, depth.max(1), sort)?);
+                return Ok(());
+            }
             let many = fleet.len() > 1;
             for (label, store) in fleet.each() {
                 if many {

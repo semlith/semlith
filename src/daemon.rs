@@ -454,6 +454,9 @@ pub struct RunState {
     /// snapshot rather than only on the log, so a page opened during one of
     /// those twenty seconds sees it too.
     pub phase: Option<String>,
+    /// The last estimate a poll was given, and when (ms of the run's clock).
+    /// What a stall holds on to, and what a jump is measured against (#143).
+    shown_eta: std::cell::Cell<Option<(u64, u64)>>,
     /// The `done` event as it was sent, with its refused, failed and
     /// skipped-by-reason lists.
     pub summary: Option<serde_json::Value>,
@@ -495,6 +498,7 @@ impl RunState {
             chunks: 0,
             symbols: 0,
             phase: None,
+            shown_eta: std::cell::Cell::new(None),
             summary: None,
             log: VecDeque::new(),
             next_seq: 0,
@@ -598,11 +602,28 @@ impl RunState {
             .unwrap_or((t0, 0, b0));
         let moved = self.bytes.saturating_sub(was);
         let span = now.saturating_sub(at);
+        let shown = self.shown_eta.get();
+        // A run writing its index moves no bytes for twenty seconds, and the
+        // rate over that window says the rest will take minutes. Issue #143:
+        // the card jumped to minutes, then back. While the run says it is in
+        // a phase, or fewer than 1 % of the bytes moved in the window, the
+        // last estimate stands.
+        let stalled = self.phase.is_some() || moved * 100 < self.bytes_total;
+        if stalled && let Some((eta, _)) = shown {
+            return Some(eta);
+        }
         if moved == 0 || span == 0 {
             return None;
         }
         let left = self.bytes_total.saturating_sub(self.bytes);
-        Some((left as u128 * span as u128 / moved as u128) as u64)
+        let mut eta = (left as u128 * span as u128 / moved as u128) as u64;
+        // And never more than double between two polls: a real slowdown shows
+        // over a few polls, a spike does not show at all.
+        if let Some((last, _)) = shown {
+            eta = eta.min(last.saturating_mul(2).max(1_000));
+        }
+        self.shown_eta.set(Some((eta, now)));
+        Some(eta)
     }
 
     /// Chunks per second per lane over the same window as [`Self::rates`].
@@ -3081,7 +3102,8 @@ fn tend(
     // the same walk up again on its own. A store the portal has just made
     // skips it, because the run on its way covers the same roots.
     let expecting = (now() as usize) < store.expecting_run_until.load(Ordering::Relaxed);
-    if !roots.is_empty() && !expecting {
+    let deferred = !roots.is_empty() && !expecting;
+    if deferred {
         let _ = admission.submit(store, roots.clone(), RunKind::CatchUp);
     }
 
@@ -3112,11 +3134,18 @@ fn tend(
                     files,
                     chunks,
                 } => {
-                    let text = format!(
-                        "watching — {files} files, {chunks} chunks \
-                         ({} indexed at startup, {} unchanged)",
-                        catch_up.indexed, catch_up.unchanged
-                    );
+                    // The catch-up is a queued run here, not the watcher's
+                    // own pass, so "0 indexed at startup" would be a claim
+                    // about work that has not happened yet (1.17).
+                    let _ = &catch_up;
+                    let text = if deferred {
+                        format!(
+                            "watching — {files} files, {chunks} chunks \
+                             (catch-up deferred: {files} files queued)"
+                        )
+                    } else {
+                        format!("watching — {files} files, {chunks} chunks")
+                    };
                     report(&format!("{}: {text}", store.name));
                     store.note(text);
                 }
@@ -3418,7 +3447,18 @@ fn perform(
                     let quiet_batch = store.run_kind(run) == Some(RunKind::Batch)
                         && tally.indexed == 0
                         && tally.removed == 0;
-                    store.note(format!("{} indexed from the portal", tally.indexed));
+                    if store.run_kind(run) == Some(RunKind::CatchUp) {
+                        // The other half of the startup line: what the
+                        // deferred catch-up found, now that it has run.
+                        let text = format!(
+                            "catch-up done: {} indexed, {} unchanged, {} removed",
+                            tally.indexed, tally.unchanged, tally.removed
+                        );
+                        eprintln!("semlith: {}: {text}", store.name);
+                        store.note(text);
+                    } else {
+                        store.note(format!("{} indexed from the portal", tally.indexed));
+                    }
                     say(serde_json::json!({
                         "event": "done",
                         // The run's, not this slice's. A run of 35 files over
@@ -4293,6 +4333,36 @@ mod tests {
             None,
             "a paused run has no time left to count down"
         );
+    }
+
+    /// Issue #143: a run that stalls for eight seconds in a phase — writing its
+    /// index — shows no estimate above twice the one before it.
+    #[test]
+    fn a_stalled_phase_holds_the_estimate_and_it_never_more_than_doubles() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        run.bytes_total = 10_000_000;
+        run.first_sample = Some((0, 0, 0));
+        run.samples = VecDeque::from(vec![(0, 0, 0), (10_000, 200, 1_000_000), (15_000, 300, 2_500_000)]);
+        run.bytes = 4_000_000;
+        run.ended = Some(Duration::from_secs(20));
+        let before = run.eta_ms().expect("settled");
+        // Eight seconds writing the index: no bytes move at all.
+        run.phase = Some("writing the index".to_string());
+        for t in 21..=28 {
+            run.samples.push_back((t * 1_000, 300, 4_000_000));
+            run.ended = Some(Duration::from_secs(t));
+            let eta = run.eta_ms().expect("held, not dropped");
+            assert!(eta <= before * 2, "{eta} ms after {before} ms at {t} s");
+        }
+        // Out of the phase, the rate over the window is far lower than
+        // before; the estimate may rise, but by at most 2x a poll.
+        run.phase = None;
+        run.samples.push_back((29_000, 310, 4_200_000));
+        run.bytes = 4_200_000;
+        run.ended = Some(Duration::from_secs(30));
+        let after = run.eta_ms().expect("moving again");
+        assert!(after <= before * 2, "{after} ms after {before} ms");
     }
 
     /// A write with several stores open has no "the" store, and guessing one

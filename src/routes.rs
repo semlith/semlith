@@ -578,6 +578,24 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    // The tree view: the same text `semlith_files {tree: true}` answers with,
+    // so the page and the agent read one answer (portal parity).
+    if request.query("tree").is_some_and(|v| v == "1" || v == "true") {
+        let depth = request
+            .query("depth")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2)
+            .clamp(1, 8);
+        let sort = match crate::tree::Sort::parse(request.query("sort").unwrap_or("")) {
+            Ok(s) => s,
+            Err(e) => return Response::error(400, &e.to_string()),
+        };
+        return with_fleet(state, json!({ "tree": "" }), move |fleet| {
+            let only = (!only.is_empty()).then_some(only);
+            Ok(json!({ "tree": crate::tree::render(fleet, only.as_deref(), &filter, depth, sort)? }))
+        });
+    }
+
     // Before anything is opened. An offset of four billion asks every open
     // store for four billion rows in sorted order and merges them, which is a
     // whole machine's memory for a page nobody is reading. The portal pages in
