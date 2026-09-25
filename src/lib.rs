@@ -1114,6 +1114,13 @@ pub struct IndexReport {
 /// some out, and neither shows up in a content hash.
 const SCAN_RULES: u32 = 2;
 
+/// The version of the graph extraction a store was last swept under. A store
+/// below it has every unchanged file's symbols and edges extracted again on its
+/// next full pass, without re-embedding: 0.30.0 records a Rust method's owner
+/// and a receiver's type, and an unchanged file would otherwise keep the edges
+/// an older release wrote until somebody edited it.
+const GRAPH_RULES: u32 = 2;
+
 /// One file or folder the scan phase says a person could accept.
 #[derive(Debug, Clone, Serialize)]
 pub struct Review {
@@ -2219,6 +2226,10 @@ impl Semlith {
         let rechunk = store::format(&self.db)? < store::CODE_CONTEXT;
         report.rechunked = rechunk;
         let rescan = self.rules_outdated()?;
+        let regraph = store::get_meta(&self.db, "graph_rules")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0)
+            < GRAPH_RULES;
         let mut prehashed = std::mem::take(&mut self.prehashed);
         let run_started = std::time::Instant::now();
 
@@ -2315,6 +2326,14 @@ impl Semlith {
         report.generated = generated.iter().map(|p| p.display().to_string()).collect();
         for (path, rule) in &excluded {
             let folder = path.is_dir();
+            // What `.semlithignore` left out is counted with the run's skips,
+            // so the Index page's card says so beside binary and empty (1.8).
+            if rule == IGNORE_FILE {
+                *report
+                    .skipped_reasons
+                    .entry(IGNORE_FILE.to_string())
+                    .or_insert(0) += 1;
+            }
             store::refuse(
                 &self.db,
                 &path.to_string_lossy(),
@@ -2442,6 +2461,7 @@ impl Semlith {
             // store already holds these bytes, so they are not read again.
             if !rechunk
                 && !rescan
+                && !regraph
                 && let (Some((size, mtime, hash)), Some(meta)) =
                     (prehashed.remove(&path), measured.as_ref())
                 && meta.len() == size
@@ -2591,6 +2611,21 @@ impl Semlith {
                     Some(why),
                 );
                 continue;
+            }
+            // The graph half of the upgrade pass: an unchanged file's symbols
+            // and edges written again under this release's extractor.
+            if same
+                && regraph
+                && !image::is_image(&path)
+                && graph::language_of(&path).is_some()
+                && let Ok(text) = chunk::extract(&path, &bytes)
+                && let Ok(Some(extraction)) = graph::extract(&path, &text)
+                && let Some((file_id, spans)) = store::graph_input(&self.db, &key)?
+            {
+                store::delete_graph(&self.db, file_id)?;
+                let (symbols, edges) = self.write_graph(Some(extraction), file_id, &spans)?;
+                report.symbols += symbols;
+                report.edges += edges;
             }
             if same {
                 // Same bytes, but `git checkout` gave the file a new mtime, and
@@ -3065,6 +3100,9 @@ impl Semlith {
             if rescan {
                 store::set_meta(&self.db, "scan_rules", &SCAN_RULES.to_string())?;
             }
+            if regraph {
+                store::set_meta(&self.db, "graph_rules", &GRAPH_RULES.to_string())?;
+            }
         }
 
         // A batch that changed nothing must not rewrite index.tv. A watcher
@@ -3345,15 +3383,30 @@ impl Semlith {
         // twice — two `new` methods on two types — and the first wins, because
         // an edge out of this file names its source by name and nothing here
         // can tell them apart either.
-        let mut ids: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+        let mut ids: std::collections::HashMap<&str, (i64, bool)> =
+            std::collections::HashMap::new();
         for symbol in &extraction.symbols {
             let chunk_id = spans
                 .iter()
                 .find(|(start, end, _)| symbol.start_line >= *start && symbol.start_line <= *end)
                 .map(|(_, _, id)| *id);
             let id = store::insert_symbol(&self.db, file_id, chunk_id, symbol)?;
-            ids.entry(symbol.name.as_str()).or_insert(id);
+            // A definition outranks the file's module symbol of the same name:
+            // `fn brief` in `brief.rs` is where its calls come from, and giving
+            // them to the module put every caller of it at line 1.
+            let module = symbol.kind == "module";
+            match ids.get(symbol.name.as_str()) {
+                None => {
+                    ids.insert(symbol.name.as_str(), (id, module));
+                }
+                Some((_, true)) if !module => {
+                    ids.insert(symbol.name.as_str(), (id, false));
+                }
+                _ => {}
+            }
         }
+        let ids: std::collections::HashMap<&str, i64> =
+            ids.into_iter().map(|(k, (id, _))| (k, id)).collect();
 
         let mut written = 0;
         for edge in &extraction.edges {

@@ -2048,6 +2048,9 @@ impl Limits {
     }
 }
 
+/// A run waiting for review: its store and the paths it will index.
+type Awaiting = (Arc<Store>, Vec<PathBuf>);
+
 /// What every route is handed.
 pub struct State {
     pub server: Arc<Server>,
@@ -2079,7 +2082,7 @@ pub struct State {
     /// Refusals by class, for the line the daemon logs on shutdown.
     pub refusals: Mutex<BTreeMap<&'static str, u64>>,
     /// Runs scanned and held for a person's review, by run id (2.7).
-    awaiting: Mutex<BTreeMap<u64, (Arc<Store>, Vec<PathBuf>)>>,
+    awaiting: Mutex<BTreeMap<u64, Awaiting>>,
     /// `semlith mcp` processes forwarding here: pid to the unix second it was
     /// last heard from. A proxy has no disconnect to observe — its client may
     /// simply stop asking — so recency is the only honest answer to "how many

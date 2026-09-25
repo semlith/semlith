@@ -2936,6 +2936,38 @@ fn unhex(hex: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// A chunk's first line, last line and id.
+pub type ChunkSpan = (u32, u32, i64);
+
+/// A file's id and its chunks' line spans, for writing its graph again.
+pub fn graph_input(db: &Connection, path: &str) -> Result<Option<(i64, Vec<ChunkSpan>)>> {
+    let Some(file_id) = db
+        .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
+            r.get::<_, i64>(0)
+        })
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut stmt = db.prepare(
+        "SELECT start_line, end_line, id FROM chunks WHERE file_id = ?1 ORDER BY start_line",
+    )?;
+    let spans = stmt
+        .query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some((file_id, spans)))
+}
+
+/// Remove one file's symbols, and with them the edges that leave them.
+pub fn delete_graph(db: &Connection, file_id: i64) -> Result<()> {
+    db.execute(
+        "DELETE FROM edges WHERE src IN (SELECT id FROM symbols WHERE file_id = ?1)",
+        params![file_id],
+    )?;
+    db.execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])?;
+    Ok(())
+}
+
 /// Bring an unchanged file's `bytes` and `indexed_at` up to what is on disk,
 /// when the file's size or mtime has moved past the row.
 ///

@@ -1048,11 +1048,11 @@ fn call_tool(
                         const FEW: usize = 5;
                         let (tail_langs, tail_files) = coverage
                             .iter()
-                            .filter(|r| r.definitions > 0 && (r.files as usize) < FEW)
-                            .fold((0usize, 0usize), |(l, f), r| (l + 1, f + r.files as usize));
+                            .filter(|r| r.definitions > 0 && r.files < FEW)
+                            .fold((0usize, 0usize), |(l, f), r| (l + 1, f + r.files));
                         for row in coverage
                             .iter()
-                            .filter(|r| r.definitions > 0 && r.files as usize >= FEW)
+                            .filter(|r| r.definitions > 0 && r.files >= FEW)
                         {
                             body.push_str(&format!(
                                 "\n  {}: {} files ({} unparsed), {} definitions, call edges \
