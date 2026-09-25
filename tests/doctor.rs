@@ -745,3 +745,48 @@ fn no_repair_note_carries_a_markdown_backtick() {
         offenders.join("\n  ")
     );
 }
+
+/// 4.1: `doctor --fix`, run in a directory whose project entry disables
+/// semlith, removes only that entry and leaves the rest of `~/.claude.json`
+/// byte-identical; `doctor` reports a missing `alwaysLoad`.
+#[test]
+fn doctor_fix_clears_only_the_disable_for_this_directory() {
+    let machine = Machine::new();
+    machine.install("claude");
+    let project = machine.home.join("work").join("repo");
+    let other = machine.home.join("work").join("other");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let config = machine.home.join(".claude.json");
+    let before = serde_json::json!({
+        "mcpServers": { "semlith": { "command": "semlith", "args": ["mcp"] } },
+        "projects": {
+            project.to_str().unwrap(): { "disabledMcpjsonServers": ["plugin:figma:figma", "semlith"], "allowedTools": [] },
+            other.to_str().unwrap(): { "disabledMcpServers": ["semlith"] },
+        },
+        "tipsHistory": { "a": 1 }
+    });
+    std::fs::write(&config, serde_json::to_string_pretty(&before).unwrap() + "\n").unwrap();
+
+    let report = machine.doctor_in(&project, &["--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    let claude = json["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "Claude Code")
+        .unwrap()
+        .clone();
+    assert_eq!(claude["always_load"], false, "{claude}");
+
+    let fixed = machine.doctor_in(&project, &["--fix"]);
+    let _ = fixed;
+    let mut expected = before.clone();
+    expected["projects"][project.to_str().unwrap()]["disabledMcpjsonServers"] =
+        serde_json::json!(["plugin:figma:figma"]);
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        serde_json::to_string_pretty(&expected).unwrap() + "\n",
+        "doctor --fix changed more than the one entry"
+    );
+}

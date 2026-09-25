@@ -32,6 +32,8 @@ ambiguity so the next person can see the choice was made rather than assumed.
 """
 
 import json
+import random
+import string
 import os
 import re
 import time
@@ -5072,3 +5074,222 @@ def _(d):
             fail("at %dpx the Agents rows' cards start at %r and %r" % (width, edges[0], edges[1]))
     d.set_viewport(1280, 900)
 
+
+
+# ---------------------------------------------------------------- 0.30.0 (10.x)
+
+def live_aws():
+    """An AWS access key id built now: live-looking, and in no source file."""
+    alphabet = string.ascii_uppercase + string.digits
+    return "AKIA" + "".join(random.choice(alphabet) for _ in range(16))
+
+
+def live_github():
+    alphabet = string.ascii_letters + string.digits
+    return "ghp_" + "".join(random.choice(alphabet) for _ in range(36))
+
+
+def review_tree(d, name):
+    """Two files the scan refuses and a person may review, one `.env` it
+    refuses and never offers, and one ordinary file."""
+    root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
+    os.makedirs(root)
+    with open(os.path.join(root, "alpha.txt"), "w") as f:
+        f.write("# settings\nkey = \"%s\"\n" % live_aws())
+    with open(os.path.join(root, "beta.txt"), "w") as f:
+        f.write("# settings\nkey = \"%s\"\n" % live_aws())
+    with open(os.path.join(root, ".env"), "w") as f:
+        f.write("TOKEN=%s\n" % live_github())
+    with open(os.path.join(root, "lib.rs"), "w") as f:
+        f.write("pub fn callee() -> u32 { 1 }\n\npub fn caller() -> u32 {\n    callee() + 1\n}\n")
+    return root
+
+
+def reviewing(d, root):
+    """Start a run the way the portal's Start indexing does, and wait for it to
+    stop at review. Returns (run id, store)."""
+    answer = d.api("/api/index", method="POST", body={"path": [root], "store": "each", "review": True})
+    runs = answer.get("runs") or []
+    if not runs or "error" in runs[0]:
+        fail("indexing %s was refused: %s" % (root, json.dumps(answer)[:300]))
+    run_id, store = runs[0]["run"], runs[0]["store"]
+    deadline = time.time() + RUN_APPEARS
+    while time.time() < deadline:
+        run = run_by_id(d, run_id)
+        if run and run.get("status") == "review":
+            return run_id, store, run
+        if run and run.get("status") in TERMINAL:
+            fail("the run went to %s without stopping for review" % run.get("status"))
+        time.sleep(0.3)
+    fail("the run never stopped for review")
+
+
+@finding("10.1", "a run with reviewable files stops at review, lists the .env with no action, and indexes an accepted file redacted")
+def _(d):
+    root = review_tree(d, "review")
+    run_id, store, run = reviewing(d, root)
+    plan = run.get("plan") or {}
+    want("files needing review", len(plan.get("review") or []), 2)
+    if not any(p.endswith(".env") for p in plan.get("credential") or []):
+        fail("the .env is not listed as a credential file: %s" % json.dumps(plan)[:300])
+    d.open_view("index", fresh=True)
+    card = still_card(store)
+    d.wait_for("!!(%s) && /Review 2 files before indexing/.test((%s).innerText)" % (card, card),
+               timeout=20, what="the card to ask for review")
+    text = d.eval("(%s).innerText" % card)
+    if ".env" not in text or "never offered" not in text:
+        fail("the card does not list the .env as never offered: %r" % text[:400])
+    # Accept alpha with redaction, through the card's own confirm.
+    d.eval(
+        "(() => { const c = %s; const row = [...c.querySelectorAll('.review-row')]"
+        ".find(r => r.innerText.includes('alpha.txt'));"
+        " [...row.querySelectorAll('button')].find(b => b.textContent === 'Accept with redaction').click(); })()"
+        % card
+    )
+    d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the accept confirm")
+    d.eval("document.querySelector('dialog.modal #reviewed-inline').click()")
+    d.eval("[...document.querySelectorAll('dialog.modal button')].find(b => b.textContent === 'Accept this file').click()")
+    d.wait_for("!document.querySelector('dialog.modal[open]')", timeout=30, what="the confirm to close")
+    start = d.eval("[...(%s).querySelectorAll('.review-box button')].find(b => /^Start indexing/.test(b.textContent))" % card)
+    if start is None:
+        fail("the review step has no Start indexing button")
+    d.eval("[...(%s).querySelectorAll('.review-box button')].find(b => /^Start indexing/.test(b.textContent)).click()" % card)
+    wait_for_run(d, store, run_id=run_id)
+    refused = d.api("/api/refused")
+    rows = [r for s in refused["stores"] if s["store"] == store for r in s["rows"]]
+    names = {os.path.basename(r["path"]): r for r in rows}
+    if "beta.txt" not in names or names["beta.txt"]["class"] != "content":
+        fail("the kept file is not on the list: %s" % json.dumps(rows)[:400])
+    if "alpha.txt" in names and names["alpha.txt"]["class"] != "dummy":
+        fail("the accepted file is still refused: %s" % json.dumps(names["alpha.txt"]))
+    read = d.api("/api/read?target=%s" % urllib.parse.quote(os.path.join(os.path.realpath(root), "alpha.txt") + ":1-2"))
+    body = json.dumps(read)
+    if "REDACTED:aws" not in body:
+        fail("the accepted file is not indexed redacted: %s" % body[:300])
+
+
+@finding("10.2", "Scan only shows the plan and starts nothing")
+def _(d):
+    root = review_tree(d, "scanonly")
+    before = len(d.api("/api/index/runs")["runs"])
+    answer = d.api("/api/index", method="POST", body={"path": [root], "store": "each", "scan_only": True})
+    plan = (answer.get("runs") or [{}])[0].get("plan")
+    if not plan:
+        fail("scan only answered no plan: %s" % json.dumps(answer)[:300])
+    want("files to review in the plan", len(plan.get("review") or []), 2)
+    if plan.get("seconds", 99) > 5:
+        fail("the scan took %.2f s over four files" % plan["seconds"])
+    if len(d.api("/api/index/runs")["runs"]) != before:
+        fail("scan only started a run")
+    d.open_view("index", fresh=True)
+    if not d.eval("[...document.querySelectorAll('button')].some(b => b.textContent === 'Scan only')"):
+        fail("the Index page has no Scan only button")
+
+
+@finding("10.3", "Impact's Where column shows the call site, not the definition")
+def _(d):
+    root = review_tree(d, "impact")
+    store = indexed_fixture(d, root)
+    answer = d.api("/api/impact?name=callee&store=%s" % urllib.parse.quote(store))
+    rows = (answer.get("impact") or {}).get("reached") or []
+    if not rows or not rows[0].get("at"):
+        fail("impact carries no call-site line: %s" % json.dumps(answer)[:300])
+    d.open_view("impact")
+    d.eval(
+        "(() => { const box = document.querySelector('.impact-band input[type=search]');"
+        " box.value = 'callee'; box.dispatchEvent(new Event('input', {bubbles: true}));"
+        " [...document.querySelectorAll('.impact-band button')].find(b => b.textContent.trim() === 'Reach').click(); })()"
+    )
+    d.wait_for("!!document.querySelector('.impact-row .where')", timeout=30, what="an Impact row")
+    where = texts_of(d, ".impact-block:not(.impact-files) .impact-row .where")
+    if not any(re.search(r"lib\.rs:%d$" % rows[0]["at"], w) for w in where):
+        fail("the Where column reads %r, not the call at line %d" % (where, rows[0]["at"]))
+
+
+@finding("10.4", "Graph's symbol box takes several names and shows a definitions table")
+def _(d):
+    root = review_tree(d, "graphnames")
+    indexed_fixture(d, root)
+    d.open_view("graph")
+    d.eval(
+        "(() => { const box = document.querySelector('.graph-scope input');"
+        " box.value = 'callee, caller'; box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()"
+    )
+    d.wait_for("document.querySelectorAll('.graph-defs .defs-row').length >= 2", timeout=20,
+               what="the definitions table")
+    rows = texts_of(d, ".graph-defs .defs-row")
+    if not any("callee" in r for r in rows) or not any("caller" in r for r in rows):
+        fail("the table does not list both names: %r" % rows)
+
+
+@finding("10.5", "the Files page's Tree tab draws the tree view")
+def _(d):
+    d.open_view("files", fresh=True)
+    d.eval("[...document.querySelectorAll('.tabs .tab')].find(b => b.textContent === 'Tree').click()")
+    d.wait_for("/files · \\d+ chunks/.test((document.querySelector('.tree-view') || {}).textContent || '')",
+               timeout=30, what="the tree view")
+
+
+@finding("10.6", "the Not indexed tab shows classes, confidence with its signals, both accept choices, revoke, and no bulk control")
+def _(d):
+    root = review_tree(d, "notindexed")
+    store = indexed_fixture(d, root)
+    d.open_view("files", fresh=True)
+    d.eval("[...document.querySelectorAll('.tabs .tab')].find(b => b.textContent === 'Not indexed').click()")
+    d.wait_for("!!document.querySelector('.not-indexed .w-refused')", timeout=30, what="the Not indexed table")
+    text = d.eval("document.querySelector('.not-indexed').innerText")
+    for wanted in ["secret-shaped value", "credential file", "never acceptable", "Review…"]:
+        if wanted not in text:
+            fail("the Not indexed tab does not say %r: %r" % (wanted, text[:500]))
+    if d.eval("!!document.querySelector('.not-indexed input[type=checkbox], .not-indexed .bulk')"):
+        fail("the Not indexed tab has a checkbox or a bulk bar")
+    if not re.search(r"\d+ %", text):
+        fail("no confidence shown: %r" % text[:400])
+    titled = d.eval("[...document.querySelectorAll('.not-indexed td span[title]')].some(s => /format|randomness|checksum|location/.test(s.title))")
+    if not titled:
+        fail("the confidence carries no signals")
+    d.eval("[...document.querySelectorAll('.not-indexed button')].find(b => b.textContent === 'Review…').click()")
+    d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the review confirm")
+    choices = d.eval("[...document.querySelectorAll('dialog.modal input[name=accept-mode]')].map(i => i.value)")
+    want("the accept choices", sorted(choices), ["as-is", "redacted"])
+    d.eval("document.querySelector('dialog.modal #reviewed-file').click()")
+    d.eval("[...document.querySelectorAll('dialog.modal button')].find(b => b.textContent === 'Accept this file').click()")
+    d.wait_for("!document.querySelector('dialog.modal[open]')", timeout=30, what="the confirm to close")
+    d.wait_for("[...document.querySelectorAll('.not-indexed button')].some(b => b.textContent === 'Revoke')",
+               timeout=30, what="the accepted row's Revoke")
+    status, _ = d.api_result("/api/refused/accept", method="POST",
+                             body={"paths": [root], "mode": "as-is", "reviewed": True, "store": store})
+    want("a list sent to the accept route", status, 400)
+
+
+@finding("10.7", "a finished run card links to the files it did not index")
+def _(d):
+    root = review_tree(d, "cardlink")
+    store = indexed_fixture(d, root)
+    d.open_view("index", fresh=True)
+    card = still_card(store)
+    d.wait_for("!!(%s)" % card, what="the finished card")
+    link = d.eval("(() => { const a = (%s).querySelector('.run-plan a'); return a ? a.textContent : null; })()" % card)
+    if not link or "not indexed" not in link or "need review" not in link:
+        fail("the finished card has no not-indexed link: %r" % link)
+
+
+@finding("10.8", "the sidebar counts files waiting for review")
+def _(d):
+    root = review_tree(d, "badge")
+    indexed_fixture(d, root)
+    d.open_view("stores", fresh=True)
+    d.wait_for("!!document.querySelector('.sidebar .nav-item[data-view=files] .nav-count')", timeout=20,
+               what="the Files item's count")
+
+
+@finding("10.9", "the Agents page names the installed hook mode")
+def _(d):
+    d.open_view("agents", fresh=True)
+    time.sleep(2)
+    body = view_text(d)
+    if "hook" in body and not re.search(r"hook \w+ \((soft|gate|hard)\)", body):
+        # A machine with no hook installed shows no mode, and that is right.
+        clients = d.api("/api/agents").get("clients") or []
+        if any(c.get("hook_mode") for c in clients):
+            fail("a hook mode is installed and the Agents page does not name it")
