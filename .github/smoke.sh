@@ -671,7 +671,23 @@ c_upgrade_airgap() {
   return 0
 }
 
+# 0.30.0: setup upgrades a Claude Code entry in place with alwaysLoad, and
+# writes the hook matching Bash|Read|Grep|Glob with its PostToolUse entry —
+# into the redirected HOME, never the real one.
+c_setup_always_load() {
+  mkdir -p "$HOME/.claude"
+  printf '{"mcpServers":{"semlith":{"command":"semlith","args":["mcp"]}}}' > "$HOME/.claude.json"
+  semlith setup --yes --airgap --no-service > /dev/null 2>&1 || { echo "setup failed"; return 1; }
+  [ "$(jq -r '.mcpServers.semlith.alwaysLoad' "$HOME/.claude.json")" = "true" ] ||
+    { echo "no alwaysLoad:"; cat "$HOME/.claude.json"; return 1; }
+  jq -e '.hooks.PreToolUse[] | select(.matcher == "Bash|Read|Grep|Glob")' "$HOME/.claude/settings.json" > /dev/null ||
+    { echo "no Bash-aware hook:"; cat "$HOME/.claude/settings.json"; return 1; }
+  jq -e '.hooks.PostToolUse[] | select(.matcher == "mcp__.*semlith.*")' "$HOME/.claude/settings.json" > /dev/null ||
+    { echo "no PostToolUse entry:"; cat "$HOME/.claude/settings.json"; return 1; }
+}
+
 check cli/setup/idempotent     "setup re-runs cleanly"              c_setup_idempotent
+check cli/setup/always-load    "setup writes alwaysLoad and both hooks" c_setup_always_load
 check cli/upgrade/check        "--check exits 0 or 10"              c_upgrade_check
 check cli/upgrade/airgap       "--airgap refuses the network"       c_upgrade_airgap
 
