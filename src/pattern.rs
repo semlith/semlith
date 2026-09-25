@@ -165,6 +165,80 @@ pub fn run(
     })
 }
 
+/// Every indexed line matching `source`, as `grep -E` would find it.
+///
+/// The sweep an agent reached for grep to make: every marker comment, every struct
+/// literal, every use of a string. Answered from the store's text, the boundary
+/// [`run`] reads through, so a refused file stays unread. Each line carries
+/// the definition it sits in, which is the next thing a grep user runs `awk`
+/// to find. A query that is not a valid regular expression is taken as
+/// literal text, because `Row {` is what someone typing a literal means.
+///
+/// `files` counts files searched and `truncated` means [`MAX_MATCHES`] cut the
+/// listing, as for a pattern; `offset` pages through it the same way.
+pub fn grep(
+    db: &rusqlite::Connection,
+    source: &str,
+    filter: &Filter,
+    offset: usize,
+) -> Result<Matches> {
+    let regex = regex::Regex::new(source)
+        .or_else(|_| regex::Regex::new(&regex::escape(source)))
+        .map_err(|e| anyhow::anyhow!("that query cannot be searched for: {e}"))?;
+    let files = store::file_rows(db, filter.groups(), store::FileSort::Path, false, i64::MAX)?;
+    let mut out = Vec::new();
+    let mut searched = 0usize;
+    let mut truncated = false;
+    let mut skipped = 0usize;
+    'files: for file in &files {
+        let Some(text) = file_text(db, &file.path)? else {
+            continue;
+        };
+        searched += 1;
+        let mut symbols = None;
+        for (i, line) in text.lines().enumerate() {
+            if !regex.is_match(line) {
+                continue;
+            }
+            if out.len() >= MAX_MATCHES {
+                truncated = true;
+                break 'files;
+            }
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            // Read once per file with a match, not per file searched.
+            if symbols.is_none() {
+                symbols = Some(
+                    store::symbols_in_files(db, std::slice::from_ref(&file.path))?
+                        .remove(&file.path)
+                        .unwrap_or_default(),
+                );
+            }
+            let defs = symbols.as_deref().unwrap_or_default();
+            let at = i as u32 + 1;
+            out.push(Match {
+                path: file.path.clone(),
+                capture: crate::enclosing_definition(defs, at, at)
+                    .map(|(_, name, _)| name)
+                    .unwrap_or_default(),
+                start_line: at,
+                end_line: at,
+                text: first_line(line),
+                store: None,
+            });
+        }
+    }
+    Ok(Matches {
+        language: String::new(),
+        matches: out,
+        files: searched,
+        truncated,
+        skipped,
+    })
+}
+
 /// One file's text, stitched from the chunks the store holds.
 ///
 /// Chunks overlap by two lines, so they are joined by line number rather than
@@ -176,31 +250,24 @@ fn file_text(db: &rusqlite::Connection, path: &str) -> Result<Option<String>> {
     if chunks.is_empty() {
         return Ok(None);
     }
-    let mut lines: Vec<(u32, String)> = Vec::new();
+    // Keyed by line number: a scan of the lines so far for each new one was
+    // quadratic in the file, which a grep over every file in the store pays.
+    let mut lines: std::collections::BTreeMap<u32, String> = Default::default();
     for chunk in &chunks {
         for (offset, line) in chunk.text.lines().enumerate() {
-            let number = chunk.start_line + offset as u32;
-            if lines.iter().any(|(n, _)| *n == number) {
-                continue;
-            }
-            lines.push((number, line.to_string()));
+            lines
+                .entry(chunk.start_line + offset as u32)
+                .or_insert_with(|| line.to_string());
         }
     }
-    lines.sort_by_key(|(number, _)| *number);
 
     // The stitched text has to start at line 1 for the parser's row numbers to
     // mean what they say. A store that never held the head of the file cannot
     // be parsed into line numbers a reader can use.
-    if lines.first().map(|(n, _)| *n) != Some(1) {
+    if lines.keys().next() != Some(&1) {
         return Ok(None);
     }
-    Ok(Some(
-        lines
-            .into_iter()
-            .map(|(_, line)| line)
-            .collect::<Vec<_>>()
-            .join("\n"),
-    ))
+    Ok(Some(lines.into_values().collect::<Vec<_>>().join("\n")))
 }
 
 /// The first line of a captured node, trimmed.
@@ -219,6 +286,34 @@ fn first_line(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grep answers every matching line with the definition around it, and
+    /// a query that is not a regular expression is searched as literal text.
+    #[test]
+    fn grep_finds_every_line_and_names_its_definition() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(store::SCHEMA).unwrap();
+        db.execute_batch(
+            "INSERT INTO files (id, path, hash, bytes, indexed_at) VALUES (1, '/r/a.rs', 'h', 1, 0);
+             INSERT INTO chunks (id, file_id, ord, start_line, end_line, text)
+               VALUES (1, 1, 0, 1, 4, 'fn one() {\n    // NOTE first\n}\nlet h = Row {');
+             INSERT INTO chunks (id, file_id, ord, start_line, end_line, text)
+               VALUES (2, 1, 1, 3, 6, '}\nlet h = Row {\nfn two() { // HACK second }\n');
+             INSERT INTO symbols (file_id, name, qualified, kind, start_line, end_line)
+               VALUES (1, 'one', 'one', 'function', 1, 3), (1, 'two', 'two', 'function', 5, 5);",
+        )
+        .unwrap();
+        let found = grep(&db, r"\b(NOTE|HACK)\b", &Filter::default(), 0).unwrap();
+        let rows: Vec<_> = found
+            .matches
+            .iter()
+            .map(|m| (m.start_line, m.capture.as_str()))
+            .collect();
+        assert_eq!(rows, [(2, "one"), (5, "two")]);
+        let literal = grep(&db, "Row {", &Filter::default(), 0).unwrap();
+        assert_eq!(literal.matches.len(), 1, "{:?}", literal.matches);
+        assert_eq!(literal.matches[0].start_line, 4);
+    }
 
     /// A pattern that does not compile is the caller's mistake and has to be
     /// reported as one. Handing back "no matches" would have the caller

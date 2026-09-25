@@ -249,6 +249,16 @@ enum Command {
         #[arg(long, default_value = "any")]
         prefer: String,
 
+        /// Every indexed line matching the query as a regular expression
+        /// (`grep -E`; literal text when it is not one), each with the
+        /// definition it sits in.
+        #[arg(long)]
+        exact: bool,
+
+        /// With --exact: skip this many matching lines, to page past the cap.
+        #[arg(long, default_value_t = 0, requires = "exact")]
+        offset: usize,
+
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
@@ -1540,11 +1550,30 @@ fn run() -> Result<()> {
             ext,
             lang,
             prefer,
+            exact,
+            offset,
             json,
         } => {
             // Built before any store is opened, so an unknown language name
             // fails immediately rather than after a model load.
             let filter = Filter::new(&path, &ext, &lang)?;
+            if exact {
+                // No model: a grep reads the stored text and nothing else.
+                let fleet = read_fleet(&cli.store, &cwd, false)?;
+                let found = fleet.grep_in(None, &query, &filter, offset)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&found)?);
+                } else {
+                    let paths = fleet.shortener();
+                    println!(
+                        "{}",
+                        paths.with_header(semlith::mcp::render_grep(&found, offset, &|p| {
+                            paths.short(p)
+                        }))
+                    );
+                }
+                return Ok(());
+            }
             // Parsed before the model loads, like the filter, so a typo in the
             // argument costs nothing.
             let prefer = semlith::Prefer::parse(&prefer)?;

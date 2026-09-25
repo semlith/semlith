@@ -564,11 +564,6 @@ impl Fleet {
     }
 
     /// One structural pattern, run over every chosen store.
-    ///
-    /// The matches are labelled and concatenated in store order; the file and
-    /// match counts are summed, and `truncated` is true when any store hit its
-    /// own budget, because a partial answer from one store is a partial
-    /// answer.
     pub fn pattern_in(
         &self,
         only: Option<&[String]>,
@@ -577,10 +572,42 @@ impl Fleet {
         filter: &crate::filter::Filter,
         offset: usize,
     ) -> Result<crate::pattern::Matches> {
+        let mut out = self.matches_in(only, offset, |db, left| {
+            crate::pattern::run(db, language, source, filter, left)
+        })?;
+        out.language = language.trim().to_ascii_lowercase();
+        Ok(out)
+    }
+
+    /// Every indexed line matching `source`, over every chosen store.
+    pub fn grep_in(
+        &self,
+        only: Option<&[String]>,
+        source: &str,
+        filter: &crate::filter::Filter,
+        offset: usize,
+    ) -> Result<crate::pattern::Matches> {
+        self.matches_in(only, offset, |db, left| {
+            crate::pattern::grep(db, source, filter, left)
+        })
+    }
+
+    /// A per-store listing run over every chosen store.
+    ///
+    /// The matches are labelled and concatenated in store order; the file and
+    /// match counts are summed, and `truncated` is true when any store hit its
+    /// own budget, because a partial answer from one store is a partial
+    /// answer.
+    fn matches_in(
+        &self,
+        only: Option<&[String]>,
+        offset: usize,
+        run: impl Fn(&rusqlite::Connection, usize) -> Result<crate::pattern::Matches>,
+    ) -> Result<crate::pattern::Matches> {
         let chosen = self.chosen(only)?;
         let label_rows = self.members.len() > 1;
         let mut out = crate::pattern::Matches {
-            language: language.trim().to_ascii_lowercase(),
+            language: String::new(),
             matches: Vec::new(),
             files: 0,
             truncated: false,
@@ -591,8 +618,7 @@ impl Fleet {
         // second is asked to skip.
         let mut left = offset;
         for i in chosen {
-            let part =
-                crate::pattern::run(self.members[i].store.db(), language, source, filter, left)?;
+            let part = run(self.members[i].store.db(), left)?;
             left = left.saturating_sub(part.skipped);
             out.skipped += part.skipped;
             out.files += part.files;

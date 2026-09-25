@@ -899,6 +899,36 @@ fn a_pattern_finds_the_shape_and_says_which_files_it_parsed() {
     assert!(nolang.contains("no grammar for"), "{nolang}");
 }
 
+/// `search --exact` is the grep an agent reached for: every matching line in
+/// every indexed file, prose included, each with the definition it sits in,
+/// and a query that is not a regular expression is searched as literal text.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_exact_search_lists_every_line_with_its_definition() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    write(
+        corpus.path(),
+        "one.rs",
+        "fn caller() {\n    helper(); // TODO later\n}\nfn helper() {}\n",
+    );
+    write(corpus.path(), "notes.md", "helper() { is called here too\n");
+    index(store.path(), corpus.path());
+
+    let out = cli(store.path(), &["search", "--exact", r"\bhelper\("]);
+    assert!(out.contains("3 matching lines"), "{out}");
+    assert!(out.contains("2 caller | helper();"), "{out}");
+    assert!(out.contains("notes.md"), "{out}");
+
+    let literal = cli(store.path(), &["search", "--exact", "helper() { is"]);
+    assert!(literal.contains("1 matching lines"), "{literal}");
+
+    let raw = cli(store.path(), &["search", "--exact", "TODO", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("--json is json");
+    assert_eq!(parsed["matches"][0]["start_line"], 2, "{raw}");
+    assert_eq!(parsed["matches"][0]["capture"], "caller", "{raw}");
+}
+
 /// Trace is the chain plus its evidence, and the two marks are not
 /// interchangeable: a hop the source settled is a fact, a hop matched by bare
 /// name is a candidate somebody has to check.

@@ -171,7 +171,8 @@ pub const INSTRUCTIONS_LIMIT: usize = 600;
 /// forty registered roots should not cost every session a page of paths.
 pub fn instructions(roots: &[std::path::PathBuf]) -> String {
     const ROUTES: &str = " For a code question there, use semlith before grep, rg, find or cat: \
-         semlith_brief to understand how something works, semlith_search to locate, \
+         semlith_brief to understand how something works, semlith_search to locate (exact: true \
+         for every line matching a string or regex), \
          semlith_impact for what breaks if a symbol changes, semlith_trace for how A reaches B, \
          semlith_read for a span or a whole definition, semlith_files with tree: true for a \
          directory. Paths in answers are relative to the root named above them.";
@@ -517,7 +518,7 @@ fn tool_defs(open: &str) -> Value {
     json!([
         {
             "name": "semlith_search",
-            "description": "Where is X: ranked spans with file:line and their definition. format excerpt adds text.",
+            "description": "Where is X: ranked spans with file:line and definition. exact: true lists every matching line, as grep -E.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -529,6 +530,7 @@ fn tool_defs(open: &str) -> Value {
                     "ext": { "type": "array" },
                     "lang": { "type": "array", "description": "See semlith_languages." },
                     "prefer": { "type": "string", "enum": ["code", "docs", "any"], "description": "Default any." },
+                    "exact": { "type": "boolean" },
                     "store": { "type": "array", "description": store_arg }
                 },
                 "required": ["query"]
@@ -537,7 +539,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_brief",
-            "description": "How does X work: spans, the best code span's text and one-hop callers/callees, in one call.",
+            "description": "How does X work: spans, the best code span's text and one-hop callers/callees.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -648,7 +650,7 @@ fn tool_defs(open: &str) -> Value {
         },
         {
             "name": "semlith_symbol",
-            "description": "Where is X defined, and what touches it: definition, callers, callees. names: up to 20 at once.",
+            "description": "Where is X defined, and what touches it: definition, callers, callees.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -789,6 +791,15 @@ fn call_tool(
 
             if selected == 0 {
                 crate::fleet::FILTER_SELECTED_NOTHING.to_string()
+            } else if args.get("exact").and_then(Value::as_bool) == Some(true) {
+                let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                match stores.grep_in(Some(&only), query, &filter, offset) {
+                    Ok(found) => {
+                        let paths = stores.shortener();
+                        paths.with_header(render_grep(&found, offset, &|p| paths.short(p)))
+                    }
+                    Err(e) => return Ok(tool_error(&e.to_string())),
+                }
             } else {
                 // Locate by default from 0.15.0. `format: "excerpt"` is the
                 // opt-back, and is what the CLI still does.
@@ -1760,6 +1771,45 @@ fn empty_graph(stores: &Fleet, name: &str) -> String {
              and C carry symbols; semlith_search still finds text in everything else."
         )
     }
+}
+
+/// An exact search: a count line, then each file once with its matching lines
+/// under it as `line definition | text`.
+///
+/// The count comes first because the question a grep answers is often "is
+/// that all of them", and the file header is written once rather than on every
+/// row, which is most of what a grep's output repeats.
+pub fn render_grep(
+    found: &crate::pattern::Matches,
+    offset: usize,
+    shorten: &dyn Fn(&str) -> String,
+) -> String {
+    let mut out = format!(
+        "{} matching lines in {} files searched",
+        found.matches.len(),
+        found.files
+    );
+    let mut last = None;
+    for m in &found.matches {
+        let file = (&m.store, &m.path);
+        if last != Some(file) {
+            out.push_str(&format!("\n{}{}", label_of(&m.store), shorten(&m.path)));
+            last = Some(file);
+        }
+        let def = if m.capture.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", m.capture)
+        };
+        out.push_str(&format!("\n  {}{def} | {}", m.start_line, m.text));
+    }
+    if found.truncated {
+        out.push_str(&format!(
+            "\ntruncated — call again with offset: {} for the rest",
+            offset + found.matches.len()
+        ));
+    }
+    out
 }
 
 fn label_of(store: &Option<String>) -> String {

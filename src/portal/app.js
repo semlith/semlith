@@ -5387,7 +5387,7 @@ async function searchView() {
    * person retype it somewhere else to see the other shape of the answer is
    * how two pages end up disagreeing about what the store says. */
   let view = "results";
-  const viewPills = ["results", "brief"].map((name) =>
+  const viewPills = ["results", "brief", "exact"].map((name) =>
     el("button", {
       class: "seg",
       type: "button",
@@ -5517,6 +5517,7 @@ async function searchView() {
       twoStage.classList.add("one-stage");
       return runBrief(query);
     }
+    if (view === "exact") return runExact(query);
 
     const mine = ++generation;
     const params = new URLSearchParams({ query, k: String(k), prefer });
@@ -5725,6 +5726,106 @@ async function searchView() {
    * found a span, and that an edge came from the graph -- are the tool's own,
    * because a page that decided for itself which list found something would be
    * a second classifier disagreeing with the one that ranked the answer. */
+  /* `semlith_search {exact: true}`: every indexed line matching the query, as
+   * grep -E finds it, grouped by file, each row naming the definition it sits
+   * in. Opening a row reads that definition whole, which is what a grep user
+   * opens the file for. */
+  async function runExact(query) {
+    const mine = ++generation;
+    const params = new URLSearchParams({ query, exact: "1" });
+    for (const store of picker.stores()) params.append("store", store);
+    const lang = langField.value.trim();
+    const path = pathField.value.trim();
+    if (lang) params.append("lang", lang);
+    if (path) params.append("path", path);
+    shapeHint.hidden = true;
+    meta.textContent = "searching…";
+    let data;
+    try {
+      data = await api(`/api/search?${params}`);
+    } catch (e) {
+      if (mine !== generation) return;
+      fill(results, error(e.message));
+      showBody(null, "");
+      fill(footer);
+      meta.textContent = "";
+      return;
+    }
+    if (mine !== generation) return;
+    const matches = data.matches || [];
+    meta.textContent = `${matches.length} line${matches.length === 1 ? "" : "s"} · ${n(data.files || 0)} files searched`;
+    if (!matches.length) {
+      showBody(null, "");
+      fill(footer);
+      fill(results, empty("No indexed line matches that. A query that is not a valid regular expression is searched as literal text."));
+      return;
+    }
+    const groups = [];
+    for (const m of matches) {
+      const found = groups.find((g) => g.path === m.path && g.store === m.store);
+      if (found) found.rows.push(m);
+      else groups.push({ path: m.path, store: m.store, rows: [m] });
+    }
+    fill(
+      results,
+      groups.map((group) =>
+        el(
+          "div",
+          { class: "locate-group" },
+          el(
+            "div",
+            { class: "locate-file" },
+            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
+            group.store ? el("span", { class: "from", text: group.store }) : null,
+            el("span", { class: "spacer" }),
+            el("span", { class: "span-summary", text: `${group.rows.length} line${group.rows.length === 1 ? "" : "s"}` }),
+          ),
+          group.rows.map((m) => {
+            const hit = {
+              path: m.path,
+              store: m.store,
+              start_line: m.start_line,
+              end_line: m.end_line,
+              text: m.text,
+              symbol: m.capture || null,
+            };
+            const row = el(
+              "button",
+              {
+                class: "locate-row",
+                type: "button",
+                "aria-pressed": "false",
+                onclick: () => {
+                  for (const other of results.querySelectorAll(".locate-row")) {
+                    other.setAttribute("aria-pressed", "false");
+                  }
+                  row.setAttribute("aria-pressed", "true");
+                  showBody(hit, query);
+                },
+              },
+              el(
+                "span",
+                { class: "row-top" },
+                el("span", { class: "lines", text: String(m.start_line) }),
+                el("span", { class: "sym", text: m.capture || "top level" }),
+              ),
+              el("span", { class: "locate-excerpt", text: m.text }),
+            );
+            return row;
+          }),
+        ),
+      ),
+    );
+    fill(
+      footer,
+      el("span", { text: `${matches.length} lines · ${groups.length} files` }),
+      data.truncated ? el("span", { class: "truncated", text: `truncated at ${matches.length}` }) : null,
+    );
+    const first = results.querySelector(".locate-row");
+    if (first) first.setAttribute("aria-pressed", "true");
+    showBody(groups[0].rows.length ? { ...groups[0].rows[0], symbol: groups[0].rows[0].capture || null } : null, query);
+  }
+
   async function runBrief(question) {
     const mine = ++generation;
     const params = new URLSearchParams({ question, budget: String(budget()), prefer });

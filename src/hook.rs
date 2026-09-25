@@ -155,7 +155,7 @@ pub fn decide(
         return (Decision::Quiet, None);
     }
     let said = format!(
-        "semlith indexes this folder. Ask it instead: {}. It answers ranked spans with file:line, for a fraction of the tokens.",
+        "semlith indexes this folder. Ask it instead: {}. It answers with file:line and the definition around each, for a fraction of the tokens.",
         lookup.call
     );
     let refund = lookup.whole.map(|p| cwd.join(p));
@@ -216,11 +216,7 @@ fn lookup_of(event: &Event) -> Option<Lookup> {
 /// grep — and a segment that searches nothing (`git log`, `cargo test`) is
 /// passed over. A command the tokenizer cannot read is silence.
 fn bash_lookup(command: &str) -> Option<Lookup> {
-    let command = command.replace("||", ";");
-    let segments = command
-        .split(['\n', ';', '&'])
-        .flat_map(|group| group.split('|').enumerate().map(|(i, s)| (i > 0, s)));
-    for (piped, segment) in segments {
+    for (piped, segment) in segments(command) {
         let words = split_words(segment.trim())?;
         let mut words: Vec<&str> = words.iter().map(String::as_str).collect();
         // Leading `sudo`, `time`, environment assignments.
@@ -348,30 +344,34 @@ fn bash_lookup(command: &str) -> Option<Lookup> {
     None
 }
 
-/// `semlith_search` for a pattern, and impact or symbol when the pattern is a
-/// name, which is what a grep for a name usually wants to know.
+/// The same sweep as `semlith_search {exact: true}`, which answers the lines
+/// the grep would with the definition each sits in, and impact when the
+/// pattern is a name, which is what a grep for a name usually wants to know.
 fn search_call(pattern: &str) -> String {
-    let clean = pattern.replace("\\b", "").replace("\\|", "|");
-    let clean = clean.trim_matches(['^', '$', '\'', '"']);
+    let clean = pattern.trim_matches(['\'', '"']);
     if clean.is_empty() {
         return "semlith_search {query: \"<what you are looking for>\"}".to_string();
     }
-    let first = clean.split('|').next().unwrap_or(clean);
-    let name = first
+    let query = clean.replace('\\', "\\\\").replace('"', "\\\"");
+    let bare = clean.replace("\\b", "");
+    let bare = bare.trim_matches(['^', '$']);
+    let name = bare
+        .split(['|', '('])
+        .next()
+        .unwrap_or(bare)
         .trim_start_matches("fn ")
         .trim_start_matches("def ")
         .trim();
     let identifier = !name.is_empty()
+        && !bare.contains('|')
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':');
-    let query = clean.replace('|', " ");
+    let exact = format!("semlith_search {{query: \"{query}\", exact: true}}");
     if identifier {
-        format!(
-            "semlith_search {{query: \"{query}\"}}, or semlith_impact {{name: \"{name}\"}} for every caller and call site"
-        )
+        format!("{exact}, or semlith_impact {{name: \"{name}\"}} for every caller and call site")
     } else {
-        format!("semlith_search {{query: \"{query}\"}}")
+        exact
     }
 }
 
@@ -383,6 +383,47 @@ fn tree_call(at: Option<&str>) -> String {
         Some(dir) => format!("semlith_files {{tree: true, path: [\"{dir}/**\"]}}"),
         None => "semlith_files {tree: true}".to_string(),
     }
+}
+
+/// A command line cut at `;`, `&`, `&&`, `||`, newlines and pipes outside
+/// quotes, each piece marked when it reads a pipe.
+///
+/// Outside quotes only: `grep -E 'alpha|beta'` is one command, and cutting it
+/// at the `|` left an unclosed quote that silenced the whole line.
+fn segments(command: &str) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    let mut piped = false;
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => {
+                quote = None;
+                piece.push(c);
+            }
+            (Some(_), c) => piece.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                piece.push(c);
+            }
+            (None, '|') if chars.peek() != Some(&'|') => {
+                out.push((piped, std::mem::take(&mut piece)));
+                piped = true;
+            }
+            (None, '|' | ';' | '&' | '\n') => {
+                if c == '|' {
+                    chars.next();
+                }
+                out.push((piped, std::mem::take(&mut piece)));
+                piped = false;
+            }
+            (None, c) => piece.push(c),
+        }
+    }
+    out.push((piped, piece));
+    out.retain(|(_, p)| !p.trim().is_empty());
+    out
 }
 
 /// Shell words, honouring single and double quotes. `None` for an unclosed
@@ -603,10 +644,28 @@ mod tests {
             panic!("{d:?}")
         };
         assert!(
-            said.contains("semlith_search {query: \"search_preferring\"}"),
+            said.contains("semlith_search {query: \"search_preferring\", exact: true}"),
             "{said}"
         );
         assert!(said.contains("semlith_impact"), "{said}");
+    }
+
+    #[test]
+    fn a_regex_sweep_is_handed_over_whole_as_an_exact_search() {
+        let (d, _) = decide(
+            &bash(r"grep -rnE '\b(alpha|beta)\b' src/"),
+            Mode::Soft,
+            &Session::default(),
+            held,
+        );
+        let Decision::Nudge(said) = d else {
+            panic!("{d:?}")
+        };
+        assert!(
+            said.contains(r#"semlith_search {query: "\\b(alpha|beta)\\b", exact: true}"#),
+            "{said}"
+        );
+        assert!(!said.contains("semlith_impact"), "{said}");
     }
 
     #[test]

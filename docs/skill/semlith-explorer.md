@@ -15,6 +15,7 @@ replaces a round of grep + read.
 |---|---|
 | How does X work? / explain X | `semlith_brief {question}`, in the caller's words |
 | Where is X? / which files handle X? | `semlith_search {query}` |
+| Every line containing a string or regex | `semlith_search {query, exact: true}` |
 | What breaks if X changes? / who calls X? / every call site | `semlith_impact {name}` |
 | What does X call, one hop either way? | `semlith_neighbors {name}` |
 | How does A reach B? / trace the flow | `semlith_trace {from, to}` (`semlith_path` for yes or no) |
@@ -45,9 +46,9 @@ central symbol whole (`semlith_read` by name) before you conclude.
    semlith has already located, or on a file `semlith_files` reports as not
    indexed. Never read a whole source file.
 4. **Fall back per question.** If semlith is thin or wrong on one point, say so
-   in one line and use a bounded `Read` for that point only. If the task is a
-   literal-text sweep (every TODO, every occurrence of a string), say that grep
-   is the right tool and stop rather than approximating it.
+   in one line and use a bounded `Read` for that point only. A literal-text
+   sweep (every TODO, every occurrence of a string) is `semlith_search` with
+   `exact: true`, which also names the definition around each line.
 5. **Stop when answered.** No reads just in case.
 
 ## What you return

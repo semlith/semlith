@@ -861,6 +861,28 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    // `semlith_search {exact: true}`: every indexed line matching the query,
+    // the shape `/api/pattern` answers in, paged by the same offset.
+    if request
+        .query("exact")
+        .is_some_and(|v| v == "1" || v == "true")
+    {
+        let offset = request
+            .query("offset")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let empty = json!({ "matches": [], "files": 0, "truncated": false });
+        return with_fleet(state, empty, move |fleet| {
+            let only = (!only.is_empty()).then_some(only);
+            Ok(serde_json::to_value(fleet.grep_in(
+                only.as_deref(),
+                query,
+                &filter,
+                offset,
+            )?)?)
+        });
+    }
+
     // Before anything is opened. An offset of four billion asks every open
     // store for four billion rows in sorted order and merges them, which is a
     // whole machine's memory for a page nobody is reading. The portal pages in
