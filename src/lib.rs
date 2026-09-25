@@ -4886,22 +4886,27 @@ pub fn serialize_plain<S: serde::Serializer>(path: &str, s: S) -> Result<S::Ok, 
     s.serialize_str(&plain(path))
 }
 
-/// How many times this process has canonicalised a path.
-///
-/// Counted because the cost is invisible until it is not: a `canonicalize` is
-/// an opened handle on Windows, and 0.18.0 did three per file — one in the
-/// walk, one on the home directory and one on the path, the last two on every
-/// file for a home that cannot change mid-run. `tests/filter_canonical.rs`
-/// asserts the count over a walk of N files stays near N rather than near 3N.
-static CANONICAL_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! {
+    /// How many times this process has canonicalised a path.
+    ///
+    /// Counted because the cost is invisible until it is not: a `canonicalize` is
+    /// an opened handle on Windows, and 0.18.0 did three per file — one in the
+    /// walk, one on the home directory and one on the path, the last two on every
+    /// file for a home that cannot change mid-run. `tests/filter_canonical.rs`
+    /// asserts the count over a walk of N files stays near N rather than near 3N.
+    // Per thread: an index pass runs on the thread that asked for it, and a
+    // process-wide count read the canonicalisations of every other test in the
+    // binary running beside the one measuring its own run.
+    static CANONICAL_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// The reading for [`CANONICAL_CALLS`], for the test that pins the cost.
 pub fn canonical_calls() -> u64 {
-    CANONICAL_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+    CANONICAL_CALLS.with(|c| c.get())
 }
 
 pub fn canonical(path: &Path) -> PathBuf {
-    CANONICAL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    CANONICAL_CALLS.with(|c| c.set(c.get() + 1));
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -5357,6 +5362,10 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     let mut unreadable = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut dirs: Vec<PathBuf> = Vec::new();
+    // What the walk yielded, as it spelled it, so the pass below compares
+    // `read_dir`'s spellings with no `canonicalize` per entry — that call is
+    // what the index_failure test counts, and what Windows pays for.
+    let mut yielded: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     // Written from inside `filter_entry`, which the walker may call from
     // several threads even on the single-threaded builder it is handed here,
     // and which must outlive the borrow the builder takes.
@@ -5433,6 +5442,7 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
+            yielded.insert(entry.path().to_path_buf());
             let path = canonical(entry.path());
             if seen.insert(path.clone()) {
                 out.push(path);
@@ -5448,14 +5458,22 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     // e). Said per entry, a folder once, never by walking into it.
     let mut credentials = Vec::new();
     let mut excluded: Vec<(PathBuf, String)> = Vec::new();
-    let walked_dirs: std::collections::HashSet<PathBuf> =
-        dirs.iter().map(|d| canonical(d)).collect();
+    let walked_dirs: std::collections::HashSet<&PathBuf> = dirs.iter().collect();
     let generated_now: Vec<PathBuf> = generated.lock().map(|g| g.clone()).unwrap_or_default();
+    // Once for the pass: `filter::denied` would resolve the home per entry.
+    let home = crate::home::user_home().ok().map(|h| canonical(&h));
     for dir in &dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
         let semlithignore = semlithignore_for(dir);
+        // Resolved once per directory, and only when something in it is
+        // recorded: a store key is canonical, a `canonicalize` per entry is
+        // what Windows pays for.
+        let mut resolved: Option<PathBuf> = None;
+        let mut key = |name: &std::ffi::OsStr| -> PathBuf {
+            resolved.get_or_insert_with(|| canonical(dir)).join(name)
+        };
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
@@ -5464,16 +5482,20 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
             };
             let path = entry.path();
             if name.starts_with('.') {
-                if kind.is_file() && matches!(filter::denied(&path), Some(filter::Denied::Name(_)))
+                if kind.is_file()
+                    && matches!(
+                        filter::denied_against(&path, home.as_deref()),
+                        Some(filter::Denied::Name(_))
+                    )
                 {
-                    credentials.push(canonical(&path));
+                    credentials.push(key(&entry.file_name()));
                 }
                 continue;
             }
             let held = if kind.is_dir() {
-                walked_dirs.contains(&canonical(&path)) || generated_now.iter().any(|g| g == &path)
+                walked_dirs.contains(&path) || generated_now.iter().any(|g| g == &path)
             } else if kind.is_file() {
-                seen.contains(&canonical(&path))
+                yielded.contains(&path)
             } else {
                 true
             };
@@ -5488,7 +5510,7 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
             } else {
                 ".gitignore"
             };
-            excluded.push((canonical(&path), rule.to_string()));
+            excluded.push((key(&entry.file_name()), rule.to_string()));
         }
     }
     credentials.sort();

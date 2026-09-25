@@ -197,7 +197,14 @@ pub fn decide(
             first.kind, first.line
         )));
     };
-    let salt = crate::store::salt_if_any(db)?.unwrap_or([0; 32]);
+    // An acceptance is made with the store's salt, so a store with an
+    // acceptance and no salt has been tampered with or half-restored; the
+    // safe answer is to refuse, never to compare against a made-up salt.
+    let Some(salt) = crate::store::salt_if_any(db)? else {
+        return Ok(Decision::Refuse(
+            "accepted, but this store has no salt to check the acceptance against".to_string(),
+        ));
+    };
     if let Some(new) = live.iter().find(|m| {
         !acceptance
             .fingerprints

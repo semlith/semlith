@@ -2946,14 +2946,13 @@ pub fn salt_if_any(db: &Connection) -> Result<Option<[u8; 32]>> {
 }
 
 fn unhex(hex: &str) -> Option<[u8; 32]> {
-    let mut out = [0u8; 32];
-    if hex.len() != 64 {
+    if hex.len() != 64 || !hex.is_ascii() {
         return None;
     }
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    let bytes: Vec<u8> = (0..32)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    bytes.try_into().ok()
 }
 
 /// A chunk's first line, last line and id.
