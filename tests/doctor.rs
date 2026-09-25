@@ -766,7 +766,11 @@ fn doctor_fix_clears_only_the_disable_for_this_directory() {
         },
         "tipsHistory": { "a": 1 }
     });
-    std::fs::write(&config, serde_json::to_string_pretty(&before).unwrap() + "\n").unwrap();
+    std::fs::write(
+        &config,
+        serde_json::to_string_pretty(&before).unwrap() + "\n",
+    )
+    .unwrap();
 
     let report = machine.doctor_in(&project, &["--json"]);
     let json: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();

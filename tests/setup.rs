@@ -1279,18 +1279,44 @@ fn setup_upgrades_a_0_29_entry_with_always_load_and_both_hooks() {
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
-    assert_eq!(after["mcpServers"]["semlith"]["alwaysLoad"], true, "{after}");
-    assert_eq!(after["numStartups"], 7, "a sibling key was changed: {after}");
+    assert_eq!(
+        after["mcpServers"]["semlith"]["alwaysLoad"], true,
+        "{after}"
+    );
+    assert_eq!(
+        after["numStartups"], 7,
+        "a sibling key was changed: {after}"
+    );
     let hooks = std::fs::read_to_string(&settings).unwrap();
     assert!(hooks.contains("Bash|Read|Grep|Glob"), "{hooks}");
-    assert!(hooks.contains("PostToolUse") && hooks.contains("mcp__.*semlith.*"), "{hooks}");
-    assert!(hooks.contains("theirs"), "somebody else's hook was taken: {hooks}");
-    assert!(!hooks.contains("Read|Grep\""), "the 0.29.0 matcher is still there: {hooks}");
+    assert!(
+        hooks.contains("PostToolUse") && hooks.contains("mcp__.*semlith.*"),
+        "{hooks}"
+    );
+    assert!(
+        hooks.contains("theirs"),
+        "somebody else's hook was taken: {hooks}"
+    );
+    assert!(
+        !hooks.contains("Read|Grep\""),
+        "the 0.29.0 matcher is still there: {hooks}"
+    );
 
-    assert!(machine.setup(&["--yes", "--airgap", "--no-hooks"]).status.success());
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--no-hooks"])
+            .status
+            .success()
+    );
     let hooks = std::fs::read_to_string(&settings).unwrap();
-    assert!(!hooks.contains("semlith"), "--no-hooks left a semlith hook: {hooks}");
-    assert!(hooks.contains("theirs"), "--no-hooks took somebody else's hook: {hooks}");
+    assert!(
+        !hooks.contains("semlith"),
+        "--no-hooks left a semlith hook: {hooks}"
+    );
+    assert!(
+        hooks.contains("theirs"),
+        "--no-hooks took somebody else's hook: {hooks}"
+    );
 }
 
 /// 4.8: setup writes the research agent where Claude Code reads subagents,
@@ -1303,6 +1329,11 @@ fn setup_writes_the_research_agent_and_no_agents_removes_it() {
     let agent = machine.home.join(".claude/agents/semlith-explorer.md");
     let text = std::fs::read_to_string(&agent).expect("the agent was written");
     assert!(text.contains("name: semlith-explorer"), "{text}");
-    assert!(machine.setup(&["--yes", "--airgap", "--no-agents"]).status.success());
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--no-agents"])
+            .status
+            .success()
+    );
     assert!(!agent.exists(), "--no-agents left the agent behind");
 }

@@ -3279,12 +3279,15 @@ fn review_plan(store: &mut Semlith, plan: &semlith::Plan) -> Result<()> {
     for (i, item) in plan.review.iter().enumerate() {
         let content = item.class == semlith::store::class::CONTENT;
         eprint!(
-            "{} ({}/{}) {} — {}: ",
+            "{}({}/{}) {}{} — {} — ",
             bold(),
             i + 1,
             plan.review.len(),
             display(Path::new(&item.path)),
-            reset()
+            reset(),
+            item.confidence
+                .map(|c| format!("{c} % likely real"))
+                .unwrap_or_else(|| item.rule.clone())
         );
         eprint!(
             "{}",
