@@ -796,7 +796,16 @@ fn call_tool(
                 match stores.grep_in(Some(&only), query, &filter, offset) {
                     Ok(found) => {
                         let paths = stores.shortener();
-                        paths.with_header(render_grep(&found, offset, &|p| paths.short(p)))
+                        paths.with_header(render_grep(
+                            &found,
+                            offset,
+                            args.get("max_tokens")
+                                .and_then(Value::as_u64)
+                                .map_or(DEFAULT_LOCATE_TOKENS, |v| v as usize)
+                                .max(200)
+                                * 4,
+                            &|p| paths.short(p),
+                        ))
                     }
                     Err(e) => return Ok(tool_error(&e.to_string())),
                 }
@@ -897,8 +906,44 @@ fn call_tool(
                     span.text
                 )
             };
-            let body = match stores.read_in(Some(&only), &target, &crate::filter::Filter::default())
-            {
+            let read = stores.read_in(Some(&only), &target, &crate::filter::Filter::default());
+            // A bare path reads the whole file (`read_within` falls back to
+            // one when no definition has the name). A span whose path ends
+            // with the name asked for is that, not a definition.
+            let whole_file = |span: &crate::Span| match &target {
+                crate::Target::Symbol(name) => {
+                    let path = crate::plain(&span.path);
+                    let name = name.trim_start_matches("./");
+                    path.len() > name.len()
+                        && path.ends_with(name)
+                        && path[..path.len() - name.len()].ends_with(['/', '\\'])
+                }
+                _ => false,
+            };
+            let body = match read {
+                // A whole file past a screenful is answered with its outline,
+                // which is what the next read is chosen from.
+                Ok(Some(crate::Read::One(span)))
+                    if whole_file(&span) && span.text.len() > WHOLE_FILE_CHARS =>
+                {
+                    let defs = stores
+                        .outline_in(span.store.as_ref().map(std::slice::from_ref), &span.path)
+                        .unwrap_or_default();
+                    let mut out = format!(
+                        "{}{} is {} lines, {} characters; its definitions, to read by path:start-end or by name:",
+                        label_of(&span.store),
+                        paths.short(&span.path),
+                        span.end_line,
+                        span.text.len()
+                    );
+                    for (start, end, name, kind) in &defs {
+                        out.push_str(&format!("\n  {start}-{end} {kind} {name}"));
+                    }
+                    if defs.is_empty() {
+                        out.push_str("\n  none parsed; ask for a line range");
+                    }
+                    out
+                }
                 Ok(None) => {
                     format!("Nothing indexed at {raw:?}. semlith_files says what is indexed.")
                 }
@@ -1774,26 +1819,40 @@ fn empty_graph(stores: &Fleet, name: &str) -> String {
 }
 
 /// An exact search: a count line, then each file once with its matching lines
-/// under it as `line definition | text`.
+/// under it as `line definition | text`, within `budget` characters.
 ///
 /// The count comes first because the question a grep answers is often "is
 /// that all of them", and the file header is written once rather than on every
-/// row, which is most of what a grep's output repeats.
+/// row, which is most of what a grep's output repeats. Past the budget the
+/// remaining files are listed with their counts, so the answer stays complete
+/// as a list of places, and the offset that continues it is named.
 pub fn render_grep(
     found: &crate::pattern::Matches,
     offset: usize,
+    budget: usize,
     shorten: &dyn Fn(&str) -> String,
 ) -> String {
+    let total = found.matches.len();
     let mut out = format!(
-        "{} matching lines in {} files searched",
-        found.matches.len(),
+        "{}{total} matching lines in {} files searched",
+        if found.truncated { "at least " } else { "" },
         found.files
     );
+    let mut shown = 0;
+    let mut rest: Vec<(String, usize)> = Vec::new();
     let mut last = None;
     for m in &found.matches {
         let file = (&m.store, &m.path);
+        let name = format!("{}{}", label_of(&m.store), shorten(&m.path));
+        if !rest.is_empty() || out.len() > budget {
+            match rest.last_mut() {
+                Some((n, count)) if *n == name => *count += 1,
+                _ => rest.push((name, 1)),
+            }
+            continue;
+        }
         if last != Some(file) {
-            out.push_str(&format!("\n{}{}", label_of(&m.store), shorten(&m.path)));
+            out.push_str(&format!("\n{name}"));
             last = Some(file);
         }
         let def = if m.capture.is_empty() {
@@ -1802,11 +1861,18 @@ pub fn render_grep(
             format!(" {}", m.capture)
         };
         out.push_str(&format!("\n  {}{def} | {}", m.start_line, m.text));
+        shown += 1;
     }
-    if found.truncated {
+    if !rest.is_empty() {
+        out.push_str(&format!("\n{} more lines, past the budget:", total - shown));
+        for (name, count) in &rest {
+            out.push_str(&format!("\n  {name} {count}"));
+        }
+    }
+    if shown < total || found.truncated {
         out.push_str(&format!(
-            "\ntruncated — call again with offset: {} for the rest",
-            offset + found.matches.len()
+            "\nnarrow with path, or call again with offset: {} for the rest",
+            offset + shown
         ));
     }
     out
@@ -2071,6 +2137,10 @@ fn best_line(text: &str, terms: &[String]) -> String {
 /// whole definition is the point of a read by name: `Semlith::search_preferring`
 /// alone is 21 000 characters, and cutting it is the failure 1.9 fixes.
 const READ_CHARS: usize = 32_000;
+
+/// Past this, `semlith_read` of a bare file path answers with the file's
+/// outline instead of its text.
+const WHOLE_FILE_CHARS: usize = 8_000;
 
 /// How many definitions of one name a read by name returns whole.
 const READ_WHOLE: usize = 4;
@@ -2398,6 +2468,37 @@ mod tests {
     ///
     /// Bytes are the proxy; tokens are the criterion. `tests/retrieval.rs`
     /// counts the real thing and is the gate that decides.
+    /// An exact search past its budget still names every file and how many
+    /// lines each holds, and the offset that continues the listing.
+    #[test]
+    fn an_exact_search_past_its_budget_lists_the_rest_as_counts() {
+        let row = |path: &str, line: u32| crate::pattern::Match {
+            path: path.to_string(),
+            capture: "f".to_string(),
+            start_line: line,
+            end_line: line,
+            text: "x".repeat(60),
+            store: None,
+        };
+        let mut matches: Vec<_> = (1..=30).map(|l| row("a.rs", l)).collect();
+        matches.extend((1..=5).map(|l| row("b.rs", l)));
+        let found = crate::pattern::Matches {
+            language: String::new(),
+            matches,
+            files: 2,
+            truncated: false,
+            skipped: 0,
+        };
+        let all = render_grep(&found, 0, usize::MAX, &|p| p.to_string());
+        assert_eq!(all.lines().filter(|l| l.contains(" f | ")).count(), 35);
+        let cut = render_grep(&found, 0, 800, &|p| p.to_string());
+        assert!(cut.len() < 1200, "{} chars: {cut}", cut.len());
+        assert!(cut.starts_with("35 matching lines"), "{cut}");
+        assert!(cut.contains("\n  b.rs 5"), "{cut}");
+        let shown = cut.lines().filter(|l| l.contains(" f | ")).count();
+        assert!(cut.contains(&format!("offset: {shown} ")), "{cut}");
+    }
+
     #[test]
     fn the_tool_list_stays_small() {
         let size = serde_json::to_string(&tool_defs("default")).unwrap().len();

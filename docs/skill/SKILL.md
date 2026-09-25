@@ -30,13 +30,20 @@ Planning a change or tracing a flow: `semlith_brief` for the core, then
 `semlith_impact` or `semlith_trace` on the central symbols it names, then read
 each central symbol whole (`semlith_read` by name) before you answer.
 
+A repository you have not looked at yet: `semlith_files {tree: true, store}`
+first, then read the map it keeps, if the tree shows one (README, AGENTS.md,
+docs/architecture). What depends on code in another repository: the graph
+covers one store, so add an exact search for the depended-on name in each other
+store; it finds the manifest line that pins the version as well as the uses.
+
 ## What the tools take and return
 
 - `semlith_impact` accepts `Type::method`, `module::function` and `Type.method`.
   Rows carry call-site lines. Past 16 000 characters it gives per-file counts
   and a `more:` line. `semlith_symbol` and `semlith_neighbors` share that cap; a
   caller of a name with several definitions shows `→ Type::method`.
-- `semlith_read` takes paths relative to the store root. A symbol name returns
+- `semlith_read` takes paths relative to the store root. A bare path reads the
+  file, or past 8 000 characters lists its definitions to read. A symbol name returns
   every definition whole (`Type::method` narrows), up to 32 000 characters. A
   file edited since indexing is read from disk and marked.
 - `semlith_search` rows read `start-end name kind @defline · lists | best line`,
@@ -45,8 +52,8 @@ each central symbol whole (`semlith_read` by name) before you answer.
 - `semlith_search {exact: true}` is grep -E over every indexed file: a count
   line, then each file once and its matching lines as `line definition | text`,
   so the enclosing function comes with the hit. A query that is not a valid
-  regex is searched as literal text. Past 200 lines it names the `offset` that
-  continues. `path`, `ext` and `lang` narrow it like any search.
+  regex is searched as literal text. Past `max_tokens` (default 1500) the rest
+  are per-file counts, with the `offset` that continues. `path`, `ext` and `lang` narrow it like any search.
 - `semlith_brief` gives text for one span, the best code span for a code
   question, plus one-hop edges. `semlith_read` the other spans you need.
 - `semlith_files {tree: true, depth, sort: name|size|symbols|recent}` shows

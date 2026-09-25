@@ -42,8 +42,10 @@ graph lines. Tests rank below product code unless the question names tests,
 identical copies collapse into one hit, and `semlith_stats` collapses its long
 tail. `semlith_search {exact: true}` is grep over the index: every indexed line
 matching a regular expression, each file once, each line naming the definition it
-sits in, paged by `offset` past 200 — also `semlith search --exact` and the
-Search page's exact view. A `git checkout` no longer marks unchanged files stale. A `.semlithignore`
+sits in, within the same `max_tokens` budget as a locate answer, the rest as per-file
+counts with the `offset` that continues — also `semlith search --exact` and the
+Search page's exact view. `semlith_read` of a bare path reads the file, or past
+8 000 characters lists its definitions; it used to answer "nothing indexed". A `git checkout` no longer marks unchanged files stale. A `.semlithignore`
 leaves paths out of a store; this repository's leaves the retrieval corpus copy
 out.
 

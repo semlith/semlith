@@ -4496,7 +4496,17 @@ impl Semlith {
                     found.retain(|r| crate::graph::owned_by(r, q));
                 }
                 match found.len() {
-                    0 => return Ok(None),
+                    // A bare path is a file, not a name nothing defines:
+                    // `src/mcp.rs` answered "nothing indexed" for an indexed
+                    // file.
+                    0 => {
+                        let whole = Target::Span {
+                            path: name.clone(),
+                            start: 1,
+                            end: u32::MAX,
+                        };
+                        return self.read_within(&whole, filter, roots);
+                    }
                     1 => {
                         let only = &found[0];
                         (only.path.clone(), only.start_line, only.end_line)

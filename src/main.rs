@@ -1567,9 +1567,12 @@ fn run() -> Result<()> {
                     let paths = fleet.shortener();
                     println!(
                         "{}",
-                        paths.with_header(semlith::mcp::render_grep(&found, offset, &|p| {
-                            paths.short(p)
-                        }))
+                        paths.with_header(semlith::mcp::render_grep(
+                            &found,
+                            offset,
+                            usize::MAX,
+                            &|p| { paths.short(p) }
+                        ))
                     );
                 }
                 return Ok(());

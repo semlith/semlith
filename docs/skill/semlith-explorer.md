@@ -28,6 +28,11 @@ For a change-planning or trace question: `semlith_brief` for the core, then
 `semlith_impact` or `semlith_trace` on the central symbols, then read each
 central symbol whole (`semlith_read` by name) before you conclude.
 
+In a repository you have not looked at: `semlith_files {tree: true, store}`
+first, then its own map if the tree shows one (README, AGENTS.md). Across
+repositories the graph covers one store, so exact-search the depended-on name
+in each other store; that finds the manifest's version pin as well as the uses.
+
 - `semlith_impact` accepts `Type::method`, `module::function` and `Type.method`;
   its rows carry call-site lines.
 - `semlith_read` takes paths relative to the store root, or a symbol name

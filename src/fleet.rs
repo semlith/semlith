@@ -592,6 +592,24 @@ impl Fleet {
         })
     }
 
+    /// The definitions in one indexed file, from the first chosen store that
+    /// holds it: `(start, end, name, kind)`, in line order.
+    pub fn outline_in(
+        &self,
+        only: Option<&[String]>,
+        path: &str,
+    ) -> Result<Vec<(u32, u32, String, String)>> {
+        for i in self.chosen(only)? {
+            let db = self.members[i].store.db();
+            if let Some(rows) =
+                crate::store::symbols_in_files(db, &[path.to_string()])?.remove(path)
+            {
+                return Ok(rows);
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// A per-store listing run over every chosen store.
     ///
     /// The matches are labelled and concatenated in store order; the file and
