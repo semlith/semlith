@@ -376,6 +376,7 @@ can see what the agent is holding.
 | `lang:` | Only this language. |
 | `path:` | Only paths matching this glob. |
 | **Budget** | Tokens the locator list may cost. Default 1500, floor 200. |
+| **View** | `results`, the ranked locator; `brief`, what `semlith_brief` answers; `exact`, what `semlith_search {exact: true}` answers. |
 
 **`prefer` multiplies and never filters.** `code` leans the ranking towards source
 files and `docs` towards prose, but neither excludes the other side: `prefer:
@@ -388,6 +389,14 @@ twice`. It comes from the answer's own fields, not from a second look at your
 query in the browser: an identifier-shaped query weights the keyword list twice
 and a question-shaped one leaves the two level, and the classifier that decided
 that is the one that ranked the hits underneath it.
+
+**`exact` is grep over the index.** The query runs as a regular expression (as
+literal text when it is not a valid one) over the stored text of every indexed
+file the store chips, `lang:` and `path:` select, prose included. Each file is
+listed once with its matching lines under it, each naming the definition it sits
+in, and opening a line reads that definition whole. The count above the list
+says how many files were searched, so "no match" and "nothing selected" read
+differently. Past 200 lines the footer says the list was truncated.
 
 ### The body panel
 

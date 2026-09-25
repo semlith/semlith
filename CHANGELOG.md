@@ -40,7 +40,10 @@ but not indexed, and why. `brief` gives its one text span to code for a code
 question, labels the others honestly, and leaves Markdown headings out of its
 graph lines. Tests rank below product code unless the question names tests,
 identical copies collapse into one hit, and `semlith_stats` collapses its long
-tail. A `git checkout` no longer marks unchanged files stale. A `.semlithignore`
+tail. `semlith_search {exact: true}` is grep over the index: every indexed line
+matching a regular expression, each file once, each line naming the definition it
+sits in, paged by `offset` past 200 — also `semlith search --exact` and the
+Search page's exact view. A `git checkout` no longer marks unchanged files stale. A `.semlithignore`
 leaves paths out of a store; this repository's leaves the retrieval corpus copy
 out.
 

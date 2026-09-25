@@ -138,7 +138,7 @@ The `path:start-end` locator is usable as it stands: hand it to an editor.
 |---|---|
 | `semlith index [PATHS...]` | Index files and directories (defaults to `.`). Re-run to update. `--each` gives every path its own store instead of one shared store; `--projects <FOLDER>` takes the paths from the git repositories directly under a folder, and implies `--each`. `--include-secrets` indexes what the deny-list otherwise refuses. |
 | `semlith watch [PATHS...]` | Stay running and re-embed files as they are saved. `--debounce MS` to tune. |
-| `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it, `--prefer code\|docs\|any` to lift one side of the corpus. |
+| `semlith search <QUERY>` | Search. `-k N` for result count, `--json` for machine output, `--path`/`--ext`/`--lang` to narrow it, `--prefer code\|docs\|any` to lift one side of the corpus, `--exact` for every line matching a regex, with its definition. |
 | `semlith brief <QUESTION>` | Everything one question needs, in one call: the spans a search would find, the text of the top ones, and the callers and callees of the symbols they sit inside, one hop each way. `--budget N` is the token ceiling and defaults to 4000 — locators and edges are kept, span text is what a small budget drops, and the answer says what it dropped. |
 | `semlith read <TARGET>` | One span or one symbol and nothing around it: `src/store.rs:1041-1080`, `src/store.rs:12`, or a name. The second stage after a search. |
 | `semlith pattern <QUERY>` | Run a tree-sitter structural pattern over the indexed files of one language. `--lang` is required; `--path` narrows it and `--offset` continues a listing the cap cut short. |
