@@ -967,7 +967,7 @@ pub struct Shape {
 /// Until 0.30.0 there was no allow-list at all, and a documentation page that
 /// quoted AWS's own `AKIAIOSFODNN7EXAMPLE` was refused like a leaked key —
 /// eight of this repository's own files were. What lets a match through now is
-/// a short set of declared rules about the value itself, in `secrets.rs`, and
+/// a short set of declared rules about the value itself, in `keyscan.rs`, and
 /// one live-looking match anywhere still refuses the whole file.
 pub const SHAPES: &[Shape] = &[
     // Anthropic before OpenAI: `sk-ant-` is an `sk-` too, and the first match
