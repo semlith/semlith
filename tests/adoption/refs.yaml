@@ -18,8 +18,8 @@ repos:
 refs:
   impact-sig:
     key: >-
-      Production call sites of Fleet::search_preferring (src/fleet.rs:475; all break): src/main.rs:1602 (CLI
-      search), src/brief.rs:202 (brief), src/mcp.rs:822 (semlith_search tool), src/routes.rs:943 (/api/search),
+      Production call sites of Fleet::search_preferring (src/fleet.rs:475; all break): src/main.rs:1605 (CLI
+      search), src/brief.rs:202 (brief), src/mcp.rs:831 (semlith_search tool), src/routes.rs:943 (/api/search),
       src/fleet.rs:467 (Fleet::search_in wrapper, itself called by Fleet::search_filtered at fleet.rs:452 and
       by tests/retrieval.rs:1315). No test calls it directly. Note src/fleet.rs:506, src/lib.rs:3983,
       tests/retrieval.rs:1243 and tests/scan.rs:873 call the DIFFERENT Semlith::search_preferring (per-store,
@@ -27,9 +27,9 @@ refs:
       Fleet::search_in / search_filtered / search.
     facts:
       - {at: src/fleet.rs:475, has: 'pub fn search_preferring'}
-      - {at: src/main.rs:1602, has: 'fleet.search_preferring('}
+      - {at: src/main.rs:1605, has: 'fleet.search_preferring('}
       - {at: src/brief.rs:202, has: 'fleet.search_preferring('}
-      - {at: src/mcp.rs:822, has: 'stores.search_preferring('}
+      - {at: src/mcp.rs:831, has: 'stores.search_preferring('}
       - {at: src/routes.rs:943, has: 'fleet.search_preferring('}
       - {at: src/fleet.rs:467, has: 'self.search_preferring('}
       - {at: src/fleet.rs:452, has: 'self.search_in(None, query, k, filter)'}
@@ -51,29 +51,29 @@ refs:
 
   how-stale:
     key: >-
-      src/lib.rs mark_freshness (src/lib.rs:4689): a hit is stale when the file's current size differs from
+      src/lib.rs mark_freshness (src/lib.rs:4699): a hit is stale when the file's current size differs from
       the indexed byte count OR its mtime is newer than indexed_at (~4719; missing/unreadable file = stale; no
       store row = fresh). Stale hits get score *= 1 - STALE_PENALTY where STALE_PENALTY = 0.10
       (src/lib.rs:454, applied at 4397 beside the other rerank tiebreaks), i.e. demoted 10% and re-sorted
       (~4407), not dropped; they are labelled stale in output. Spans have the same check
       (mark_span_freshness 4637).
     facts:
-      - {at: src/lib.rs:4689, has: 'fn mark_freshness'}
-      - {at: src/lib.rs:4719, has: 'indexed_at'}
+      - {at: src/lib.rs:4699, has: 'fn mark_freshness'}
+      - {at: src/lib.rs:4715, has: 'indexed_at'}
       - {at: src/lib.rs:454, has: 'const STALE_PENALTY: f32 = 0.10'}
       - {at: src/lib.rs:4397, has: '1.0 - STALE_PENALTY'}
-      - {at: src/lib.rs:4637, has: 'fn mark_span_freshness'}
+      - {at: src/lib.rs:4647, has: 'fn mark_span_freshness'}
 
   callers-brief:
     key: >-
-      crate::brief::brief (src/brief.rs:194) is called by: CLI `semlith brief` at src/main.rs:4049; MCP
-      semlith_brief in call_tool at src/mcp.rs:855; daemon HTTP route /api/brief at src/routes.rs:808
+      crate::brief::brief (src/brief.rs:194) is called by: CLI `semlith brief` at src/main.rs:4052; MCP
+      semlith_brief in call_tool at src/mcp.rs:864; daemon HTTP route /api/brief at src/routes.rs:808
       (routed at routes.rs:83). The portal calls it via runBrief in src/portal/app.js:5829 which fetches
       /api/brief (app.js:5748). Ledger records briefs (ledger.rs:349).
     facts:
       - {at: src/brief.rs:194, has: 'pub fn brief('}
-      - {at: src/main.rs:4049, has: 'semlith::brief::brief('}
-      - {at: src/mcp.rs:855, has: 'crate::brief::brief('}
+      - {at: src/main.rs:4052, has: 'semlith::brief::brief('}
+      - {at: src/mcp.rs:864, has: 'crate::brief::brief('}
       - {at: src/routes.rs:808, has: 'crate::brief::brief('}
       - {at: src/routes.rs:83, has: '"/api/brief"'}
       - {at: src/portal/app.js:5829, has: 'async function runBrief'}
@@ -83,7 +83,7 @@ refs:
   trace-mcp:
     key: >-
       Chain: mcp.rs serve (stdio loop, src/mcp.rs:208) -> answer (mcp.rs:94) request handling -> call_tool
-      (src/mcp.rs:751) semlith_search branch -> Fleet::search_preferring (src/mcp.rs:822 -> src/fleet.rs:475)
+      (src/mcp.rs:751) semlith_search branch -> Fleet::search_preferring (src/mcp.rs:831 -> src/fleet.rs:475)
       -> per-store Semlith::search_preferring (src/fleet.rs:506 -> src/lib.rs:3992) -> embed query
       (embed_query ~3914) -> self.index.search(vector, depth, allowlist) (src/lib.rs:4077) vector index lookup
       (index.rs), plus the FTS5 keyword half (store::keyword_search, lib.rs:4094), graph expansion and fusion.
@@ -92,7 +92,7 @@ refs:
       - {at: src/mcp.rs:208, has: 'pub fn serve('}
       - {at: src/mcp.rs:94, has: 'pub fn answer('}
       - {at: src/mcp.rs:751, has: 'fn call_tool('}
-      - {at: src/mcp.rs:822, has: 'stores.search_preferring('}
+      - {at: src/mcp.rs:831, has: 'stores.search_preferring('}
       - {at: src/fleet.rs:475, has: 'pub fn search_preferring'}
       - {at: src/fleet.rs:506, has: '.search_preferring(query, &vector'}
       - {at: src/lib.rs:3992, has: 'pub fn search_preferring('}
@@ -118,16 +118,16 @@ refs:
   hit-literals:
     key: >-
       Hit struct literals in Rust src: src/lib.rs:4235 (image hit) and src/lib.rs:4271 (text/chunk hit) in
-      Semlith::search_preferring; a test literal in lib.rs's own tests at src/lib.rs:5570
-      (product_code_comes_before_tests_and_prose_stays_put, new in 0.30.0); test helpers src/fleet.rs:1348 and
-      src/mcp.rs:2272. (tests/fixtures copies do not count.) Exactly these five.
+      Semlith::search_preferring; a test literal in lib.rs's own tests at src/lib.rs:5580
+      (product_code_comes_before_tests_and_prose_stays_put, new in 0.30.0); test helpers src/fleet.rs:1366 and
+      src/mcp.rs:2342. (tests/fixtures copies do not count.) Exactly these five.
     facts:
       - {at: src/lib.rs:4235, has: 'Hit {'}
       - {at: src/lib.rs:4271, has: 'Hit {'}
-      - {at: src/lib.rs:5570, has: 'Hit {'}
-      - {at: src/lib.rs:5567, has: 'fn product_code_comes_before_tests_and_prose_stays_put'}
-      - {at: src/fleet.rs:1348, has: 'Hit {'}
-      - {at: src/mcp.rs:2272, has: 'crate::Hit {'}
+      - {at: src/lib.rs:5580, has: 'Hit {'}
+      - {at: src/lib.rs:5577, has: 'fn product_code_comes_before_tests_and_prose_stays_put'}
+      - {at: src/fleet.rs:1366, has: 'Hit {'}
+      - {at: src/mcp.rs:2342, has: 'crate::Hit {'}
       - {count: 'Hit \{\s*$', not: 'struct |->', under: src, ext: .rs, is: 5}
 
   bug-startup:
@@ -157,17 +157,17 @@ refs:
       docs/compatibility.md:130-135: the `score` is a reciprocal rank fusion score; it orders results within
       one query and means nothing across queries or across versions; don't assert on it or assume a result
       keeps its position. Also AGENTS.md:97-101 (fusion scores 1/(60+rank), not cosines) and
-      docs/skill/SKILL.md:89 (never compare scores across stores).
+      docs/skill/SKILL.md:96 (never compare scores across stores).
     facts:
       - {at: docs/compatibility.md:130, has: 'The `score` on a hit is a reciprocal'}
       - {at: docs/compatibility.md:131, has: 'means nothing across'}
       - {at: AGENTS.md:99, has: '1 / (60 + rank)'}
-      - {at: docs/skill/SKILL.md:89, has: 'never compare scores across stores'}
+      - {at: docs/skill/SKILL.md:96, has: 'never compare scores across stores'}
 
   plan-confidence:
     key: >-
       Core: Semlith::search_preferring in src/lib.rs (3992) is the one ranking function; Hit struct
-      src/lib.rs:667; Hit built at lib.rs:4235/4271; Fleet merge src/fleet.rs:1200 drops cosine; rerank.rs:219
+      src/lib.rs:667; Hit built at lib.rs:4235/4271; Fleet merge src/fleet.rs:1218 drops cosine; rerank.rs:219
       drops scores. Surfaces: CLI main.rs:1573/1613 (+--json 1581), MCP mcp.rs render 2121 / locate_row 1945 /
       brief render 2050, brief Span brief.rs:340, daemon /api/search routes.rs:939-957 (hand-built JSON),
       portal app.js locateRow 5658 (portal parity rule). Docs: compatibility.md:130, AGENTS.md:99, SKILL.md.
@@ -178,18 +178,18 @@ refs:
     facts:
       - {at: src/lib.rs:3992, has: 'pub fn search_preferring('}
       - {at: src/lib.rs:667, has: 'pub struct Hit'}
-      - {at: src/fleet.rs:1200, has: 'fn merge('}
+      - {at: src/fleet.rs:1218, has: 'fn merge('}
       - {at: src/rerank.rs:219, has: 'pub fn order('}
-      - {at: src/main.rs:1602, has: 'fleet.search_preferring('}
-      - {at: src/main.rs:1610, has: 'to_string_pretty(&hits)'}
-      - {at: src/mcp.rs:2171, has: 'fn render(hits'}
-      - {at: src/mcp.rs:1995, has: 'fn locate_row('}
-      - {at: src/mcp.rs:2100, has: 'fn render_brief('}
+      - {at: src/main.rs:1605, has: 'fleet.search_preferring('}
+      - {at: src/main.rs:1613, has: 'to_string_pretty(&hits)'}
+      - {at: src/mcp.rs:2241, has: 'fn render(hits'}
+      - {at: src/mcp.rs:2061, has: 'fn locate_row('}
+      - {at: src/mcp.rs:2170, has: 'fn render_brief('}
       - {at: src/brief.rs:340, has: 'fn locating(hit: &Hit)'}
       - {at: src/routes.rs:961, has: 'let out: Vec<Value> = hits'}
       - {at: src/portal/app.js:5659, has: 'function locateRow'}
       - {at: src/ledger.rs:252, has: 'A locate reply puts a bare path'}
-      - {at: src/mcp.rs:2429, has: 'tools/list is {size} bytes'}
+      - {at: src/mcp.rs:2530, has: 'tools/list is {size} bytes'}
       - {at: src/store.rs:150, has: 'confidence TEXT NOT NULL'}
       - {at: src/keyscan.rs:53, has: 'pub confidence: u8'}
 
@@ -225,7 +225,7 @@ refs:
       - {at: src/keyscan.rs:253, has: '(c) a private-key header with no key body'}
       - {at: src/keyscan.rs:398, has: 'pub fn dummy_rule('}
       - {at: src/keyscan.rs:393, has: '(a) a published documentation example'}
-      - {at: src/keyscan.rs:404, has: '(b) a marker such as EXAMPLE or FAKE'}
+      - {at: src/keyscan.rs:403, has: '(b) a marker such as EXAMPLE or FAKE'}
       - {at: src/lib.rs:914, has: 'pub fn refuses('}
       - {at: src/lib.rs:1741, has: 'pub fn plan('}
       - {at: src/lib.rs:1907, has: 'pub fn accept('}
@@ -389,10 +389,10 @@ refs:
     key: >-
       Core, compile errors: `Hit` (src/lib.rs:667) has public fields, no Default and no #[non_exhaustive], so
       every struct literal stops compiling (E0063) until it sets the new field: src/lib.rs:4235 (image hit),
-      src/lib.rs:4271 (chunk hit), and the test literals src/lib.rs:5570, src/fleet.rs:1348 and
-      src/mcp.rs:2272. Nothing in tests/*.rs builds one (tests/fixtures copies do not count). Core, output that
+      src/lib.rs:4271 (chunk hit), and the test literals src/lib.rs:5580, src/fleet.rs:1366 and
+      src/mcp.rs:2342. Nothing in tests/*.rs builds one (tests/fixtures copies do not count). Core, output that
       changes without breaking: Hit derives Serialize (lib.rs:666), so `semlith search --json`
-      (src/main.rs:1610) gains a key unless the field is skip_serializing_if; the MCP text renderers (mcp.rs
+      (src/main.rs:1613) gains a key unless the field is skip_serializing_if; the MCP text renderers (mcp.rs
       render 2121, locate_row 1945) and the hand-built /api/search JSON (routes.rs ~939) do not show it until
       changed (portal parity); compatibility.md:163 allows additive fields, and compatibility.md:51 says the
       library API (including Hit) changes with the minor version, so a new pub field is a breaking change for
@@ -408,10 +408,10 @@ refs:
       - {at: src/lib.rs:666, has: '#[derive(Debug, Clone, Serialize)]'}
       - {at: src/lib.rs:4235, has: 'Hit {'}
       - {at: src/lib.rs:4271, has: 'Hit {'}
-      - {at: src/lib.rs:5570, has: 'Hit {'}
-      - {at: src/fleet.rs:1348, has: 'Hit {'}
-      - {at: src/mcp.rs:2272, has: 'crate::Hit {'}
-      - {at: src/main.rs:1610, has: 'to_string_pretty(&hits)'}
+      - {at: src/lib.rs:5580, has: 'Hit {'}
+      - {at: src/fleet.rs:1366, has: 'Hit {'}
+      - {at: src/mcp.rs:2342, has: 'crate::Hit {'}
+      - {at: src/main.rs:1613, has: 'to_string_pretty(&hits)'}
       - {at: docs/compatibility.md:51, has: '`Hit`'}
       - {at: docs/compatibility.md:163, has: 'Additive fields'}
       - {count: 'Hit \{\s*$', not: 'struct |->', under: src, ext: .rs, is: 5}
