@@ -909,6 +909,88 @@ mod tests {
         }
     }
 
+    /// The confidence is calibrated on a labelled set built now, so no
+    /// live-looking literal is in the source: every live-shaped value scores
+    /// at least 70 %, every dummy, placeholder, invalid checksum and header
+    /// only case at most 30 %, and every row shows a signal. The spread per
+    /// class is printed for the release record (`--nocapture`).
+    #[test]
+    fn confidence_is_calibrated_on_two_hundred_labelled_cases() {
+        let mut live: Vec<(String, String)> = Vec::new();
+        let mut not: Vec<(String, String)> = Vec::new();
+        for (i, shape) in SHAPES.iter().enumerate() {
+            for _ in 0..10 {
+                live.push((shape.kind.to_string(), forge(i)));
+            }
+            not.push((format!("{} example", shape.kind), shape.example.to_string()));
+            let value = forge(i);
+            if shape.prefix_len > 0 && value.len() > shape.prefix_len + 8 {
+                let prefix = &value[..shape.prefix_len];
+                let body_len = value.len() - shape.prefix_len;
+                for marker in ["FAKE", "EXAMPLE", "DUMMY"] {
+                    let body: String = marker.chars().cycle().take(body_len).collect();
+                    not.push((
+                        format!("{} {marker}", shape.kind),
+                        format!("{prefix}{body}"),
+                    ));
+                }
+                not.push((
+                    format!("{} X run", shape.kind),
+                    format!("{prefix}{}", "X".repeat(body_len)),
+                ));
+            }
+        }
+        for provider in ["github", "npm"] {
+            let i = SHAPES
+                .iter()
+                .position(|s| s.provider == provider && s.label == "token")
+                .unwrap();
+            for _ in 0..10 {
+                let mut value = forge(i);
+                let last = value.pop().unwrap();
+                value.push(if last == 'Z' { 'Y' } else { 'Z' });
+                not.push((format!("{provider} invalid checksum"), value));
+            }
+        }
+        for header in ["RSA ", "EC ", "OPENSSH ", "", "ENCRYPTED "] {
+            not.push((
+                "private key header only".to_string(),
+                format!("-----BEGIN {header}PRIVATE KEY-----\n-----END {header}PRIVATE KEY-----"),
+            ));
+        }
+        assert!(
+            live.len() + not.len() >= 200,
+            "{} cases",
+            live.len() + not.len()
+        );
+
+        let score = |value: &str| -> (u8, usize) {
+            let found = scan("src/config.rs", value);
+            let best = found.iter().map(|m| m.confidence).max().unwrap_or(0);
+            let signals = found.iter().map(|m| m.signals.len()).min().unwrap_or(1);
+            (best, signals)
+        };
+        let mut spread: std::collections::BTreeMap<String, (u8, u8)> = Default::default();
+        for (class, value) in &live {
+            let (c, signals) = score(value);
+            assert!(c >= 70, "{class}: live-shaped scored {c}");
+            assert!(signals >= 1, "{class}: no signal");
+            let e = spread.entry(format!("live {class}")).or_insert((100, 0));
+            *e = (e.0.min(c), e.1.max(c));
+        }
+        for (class, value) in &not {
+            let (c, signals) = score(value);
+            assert!(c <= 30, "{class}: scored {c}");
+            assert!(signals >= 1, "{class}: no signal");
+            let e = spread.entry(class.clone()).or_insert((100, 0));
+            *e = (e.0.min(c), e.1.max(c));
+        }
+        for (class, (lo, hi)) in &spread {
+            println!("{class}: {lo}-{hi} %");
+        }
+        println!("{} live, {} not live", live.len(), not.len());
+    }
+
     #[test]
     fn a_bad_checksum_cannot_be_a_real_token() {
         let github = SHAPES

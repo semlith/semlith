@@ -1758,6 +1758,9 @@ impl Semlith {
             plan.credential.push(path.to_string_lossy().into_owned());
             not(&mut plan, store::class::CREDENTIAL);
         }
+        for _ in &walked.excluded {
+            not(&mut plan, store::class::EXCLUDED);
+        }
         for (path, walked) in all {
             let key = path.to_string_lossy().into_owned();
             if let Some(refusal) = self.boundary.refuses(&path, walked, home.as_deref()) {
@@ -2094,6 +2097,7 @@ impl Semlith {
                 unreadable: Vec::new(),
                 generated: Vec::new(),
                 credentials: Vec::new(),
+                excluded: Vec::new(),
             },
             true,
             Some(deadline),
@@ -2132,6 +2136,7 @@ impl Semlith {
                 unreadable: Vec::new(),
                 generated: Vec::new(),
                 credentials: Vec::new(),
+                excluded: Vec::new(),
             },
             false,
             None,
@@ -2228,6 +2233,7 @@ impl Semlith {
             unreadable: unwalkable,
             generated,
             credentials: hidden_credentials,
+            excluded,
         } = walked;
         let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = {
             let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
@@ -2307,6 +2313,18 @@ impl Semlith {
             );
         }
         report.generated = generated.iter().map(|p| p.display().to_string()).collect();
+        for (path, rule) in &excluded {
+            let folder = path.is_dir();
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::EXCLUDED,
+                &format!("left out by {rule}; change the rule rather than accept the file"),
+                &[],
+                if folder { 0 } else { 1 },
+                now(),
+            )?;
+        }
         for path in &hidden_credentials {
             let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
             store::refuse(
@@ -5089,6 +5107,8 @@ pub(crate) struct Walked {
     /// Credential files by name that the hidden-file rule stepped over, so
     /// they can be listed rather than silently absent.
     pub credentials: Vec<PathBuf>,
+    /// Files and folders an ignore rule left out, each with the rule.
+    pub excluded: Vec<(PathBuf, String)>,
 }
 
 /// Directories that are generated or vendored rather than written.
@@ -5328,24 +5348,58 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     // Credential files the hidden rule stepped over — a `.env`, a `.npmrc` —
     // named so the not-indexed list can say so (2.3, class b). One `read_dir`
     // of each directory the walk entered; nothing under them is read.
+    // And what an ignore rule left out, beside it: a file or folder directly
+    // in a walked directory that the walk did not yield, not hidden and not
+    // generated, was excluded by `.gitignore` or `.semlithignore` (2.3, class
+    // e). Said per entry, a folder once, never by walking into it.
     let mut credentials = Vec::new();
+    let mut excluded: Vec<(PathBuf, String)> = Vec::new();
+    let walked_dirs: std::collections::HashSet<PathBuf> =
+        dirs.iter().map(|d| canonical(d)).collect();
+    let generated_now: Vec<PathBuf> = generated.lock().map(|g| g.clone()).unwrap_or_default();
     for dir in &dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
+        let semlithignore = semlithignore_for(dir);
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let is_file = entry.file_type().is_ok_and(|t| t.is_file());
-            if is_file
-                && name.to_string_lossy().starts_with('.')
-                && matches!(filter::denied(&entry.path()), Some(filter::Denied::Name(_)))
-            {
-                credentials.push(canonical(&entry.path()));
+            let name = name.to_string_lossy();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if name.starts_with('.') {
+                if kind.is_file() && matches!(filter::denied(&path), Some(filter::Denied::Name(_)))
+                {
+                    credentials.push(canonical(&path));
+                }
+                continue;
             }
+            let held = if kind.is_dir() {
+                walked_dirs.contains(&canonical(&path)) || generated_now.iter().any(|g| g == &path)
+            } else if kind.is_file() {
+                seen.contains(&canonical(&path))
+            } else {
+                true
+            };
+            if held {
+                continue;
+            }
+            let rule = if semlithignore.as_ref().is_some_and(|m| {
+                m.matched_path_or_any_parents(&path, kind.is_dir())
+                    .is_ignore()
+            }) {
+                IGNORE_FILE
+            } else {
+                ".gitignore"
+            };
+            excluded.push((canonical(&path), rule.to_string()));
         }
     }
     credentials.sort();
     credentials.dedup();
+    excluded.sort();
     // Sorted, and this is issue #88's index-time half. `ignore::Walk` yields
     // entries in whatever order the filesystem hands the directory over, which
     // is not stable between two walks of two byte-identical trees. Indexing in
@@ -5369,7 +5423,22 @@ fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
         unreadable,
         generated,
         credentials,
+        excluded,
     }
+}
+
+/// The `.semlithignore` in force for a directory: the nearest one at or
+/// above it, as a matcher.
+fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
+    let mut at = Some(dir);
+    while let Some(d) = at {
+        let file = d.join(IGNORE_FILE);
+        if file.is_file() {
+            return Some(ignore::gitignore::Gitignore::new(&file).0);
+        }
+        at = d.parent();
+    }
+    None
 }
 
 #[cfg(test)]
