@@ -1046,30 +1046,60 @@ fn collect(
     }
 }
 
-/// The declared type of every struct field in one Rust file, by field name.
+/// A Rust type as far as a method call needs it: its name, and for a
+/// container (`Vec<T>`, `Option<T>`, `[T]`) the element a `[i]` or a `for`
+/// hands out.
+#[derive(Debug, Clone, PartialEq)]
+struct Ty {
+    name: String,
+    elem: Option<String>,
+}
+
+/// Standard containers and values: a receiver of one of these is not a
+/// type in the corpus, so the variable's name stays the better lead.
+const STD_TYPES: [&str; 14] = [
+    "Vec", "VecDeque", "Option", "Result", "String", "str", "HashMap", "BTreeMap", "HashSet",
+    "BTreeSet", "Path", "PathBuf", "[]", "Self",
+];
+
+/// The declared type of every struct field in one Rust file: by owner and
+/// field, and by field name alone for a receiver whose owner is unknown.
 ///
-/// A name declared with two different types in one file maps to nothing: a
-/// receiver `x.store` could then be either, and a guess is what the ranking
-/// already does without this.
-struct RustFields(std::collections::HashMap<String, Option<String>>);
+/// A field name declared with two different types in one file maps to
+/// nothing by name — `store: Semlith` beside `store: String` — and is then
+/// answered only through its owner: `self.members[i].store` is `Member`'s.
+struct RustFields {
+    by_owner: std::collections::HashMap<(String, String), Ty>,
+    by_name: std::collections::HashMap<String, Option<Ty>>,
+}
 
 impl RustFields {
     fn of(root: tree_sitter::Node, text: &str) -> RustFields {
-        let mut fields: std::collections::HashMap<String, Option<String>> =
-            std::collections::HashMap::new();
+        let mut out = RustFields {
+            by_owner: Default::default(),
+            by_name: Default::default(),
+        };
         let mut cursor = root.walk();
         let mut stack = vec![root];
         while let Some(node) = stack.pop() {
             if node.kind() == "field_declaration" {
+                let owner = node
+                    .parent()
+                    .and_then(|list| list.parent())
+                    .filter(|item| item.kind() == "struct_item")
+                    .and_then(|item| item.child_by_field_name("name"))
+                    .map(|n| text[n.byte_range()].to_string());
                 let name = node.child_by_field_name("name");
                 let ty = node
                     .child_by_field_name("type")
-                    .and_then(|t| rust_type_name(t, text));
+                    .and_then(|t| rust_ty(t, text));
                 if let (Some(name), Some(ty)) = (name, ty) {
-                    let entry = fields
-                        .entry(text[name.byte_range()].to_string())
-                        .or_insert_with(|| Some(ty.clone()));
-                    if entry.as_deref() != Some(ty.as_str()) {
+                    let field = text[name.byte_range()].to_string();
+                    if let Some(owner) = owner {
+                        out.by_owner.insert((owner, field.clone()), ty.clone());
+                    }
+                    let entry = out.by_name.entry(field).or_insert_with(|| Some(ty.clone()));
+                    if entry.as_ref() != Some(&ty) {
                         *entry = None;
                     }
                 }
@@ -1077,7 +1107,7 @@ impl RustFields {
             }
             stack.extend(node.named_children(&mut cursor));
         }
-        RustFields(fields)
+        out
     }
 }
 
@@ -1104,25 +1134,38 @@ fn rust_owner(node: tree_sitter::Node, text: &str) -> Option<String> {
 
 /// The type a type node names, through references and the smart pointers a
 /// method call sees through: `&mut Fleet`, `Arc<Mutex<Fleet>>` and
-/// `crate::fleet::Fleet` all name `Fleet`. `Option<T>` does not — a method
-/// called on it is `Option`'s.
+/// `crate::fleet::Fleet` all name `Fleet`.
 fn rust_type_name(node: tree_sitter::Node, text: &str) -> Option<String> {
+    rust_ty(node, text).map(|t| t.name)
+}
+
+/// [`rust_type_name`], keeping a container's element.
+fn rust_ty(node: tree_sitter::Node, text: &str) -> Option<Ty> {
     const THROUGH: [&str; 7] = ["Box", "Rc", "Arc", "RefCell", "Mutex", "RwLock", "Cell"];
+    let plain = |name: String| Some(Ty { name, elem: None });
     match node.kind() {
-        "type_identifier" => Some(text[node.byte_range()].to_string()),
-        "reference_type" | "pointer_type" => {
-            rust_type_name(node.child_by_field_name("type")?, text)
-        }
-        "scoped_type_identifier" => rust_type_name(node.child_by_field_name("name")?, text),
+        "type_identifier" | "primitive_type" => plain(text[node.byte_range()].to_string()),
+        "reference_type" | "pointer_type" => rust_ty(node.child_by_field_name("type")?, text),
+        "scoped_type_identifier" => rust_ty(node.child_by_field_name("name")?, text),
+        "array_type" => Some(Ty {
+            name: "[]".to_string(),
+            elem: node
+                .child_by_field_name("element")
+                .and_then(|e| rust_type_name(e, text)),
+        }),
         "generic_type" => {
             let base = rust_type_name(node.child_by_field_name("type")?, text)?;
-            if !THROUGH.contains(&base.as_str()) {
-                return Some(base);
+            let first = node.child_by_field_name("type_arguments").and_then(|args| {
+                let mut cursor = args.walk();
+                args.named_children(&mut cursor).next()
+            });
+            if THROUGH.contains(&base.as_str()) {
+                return rust_ty(first?, text);
             }
-            let arguments = node.child_by_field_name("type_arguments")?;
-            let mut cursor = arguments.walk();
-            let first = arguments.named_children(&mut cursor).next()?;
-            rust_type_name(first, text)
+            Some(Ty {
+                name: base,
+                elem: first.and_then(|f| rust_type_name(f, text)),
+            })
         }
         _ => None,
     }
@@ -1130,37 +1173,66 @@ fn rust_type_name(node: tree_sitter::Node, text: &str) -> Option<String> {
 
 /// The type of a Rust method call's receiver, where the source states it.
 ///
-/// Three places say it: `self` inside an `impl T` block, a parameter or local
-/// declared `x: T` (or bound to `T::new()`, `T::open(…)?` or `T { … }`), and a
-/// field declared `store: T` in the same file. Anything else is `None`, and
-/// the receiver's own name stays the hint, as it was before 0.30.0.
+/// `self` inside an `impl T` block; a parameter, `let` or `for` binding whose
+/// type is declared or constructed (`x: T`, `T::new()`, `T::open(…)?`,
+/// `T { … }`, `for x in &self.items`); and a field, through its owner's
+/// declared type when the chain says whose field it is (`self.members[i].store`
+/// is `Member.store`), or by its name when only one type in the file declares
+/// it. A standard container is not a lead, so `None` and the receiver's own
+/// name stays the hint, as it was before 0.30.0.
 fn receiver_type(receiver: tree_sitter::Node, text: &str, fields: &RustFields) -> Option<String> {
-    match receiver.kind() {
-        // The method `self` belongs to: climb to the function it is written
-        // in, then to that function's `impl`.
+    expr_ty(receiver, text, fields, 0)
+        .map(|t| t.name)
+        .filter(|name| !STD_TYPES.contains(&name.as_str()))
+}
+
+/// The type an expression evaluates to, where the source states it.
+fn expr_ty(node: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) -> Option<Ty> {
+    if depth > 8 {
+        return None;
+    }
+    match node.kind() {
         "self" => {
-            let mut at = receiver.parent();
+            let mut at = node.parent();
             while let Some(n) = at {
                 if n.kind() == "function_item" {
-                    return rust_owner(n, text);
+                    return rust_owner(n, text).map(|name| Ty { name, elem: None });
                 }
                 at = n.parent();
             }
             None
         }
-        "identifier" => binding_type(receiver, text),
+        "identifier" => binding_ty(node, text, fields, depth),
         "field_expression" => {
-            let field = receiver.child_by_field_name("field")?;
-            fields.0.get(&text[field.byte_range()]).cloned().flatten()
+            let field = text[node.child_by_field_name("field")?.byte_range()].to_string();
+            let owner = node
+                .child_by_field_name("value")
+                .and_then(|v| expr_ty(v, text, fields, depth + 1));
+            if let Some(owner) = owner
+                && let Some(ty) = fields.by_owner.get(&(owner.name, field.clone()))
+            {
+                return Some(ty.clone());
+            }
+            fields.by_name.get(&field).cloned().flatten()
+        }
+        "index_expression" => {
+            let container = expr_ty(node.named_child(0)?, text, fields, depth + 1)?;
+            container.elem.map(|name| Ty { name, elem: None })
+        }
+        "reference_expression" | "parenthesized_expression" | "try_expression" => {
+            let inner = node
+                .child_by_field_name("value")
+                .or_else(|| node.named_child(0))?;
+            expr_ty(inner, text, fields, depth + 1)
         }
         _ => None,
     }
 }
 
 /// The declared or constructed type of a local named by `ident`: the last
-/// parameter or `let` binding of that name in the enclosing function that
-/// comes before the use.
-fn binding_type(ident: tree_sitter::Node, text: &str) -> Option<String> {
+/// parameter, `let` or `for` binding of that name in the enclosing function
+/// that comes before the use.
+fn binding_ty(ident: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) -> Option<Ty> {
     let name = &text[ident.byte_range()];
     let mut function = ident.parent();
     while let Some(f) = function {
@@ -1173,34 +1245,38 @@ fn binding_type(ident: tree_sitter::Node, text: &str) -> Option<String> {
     // ponytail: walks the whole enclosing function per method call; a
     // per-function binding table if a pathological file ever shows up in
     // the indexing profile.
-    let mut found: Option<(usize, String)> = None;
+    let mut found: Option<(usize, Ty)> = None;
     let mut cursor = function.walk();
     let mut stack = vec![function];
     while let Some(node) = stack.pop() {
         if node.start_byte() >= ident.start_byte() {
             continue;
         }
-        let bound = match node.kind() {
-            "parameter" | "let_declaration" => node
-                .child_by_field_name("pattern")
-                .is_some_and(|p| p.kind() == "identifier" && &text[p.byte_range()] == name),
-            _ => false,
+        let names_it = |field: &str| {
+            node.child_by_field_name(field)
+                .is_some_and(|p| p.kind() == "identifier" && &text[p.byte_range()] == name)
         };
-        if bound {
-            let ty = node
+        let ty = match node.kind() {
+            "parameter" | "let_declaration" if names_it("pattern") => node
                 .child_by_field_name("type")
-                .and_then(|t| rust_type_name(t, text))
+                .and_then(|t| rust_ty(t, text))
                 .or_else(|| {
                     node.child_by_field_name("value")
                         .and_then(|v| constructed_type(v, text))
-                });
-            // Later bindings shadow earlier ones; the stack is not in source
-            // order, so the position decides.
-            if let Some(ty) = ty
-                && found.as_ref().is_none_or(|(at, _)| node.start_byte() > *at)
-            {
-                found = Some((node.start_byte(), ty));
-            }
+                        .map(|name| Ty { name, elem: None })
+                }),
+            // `for x in &self.items`: the element of what is iterated.
+            "for_expression" if names_it("pattern") => node
+                .child_by_field_name("value")
+                .and_then(|v| expr_ty(v, text, fields, depth + 1))
+                .and_then(|t| t.elem)
+                .map(|name| Ty { name, elem: None }),
+            _ => None,
+        };
+        if let Some(ty) = ty
+            && found.as_ref().is_none_or(|(at, _)| node.start_byte() > *at)
+        {
+            found = Some((node.start_byte(), ty));
         }
         stack.extend(node.named_children(&mut cursor));
     }
@@ -3738,6 +3814,7 @@ mod tests {
     #[test]
     fn rust_receivers_name_their_type_and_methods_their_owner() {
         let src = "struct Member { store: Semlith }\n\
+            struct Unreadable { store: String }\n\
             struct Fleet { members: Vec<Member> }\n\
             impl Fleet {\n\
                 fn search_in(&self) { self.search_preferring(); }\n\
@@ -3774,6 +3851,17 @@ mod tests {
         assert_eq!(hint("run", "open").as_deref(), Some("Fleet"));
         assert_eq!(hint("build", "index").as_deref(), Some("Semlith"));
         assert_eq!(hint("build", "go").as_deref(), Some("Other"));
+        // A `for` binding is the element of what it iterates.
+        let e = run(
+            "a.rs",
+            "struct Item; impl Item { fn go(&self) {} }\nstruct Bag { items: Vec<Item> }\nimpl Bag { fn all(&self) { for it in &self.items { it.go(); } } }\n",
+        );
+        let go = e
+            .edges
+            .iter()
+            .find(|x| x.from == "all" && x.to == "go")
+            .and_then(|x| x.hint.clone());
+        assert_eq!(go.as_deref(), Some("Item"), "{:?}", e.edges);
     }
 
     /// Recursion still adds no edge.

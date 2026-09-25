@@ -850,7 +850,10 @@ fn call_tool(
                 crate::Prefer::default(),
             ) {
                 Ok(brief) if brief.spans.is_empty() => stores.no_match_reason(&filter),
-                Ok(brief) => render_brief(&brief),
+                Ok(brief) => {
+                    let paths = stores.shortener();
+                    paths.with_header(render_brief(&brief, &|p| paths.short(p)))
+                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -2044,7 +2047,7 @@ fn tokens(text: &str) -> usize {
 /// Every part says what found it, because that is the difference between a
 /// span an embedding matched and one an edge reached, and an agent that cannot
 /// tell them apart treats a neighbour as an answer.
-fn render_brief(brief: &crate::brief::Brief) -> String {
+fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -> String {
     let mut out = String::new();
     for span in &brief.spans {
         let via = if span.lists.is_empty() {
@@ -2059,7 +2062,9 @@ fn render_brief(brief: &crate::brief::Brief) -> String {
         };
         out.push_str(&format!(
             "{}:{}-{}{what}{via}\n",
-            span.path, span.start_line, span.end_line
+            shorten(&span.path),
+            span.start_line,
+            span.end_line
         ));
         match &span.text {
             Some(text) => {
@@ -2078,13 +2083,17 @@ fn render_brief(brief: &crate::brief::Brief) -> String {
         for edge in &symbol.callers {
             out.push_str(&format!(
                 "    called by {} {}:{}\n",
-                edge.symbol.name, edge.symbol.path, edge.symbol.start_line
+                edge.symbol.name,
+                shorten(&edge.symbol.path),
+                edge.symbol.start_line
             ));
         }
         for edge in &symbol.callees {
             out.push_str(&format!(
                 "    calls {} {}:{}\n",
-                edge.symbol.name, edge.symbol.path, edge.symbol.start_line
+                edge.symbol.name,
+                shorten(&edge.symbol.path),
+                edge.symbol.start_line
             ));
         }
         if symbol.hidden > 0 {

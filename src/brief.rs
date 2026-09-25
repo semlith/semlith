@@ -232,8 +232,15 @@ pub fn brief(
     // built from prose about the function rather than the function.
     let code = crate::code_shaped(question);
     let texted: usize = if code {
+        let product =
+            |i: usize| crate::filter::is_code(&hits[i].path) && !crate::is_test_path(&hits[i].path);
+        let about_tests = question.to_lowercase().contains("test");
         kept.iter()
-            .position(|&i| crate::filter::is_code(&hits[i].path))
+            .position(|&i| product(i) || (about_tests && crate::filter::is_code(&hits[i].path)))
+            .or_else(|| {
+                kept.iter()
+                    .position(|&i| crate::filter::is_code(&hits[i].path))
+            })
             .unwrap_or(0)
     } else {
         0

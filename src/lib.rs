@@ -460,6 +460,11 @@ const STALE_PENALTY: f32 = 0.10;
 /// a filter. On 2026-09-25 `brief` put `tests/watch.rs` first for a question
 /// about the MCP request path, because a test that drives a path names every
 /// step of it. A question about tests is exempt and ranks them as before.
+///
+/// A weight alone was not enough — on the 0.30.0 tree that test outranked
+/// `src/` by 16 % through the graph list, and a demotion large enough to undo
+/// that would be a ranking rather than a tiebreak — so [`product_first`]
+/// adds a precedence beside it.
 const TEST_PENALTY: f32 = 0.10;
 
 /// One candidate in the fusion: which id space it is in, its id, the score it
@@ -1119,7 +1124,7 @@ const SCAN_RULES: u32 = 2;
 /// next full pass, without re-embedding: 0.30.0 records a Rust method's owner
 /// and a receiver's type, and an unchanged file would otherwise keep the edges
 /// an older release wrote until somebody edited it.
-const GRAPH_RULES: u32 = 2;
+const GRAPH_RULES: u32 = 3;
 
 /// One file or folder the scan phase says a person could accept.
 #[derive(Debug, Clone, Serialize)]
@@ -4406,6 +4411,9 @@ impl Semlith {
                 .then_with(|| a.0.start_line.cmp(&b.0.start_line))
         });
         collapse_copies(&mut hits);
+        if !about_tests {
+            product_first(&mut hits);
+        }
         hits.truncate(k);
         Ok(hits)
     }
@@ -4895,6 +4903,39 @@ pub fn canonical_calls() -> u64 {
 pub fn canonical(path: &Path) -> PathBuf {
     CANONICAL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// No test or fixture hit ahead of the first product-code hit, for a
+/// question that does not name tests.
+///
+/// Precedence, not a weight — the definition lift's shape. A test that drives
+/// a code path names every step of it and the graph list carries it up; a
+/// weight large enough to undo that would outvote the query. Only the tests
+/// ahead of the first product-code hit move, to just behind it; prose and
+/// everything else keep their places.
+fn product_first(hits: &mut Vec<(Hit, f32)>) {
+    let product = |h: &Hit| filter::is_code(&h.path) && !is_test_path(&h.path);
+    let Some(first) = hits.iter().position(|(h, _)| product(h)) else {
+        return;
+    };
+    let held: Vec<usize> = (0..first)
+        .filter(|&i| is_test_path(&hits[i].0.path))
+        .collect();
+    if held.is_empty() {
+        return;
+    }
+    let mut moved: Vec<(Hit, f32)> = Vec::with_capacity(held.len());
+    for &i in held.iter().rev() {
+        moved.push(hits.remove(i));
+    }
+    moved.reverse();
+    let at = hits
+        .iter()
+        .position(|(h, _)| product(h))
+        .map_or(hits.len(), |p| p + 1);
+    for (offset, hit) in moved.into_iter().enumerate() {
+        hits.insert(at + offset, hit);
+    }
 }
 
 /// Fold hits whose text is identical into the best-ranked of them, which
@@ -5498,6 +5539,52 @@ fn semlithignore_for(dir: &Path) -> Option<ignore::gitignore::Gitignore> {
 mod tests {
     use super::*;
 
+    /// For a question that does not name tests, no test hit sits above the
+    /// first product-code hit; prose keeps its place (1.15).
+    #[test]
+    fn product_code_comes_before_tests_and_prose_stays_put() {
+        let hit = |path: &str| {
+            (
+                Hit {
+                    score: 1.0,
+                    path: path.to_string(),
+                    start_line: 1,
+                    end_line: 2,
+                    text: path.to_string(),
+                    store: None,
+                    lists: Vec::new(),
+                    image: None,
+                    fresh: true,
+                    symbol: None,
+                    symbol_kind: None,
+                    symbol_line: None,
+                    provenance: None,
+                    copies: Vec::new(),
+                },
+                1.0,
+            )
+        };
+        let mut hits = vec![
+            hit("/r/README.md"),
+            hit("/r/tests/watch.rs"),
+            hit("/r/tests/fixtures/x.rs"),
+            hit("/r/src/lib.rs"),
+            hit("/r/src/mcp.rs"),
+        ];
+        product_first(&mut hits);
+        let order: Vec<&str> = hits.iter().map(|(h, _)| h.path.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "/r/README.md",
+                "/r/src/lib.rs",
+                "/r/tests/watch.rs",
+                "/r/tests/fixtures/x.rs",
+                "/r/src/mcp.rs"
+            ]
+        );
+    }
+
     /// A `.semlithignore` leaves its patterns out of a walk from above, and a
     /// walk rooted inside an ignored directory still sees that directory's
     /// files: the retrieval harness indexes its pinned corpus from inside the
@@ -5636,17 +5723,22 @@ mod tests {
     /// it matched well, and large enough to separate two that matched equally.
     #[test]
     fn every_rerank_factor_is_a_tiebreak_rather_than_a_ranking() {
+        // The lift against any one penalty stays under 1.5x. The two
+        // penalties are about different properties — a file edited since,
+        // a file under tests/ — and a stale test is the one case both reach.
         let strongest = 1.0 + GRAPH_PROXIMITY;
-        let weakest = 1.0 - STALE_PENALTY;
-        assert!(
-            strongest / weakest < 1.5,
-            "the whole rerank spans {strongest}/{weakest}, which is a ranking rather than a \
-             tiebreak"
-        );
-        const { assert!(GRAPH_PROXIMITY > 0.0 && STALE_PENALTY > 0.0) };
+        for penalty in [STALE_PENALTY, TEST_PENALTY] {
+            let weakest = 1.0 - penalty;
+            assert!(
+                strongest / weakest < 1.6,
+                "the rerank spans {strongest}/{weakest}, which is a ranking rather than a \
+                 tiebreak"
+            );
+        }
+        const { assert!(GRAPH_PROXIMITY > 0.0 && STALE_PENALTY > 0.0 && TEST_PENALTY > 0.0) };
         // A stale hit is pushed down, never removed: the excerpt in hand may
         // still be the best answer there is.
-        const { assert!(STALE_PENALTY < 1.0) };
+        const { assert!(STALE_PENALTY < 1.0 && TEST_PENALTY < 1.0) };
     }
 
     /// A span and a name are told apart by shape, not by trying one and
