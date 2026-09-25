@@ -399,10 +399,10 @@ pub fn dummy_rule(value: &str, body: &str) -> Option<&'static str> {
     if DOC_EXAMPLES.iter().any(|e| value.contains(e)) {
         return Some("(a) a published documentation example");
     }
-    let upper = body.to_ascii_uppercase();
-    if MARKERS.iter().any(|m| upper.contains(m)) {
+    if MARKERS.iter().any(|m| has_marker(body, m)) {
         return Some("(b) a marker such as EXAMPLE or FAKE in the body");
     }
+    let upper = body.to_ascii_uppercase();
     if upper.contains("XXXXXXXX") {
         return Some("(b) a run of eight or more X");
     }
@@ -411,6 +411,27 @@ pub fn dummy_rule(value: &str, body: &str) -> Option<&'static str> {
         return Some("(b) one character repeated");
     }
     None
+}
+
+/// Whether `body` carries `marker` as someone wrote it, not as a generator
+/// happened to spell it.
+///
+/// Written in one case, `FAKE` or `fake`: a random mixed-case body spells
+/// `FAKe` about once in 20 000 Slack tokens, and a live key read as a dummy is
+/// indexed. A short marker also has to start or end the body or one of its
+/// `-`, `_` or `.` segments, because four letters in one case still turn up by
+/// chance; seven or more (`EXAMPLE`, `REDACTED`) do not, and sit anywhere, as
+/// in `github_pat_11EXAMPLE0…`.
+fn has_marker(body: &str, marker: &str) -> bool {
+    let lower = marker.to_ascii_lowercase();
+    let segments = || body.split(['-', '_', '.']);
+    [marker, lower.as_str()].iter().any(|m| {
+        if marker.len() >= 7 {
+            body.contains(m)
+        } else {
+            segments().any(|seg| seg.starts_with(m) || seg.ends_with(m))
+        }
+    })
 }
 
 /// Whether the value has the length its issuer documents, when that is known.
@@ -484,16 +505,25 @@ fn randomness(body: &str) -> (i32, String) {
     }
 }
 
-/// Eight or more characters rising or falling by one, or a dictionary run.
+/// Eight or more characters rising by one, or falling by one.
+///
+/// One direction per run: `2123212` steps by one each time but is not
+/// sequential, and counting it as a run marked random Slack tokens, whose
+/// numeric segments zigzag like that by chance, as typed by hand.
 fn sequential(chars: &[char]) -> bool {
     let mut run = 1;
+    let mut direction = 0;
     for pair in chars.windows(2) {
         let step = pair[1] as i32 - pair[0] as i32;
-        if step == 1 || step == -1 {
+        if (step == 1 || step == -1) && (run == 1 || step == direction) {
+            direction = step;
             run += 1;
             if run >= 8 {
                 return true;
             }
+        } else if step == 1 || step == -1 {
+            direction = step;
+            run = 2;
         } else {
             run = 1;
         }
@@ -1020,5 +1050,34 @@ mod tests {
         assert_eq!(redacted.lines().count(), text.lines().count());
         assert!(redacted.contains("[REDACTED:pem private key]"));
         assert!(redacted.ends_with("b\n"));
+    }
+
+    /// A zigzag is not a run, and a marker a generator spelled by chance is
+    /// not a marker: both once turned a live-shaped Slack token into a
+    /// dummy-looking one, about one run in fifty of the calibration test.
+    #[test]
+    fn chance_spellings_are_neither_runs_nor_markers() {
+        let chars = |s: &str| s.chars().collect::<Vec<_>>();
+        assert!(!sequential(&chars("5312123212270893")));
+        assert!(sequential(&chars("x12345678x")));
+        assert!(sequential(&chars("hgfedcba")));
+        assert!(dummy_rule("x", "gZZFFZnsFAKeKZFNY0rfxRAk").is_none());
+        assert!(dummy_rule("x", "gZZFFZnsFAKEKZFNY0rfxRAk").is_none());
+        assert!(dummy_rule("x", "FAKEFAKEFAKEFAKE").is_some());
+        assert!(dummy_rule("x", "11EXAMPLE0aaaaaaaaaaaa_aaaa").is_some());
+        assert!(dummy_rule("x", "1234-fake-token").is_some());
+        let slack = crate::filter::SHAPES
+            .iter()
+            .position(|s| s.provider == "slack")
+            .unwrap();
+        for _ in 0..5000 {
+            let value = forge(slack);
+            let best = scan("src/config.rs", &value)
+                .iter()
+                .map(|m| m.confidence)
+                .max()
+                .unwrap_or(0);
+            assert!(best >= 70, "{value} scored {best}");
+        }
     }
 }
