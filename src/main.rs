@@ -95,6 +95,17 @@ enum Command {
         /// is the dry run worth doing first on a store you did not build today.
         #[arg(long, value_name = "MODE", default_value = "drop")]
         reconcile: Reconcile,
+
+        /// Scan and print the plan — what would be embedded, what is
+        /// unchanged, what is not indexed and why — without embedding.
+        #[arg(long)]
+        scan_only: bool,
+
+        /// Never stop to ask about a file the scan refused: clean files are
+        /// indexed and refused ones are listed for `semlith refused`. A run
+        /// with no terminal never asks either.
+        #[arg(long)]
+        no_review: bool,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -332,6 +343,22 @@ enum Command {
     /// Remove a file from the store.
     Forget { path: PathBuf },
 
+    /// Every file that was not indexed, and why; accept or revoke one.
+    ///
+    /// Five classes: a secret-shaped value (reviewable), a credential file
+    /// (never acceptable), a policy limit such as the size cap (reviewable),
+    /// a file no reader can take, and your own ignore rules. A secret row
+    /// carries a 0-100 % estimate that it is real, with the signals behind
+    /// it, and never the value.
+    Refused {
+        #[command(subcommand)]
+        action: Option<RefusedCommand>,
+
+        /// Emit JSON instead of formatted text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List every file the store holds that semlith would refuse today.
     ///
     /// The path for a store indexed before a rule widened, or before the
@@ -562,8 +589,10 @@ enum Command {
 
     /// Find where a symbol is defined.
     Symbol {
-        /// The symbol's name, matched exactly.
-        name: String,
+        /// The symbol's name, matched exactly. `Type::method` narrows to one
+        /// owner. Several names print one row per definition and no rings.
+        #[arg(required = true, num_args = 1..)]
+        names: Vec<String>,
 
         /// Most definitions to print.
         #[arg(long, short, default_value_t = 20)]
@@ -772,6 +801,36 @@ enum Command {
         /// Emit JSON instead of formatted text.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RefusedCommand {
+    /// Accept one refused file, after reading what was found in it.
+    ///
+    /// One path per call, never a list or a glob. Prints each masked match,
+    /// its line and confidence, and asks for the file's name to be typed.
+    Accept {
+        path: PathBuf,
+        /// Replace each detected value with `[REDACTED:…]` before anything is
+        /// stored. Covers only what the scanner detected.
+        #[arg(long, conflicts_with = "as_is", required_unless_present = "as_is")]
+        redact: bool,
+        /// Index the file's full text, values included.
+        #[arg(long)]
+        as_is: bool,
+        /// Skip the typed confirmation, for a script. Still one path.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Undo an acceptance: the file leaves the store and is listed again.
+    Revoke { path: PathBuf },
+    /// Keep out a file that was let through because every match in it is a
+    /// declared test dummy.
+    Refuse {
+        path: PathBuf,
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1032,6 +1091,8 @@ fn run() -> Result<()> {
             each,
             projects,
             reconcile,
+            scan_only,
+            no_review,
         } => {
             arm_airgap(airgap);
 
@@ -1122,6 +1183,23 @@ fn run() -> Result<()> {
                     roots: None,
                     allow_secrets: include_secrets,
                 };
+
+                // The scan phase (2.7): the whole plan before the model is
+                // even loaded, and a stop for review only when a person is at
+                // the terminal and something is theirs to decide.
+                let plan = store.plan(roots)?;
+                if !quiet || scan_only {
+                    print_plan(&plan);
+                }
+                if scan_only {
+                    continue;
+                }
+                use std::io::IsTerminal;
+                let interactive =
+                    !no_review && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+                if interactive && !plan.review.is_empty() {
+                    review_plan(&mut store, &plan)?;
+                }
 
                 let started = Instant::now();
                 // Throttled, not per file: a corpus large enough to need an
@@ -1284,6 +1362,22 @@ fn run() -> Result<()> {
                     semlith::human_bytes(bytes),
                     dir.display()
                 );
+                if report.dummies_indexed > 0 {
+                    eprintln!(
+                        "{} file(s) indexed holding only declared test dummies (semlith refused lists them)",
+                        report.dummies_indexed
+                    );
+                }
+                let rows = semlith::store::refusals(store.db())?;
+                let not: usize = rows
+                    .iter()
+                    .filter(|r| r.class != semlith::store::class::DUMMY)
+                    .map(|r| r.files.max(1) as usize)
+                    .sum();
+                let review = rows.iter().filter(|r| r.reviewable && r.accepted.is_none()).count();
+                if not > 0 {
+                    eprintln!("{not} not indexed · {review} need review · semlith refused");
+                }
             }
 
             // The readable roots are indexed and recorded; the status is what
@@ -1606,12 +1700,36 @@ fn run() -> Result<()> {
         }
 
         Command::Symbol {
-            name,
+            names,
             k,
             history,
             json,
         } => {
             let fleet = read_fleet(&cli.store, &cwd, false)?;
+            if names.len() > 1 && !history {
+                if names.len() > semlith::graph::NAMES_LIMIT {
+                    bail!(
+                        "at most {} names at once; {} given",
+                        semlith::graph::NAMES_LIMIT,
+                        names.len()
+                    );
+                }
+                let rows = fleet.signatures_in(None, &names)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else if rows.is_empty() {
+                    eprintln!("{}", nothing_known(&fleet, &names.join(", ")));
+                } else {
+                    println!(
+                        "{}",
+                        semlith::graph::render_signatures(&rows, &|p| display(std::path::Path::new(
+                            p
+                        )))
+                    );
+                }
+                return Ok(());
+            }
+            let name = names[0].clone();
             if history {
                 let past = fleet.past_in(None, &name, k)?;
                 if json {
@@ -2330,6 +2448,67 @@ fn run() -> Result<()> {
             std::process::exit(1);
         }
 
+        Command::Refused { action, json } => {
+            let dirs = home::all_dirs(&cli.store, &cwd)?;
+            let upstream = semlith::proxy::find(&dirs);
+            match action {
+                None => {
+                    let listing: serde_json::Value = match &upstream {
+                        Some(daemon) => serde_json::from_str(&daemon.get("/api/refused")?)?,
+                        None => {
+                            let fleet = read_fleet(&cli.store, &cwd, true)?;
+                            let mut stores = Vec::new();
+                            let (mut total, mut review) = (0usize, 0usize);
+                            for (label, store) in fleet.each() {
+                                let rows = semlith::store::refusals(store.db())?;
+                                let needs = rows
+                                    .iter()
+                                    .filter(|r| r.reviewable && r.accepted.is_none())
+                                    .count();
+                                total += rows
+                                    .iter()
+                                    .filter(|r| r.class != semlith::store::class::DUMMY)
+                                    .map(|r| r.files.max(1) as usize)
+                                    .sum::<usize>();
+                                review += needs;
+                                stores.push(serde_json::json!({ "store": label, "rows": rows, "review": needs }));
+                            }
+                            serde_json::json!({ "stores": stores, "total": total, "review": review })
+                        }
+                    };
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&listing)?);
+                    } else {
+                        print_refused(&listing);
+                    }
+                }
+                Some(RefusedCommand::Revoke { path }) => {
+                    let key = semlith::canonical(&path).to_string_lossy().into_owned();
+                    let body = serde_json::json!({ "path": key, "store": store_of(&cli.store, &path)? });
+                    match &upstream {
+                        Some(daemon) => {
+                            daemon.post("/api/refused/revoke", &body)?;
+                        }
+                        None => {
+                            let dir = home::resolve(&cli.store, &path, None)?.one()?;
+                            let mut store = Semlith::open(&dir, None)?;
+                            if !store.revoke(&key)? {
+                                bail!("{} has no acceptance to revoke", path.display());
+                            }
+                            store.index_paths(&[PathBuf::from(&key)], |_, _| {})?;
+                        }
+                    }
+                    eprintln!("revoked {}; it is refused again and listed", path.display());
+                }
+                Some(RefusedCommand::Accept { path, redact, as_is: _, yes }) => {
+                    decide_refused(&cli.store, upstream.as_ref(), &path, if redact { "redacted" } else { "as-is" }, yes)?;
+                }
+                Some(RefusedCommand::Refuse { path, yes }) => {
+                    decide_refused(&cli.store, upstream.as_ref(), &path, "refused", yes)?;
+                }
+            }
+        }
+
         Command::Forget { path } => {
             // Anchored on the file, the way `index` is anchored on the path it
             // is given. Resolving from the working directory asked whichever
@@ -2769,6 +2948,228 @@ fn arm_airgap(on: bool) {
 /// `all` is what `mcp` asks for: every registered store, because a client
 /// stanza cannot know which directory the agent will be started in. Everything
 /// else asks about the store covering the working directory.
+/// The registered name of the store that covers `path`, for a daemon route.
+fn store_of(flags: &[PathBuf], path: &Path) -> Result<Option<String>> {
+    let dir = home::resolve(flags, path, None)?.one()?;
+    Ok(dir.file_name().map(|n| n.to_string_lossy().into_owned()))
+}
+
+/// Accept one refused file, or keep out a dummy-only one, after showing a
+/// person what was found and asking for the file's name (2.5).
+fn decide_refused(
+    flags: &[PathBuf],
+    upstream: Option<&semlith::proxy::Upstream>,
+    path: &Path,
+    mode: &str,
+    yes: bool,
+) -> Result<()> {
+    let key = semlith::canonical(path).to_string_lossy().into_owned();
+    let dir = home::resolve(flags, path, None)?.one()?;
+    // Read-only: what the store recorded about the file, to show before asking.
+    let row = {
+        let store = Semlith::open_existing(&dir)?;
+        semlith::store::refusal(store.db(), &key)?
+    };
+    let Some(row) = row else {
+        bail!("{} is not on the not-indexed list", path.display());
+    };
+    if row.class == semlith::store::class::CREDENTIAL {
+        bail!(
+            "{} is a credential file and is never accepted; `semlith index --include-secrets` \
+             is the only way to index one",
+            path.display()
+        );
+    }
+    eprintln!("{}{}{} — {}", bold(), display(path), reset(), row.rule);
+    for m in &row.matches {
+        eprintln!(
+            "  line {} · {} {} · {} % likely real ({})",
+            m.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
+            m.get("kind").and_then(|v| v.as_str()).unwrap_or(""),
+            m.get("masked").and_then(|v| v.as_str()).unwrap_or(""),
+            m.get("confidence").and_then(|v| v.as_u64()).unwrap_or(0),
+            m.get("signals")
+                .and_then(|v| v.as_array())
+                .map(|s| s
+                    .iter()
+                    .map(|x| format!(
+                        "{} {}",
+                        x.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                        if x.get("effect").and_then(|v| v.as_str()) == Some("up") { "↑" } else { "↓" }
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default()
+        );
+    }
+    match mode {
+        "redacted" => eprintln!(
+            "Accepting with redaction replaces each value above with [REDACTED:…]. It covers only \
+             what the scanner detected."
+        ),
+        "as-is" => eprintln!("Accepting as-is indexes the file's full text, values included."),
+        _ => eprintln!("Refusing keeps this file out of the store although every match is a test dummy."),
+    }
+    if !yes {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        eprint!("Type {name} to confirm: ");
+        let mut typed = String::new();
+        std::io::stdin().read_line(&mut typed)?;
+        if typed.trim() != name {
+            bail!("not confirmed; nothing changed");
+        }
+    }
+    match upstream {
+        Some(daemon) => {
+            let body = serde_json::json!({
+                "path": key,
+                "mode": mode,
+                "reviewed": true,
+                "source": "cli",
+                "store": dir.file_name().map(|n| n.to_string_lossy().into_owned()),
+            });
+            daemon.post("/api/refused/accept", &body)?;
+        }
+        None => {
+            let mut store = Semlith::open(&dir, None)?;
+            store.accept(&key, mode, "cli")?;
+            if mode != "refused" {
+                store.index_paths(&[PathBuf::from(&key)], |_, _| {})?;
+            }
+        }
+    }
+    eprintln!(
+        "{} {}",
+        if mode == "refused" { "kept out" } else { "accepted and indexed" },
+        path.display()
+    );
+    Ok(())
+}
+
+/// The not-indexed list as text, reviewable rows first.
+fn print_refused(listing: &serde_json::Value) {
+    let total = listing.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let review = listing.get("review").and_then(|v| v.as_u64()).unwrap_or(0);
+    println!("{total} not indexed · {review} need review");
+    for store in listing.get("stores").and_then(|v| v.as_array()).into_iter().flatten() {
+        let name = store.get("store").and_then(|v| v.as_str()).unwrap_or("");
+        let rows = store.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if rows.is_empty() {
+            continue;
+        }
+        println!("\n{}{name}{}", bold(), reset());
+        let mut dummies = Vec::new();
+        for row in &rows {
+            let class = row.get("class").and_then(|v| v.as_str()).unwrap_or("");
+            let path = row.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let rule = row.get("rule").and_then(|v| v.as_str()).unwrap_or("");
+            if class == "dummy" {
+                dummies.push(row.clone());
+                continue;
+            }
+            let confidence = row
+                .get("confidence")
+                .and_then(|v| v.as_u64())
+                .map(|c| format!(" · {c} % likely real"))
+                .unwrap_or_default();
+            let accepted = row
+                .get("accepted")
+                .and_then(|v| v.as_str())
+                .map(|m| format!(" · accepted {m}"))
+                .unwrap_or_default();
+            println!("  {class:<11} {path}{confidence}{accepted}");
+            println!("              {rule}");
+        }
+        if !dummies.is_empty() {
+            println!("  let through as test dummies:");
+            for row in dummies {
+                println!(
+                    "    {} · {} % likely real",
+                    row.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                    row.get("confidence").and_then(|v| v.as_u64()).unwrap_or(0)
+                );
+            }
+        }
+    }
+    if review > 0 {
+        println!(
+            "\nsemlith refused accept <path> --redact | --as-is reviews one file; credential files are never accepted."
+        );
+    }
+}
+
+/// The scan phase's plan, as a person reads it.
+fn print_plan(plan: &semlith::Plan) {
+    let langs: Vec<String> = plan
+        .languages
+        .iter()
+        .map(|(l, n)| format!("{l} {n}"))
+        .collect();
+    let not: usize = plan.not_indexed.values().sum();
+    let eta = plan
+        .eta_ms
+        .map(|ms| format!(" · about {} to embed", human_duration(ms as f32 / 1000.0)))
+        .unwrap_or_default();
+    eprintln!(
+        "plan: {} to embed ({}{}) · {} unchanged · {not} not indexed · {} need review{eta} · scanned in {:.2}s",
+        plan.embed,
+        semlith::human_bytes(plan.embed_bytes as i64),
+        if langs.is_empty() { String::new() } else { format!(": {}", langs.join(", ")) },
+        plan.unchanged,
+        plan.review.len(),
+        plan.seconds,
+    );
+    for path in &plan.credential {
+        eprintln!("  credential file, never indexed: {}", display(Path::new(path)));
+    }
+    for item in &plan.review {
+        eprintln!("  needs review: {} — {}", display(Path::new(&item.path)), item.rule);
+        for m in &item.matches {
+            eprintln!("      line {} · {} {} · {} % likely real", m.line, m.kind, m.masked, m.confidence);
+        }
+    }
+}
+
+/// One prompt per reviewable file, before anything is embedded (2.7).
+///
+/// There is never an accept-all: the one choice that covers the rest keeps
+/// them refused and starts the run.
+fn review_plan(store: &mut Semlith, plan: &semlith::Plan) -> Result<()> {
+    for (i, item) in plan.review.iter().enumerate() {
+        let content = item.class == semlith::store::class::CONTENT;
+        eprint!(
+            "{} ({}/{}) {} — {}: ",
+            bold(),
+            i + 1,
+            plan.review.len(),
+            display(Path::new(&item.path)),
+            reset()
+        );
+        eprint!(
+            "{}",
+            if content {
+                "[r]edact / [a]s-is / [k]eep refused / keep the rest refused and [s]tart? "
+            } else {
+                "[a]ccept / [k]eep refused / keep the rest refused and [s]tart? "
+            }
+        );
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        let mode = match answer.trim().to_ascii_lowercase().as_str() {
+            "r" | "redact" if content => "redacted",
+            "a" | "as-is" | "accept" => "as-is",
+            "s" | "start" => break,
+            _ => continue,
+        };
+        store.accept(&item.path, mode, "cli")?;
+        eprintln!("  accepted ({mode})");
+    }
+    Ok(())
+}
+
 fn read_fleet(flags: &[PathBuf], cwd: &Path, all: bool) -> Result<Fleet> {
     let dirs = if all {
         home::all_dirs(flags, cwd)?
@@ -3540,7 +3941,8 @@ fn brief(
             }
             // Said rather than left blank: a span with no text under it
             // looks like a span with no text in it.
-            None => writeln!(out, "   (text left out for the budget)")?,
+            None if span.over_budget => writeln!(out, "   (text left out for the budget)")?,
+            None => writeln!(out, "   (text: top span only)")?,
         }
         writeln!(out)?;
     }

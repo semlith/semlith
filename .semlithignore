@@ -1,0 +1,4 @@
+# Paths a store indexed over this repository leaves out, in gitignore syntax.
+# The retrieval harness indexes its pinned corpus on its own, from inside it,
+# so this does not change what the harness measures.
+tests/fixtures/retrieval/corpus/

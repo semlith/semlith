@@ -51,6 +51,7 @@ pub mod report;
 pub mod rerank;
 pub mod routes;
 pub mod schedule;
+pub mod keyscan;
 /// The daemon as a login service, so a client never finds nothing.
 pub mod service;
 pub mod setup;
@@ -309,6 +310,52 @@ pub fn shape_of(query: &str) -> Shape {
     }
 }
 
+/// Whether a question is about code, which is what `brief` spends its one
+/// text span and its graph lines on.
+///
+/// A second reading of the same text, kept beside [`shape_of`] so there is
+/// still one place the query is read: an identifier-shaped query is code, and
+/// so is a sentence that names an identifier (`semlith_search`, `Fleet::open`,
+/// `run()`, `searchPreferring`) or asks about a function, a caller or a type.
+pub fn code_shaped(query: &str) -> bool {
+    const CODE_WORDS: [&str; 22] = [
+        "function", "functions", "method", "methods", "call", "calls", "called", "caller",
+        "callers", "callee", "struct", "class", "impl", "trait", "enum", "type", "field",
+        "variable", "signature", "parameter", "return", "returns",
+    ];
+    if shape_of(query) == Shape::Identifier {
+        return true;
+    }
+    query.split_whitespace().any(|word| {
+        let word = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != ':');
+        let inner_capital = word.chars().skip(1).any(char::is_uppercase)
+            && word.chars().any(char::is_lowercase);
+        word.contains('_')
+            || word.contains("::")
+            || inner_capital
+            || CODE_WORDS.contains(&word.to_lowercase().as_str())
+    }) || query.contains("()")
+}
+
+/// Whether a query asks about tests, which is what exempts it from
+/// [`TEST_PENALTY`].
+fn names_tests(query: &str) -> bool {
+    query.split(|c: char| !c.is_alphanumeric()).any(|w| {
+        let w = w.to_lowercase();
+        w.starts_with("test") || w.starts_with("spec") || w.starts_with("fixture")
+    })
+}
+
+/// Whether a path sits under a test or fixture directory.
+pub fn is_test_path(path: &str) -> bool {
+    Path::new(path).components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some("tests" | "test" | "fixtures" | "spec" | "__tests__")
+        )
+    })
+}
+
 /// Which side of the corpus a caller would rather be given.
 ///
 /// The automatic weighting above is about *how* the query was written;
@@ -385,6 +432,15 @@ const GRAPH_PROXIMITY: f32 = 0.15;
 /// already flags it as stale. This only means a current answer of equal
 /// quality is preferred to it.
 const STALE_PENALTY: f32 = 0.10;
+
+/// How much a chunk under `tests/`, `fixtures/`, `spec/` or `__tests__/` is
+/// pushed down for a question that does not name tests.
+///
+/// The same size and the same reasoning as [`STALE_PENALTY`]: a tiebreak, not
+/// a filter. On 2026-09-25 `brief` put `tests/watch.rs` first for a question
+/// about the MCP request path, because a test that drives a path names every
+/// step of it. A question about tests is exempt and ranks them as before.
+const TEST_PENALTY: f32 = 0.10;
 
 /// One candidate in the fusion: which id space it is in, its id, the score it
 /// has accumulated, and which lists put it there.
@@ -561,6 +617,10 @@ pub struct Span {
     pub symbol_kind: Option<String>,
     /// Whether the file still looks the way it did when it was indexed.
     pub fresh: bool,
+    /// The text is the file's current lines, read because the store's copy
+    /// was out of date. See [`Semlith::read_within`].
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub from_disk: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
 }
@@ -631,6 +691,11 @@ pub struct Hit {
     pub symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_kind: Option<String>,
+    /// The line `symbol` is defined on, which is what an answer should cite:
+    /// the chunk's range can start at a doc comment or sit in the middle of a
+    /// long function, and "line 3290" of a 40-line method is not where it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_line: Option<u32>,
     /// For a hit the graph list reached: how well supported the edge that
     /// reached it was.
     ///
@@ -639,6 +704,11 @@ pub struct Hit {
     /// guess about a neighbour, and an agent should weigh it as one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
+    /// Other files holding exactly this chunk's text — a vendored or fixture
+    /// copy — shown once here instead of spending a result slot each.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(serialize_with = "serialize_plain_list")]
+    pub copies: Vec<String>,
 }
 
 /// An image's pixel size.
@@ -749,6 +819,15 @@ impl SkipReason {
             Self::Binary => "binary".to_string(),
             Self::NoText => "no text in this document".to_string(),
             Self::NotDecodableImage => "not a decodable image".to_string(),
+        }
+    }
+
+    /// Which not-indexed class this is (2.3): over the cap is a policy a
+    /// person may override, everything else is a fact accepting cannot change.
+    pub fn class(&self) -> &'static str {
+        match self {
+            Self::TooLarge => store::class::POLICY,
+            _ => store::class::UNINDEXABLE,
         }
     }
 
@@ -978,6 +1057,10 @@ pub struct IndexReport {
     /// indexed anyway. Reported so that the flag is never silent about what it
     /// did: a store that holds credentials should say how many.
     pub secrets_indexed: usize,
+    /// Files indexed whose every secret-shaped match was a declared test dummy.
+    pub dummies_indexed: usize,
+    /// Files indexed because a person accepted them, in their accepted mode.
+    pub accepted_indexed: usize,
     /// Symbols extracted in this run, and the edges between them.
     pub symbols: usize,
     pub edges: usize,
@@ -1003,6 +1086,49 @@ pub struct IndexReport {
     /// the slices of one logical run, so stopping can undo the whole run
     /// rather than only the slice that happened to be going.
     pub written: Vec<String>,
+}
+
+/// The version of the scan rules a store was last swept under. A store below
+/// it has every unchanged file scanned again on its next full pass: 0.30.0's
+/// dummy rules (2.1) let some files in, and its no-prefix rule (2.2) keeps
+/// some out, and neither shows up in a content hash.
+const SCAN_RULES: u32 = 2;
+
+/// One file or folder the scan phase says a person could accept.
+#[derive(Debug, Clone, Serialize)]
+pub struct Review {
+    #[serde(serialize_with = "serialize_plain")]
+    pub path: String,
+    pub class: String,
+    pub rule: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<keyscan::Match>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
+}
+
+/// What a run would do, before it embeds anything (2.7).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Plan {
+    /// Files to embed, their bytes, and how many of each language.
+    pub embed: usize,
+    pub embed_bytes: u64,
+    pub languages: std::collections::BTreeMap<String, usize>,
+    pub unchanged: usize,
+    /// Not indexed, by class.
+    pub not_indexed: std::collections::BTreeMap<String, usize>,
+    /// What a person could accept, one entry each.
+    pub review: Vec<Review>,
+    /// Credential files: listed, never offered.
+    #[serde(serialize_with = "serialize_plain_list")]
+    pub credential: Vec<String>,
+    /// Files whose every match is a declared test dummy.
+    pub dummies: usize,
+    /// Milliseconds to embed, from the store's last measured byte rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_ms: Option<u64>,
+    /// How long the scan itself took.
+    pub seconds: f64,
 }
 
 /// The size a file counts for in a run's byte totals: its length, or nothing
@@ -1214,6 +1340,9 @@ pub struct Semlith {
     /// What this caller may index. The default is the command line's: the
     /// deny-list, and no confinement.
     pub boundary: Boundary,
+    /// Size, mtime and content hash of each file the scan phase read, so the
+    /// embed pass that follows it does not read an unchanged file twice.
+    prehashed: std::collections::HashMap<PathBuf, (u64, i64, String)>,
 }
 
 impl Semlith {
@@ -1303,6 +1432,7 @@ impl Semlith {
             generation,
             quiet: false,
             boundary: Boundary::default(),
+            prehashed: Default::default(),
         })
     }
 
@@ -1555,6 +1685,276 @@ impl Semlith {
         Ok(out)
     }
 
+    /// The walk an index pass takes: [`walk`], plus the generated folders a
+    /// person accepted.
+    fn walk(&self, roots: &[PathBuf]) -> Walked {
+        let allowed: Vec<PathBuf> = store::acceptances(&self.db)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.class == store::class::POLICY)
+            .map(|a| PathBuf::from(a.path))
+            .collect();
+        walk_allowing(roots, &allowed)
+    }
+
+    /// The scan phase (2.7): what a run over `roots` would do, decided without
+    /// the embedding model.
+    ///
+    /// Walks, stats, reads and hashes each file, sorts it into the
+    /// not-indexed classes, runs the secret scan with its confidence and
+    /// checks the store and the acceptances. Measured on 2026-09-25 at 0.01 to
+    /// 0.05 s for this repository against 8 to 13 minutes to embed it. The
+    /// hashes it took are kept, so the embed pass that follows reads an
+    /// unchanged file once, not twice.
+    pub fn plan(&mut self, roots: &[PathBuf]) -> Result<Plan> {
+        let started = std::time::Instant::now();
+        let walked = self.walk(roots);
+        let mut plan = Plan::default();
+        let home = crate::home::user_home().ok().map(|h| canonical(&h));
+        let rechunk = store::format(&self.db)? < store::CODE_CONTEXT;
+        let rescan = self.rules_outdated()?;
+        let all = walked
+            .named
+            .into_iter()
+            .map(|p| (p, false))
+            .chain(walked.files.into_iter().map(|p| (p, true)));
+        let not = |plan: &mut Plan, class: &str| {
+            *plan.not_indexed.entry(class.to_string()).or_insert(0) += 1;
+        };
+        for dir in &walked.generated {
+            plan.review.push(Review {
+                path: dir.to_string_lossy().into_owned(),
+                class: store::class::POLICY.to_string(),
+                rule: "a generated or vendored folder the walk steps over".to_string(),
+                matches: Vec::new(),
+                confidence: None,
+            });
+            not(&mut plan, store::class::POLICY);
+        }
+        for _ in &walked.unreadable {
+            not(&mut plan, store::class::UNINDEXABLE);
+        }
+        for (path, walked) in all {
+            let key = path.to_string_lossy().into_owned();
+            if let Some(refusal) = self.boundary.refuses(&path, walked, home.as_deref()) {
+                if refusal.credential {
+                    plan.credential.push(key);
+                    not(&mut plan, store::class::CREDENTIAL);
+                } else {
+                    not(&mut plan, store::class::EXCLUDED);
+                }
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                not(&mut plan, store::class::UNINDEXABLE);
+                continue;
+            };
+            if !meta.is_file() || meta.len() == 0 {
+                not(&mut plan, store::class::UNINDEXABLE);
+                continue;
+            }
+            let accepted = store::acceptance(&self.db, &key)?;
+            if meta.len() > chunk::MAX_FILE_BYTES
+                && !accepted.as_ref().is_some_and(|a| a.class == store::class::POLICY)
+            {
+                plan.review.push(Review {
+                    path: key,
+                    class: store::class::POLICY.to_string(),
+                    rule: format!(
+                        "over {} MiB ({} MiB)",
+                        chunk::MAX_FILE_BYTES / (1024 * 1024),
+                        meta.len() / (1024 * 1024)
+                    ),
+                    matches: Vec::new(),
+                    confidence: None,
+                });
+                not(&mut plan, store::class::POLICY);
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                not(&mut plan, store::class::UNINDEXABLE);
+                continue;
+            };
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs() as i64);
+            self.prehashed
+                .insert(path.clone(), (meta.len(), mtime, hash.clone()));
+            let unchanged =
+                !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str());
+            if unchanged && !rescan {
+                plan.unchanged += 1;
+                continue;
+            }
+            if image::is_image(&path) {
+                if unchanged {
+                    plan.unchanged += 1;
+                } else {
+                    plan.embed += 1;
+                    plan.embed_bytes += meta.len();
+                }
+                continue;
+            }
+            let text = match chunk::extract(&path, &bytes) {
+                Ok(text) => text,
+                Err(_) => {
+                    not(&mut plan, store::class::UNINDEXABLE);
+                    continue;
+                }
+            };
+            if self.boundary.allow_secrets {
+                plan.embed += usize::from(!unchanged);
+                plan.unchanged += usize::from(unchanged);
+                continue;
+            }
+            let found = keyscan::scan(&key, &text);
+            match keyscan::decide(&self.db, &key, &text, &found)? {
+                keyscan::Decision::Index { .. } => {
+                    if !found.is_empty() {
+                        plan.dummies += 1;
+                    }
+                    if unchanged {
+                        plan.unchanged += 1;
+                    } else {
+                        plan.embed += 1;
+                        plan.embed_bytes += meta.len();
+                        if let Some(lang) = filter::language_of_path(&key) {
+                            *plan.languages.entry(lang.name.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+                keyscan::Decision::Refuse(rule) => {
+                    let live: Vec<keyscan::Match> =
+                        found.into_iter().filter(|m| m.dummy.is_none()).collect();
+                    plan.review.push(Review {
+                        path: key,
+                        class: store::class::CONTENT.to_string(),
+                        confidence: live.iter().map(|m| m.confidence).max(),
+                        rule,
+                        matches: live,
+                    });
+                    not(&mut plan, store::class::CONTENT);
+                }
+            }
+        }
+        plan.eta_ms = store::get_meta(&self.db, "embed_bytes_per_sec")?
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|r| *r > 0.0)
+            .map(|rate| (plan.embed_bytes as f64 / rate * 1000.0) as u64);
+        plan.seconds = started.elapsed().as_secs_f64();
+        Ok(plan)
+    }
+
+    /// Whether this store was last swept under an older set of scan rules,
+    /// so its unchanged files must be scanned again (2.7's upgrade pass).
+    fn rules_outdated(&self) -> Result<bool> {
+        Ok(store::get_meta(&self.db, "scan_rules")?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0)
+            < SCAN_RULES)
+    }
+
+    /// Accept one refused file, as a person, and index it at once (2.5, 2.6).
+    ///
+    /// `mode` is `redacted`, `as-is`, or `refused` (for a dummy-only file a
+    /// person wants kept out). The fingerprints of the matches the person saw
+    /// are what is remembered, never the values. A credential file cannot be
+    /// accepted: the deny-list is not a review.
+    pub fn accept(&mut self, path: &str, mode: &str, source: &str) -> Result<store::Acceptance> {
+        let key = self.stored_key(path);
+        if let Some(why) = filter::denied(Path::new(&key))
+            && why != filter::Denied::Hidden
+        {
+            anyhow::bail!(
+                "{key} is a credential file ({}) and is never accepted; `semlith index \
+                 --include-secrets` is the only way to index one",
+                why.reason()
+            );
+        }
+        if !matches!(mode, "redacted" | "as-is" | "refused") {
+            anyhow::bail!("mode is redacted, as-is or refused, not {mode:?}");
+        }
+        let row = store::refusal(&self.db, &key)?;
+        let class = row.as_ref().map_or(store::class::CONTENT, |r| r.class.as_str()).to_string();
+        if !(store::class::reviewable(&class) || class == store::class::DUMMY) {
+            anyhow::bail!("{key} is not indexable ({}); accepting cannot change that", class);
+        }
+        if mode == "refused" && class != store::class::DUMMY {
+            anyhow::bail!("only a file let through as test dummies can be refused instead");
+        }
+        let accepted = self.writing(|me| {
+            let salt = store::salt(&me.db)?;
+            let mut prints = Vec::new();
+            let mut confidence = None;
+            if class == store::class::CONTENT || class == store::class::DUMMY {
+                let bytes = anyhow::Context::with_context(std::fs::read(&key), || {
+                    format!("reading {key}")
+                })?;
+                let text = chunk::extract(Path::new(&key), &bytes)
+                    .map_err(|why| anyhow::anyhow!("{key}: {}", why.as_str()))?;
+                let found = keyscan::scan(&key, &text);
+                for m in found.iter().filter(|m| m.dummy.is_none()) {
+                    prints.push(keyscan::fingerprint(&salt, &text, m));
+                }
+                confidence = found.iter().map(|m| m.confidence).max();
+            }
+            let a = store::Acceptance {
+                path: key.clone(),
+                class: if class == store::class::DUMMY {
+                    store::class::DUMMY.to_string()
+                } else {
+                    class.clone()
+                },
+                mode: mode.to_string(),
+                fingerprints: prints,
+                confidence,
+                at: now(),
+                source: source.to_string(),
+            };
+            store::accept(&me.db, &a)?;
+            if mode == "refused" {
+                let (gone, images) = me.evict(&key)?;
+                if gone + images > 0 {
+                    me.save()?;
+                }
+            }
+            crate::ledger::acceptance(&me.db, &a, "accept")?;
+            Ok(a)
+        })?;
+        Ok(accepted)
+    }
+
+    /// Undo an acceptance: the file leaves the store and returns to the list.
+    pub fn revoke(&mut self, path: &str) -> Result<bool> {
+        let key = self.stored_key(path);
+        self.writing(|me| {
+            let Some(a) = store::acceptance(&me.db, &key)? else {
+                return Ok(false);
+            };
+            store::revoke(&me.db, &key)?;
+            let (gone, images) = me.evict(&key)?;
+            if gone + images > 0 {
+                me.save()?;
+            }
+            crate::ledger::acceptance(&me.db, &a, "revoke")?;
+            Ok(true)
+        })
+    }
+
+    /// The key a path is stored under: canonical when it exists, as given
+    /// when a row names it already.
+    fn stored_key(&self, path: &str) -> String {
+        let given = Path::new(path);
+        if given.exists() {
+            canonical(given).to_string_lossy().into_owned()
+        } else {
+            path.to_string()
+        }
+    }
+
     /// Walk `roots`, embed anything new or changed, and drop anything that has
     /// disappeared from disk.
     pub fn index_paths(
@@ -1597,7 +1997,7 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
-        self.index_set(walk(roots), true, Some(deadline), None, on_file)
+        self.index_set(self.walk(roots), true, Some(deadline), None, on_file)
     }
 
     /// [`Semlith::index_walk`] under a control, so the catch-up a watcher runs
@@ -1608,7 +2008,7 @@ impl Semlith {
         control: &dyn Fn() -> Flow,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(walk(roots), true, None, Some(control), on_file)
+        self.index_set(self.walk(roots), true, None, Some(control), on_file)
     }
 
     /// [`Semlith::index_within_held`] that can be paused and stopped from
@@ -1625,7 +2025,7 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
-        self.index_set(walk(roots), true, Some(deadline), Some(control), on_file)
+        self.index_set(self.walk(roots), true, Some(deadline), Some(control), on_file)
     }
 
     /// Carry on a run from exactly where its last slice stopped.
@@ -1670,7 +2070,7 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(walk(roots), true, None, None, on_file)
+        self.index_set(self.walk(roots), true, None, None, on_file)
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -1773,6 +2173,9 @@ impl Semlith {
         // the meta row would be a claim about files this run never looked at.
         let rechunk = store::format(&self.db)? < store::CODE_CONTEXT;
         report.rechunked = rechunk;
+        let rescan = self.rules_outdated()?;
+        let mut prehashed = std::mem::take(&mut self.prehashed);
+        let run_started = std::time::Instant::now();
 
         // Refused before anything is read. A path that names a credential or
         // sits outside this caller's boundary is reported by name with the rule
@@ -1839,6 +2242,12 @@ impl Semlith {
                 .refused
                 .push((path.display().to_string(), why.clone()));
             report.scanned += 1;
+            let class = if refusal.credential {
+                store::class::CREDENTIAL
+            } else {
+                store::class::EXCLUDED
+            };
+            store::refuse(&self.db, &path.to_string_lossy(), class, &refusal.why, &[], 1, now())?;
             say_file(
                 &mut on_file,
                 &report,
@@ -1849,10 +2258,30 @@ impl Semlith {
             );
         }
         report.generated = generated.iter().map(|p| p.display().to_string()).collect();
+        for dir in &generated {
+            store::refuse(
+                &self.db,
+                &dir.to_string_lossy(),
+                store::class::POLICY,
+                "a generated or vendored folder the walk steps over",
+                &[],
+                0,
+                now(),
+            )?;
+        }
         // Entries the walk could not read. They used to be a line on stderr,
         // which the daemon and the portal never see, so an unreadable
         // directory looked like a tree that simply had nothing in it.
         for (path, why) in &unwalkable {
+            store::refuse(
+                &self.db,
+                &path.to_string_lossy(),
+                store::class::UNINDEXABLE,
+                why,
+                &[],
+                1,
+                now(),
+            )?;
             report
                 .failed
                 .push((path.display().to_string(), why.clone()));
@@ -1930,6 +2359,34 @@ impl Semlith {
             // silent `skipped`, and a person looking at two thousand of them
             // could not tell an empty `__init__.py` from a file the operating
             // system would not open.
+            // Taken by the scan phase a moment ago and unchanged since: the
+            // store already holds these bytes, so they are not read again.
+            if !rechunk
+                && !rescan
+                && let (Some((size, mtime, hash)), Some(meta)) =
+                    (prehashed.remove(&path), measured.as_ref())
+                && meta.len() == size
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs() as i64)
+                    == mtime
+                && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str())
+            {
+                store::heal_stamps(&self.db, &key, size as i64, mtime, now())?;
+                report.unchanged += 1;
+                say_file(&mut on_file, &report, total, &path, FileOutcome::Unchanged, None);
+                continue;
+            }
+            // A file over the cap that a person accepted is read whole.
+            let cap = if store::acceptance(&self.db, &key)?
+                .is_some_and(|a| a.class == store::class::POLICY)
+            {
+                u64::MAX - 1
+            } else {
+                chunk::MAX_FILE_BYTES
+            };
             let unusable = match (&opened, &measured) {
                 (Err(e), _) => Some(SkipReason::Unreadable(e.to_string())),
                 (_, None) => Some(SkipReason::Unreadable(
@@ -1937,7 +2394,7 @@ impl Semlith {
                 )),
                 (_, Some(m)) if !m.is_file() => Some(SkipReason::NotRegular),
                 (_, Some(m)) if m.len() == 0 => Some(SkipReason::Empty),
-                (_, Some(m)) if m.len() > chunk::MAX_FILE_BYTES => Some(SkipReason::TooLarge),
+                (_, Some(m)) if m.len() > cap => Some(SkipReason::TooLarge),
                 _ => None,
             };
             if let Some(why) = unusable {
@@ -1963,6 +2420,7 @@ impl Semlith {
                     }
                 }
                 skip(&mut report, &why);
+                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                 say_file(
                     &mut on_file,
                     &report,
@@ -1979,18 +2437,19 @@ impl Semlith {
             let read = opened.and_then(|file| {
                 use std::io::Read;
                 let mut bytes = Vec::new();
-                file.take(chunk::MAX_FILE_BYTES + 1)
+                file.take(cap + 1)
                     .read_to_end(&mut bytes)
                     .map(|_| bytes)
             });
             let bytes = match read {
-                Ok(bytes) if bytes.len() as u64 <= chunk::MAX_FILE_BYTES => bytes,
+                Ok(bytes) if bytes.len() as u64 <= cap => bytes,
                 // Grew past the cap between the measure and the read, or the
                 // read itself failed. Two different answers, and the person
                 // chasing the file needs to know which.
                 Ok(_) => {
                     let why = SkipReason::TooLarge;
                     skip(&mut report, &why);
+                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2004,6 +2463,7 @@ impl Semlith {
                 Err(e) => {
                     let why = SkipReason::Unreadable(e.to_string());
                     skip(&mut report, &why);
+                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2017,7 +2477,39 @@ impl Semlith {
             };
 
             let hash = blake3::hash(&bytes).to_hex().to_string();
-            if !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str()) {
+            let same = !rechunk && store::file_hash(&self.db, &key)?.as_deref() == Some(hash.as_str());
+            // The upgrade pass (2.7): an unchanged file is scanned again under
+            // the new rules, and one they now refuse leaves the store.
+            if same
+                && rescan
+                && !self.boundary.allow_secrets
+                && !image::is_image(&path)
+                && let Ok(text) = chunk::extract(&path, &bytes)
+                && let found = keyscan::scan(&key, &text)
+                && let keyscan::Decision::Refuse(why) = keyscan::decide(&self.db, &key, &text, &found)?
+            {
+                let live: Vec<keyscan::Match> =
+                    found.into_iter().filter(|m| m.dummy.is_none()).collect();
+                store::refuse(&self.db, &key, store::class::CONTENT, &why, &live, 1, now())?;
+                let (gone, images) = self.evict(&key)?;
+                report.removed += usize::from(gone + images > 0);
+                report.refused.push((path.display().to_string(), why.clone()));
+                say_file(&mut on_file, &report, total, &path, FileOutcome::Refused, Some(why));
+                continue;
+            }
+            if same {
+                // Same bytes, but `git checkout` gave the file a new mtime, and
+                // every search hit in it read as stale from then on. The row's
+                // stamps catch up with the file; nothing is re-embedded, and
+                // the freshness rule itself stays as conservative as it was.
+                if let Some(meta) = &measured {
+                    let mtime = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs() as i64);
+                    store::heal_stamps(&self.db, &key, bytes.len() as i64, mtime, now())?;
+                }
                 report.unchanged += 1;
                 say_file(
                     &mut on_file,
@@ -2057,6 +2549,7 @@ impl Semlith {
                 let Some((width, height)) = image::dimensions(&bytes) else {
                     let why = SkipReason::NotDecodableImage;
                     skip(&mut report, &why);
+                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2142,6 +2635,7 @@ impl Semlith {
                 Ok(Ok(text)) => text,
                 Ok(Err(why)) => {
                     skip(&mut report, &why);
+                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                     say_file(
                         &mut on_file,
                         &report,
@@ -2158,40 +2652,76 @@ impl Semlith {
             // so it is decided from the text a reader produced — which is also
             // what catches an AWS key sitting in the body of a `.docx`. Images
             // never reach this line; they were never text.
-            match filter::scan_text(&text) {
-                Some(found) if self.boundary.allow_secrets => {
-                    // Counted, not hidden. `--include-secrets` is the user
-                    // saying they meant it, not semlith agreeing it is fine.
-                    let _ = found;
+            let found = keyscan::scan(&key, &text);
+            let text = if self.boundary.allow_secrets {
+                // Counted, not hidden. `--include-secrets` is the user saying
+                // they meant it, not semlith agreeing it is fine.
+                if keyscan::refuses(&found) {
                     report.secrets_indexed += 1;
                 }
-                Some(found) => {
-                    let why = found.reason();
-                    // A file that held no credential when it was indexed and
-                    // holds one now leaves the store on this run.
-                    let (gone, images) = self.evict(&key)?;
-                    let evicted = gone + images;
-                    report.removed += usize::from(evicted > 0);
-                    let why = if evicted > 0 {
-                        format!("{why}. Its earlier contents have been removed from this store.")
-                    } else {
-                        why
-                    };
-                    report
-                        .refused
-                        .push((path.display().to_string(), why.clone()));
-                    say_file(
-                        &mut on_file,
-                        &report,
-                        total,
-                        &path,
-                        FileOutcome::Refused,
-                        Some(why),
-                    );
-                    continue;
+                store::unrefuse(&self.db, &key)?;
+                text
+            } else {
+                match keyscan::decide(&self.db, &key, &text, &found)? {
+                    keyscan::Decision::Index { text, accepted } => {
+                        if accepted {
+                            report.accepted_indexed += 1;
+                            store::unrefuse(&self.db, &key)?;
+                        } else if !found.is_empty() {
+                            // Every match a declared test dummy: indexed, and
+                            // listed so a person can see what was let through.
+                            report.dummies_indexed += 1;
+                            store::refuse(
+                                &self.db,
+                                &key,
+                                store::class::DUMMY,
+                                "every match is a declared test dummy",
+                                &found,
+                                1,
+                                now(),
+                            )?;
+                        } else {
+                            store::unrefuse(&self.db, &key)?;
+                        }
+                        text
+                    }
+                    keyscan::Decision::Refuse(why) => {
+                        let live: Vec<keyscan::Match> =
+                            found.iter().filter(|m| m.dummy.is_none()).cloned().collect();
+                        store::refuse(
+                            &self.db,
+                            &key,
+                            store::class::CONTENT,
+                            &why,
+                            if live.is_empty() { &found } else { &live },
+                            1,
+                            now(),
+                        )?;
+                        // A file that held no credential when it was indexed and
+                        // holds one now leaves the store on this run.
+                        let (gone, images) = self.evict(&key)?;
+                        let evicted = gone + images;
+                        report.removed += usize::from(evicted > 0);
+                        let why = if evicted > 0 {
+                            format!("{why}. Its earlier contents have been removed from this store.")
+                        } else {
+                            why
+                        };
+                        report
+                            .refused
+                            .push((path.display().to_string(), why.clone()));
+                        say_file(
+                            &mut on_file,
+                            &report,
+                            total,
+                            &path,
+                            FileOutcome::Refused,
+                            Some(why),
+                        );
+                        continue;
+                    }
                 }
-                None => {}
-            }
+            };
 
             // Parsed before a single row is written, which is the whole
             // reason this call sits above the inserts: tree-sitter failing on
@@ -2240,6 +2770,7 @@ impl Semlith {
             if chunks.is_empty() {
                 let why = SkipReason::NoText;
                 skip(&mut report, &why);
+                store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
                 say_file(
                     &mut on_file,
                     &report,
@@ -2425,6 +2956,15 @@ impl Semlith {
                     report.removed += 1;
                 }
             }
+            // A not-indexed row for something no longer on disk says nothing.
+            for row in store::refusals(&self.db)? {
+                if !Path::new(&row.path).exists() {
+                    store::unrefuse(&self.db, &row.path)?;
+                }
+            }
+            if rescan {
+                store::set_meta(&self.db, "scan_rules", &SCAN_RULES.to_string())?;
+            }
         }
 
         // A batch that changed nothing must not rewrite index.tv. A watcher
@@ -2435,6 +2975,13 @@ impl Semlith {
         }
 
         self.commit_hashes(&mut completed)?;
+
+        // The byte rate this store embeds at, for the next scan phase's
+        // estimate: a plan can say how long before the model has loaded.
+        let secs = run_started.elapsed().as_secs_f64();
+        if report.indexed > 0 && report.bytes > 1_000_000 && secs > 1.0 {
+            store::set_meta(&self.db, "embed_bytes_per_sec", &format!("{:.0}", report.bytes as f64 / secs))?;
+        }
 
         // The chunking rule this store is now on, recorded only when a pass
         // that swept the whole store ran to the end. A slice that yielded, a
@@ -3540,7 +4087,9 @@ impl Semlith {
                             fresh: true,
                             symbol: None,
                             symbol_kind: None,
+                            symbol_line: None,
                             provenance: None,
+                            copies: Vec::new(),
                         },
                         0.0,
                     ));
@@ -3571,7 +4120,9 @@ impl Semlith {
                         fresh: true,
                         symbol: None,
                         symbol_kind: None,
+                        symbol_line: None,
                         provenance: provenance_of(&graph_ids, id),
+                        copies: Vec::new(),
                     },
                     similarity,
                 ));
@@ -3677,10 +4228,14 @@ impl Semlith {
         // The fused score stays the dominant term. These are tiebreaks: a
         // chunk the query matched badly does not climb over one it matched
         // well because it happens to sit in a function.
+        let about_tests = names_tests(query);
         for ((hit, _), proximity) in hits.iter_mut().zip(&proximity) {
             hit.score *= 1.0 + GRAPH_PROXIMITY * proximity;
             if !hit.fresh {
                 hit.score *= 1.0 - STALE_PENALTY;
+            }
+            if !about_tests && is_test_path(&hit.path) {
+                hit.score *= 1.0 - TEST_PENALTY;
             }
             hit.score *= prefer.multiplier(filter::is_code(&hit.path));
         }
@@ -3693,6 +4248,7 @@ impl Semlith {
                 .then_with(|| a.0.path.cmp(&b.0.path))
                 .then_with(|| a.0.start_line.cmp(&b.0.start_line))
         });
+        collapse_copies(&mut hits);
         hits.truncate(k);
         Ok(hits)
     }
@@ -3705,12 +4261,48 @@ impl Semlith {
     /// an agent holding the agent key could read `~/.ssh/id_rsa` by naming it
     /// as a span.
     pub fn read(&self, target: &Target, filter: &Filter) -> Result<Option<Read>> {
+        self.read_within(target, filter, &[])
+    }
+
+    /// [`Semlith::read`], with the roots the store indexes, so a path
+    /// relative to one of them means that file.
+    ///
+    /// `src/lib.rs` on a store over a repository that keeps a copy of itself
+    /// under `tests/fixtures` used to end two indexed paths and be refused. A
+    /// root joined with the path is an exact answer and wins; the suffix match
+    /// is what is left for a path that no root holds. Two roots that both hold
+    /// the exact relative path are still refused, naming both.
+    pub fn read_within(
+        &self,
+        target: &Target,
+        filter: &Filter,
+        roots: &[PathBuf],
+    ) -> Result<Option<Read>> {
         let (path, start, end) = match target {
             Target::Span { path, start, end } => {
-                // A locate answer prints a store-relative path, so that is
+                let exact: Vec<String> = if Path::new(path).is_relative() {
+                    let mut found = Vec::new();
+                    for root in roots {
+                        let joined = root.join(path);
+                        let joined = joined.to_string_lossy();
+                        for hit in store::files_ending_with(&self.db, &joined, 2)? {
+                            if plain(&hit) == plain(&joined) && !found.contains(&hit) {
+                                found.push(hit);
+                            }
+                        }
+                    }
+                    found
+                } else {
+                    Vec::new()
+                };
+                // A locate answer prints a root-relative path, so that is
                 // what comes back in. Two indexed files can end with the same
                 // suffix, and choosing one of them would be a guess.
-                let candidates = store::files_ending_with(&self.db, path, 8)?;
+                let candidates = if exact.is_empty() {
+                    store::files_ending_with(&self.db, path, 8)?
+                } else {
+                    exact
+                };
                 match candidates.len() {
                     0 => return Ok(None),
                     1 => (candidates[0].clone(), *start, *end),
@@ -3722,7 +4314,22 @@ impl Semlith {
                 }
             }
             Target::Symbol(name) => {
-                let found = store::symbols_named(&self.db, name, 200)?;
+                // `Type::method` narrows to that owner's definition, and a
+                // heading or a key is left out when real definitions share
+                // the name: `read search_preferring` means the method.
+                let (qualifier, bare) = crate::graph::split_qualified(name);
+                let mut found = store::symbols_named(&self.db, bare, 200)?;
+                if found
+                    .iter()
+                    .any(|r| !crate::graph::NAVIGATIONAL_KINDS.contains(&r.kind.as_str()))
+                {
+                    found.retain(|r| !crate::graph::NAVIGATIONAL_KINDS.contains(&r.kind.as_str()));
+                }
+                if let Some(q) = qualifier
+                    && found.iter().any(|r| crate::graph::owned_by(r, q))
+                {
+                    found.retain(|r| crate::graph::owned_by(r, q));
+                }
                 match found.len() {
                     0 => return Ok(None),
                     1 => {
@@ -3789,11 +4396,59 @@ impl Semlith {
             symbol: None,
             symbol_kind: None,
             fresh: true,
+            from_disk: false,
             store: None,
         };
         self.name_enclosing_symbol(&mut span)?;
         self.mark_span_freshness(&mut span)?;
+        if !span.fresh {
+            self.read_from_disk(&mut span, start, end)?;
+        }
         Ok(Some(Read::One(span)))
+    }
+
+    /// Replace a stale span's text with the file's current lines, when the
+    /// file really did change and what is on disk now may be read (1.18).
+    ///
+    /// Only for a file the store indexed, so this answers for nothing semlith
+    /// was not already allowed to read. The current text goes through the
+    /// same secret scan indexing does, and a file that now holds something
+    /// live-looking is not read: the stale copy stays, marked stale, because
+    /// serving a secret the store never held is exactly what reading from
+    /// chunks exists to prevent. A file whose bytes hash the same as the row
+    /// is not re-read at all — its stamps are behind, not its text (1.4).
+    fn read_from_disk(&self, span: &mut Span, start: u32, end: u32) -> Result<()> {
+        let Ok(bytes) = std::fs::read(&span.path) else {
+            return Ok(());
+        };
+        if bytes.len() as u64 > chunk::MAX_FILE_BYTES {
+            return Ok(());
+        }
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        if store::file_hash(&self.db, &span.path)?.as_deref() == Some(hash.as_str()) {
+            span.fresh = true;
+            return Ok(());
+        }
+        // Plain text only: a PDF or a spreadsheet goes through a reader at
+        // index time, and its current lines are not the file's bytes.
+        let Ok(text) = String::from_utf8(bytes) else {
+            return Ok(());
+        };
+        let text = match keyscan::readable(&self.db, &span.path, &text)? {
+            Some(text) => text,
+            None => return Ok(()),
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let first = start.max(1);
+        let last = end.min(lines.len() as u32);
+        if first > last {
+            return Ok(());
+        }
+        span.text = lines[(first - 1) as usize..last as usize].join("\n");
+        span.start_line = first;
+        span.end_line = last;
+        span.from_disk = true;
+        Ok(())
     }
 
     /// The innermost definition a span sits inside, if any.
@@ -3802,22 +4457,11 @@ impl Semlith {
         let Some(symbols) = by_file.get(&span.path) else {
             return Ok(());
         };
-        // The same containment-then-overlap rule search uses, for the same
-        // reason: a span that begins in a function's doc comment is that
-        // function's.
-        let contains = symbols
-            .iter()
-            .filter(|(start, end, _, _)| *start <= span.start_line && *end >= span.start_line)
-            .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
-        let best = contains.or_else(|| {
-            symbols
-                .iter()
-                .filter(|(start, end, _, _)| *start <= span.end_line && *end >= span.start_line)
-                .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
-        });
-        if let Some((_, _, name, kind)) = best {
-            span.symbol = Some(name.clone());
-            span.symbol_kind = Some(kind.clone());
+        // The same rule search uses, for the same reason: a span that begins
+        // in a function's doc comment is that function's.
+        if let Some((_, name, kind)) = enclosing_definition(symbols, span.start_line, span.end_line) {
+            span.symbol = Some(name);
+            span.symbol_kind = Some(kind);
         }
         Ok(())
     }
@@ -3859,20 +4503,10 @@ impl Semlith {
             let Some(symbols) = by_file.get(&hit.path) else {
                 continue;
             };
-            // Containment first, overlap second, innermost within each.
-            let contains = symbols
-                .iter()
-                .filter(|(start, end, _, _)| *start <= hit.start_line && *end >= hit.start_line)
-                .min_by_key(|(start, end, _, _)| end.saturating_sub(*start));
-            let best = contains.or_else(|| {
-                symbols
-                    .iter()
-                    .filter(|(start, end, _, _)| *start <= hit.end_line && *end >= hit.start_line)
-                    .min_by_key(|(start, end, _, _)| end.saturating_sub(*start))
-            });
-            if let Some((_, _, name, kind)) = best {
-                hit.symbol = Some(name.clone());
-                hit.symbol_kind = Some(kind.clone());
+            if let Some((start, name, kind)) = enclosing_definition(symbols, hit.start_line, hit.end_line) {
+                hit.symbol = Some(name);
+                hit.symbol_kind = Some(kind);
+                hit.symbol_line = Some(start);
             }
         }
         Ok(())
@@ -4068,6 +4702,14 @@ pub fn human_bytes(bytes: i64) -> String {
     }
 }
 
+/// [`serialize_plain`] for a list of paths.
+pub fn serialize_plain_list<S: serde::Serializer>(
+    paths: &[String],
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    s.collect_seq(paths.iter().map(|p| plain(p)))
+}
+
 /// Serialize a stored path in the form a person reads, leaving the value in
 /// memory as the store's own key. One attribute per field beats a call at every
 /// place a struct reaches JSON, and the CLI's `--json`, the portal and the MCP
@@ -4093,6 +4735,142 @@ pub fn canonical_calls() -> u64 {
 pub fn canonical(path: &Path) -> PathBuf {
     CANONICAL_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Fold hits whose text is identical into the best-ranked of them, which
+/// then names the others in `copies`.
+///
+/// A repository that vendors a file, or keeps a fixture copy of itself, has
+/// every chunk of that file twice, and the second copy spent a result slot
+/// saying nothing new. Exact text only: two similar functions are two answers.
+fn collapse_copies(hits: &mut Vec<(Hit, f32)>) {
+    let mut first: std::collections::HashMap<blake3::Hash, usize> =
+        std::collections::HashMap::new();
+    let mut keep: Vec<bool> = Vec::with_capacity(hits.len());
+    let mut copies: Vec<(usize, String)> = Vec::new();
+    for (i, (hit, _)) in hits.iter().enumerate() {
+        if hit.image.is_some() || hit.text.trim().is_empty() {
+            keep.push(true);
+            continue;
+        }
+        let key = blake3::hash(hit.text.as_bytes());
+        match first.get(&key) {
+            Some(&j) if hits[j].0.path != hit.path => {
+                copies.push((j, hit.path.clone()));
+                keep.push(false);
+            }
+            Some(_) => keep.push(true),
+            None => {
+                first.insert(key, i);
+                keep.push(true);
+            }
+        }
+    }
+    for (j, path) in copies {
+        if !hits[j].0.copies.contains(&path) {
+            hits[j].0.copies.push(path);
+        }
+    }
+    let mut flags = keep.into_iter();
+    hits.retain(|_| flags.next().unwrap_or(true));
+}
+
+/// The definition a chunk from `start` to `end` is about, as `(line, name,
+/// kind)`.
+///
+/// A definition that *starts* inside the chunk comes first — the chunker cuts
+/// at definitions, so a chunk opening with a doc comment is about the
+/// function below it, not the one whose last two lines it overlaps. Then the
+/// innermost definition containing the chunk's first line, then the innermost
+/// overlapping it at all.
+pub(crate) fn enclosing_definition(
+    symbols: &[(u32, u32, String, String)],
+    start: u32,
+    end: u32,
+) -> Option<(u32, String, String)> {
+    let starts_inside = symbols
+        .iter()
+        .filter(|(s, _, _, _)| *s >= start && *s <= end)
+        .min_by_key(|(s, e, _, _)| (*s, std::cmp::Reverse(e.saturating_sub(*s))));
+    let contains = || {
+        symbols
+            .iter()
+            .filter(|(s, e, _, _)| *s <= start && *e >= start)
+            .min_by_key(|(s, e, _, _)| e.saturating_sub(*s))
+    };
+    let overlaps = || {
+        symbols
+            .iter()
+            .filter(|(s, e, _, _)| *s <= end && *e >= start)
+            .min_by_key(|(s, e, _, _)| e.saturating_sub(*s))
+    };
+    starts_inside
+        .or_else(contains)
+        .or_else(overlaps)
+        .map(|(s, _, name, kind)| (*s, name.clone(), kind.clone()))
+}
+
+/// Paths written relative to the store root that holds them, with the roots
+/// named once.
+///
+/// An absolute path is most of a locate row: `/Users/…/semlith/src/lib.rs`
+/// is fifty characters of which eleven say anything, and an answer of forty
+/// rows repeated the other thirty-nine forty times. The roots used are
+/// collected as paths are shortened, so [`Shortener::header`] names exactly the
+/// ones the answer needs to be turned back into absolute paths — and
+/// `semlith_read` resolves a root-relative path against the same roots (1.3).
+pub struct Shortener {
+    /// Longest first, so a root nested inside another claims its own files.
+    roots: Vec<std::path::PathBuf>,
+    used: std::cell::RefCell<std::collections::BTreeSet<std::path::PathBuf>>,
+}
+
+impl Shortener {
+    pub fn new(mut roots: Vec<std::path::PathBuf>) -> Self {
+        roots.sort_by_key(|r| std::cmp::Reverse(r.as_os_str().len()));
+        Self {
+            roots,
+            used: Default::default(),
+        }
+    }
+
+    /// `path` relative to its root, or whole when no root holds it.
+    pub fn short(&self, path: &str) -> String {
+        let plain_path = plain(path);
+        for root in &self.roots {
+            let root_text = plain(&root.to_string_lossy());
+            if let Some(rest) = plain_path.strip_prefix(root_text.as_str())
+                && let Some(rest) = rest.strip_prefix(['/', '\\'])
+            {
+                self.used.borrow_mut().insert(root.clone());
+                return rest.to_string();
+            }
+        }
+        plain_path
+    }
+
+    /// The line that says what the relative paths are relative to, or
+    /// nothing when every path was printed whole.
+    pub fn header(&self) -> Option<String> {
+        let used = self.used.borrow();
+        if used.is_empty() {
+            return None;
+        }
+        let roots: Vec<String> = used.iter().map(|r| plain(&r.to_string_lossy())).collect();
+        Some(if roots.len() == 1 {
+            format!("root {}", roots[0])
+        } else {
+            format!("roots {}", roots.join(", "))
+        })
+    }
+
+    /// `text` with the header above it, when there is one.
+    pub fn with_header(&self, text: String) -> String {
+        match self.header() {
+            Some(h) if !text.is_empty() => format!("{h}\n{text}"),
+            _ => text,
+        }
+    }
 }
 
 /// A path as a person or an agent should read it.
@@ -4175,6 +4953,9 @@ pub fn check_roots(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) 
     }
     (readable, refused)
 }
+
+/// The file of gitignore patterns a store honours on top of `.gitignore`.
+pub const IGNORE_FILE: &str = ".semlithignore";
 
 /// Walk `roots`, honouring `.gitignore` and skipping hidden files. Returns
 /// canonical paths so the same file reached two ways is one entry.
@@ -4360,6 +5141,11 @@ fn sibling_exists(parent: &Path, manifest: &str) -> bool {
 }
 
 fn walk(roots: &[PathBuf]) -> Walked {
+    walk_allowing(roots, &[])
+}
+
+/// [`walk`], descending into the generated folders a person accepted (2.5).
+fn walk_allowing(roots: &[PathBuf], allowed: &[PathBuf]) -> Walked {
     let mut out = Vec::new();
     let mut named = Vec::new();
     let mut unreadable = Vec::new();
@@ -4391,15 +5177,25 @@ fn walk(roots: &[PathBuf]) -> Walked {
             // folder is a perfectly normal thing to index, and a `.gitignore`
             // sitting in it still means "not this".
             .require_git(false)
+            // What to leave out of a store that is not what to leave out of
+            // git: a repository that keeps a copy of itself under
+            // `tests/fixtures` commits it and does not want it searched.
+            // Same syntax, same walk, so the watcher and the catch-up — which
+            // ask this walk what counts — honour it too.
+            .add_custom_ignore_filename(IGNORE_FILE)
             // `.semlith` is the store itself; the rest is generated output
             // that `.gitignore` covers only where somebody wrote one.
             .filter_entry({
                 let generated = generated.clone();
+                let allowed = allowed.to_vec();
                 move |e| {
                     if e.file_name() == ".semlith" {
                         return false;
                     }
-                    if e.file_type().is_some_and(|t| t.is_dir()) && is_generated_dir(e.path()) {
+                    if e.file_type().is_some_and(|t| t.is_dir())
+                        && is_generated_dir(e.path())
+                        && !allowed.iter().any(|a| canonical(e.path()) == *a)
+                    {
                         if let Ok(mut seen) = generated.lock() {
                             seen.push(e.path().to_path_buf());
                         }
@@ -4461,6 +5257,28 @@ fn walk(roots: &[PathBuf]) -> Walked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `.semlithignore` leaves its patterns out of a walk from above, and a
+    /// walk rooted inside an ignored directory still sees that directory's
+    /// files: the retrieval harness indexes its pinned corpus from inside the
+    /// repository whose `.semlithignore` excludes it.
+    #[test]
+    fn semlithignore_leaves_a_copy_out_and_a_root_inside_it_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonical(dir.path());
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests/fixtures/corpus/src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(root.join("tests/fixtures/corpus/src/lib.rs"), "fn a() {}").unwrap();
+        std::fs::write(root.join(IGNORE_FILE), "tests/fixtures/corpus/\n").unwrap();
+
+        let whole = walk(std::slice::from_ref(&root)).files;
+        assert_eq!(whole, vec![root.join("src/lib.rs")], "{whole:?}");
+
+        let corpus = root.join("tests/fixtures/corpus");
+        let inside = walk(std::slice::from_ref(&corpus)).files;
+        assert_eq!(inside, vec![corpus.join("src/lib.rs")], "{inside:?}");
+    }
 
     /// The graph list adds candidates and never amplifies them.
     ///

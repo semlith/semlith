@@ -112,6 +112,16 @@ impl Upstream {
         self.request("POST", "/api/ledger/raw-read", Some(&body), timeout)
     }
 
+    /// A read of one of the daemon's routes, as the owner.
+    pub fn get(&self, path: &str) -> Result<String> {
+        self.request("GET", path, None, CALL_TIMEOUT)
+    }
+
+    /// A write to one of the daemon's routes, as the owner.
+    pub fn post(&self, path: &str, body: &serde_json::Value) -> Result<String> {
+        self.request("POST", path, Some(&body.to_string()), CALL_TIMEOUT)
+    }
+
     /// Ask the daemon to close and delete a store.
     ///
     /// Through the daemon rather than behind its back: it is the process

@@ -48,37 +48,63 @@ fn run(
     (report, events)
 }
 
+/// The row of `SHAPES` whose kind contains `kind`.
+fn row(kind: &str) -> usize {
+    semlith::filter::SHAPES
+        .iter()
+        .position(|s| s.kind.contains(kind))
+        .unwrap()
+}
+
+/// A live-looking value for the row, built now. The source never holds one:
+/// from 0.30.0 a live-looking literal here would refuse this file itself.
+fn live(kind: &str) -> String {
+    semlith::keyscan::forge(row(kind))
+}
+
+/// Twenty random characters of a generated key, for the generic rule.
+fn random20() -> String {
+    live("GitHub token")[4..24].to_string()
+}
+
 /// A `.txt` per shape, named after nothing in the deny-list so the only rule
 /// that can refuse it is the content scan.
 fn credential_files(corpus: &Path) {
-    for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+    for i in 0..semlith::filter::SHAPES.len() {
         write(
             corpus,
             &format!("config{i}.txt"),
             &format!(
                 "# configuration\nvalue = \"{}\"\nother = 1\n",
-                shape.example
+                semlith::keyscan::forge(i)
             ),
         );
     }
     write(
         corpus,
         "generic.txt",
-        "# configuration\napi_key = \"Xq7Lp2Rv9Wz4Kd8Nf1Hj\"\n",
+        &format!("# configuration\napi_key = \"{}\"\n", random20()),
     );
 }
 
 /// The table is only as good as the fact that every row means what it says.
 #[test]
 fn every_shape_matches_its_example_and_not_its_near_miss() {
-    for shape in semlith::filter::SHAPES {
-        let found = semlith::filter::scan_text(shape.example);
+    for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+        // The example matches the pattern and is a declared test dummy.
+        let example = semlith::keyscan::scan("", shape.example);
         assert!(
-            found.is_some(),
-            "{}: the pattern {:?} does not match its own example {:?}",
+            !example.is_empty() && !semlith::keyscan::refuses(&example),
+            "{}: the pattern {:?} should match its example {:?} as a dummy: {example:?}",
             shape.kind,
             shape.pattern,
             shape.example
+        );
+        // A value built now in the row's shape is refused.
+        assert!(
+            semlith::filter::scan_text(&semlith::keyscan::forge(i)).is_some(),
+            "{}: a live-shaped value was let through",
+            shape.kind
         );
         assert!(
             !shape.example.is_empty() && !shape.near_miss.is_empty(),
@@ -99,9 +125,10 @@ fn every_shape_matches_its_example_and_not_its_near_miss() {
 /// fixture or a hash.
 #[test]
 fn the_generic_rule_needs_the_name_and_the_entropy_together() {
-    assert!(semlith::filter::scan_text("api_key = \"Xq7Lp2Rv9Wz4Kd8Nf1Hj\"").is_some());
+    let value = random20();
+    assert!(semlith::filter::scan_text(&format!("api_key = \"{value}\"")).is_some());
     // Entropy without a key-like name.
-    assert!(semlith::filter::scan_text("digest = \"Xq7Lp2Rv9Wz4Kd8Nf1Hj\"").is_none());
+    assert!(semlith::filter::scan_text(&format!("digest = \"{value}\"")).is_none());
     // A key-like name with no entropy behind it.
     assert!(semlith::filter::scan_text("password = \"aaaaaaaaaaaaaaaaaaaaaa\"").is_none());
     // Short enough to be a real password and not worth refusing a file for.
@@ -111,8 +138,8 @@ fn the_generic_rule_needs_the_name_and_the_entropy_together() {
 /// The line number is the useful half of the finding.
 #[test]
 fn the_finding_names_the_line() {
-    let text = "one\ntwo\nthree\nghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678\n";
-    let found = semlith::filter::scan_text(text).expect("a GitHub token");
+    let text = format!("one\ntwo\nthree\n{}\n", live("GitHub token"));
+    let found = semlith::filter::scan_text(&text).expect("a GitHub token");
     assert_eq!(found.line, 4);
     assert!(found.kind.contains("GitHub"));
 }
@@ -121,11 +148,11 @@ fn the_finding_names_the_line() {
 /// contain the thing it found.
 #[test]
 fn no_reason_ever_quotes_the_credential() {
-    for shape in semlith::filter::SHAPES {
-        let found = semlith::filter::scan_text(shape.example).expect("its own example");
+    for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+        let value = semlith::keyscan::forge(i);
+        let found = semlith::filter::scan_text(&value).expect("a live-shaped value");
         let reason = found.reason();
-        for window in shape
-            .example
+        for window in value
             .as_bytes()
             .windows(8)
             .map(|w| String::from_utf8_lossy(w).into_owned())
@@ -204,7 +231,7 @@ fn a_credential_inside_a_document_is_refused_on_the_readers_text() {
     let store = tempfile::tempdir().unwrap();
     write_docx(
         &corpus.path().join("handover.docx"),
-        "Access key AKIAIOSFODNN7EXAMPLE, please rotate it.",
+        &format!("Access key {}, please rotate it.", live("AWS")),
     );
 
     let (report, _) = run(store.path(), corpus.path(), false);
@@ -225,11 +252,9 @@ fn an_image_is_not_scanned() {
     let store = tempfile::tempdir().unwrap();
     // Not a decodable image, which is enough: what is asserted is that the
     // content scan never sees it, and a scan that ran would refuse it.
-    fs::write(
-        corpus.path().join("shot.png"),
-        b"\x89PNG\r\n\x1a\nAKIAIOSFODNN7EXAMPLE",
-    )
-    .unwrap();
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend(live("AWS").as_bytes());
+    fs::write(corpus.path().join("shot.png"), bytes).unwrap();
 
     let (report, _) = run(store.path(), corpus.path(), false);
     assert!(
@@ -281,7 +306,7 @@ fn a_file_that_gains_a_token_is_evicted_on_the_next_run() {
     write(
         corpus.path(),
         "deploy.md",
-        "Deployment runs on Tuesdays.\ntoken = \"ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678\"\n",
+        &format!("Deployment runs on Tuesdays.\ntoken = \"{}\"\n", live("GitHub token")),
     );
     let (second, _) = run(store.path(), corpus.path(), false);
 
@@ -315,7 +340,7 @@ fn scan_finds_what_todays_rules_would_refuse_and_forget_evicts_it() {
     write(
         corpus.path(),
         "handover.md",
-        "The key is ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678 until Friday.\n",
+        &format!("The key is {} until Friday.\n", live("GitHub token")),
     );
     let (report, _) = run(store.path(), corpus.path(), true);
     assert_eq!(report.indexed, 2);
@@ -565,4 +590,47 @@ fn only_a_refusal_about_the_file_itself_is_marked_for_eviction() {
         .refuses(&root.join(".env"), true, Some(&home))
         .expect("a credential is refused by name");
     assert!(named.credential, "{:?}", named.why);
+}
+
+/// Each declared dummy rule lets its own case through, and one live-looking
+/// match beside a dummy still refuses the file (2.1).
+#[test]
+fn each_dummy_rule_passes_its_case_and_a_live_neighbour_still_refuses() {
+    let aws_id = row("AWS");
+    let example = semlith::filter::SHAPES[aws_id].example;
+    // (a) a published documentation example.
+    assert!(semlith::filter::scan_text(&format!("key {example}")).is_none());
+    // (b) a marker in the body, a run of X, one character repeated.
+    for body in ["FAKEFAKEFAKEFAKE", "XXXXXXXXXXXXXXXX", "AAAAAAAAAAAAAAAA"] {
+        assert!(
+            semlith::filter::scan_text(&format!("AKIA{body}")).is_none(),
+            "AKIA{body}"
+        );
+    }
+    // A marker in the text around a key is not in its body.
+    let key = live("AWS");
+    assert!(semlith::filter::scan_text(&format!("# FAKE test key\n{key}")).is_some());
+    // (c) a private-key header with no body, and one with a real body.
+    assert!(semlith::filter::scan_text("-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----").is_none());
+    assert!(semlith::filter::scan_text(&live("private key")).is_some());
+    // One dummy and one live id: refused.
+    assert!(semlith::filter::scan_text(&format!("{example}\n{key}\n")).is_some());
+}
+
+/// The no-prefix rule: a secret-sounding name assigned a long random literal
+/// refuses the file, quoted or not; a dummy or a low-entropy value does not
+/// (2.2).
+#[test]
+fn a_secret_with_no_prefix_is_refused_by_its_name_and_randomness() {
+    let value = format!("{}{}", random20(), random20());
+    assert_eq!(value.len(), 40);
+    assert!(semlith::filter::scan_text(&format!("AWS_SECRET_ACCESS_KEY={value}\n")).is_some());
+    assert!(semlith::filter::scan_text(&format!("export DB_TOKEN={value}\n")).is_some());
+    assert!(
+        semlith::filter::scan_text("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n")
+            .is_none()
+    );
+    assert!(semlith::filter::scan_text("PASSWORD=changeme\n").is_none());
+    // Code is not an assignment of a literal.
+    assert!(semlith::filter::scan_text("let token = compute_the_session_token(input);\n").is_none());
 }

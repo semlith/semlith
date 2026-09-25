@@ -158,10 +158,48 @@ impl Session {
 /// `server/discover` has carried it since 0.20.0 and `initialize` did not,
 /// which meant the clients still on a 2025 revision -- most of them -- were
 /// handed a tool list and no sentence saying what the tools were for.
-pub const INSTRUCTIONS: &str = "Search and maintain the local semlith stores this server was opened on. \
-     Call semlith_stats first to learn the store names the other tools accept. \
-     Prefer semlith_brief for a question about how something works: it answers in \
-     one call what search, read and neighbors answer in four.";
+/// The most bytes the server instructions may take, whatever the fleet.
+pub const INSTRUCTIONS_LIMIT: usize = 600;
+
+/// What this server is for, built from the folders it indexes.
+///
+/// Sent at `initialize` and `server/discover`. Until 0.30.0 it was a fixed
+/// sentence that told the agent to call `semlith_stats` first — a round trip
+/// that bought a store name and nothing about when to use the tools. Now it
+/// names the folders, so an agent can tell a question semlith can answer from
+/// one it cannot, and routes by the question. Bounded, because a machine with
+/// forty registered roots should not cost every session a page of paths.
+pub fn instructions(roots: &[std::path::PathBuf]) -> String {
+    const ROUTES: &str = " For a code question there, use semlith before grep, rg, find or cat: \
+         semlith_brief to understand how something works, semlith_search to locate, \
+         semlith_impact for what breaks if a symbol changes, semlith_trace for how A reaches B, \
+         semlith_read for a span or a whole definition, semlith_files with tree: true for a \
+         directory. Paths in answers are relative to the root named above them.";
+    let lead = "semlith indexes ";
+    let mut named = String::new();
+    let mut left = roots.len();
+    for root in roots {
+        let text = crate::plain(&root.to_string_lossy());
+        let more = format!(" and {} more", left);
+        let sep = if named.is_empty() { "" } else { ", " };
+        if lead.len() + named.len() + sep.len() + text.len() + more.len() + 1 + ROUTES.len()
+            > INSTRUCTIONS_LIMIT
+        {
+            break;
+        }
+        named.push_str(sep);
+        named.push_str(&text);
+        left -= 1;
+    }
+    if named.is_empty() && left == 0 {
+        return format!("semlith searches the local stores this server was opened on.{ROUTES}");
+    }
+    if left > 0 {
+        let sep = if named.is_empty() { "" } else { " and " };
+        named.push_str(&format!("{sep}{left} more folder{}", if left == 1 { "" } else { "s" }));
+    }
+    format!("{lead}{named}.{ROUTES}")
+}
 
 pub fn serve(
     stores: &Mutex<Fleet>,
@@ -173,7 +211,11 @@ pub fn serve(
     // it. The caller sets this too; it is set again because this function is
     // the boundary, and a future caller that forgets would corrupt a stream
     // rather than print an untidy line.
-    stores.lock().unwrap_or_else(|e| e.into_inner()).quiet = true;
+    let roots = {
+        let mut fleet = stores.lock().unwrap_or_else(|e| e.into_inner());
+        fleet.quiet = true;
+        fleet.roots()
+    };
 
     // One connection is one conversation, so the id is made once here and every
     // row this client writes carries it.
@@ -204,7 +246,7 @@ pub fn serve(
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
-        let result = match without_stores(labels, method, &params, &mut session) {
+        let result = match without_stores(labels, &roots, method, &params, &mut session) {
             Some(answered) => answered,
             None => {
                 let mut fleet = stores.lock().unwrap_or_else(|e| e.into_inner());
@@ -246,7 +288,13 @@ fn dispatch(
 ) -> Result<Value, Fail> {
     // The handshake first, and through the same function `serve` uses, so
     // there is one implementation of it rather than two that agree today.
-    if let Some(answered) = without_stores(&stores.labels().join(", "), method, params, session) {
+    if let Some(answered) = without_stores(
+        &stores.labels().join(", "),
+        &stores.roots(),
+        method,
+        params,
+        session,
+    ) {
         return answered;
     }
     let declared = declared_version(params);
@@ -281,6 +329,7 @@ fn dispatch(
 /// the life of the process and reading it is what would need the lock.
 fn without_stores(
     labels: &str,
+    roots: &[std::path::PathBuf],
     method: &str,
     params: &Value,
     session: &mut Session,
@@ -309,7 +358,7 @@ fn without_stores(
             json!({
                 "supportedVersions": SUPPORTED,
                 "capabilities": { "tools": {} },
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(roots),
             }),
             Some("public"),
         )),
@@ -346,7 +395,7 @@ fn without_stores(
                 // revision never calls discover, so until 0.24.0 the sentence
                 // that says what this server is for reached only the clients
                 // that needed it least.
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(roots),
             }))
         }
 
@@ -439,7 +488,7 @@ pub fn tool_list_bytes() -> usize {
 /// The harness measures what an agent is actually handed, which is this and
 /// not the `Hit` list behind it.
 pub fn locate_bytes(hits: &[crate::Hit], query: &str) -> usize {
-    locate(hits, query, DEFAULT_LOCATE_TOKENS).len()
+    locate(hits, query, DEFAULT_LOCATE_TOKENS, &crate::plain).len()
 }
 
 fn tool_defs(open: &str) -> Value {
@@ -598,11 +647,11 @@ fn tool_defs(open: &str) -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
+                    "names": { "type": "array", "items": { "type": "string" }, "description": "Up to 20: one row per definition, no rings." },
                     "k": { "type": "integer", "description": "Default 20." },
                     "history": { "type": "boolean", "description": "What it used to be." },
                     "store": { "type": "string" }
-                },
-                "required": ["name"]
+                }
             },
             "annotations": { "readOnlyHint": true }
         },
@@ -759,11 +808,11 @@ fn call_tool(
                     Ok(hits) if excerpts => {
                         format!("{}\n{}", reading(query, prefer), render(&hits))
                     }
-                    Ok(hits) => format!(
-                        "{}\n{}",
-                        reading(query, prefer),
-                        locate(&hits, query, max_tokens)
-                    ),
+                    Ok(hits) => {
+                        let paths = stores.shortener();
+                        let rows = locate(&hits, query, max_tokens, &|p| paths.short(p));
+                        paths.with_header(format!("{}\n{rows}", reading(query, prefer)))
+                    }
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
                     Err(e) => return Ok(tool_error(&e.to_string())),
@@ -923,7 +972,20 @@ fn call_tool(
                 // to different next moves.
                 match crate::store::coverage_by_language(store.db()) {
                     Ok(coverage) => {
-                        for row in coverage.iter().filter(|r| r.definitions > 0) {
+                        // The long tail in one line. Thirty-eight languages
+                        // with two fixture files each were most of 6 073
+                        // characters an agent paid for at the start of every
+                        // session; `semlith stats` and the portal keep the
+                        // whole table for a person who wants it.
+                        const FEW: usize = 5;
+                        let (tail_langs, tail_files) = coverage
+                            .iter()
+                            .filter(|r| r.definitions > 0 && (r.files as usize) < FEW)
+                            .fold((0usize, 0usize), |(l, f), r| (l + 1, f + r.files as usize));
+                        for row in coverage
+                            .iter()
+                            .filter(|r| r.definitions > 0 && r.files as usize >= FEW)
+                        {
                             body.push_str(&format!(
                                 "\n  {}: {} files ({} unparsed), {} definitions, call edges \
                                  {} extracted / {} resolved / {} ambiguous / {} unresolved \
@@ -937,6 +999,12 @@ fn call_tool(
                                 row.ambiguous,
                                 row.unresolved,
                                 row.settled_share(),
+                            ));
+                        }
+                        if tail_langs > 0 {
+                            body.push_str(&format!(
+                                "\n  + {tail_langs} more language{}, {tail_files} files",
+                                if tail_langs == 1 { "" } else { "s" }
                             ));
                         }
                     }
@@ -1193,12 +1261,48 @@ fn call_tool(
             }
         }
         "semlith_symbol" => {
-            let Some(name) = args.get("name").and_then(Value::as_str) else {
-                return Err((-32602, "missing required argument: name".into(), None));
+            let mut names = strings(&args, "names");
+            if let Some(name) = args.get("name").and_then(Value::as_str)
+                && !names.iter().any(|n| n == name)
+            {
+                names.insert(0, name.to_string());
+            }
+            let Some(name) = names.first().cloned() else {
+                return Err((-32602, "missing required argument: name or names".into(), None));
             };
+            let name = name.as_str();
             let k = args.get("k").and_then(Value::as_u64).unwrap_or(20) as usize;
             let only = strings(&args, "store");
-            if args
+            if names.len() > 1 {
+                if names.len() > crate::graph::NAMES_LIMIT {
+                    return Ok(tool_error(&format!(
+                        "at most {} names at once; {} given",
+                        crate::graph::NAMES_LIMIT,
+                        names.len()
+                    )));
+                }
+                let paths = stores.shortener();
+                match stores.signatures_in(Some(&only), &names) {
+                    Ok(rows) if rows.is_empty() => empty_graph(stores, &names.join(", ")),
+                    Ok(rows) => {
+                        let text = crate::graph::render_signatures(&rows, &|p| paths.short(p));
+                        let missing: Vec<&String> = names
+                            .iter()
+                            .filter(|n| !rows.iter().any(|r| r.asked == **n))
+                            .collect();
+                        let text = if missing.is_empty() {
+                            text
+                        } else {
+                            format!(
+                                "{text}\nno definition: {}",
+                                missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(", ")
+                            )
+                        };
+                        paths.with_header(crate::graph::fit(text, "ask for fewer names"))
+                    }
+                    Err(e) => return Ok(tool_error(&e.to_string())),
+                }
+            } else if args
                 .get("history")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
@@ -1243,7 +1347,13 @@ fn call_tool(
                     // will accept — which was every locator this tool returned on
                     // Windows. The store keeps the verbatim key; only the text on
                     // its way out is plain.
-                    Ok(found) => found.render("", "", &crate::plain),
+                    Ok(found) => {
+                        let paths = stores.shortener();
+                        paths.with_header(crate::graph::fit(
+                            found.render("", "", &|p| paths.short(p)),
+                            "ask with a qualified name such as Type::method, or a smaller k",
+                        ))
+                    }
                     Err(e) => return Ok(tool_error(&e.to_string())),
                 }
             }
@@ -1301,12 +1411,13 @@ fn call_tool(
                     empty_graph(stores, name)
                 }
                 Ok(n) => {
+                    let paths = stores.shortener();
                     let mut body = format!(
                         "callers of {name} ({}):\n{}\n\ncallees of {name} ({}):\n{}",
                         n.callers.len(),
-                        render_ends(&n.callers),
+                        render_ends(&n.callers, &|p| paths.short(p)),
                         n.callees.len(),
-                        render_ends(&n.callees),
+                        render_ends(&n.callees, &|p| paths.short(p)),
                     );
                     if n.hidden > 0 {
                         body.push_str(&format!(
@@ -1324,7 +1435,10 @@ fn call_tool(
                             .join("\n");
                         body.push_str(&format!("\n\noutside this store:\n{outside}"));
                     }
-                    body
+                    paths.with_header(crate::graph::fit(
+                        body,
+                        "ask with a qualified name such as Type::method, or a kind",
+                    ))
                 }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
@@ -1361,7 +1475,10 @@ fn call_tool(
                 .unwrap_or(false)
                 && !strict;
             match stores.impact_in(Some(&only), name, &kinds, depth, all_edges) {
-                Ok(impact) => impact.render("", "", &crate::plain),
+                Ok(impact) => {
+                    let paths = stores.shortener();
+                    paths.with_header(impact.render("", "", &|p| paths.short(p)))
+                }
                 Err(e) => return Ok(tool_error(&e.to_string())),
             }
         }
@@ -1536,7 +1653,7 @@ fn label_of(store: &Option<String>) -> String {
     }
 }
 
-fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
+fn render_ends(ends: &[crate::store::EdgeEnd], shorten: &dyn Fn(&str) -> String) -> String {
     if ends.is_empty() {
         return "  none".to_string();
     }
@@ -1552,7 +1669,7 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
                     e.kind,
                     e.confidence,
                     e.definitions,
-                    crate::graph::call_site(e, &crate::plain)
+                    crate::graph::call_site(e, shorten)
                 );
             }
             format!(
@@ -1561,9 +1678,9 @@ fn render_ends(ends: &[crate::store::EdgeEnd]) -> String {
                 e.kind,
                 e.confidence,
                 label_of(&e.symbol.store),
-                crate::plain(&e.symbol.path),
+                shorten(&e.symbol.path),
                 e.symbol.start_line,
-                crate::graph::call_site(e, &crate::plain)
+                crate::graph::call_site(e, shorten)
             )
         })
         .collect::<Vec<_>>()
@@ -1629,7 +1746,12 @@ fn tool_error(message: &str) -> Value {
 ///
 /// Rows are grouped by file because that is how the answer is used: eight hits
 /// in one file are one file to open.
-fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
+fn locate(
+    hits: &[crate::Hit],
+    query: &str,
+    max_tokens: usize,
+    shorten: &dyn Fn(&str) -> String,
+) -> String {
     if hits.is_empty() {
         return String::new();
     }
@@ -1645,8 +1767,8 @@ fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
     let mut files: Vec<(String, Vec<&crate::Hit>)> = Vec::new();
     for hit in hits {
         let label = match &hit.store {
-            Some(store) => format!("{store} {}", crate::plain(&hit.path)),
-            None => crate::plain(&hit.path),
+            Some(store) => format!("{store} {}", shorten(&hit.path)),
+            None => shorten(&hit.path),
         };
         match files.iter_mut().find(|(name, _)| *name == label) {
             Some((_, group)) => group.push(hit),
@@ -1660,7 +1782,7 @@ fn locate(hits: &[crate::Hit], query: &str, max_tokens: usize) -> String {
     for (label, group) in &files {
         let mut block = format!("{label}\n");
         for hit in group {
-            block.push_str(&locate_row(hit, &terms));
+            block.push_str(&locate_row(hit, &terms, shorten));
         }
         blocks.push((group.len(), block));
     }
@@ -1699,8 +1821,12 @@ fn reading(query: &str, prefer: crate::Prefer) -> String {
     }
 }
 
-/// One line of `where`, and one line of `what`.
-fn locate_row(hit: &crate::Hit, terms: &[String]) -> String {
+/// One row per span: where, what it is, how it was found, and its best line.
+///
+/// One line rather than two from 0.30.0: the second line's indent and newline
+/// were a tenth of every row, and on 2026-09-25 a semlith session's lookups
+/// came to more characters than grep and `sed -n` spent on the same prompts.
+fn locate_row(hit: &crate::Hit, terms: &[String], shorten: &dyn Fn(&str) -> String) -> String {
     if let Some(px) = hit.image {
         return format!("  image {}x{} px\n", px.width, px.height);
     }
@@ -1716,9 +1842,22 @@ fn locate_row(hit: &crate::Hit, terms: &[String]) -> String {
     if !hit.fresh {
         marks.push("stale".to_string());
     }
+    if !hit.copies.is_empty() {
+        let copies: Vec<String> = hit.copies.iter().map(|p| shorten(p)).collect();
+        marks.push(format!(
+            "also in {} cop{}: {}",
+            copies.len(),
+            if copies.len() == 1 { "y" } else { "ies" },
+            copies.join(", ")
+        ));
+    }
+    let at = match hit.symbol_line {
+        Some(line) => format!(" @{line}"),
+        None => String::new(),
+    };
     let named = match (&hit.symbol, &hit.symbol_kind) {
-        (Some(name), Some(kind)) => format!(" \u{00b7} {name} {kind}"),
-        (Some(name), None) => format!(" \u{00b7} {name}"),
+        (Some(name), Some(kind)) => format!(" {name} {kind}{at}"),
+        (Some(name), None) => format!(" {name}{at}"),
         _ => String::new(),
     };
     let marked = if marks.is_empty() {
@@ -1727,7 +1866,7 @@ fn locate_row(hit: &crate::Hit, terms: &[String]) -> String {
         format!(" \u{00b7} {}", marks.join(" \u{00b7} "))
     };
     format!(
-        "  {}-{}{named}{marked}\n    {}\n",
+        "  {}-{}{named}{marked} | {}\n",
         hit.start_line,
         hit.end_line,
         best_line(&hit.text, terms),
@@ -1792,9 +1931,10 @@ fn render_brief(brief: &crate::brief::Brief) -> String {
         } else {
             format!(" [{}]", span.lists.join("+"))
         };
-        let what = match &span.symbol {
-            Some(name) => format!(" {name}"),
-            None => String::new(),
+        let what = match (&span.symbol, span.symbol_line) {
+            (Some(name), Some(line)) => format!(" {name} @{line}"),
+            (Some(name), None) => format!(" {name}"),
+            _ => String::new(),
         };
         out.push_str(&format!(
             "{}:{}-{}{what}{via}\n",
@@ -1808,7 +1948,8 @@ fn render_brief(brief: &crate::brief::Brief) -> String {
                     out.push('\n');
                 }
             }
-            None => out.push_str("    (text left out for the budget)\n"),
+            None if span.over_budget => out.push_str("    (text left out for the budget)\n"),
+            None => out.push_str("    (text: top span only)\n"),
         }
     }
     for symbol in &brief.symbols {
@@ -1960,7 +2101,9 @@ mod tests {
             fresh: true,
             symbol: Some("edges_out".to_string()),
             symbol_kind: Some("fn".to_string()),
+            symbol_line: None,
             provenance: None,
+            copies: Vec::new(),
         }
     }
 
@@ -1985,7 +2128,7 @@ mod tests {
             })
             .collect();
 
-        let reply = locate(&hits, "edges_out", DEFAULT_LOCATE_TOKENS);
+        let reply = locate(&hits, "edges_out", DEFAULT_LOCATE_TOKENS, &crate::plain);
         let per_hit = reply.len() / hits.len();
         assert!(
             per_hit < 200,
@@ -2007,10 +2150,10 @@ mod tests {
             .map(|i| hit(&format!("src/file{i}.rs"), 10, 40, "fn a() { helper(); }\n"))
             .collect();
 
-        let full = locate(&hits, "helper", 10_000);
+        let full = locate(&hits, "helper", 10_000, &crate::plain);
         assert!(!full.contains("truncated:"), "nothing was cut: {full}");
 
-        let cut = locate(&hits, "helper", MIN_LOCATE_TOKENS);
+        let cut = locate(&hits, "helper", MIN_LOCATE_TOKENS, &crate::plain);
         assert!(cut.contains("truncated:"), "{cut}");
         assert!(cut.len() < full.len(), "the budget did not cut anything");
         assert!(
@@ -2024,7 +2167,7 @@ mod tests {
     #[test]
     fn an_impossible_budget_still_returns_the_best_file() {
         let hits = vec![hit("src/store.rs", 948, 970, "fn edges_out() {}\n")];
-        let reply = locate(&hits, "edges_out", 1);
+        let reply = locate(&hits, "edges_out", 1, &crate::plain);
         assert!(reply.contains("src/store.rs"), "{reply}");
     }
 
@@ -2038,7 +2181,7 @@ mod tests {
         reached.lists = vec!["graph"];
         reached.provenance = Some(crate::graph::RESOLVED.to_string());
 
-        let reply = locate(&[stale, reached], "a", DEFAULT_LOCATE_TOKENS);
+        let reply = locate(&[stale, reached], "a", DEFAULT_LOCATE_TOKENS, &crate::plain);
         assert!(reply.contains("stale"), "{reply}");
         assert!(reply.contains("graph(resolved)"), "{reply}");
     }

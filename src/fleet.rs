@@ -53,6 +53,10 @@ pub struct Fleet {
 struct Member {
     label: String,
     store: Semlith,
+    /// The directories this store indexes, from the registry. Empty for a
+    /// store named by `--store` that the registry does not know, which then
+    /// answers with absolute paths as it always did.
+    roots: Vec<PathBuf>,
 }
 
 /// A store directory that holds a `store.db` the process could not open.
@@ -215,11 +219,22 @@ impl Fleet {
             members.push(Member {
                 label: String::new(),
                 store,
+                roots: Vec::new(),
             });
         }
 
+        // A registry that cannot be read costs relative paths, not the open.
+        let registry = crate::home::Registry::load().unwrap_or_default();
         for (member, key) in members.iter_mut().zip(&keys) {
             member.label = label(key);
+            member.roots = registry
+                .stores
+                .iter()
+                .find(|(name, _)| {
+                    crate::home::Registry::dir_of(name).is_ok_and(|d| canonical(&d) == *key)
+                })
+                .map(|(_, entry)| entry.roots.clone())
+                .unwrap_or_default();
         }
         disambiguate(&mut members, &keys);
 
@@ -246,6 +261,24 @@ impl Fleet {
 
     pub fn len(&self) -> usize {
         self.members.len()
+    }
+
+    /// Every root the open stores index, from the registry.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .members
+            .iter()
+            .flat_map(|m| m.roots.iter().cloned())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    /// Writes paths relative to the root that holds them, for an answer an
+    /// agent reads. See [`crate::Shortener`].
+    pub fn shortener(&self) -> crate::Shortener {
+        crate::Shortener::new(self.roots())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -581,7 +614,8 @@ impl Fleet {
         let chosen = self.chosen(only)?;
         let label_rows = self.members.len() > 1;
         for i in chosen {
-            let Some(found) = self.members[i].store.read(target, filter)? else {
+            let roots = &self.members[i].roots;
+            let Some(found) = self.members[i].store.read_within(target, filter, roots)? else {
                 continue;
             };
             return Ok(Some(match found {
@@ -602,6 +636,30 @@ impl Fleet {
             }));
         }
         Ok(None)
+    }
+
+    /// Every definition of several names, one row each, across the chosen
+    /// stores. See [`crate::graph::signatures`].
+    pub fn signatures_in(
+        &self,
+        only: Option<&[String]>,
+        names: &[String],
+    ) -> Result<Vec<crate::graph::Signature>> {
+        let label_rows = self.members.len() > 1;
+        let mut out = Vec::new();
+        for i in self.chosen(only)? {
+            let mut rows = crate::graph::signatures(self.members[i].store.db(), names)?;
+            if label_rows {
+                for row in &mut rows {
+                    row.symbol.store = Some(self.members[i].label.clone());
+                }
+            }
+            out.extend(rows);
+        }
+        // Grouped by the name asked, in the order asked, so the table reads
+        // as answers to the question rather than as one store after another.
+        out.sort_by_key(|r| names.iter().position(|n| *n == r.asked).unwrap_or(usize::MAX));
+        Ok(out)
     }
 
     /// Everything the chosen stores know about `name`, in one reply.
@@ -648,10 +706,23 @@ impl Fleet {
         kinds: &[String],
         all: bool,
     ) -> Result<crate::graph::Neighbours> {
-        let callers = self.graph_in(only, |s| crate::store::edges_in(s.db(), name, kinds))?;
-        let callees = self.graph_in(only, |s| crate::store::edges_out(s.db(), name, kinds))?;
-        let unresolved =
-            self.graph_in(only, |s| crate::store::unresolved_out(s.db(), name, kinds))?;
+        // Each store resolves its own callers against its own definitions —
+        // which `Type::method` a call means is a fact inside one store — and
+        // the rows are joined after.
+        let label_rows = self.members.len() > 1;
+        let (mut callers, mut callees, mut unresolved) = (Vec::new(), Vec::new(), Vec::new());
+        for i in self.chosen(only)? {
+            let mut part = crate::graph::neighbours(self.members[i].store.db(), name, kinds, true)?;
+            if label_rows {
+                let label = &self.members[i].label;
+                for row in part.callers.iter_mut().chain(part.callees.iter_mut()) {
+                    row.label(label);
+                }
+            }
+            callers.append(&mut part.callers);
+            callees.append(&mut part.callees);
+            unresolved.append(&mut part.unresolved);
+        }
         // Collapsed after the stores are joined, not inside each of them: one
         // name with two definitions in two stores is still one name.
         Ok(crate::graph::Neighbours {
@@ -754,12 +825,17 @@ impl Fleet {
             reached: Vec::new(),
             files: Vec::new(),
             hidden: 0,
+            unqualified: false,
             extracted: 0,
             resolved: 0,
             inferred: 0,
             ambiguous: 0,
         };
+        let mut owned_somewhere = false;
+        let mut any_part = false;
         for part in parts {
+            any_part = true;
+            owned_somewhere |= !part.unqualified;
             merged.definitions.extend(part.definitions);
             merged.reached.extend(part.reached);
             merged.files.extend(part.files);
@@ -769,6 +845,8 @@ impl Fleet {
             merged.inferred += part.inferred;
             merged.ambiguous += part.ambiguous;
         }
+        // The qualifier fell back only if it matched in no store at all.
+        merged.unqualified = any_part && !owned_somewhere;
         merged.reached.sort_by(|a, b| {
             a.hop
                 .cmp(&b.hop)
@@ -1239,7 +1317,9 @@ mod tests {
             fresh: true,
             symbol: None,
             symbol_kind: None,
+            symbol_line: None,
             provenance: None,
+            copies: Vec::new(),
         }
     }
 

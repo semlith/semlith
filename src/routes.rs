@@ -111,10 +111,13 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/index/log") => index_log(state, request),
         (true, _, "/api/projects") => projects(request),
         (true, _, "/api/changes") => changes(state),
+        (true, _, "/api/refused") => refused(state),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
+        (_, true, "/api/refused/accept") => refused_decide(state, request, true),
+        (_, true, "/api/refused/revoke") => refused_decide(state, request, false),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
@@ -2135,6 +2138,21 @@ fn read(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    // Several names: the definitions table `semlith symbol a b c` prints.
+    if let Some(names) = request.query("names").filter(|n| n.contains(',')) {
+        let names: Vec<String> = names
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .take(crate::graph::NAMES_LIMIT)
+            .collect();
+        let only = request.query_all("store");
+        return with_fleet(state, json!({ "table": [] }), move |fleet| {
+            let only = (!only.is_empty()).then_some(only);
+            Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names)? }))
+        });
+    }
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
         return Response::error(400, "missing name");
     };
@@ -3292,6 +3310,100 @@ fn upgrade(request: &Request) -> Response {
             Err(e) => Response::error(409, &e.to_string()),
         },
         _ => Response::error(400, "action must be \"check\" or \"apply\""),
+    }
+}
+
+/// Every file the open stores did not index, and why (2.3).
+///
+/// Per store, because a decision about a file is a decision in one store.
+/// Values are never here: a content row carries its masked matches, their
+/// confidence and the signals behind it.
+fn refused(state: &Arc<State>) -> Response {
+    with_fleet(state, json!({ "stores": [] }), move |fleet| {
+        let mut stores = Vec::new();
+        let (mut total, mut review) = (0usize, 0usize);
+        for (label, store) in fleet.each() {
+            let rows = crate::store::refusals(store.db())?;
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut accepted: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut needs = 0usize;
+            for row in &rows {
+                *counts.entry(row.class.clone()).or_insert(0) += row.files.max(1) as usize;
+                if row.reviewable && row.accepted.is_none() {
+                    needs += 1;
+                }
+            }
+            for a in crate::store::acceptances(store.db())? {
+                *accepted.entry(a.mode).or_insert(0) += 1;
+            }
+            total += rows
+                .iter()
+                .filter(|r| r.class != crate::store::class::DUMMY)
+                .map(|r| r.files.max(1) as usize)
+                .sum::<usize>();
+            review += needs;
+            stores.push(json!({
+                "store": label,
+                "rows": rows,
+                "counts": counts,
+                "review": needs,
+                "accepted": accepted,
+            }));
+        }
+        Ok(json!({ "stores": stores, "total": total, "review": review }))
+    })
+}
+
+/// Accept or revoke exactly one refused file, as the person holding the
+/// session token (2.5).
+///
+/// One path and never a list: a body naming `paths`, or a `path` that is not
+/// a single string, is refused before anything is read. The page sends the
+/// per-file tick as `reviewed`, and an accept without it is refused too. The
+/// agent key cannot reach this route at all — `http` opens only `/mcp` to it —
+/// and no MCP tool calls it, by design.
+fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    if body.get("paths").is_some() {
+        return Response::error(400, "one file at a time: send path, not paths");
+    }
+    let Some(path) = body.get("path").and_then(Value::as_str) else {
+        return Response::error(400, "path must be one file's path, as a string");
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    let progress = if accept {
+        let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
+        if !matches!(mode, "redacted" | "as-is" | "refused") {
+            return Response::error(400, "mode is redacted, as-is or refused");
+        }
+        if body.get("reviewed").and_then(Value::as_bool) != Some(true) {
+            return Response::error(400, "tick \"I have reviewed this file\" first");
+        }
+        let source = match body.get("source").and_then(Value::as_str) {
+            Some("cli") => "cli",
+            _ => "portal",
+        };
+        state.accept(&store, PathBuf::from(path), mode, source)
+    } else {
+        state.revoke(&store, PathBuf::from(path))
+    };
+    let progress = match progress {
+        Ok(p) => p,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    match progress.recv() {
+        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => Response::error(
+            409,
+            value.get("error").and_then(Value::as_str).unwrap_or("refused"),
+        ),
+        Ok(value) => Response::json(&value),
+        Err(_) => Response::error(500, "the writer stopped before answering"),
     }
 }
 

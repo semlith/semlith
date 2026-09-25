@@ -292,6 +292,15 @@ struct Indexing {
 enum Job {
     Index(Indexing),
     Forget(PathBuf),
+    /// A person's decision about one refused file (2.5): `mode` is
+    /// `redacted`, `as-is` or `refused`, and anything but the last indexes
+    /// the file straight after.
+    Accept {
+        path: PathBuf,
+        mode: String,
+        source: String,
+    },
+    Revoke(PathBuf),
 }
 
 /// A job and the channel its progress goes back on.
@@ -1228,6 +1237,18 @@ impl Store {
         // the writer performs and not a run with a card, and its events belong
         // to no run's log.
         queue.push_back(Queued {
+            run: NO_RUN,
+            job,
+            report,
+        });
+        progress
+    }
+
+    /// [`Store::submit`], at the front of the queue.
+    fn submit_front(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
+        let (report, progress) = mpsc::channel();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push_front(Queued {
             run: NO_RUN,
             job,
             report,
@@ -2194,6 +2215,29 @@ impl State {
         Self::writer_alive(store)?;
         // No notice: this caller takes the first message as the answer.
         Ok(store.submit(Job::Forget(path), None))
+    }
+
+    /// Accept one refused file, at the front of the writer's queue: a person
+    /// waiting on a confirm should not wait behind a long run's slices.
+    pub fn accept(
+        &self,
+        store: &Arc<Store>,
+        path: PathBuf,
+        mode: &str,
+        source: &str,
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit_front(Job::Accept {
+            path,
+            mode: mode.to_string(),
+            source: source.to_string(),
+        }))
+    }
+
+    /// Undo an acceptance: the file leaves the store and returns to the list.
+    pub fn revoke(&self, store: &Arc<Store>, path: PathBuf) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit_front(Job::Revoke(path)))
     }
 
     /// Close a store and delete everything it holds.
@@ -3423,6 +3467,50 @@ fn perform(
             store.paused.store(false, Ordering::Relaxed);
             store.cancelled.store(false, Ordering::Relaxed);
             release(run, admission);
+            None
+        }
+        Job::Accept { path, mode, source } => {
+            let key = path.to_string_lossy().into_owned();
+            match writer.accept(&key, &mode, &source) {
+                Ok(accepted) => {
+                    // Indexed at once, in the same job: the person who
+                    // accepted it is looking at the page for the result.
+                    let indexed = if mode == "refused" {
+                        Ok(0)
+                    } else {
+                        writer
+                            .index_changed(vec![PathBuf::from(&accepted.path)], |_, _| {})
+                            .map(|r| r.indexed)
+                    };
+                    store.last_write.store(now() as usize, Ordering::Relaxed);
+                    store.note(format!("{} {} ({})", if mode == "refused" { "refused" } else { "accepted" }, path.display(), mode));
+                    match indexed {
+                        Ok(n) => say(serde_json::json!({
+                            "event": "done",
+                            "accepted": accepted,
+                            "indexed": n,
+                        })),
+                        Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+                    }
+                }
+                Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+            }
+            None
+        }
+        Job::Revoke(path) => {
+            let key = path.to_string_lossy().into_owned();
+            match writer.revoke(&key) {
+                Ok(revoked) => {
+                    // Scanned again at once, so the file is back on the list
+                    // with today's reasons rather than missing from both.
+                    if revoked {
+                        let _ = writer.index_changed(vec![path.clone()], |_, _| {});
+                    }
+                    store.note(format!("revoked {}", path.display()));
+                    say(serde_json::json!({ "event": "done", "revoked": revoked }))
+                }
+                Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+            }
             None
         }
         Job::Forget(path) => {

@@ -1,0 +1,4 @@
+# Run output is evidence for one run, never source. Nothing here is committed.
+runs/
+__pycache__/
+*.pyc

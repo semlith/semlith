@@ -932,11 +932,22 @@ mod deny_tests {
 pub struct Shape {
     /// What the match is called, in the line a user reads.
     pub kind: &'static str,
+    /// Who issues it, as the redaction marker names it: `[REDACTED:aws …]`.
+    pub provider: &'static str,
+    /// What it is, in two or three words, for the same marker.
+    pub label: &'static str,
+    /// How many leading characters are the issuer's prefix rather than the
+    /// secret — `ghp_`, `AKIA` — which is what a mask shows and what the
+    /// dummy rules look past.
+    pub prefix_len: usize,
     /// The regular expression. Anchored by the credential's own prefix
     /// wherever there is one, because a prefix is the issuer declaring what
     /// the string is — which is what makes these safe to refuse on sight.
     pub pattern: &'static str,
-    /// A string of this shape. Fake, and refused all the same.
+    /// A string of this shape that is a declared test dummy (see
+    /// `keyscan::dummy_rule`): it matches the pattern and is let through.
+    /// From 0.30.0 no row carries a live-looking literal; the tests that need
+    /// one build it at run time with `keyscan::forge`.
     pub example: &'static str,
     /// A string that looks like it but is not: the right prefix and the wrong
     /// length, usually. What stops a pattern being widened by accident.
@@ -950,54 +961,71 @@ pub struct Shape {
 /// and GitHub's own push protection refuses a branch that contains them — it
 /// stopped 0.19.0's first push over the Slack and Twilio rows. Splitting the
 /// literal keeps the source free of a contiguous match while the constant it
-/// compiles to is exactly the string the tests assert against. Any row a
-/// scanner flags gets the same treatment; the rest stay whole, because an
-/// unnecessary split is a row that reads worse for nothing.
+/// compiles to is exactly the string the tests assert against.
 ///
-/// Prefix-declared, not entropy-guessed, with one exception at the bottom. A
-/// documentation page that quotes AWS's own `AKIAIOSFODNN7EXAMPLE` is refused
-/// like any other match and `--include-secrets` indexes it: an allow-list of
-/// known-fake values is a second table to keep right, and a credential that
-/// gets indexed because it resembled an example is the failure that matters.
+/// Prefix-declared, not entropy-guessed, with one exception at the bottom.
+/// Until 0.30.0 there was no allow-list at all, and a documentation page that
+/// quoted AWS's own `AKIAIOSFODNN7EXAMPLE` was refused like a leaked key —
+/// eight of this repository's own files were. What lets a match through now is
+/// a short set of declared rules about the value itself, in `secrets.rs`, and
+/// one live-looking match anywhere still refuses the whole file.
 pub const SHAPES: &[Shape] = &[
     // Anthropic before OpenAI: `sk-ant-` is an `sk-` too, and the first match
     // is the one named.
     Shape {
         kind: "an Anthropic API key",
+        provider: "anthropic",
+        label: "api key",
+        prefix_len: 7,
         pattern: r"\bsk-ant-[A-Za-z0-9_-]{24,}",
-        example: "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH",
+        example: "sk-ant-api03-EXAMPLEEXAMPLEEXAMPLEEXAMPLE",
         near_miss: "sk-ant-short",
     },
     Shape {
         kind: "an OpenAI API key",
+        provider: "openai",
+        label: "api key",
+        prefix_len: 3,
         pattern: r"\bsk-[A-Za-z0-9_-]{32,}",
-        example: "sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHHIIII",
+        example: "sk-proj-EXAMPLEEXAMPLEEXAMPLEEXAMPLE1234",
         near_miss: "sk-tooshort",
     },
     Shape {
         kind: "an AWS access key id",
+        provider: "aws",
+        label: "access key id",
+        prefix_len: 4,
         pattern: r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
-        example: "AKIAIOSFODNN7EXAMPLE",
+        example: concat!("AKIAIOSFODNN7", "EXAMPLE"),
         near_miss: "AKIAIOSFODNN7EXAMPL",
     },
     Shape {
         kind: "a GitHub token",
+        provider: "github",
+        label: "token",
+        prefix_len: 4,
         pattern: r"\bgh[pousr]_[A-Za-z0-9]{36}\b",
-        example: "ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678",
+        example: "ghp_EXAMPLEaaaaBBBBccccDDDDeeeeFFFF12345",
         near_miss: "ghp_tooshortforatoken",
     },
     Shape {
         kind: "a GitHub fine-grained token",
+        provider: "github",
+        label: "fine-grained token",
+        prefix_len: 11,
         pattern: r"\bgithub_pat_[A-Za-z0-9_]{40,}",
-        example: "github_pat_11AAAAAAA0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        example: "github_pat_11EXAMPLE0aaaaaaaaaaaa_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         near_miss: "github_pat_11AAAAAAA0",
     },
     Shape {
         kind: "a Slack token",
+        provider: "slack",
+        label: "token",
+        prefix_len: 5,
         pattern: r"\bxox[abprs]-[0-9A-Za-z-]{12,}",
         example: concat!(
             "xox",
-            "b-123456789012-1234567890123-aaaaaaaaaaaaaaaaaaaaaaaa"
+            "b-123456789012-1234567890123-EXAMPLEaaaaaaaaaaaaaaaaa"
         ),
         near_miss: "xoxb-123",
     },
@@ -1009,50 +1037,74 @@ pub const SHAPES: &[Shape] = &[
     // `.env`.
     Shape {
         kind: "a Stripe key",
+        provider: "stripe",
+        label: "key",
+        prefix_len: 8,
         pattern: r"\b[sr]k_(?:live|test)_[0-9A-Za-z]{16,}",
-        example: "sk_live_aaaaBBBBccccDDDD1234",
+        example: "sk_live_EXAMPLEaaaaBBBB1234",
         near_miss: "sk_live_tooshort",
     },
     Shape {
         kind: "a Google API key",
+        provider: "google",
+        label: "api key",
+        prefix_len: 4,
         pattern: r"\bAIza[0-9A-Za-z_-]{35}\b",
-        example: concat!("AIza", "SyA0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        example: concat!("AIza", "SyEXAMPLEaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         near_miss: "AIzaSyA0aaaaaaaaaaaa",
     },
     Shape {
         kind: "a Twilio API key",
+        provider: "twilio",
+        label: "api key",
+        prefix_len: 2,
         pattern: r"\bSK[0-9a-fA-F]{32}\b",
-        example: concat!("SK", "0123456789abcdef0123456789abcdef"),
+        example: concat!("SK", "00000000000000000000000000000000"),
         near_miss: "SK0123456789abcdef",
     },
     Shape {
         kind: "a SendGrid API key",
+        provider: "sendgrid",
+        label: "api key",
+        prefix_len: 3,
         pattern: r"\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}",
-        example: "SG.aaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        example: "SG.EXAMPLEaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         near_miss: "SG.aaaa.bbbb",
     },
     Shape {
         kind: "an npm token",
+        provider: "npm",
+        label: "token",
+        prefix_len: 4,
         pattern: r"\bnpm_[A-Za-z0-9]{36}\b",
-        example: "npm_aaaaBBBBccccDDDDeeeeFFFFgggg12345678",
+        example: "npm_EXAMPLEaaaaBBBBccccDDDDeeeeFFFF12345",
         near_miss: "npm_install",
     },
     Shape {
         kind: "a semlith agent key",
+        provider: "semlith",
+        label: "agent key",
+        prefix_len: 4,
         pattern: r"\bsml_[0-9a-f]{64}\b",
-        example: "sml_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        example: "sml_0000000000000000000000000000000000000000000000000000000000000000",
         near_miss: "sml_0123456789abcdef",
     },
     Shape {
         kind: "a private key block",
+        provider: "pem",
+        label: "private key",
+        prefix_len: 0,
         pattern: r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----",
         example: "-----BEGIN RSA PRIVATE KEY-----",
         near_miss: "-----BEGIN CERTIFICATE-----",
     },
     Shape {
         kind: "a JSON web token",
+        provider: "jwt",
+        label: "token",
+        prefix_len: 3,
         pattern: r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-        example: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        example: "eyJFAKEaaaaaaaaaa.eyJFAKEbbbbbbbbbb.FAKEcccccccccccc",
         near_miss: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0",
     },
 ];
@@ -1069,14 +1121,22 @@ pub const SHAPES: &[Shape] = &[
 /// name alone catches `password = "hunter2"`, which is not a credential worth
 /// refusing a file for; the entropy alone catches every base64 fixture and
 /// every lockfile hash in the corpus. Both together is the rule.
-const ASSIGNMENT: &str = r#"(?i)[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|auth)[a-z0-9_-]*[ \t]*[:=][ \t]*["']([^"'\r\n]{20,})["']"#;
+pub(crate) const ASSIGNMENT: &str = r#"(?i)[a-z0-9_-]*(?:api[_-]?key|secret|token|password|passwd|auth|[_-]key)[a-z0-9_-]*[ \t]*[:=][ \t]*["']([^"'\r\n]{20,})["']"#;
+
+/// The same rule for a value written without quotes, as a `.env`, a shell
+/// `export` or a YAML file writes one (0.30.0, 2.2).
+///
+/// Anchored to a whole line and to a value made only of the characters a key
+/// is made of, so `let token = compute_token(input);` — a key-like name
+/// assigned code — is not a match: the parentheses end the value.
+pub(crate) const ENV_ASSIGNMENT: &str = r#"(?im)^[ \t]*(?:export[ \t]+)?[a-z0-9_.-]*(?:api[_-]?key|secret|token|password|passwd|auth|[_-]key)[a-z0-9_.-]*[ \t]*[:=][ \t]*([A-Za-z0-9+/=_.-]{20,})[ \t]*\r?$"#;
 
 /// How much entropy a generic literal needs before it reads as a credential.
 ///
 /// Shannon bits per character. A random 24-character token sits near 4.5; a
 /// placeholder like `changeme_changeme_changeme` sits near 2.5. Measured
 /// against both corpora in the 0.19.0 false-positive audit.
-const MIN_ENTROPY: f64 = 3.2;
+pub(crate) const MIN_ENTROPY: f64 = 3.2;
 
 /// What the scan found, and where.
 ///
@@ -1100,55 +1160,36 @@ impl Found {
     }
 }
 
-/// The compiled table, built once.
-fn shapes() -> &'static (regex::RegexSet, Vec<regex::Regex>, regex::Regex) {
-    static COMPILED: std::sync::OnceLock<(regex::RegexSet, Vec<regex::Regex>, regex::Regex)> =
+/// The compiled table, built once: one regex per row, and the two
+/// assignment rules.
+pub(crate) fn shapes() -> &'static (Vec<regex::Regex>, regex::Regex, regex::Regex) {
+    static COMPILED: std::sync::OnceLock<(Vec<regex::Regex>, regex::Regex, regex::Regex)> =
         std::sync::OnceLock::new();
     COMPILED.get_or_init(|| {
-        let set = regex::RegexSet::new(SHAPES.iter().map(|s| s.pattern))
-            .expect("the credential shapes compile");
         let each = SHAPES
             .iter()
             .map(|s| regex::Regex::new(s.pattern).expect("the credential shapes compile"))
             .collect();
         let assignment = regex::Regex::new(ASSIGNMENT).expect("the assignment rule compiles");
-        (set, each, assignment)
+        let env = regex::Regex::new(ENV_ASSIGNMENT).expect("the assignment rule compiles");
+        (each, assignment, env)
     })
 }
 
-/// The first credential this text looks like it holds, if any.
+/// The first live-looking credential this text holds, if any.
 ///
-/// One `RegexSet` pass decides whether anything matched at all, which is the
-/// answer for every file in a corpus but a handful; only then is the matching
-/// shape run again to find where. Called on the text a reader produced, before
-/// it is chunked, stored or embedded — a file semlith refuses is a file whose
-/// contents never reach the store in the first place.
+/// Called on the text a reader produced, before it is chunked, stored or
+/// embedded — a file semlith refuses is a file whose contents never reach the
+/// store in the first place. A match that is a declared test dummy does not
+/// count; see `keyscan::scan` for every match with its verdict.
 pub fn scan_text(text: &str) -> Option<Found> {
-    let (set, each, assignment) = shapes();
-    let mut best: Option<(usize, &'static str)> = None;
-    for index in set.matches(text).iter() {
-        if let Some(m) = each[index].find(text) {
-            let at = m.start();
-            if best.is_none_or(|(prev, _)| at < prev) {
-                best = Some((at, SHAPES[index].kind));
-            }
-        }
-    }
-    if let Some(caps) = assignment.captures(text)
-        && let Some(value) = caps.get(1)
-        && !is_placeholder(value.as_str())
-        && entropy(value.as_str()) >= MIN_ENTROPY
-    {
-        let at = caps.get(0).expect("the whole match").start();
-        if best.is_none_or(|(prev, _)| at < prev) {
-            best = Some((at, "a secret assigned to a key-like name"));
-        }
-    }
-    let (at, kind) = best?;
-    Some(Found {
-        kind: kind.to_string(),
-        line: line_of(text, at),
-    })
+    crate::keyscan::scan("", text)
+        .into_iter()
+        .find(|m| m.dummy.is_none())
+        .map(|m| Found {
+            kind: m.kind,
+            line: m.line,
+        })
 }
 
 /// Whether a value is a placeholder standing in for a credential rather than
@@ -1165,7 +1206,7 @@ pub fn scan_text(text: &str) -> Option<Found> {
 /// all things a credential is never spelled as: a real key mixes case or digits
 /// in a way a variable name does not. The prefixed shapes in [`SHAPES`] get no
 /// such exemption — an `AKIA…` is an AWS key wherever it is written.
-fn is_placeholder(value: &str) -> bool {
+pub(crate) fn is_placeholder(value: &str) -> bool {
     if value.contains("${") || value.contains("{{") || value.contains("<") || value.contains("%(") {
         return true;
     }
@@ -1180,7 +1221,7 @@ fn is_placeholder(value: &str) -> bool {
 }
 
 /// Shannon entropy in bits per character.
-fn entropy(value: &str) -> f64 {
+pub(crate) fn entropy(value: &str) -> f64 {
     let mut counts = std::collections::HashMap::new();
     for c in value.chars() {
         *counts.entry(c).or_insert(0usize) += 1;
@@ -1199,6 +1240,6 @@ fn entropy(value: &str) -> f64 {
 }
 
 /// Which line a byte offset falls on, counting from one.
-fn line_of(text: &str, at: usize) -> u32 {
+pub(crate) fn line_of(text: &str, at: usize) -> u32 {
     text[..at].bytes().filter(|b| *b == b'\n').count() as u32 + 1
 }

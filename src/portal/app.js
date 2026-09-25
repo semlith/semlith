@@ -2530,9 +2530,82 @@ async function graphView() {
     load({ name, limit: "45" });
   }
 
+  /* Several names, comma-separated: where each is defined and its first
+   * line, the table `semlith symbol a b c` prints. The graph centres on the
+   * first. */
+  const defsCard = el("div", { class: "card table-card graph-defs", hidden: "" });
+  async function showDefinitions(names) {
+    const params = new URLSearchParams({ names: names.join(",") });
+    for (const store of chosen) params.append("store", store);
+    let data;
+    try {
+      data = await api(`/api/symbol?${params}`);
+    } catch (_) {
+      return;
+    }
+    const rows = data.table || [];
+    defsCard.hidden = false;
+    fill(
+      defsCard,
+      el(
+        "div",
+        { class: "table-head" },
+        el("h2", { text: "Definitions" }),
+        el("span", { class: "muted", text: `${rows.length} for ${names.length} name${names.length === 1 ? "" : "s"}` }),
+      ),
+      el(
+        "div",
+        { class: "table-wrap" },
+        el(
+          "table",
+          {},
+          el("caption", { class: "sr-only", text: "Every definition of the names asked for" }),
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              el("th", { text: "Definition" }),
+              el("th", { text: "Kind" }),
+              el("th", { text: "Where" }),
+              el("th", { text: "First line" }),
+            ),
+          ),
+          el(
+            "tbody",
+            {},
+            rows.length
+              ? rows.map((row) =>
+                  el(
+                    "tr",
+                    { class: "defs-row" },
+                    el("td", { class: "sym" }, el("code", { text: row.qualified })),
+                    el("td", { text: row.kind }),
+                    el("td", {
+                      class: "where path",
+                      title: `${row.path}:${row.start_line}-${row.end_line}`,
+                      text: `${shortPath(row.path)}:${row.start_line}`,
+                    }),
+                    el("td", {}, el("code", { class: "one-line", text: row.signature })),
+                  ),
+                )
+              : el("tr", {}, el("td", { colspan: "4", class: "muted", text: "No definition of any of these names." })),
+          ),
+        ),
+      ),
+    );
+  }
+
   /** Apply whatever is in the scope box. */
   function applyScope() {
     const value = scopeInput.value.trim();
+    defsCard.hidden = true;
+    if (value.includes(",")) {
+      const names = value.split(",").map((n) => n.trim()).filter(Boolean).slice(0, 20);
+      showDefinitions(names);
+      return names.length ? load({ name: names[0] }) : load({});
+    }
     if (!value) return load({});
     // A path fragment scopes; anything else is read as a symbol to centre on.
     load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
@@ -2540,7 +2613,7 @@ async function graphView() {
 
   const scopeInput = el("input", {
     type: "search",
-    placeholder: "Scope to a path, or find a symbol",
+    placeholder: "Scope to a path, or find symbols: a, b, c",
     // Every other control on this page applies on a click, so a text field
     // that silently waits for Enter reads as broken. It still takes Enter, and
     // now it also says so and has a button.
@@ -2626,6 +2699,7 @@ async function graphView() {
         ),
         storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
       ),
+      defsCard,
     ),
     el(
       "div",
@@ -5381,7 +5455,10 @@ async function searchView() {
               { class: "brief-head brief-row" },
               el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
               span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
-              el("span", { class: "brief-dropped", text: "text left out for the budget" }),
+              el("span", {
+                class: "brief-dropped",
+                text: span.over_budget ? "text left out for the budget" : "text: top span only",
+              }),
               el("span", { class: "brief-lists" }, fusionBadges(span.lists)),
             ),
       );
@@ -10495,12 +10572,22 @@ async function impactView() {
       "tr",
       { class: "impact-row" },
       el("td", { class: "sym" }, el("code", { title: row.name, text: row.name })),
-      // The whole path in the title, because the cell truncates it.
-      el("td", {
-        class: "where path",
-        title: `${row.path}:${row.line}`,
-        text: `${shortPath(row.path)}:${row.line}`,
-      }),
+      // The call site, where the store recorded one: the line to open to see
+      // the call, which can sit hundreds of lines below the definition. An
+      // edge an older binary wrote has none, and the cell says so rather
+      // than passing the definition off as the call. The whole path is in the
+      // title, because the cell truncates it.
+      row.at
+        ? el("td", {
+            class: "where path",
+            title: `${row.path}:${row.at} · call in ${row.name}, defined at line ${row.line}`,
+            text: `${shortPath(row.path)}:${row.at}`,
+          })
+        : el("td", {
+            class: "where path",
+            title: `${row.path}:${row.line} · no call-site line in this store; a re-index adds it`,
+            text: `${shortPath(row.path)}:${row.line} (definition)`,
+          }),
       el(
         "td",
         { class: "via" },
@@ -10610,6 +10697,12 @@ async function impactView() {
     fill(
       results,
       el("p", { class: "headline", text: data.headline }),
+      impact.unqualified
+        ? el("p", {
+            class: "note",
+            text: `Nothing named ${name} matched that owner, so this is every definition of the bare name.`,
+          })
+        : null,
       allEdges
         ? el("p", {
             class: "note hypothesis",

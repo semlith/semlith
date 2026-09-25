@@ -439,6 +439,45 @@ pub fn raw_read(fleet: &Fleet, client: &str, session: &str, path: &str) -> bool 
     false
 }
 
+/// Record that a person accepted or revoked one refused file (2.6).
+///
+/// Hash-chained like every other row, with the path, class, mode and
+/// confidence in the query column — never the value, which the acceptance
+/// itself never holds either. `source` is `portal` or `cli`, which is what
+/// the client column says.
+pub fn acceptance(
+    db: &rusqlite::Connection,
+    a: &store::Acceptance,
+    action: &str,
+) -> anyhow::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let query = serde_json::json!({
+        "path": crate::plain(&a.path),
+        "class": a.class,
+        "mode": a.mode,
+        "confidence": a.confidence,
+    })
+    .to_string();
+    store::record_retrieval(
+        db,
+        &store::NewRetrieval {
+            client: &a.source,
+            session: "",
+            tool: action,
+            query: &query,
+            hits: 0,
+            micros: 0,
+            excerpt_tokens: 0,
+            whole_file_tokens: 0,
+            stale_hits: 0,
+            tokenizer: CHARS4,
+            query_id: &query_id(),
+        },
+    )
+}
+
 /// Who made a retrieval, and which conversation it belonged to.
 #[derive(Debug, Clone, Copy)]
 pub struct Who<'a> {

@@ -104,6 +104,9 @@ pub struct Span {
     pub symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_kind: Option<String>,
+    /// Where `symbol` is defined. See [`crate::Hit::symbol_line`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
     /// Whether the file still looks the way it did when it was indexed.
@@ -112,6 +115,12 @@ pub struct Span {
     /// did not. Never truncated: half a function is worse than a locator.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// This span was chosen for text and the budget could not fit it — as
+    /// opposed to every other span, which carries no text by design
+    /// ([`TEXT_SPANS`]). The two used to share one label, so a brief a fifth
+    /// spent said seven spans were "left out for the budget".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub over_budget: bool,
 }
 
 /// The one-hop neighbourhood of a symbol a span sits inside.
@@ -217,6 +226,20 @@ pub fn brief(
         kept.push(i);
     }
 
+    // Which span gets the text. For a question about code it is the
+    // best-ranked span in a code file: on 2026-09-25 the one text span went to
+    // a Markdown section for a question about scoring code, and the answer was
+    // built from prose about the function rather than the function.
+    let code = crate::code_shaped(question);
+    let texted: usize = if code {
+        kept.iter()
+            .position(|&i| crate::filter::is_code(&hits[i].path))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let navigational = |kind: &str| crate::graph::NAVIGATIONAL_KINDS.contains(&kind);
+
     // 2. Edges, for the symbols enclosing the spans this brief actually shows.
     //
     // Not for all eight. The neighbourhood of a span whose text was never
@@ -225,16 +248,25 @@ pub fn brief(
     // was two thirds of what a brief cost when the harness first measured one.
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for hit in kept.iter().take(TEXT_SPANS).map(|&i| &hits[i]) {
+    for hit in kept.iter().skip(texted).take(TEXT_SPANS).map(|&i| &hits[i]) {
         let Some(name) = hit.symbol.as_deref() else {
             continue;
         };
+        // A heading is a place in a document, and "What fusion means here
+        // called by Search" is not a fact about code.
+        if code && hit.symbol_kind.as_deref().is_some_and(navigational) {
+            continue;
+        }
         if seen.iter().any(|s| s == name) {
             continue;
         }
         seen.push(name.to_string());
 
-        let found = fleet.neighbours_in(only, name, &[], false)?;
+        let mut found = fleet.neighbours_in(only, name, &[], false)?;
+        if code {
+            found.callers.retain(|e| !navigational(&e.symbol.kind));
+            found.callees.retain(|e| !navigational(&e.symbol.kind));
+        }
         let (callers, hidden_callers) = cap(found.callers);
         let (callees, hidden_callees) = cap(found.callees);
         if callers.is_empty() && callees.is_empty() {
@@ -257,19 +289,20 @@ pub fn brief(
         symbols.push(symbol);
     }
 
-    // 3. Span text, best-ranked first, for the top few only.
+    // 3. Span text, for the chosen span only. The others carry none by
+    // design, and are not counted as cut: nothing was dropped from them.
     for (i, (span, hit)) in spans
         .iter_mut()
         .zip(kept.iter().map(|&i| &hits[i]))
         .enumerate()
     {
-        if i >= TEXT_SPANS {
-            cut.span_text += 1;
+        if i < texted || i >= texted + TEXT_SPANS {
             continue;
         }
         let cost = counter.count(&hit.text);
         if tokens + cost > budget {
             cut.span_text += 1;
+            span.over_budget = true;
             continue;
         }
         tokens += cost;
@@ -305,6 +338,8 @@ impl Span {
             lists: hit.lists.clone(),
             symbol: hit.symbol.clone(),
             symbol_kind: hit.symbol_kind.clone(),
+            symbol_line: hit.symbol_line,
+            over_budget: false,
             store: hit.store.clone(),
             fresh: hit.fresh,
             text: None,
