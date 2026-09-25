@@ -6563,10 +6563,16 @@ function runCard(run, controls) {
   const reviewBox = el("div", { class: "review-box rows tight", hidden: "" });
   let reviewDrawn = false;
   const kept = new Set();
+  // Painted only when what it says changes: a poll a second must not
+  // rebuild a line nobody's eyes moved on (drive finding 8.3).
+  let planSaid = "";
   function paintPlan(next) {
     const plan = next.plan;
     planLine.hidden = !plan;
     if (!plan) return;
+    const said = JSON.stringify([plan, next.status]);
+    if (said === planSaid) return;
+    planSaid = said;
     const not = Object.values(plan.not_indexed || {}).reduce((a, b) => a + b, 0);
     const review = (plan.review || []).length;
     const tail =
