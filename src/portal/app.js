@@ -1426,11 +1426,17 @@ async function refreshRuns() {
 /** "2 indexing" in the navigation, on every page, so a run is never something
  * that happened out of sight. */
 function paintRunCount() {
-  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status)).length;
+  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status) && run.status !== "review").length;
   const waiting = (state.runs?.queue || []).length;
+  // A run waiting for a person is not indexing; it is named apart.
+  const review = (state.runs?.runs || []).filter((run) => run.status === "review").length;
   for (const node of document.querySelectorAll(".run-count")) {
-    node.textContent = on ? `${on} indexing${waiting ? ` · ${waiting} queued` : ""}` : "";
-    node.hidden = !on;
+    const parts = [];
+    if (on) parts.push(`${on} indexing`);
+    if (waiting) parts.push(`${waiting} queued`);
+    if (review) parts.push(`${review} waiting for review`);
+    node.textContent = parts.join(" · ");
+    node.hidden = !parts.length;
   }
 }
 
@@ -4940,7 +4946,7 @@ function notIndexed() {
       return el(
         "span",
         { class: "one-line" },
-        el("span", { class: "pill", text: `accepted ${row.accepted}` }),
+        el("span", { class: "pill", text: row.accepted === "refused" ? "refused by you" : `accepted ${row.accepted}` }),
         " ",
         el("button", { class: "button secondary small", type: "button", text: "Revoke", onclick: () => revoke(store, row) }),
       );
@@ -5002,8 +5008,8 @@ function notIndexed() {
     for (const store of data.stores || []) {
       const rows = store.rows || [];
       if (!rows.length) continue;
-      const refused = rows.filter((r) => r.class !== "dummy");
-      const dummies = rows.filter((r) => r.class === "dummy");
+      const refused = rows.filter((r) => r.class !== "dummy" || r.accepted);
+      const dummies = rows.filter((r) => r.class === "dummy" && !r.accepted);
       blocks.push(el("h2", { class: "section-title", text: store.store }));
       if (refused.length) blocks.push(table(store.store, refused, `Files ${store.store} did not index, and why`));
       if (dummies.length) {
@@ -6796,7 +6802,7 @@ function runCard(run, controls) {
     // when it turns from Pause to Resume.
     setText(pause, held ? "Resume" : "Pause");
     // Nothing to pause in a run that has not started or is held for a slot.
-    pause.hidden = !live || next.status === "queued" || next.status === "held";
+    pause.hidden = !live || next.status === "queued" || next.status === "held" || next.status === "review";
     // A queued run has embedded nothing, so taking it out of the line costs
     // nothing and is not the same act as stopping one that is going.
     // "Take out of the queue" rather than "Remove": a finished card's Remove

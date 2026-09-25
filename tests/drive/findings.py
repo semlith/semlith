@@ -5134,7 +5134,7 @@ def _(d):
         fail("the .env is not listed as a credential file: %s" % json.dumps(plan)[:300])
     d.open_view("index", fresh=True)
     card = still_card(store)
-    d.wait_for("!!(%s) && /Review 2 files before indexing/.test((%s).innerText)" % (card, card),
+    d.wait_for("!!(%s) && /Review 2 files before indexing/i.test((%s).innerText)" % (card, card),
                timeout=20, what="the card to ask for review")
     text = d.eval("(%s).innerText" % card)
     if ".env" not in text or "never offered" not in text:
@@ -5160,8 +5160,8 @@ def _(d):
     names = {os.path.basename(r["path"]): r for r in rows}
     if "beta.txt" not in names or names["beta.txt"]["class"] != "content":
         fail("the kept file is not on the list: %s" % json.dumps(rows)[:400])
-    if "alpha.txt" in names and names["alpha.txt"]["class"] != "dummy":
-        fail("the accepted file is still refused: %s" % json.dumps(names["alpha.txt"]))
+    if names.get("alpha.txt", {}).get("accepted") != "redacted":
+        fail("the accepted file is not listed as accepted (redacted): %s" % json.dumps(names.get("alpha.txt")))
     read = d.api("/api/read?target=%s" % urllib.parse.quote(os.path.join(os.path.realpath(root), "alpha.txt") + ":1-2"))
     body = json.dumps(read)
     if "REDACTED:aws" not in body:

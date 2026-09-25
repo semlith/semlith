@@ -1425,7 +1425,7 @@ fn run() -> Result<()> {
                 let rows = semlith::store::refusals(store.db())?;
                 let not: usize = rows
                     .iter()
-                    .filter(|r| r.class != semlith::store::class::DUMMY)
+                    .filter(|r| r.class != semlith::store::class::DUMMY && r.accepted.is_none())
                     .map(|r| r.files.max(1) as usize)
                     .sum();
                 let review = rows
@@ -2548,7 +2548,10 @@ fn run() -> Result<()> {
                                     .count();
                                 total += rows
                                     .iter()
-                                    .filter(|r| r.class != semlith::store::class::DUMMY)
+                                    .filter(|r| {
+                                        r.class != semlith::store::class::DUMMY
+                                            && r.accepted.is_none()
+                                    })
                                     .map(|r| r.files.max(1) as usize)
                                     .sum::<usize>();
                                 review += needs;

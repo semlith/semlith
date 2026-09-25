@@ -2627,11 +2627,7 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
                 .map(|plan| json!({ "plan": plan, "store": store.name }))
                 .map_err(|e| format!("{e:#}"));
         }
-        let run = if review {
-            state.index_reviewed(store, paths)
-        } else {
-            state.index(store, paths).map(|(run, _)| run)
-        };
+        let run = state.index_planned(store, paths, review);
         run.map(|run| json!({ "run": run, "store": store.name }))
             .map_err(|e| e.to_string())
     };
@@ -3404,7 +3400,7 @@ fn refused(state: &Arc<State>) -> Response {
             }
             total += rows
                 .iter()
-                .filter(|r| r.class != crate::store::class::DUMMY)
+                .filter(|r| r.class != crate::store::class::DUMMY && r.accepted.is_none())
                 .map(|r| r.files.max(1) as usize)
                 .sum::<usize>();
             review += needs;

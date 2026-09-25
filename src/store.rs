@@ -2819,7 +2819,27 @@ pub fn refusals(db: &Connection) -> Result<Vec<Refused>> {
             accepted: r.get(8)?,
         })
     })?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    // Accepted files are indexed and off the list proper, and still listed:
+    // a person who accepted one has to be able to find it again to revoke it.
+    for a in acceptances(db)? {
+        if rows.iter().any(|r| r.path == a.path) {
+            continue;
+        }
+        rows.push(Refused {
+            path: a.path,
+            class: a.class.clone(),
+            rule: format!("accepted from the {} ({})", a.source, a.mode),
+            matches: Vec::new(),
+            confidence: a.confidence,
+            files: 1,
+            first_seen: a.at,
+            last_seen: a.at,
+            reviewable: class::reviewable(&a.class) || a.class == class::DUMMY,
+            accepted: Some(a.mode),
+        });
+    }
+    Ok(rows)
 }
 
 /// One not-indexed row, by exact path.
