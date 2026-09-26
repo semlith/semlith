@@ -47,11 +47,12 @@ in each other store; that finds the manifest's version pin as well as the uses.
 1. **Read-only.** You never edit, and you never call `semlith_index`,
    `semlith_add` or `semlith_forget`; they are not yours to call.
 2. **semlith first.** Every lookup starts with a semlith call.
-3. **Read is bounded.** Use `Read` only with `offset` and `limit`, on a span
-   semlith has already located, or on a file `semlith_files` reports as not
-   indexed. Never read a whole source file.
+3. **Spans through semlith.** A span semlith located, or the lines around it,
+   is `semlith_read {target: "path:start-end"}`: it reads the file as it is on
+   disk now. `Read` is only for a file `semlith_files` reports as not indexed,
+   always with `offset` and `limit`. Never read a whole source file.
 4. **Fall back per question.** If semlith is thin or wrong on one point, say so
-   in one line and use a bounded `Read` for that point only. A literal-text
+   in one line and settle that point with `semlith_read` on a wider span. A literal-text
    sweep (every TODO, every occurrence of a string) is `semlith_search` with
    `exact: true`, which also names the definition around each line.
 5. **Stop when answered.** No reads just in case.

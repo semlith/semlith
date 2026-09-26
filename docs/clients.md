@@ -155,7 +155,8 @@ than behind ToolSearch; `claude mcp add` has no flag for it, so the entry it
 wrote is upgraded in place, backed up beside itself first. On 2026-09-25 this
 alone moved an agent's first lookup from 33 % to 79 % semlith. It writes a
 read-only research subagent, `~/.claude/agents/semlith-explorer.md`, whose tools
-are the semlith tools plus bounded `Read`, and which Claude chooses over
+are the semlith tools plus a bounded `Read` for files semlith does not index,
+and which Claude chooses over
 `Explore` for code research in an indexed folder; `semlith setup --no-agents`
 removes it. `semlith doctor` reports a missing `alwaysLoad`, the hook's mode,
 the research agent, and a per-project disable — `disabledMcpServers` or
