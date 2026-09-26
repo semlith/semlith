@@ -6660,39 +6660,41 @@ function runCard(run, controls) {
   const outcome = el("div", { class: "note" }, "");
   /* The scan phase's plan (2.7), and the review step when the scan found
    * something that is a person's to decide. */
-  const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
+  /* Its nodes are made once and only their words and `hidden` change after:
+   * a status moving to done swaps the words for a link without adding or
+   * removing a child, so no poll rebuilds the line (drive finding 8.3). */
+  const planHead = document.createTextNode("");
+  const planWords = el("span", {}, "");
+  const planLink = el(
+    "a",
+    {
+      href: "#files",
+      hidden: "",
+      onclick: (e) => {
+        e.preventDefault();
+        state.filesTab = "not-indexed";
+        go("files");
+      },
+    },
+    "",
+  );
+  const planLine = el("div", { class: "meta run-plan", hidden: "" }, planHead, planWords, planLink);
   const reviewBox = el("div", { class: "review-box rows tight", hidden: "" });
   let reviewDrawn = false;
   const kept = new Set();
-  // Painted only when what it says changes: a poll a second must not
-  // rebuild a line nobody's eyes moved on (drive finding 8.3).
-  let planSaid = "";
   function paintPlan(next) {
     const plan = next.plan;
     planLine.hidden = !plan;
     if (!plan) return;
-    const said = JSON.stringify([plan, next.status]);
-    if (said === planSaid) return;
-    planSaid = said;
     const not = Object.values(plan.not_indexed || {}).reduce((a, b) => a + b, 0);
     const review = (plan.review || []).length;
-    const tail =
-      next.status === "done" && (not || review)
-        ? el("a", {
-            href: "#files",
-            text: `${n(not)} not indexed · ${n(review)} need review`,
-            onclick: (e) => {
-              e.preventDefault();
-              state.filesTab = "not-indexed";
-              go("files");
-            },
-          })
-        : `${n(not)} not indexed · ${n(review)} need review`;
-    fill(
-      planLine,
-      `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · `,
-      tail,
-    );
+    const tail = `${n(not)} not indexed · ${n(review)} need review`;
+    const linked = next.status === "done" && Boolean(not || review);
+    setText(planHead, `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · `);
+    setText(planWords, tail);
+    setText(planLink, tail);
+    planWords.hidden = linked;
+    planLink.hidden = !linked;
     reviewBox.hidden = next.status !== "review";
     if (next.status !== "review" || reviewDrawn) return;
     reviewDrawn = true;

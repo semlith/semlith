@@ -5269,7 +5269,7 @@ def _(d):
     d.open_view("index", fresh=True)
     card = still_card(store)
     d.wait_for("!!(%s)" % card, what="the finished card")
-    link = d.eval("(() => { const a = (%s).querySelector('.run-plan a'); return a ? a.textContent : null; })()" % card)
+    link = d.eval("(() => { const a = (%s).querySelector('.run-plan a:not([hidden])'); return a ? a.textContent : null; })()" % card)
     if not link or "not indexed" not in link or "need review" not in link:
         fail("the finished card has no not-indexed link: %r" % link)
 
