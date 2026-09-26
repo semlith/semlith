@@ -1273,10 +1273,10 @@ binary and a 0.30.0 binary open each other's stores.
 | `symbols.qualified` | **Changed** for Rust methods written by 0.30.0: `Type::name` (the `impl` or `trait` owner) instead of `module::name`. Rows written by an older binary keep theirs until the file is re-indexed. |
 | Secret scan | A match that is a declared test dummy no longer refuses its file; a secret-sounding name assigned a random literal, quoted or not, now does. The first pass under 0.30.0 rescans every file. See `docs/security.md`. |
 | `GET /api/refused`, `POST /api/refused/accept`, `POST /api/refused/revoke` | New. The two writes take one `path`, refuse `paths`, and need the session token. |
-| `POST /api/index` | New `review` (the portal's stop for review) and `scan_only` (answers `{plan}` per path, starts nothing). |
-| `GET /api/index/runs`, per run | New `plan`, and a `review` status for a run waiting for a person. |
-| `POST /api/index/control` | `start` queues a run waiting for review; `stop` drops one. |
-| `GET /api/files` | `tree=1` answers `{tree}` with the text the MCP tool gives. |
+| `POST /api/index` | New `review`: `"always"` holds every run after its scan, even when nothing needs a person (the portal's **Scan**); `true` holds a run only when something is reviewable. New `scan_only` (answers `{plan}` per path, starts nothing), which the portal no longer sends. |
+| `GET /api/index/runs`, per run | New `plan`, and a `review` status for a run held after its scan. |
+| `POST /api/index/control` | `start` queues a held run; `stop` drops one, and with `delete: true` also deletes its store once dropped (the portal sends it only for a store that held no files before the scan). |
+| `GET /api/files` | `tree=1` answers `{tree}` with the text the MCP tool gives. `tree=1&format=json` answers one level instead: `dir` is a folder relative to a root (absolute or climbing with `..` is refused), `store` and `sort` as for the text form, and the answer is `{roots: [{store, root, dir, dirs: [{name, files, chunks, langs}], files: [{name, lines, symbols, chunks, stale, lang}], not_indexed: [{name, why, dir}], more}]}`, one entry per store root that holds `dir`, at most 1 000 entries a level with the rest counted in `more`. |
 
 ## What a break would look like
 

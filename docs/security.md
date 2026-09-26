@@ -227,14 +227,17 @@ through anything that looked random enough would index the one real key that
 did not. **One live-looking match anywhere still refuses the whole file**,
 dummies beside it or not: a companion secret, such as an AWS secret access key
 written without a name the assignment rule knows, cannot be detected by prefix.
-`semlith index` says how many files it indexed holding only dummies, and the
-not-indexed list shows them under "let through as test dummies", with a "Refuse
-instead" for a person who disagrees. `--include-secrets` is unchanged.
+`semlith index` says how many files it indexed holding only dummies, and
+`semlith refused` lists them under "let through as test dummies"; a person who
+disagrees refuses one with `semlith refused refuse <path>` or the portal's
+**Refuse instead** on Files ▸ Decisions. `--include-secrets` is unchanged.
 
 **Every file that was not indexed is listed, and the list persists.** Each
 store keeps a `refusals` table, written by `semlith index`, the watcher and the
 daemon's catch-up alike, and read by `semlith refused`, `/api/refused` and the
-portal's Files ▸ Not indexed tab. A row falls into one of five classes:
+portal — the Index page's scan panel, which asks about each reviewable file and
+lists the rest, and the Files page's Decisions tab and tree. A row falls into
+one of five classes:
 
 - **(a) content scan** — a secret-shaped value. Reviewable.
 - **(b) credential file** — a name or folder on the deny-list: `.env*`, `id_rsa`,
@@ -264,10 +267,13 @@ token whose `exp` has passed. **It is an estimate, never a guarantee**, and it
 decides nothing: what refuses a file is the dummy rules above.
 
 **A person may accept one refused file at a time, never an agent and never in
-bulk.** From the portal's Not indexed tab or `semlith refused accept <path>`,
-one path per call, after the file, each masked match, its line and its
-confidence have been shown and the file's name typed (or "I have reviewed this
-file" ticked). There is no select-all, no bulk bar and no glob. Two choices:
+bulk.** From the portal's scan panel on the Index page, after a scan, or
+`semlith refused accept <path>`, one path per call, after the file, each masked
+match, its line and its confidence have been shown and the file's name typed
+(or "I have reviewed this file" ticked). There is no select-all, no bulk bar
+and no glob. Credential files are never offered. A decision is undone one file
+at a time from the portal's Files ▸ Decisions tab or `semlith refused revoke`.
+Two choices:
 
 - **Accept with redaction** replaces each detected value with
   `[REDACTED:<provider> <kind>]` before anything is chunked, embedded or written
@@ -293,11 +299,13 @@ same redaction, so a read never serves what the store was never given.
 
 **The scan runs before anything is embedded (0.30.0).** Every index run opens
 with a scan phase that needs no embedding model: it walks, stats, reads and
-hashes each file and sorts it into the classes above, then shows the plan. A run
-started by a person — the portal's Start indexing, or `semlith index` on a
-terminal — stops for review only when something is reviewable; an agent's run,
-the watcher and a piped `semlith index` never wait, and the MCP reply says how
-many files await the owner's review. The first pass under 0.30.0 scans every
+hashes each file and sorts it into the classes above, then shows the plan. The
+portal's **Scan** holds every run after its scan, even when nothing is
+reviewable, and embeds nothing until **Start indexing** is pressed; a file left
+undecided stays refused. `semlith index` on a terminal stops for review only
+when something is reviewable. An agent's run, the watcher and a piped `semlith
+index` never wait, and the MCP reply says how many files await the owner's
+review. The first pass under 0.30.0 scans every
 indexed file against the new rules, so a file the no-prefix rule now refuses is
 evicted and listed, and one the dummy rules now let through is indexed.
 

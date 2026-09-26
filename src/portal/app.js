@@ -400,6 +400,9 @@ const ICONS = {
     + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
   // Three tracks with a handle on each: the machine's three numbers.
   sliders: "M4 7h10|M18 7h2|M4 12h4|M12 12h8|M4 17h11|M19 17h1|M15 5v4|M9 10v4|M16 15v4",
+  // The explorer tree's marks: a disclosure chevron, and a folder drawn open.
+  chevron: "M9 6l6 6-6 6",
+  folderOpen: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v1H7.2a1.5 1.5 0 0 0-1.4 1L3.6 18.5|M3.6 18.5 6 12h15l-2.4 6.5z",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -4548,9 +4551,15 @@ async function filesView() {
         key: "path",
         label: "Path",
         className: "path",
-        // One line, with the whole path on the shared tooltip: a wrapped path
-        // makes every row a different height and the column unreadable.
-        render: (f) => pathCell(f.path),
+        // One line, under the store's root, with the whole path on the
+        // shared tooltip: the machine's absolute path took the column's width
+        // and truncated to the part every row had in common.
+        render: (f) => {
+          const cell = pathCell(rootRel(f.path, f.store));
+          cell.title = f.path;
+          cell.dataset.tip = f.path;
+          return cell;
+        },
       },
       {
         key: "store",
@@ -4730,22 +4739,26 @@ async function filesView() {
     { class: "rows tight" },
     el(
       "div",
-      { class: "filters" },
+      { class: "files-filters" },
       el(
         "div",
-        { class: "field wide" },
-        icon(ICONS.search, 15),
-        labelled("files-filter", "Filter files by path glob", pathInput),
+        { class: "filters" },
+        el(
+          "div",
+          { class: "field wide" },
+          icon(ICONS.search, 15),
+          labelled("files-filter", "Filter files by path glob", pathInput),
+        ),
       ),
-      extChips,
+      el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Type" }), extChips),
+      el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Store" }), storeFilter.node),
     ),
-    storeFilter.node,
     bulkBar,
     bulkNote,
     holder,
     footnote,
   );
-  const treePane = filesTree(pathInput, storeFilter);
+  const treePane = filesTree(storeFilter);
   const decisionsTab = decisionsPane();
   const panes = [
     ["Indexed", indexedPane, null],
@@ -4786,27 +4799,150 @@ async function filesView() {
   );
 }
 
-/* The tree view: the same answer `semlith_files {tree: true}` gives an agent,
- * drawn as it reads. Directories with their counts and languages, files with
- * their lines, symbols and first definitions, and what is on disk but not
- * indexed, and why. */
-function filesTree(pathInput, storeFilter) {
-  let depth = 2;
+/* The tree view: an editor's explorer over what each store holds.
+ *
+ * One level at a time, read when a folder is opened, so a tree of a hundred
+ * thousand files costs what the open folders hold. Each store is a root; a
+ * folder shows how many files it holds, a file its lines and symbols, and
+ * what sits on disk but is not indexed is listed greyed with why. The same
+ * facts `semlith_files {tree: true}` gives an agent as text. */
+const FILE_TYPES = [
+  [/\.rs$/, "ft-rust"],
+  [/\.(m?js|cjs|jsx)$/, "ft-js"],
+  [/\.tsx?$/, "ft-ts"],
+  [/\.py$/, "ft-py"],
+  [/\.(md|markdown|txt|rst)$/, "ft-md"],
+  [/\.(json|ya?ml|toml|lock)$/, "ft-data"],
+  [/\.(html?|css|scss|svg)$/, "ft-web"],
+  [/\.(png|jpe?g|gif|webp|ico)$/, "ft-image"],
+];
+const fileType = (name) => (FILE_TYPES.find(([re]) => re.test(name.toLowerCase())) || [null, ""])[1];
+
+function filesTree(storeFilter) {
   let sort = "name";
-  const out = el("pre", { class: "tree-view" });
-  const depthChips = [1, 2, 3].map((d) =>
-    el("button", {
-      class: "chip",
-      type: "button",
-      "aria-pressed": String(d === depth),
-      text: `depth ${d}`,
-      onclick: () => {
-        depth = d;
-        depthChips.forEach((c, i) => c.setAttribute("aria-pressed", String(i + 1 === d)));
-        load();
+  const list = el("ul", { role: "tree", "aria-label": "Indexed files, by folder" });
+  const box = el("div", { class: "card ftree" }, list);
+
+  const url = (store, dir) => {
+    const params = new URLSearchParams({ tree: "1", format: "json", sort });
+    if (dir) params.set("dir", dir);
+    if (store) params.append("store", store);
+    else for (const name of storeFilter.stores()) params.append("store", name);
+    return `/api/files?${params}`;
+  };
+
+  function row(level, kind, name, meta, extra) {
+    const guides = [el("span", { class: "indent lead" })];
+    for (let i = 1; i < level; i++) guides.push(el("span", { class: "indent" }));
+    const dir = kind === "dir" || kind === "root";
+    return el(
+      "div",
+      {
+        class: `ftree-row ${kind === "root" ? "dir root" : kind}${extra?.cls ? ` ${extra.cls}` : ""}`,
+        role: "treeitem",
+        "aria-level": String(level),
+        "aria-expanded": dir ? "false" : null,
+        tabindex: "-1",
+        title: extra?.title || null,
       },
-    }),
-  );
+      guides,
+      el("span", { class: "chev" }, dir ? icon(ICONS.chevron, 12) : null),
+      el(
+        "span",
+        { class: `ficon${kind === "file" ? ` ${fileType(name)}` : ""}` },
+        icon(dir ? ICONS.folder : ICONS.file, 15),
+      ),
+      el("span", { class: "fname", text: name }),
+      meta ? el("span", { class: "fmeta", text: meta }) : null,
+    );
+  }
+
+  /* A folder: its row, and its children under it, read the first time it
+   * opens. `where` is the store and root the folder belongs to. */
+  function folder(where, dirPath, name, meta, level, kind, preload) {
+    const head = row(level, kind, name, meta, { title: `${where.root}/${dirPath}`.replace(/\/$/, "") });
+    const kids = el("ul", { role: "group", hidden: "" });
+    const item = el("li", {}, head, kids);
+    let loaded = false;
+    const glyph = head.querySelector(".ficon");
+    async function open(want) {
+      const on = want === undefined ? kids.hidden : want;
+      head.setAttribute("aria-expanded", String(on));
+      kids.hidden = !on;
+      fill(glyph, icon(on ? ICONS.folderOpen : ICONS.folder, 15));
+      if (!on || loaded) return;
+      loaded = true;
+      fill(kids, el("li", { class: "ftree-more", text: "Reading…" }));
+      try {
+        const data = await api(url(where.store, dirPath));
+        const mine = (data.roots || []).find((r) => r.store === where.store && r.root === where.root);
+        children(kids, where, dirPath, mine, level + 1);
+      } catch (e) {
+        loaded = false;
+        fill(kids, el("li", { class: "ftree-more", text: e.message }));
+      }
+    }
+    head.addEventListener("click", () => open());
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      } else if (e.key === "ArrowRight") open(true);
+      else if (e.key === "ArrowLeft") open(false);
+    });
+    if (preload) {
+      loaded = true;
+      children(kids, where, dirPath, preload, level + 1);
+      head.setAttribute("aria-expanded", "true");
+      kids.hidden = false;
+      fill(glyph, icon(ICONS.folderOpen, 15));
+    }
+    return item;
+  }
+
+  function children(ul, where, dirPath, entry, level) {
+    const items = [];
+    const under = (name) => (dirPath ? `${dirPath}/${name}` : name);
+    for (const d of entry?.dirs || []) {
+      items.push(folder(where, under(d.name), d.name, `${n(d.files)} file${d.files === 1 ? "" : "s"}`, level, "dir"));
+    }
+    for (const f of entry?.files || []) {
+      const meta = f.lines ? `${n(f.lines)} lines · ${n(f.symbols)} symbol${f.symbols === 1 ? "" : "s"}` : `${n(f.chunks)} chunks`;
+      items.push(el("li", {}, row(level, "file", f.name, meta, { cls: f.stale ? "stale" : "", title: `${where.root}/${under(f.name)}` })));
+    }
+    for (const o of entry?.not_indexed || []) {
+      items.push(el("li", {}, row(level, "file", o.name, `not indexed — ${o.why}`, { cls: "off", title: `${where.root}/${under(o.name)}` })));
+    }
+    if (entry?.more) items.push(el("li", { class: "ftree-more", text: `+ ${n(entry.more)} more in this folder` }));
+    if (!items.length) items.push(el("li", { class: "ftree-more", text: "Empty." }));
+    fill(ul, items);
+  }
+
+  async function load() {
+    fill(list, el("li", { class: "ftree-more", text: "Reading…" }));
+    let data;
+    try {
+      data = await api(url(null, ""));
+    } catch (e) {
+      fill(list, el("li", { class: "ftree-more", text: e.message }));
+      return;
+    }
+    const roots = data.roots || [];
+    if (!roots.length) {
+      fill(list, el("li", { class: "ftree-more", text: "Nothing indexed yet." }));
+      return;
+    }
+    fill(
+      list,
+      roots.map((r) => {
+        const where = { store: r.store, root: r.root };
+        const leaf = r.root.split("/").filter(Boolean).pop() || r.root;
+        const label = leaf === r.store ? r.store : `${r.store} · ${leaf}`;
+        return folder(where, "", label, null, 1, "root", r);
+      }),
+    );
+  }
+
   const sortChips = ["name", "size", "symbols", "recent"].map((k) =>
     el("button", {
       class: "chip",
@@ -4820,24 +4956,11 @@ function filesTree(pathInput, storeFilter) {
       },
     }),
   );
-  async function load() {
-    const params = new URLSearchParams({ tree: "1", depth: String(depth), sort });
-    const glob = pathInput.value.trim();
-    if (glob) params.append("path", glob);
-    for (const store of storeFilter.stores()) params.append("store", store);
-    out.textContent = "Reading…";
-    try {
-      const data = await api(`/api/files?${params}`);
-      out.textContent = data.tree || "Nothing indexed matches that.";
-    } catch (e) {
-      out.textContent = e.message;
-    }
-  }
   const node = el(
     "div",
     { class: "rows tight" },
-    el("div", { class: "filters" }, depthChips, el("span", { class: "rule" }), sortChips),
-    el("div", { class: "card pad" }, out),
+    el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Sort" }), sortChips),
+    box,
   );
   return { node, load };
 }
@@ -8087,11 +8210,12 @@ async function indexView() {
       const started = (answer.runs || []).filter((run) => run.run !== undefined);
       const refused = (answer.runs || []).filter((run) => run.error);
       transient = true;
-      say(
-        `${started.length} run${started.length === 1 ? "" : "s"} queued${
-          refused.length ? `; ${refused.length} refused` : ""
-        }.`,
-      );
+      const many = started.length === 1 ? "" : "s";
+      const done =
+        body.review === "always"
+          ? `Scanned ${started.length} folder${many}: the plan is below. Press Start indexing when it looks right`
+          : `${started.length} run${many} queued`;
+      say(`${done}${refused.length ? `; ${refused.length} refused` : ""}.`);
       if (refused.length) {
         complain(refused.map((run) => `${run.path}: ${run.error}`).join("; "));
       }
@@ -8280,10 +8404,10 @@ async function indexView() {
         ),
         urlNote,
       ),
+      /* What the scan found, first: it is waiting on the person reading. */
+      scan.node,
       queueCard,
       settingsCard,
-      /* What the scan found, above the runs it is about to start. */
-      scan.node,
       /* Then the run itself. */
       cards,
       idle,

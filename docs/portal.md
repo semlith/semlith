@@ -206,17 +206,22 @@ the scroll position is kept.
 this" and "semlith read it and it does not say that" stop looking the same from
 the outside.
 
-**Controls.** A path glob filter (`src/**`) and a row of extension chips for the
-common formats. Both narrow the server's query, not the drawn page, so the
-totals underneath are about the filter and not about the ten rows on screen. The
-pill in the heading reads `N files · N formats · N stores` for whatever the
+The page has three tabs: **Indexed**, the table below; **Tree**, the same files
+as an explorer; and **Decisions**, what a person decided about files the scan
+held back.
+
+**Controls.** A path glob filter (`src/**`), a **Type** row of extension chips
+for the common formats, and a **Store** row that narrows the page to one store
+or shows them all. All three narrow the server's query, not the drawn page, so
+the totals underneath are about the filter and not about the ten rows on screen.
+The pill in the heading reads `N files · N formats · N stores` for whatever the
 filter selected.
 
 **The columns:**
 
 | Column | What it means |
 |---|---|
-| Path | The file's path on disk, one line, with the whole of it on hover. |
+| Path | The file's path under its store's root, one line, with the whole absolute path on hover. |
 | Store | Which store holds it. |
 | Read as | Which reader turned this file into text. |
 | Language | The language the search filter would call it, or `—`. |
@@ -242,37 +247,43 @@ writes, because a write names the store it is for.
 
 ### Tree
 
-The same answer `semlith_files {tree: true}` gives an agent and `semlith files
---tree` prints, drawn as it reads: each directory with its file and chunk counts
-and its languages, each file with its length in lines, its symbol count and its
-first definitions, a `changed since indexed` mark on a file edited since, and at
-the end of each directory what is on disk but not in the store, and why — `+ 4
-on disk not indexed: 2 binary, 1 refused as a secret, 1 .semlithignore`. Depth
-chips choose how many levels show, and sort chips order by name, size, symbols
-or `recent` (newest indexed first). The path filter above narrows it. The answer
-stops at 8 000 characters with a line naming the depth or path that would show
-the rest.
+An explorer over what each store holds, laid out like an editor's. Each store
+root is a top-level entry, open when the tab opens and named by its store, with
+the root folder's name beside it when the two differ. A folder opens one level
+at a time, and its contents are read from the daemon only when it opens, so a
+tree of a hundred thousand files costs what the open folders hold. A folder
+shows how many files it holds; a file shows an icon for its type, its length in
+lines and its symbol count (its chunks, for a file with no lines such as an
+image), and `changed since indexed` when it was edited since. What is on disk
+but not in the store sits among them greyed and struck through, with why —
+`not indexed — binary`, `refused as a secret`, `credential file`, `over the
+size cap`, `generated folder`, `.gitignore`, `.semlithignore`, or `not indexed
+yet`. A folder past 1 000 entries lists the first thousand and counts the rest.
+Sort chips order each folder by name, size, symbols or `recent` (newest indexed
+first), and the Store row chooses which stores appear. Enter or Space opens and
+closes a folder, Right opens it and Left closes it.
 
-### Not indexed
+The facts are the ones `semlith_files {tree: true}` gives an agent and
+`semlith files --tree` prints as text; the tab reads them one level at a time
+from the JSON form of the same route.
 
-Every file the store did not index, and why, in five classes: a secret-shaped
-value (reviewable), a credential file (never acceptable, listed with its rule
-and no action), a policy limit such as the size cap or a pruned generated folder
-(reviewable), a file no reader can take (a fact, with no action), and your own
-exclusions (change the rule, not the file). A secret row carries its masked
-matches, their lines and a **likely real** percentage with the signals behind
-it; the percentage is an estimate, never a guarantee. Files let through because
-every match in them is a declared test dummy are listed below, with **Refuse
-instead**.
+### Decisions
 
-**Review…** opens one file's confirm: the path, each masked match with its line
-and confidence, the choice between **Accept with redaction** (each value
-replaced by `[REDACTED:…]` before anything is stored; covers only what the scan
-detected) and **Accept as-is**, and a per-file **I have reviewed this file**
-tick. The file is indexed at once. An accepted row shows its mode and
-**Revoke**. There is no select-all and no bulk bar, and the route takes one
-path. The sidebar's Files item carries the count waiting for review, and a
-finished run card links here with `N not indexed · M need review`.
+What a person has already decided about files the scan held back, per store:
+files accepted with redaction or as-is, files refused by you, and files let
+through because every match in them is a declared test dummy. Each row carries
+the file's path under its store's root, the decision, why the file was held
+back, and the **likely real** percentage where there is one. An accepted or
+refused row has **Revoke**: an accepted file leaves the store and is refused
+again with today's reasons, so the next scan offers it for a decision again; a
+refused dummy file is indexed again at the next run. A let-through row has
+**Refuse instead**, behind a confirm that shows the file and its matches and
+asks for the **I have reviewed this file** tick. Everything acts on one file at
+a time: there is no select-all and no bulk bar, and the routes take one path.
+
+New decisions are not made here. They are made on the
+[Index page](#inside-the-index) after a scan, which is also where files that
+were not indexed and need no decision are counted and listed.
 
 ## Search
 
@@ -940,24 +951,41 @@ screen saying it had happened.
   synchronous part, because its refusals — the URL was `http`, the body was too
   large, nothing here reads that content type — are what the card has to show.
 - **the target** — where the paths go. Three answers, below.
-- **Scan only** — the scan phase and nothing else: for each path, how many
-  files would be embedded and their bytes, how many are unchanged, how many are
-  not indexed and how many need a person's review, and how long the scan took.
-  No model is loaded and nothing is written.
-- **Start indexing** — scans first (0.30.0), then queues the runs and answers at
-  once with how many were queued, in a note beside the button. Each card opens
-  with its plan line: files to embed, unchanged, not indexed, need review. When
-  the scan found something that is a person's to decide, the card stops at
-  **Review N files before indexing** instead of queuing: each file has **Accept
-  with redaction**, **Accept as-is** (or **Accept** for a policy limit) and
-  **Keep refused**, each accept behind the same confirm as the Files page's Not
-  indexed tab, and credential files are listed with no action. **Start indexing
-  — N stay refused until reviewed** is always enabled: it queues the run and
-  whatever was not accepted stays on the Not indexed list. A card waiting for
-  review holds nothing — no slot, no writer — so other runs and the watcher go
-  on. A run started by an agent, the watcher or the catch-up never waits. The
-  note empties once there is nothing to say, so no blank line is left above the
-  cards.
+- **Scan**, then **Start indexing** — one button for the whole flow (0.30.0).
+  **Scan** runs the scan phase for every path, which needs no model and embeds
+  nothing, and then holds each run in `review` with its plan, even when nothing
+  in it needs a decision, so nothing is embedded before its plan has been on
+  screen. The note beside the button says how many folders were scanned. While
+  any run is held the button reads **Start indexing**, and pressing it queues
+  every held run. **Discard scan**, beside it, drops the held runs instead, and
+  deletes each store that held no files before its scan — the store a scan of a
+  new folder makes — so discarding that scan leaves nothing behind. The note empties once there is
+  nothing to say, so no blank line is left above the cards.
+
+**The scan panel** appears above the cards while any run is held. It opens with
+a summary: files **to embed** and their size, **unchanged** files already
+indexed, files that **need a decision**, files **not indexed** that need no
+action, and an **estimate** of the embedding time (`—` when there is no rate to
+estimate from yet). Several folders scanned at once add a table of the same counts
+per folder. **Needs your decision** follows, one row per file the scan held
+back: its path under the store's root, why, and the **likely real**
+percentage for a secret. A secret-shaped value offers **Accept redacted**,
+**Accept as-is** and **Keep refused**; a policy limit, such as the size cap or
+a generated folder, offers **Accept** and **Keep refused**. Each accept opens a
+confirm with the file, each masked match with its line and confidence, what the
+choice does — redaction replaces each detected value with `[REDACTED:…]` before
+anything is stored, and covers only what the scanner detected — and an **I have
+reviewed this file** tick, and records the decision at once. A decided row shows
+what was chosen; **Keep refused** can be changed back. Last, one line counts
+the files not indexed that need no action — not indexable (binary, empty, no
+text), your own exclusions, and credential files — with **Show files** to list
+them with their reasons. Credential files are never offered for a decision.
+
+**Start indexing** embeds the plan. A file left undecided stays refused, and
+any decision can be undone later on [Files ▸ Decisions](#decisions). A held run
+holds nothing — no slot, no writer — so other runs and the watcher go on, and
+the sidebar's Index item carries the count of files waiting for a decision. A
+run started by an agent, the watcher or the catch-up never waits.
 
 The three pickers are mutually exclusive: two of them open at once is two answers
 to one question.
@@ -1031,6 +1059,7 @@ its card rather than keeping a stale one.
 
 | Status | What it means |
 |---|---|
+| `review` | Scanned and held for **Start indexing**; the pill reads `waiting for review` and the plan line `waiting for Start indexing`. It holds no slot and no writer. |
 | `queued` | Submitted and not yet under way. The pill carries its place in line when it is waiting on the daemon-wide queue below; without a place it is waiting on its own store's writer, which is the watcher being mid-file — one writer per store is the rule that stops two passes corrupting each other. |
 | `running` | A writer has it. |
 | `pausing` | **Pause** was pressed and the engine has not reached its next batch yet. Shown from the click, not from the next poll. |

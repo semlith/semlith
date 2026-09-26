@@ -68,10 +68,32 @@ beside its id. Every file that was not indexed is listed, per store, in five
 classes, and a secret carries a 0–100 % estimate that it is real with the
 signals behind it. A person — never an agent, never in bulk — can accept one
 file at a time, redacted or as-is, from `semlith refused accept` or the portal's
-Files ▸ Not indexed tab; the acceptance remembers salted fingerprints, never
+Index page after a scan; the acceptance remembers salted fingerprints, never
 values, and a new secret refuses the file again. A credential file is never
-acceptable. Every run opens with a model-free scan phase and, when a person
-started it, stops for review only when something is theirs to decide.
+acceptable. Every run opens with a model-free scan phase. `semlith index` on a
+terminal stops for review only when something is the person's to decide; the
+portal holds every scan for a look at its plan.
+
+### The portal shows the plan before it embeds
+
+The Index page's one button reads **Scan**: every run stops after its scan
+phase and the page shows what it found — files to embed and their size,
+unchanged, needing a decision, not indexed, and an estimate — even when nothing
+needs a decision. Each held-back file is a row with **Accept redacted**,
+**Accept as-is** (or **Accept**) and **Keep refused**, each accept behind a
+confirm with an "I have reviewed this file" tick, and one line counts the files
+not indexed that need nothing, with **Show files** to list them. The button then
+reads **Start indexing**; an undecided file stays refused, and **Discard scan**
+drops the held runs along with a store the scan made for a new folder. The
+sidebar's Index item counts the files waiting for a decision. The Files page
+gains a **Decisions** tab, which lists only what a person decided — accepted,
+refused, or let through as test dummies — each with **Revoke** or **Refuse
+instead**, and a **Tree** tab, an editor-style explorer that opens one folder
+level at a time, with file icons, lines and symbols, and what is on disk but not
+indexed greyed with why; the Indexed tab shows paths relative to the store root.
+`POST /api/index` takes `review: "always"`, a
+discarded scan's `stop` takes `delete: true`, and `/api/files?tree=1&format=json`
+answers one tree level.
 
 ### Fixed
 
