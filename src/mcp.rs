@@ -181,7 +181,12 @@ pub fn instructions(roots: &[std::path::PathBuf]) -> String {
     let mut left = roots.len();
     for root in roots {
         let text = crate::plain(&root.to_string_lossy());
-        let more = format!(" and {} more", left);
+        // The tail the line ends with if this root is the last one named.
+        let more = match left - 1 {
+            0 => String::new(),
+            1 => " and 1 more folder".to_string(),
+            n => format!(" and {n} more folders"),
+        };
         let sep = if named.is_empty() { "" } else { ", " };
         if lead.len() + named.len() + sep.len() + text.len() + more.len() + 1 + ROUTES.len()
             > INSTRUCTIONS_LIMIT
@@ -2306,6 +2311,25 @@ fn reply(id: &Value, result: Result<Value, Fail>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The walk stop of 0.30.0 found 604 bytes with three roots: the budget
+    /// held room for " and 1 more" but the tail says " and 1 more folder".
+    #[test]
+    fn the_instructions_stay_within_their_limit_for_any_fleet() {
+        for count in 0..=40 {
+            for width in [8, 40, 75, 120, 300, 700] {
+                let roots: Vec<std::path::PathBuf> = (0..count)
+                    .map(|i| std::path::PathBuf::from(format!("/{i}{}", "x".repeat(width))))
+                    .collect();
+                let said = instructions(&roots);
+                assert!(
+                    said.len() <= INSTRUCTIONS_LIMIT,
+                    "{count} roots of {width} bytes: {} bytes: {said}",
+                    said.len()
+                );
+            }
+        }
+    }
 
     /// The defect this release exists to fix: answering a handshake with
     /// whatever it was sent claims every revision that will ever exist,
