@@ -243,7 +243,7 @@ enum Work {
 /// files that took three slices ended by announcing the four the third slice
 /// reached. Every one of these is the run's, which is what the summary claims
 /// to be.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct Tally {
     indexed: u64,
     unchanged: u64,
@@ -254,10 +254,21 @@ struct Tally {
     /// Symbols extracted, carried for the same reason the chunks are: a
     /// slice's own count starts at zero and the page is drawing one run.
     symbols: u64,
+    /// Named per file, and the skips by reason: each slice's report holds
+    /// only its own, so a forwarded `semlith_index` listed one refusal of
+    /// three and reasons that did not add up to the total.
+    refused: Vec<(String, String)>,
+    failed: Vec<(String, String)>,
+    skipped_reasons: std::collections::BTreeMap<String, usize>,
 }
 
 impl Tally {
     fn add(&mut self, report: &crate::IndexReport) {
+        self.refused.extend(report.refused.iter().cloned());
+        self.failed.extend(report.failed.iter().cloned());
+        for (kind, n) in &report.skipped_reasons {
+            *self.skipped_reasons.entry(kind.clone()).or_insert(0) += n;
+        }
         self.indexed += report.indexed as u64;
         self.unchanged += report.unchanged as u64;
         self.skipped += report.skipped as u64;
@@ -538,6 +549,15 @@ impl RunState {
                 .unwrap_or_default();
         now.saturating_duration_since(self.origin)
             .saturating_sub(held)
+    }
+
+    /// Bytes per second from the first batch to the last, once there were two.
+    fn embed_rate(&self) -> Option<f64> {
+        let (t0, _, b0) = self.first_sample?;
+        let &(at, _, bytes) = self.samples.back()?;
+        let ms = at.checked_sub(t0).filter(|ms| *ms > 0)?;
+        let moved = bytes.checked_sub(b0).filter(|b| *b > 0)?;
+        Some(moved as f64 * 1000.0 / ms as f64)
     }
 
     /// Stop counting for as long as the run is held.
@@ -948,9 +968,18 @@ impl Store {
     /// Put the scan phase's plan on a run, and hold it for review when asked.
     fn set_plan(&self, id: u64, plan: &crate::Plan, review: bool) {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        // A store with no rate of its own yet, on the rate of the last run this
+        // daemon watched embed: the model and the machine are most of it.
+        let seen = runs
+            .iter()
+            .filter(|r| r.id != id)
+            .filter_map(RunState::embed_rate)
+            .last();
         if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
             run.plan = serde_json::to_value(plan).ok();
-            run.plan_eta_ms = plan.eta_ms;
+            run.plan_eta_ms = plan
+                .eta_ms
+                .or_else(|| seen.map(|rate| (plan.embed_bytes as f64 / rate * 1000.0) as u64));
             if review {
                 run.status = RunStatus::Review;
             }
@@ -3584,6 +3613,7 @@ fn perform(
                     // the reader keeps one stream rather than being asked to
                     // press the button again.
                     tally.add(&done);
+                    let (slice_indexed, slice_chunks) = (tally.indexed, tally.chunks);
                     if done.remaining > 0 {
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
@@ -3619,8 +3649,8 @@ fn perform(
                         say(serde_json::json!({
                             "event": "slice",
                             "remaining": done.remaining,
-                            "indexed": tally.indexed,
-                            "chunks": tally.chunks,
+                            "indexed": slice_indexed,
+                            "chunks": slice_chunks,
                         }));
                         return None;
                     }
@@ -3663,20 +3693,25 @@ fn perform(
                         "stopped": done.stopped,
                         // Named, with the rule that refused each. A count would
                         // be a number somebody has to go and investigate.
-                        "refused": done.refused.iter().map(|(path, why)| {
+                        "refused": tally.refused.iter().map(|(path, why)| {
                             serde_json::json!({ "path": crate::plain(path), "why": why })
                         }).collect::<Vec<_>>(),
                         // Named for the same reason as the refused, and the
                         // reason this release exists: a run that ends with
                         // "one file failed" and no name is a run whose one
                         // failure nobody can find.
-                        "failed": done.failed.iter().map(|(path, why)| {
+                        "failed": tally.failed.iter().map(|(path, why)| {
                             serde_json::json!({ "path": crate::plain(path), "why": why })
                         }).collect::<Vec<_>>(),
                         // How the skipped divide up. The total alone is the
                         // number that made an Angular tree look like a run
                         // that had lost two thousand files.
-                        "skipped_reasons": done.skipped_reasons,
+                        "skipped_reasons": tally.skipped_reasons,
+                        // What waits for a person, so a forwarded
+                        // `semlith_index` says it as the in-process one does.
+                        "review": crate::store::refusals(writer.db())
+                            .map(|rows| rows.iter().filter(|r| r.reviewable && r.accepted.is_none()).count())
+                            .unwrap_or(0),
                         // The daemon's own elapsed, so the page's clock is
                         // corrected to the run rather than to the tab.
                         "elapsed_ms": store.run_elapsed_ms(run),
@@ -3980,6 +4015,14 @@ impl crate::mcp::Writer for Writer {
                 };
                 text.push_str(&format!("\n{kind}: {path} — {why}"));
             }
+        }
+        let waiting = count("review");
+        if waiting > 0 {
+            text.push_str(&format!(
+                "\n{waiting} file{} await{} the owner's review (semlith refused, or the portal's Files ▸ Not indexed).",
+                if waiting == 1 { "" } else { "s" },
+                if waiting == 1 { "s" } else { "" }
+            ));
         }
         Ok(text)
     }
@@ -4527,6 +4570,32 @@ mod tests {
             run.eta_ms(),
             None,
             "a paused run has no time left to count down"
+        );
+    }
+
+    /// The plan's estimate is on the card from the first batch, before the
+    /// measured rate settles, and a finished run's rate is what a store with
+    /// no rate of its own is planned on (2.7, measured failing at the 0.30.0
+    /// walk stop: the first estimate came five seconds into embedding).
+    #[test]
+    fn the_first_estimate_comes_with_the_first_batch() {
+        let mut done = RunState::new(1, Vec::new(), RunKind::Run);
+        done.first_sample = Some((1_000, 0, 0));
+        done.samples = VecDeque::from(vec![(1_000, 0, 0), (5_000, 90, 2_000_000)]);
+        assert_eq!(done.embed_rate(), Some(500_000.0));
+
+        let mut run = RunState::new(2, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        run.bytes_total = 3_000_000;
+        run.plan_eta_ms = Some(6_000);
+        run.first_sample = Some((500, 0, 0));
+        run.samples = VecDeque::from(vec![(500, 0, 0)]);
+        run.bytes = 50_000;
+        run.ended = Some(Duration::from_millis(600));
+        assert_eq!(
+            run.eta_ms(),
+            Some(5_400),
+            "no estimate with the first batch"
         );
     }
 

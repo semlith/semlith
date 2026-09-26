@@ -2334,6 +2334,7 @@ impl Semlith {
             // What `.semlithignore` left out is counted with the run's skips,
             // so the Index page's card says so beside binary and empty (1.8).
             if rule == IGNORE_FILE {
+                report.skipped += 1;
                 *report
                     .skipped_reasons
                     .entry(IGNORE_FILE.to_string())
@@ -3121,13 +3122,20 @@ impl Semlith {
 
         // The byte rate this store embeds at, for the next scan phase's
         // estimate: a plan can say how long before the model has loaded.
+        // A daemon run arrives in slices of a few hundred kilobytes, so any
+        // slice of real size counts, averaged with what was known: a floor of
+        // one megabyte meant a store built from the portal never had a rate.
         let secs = run_started.elapsed().as_secs_f64();
-        if report.indexed > 0 && report.bytes > 1_000_000 && secs > 1.0 {
-            store::set_meta(
-                &self.db,
-                "embed_bytes_per_sec",
-                &format!("{:.0}", report.bytes as f64 / secs),
-            )?;
+        if report.indexed > 0 && report.bytes >= 64 * 1024 && secs >= 0.25 {
+            let sample = report.bytes as f64 / secs;
+            let rate = match store::get_meta(&self.db, "embed_bytes_per_sec")?
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|r| *r > 0.0)
+            {
+                Some(known) => (known + sample) / 2.0,
+                None => sample,
+            };
+            store::set_meta(&self.db, "embed_bytes_per_sec", &format!("{rate:.0}"))?;
         }
 
         // The chunking rule this store is now on, recorded only when a pass
