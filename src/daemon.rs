@@ -988,6 +988,17 @@ impl Store {
         self.runs_changed();
     }
 
+    /// What the store held before a run that has not started.
+    fn set_before(&self, id: u64, files: u64, chunks: u64) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
+            run.files_before = Some(files);
+            run.chunks_before = Some(chunks);
+        }
+        drop(runs);
+        self.runs_changed();
+    }
+
     /// A run held for review, moved to the queue or ended.
     fn leave_review(&self, id: u64, to: RunStatus) -> bool {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
@@ -2361,6 +2372,14 @@ impl State {
             let run = self.admission.mint();
             store.begin_run(run, paths.clone(), RunKind::Run);
             store.set_plan(run, plan, true);
+            // What the store held before, as a started run reports it: a
+            // held run never starts, and Discard scan decides from this
+            // whether the scan made the store and should take it away.
+            if let Ok((files, chunks, _)) =
+                crate::Semlith::open_existing(&store.dir).and_then(|reader| reader.stats())
+            {
+                store.set_before(run, files.max(0) as u64, chunks.max(0) as u64);
+            }
             self.awaiting
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
