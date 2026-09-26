@@ -4673,16 +4673,26 @@ td.row-end {
 .modal.wide {
   width: min(560px, calc(100vw - 2 * var(--sp-4)));
 }
+.modal-head,
+.modal-foot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
 .modal-body {
   flex: 1 1 auto;
   min-height: 0;
+  margin-top: var(--sp-3);
   overflow-y: auto;
   overscroll-behavior: contain;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
 }
-.modal .card-title,
+.modal-foot:has(> *:not(:empty)) {
+  margin-top: var(--sp-3);
+}
+.modal .card-title {
+  margin: 0;
+}
 .modal .actions {
   flex-shrink: 0;
 }
@@ -6972,11 +6982,6 @@ td.decide-col {
 
 /* The decision dialog: the file, what was found in it, the choice. One font
    per role, so the findings read as a list and not as a paragraph. */
-.rows.decision-body {
-  gap: var(--sp-3);
-  margin-top: var(--sp-2);
-  min-width: 0;
-}
 .dialog-path {
   display: block;
   padding: var(--sp-2) var(--sp-3);
@@ -7170,17 +7175,6 @@ td.decide-col {
 }
 .files-filters .store-chips {
   flex-wrap: wrap;
-}
-.nav-item .nav-count {
-  margin-left: auto;
-  min-width: 18px;
-  padding: 0 6px;
-  border-radius: 9px;
-  background: var(--amber-soft);
-  color: var(--amber-ink);
-  font-size: 11px;
-  line-height: 18px;
-  text-align: center;
 }
 .pill.class-credential {
   background: var(--red-soft);

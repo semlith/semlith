@@ -5546,20 +5546,19 @@ def _(d):
     want("links on the plan line", plan["links"], 0)
 
 
-@finding("10.8", "the sidebar counts files waiting for review on the Index item")
+@finding("10.8", "the sidebar carries no count of files waiting for review")
 def _(d):
+    """The owner's fourth walk took the count off the sidebar: a scan's panel
+    says what waits for a decision, and a number on a nav item said it again
+    on every page. It is on no item, even with files waiting."""
     root = review_tree(d, "badge")
     indexed_fixture(d, root)
-    waiting = d.api("/api/refused").get("review") or 0
-    if not waiting:
+    if not (d.api("/api/refused").get("review") or 0):
         fail("/api/refused counts nothing waiting for review after a run that refused two files")
     d.open_view("stores", fresh=True)
-    d.wait_for("!!document.querySelector('.sidebar .nav-item[data-view=index] .nav-count')", timeout=20,
-               what="the Index item's count")
-    want("the Index item's count", text_of(d, ".sidebar .nav-item[data-view=index] .nav-count", "the count"),
-         str(d.api("/api/refused").get("review") or 0))
-    if exists(d, ".sidebar .nav-item[data-view=files] .nav-count"):
-        fail("the Files item still carries a count; it moved to Index, where the scan asks")
+    time.sleep(1.5)
+    if exists(d, ".sidebar .nav-count"):
+        fail("a sidebar item still carries a count of files waiting for review")
 
 
 @finding("10.9", "the Agents page names the installed hook mode")

@@ -983,8 +983,7 @@ them with their reasons. Credential files are never offered for a decision.
 
 **Start indexing** embeds the plan. A file left undecided stays refused, and
 any decision can be undone later on [Files ▸ Decisions](#decisions). A held run
-holds nothing — no slot, no writer — so other runs and the watcher go on, and
-the sidebar's Index item carries the count of files waiting for a decision. A
+holds nothing — no slot, no writer — so other runs and the watcher go on. A
 run started by an agent, the watcher or the catch-up never waits.
 
 The three pickers are mutually exclusive: two of them open at once is two answers

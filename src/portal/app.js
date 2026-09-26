@@ -3709,7 +3709,10 @@ function agentsCard() {
  * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
  * it is pending the dialog says so, and an error is shown inside it rather
  * than behind it. */
-function ask({ title, body, extra, confirm, tone, run, wide }) {
+/* A confirm dialog. `lead` stays under the title and `tail` above the
+ * buttons; only `extra` between them scrolls, so a long list of findings
+ * never takes the file it is about, or the choice, off the screen. */
+function ask({ title, body, extra, lead, tail, confirm, tone, run, wide }) {
   const dialog = el("dialog", { class: wide ? "modal wide" : "modal" });
   const problem = el("div", { class: "note" });
   const go = el("button", {
@@ -3735,10 +3738,9 @@ function ask({ title, body, extra, confirm, tone, run, wide }) {
   });
   fill(
     dialog,
-    el("h2", { class: "card-title", text: title }),
-    /* The only part that scrolls: a long list of findings moves under a
-     * title and buttons that stay where they are. */
-    el("div", { class: "modal-body" }, el("p", { class: "subtitle", text: body }), extra || null, problem),
+    el("div", { class: "modal-head" }, el("h2", { class: "card-title", text: title }), el("p", { class: "subtitle", text: body }), lead || null),
+    extra ? el("div", { class: "modal-body" }, extra) : null,
+    el("div", { class: "modal-foot" }, tail || null, problem),
     el(
       "div",
       { class: "actions" },
@@ -4970,13 +4972,9 @@ function decisionsPane() {
     ask({
       title: "Refuse this file?",
       body: "Every match in it is a declared test dummy, so it was indexed. Refusing takes it out of this store until you revoke the decision.",
-      extra: el(
-        "div",
-        { class: "rows tight decision-body" },
-        dialogPath(row.path, store),
-        row.matches && row.matches.length ? findingsList(row.matches) : null,
-        el("label", { class: "reviewed", for: "reviewed-file" }, reviewed, el("span", { text: "I have reviewed this file" })),
-      ),
+      lead: dialogPath(row.path, store),
+      extra: row.matches && row.matches.length ? findingsList(row.matches) : null,
+      tail: el("label", { class: "reviewed", for: "reviewed-file" }, reviewed, el("span", { text: "I have reviewed this file" })),
       confirm: "Refuse this file",
       tone: "bad",
       wide: true,
@@ -4995,7 +4993,7 @@ function decisionsPane() {
         row.accepted === "refused"
           ? "The file is indexed again at the next run, as a test-dummy file."
           : "The file leaves the store and is refused again with today's reasons; the next scan offers it for a decision.",
-      extra: el("div", { class: "rows tight decision-body" }, dialogPath(row.path, store)),
+      lead: dialogPath(row.path, store),
       confirm: "Revoke",
       tone: "bad",
       wide: true,
@@ -5080,7 +5078,6 @@ function decisionsPane() {
       blocks.push(el("div", { class: "card pad" }, empty("No decisions yet. When a scan holds a file back, the Index page asks about it.")));
     }
     fill(node, ...blocks);
-    refreshNotIndexedBadge(data.review || 0);
   }
   return { node, load };
 }
@@ -5131,17 +5128,13 @@ function reviewOne(store, item, mode, done) {
         : item.class === "content"
           ? "The file's full text is indexed, values included."
           : `${item.rule}. Accepting indexes it anyway.`,
-    extra: el(
-      "div",
-      { class: "rows tight decision-body" },
-      dialogPath(item.path, store),
-      item.matches && item.matches.length ? findingsList(item.matches) : null,
-      el(
-        "label",
-        { class: "reviewed", for: "reviewed-inline" },
-        reviewed,
-        el("span", { text: "I have reviewed this file" }),
-      ),
+    lead: dialogPath(item.path, store),
+    extra: item.matches && item.matches.length ? findingsList(item.matches) : null,
+    tail: el(
+      "label",
+      { class: "reviewed", for: "reviewed-inline" },
+      reviewed,
+      el("span", { text: "I have reviewed this file" }),
     ),
     confirm: "Accept this file",
     wide: true,
@@ -5151,27 +5144,6 @@ function reviewOne(store, item, mode, done) {
       done();
     },
   });
-}
-
-/* The sidebar's count of files waiting for a person's review. */
-function refreshNotIndexedBadge(count) {
-  // On Index, where the scan that asks about them is.
-  for (const link of document.querySelectorAll('.sidebar .nav-item[data-view="index"]')) {
-    paintNavCount(link, count);
-  }
-}
-
-function paintNavCount(link, count) {
-  let badge = link.querySelector(".nav-count");
-  if (!count) {
-    if (badge) badge.remove();
-    return;
-  }
-  if (!badge) {
-    badge = el("span", { class: "nav-count", title: "files waiting for your review" });
-    link.append(badge);
-  }
-  badge.textContent = String(count);
 }
 
 // ------------------------------------------------------- read and pattern
@@ -13474,11 +13446,6 @@ async function boot() {
   // so, and the number is not worth holding the first paint for.
   refreshRuns().catch(() => {});
   await render();
-  // The sidebar's count of files waiting for review, after the first paint so
-  // the nav it sits in exists. Refreshed when the Not indexed tab loads.
-  api("/api/refused")
-    .then((data) => refreshNotIndexedBadge(data.review || 0))
-    .catch(() => {});
 
   // One clock, started once, for the life of the tab. Every live view hangs
   // off it; no view starts a timer of its own.

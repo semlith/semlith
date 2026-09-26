@@ -84,8 +84,7 @@ needs a decision. Each held-back file is a row with **Accept redacted**,
 confirm with an "I have reviewed this file" tick, and one line counts the files
 not indexed that need nothing, with **Show files** to list them. The button then
 reads **Start indexing**; an undecided file stays refused, and **Discard scan**
-drops the held runs along with a store the scan made for a new folder. The
-sidebar's Index item counts the files waiting for a decision. The Files page
+drops the held runs along with a store the scan made for a new folder. The Files page
 gains a **Decisions** tab, which lists only what a person decided — accepted,
 refused, or let through as test dummies — each with **Revoke** or **Refuse
 instead**, and a **Tree** tab, an editor-style explorer that opens one folder
