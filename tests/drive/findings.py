@@ -32,6 +32,8 @@ ambiguity so the next person can see the choice was made rather than assumed.
 """
 
 import json
+import random
+import string
 import os
 import re
 import time
@@ -4886,14 +4888,20 @@ def _(d):
 
 @finding("9.3", "no line is held above the run cards")
 def _(d):
+    """0.30.0 moved the button row into `.index-bar`, and the page's answer to
+    Scan / Start indexing sits directly under it rather than inside it. What
+    the finding is about still holds: nothing else is on a line of its own
+    above the cards, and the answer takes no room while it has nothing to say.
+    """
     d.open_view("index", fresh=True)
     seen = d.eval(
         """
         (() => {
           const view = document.querySelector('#root .view');
           const note = view.querySelector('.index-note');
-          return {stray: !!view.querySelector(':scope > .note'),
-                  inRow: !!note && !!note.closest('.filters'),
+          const bar = view.querySelector('.index-bar');
+          return {stray: [...view.querySelectorAll(':scope > .note')].filter(n => n !== note).length,
+                  underBar: !!note && !!bar && bar.nextElementSibling === note,
                   text: note ? note.textContent : null,
                   shown: note ? getComputedStyle(note).display !== 'none' : null};
         })()
@@ -4901,10 +4909,10 @@ def _(d):
     )
     if seen["stray"]:
         fail("the Index view still has a note on a line of its own above the cards")
-    if not seen["inRow"]:
-        fail("the Index page's answer to Start indexing is not in the button row")
+    if not seen["underBar"]:
+        fail("the Index page's answer to Scan is not directly under the button row (.index-bar)")
     if not seen["text"] and seen["shown"]:
-        fail("the empty note still takes up room in the button row")
+        fail("the empty note still takes up room under the button row")
 
 
 @finding("9.4", "every paginated table opens at 5 per page")
@@ -5072,3 +5080,524 @@ def _(d):
             fail("at %dpx the Agents rows' cards start at %r and %r" % (width, edges[0], edges[1]))
     d.set_viewport(1280, 900)
 
+
+
+# ---------------------------------------------------------------- 0.30.0 (10.x)
+
+def live_aws():
+    """An AWS access key id built now: live-looking, and in no source file."""
+    alphabet = string.ascii_uppercase + string.digits
+    return "AKIA" + "".join(random.choice(alphabet) for _ in range(16))
+
+
+def live_github():
+    alphabet = string.ascii_letters + string.digits
+    return "ghp_" + "".join(random.choice(alphabet) for _ in range(36))
+
+
+def review_tree(d, name):
+    """Two files the scan refuses and a person may review, one `.env` it
+    refuses and never offers, and one ordinary file."""
+    root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
+    os.makedirs(root)
+    with open(os.path.join(root, "alpha.txt"), "w") as f:
+        f.write("# settings\nkey = \"%s\"\n" % live_aws())
+    with open(os.path.join(root, "beta.txt"), "w") as f:
+        f.write("# settings\nkey = \"%s\"\n" % live_aws())
+    with open(os.path.join(root, ".env"), "w") as f:
+        f.write("TOKEN=%s\n" % live_github())
+    with open(os.path.join(root, "lib.rs"), "w") as f:
+        f.write("pub fn callee() -> u32 { 1 }\n\npub fn caller() -> u32 {\n    callee() + 1\n}\n")
+    return root
+
+
+#: The Index page's one button for the whole flow (0.30.0). It reads Scan, and
+#: while any run is held after its scan it reads Start indexing.
+SCAN_BUTTON = ".index-bar .index-bar-group.end .button:not(.secondary)"
+
+#: The page-level card that lists what a held scan found, above the run cards.
+SCAN_PANEL = ".scan-panel:not([hidden])"
+
+
+def scan_button(d):
+    return text_of(d, SCAN_BUTTON, "the Index page's Scan button")
+
+
+def clean_tree(d, name):
+    """Two ordinary files and nothing the scan would hold back."""
+    root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
+    os.makedirs(root)
+    with open(os.path.join(root, "lib.rs"), "w") as f:
+        f.write("pub fn callee() -> u32 { 1 }\n\npub fn caller() -> u32 {\n    callee() + 1\n}\n")
+    with open(os.path.join(root, "notes.md"), "w") as f:
+        f.write("# Notes\n\nNothing secret in here.\n")
+    return root
+
+
+def held_run(d, root):
+    """The run the daemon holds for `root` once its scan is over."""
+    wanted = normalise(os.path.realpath(root))
+    deadline = time.time() + RUN_APPEARS
+    while time.time() < deadline:
+        for run in d.api("/api/index/runs")["runs"]:
+            if wanted not in [normalise(p) for p in run.get("paths") or []]:
+                continue
+            if run.get("status") == "review":
+                return run
+            if run.get("status") in TERMINAL:
+                fail("the scan of %s went to %s without holding for Start indexing"
+                     % (root, run.get("status")))
+        time.sleep(0.3)
+    fail("the scan of %s never held for Start indexing within %ds" % (root, RUN_APPEARS))
+
+
+def scan_on_page(d, root):
+    """Scan a folder the way a person does: its path in the box, each folder
+    its own store, and the one button, which reads Scan. Returns the held run.
+
+    Every scan from the page holds (`review: "always"`), even a clean one, so
+    nothing is embedded before its plan has been on screen.
+    """
+    d.open_view("index", fresh=True)
+    d.wait_for("!!document.querySelector(%s)" % json.dumps(SCAN_BUTTON), what="the Scan button")
+    label = scan_button(d)
+    if label != "Scan":
+        fail("the Index page opened with its button reading %r, not 'Scan': a scan an "
+             "earlier check left held would be started by pressing it" % label)
+    d.type("#index-path", root)
+    d.eval(
+        "(() => { const s = document.querySelector('.index-bar-group.end select');"
+        " s.value = 'each'; s.dispatchEvent(new Event('change', {bubbles: true})); })()"
+    )
+    d.click(SCAN_BUTTON)
+    run = held_run(d, root)
+    d.wait_for(
+        "(document.querySelector(%s) || {}).textContent === 'Start indexing'" % json.dumps(SCAN_BUTTON),
+        timeout=30, what="the Scan button to read Start indexing while the scan is held",
+    )
+    return run
+
+
+def release_held(d, run):
+    """Drop a scan a failed check left held, so the next check's page opens on
+    Scan rather than on this check's Start indexing."""
+    now = run_by_id(d, run["id"])
+    if now and now.get("status") == "review":
+        for action in ("stop", "remove"):
+            d.api_result("/api/index/control", method="POST",
+                         body={"store": run["store"], "action": action, "run": run["id"]})
+
+
+def scan_rows(d, store):
+    """The scan panel's decision rows for one store, as {file, cells, buttons}.
+
+    The Store column is there only when more than one folder is held, so a
+    five-cell row carries the store second and a four-cell row is the only
+    store on the panel.
+    """
+    rows = d.eval(
+        """
+        [...document.querySelectorAll(%s)].map(tr => ({
+          cells: [...tr.cells].map(td => (td.innerText || '').trim()),
+          buttons: [...tr.querySelectorAll('button')].map(b => b.textContent.trim()),
+        }))
+        """
+        % json.dumps(SCAN_PANEL + " .w-scan-review tbody tr")
+    )
+    return [dict(r, file=r["cells"][0]) for r in rows
+            if len(r["cells"]) == 4 or (len(r["cells"]) == 5 and r["cells"][1] == store)]
+
+
+def press_in_scan_row(d, store, name, label):
+    pressed = d.eval(
+        """
+        (() => {
+          for (const tr of document.querySelectorAll(%s)) {
+            const cells = [...tr.cells].map(td => (td.innerText || '').trim());
+            if (cells[0] !== %s || (cells.length === 5 && cells[1] !== %s)) continue;
+            const b = [...tr.querySelectorAll('button')].find(b => b.textContent.trim() === %s);
+            if (!b) return 'the row offers only ' + [...tr.querySelectorAll('button')].map(b => b.textContent.trim()).join(', ');
+            b.click();
+            return 'pressed';
+          }
+          return 'no row of the scan panel reads ' + %s;
+        })()
+        """
+        % (json.dumps(SCAN_PANEL + " .w-scan-review tbody tr"), json.dumps(name), json.dumps(store),
+           json.dumps(label), json.dumps(name))
+    )
+    if pressed != "pressed":
+        fail("pressing %r on %s in the scan panel: %s" % (label, name, pressed))
+
+
+@finding("10.1", "a scan lists reviewable files for a decision, the .env only as a no-action count, and indexes an accepted file redacted")
+def _(d):
+    root = review_tree(d, "review")
+    run = scan_on_page(d, root)
+    run_id, store = run["id"], run["store"]
+    try:
+        plan = run.get("plan") or {}
+        want("files needing review in the plan", len(plan.get("review") or []), 2)
+        if not any(p.endswith(".env") for p in plan.get("credential") or []):
+            fail("the .env is not listed as a credential file: %s" % json.dumps(plan)[:300])
+
+        d.wait_for("!!document.querySelector(%s)" % json.dumps(SCAN_PANEL + " .w-scan-review"),
+                   timeout=20, what="the scan panel's decision table")
+        panel = text_of(d, SCAN_PANEL, "the scan panel")
+        if ("Scanned %s" % store) not in panel and not re.search(r"Scanned \d+ folders", panel):
+            fail("the scan panel is not titled for the scan: %r" % panel[:200])
+        # innerText follows the eyebrow's text-transform, so compared folded.
+        if "needs your decision" not in panel.lower():
+            fail("the scan panel has no 'Needs your decision' heading: %r" % panel[:400])
+        rows = scan_rows(d, store)
+        want("the files the panel asks about", sorted(r["file"] for r in rows), ["alpha.txt", "beta.txt"])
+        for r in rows:
+            # A secret-shaped value: both accepts, and keeping it refused.
+            want("the choices on %s" % r["file"], r["buttons"], ["Accept redacted", "Accept as-is", "Keep refused"])
+        # The .env is never offered: no row, only the no-action line.
+        if any(".env" in " ".join(r["cells"]) for r in scan_rows(d, store)):
+            fail("the .env has a decision row; a credential file is never offered")
+        skipped = text_of(d, SCAN_PANEL + " .scan-skipped", "the scan panel's no-action line")
+        if "credential file" not in skipped or "no action needed" not in skipped:
+            fail("the no-action line does not count the credential file: %r" % skipped)
+        d.click_text(SCAN_PANEL + " .scan-skipped button", "Show files")
+        d.wait_for("(() => { const t = document.querySelector(%s + ' .scan-skipped + .rows');"
+                   " return !!t && !t.hidden && !!t.firstChild; })()" % json.dumps(SCAN_PANEL),
+                   what="the no-action file list to open")
+        listed = d.eval("(() => { const t = document.querySelector(%s + ' .scan-skipped + .rows');"
+                        " return {text: t.innerText, buttons: t.querySelectorAll('button').length,"
+                        " table: !!t.querySelector('.w-scan-skipped')}; })()" % json.dumps(SCAN_PANEL))
+        if listed["buttons"]:
+            fail("the no-action list offers a button: %r" % listed["text"][:300])
+        if listed["table"] and ".env" not in listed["text"]:
+            fail("the no-action list does not name the .env: %r" % listed["text"][:300])
+
+        # Accept alpha with redaction, through the dialog.
+        press_in_scan_row(d, store, "alpha.txt", "Accept redacted")
+        d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the accept dialog")
+        dialog = d.eval(
+            """
+            (() => { const m = document.querySelector('dialog.modal[open]');
+              const t = s => [...m.querySelectorAll(s)].map(e => (e.innerText || '').trim());
+              return {title: t('h2')[0], path: t('code.dialog-path')[0], values: t('ul.findings .finding-value'),
+                      kinds: t('ul.findings .finding-kind'), conf: t('ul.findings .finding-conf'),
+                      signals: t('ul.findings .finding-signals'), radios: m.querySelectorAll('input[type=radio]').length,
+                      tick: !!m.querySelector('label.reviewed #reviewed-inline')}; })()
+            """
+        )
+        want("the dialog's title", dialog["title"], "Accept with redaction?")
+        want("the dialog's file", dialog["path"], "alpha.txt")
+        if not dialog["values"] or any(re.search(r"AKIA[A-Z0-9]{16}", v) for v in dialog["values"]):
+            fail("the dialog does not show the match masked: %r" % dialog["values"])
+        if not dialog["kinds"] or not all(re.search(r"%", c) for c in dialog["conf"]):
+            fail("the dialog does not say what matched and how likely it is real: %r" % dialog)
+        if not any(dialog["signals"]):
+            fail("the dialog's confidence carries no signals: %r" % dialog)
+        if dialog["radios"]:
+            fail("the dialog still offers a mode choice; the row's button chose it")
+        if not dialog["tick"]:
+            fail("the dialog has no 'I have reviewed this file' tick")
+        d.eval("document.querySelector('dialog.modal #reviewed-inline').click()")
+        d.eval("[...document.querySelectorAll('dialog.modal button')].find(b => b.textContent === 'Accept this file').click()")
+        d.wait_for("!document.querySelector('dialog.modal[open]')", timeout=30, what="the dialog to close")
+        d.wait_for(
+            "[...document.querySelectorAll(%s)].some(tr => tr.cells[0].innerText.trim() === 'alpha.txt'"
+            " && /accepted, redacted/.test(tr.innerText))" % json.dumps(SCAN_PANEL + " .w-scan-review tbody tr"),
+            what="alpha.txt's row to say accepted, redacted",
+        )
+        press_in_scan_row(d, store, "beta.txt", "Keep refused")
+        d.wait_for(
+            "[...document.querySelectorAll(%s)].some(tr => tr.cells[0].innerText.trim() === 'beta.txt'"
+            " && /stays refused/.test(tr.innerText))" % json.dumps(SCAN_PANEL + " .w-scan-review tbody tr"),
+            what="beta.txt's row to say stays refused",
+        )
+
+        # Start indexing, from the same button that scanned.
+        want("the button while the scan is held", scan_button(d), "Start indexing")
+        d.click(SCAN_BUTTON)
+        wait_for_run(d, store, run_id=run_id)
+    finally:
+        release_held(d, run)
+    refused = d.api("/api/refused")
+    rows = [r for s in refused["stores"] if s["store"] == store for r in s["rows"]]
+    names = {os.path.basename(r["path"]): r for r in rows}
+    if "beta.txt" not in names or names["beta.txt"]["class"] != "content" or names["beta.txt"].get("accepted"):
+        fail("the kept file is not still refused: %s" % json.dumps(rows)[:400])
+    if names.get("alpha.txt", {}).get("accepted") != "redacted":
+        fail("the accepted file is not listed as accepted (redacted): %s" % json.dumps(names.get("alpha.txt")))
+    read = d.api("/api/read?target=%s" % urllib.parse.quote(os.path.join(os.path.realpath(root), "alpha.txt") + ":1-2"))
+    body = json.dumps(read)
+    if "REDACTED:aws" not in body:
+        fail("the accepted file is not indexed redacted in the same run: %s" % body[:300])
+
+
+@finding("10.2", "Scan on a clean folder shows the plan and waits for Start indexing")
+def _(d):
+    root = clean_tree(d, "scanclean")
+    run = scan_on_page(d, root)
+    run_id, store = run["id"], run["store"]
+    try:
+        plan = run.get("plan") or {}
+        want("files to review in a clean plan", len(plan.get("review") or []), 0)
+        if not plan.get("embed"):
+            fail("the held plan has nothing to embed: %s" % json.dumps(plan)[:300])
+        if plan.get("seconds", 99) > 5:
+            fail("the scan took %.2f s over two files" % plan["seconds"])
+        card = still_card(store)
+        d.wait_for("!!(%s) && !((%s).querySelector('.run-plan') || {hidden: true}).hidden" % (card, card),
+                   timeout=20, what="the held card's plan line")
+        line = d.eval("(%s).querySelector('.run-plan').innerText.trim()" % card)
+        if not re.match(r"^scanned: \d+ to embed \(.+\) · \d+ unchanged · waiting for Start indexing$", line):
+            fail("the held card's plan reads %r" % line)
+        panel = text_of(d, SCAN_PANEL, "the scan panel")
+        if "Nothing here needs a decision." not in panel:
+            fail("the scan panel of a clean folder does not say nothing needs a decision: %r" % panel[:400])
+        if not exists(d, ".index-bar-group.end .button.secondary:not([hidden])"):
+            fail("a held scan offers no Discard scan")
+        # Held means held: nothing starts on its own.
+        time.sleep(2)
+        want("the run's status two seconds after a clean scan", (run_by_id(d, run_id) or {}).get("status"), "review")
+        d.click(SCAN_BUTTON)
+        final = wait_for_run(d, store, run_id=run_id)
+    finally:
+        release_held(d, run)
+    want("the run started by Start indexing", final.get("status"), "done")
+    d.wait_for("(document.querySelector(%s) || {}).textContent === 'Scan'" % json.dumps(SCAN_BUTTON),
+               timeout=20, what="the button to read Scan again once nothing is held")
+
+
+@finding("10.3", "Impact's Where column shows the call site, not the definition")
+def _(d):
+    root = review_tree(d, "impact")
+    store = indexed_fixture(d, root)
+    answer = d.api("/api/impact?name=callee&store=%s" % urllib.parse.quote(store))
+    rows = (answer.get("impact") or {}).get("reached") or []
+    if not rows or not rows[0].get("at"):
+        fail("impact carries no call-site line: %s" % json.dumps(answer)[:300])
+    d.open_view("impact")
+    d.eval(
+        "(() => { const box = document.querySelector('.impact-band input[type=search]');"
+        " box.value = 'callee'; box.dispatchEvent(new Event('input', {bubbles: true}));"
+        " [...document.querySelectorAll('.impact-band button')].find(b => b.textContent.trim() === 'Reach').click(); })()"
+    )
+    d.wait_for("!!document.querySelector('.impact-row .where')", timeout=30, what="an Impact row")
+    where = texts_of(d, ".impact-block:not(.impact-files) .impact-row .where")
+    if not any(re.search(r"lib\.rs:%d$" % rows[0]["at"], w) for w in where):
+        fail("the Where column reads %r, not the call at line %d" % (where, rows[0]["at"]))
+
+
+@finding("10.4", "Graph's symbol box takes several names and shows a definitions table")
+def _(d):
+    root = review_tree(d, "graphnames")
+    indexed_fixture(d, root)
+    d.open_view("graph")
+    d.eval(
+        "(() => { const box = document.querySelector('.graph-scope input');"
+        " box.value = 'callee, caller'; box.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})); })()"
+    )
+    d.wait_for("document.querySelectorAll('.graph-defs .defs-row').length >= 2", timeout=20,
+               what="the definitions table")
+    rows = texts_of(d, ".graph-defs .defs-row")
+    if not any("callee" in r for r in rows) or not any("caller" in r for r in rows):
+        fail("the table does not list both names: %r" % rows)
+
+
+def explorer_tree(d, name):
+    """A folder with a subfolder to open, an ordinary file beside it, and a
+    binary the scan cannot index, so the explorer has a greyed row to show."""
+    root = os.path.join(d.fixtures.root, "%s-%d" % (name, random.randint(0, 10**9)))
+    os.makedirs(os.path.join(root, "src"))
+    with open(os.path.join(root, "src", "lib.rs"), "w") as f:
+        f.write("pub fn callee() -> u32 { 1 }\n")
+    with open(os.path.join(root, "README.md"), "w") as f:
+        f.write("# Explorer\n\nA folder for the tree.\n")
+    with open(os.path.join(root, "logo.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8)
+    return root
+
+
+#: One root's rows in the Tree tab, found by the folder its title names.
+TREE_ROOT = """
+(() => {
+  const leaf = %s;
+  const head = [...document.querySelectorAll('.ftree ul[role=tree] .ftree-row.root')]
+    .find(r => (r.title || '').split(/[\\\\/]/).pop() === leaf);
+  if (!head) return null;
+  const rows = group => group ? [...group.querySelectorAll(':scope > li > .ftree-row')].map(r => ({
+    name: (r.querySelector('.fname') || {}).textContent, cls: r.className,
+    expanded: r.getAttribute('aria-expanded'), meta: (r.querySelector('.fmeta') || {}).textContent || ''})) : [];
+  const kids = head.parentElement.querySelector(':scope > ul[role=group]');
+  const src = kids && [...kids.querySelectorAll(':scope > li > .ftree-row.dir')]
+    .find(r => (r.querySelector('.fname') || {}).textContent === 'src');
+  return {expanded: head.getAttribute('aria-expanded'), rows: rows(kids),
+          src: src ? rows(src.parentElement.querySelector(':scope > ul[role=group]')) : null};
+})()
+"""
+
+
+@finding("10.5", "the Files page's Tree tab opens folders on click and greys a file it did not index")
+def _(d):
+    root = explorer_tree(d, "explorer")
+    indexed_fixture(d, root)
+    leaf = os.path.basename(root)
+    d.open_view("files", fresh=True)
+    d.click_text(".tabs .tab", "Tree")
+    d.wait_for("(() => { const t = %s; return !!t && t.rows.length > 0; })()" % (TREE_ROOT % json.dumps(leaf)),
+               timeout=30, what="the explorer to draw the fixture's root with its children")
+    tree = d.eval(TREE_ROOT % json.dumps(leaf))
+    want("the root folder's aria-expanded", tree["expanded"], "true")
+    by_name = {r["name"]: r for r in tree["rows"]}
+    src = by_name.get("src")
+    if not src or "dir" not in src["cls"].split():
+        fail("the root does not list the src folder as a folder: %r" % tree["rows"])
+    want("the unopened src folder's aria-expanded", src["expanded"], "false")
+    if tree["src"]:
+        fail("the src folder's children are drawn before it was opened: %r" % tree["src"])
+    readme = by_name.get("README.md")
+    if not readme or "off" in readme["cls"].split():
+        fail("README.md is not an ordinary indexed row: %r" % readme)
+    logo = by_name.get("logo.png")
+    if not logo or "off" not in logo["cls"].split() or not logo["meta"].startswith("not indexed"):
+        fail("the binary is not a greyed not-indexed row: %r" % tree["rows"])
+    # The owner's third walk: sort chips on an explorer were no use, so the
+    # tree has none, and orders folders first, then files, by name.
+    chips = texts_of(d, ".tab-panel .filters .chip")
+    want("the explorer's chips", chips, [])
+
+    d.eval(
+        "[...document.querySelectorAll('.ftree .ftree-row.dir')].find(r => r.getAttribute('aria-expanded') === 'false'"
+        " && (r.querySelector('.fname') || {}).textContent === 'src'"
+        " && r.closest('ul[role=group]').parentElement.querySelector(':scope > .ftree-row.root').title.split(/[\\\\/]/).pop() === %s).click()"
+        % json.dumps(leaf)
+    )
+    d.wait_for("(() => { const t = %s; return !!t && !!t.src && t.src.some(r => r.name === 'lib.rs'); })()"
+               % (TREE_ROOT % json.dumps(leaf)), timeout=20, what="the src folder to open and list lib.rs")
+    tree = d.eval(TREE_ROOT % json.dumps(leaf))
+    want("the opened src folder's aria-expanded",
+         next(r["expanded"] for r in tree["rows"] if r["name"] == "src"), "true")
+
+
+@finding("10.6", "the Decisions tab lists each decision with its reason and confidence, Revoke undoes one, and nothing is bulk")
+def _(d):
+    root = review_tree(d, "decisions")
+    store = indexed_fixture(d, root)
+    rows = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"]]
+    alpha = next((r["path"] for r in rows if os.path.basename(r["path"]) == "alpha.txt"), None)
+    if not alpha:
+        fail("alpha.txt is not on the store's refused list: %s" % json.dumps(rows)[:400])
+    d.api("/api/refused/accept", method="POST",
+          body={"store": store, "path": alpha, "mode": "redacted", "reviewed": True})
+
+    table = (
+        "(() => { const h = [...document.querySelectorAll('.decisions h2.section-title')]"
+        ".find(h => h.textContent === %s); return h ? h.nextElementSibling : null; })()" % json.dumps(store)
+    )
+    d.open_view("files", fresh=True)
+    d.click_text(".tabs .tab", "Decisions")
+    d.wait_for("!!%s" % table, timeout=30, what="the Decisions table for %s" % store)
+    seen = d.eval(
+        "(() => { const t = %s; return {heads: [...t.querySelectorAll('thead th')].map(th => (th.textContent || '').trim()),"
+        " rows: [...t.querySelectorAll('tbody tr')].map(tr => ({cells: [...tr.cells].map(td => (td.innerText || '').trim()),"
+        " buttons: [...tr.querySelectorAll('button')].map(b => b.textContent.trim())}))}; })()" % table
+    )
+    for label in ("File", "Decision", "Why it was held back", "Likely real"):
+        if not any(h.startswith(label) for h in seen["heads"]):
+            fail("the Decisions table has no %r column: %r" % (label, seen["heads"]))
+    # Only what a person decided: not the kept beta.txt, never the .env.
+    want("the files listed as decided", [r["cells"][0] for r in seen["rows"]], ["alpha.txt"])
+    cells = seen["rows"][0]["cells"]
+    if "accepted, redacted" not in cells or not any(re.search(r"^\d+ %$", c) for c in cells):
+        fail("the decided row does not say accepted, redacted with a confidence: %r" % cells)
+    want("the decided row's action", seen["rows"][0]["buttons"], ["Revoke"])
+    if d.eval("!!document.querySelector('.decisions input[type=checkbox], .decisions .bulk')"):
+        fail("the Decisions tab has a select-all checkbox or a bulk bar")
+
+    d.eval("[...(%s).querySelectorAll('tbody button')].find(b => b.textContent.trim() === 'Revoke').click()" % table)
+    d.wait_for("!!document.querySelector('dialog.modal[open]')", what="the revoke confirm")
+    want("the revoke dialog's file", text_of(d, "dialog.modal[open] code.dialog-path", "the dialog's file"), "alpha.txt")
+    d.eval("[...document.querySelectorAll('dialog.modal[open] button')].find(b => b.textContent.trim() === 'Revoke').click()")
+    d.wait_for("!document.querySelector('dialog.modal[open]')", timeout=30, what="the revoke confirm to close")
+    d.wait_for("!%s" % table, timeout=30, what="the revoked decision to leave the Decisions tab")
+    after = [r for s in d.api("/api/refused")["stores"] if s["store"] == store for r in s["rows"]]
+    if any(os.path.basename(r["path"]) == "alpha.txt" and r.get("accepted") for r in after):
+        fail("Revoke left alpha.txt accepted: %s" % json.dumps(after)[:400])
+
+    status, _ = d.api_result("/api/refused/accept", method="POST",
+                             body={"paths": [root], "mode": "as-is", "reviewed": True, "store": store})
+    want("a list sent to the accept route", status, 400)
+
+
+@finding("10.7", "a finished run card states its plan, with what it did not index and what needed review")
+def _(d):
+    root = review_tree(d, "cardplan")
+    store = indexed_fixture(d, root)
+    d.open_view("index", fresh=True)
+    card = still_card(store)
+    d.wait_for("!!(%s) && !((%s).querySelector('.run-plan') || {hidden: true}).hidden" % (card, card),
+               timeout=20, what="the finished card's plan line")
+    plan = d.eval("(() => { const p = (%s).querySelector('.run-plan');"
+                  " return {text: p.textContent.trim(), links: p.querySelectorAll('a').length}; })()" % card)
+    found = re.match(r"^plan: \d+ to embed \(.+\) · \d+ unchanged · (\d+) not indexed · (\d+) needed review$", plan["text"])
+    if not found:
+        fail("the finished card's plan reads %r" % plan["text"])
+    if int(found.group(1)) < 1:
+        fail("the plan counts nothing not indexed, and the .env was not: %r" % plan["text"])
+    want("files the plan says needed review", int(found.group(2)), 2)
+    want("links on the plan line", plan["links"], 0)
+
+
+@finding("10.8", "the sidebar carries no count of files waiting for review")
+def _(d):
+    """The owner's fourth walk took the count off the sidebar: a scan's panel
+    says what waits for a decision, and a number on a nav item said it again
+    on every page. It is on no item, even with files waiting."""
+    root = review_tree(d, "badge")
+    indexed_fixture(d, root)
+    if not (d.api("/api/refused").get("review") or 0):
+        fail("/api/refused counts nothing waiting for review after a run that refused two files")
+    d.open_view("stores", fresh=True)
+    time.sleep(1.5)
+    if exists(d, ".sidebar .nav-count"):
+        fail("a sidebar item still carries a count of files waiting for review")
+
+
+@finding("10.9", "the Agents page names the installed hook mode")
+def _(d):
+    d.open_view("agents", fresh=True)
+    time.sleep(2)
+    body = view_text(d)
+    if "hook" in body and not re.search(r"hook \w+ \((soft|gate|hard)\)", body):
+        # A machine with no hook installed shows no mode, and that is right.
+        clients = d.api("/api/agents").get("clients") or []
+        if any(c.get("hook_mode") for c in clients):
+            fail("a hook mode is installed and the Agents page does not name it")
+
+
+@finding("10.10", "Discard scan leaves no empty store behind for a folder that had none")
+def _(d):
+    """The scan of a new folder registers its store so the plan has somewhere
+    to live. Discarding that scan has to take the store with it (`delete: true`
+    on the held run's stop, sent when it had no files before), or every scan a
+    person thinks better of leaves an empty store on the Stores page."""
+    root = clean_tree(d, "discard")
+    run = scan_on_page(d, root)
+    store = run["store"]
+    try:
+        d.click_text(".index-bar-group.end button", "Discard scan")
+        d.wait_for("(document.querySelector(%s) || {}).textContent === 'Scan'" % json.dumps(SCAN_BUTTON),
+                   timeout=20, what="the button to read Scan again after the discard")
+        if exists(d, SCAN_PANEL):
+            fail("the scan panel is still on screen after Discard scan")
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if store not in {s["name"] for s in d.api("/api/stores")["stores"]}:
+                break
+            time.sleep(0.5)
+        else:
+            fail("%s is still registered 20 s after its only scan was discarded "
+                 "(files_before on the held run: %r)" % (store, run.get("files_before")))
+        now = run_by_id(d, run["id"])
+        if now and now.get("status") not in TERMINAL:
+            fail("the discarded run is still %s" % now.get("status"))
+    finally:
+        release_held(d, run)

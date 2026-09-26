@@ -4662,8 +4662,39 @@ td.row-end {
   /* A path has no spaces in it, so without this the line cannot break and the
    * dialog's own text pushes out past both its edges. */
   overflow-wrap: anywhere;
-  max-height: 40dvh;
+}
+/* A tall dialog scrolls in its middle only: the title and the buttons stay
+ * on screen, so the choice is never scrolled away from what it is about. */
+.modal[open] {
+  display: flex;
+  flex-direction: column;
+  max-height: min(86dvh, 760px);
+}
+.modal.wide {
+  width: min(560px, calc(100vw - 2 * var(--sp-4)));
+}
+.modal-head,
+.modal-foot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: var(--sp-3);
   overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.modal-foot:has(> *:not(:empty)) {
+  margin-top: var(--sp-3);
+}
+.modal .card-title {
+  margin: 0;
+}
+.modal .actions {
+  flex-shrink: 0;
 }
 .modal .card-title {
   overflow-wrap: anywhere;
@@ -6338,6 +6369,11 @@ pre.report-cli {
   margin-top: var(--sp-4);
   min-width: 0;
 }
+/* In a view the column's own gap is already the air under the tabs; the
+ * margin on top of it doubled it. */
+.view > .tabs + .tab-panel {
+  margin-top: 0;
+}
 
 /* The Agents page's own cards, in pairs rather than as a column of full-width
  * bands. Equal height, because two cards side by side at two different heights
@@ -6840,4 +6876,323 @@ pre.report-cli {
   /* A file path is the one value that can outrun the card. */
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
+}
+
+/* 0.30.0: the Index page's scan panel and its bar, the decision dialog, the
+   Files page's tree and Decisions tab, and the sidebar's count of files
+   waiting for a decision. Every value is a token the rest of the page uses. */
+
+/* The Index bar: the ways to choose what to read, then where it goes and
+   the button that reads it, which stay together when the line wraps. */
+.index-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-4);
+}
+.index-bar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.index-bar-group.end {
+  margin-left: auto;
+  flex-wrap: nowrap;
+}
+.index-bar .select {
+  max-width: 18rem;
+  padding-right: 34px;
+}
+.decisions .section-title {
+  margin: var(--sp-2) 0 calc(-1 * var(--sp-2));
+}
+.index-note:empty {
+  display: none;
+}
+
+/* The scan panel: the summary first, then what needs a person, then one
+   line for what needs nothing. */
+.scan-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.scan-panel > .eyebrow {
+  margin: var(--sp-2) 0 calc(-1 * var(--sp-2));
+}
+.scan-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-3);
+}
+.scan-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-3);
+  background: var(--soft);
+  min-width: 0;
+}
+.scan-stat strong {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.scan-stat .meta {
+  font-size: var(--t-small);
+}
+.scan-panel .table-card {
+  box-shadow: none;
+}
+.scan-skipped {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2h) var(--sp-4);
+  border: 1px dashed var(--line);
+  border-radius: var(--r-3);
+}
+.scan-panel > .note {
+  margin: 0;
+}
+.decide {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+td.decide-col {
+  width: 1%;
+  white-space: nowrap;
+}
+.w-scan-review .path,
+.w-decisions .path {
+  max-width: 34rem;
+}
+
+/* The decision dialog: the file, what was found in it, the choice. One font
+   per role, so the findings read as a list and not as a paragraph. */
+.dialog-path {
+  display: block;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-2);
+  background: var(--chip);
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  line-height: 1.5;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+.findings li {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-2);
+  min-width: 0;
+}
+.finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-2);
+  font-size: var(--t-body-sm);
+  color: var(--ink-2);
+}
+.finding-value {
+  font-family: var(--mono);
+  font-size: var(--t-small);
+  padding: 1px var(--sp-1);
+  border-radius: var(--r-1);
+  background: var(--chip);
+  color: var(--ink);
+}
+.finding-conf {
+  font-size: var(--t-body-sm);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.finding-signals {
+  margin-top: var(--sp-1);
+  font-size: var(--t-small);
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.reviewed {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--t-body-sm);
+  color: var(--ink);
+  cursor: pointer;
+}
+.reviewed input {
+  margin: 0;
+}
+
+/* The Files page's tree: one row per entry, like an editor's explorer. */
+.ftree {
+  padding: var(--sp-2) 0;
+  font-size: var(--t-body-sm);
+  overflow-x: auto;
+}
+.ftree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.ftree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding-right: var(--sp-4);
+  border-radius: var(--r-2);
+  color: var(--ink);
+  cursor: default;
+  white-space: nowrap;
+  min-width: max-content;
+}
+.ftree-row:hover {
+  background: var(--soft);
+}
+.ftree-row.dir {
+  cursor: pointer;
+}
+.ftree-row:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+.ftree-row .indent {
+  flex-shrink: 0;
+  align-self: stretch;
+  width: 16px;
+  border-left: 1px solid var(--line-soft);
+  margin-left: 7px;
+}
+.ftree-row .indent.lead {
+  border-left: 0;
+  margin-left: 0;
+  width: 8px;
+}
+.ftree-row .chev {
+  flex-shrink: 0;
+  width: 16px;
+  display: inline-flex;
+  justify-content: center;
+  color: var(--muted);
+  transition: transform var(--d-fade) var(--e-in-out);
+}
+.ftree-row[aria-expanded="true"] .chev {
+  transform: rotate(90deg);
+}
+.ftree-row .ficon {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--muted);
+}
+.ftree-row.dir .ficon {
+  color: var(--blue);
+}
+.ftree-row .fname {
+  color: var(--ink);
+}
+.ftree-row.root .fname {
+  font-weight: 600;
+}
+.ftree-row .fmeta {
+  margin-left: var(--sp-3);
+  font-family: var(--mono);
+  font-size: var(--t-tiny);
+  color: var(--muted);
+}
+.ftree-row.off .fname,
+.ftree-row.off .ficon {
+  color: var(--muted);
+}
+.ftree-row.off .fname {
+  text-decoration: line-through;
+  text-decoration-color: var(--line);
+}
+.ftree-row.stale .fmeta::after {
+  content: " · changed since indexed";
+  color: var(--amber-ink);
+}
+.ftree .ft-rust { color: #c9713a; }
+.ftree .ft-js,
+.ftree .ft-ts { color: #b8912a; }
+.ftree .ft-py { color: #3f79b0; }
+.ftree .ft-md { color: var(--blue); }
+.ftree .ft-data { color: var(--green); }
+.ftree .ft-web { color: #c0572b; }
+.ftree .ft-image { color: #8a5bb0; }
+.ftree-more {
+  padding: var(--sp-1) 0 var(--sp-1) 40px;
+  font-size: var(--t-small);
+  color: var(--muted);
+}
+
+/* The Files page's filter rows: the path box and types on one line, the
+   stores on the next, each led by what it filters. */
+.files-filters {
+  display: grid;
+  gap: var(--sp-3);
+}
+/* A Files tab's blocks: the filters, the table, the footnote under it. */
+.rows.files-pane {
+  gap: var(--sp-4);
+}
+.rows.files-pane > .subtitle {
+  margin: 0;
+}
+.files-filters .filters {
+  row-gap: var(--sp-2);
+}
+.filter-label {
+  min-width: 3.5rem;
+  font-size: var(--t-tiny);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.files-filters .store-chips {
+  flex-wrap: wrap;
+}
+.pill.class-credential {
+  background: var(--red-soft);
+  color: var(--red-ink);
+}
+.pill.class-content {
+  background: var(--amber-soft);
+  color: var(--amber-ink);
+}
+
+/* On a phone the Index bar's right-hand group is wider than the screen, so
+   it wraps under the choosers instead of holding one line. */
+@media (max-width: 599px) {
+  .index-bar-group.end {
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+  .index-bar .select {
+    max-width: 100%;
+  }
 }

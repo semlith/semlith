@@ -53,6 +53,10 @@ pub struct Fleet {
 struct Member {
     label: String,
     store: Semlith,
+    /// The directories this store indexes, from the registry. Empty for a
+    /// store named by `--store` that the registry does not know, which then
+    /// answers with absolute paths as it always did.
+    roots: Vec<PathBuf>,
 }
 
 /// A store directory that holds a `store.db` the process could not open.
@@ -215,11 +219,22 @@ impl Fleet {
             members.push(Member {
                 label: String::new(),
                 store,
+                roots: Vec::new(),
             });
         }
 
+        // A registry that cannot be read costs relative paths, not the open.
+        let registry = crate::home::Registry::load().unwrap_or_default();
         for (member, key) in members.iter_mut().zip(&keys) {
             member.label = label(key);
+            member.roots = registry
+                .stores
+                .iter()
+                .find(|(name, _)| {
+                    crate::home::Registry::dir_of(name).is_ok_and(|d| canonical(&d) == *key)
+                })
+                .map(|(_, entry)| entry.roots.clone())
+                .unwrap_or_default();
         }
         disambiguate(&mut members, &keys);
 
@@ -246,6 +261,33 @@ impl Fleet {
 
     pub fn len(&self) -> usize {
         self.members.len()
+    }
+
+    /// `(label, store)` for each chosen store that can be read.
+    pub fn chosen_each(&self, only: Option<&[String]>) -> Result<Vec<(&str, &Semlith)>> {
+        Ok(self
+            .chosen(only)?
+            .into_iter()
+            .map(|i| (self.members[i].label.as_str(), &self.members[i].store))
+            .collect())
+    }
+
+    /// Every root the open stores index, from the registry.
+    pub fn roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .members
+            .iter()
+            .flat_map(|m| m.roots.iter().cloned())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    /// Writes paths relative to the root that holds them, for an answer an
+    /// agent reads. See [`crate::Shortener`].
+    pub fn shortener(&self) -> crate::Shortener {
+        crate::Shortener::new(self.roots())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -522,11 +564,6 @@ impl Fleet {
     }
 
     /// One structural pattern, run over every chosen store.
-    ///
-    /// The matches are labelled and concatenated in store order; the file and
-    /// match counts are summed, and `truncated` is true when any store hit its
-    /// own budget, because a partial answer from one store is a partial
-    /// answer.
     pub fn pattern_in(
         &self,
         only: Option<&[String]>,
@@ -535,10 +572,60 @@ impl Fleet {
         filter: &crate::filter::Filter,
         offset: usize,
     ) -> Result<crate::pattern::Matches> {
+        let mut out = self.matches_in(only, offset, |db, left| {
+            crate::pattern::run(db, language, source, filter, left)
+        })?;
+        out.language = language.trim().to_ascii_lowercase();
+        Ok(out)
+    }
+
+    /// Every indexed line matching `source`, over every chosen store.
+    pub fn grep_in(
+        &self,
+        only: Option<&[String]>,
+        source: &str,
+        filter: &crate::filter::Filter,
+        offset: usize,
+    ) -> Result<crate::pattern::Matches> {
+        self.matches_in(only, offset, |db, left| {
+            crate::pattern::grep(db, source, filter, left)
+        })
+    }
+
+    /// The definitions in one indexed file, from the first chosen store that
+    /// holds it: `(start, end, name, kind)`, in line order.
+    pub fn outline_in(
+        &self,
+        only: Option<&[String]>,
+        path: &str,
+    ) -> Result<Vec<(u32, u32, String, String)>> {
+        for i in self.chosen(only)? {
+            let db = self.members[i].store.db();
+            if let Some(rows) =
+                crate::store::symbols_in_files(db, &[path.to_string()])?.remove(path)
+            {
+                return Ok(rows);
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// A per-store listing run over every chosen store.
+    ///
+    /// The matches are labelled and concatenated in store order; the file and
+    /// match counts are summed, and `truncated` is true when any store hit its
+    /// own budget, because a partial answer from one store is a partial
+    /// answer.
+    fn matches_in(
+        &self,
+        only: Option<&[String]>,
+        offset: usize,
+        run: impl Fn(&rusqlite::Connection, usize) -> Result<crate::pattern::Matches>,
+    ) -> Result<crate::pattern::Matches> {
         let chosen = self.chosen(only)?;
         let label_rows = self.members.len() > 1;
         let mut out = crate::pattern::Matches {
-            language: language.trim().to_ascii_lowercase(),
+            language: String::new(),
             matches: Vec::new(),
             files: 0,
             truncated: false,
@@ -549,8 +636,7 @@ impl Fleet {
         // second is asked to skip.
         let mut left = offset;
         for i in chosen {
-            let part =
-                crate::pattern::run(self.members[i].store.db(), language, source, filter, left)?;
+            let part = run(self.members[i].store.db(), left)?;
             left = left.saturating_sub(part.skipped);
             out.skipped += part.skipped;
             out.files += part.files;
@@ -578,30 +664,91 @@ impl Fleet {
         target: &crate::Target,
         filter: &crate::filter::Filter,
     ) -> Result<Option<crate::Read>> {
-        let chosen = self.chosen(only)?;
         let label_rows = self.members.len() > 1;
-        for i in chosen {
-            let Some(found) = self.members[i].store.read(target, filter)? else {
-                continue;
-            };
-            return Ok(Some(match found {
-                crate::Read::One(mut span) => {
-                    if label_rows {
-                        span.store = Some(self.members[i].label.clone());
-                    }
-                    crate::Read::One(span)
+        // A root-relative span two stores both hold is the same ambiguity
+        // `read_within` refuses inside one store: taking the first would be a
+        // guess, so the refusal names each. A symbol keeps the first store
+        // that defines it.
+        let every =
+            matches!(target, crate::Target::Span { path, .. } if Path::new(path).is_relative());
+        let mut found: Vec<(usize, crate::Read)> = Vec::new();
+        for i in self.chosen(only)? {
+            let roots = &self.members[i].roots;
+            if let Some(read) = self.members[i].store.read_within(target, filter, roots)? {
+                found.push((i, read));
+                if !every {
+                    break;
                 }
-                crate::Read::Choose(mut rows) => {
-                    if label_rows {
-                        for row in &mut rows {
-                            row.store = Some(self.members[i].label.clone());
-                        }
-                    }
-                    crate::Read::Choose(rows)
-                }
-            }));
+            }
         }
-        Ok(None)
+        if found.len() > 1 {
+            let holding: Vec<String> = found
+                .iter()
+                .map(|(i, read)| match read {
+                    crate::Read::One(span) => {
+                        format!("[{}] {}", self.members[*i].label, crate::plain(&span.path))
+                    }
+                    crate::Read::Choose(_) => format!("[{}]", self.members[*i].label),
+                })
+                .collect();
+            anyhow::bail!(
+                "{:?} is in {} stores: {}. Name the store, or more of the path.",
+                match target {
+                    crate::Target::Span { path, .. } => path.as_str(),
+                    crate::Target::Symbol(name) => name.as_str(),
+                },
+                holding.len(),
+                holding.join(", ")
+            );
+        }
+        let Some((i, found)) = found.pop() else {
+            return Ok(None);
+        };
+        Ok(Some(match found {
+            crate::Read::One(mut span) => {
+                if label_rows {
+                    span.store = Some(self.members[i].label.clone());
+                }
+                crate::Read::One(span)
+            }
+            crate::Read::Choose(mut rows) => {
+                if label_rows {
+                    for row in &mut rows {
+                        row.store = Some(self.members[i].label.clone());
+                    }
+                }
+                crate::Read::Choose(rows)
+            }
+        }))
+    }
+
+    /// Every definition of several names, one row each, across the chosen
+    /// stores. See [`crate::graph::signatures`].
+    pub fn signatures_in(
+        &self,
+        only: Option<&[String]>,
+        names: &[String],
+    ) -> Result<Vec<crate::graph::Signature>> {
+        let label_rows = self.members.len() > 1;
+        let mut out = Vec::new();
+        for i in self.chosen(only)? {
+            let mut rows = crate::graph::signatures(self.members[i].store.db(), names)?;
+            if label_rows {
+                for row in &mut rows {
+                    row.symbol.store = Some(self.members[i].label.clone());
+                }
+            }
+            out.extend(rows);
+        }
+        // Grouped by the name asked, in the order asked, so the table reads
+        // as answers to the question rather than as one store after another.
+        out.sort_by_key(|r| {
+            names
+                .iter()
+                .position(|n| *n == r.asked)
+                .unwrap_or(usize::MAX)
+        });
+        Ok(out)
     }
 
     /// Everything the chosen stores know about `name`, in one reply.
@@ -648,10 +795,23 @@ impl Fleet {
         kinds: &[String],
         all: bool,
     ) -> Result<crate::graph::Neighbours> {
-        let callers = self.graph_in(only, |s| crate::store::edges_in(s.db(), name, kinds))?;
-        let callees = self.graph_in(only, |s| crate::store::edges_out(s.db(), name, kinds))?;
-        let unresolved =
-            self.graph_in(only, |s| crate::store::unresolved_out(s.db(), name, kinds))?;
+        // Each store resolves its own callers against its own definitions —
+        // which `Type::method` a call means is a fact inside one store — and
+        // the rows are joined after.
+        let label_rows = self.members.len() > 1;
+        let (mut callers, mut callees, mut unresolved) = (Vec::new(), Vec::new(), Vec::new());
+        for i in self.chosen(only)? {
+            let mut part = crate::graph::neighbours(self.members[i].store.db(), name, kinds, true)?;
+            if label_rows {
+                let label = &self.members[i].label;
+                for row in part.callers.iter_mut().chain(part.callees.iter_mut()) {
+                    row.label(label);
+                }
+            }
+            callers.append(&mut part.callers);
+            callees.append(&mut part.callees);
+            unresolved.append(&mut part.unresolved);
+        }
         // Collapsed after the stores are joined, not inside each of them: one
         // name with two definitions in two stores is still one name.
         Ok(crate::graph::Neighbours {
@@ -754,12 +914,17 @@ impl Fleet {
             reached: Vec::new(),
             files: Vec::new(),
             hidden: 0,
+            unqualified: false,
             extracted: 0,
             resolved: 0,
             inferred: 0,
             ambiguous: 0,
         };
+        let mut owned_somewhere = false;
+        let mut any_part = false;
         for part in parts {
+            any_part = true;
+            owned_somewhere |= !part.unqualified;
             merged.definitions.extend(part.definitions);
             merged.reached.extend(part.reached);
             merged.files.extend(part.files);
@@ -769,6 +934,8 @@ impl Fleet {
             merged.inferred += part.inferred;
             merged.ambiguous += part.ambiguous;
         }
+        // The qualifier fell back only if it matched in no store at all.
+        merged.unqualified = any_part && !owned_somewhere;
         merged.reached.sort_by(|a, b| {
             a.hop
                 .cmp(&b.hop)
@@ -1239,7 +1406,9 @@ mod tests {
             fresh: true,
             symbol: None,
             symbol_kind: None,
+            symbol_line: None,
             provenance: None,
+            copies: Vec::new(),
         }
     }
 

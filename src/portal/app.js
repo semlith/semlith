@@ -400,6 +400,9 @@ const ICONS = {
     + "M12 15.9a2 2 0 1 0 0 4 2 2 0 0 0 0-4z",
   // Three tracks with a handle on each: the machine's three numbers.
   sliders: "M4 7h10|M18 7h2|M4 12h4|M12 12h8|M4 17h11|M19 17h1|M15 5v4|M9 10v4|M16 15v4",
+  // The explorer tree's marks: a disclosure chevron, and a folder drawn open.
+  chevron: "M9 6l6 6-6 6",
+  folderOpen: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.5h7A1.5 1.5 0 0 1 19 10v1H7.2a1.5 1.5 0 0 0-1.4 1L3.6 18.5|M3.6 18.5 6 12h15l-2.4 6.5z",
 };
 
 /* The nav marks, from the design. `|` separates subpaths so one mark can be
@@ -1426,16 +1429,22 @@ async function refreshRuns() {
 /** "2 indexing" in the navigation, on every page, so a run is never something
  * that happened out of sight. */
 function paintRunCount() {
-  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status)).length;
+  const on = (state.runs?.runs || []).filter((run) => TICKING.has(run.status) && run.status !== "review").length;
   const waiting = (state.runs?.queue || []).length;
+  // A run waiting for a person is not indexing; it is named apart.
+  const review = (state.runs?.runs || []).filter((run) => run.status === "review").length;
   for (const node of document.querySelectorAll(".run-count")) {
-    node.textContent = on ? `${on} indexing${waiting ? ` · ${waiting} queued` : ""}` : "";
-    node.hidden = !on;
+    const parts = [];
+    if (on) parts.push(`${on} indexing`);
+    if (waiting) parts.push(`${waiting} queued`);
+    if (review) parts.push(`${review} waiting for review`);
+    node.textContent = parts.join(" · ");
+    node.hidden = !parts.length;
   }
 }
 
 /** The statuses a run is still in. */
-const TICKING = new Set(["queued", "running", "pausing", "paused", "held", "stopping"]);
+const TICKING = new Set(["queued", "review", "running", "pausing", "paused", "held", "stopping"]);
 
 /** Draw the view on screen again, keeping where the reader had scrolled to.
  *
@@ -2530,9 +2539,82 @@ async function graphView() {
     load({ name, limit: "45" });
   }
 
+  /* Several names, comma-separated: where each is defined and its first
+   * line, the table `semlith symbol a b c` prints. The graph centres on the
+   * first. */
+  const defsCard = el("div", { class: "card table-card graph-defs", hidden: "" });
+  async function showDefinitions(names) {
+    const params = new URLSearchParams({ names: names.join(",") });
+    for (const store of chosen) params.append("store", store);
+    let data;
+    try {
+      data = await api(`/api/symbol?${params}`);
+    } catch (_) {
+      return;
+    }
+    const rows = data.table || [];
+    defsCard.hidden = false;
+    fill(
+      defsCard,
+      el(
+        "div",
+        { class: "table-head" },
+        el("h2", { text: "Definitions" }),
+        el("span", { class: "muted", text: `${rows.length} for ${names.length} name${names.length === 1 ? "" : "s"}` }),
+      ),
+      el(
+        "div",
+        { class: "table-wrap" },
+        el(
+          "table",
+          {},
+          el("caption", { class: "sr-only", text: "Every definition of the names asked for" }),
+          el(
+            "thead",
+            {},
+            el(
+              "tr",
+              {},
+              el("th", { text: "Definition" }),
+              el("th", { text: "Kind" }),
+              el("th", { text: "Where" }),
+              el("th", { text: "First line" }),
+            ),
+          ),
+          el(
+            "tbody",
+            {},
+            rows.length
+              ? rows.map((row) =>
+                  el(
+                    "tr",
+                    { class: "defs-row" },
+                    el("td", { class: "sym" }, el("code", { text: row.qualified })),
+                    el("td", { text: row.kind }),
+                    el("td", {
+                      class: "where path",
+                      title: `${row.path}:${row.start_line}-${row.end_line}`,
+                      text: `${shortPath(row.path)}:${row.start_line}`,
+                    }),
+                    el("td", {}, el("code", { class: "one-line", text: row.signature })),
+                  ),
+                )
+              : el("tr", {}, el("td", { colspan: "4", class: "muted", text: "No definition of any of these names." })),
+          ),
+        ),
+      ),
+    );
+  }
+
   /** Apply whatever is in the scope box. */
   function applyScope() {
     const value = scopeInput.value.trim();
+    defsCard.hidden = true;
+    if (value.includes(",")) {
+      const names = value.split(",").map((n) => n.trim()).filter(Boolean).slice(0, 20);
+      showDefinitions(names);
+      return names.length ? load({ name: names[0] }) : load({});
+    }
     if (!value) return load({});
     // A path fragment scopes; anything else is read as a symbol to centre on.
     load(value.includes("/") || value.includes(".") ? { path: value } : { name: value });
@@ -2540,7 +2622,7 @@ async function graphView() {
 
   const scopeInput = el("input", {
     type: "search",
-    placeholder: "Scope to a path, or find a symbol",
+    placeholder: "Scope to a path, or find symbols: a, b, c",
     // Every other control on this page applies on a click, so a text field
     // that silently waits for Enter reads as broken. It still takes Enter, and
     // now it also says so and has a button.
@@ -2626,6 +2708,7 @@ async function graphView() {
         ),
         storeChips.length > 1 ? el("div", { class: "filters" }, storeChips) : null,
       ),
+      defsCard,
     ),
     el(
       "div",
@@ -3626,8 +3709,11 @@ function agentsCard() {
  * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
  * it is pending the dialog says so, and an error is shown inside it rather
  * than behind it. */
-function ask({ title, body, extra, confirm, tone, run }) {
-  const dialog = el("dialog", { class: "modal" });
+/* A confirm dialog. `lead` stays under the title and `tail` above the
+ * buttons; only `extra` between them scrolls, so a long list of findings
+ * never takes the file it is about, or the choice, off the screen. */
+function ask({ title, body, extra, lead, tail, confirm, tone, run, wide }) {
+  const dialog = el("dialog", { class: wide ? "modal wide" : "modal" });
   const problem = el("div", { class: "note" });
   const go = el("button", {
     class: tone === "bad" ? "button danger" : "button",
@@ -3652,10 +3738,9 @@ function ask({ title, body, extra, confirm, tone, run }) {
   });
   fill(
     dialog,
-    el("h2", { class: "card-title", text: title }),
-    el("p", { class: "subtitle", text: body }),
-    extra || null,
-    problem,
+    el("div", { class: "modal-head" }, el("h2", { class: "card-title", text: title }), el("p", { class: "subtitle", text: body }), lead || null),
+    extra ? el("div", { class: "modal-body" }, extra) : null,
+    el("div", { class: "modal-foot" }, tail || null, problem),
     el(
       "div",
       { class: "actions" },
@@ -4468,9 +4553,15 @@ async function filesView() {
         key: "path",
         label: "Path",
         className: "path",
-        // One line, with the whole path on the shared tooltip: a wrapped path
-        // makes every row a different height and the column unreadable.
-        render: (f) => pathCell(f.path),
+        // One line, under the store's root, with the whole path on the
+        // shared tooltip: the machine's absolute path took the column's width
+        // and truncated to the part every row had in common.
+        render: (f) => {
+          const cell = pathCell(rootRel(f.path, f.store));
+          cell.title = f.path;
+          cell.dataset.tip = f.path;
+          return cell;
+        },
       },
       {
         key: "store",
@@ -4645,6 +4736,56 @@ async function filesView() {
 
   load();
 
+  const indexedPane = el(
+    "div",
+    { class: "rows files-pane" },
+    el(
+      "div",
+      { class: "files-filters" },
+      el(
+        "div",
+        { class: "filters" },
+        el(
+          "div",
+          { class: "field wide" },
+          icon(ICONS.search, 15),
+          labelled("files-filter", "Filter files by path glob", pathInput),
+        ),
+      ),
+      el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Type" }), extChips),
+      el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Store" }), storeFilter.node),
+    ),
+    bulkBar,
+    bulkNote,
+    holder,
+    footnote,
+  );
+  const treePane = filesTree(storeFilter);
+  const decisionsTab = decisionsPane();
+  const panes = [
+    ["Indexed", indexedPane, null],
+    ["Tree", treePane.node, treePane.load],
+    ["Decisions", decisionsTab.node, decisionsTab.load],
+  ];
+  const panel = el("div", { class: "tab-panel" });
+  const tabButtons = panes.map(([label], i) =>
+    el("button", {
+      class: "tab",
+      type: "button",
+      text: label,
+      "data-tab": label,
+      "aria-pressed": String(i === 0),
+      onclick: () => showPane(i),
+    }),
+  );
+  function showPane(index) {
+    tabButtons.forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
+    fill(panel, panes[index][1]);
+    if (panes[index][2]) panes[index][2]();
+  }
+  showPane(state.filesTab === "decisions" ? 2 : state.filesTab === "tree" ? 1 : 0);
+  state.filesTab = "";
+
   return el(
     "div",
     { class: "view" },
@@ -4654,24 +4795,355 @@ async function filesView() {
       "What is indexed, and which reader parsed it — so “not indexed” and “not discussed” stop looking the same.",
       { pill: summary },
     ),
-    el(
-      "div",
-      { class: "filters" },
-      el(
-        "div",
-        { class: "field wide" },
-        icon(ICONS.search, 15),
-        labelled("files-filter", "Filter files by path glob", pathInput),
-      ),
-      extChips,
-    ),
-    storeFilter.node,
-    bulkBar,
-    bulkNote,
-    holder,
-    footnote,
+    el("div", { class: "tabs" }, tabButtons),
+    panel,
     announcer,
   );
+}
+
+/* The tree view: an editor's explorer over what each store holds.
+ *
+ * One level at a time, read when a folder is opened, so a tree of a hundred
+ * thousand files costs what the open folders hold. Each store is a root; a
+ * folder shows how many files it holds, a file its lines and symbols, and
+ * what sits on disk but is not indexed is listed greyed with why. The same
+ * facts `semlith_files {tree: true}` gives an agent as text. */
+const FILE_TYPES = [
+  [/\.rs$/, "ft-rust"],
+  [/\.(m?js|cjs|jsx)$/, "ft-js"],
+  [/\.tsx?$/, "ft-ts"],
+  [/\.py$/, "ft-py"],
+  [/\.(md|markdown|txt|rst)$/, "ft-md"],
+  [/\.(json|ya?ml|toml|lock)$/, "ft-data"],
+  [/\.(html?|css|scss|svg)$/, "ft-web"],
+  [/\.(png|jpe?g|gif|webp|ico)$/, "ft-image"],
+];
+const fileType = (name) => (FILE_TYPES.find(([re]) => re.test(name.toLowerCase())) || [null, ""])[1];
+
+function filesTree(storeFilter) {
+  const sort = "name";
+  const list = el("ul", { role: "tree", "aria-label": "Indexed files, by folder" });
+  const box = el("div", { class: "card ftree" }, list);
+
+  const url = (store, dir) => {
+    const params = new URLSearchParams({ tree: "1", format: "json", sort });
+    if (dir) params.set("dir", dir);
+    if (store) params.append("store", store);
+    else for (const name of storeFilter.stores()) params.append("store", name);
+    return `/api/files?${params}`;
+  };
+
+  function row(level, kind, name, meta, extra) {
+    const guides = [el("span", { class: "indent lead" })];
+    for (let i = 1; i < level; i++) guides.push(el("span", { class: "indent" }));
+    const dir = kind === "dir" || kind === "root";
+    return el(
+      "div",
+      {
+        class: `ftree-row ${kind === "root" ? "dir root" : kind}${extra?.cls ? ` ${extra.cls}` : ""}`,
+        role: "treeitem",
+        "aria-level": String(level),
+        "aria-expanded": dir ? "false" : null,
+        tabindex: "-1",
+        title: extra?.title || null,
+      },
+      guides,
+      el("span", { class: "chev" }, dir ? icon(ICONS.chevron, 12) : null),
+      el(
+        "span",
+        { class: `ficon${kind === "file" ? ` ${fileType(name)}` : ""}` },
+        icon(dir ? ICONS.folder : ICONS.file, 15),
+      ),
+      el("span", { class: "fname", text: name }),
+      meta ? el("span", { class: "fmeta", text: meta }) : null,
+    );
+  }
+
+  /* A folder: its row, and its children under it, read the first time it
+   * opens. `where` is the store and root the folder belongs to. */
+  function folder(where, dirPath, name, meta, level, kind, preload) {
+    const head = row(level, kind, name, meta, { title: `${where.root}/${dirPath}`.replace(/\/$/, "") });
+    const kids = el("ul", { role: "group", hidden: "" });
+    const item = el("li", {}, head, kids);
+    let loaded = false;
+    const glyph = head.querySelector(".ficon");
+    async function open(want) {
+      const on = want === undefined ? kids.hidden : want;
+      head.setAttribute("aria-expanded", String(on));
+      kids.hidden = !on;
+      fill(glyph, icon(on ? ICONS.folderOpen : ICONS.folder, 15));
+      if (!on || loaded) return;
+      loaded = true;
+      fill(kids, el("li", { class: "ftree-more", text: "Reading…" }));
+      try {
+        const data = await api(url(where.store, dirPath));
+        const mine = (data.roots || []).find((r) => r.store === where.store && r.root === where.root);
+        children(kids, where, dirPath, mine, level + 1);
+      } catch (e) {
+        loaded = false;
+        fill(kids, el("li", { class: "ftree-more", text: e.message }));
+      }
+    }
+    head.addEventListener("click", () => open());
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      } else if (e.key === "ArrowRight") open(true);
+      else if (e.key === "ArrowLeft") open(false);
+    });
+    if (preload) {
+      loaded = true;
+      children(kids, where, dirPath, preload, level + 1);
+      head.setAttribute("aria-expanded", "true");
+      kids.hidden = false;
+      fill(glyph, icon(ICONS.folderOpen, 15));
+    }
+    return item;
+  }
+
+  function children(ul, where, dirPath, entry, level) {
+    const items = [];
+    const under = (name) => (dirPath ? `${dirPath}/${name}` : name);
+    for (const d of entry?.dirs || []) {
+      items.push(folder(where, under(d.name), d.name, `${n(d.files)} file${d.files === 1 ? "" : "s"}`, level, "dir"));
+    }
+    for (const f of entry?.files || []) {
+      const meta = f.lines ? `${n(f.lines)} lines · ${n(f.symbols)} symbol${f.symbols === 1 ? "" : "s"}` : `${n(f.chunks)} chunks`;
+      items.push(el("li", {}, row(level, "file", f.name, meta, { cls: f.stale ? "stale" : "", title: `${where.root}/${under(f.name)}` })));
+    }
+    for (const o of entry?.not_indexed || []) {
+      items.push(el("li", {}, row(level, "file", o.name, `not indexed — ${o.why}`, { cls: "off", title: `${where.root}/${under(o.name)}` })));
+    }
+    if (entry?.more) items.push(el("li", { class: "ftree-more", text: `+ ${n(entry.more)} more in this folder` }));
+    if (!items.length) items.push(el("li", { class: "ftree-more", text: "Empty." }));
+    fill(ul, items);
+  }
+
+  async function load() {
+    fill(list, el("li", { class: "ftree-more", text: "Reading…" }));
+    let data;
+    try {
+      data = await api(url(null, ""));
+    } catch (e) {
+      fill(list, el("li", { class: "ftree-more", text: e.message }));
+      return;
+    }
+    const roots = data.roots || [];
+    if (!roots.length) {
+      fill(list, el("li", { class: "ftree-more", text: "Nothing indexed yet." }));
+      return;
+    }
+    fill(
+      list,
+      roots.map((r) => {
+        const where = { store: r.store, root: r.root };
+        const leaf = r.root.split("/").filter(Boolean).pop() || r.root;
+        const label = leaf === r.store ? r.store : `${r.store} · ${leaf}`;
+        return folder(where, "", label, null, 1, "root", r);
+      }),
+    );
+  }
+
+  // Folders first, then files, by name, as an editor's explorer orders them.
+  const node = box;
+  return { node, load };
+}
+
+/* Decisions already made about files the scan held back (2.5): files a
+ * person accepted, redacted or as-is, files they refused, and files the scan
+ * let through because every match is a declared test dummy. Each one can be
+ * undone here, one file at a time. New decisions are made on the Index page
+ * after a scan; what was not indexed and needs nothing is said there too. */
+const CLASS_LABELS = {
+  content: "secret-shaped value",
+  credential: "credential file",
+  policy: "policy limit",
+  unindexable: "not indexable",
+  excluded: "your exclusions",
+  dummy: "test dummies",
+};
+
+function decisionsPane() {
+  const node = el("div", { class: "rows files-pane decisions" });
+
+  function refuseDummy(store, row) {
+    const reviewed = el("input", { type: "checkbox", id: "reviewed-file" });
+    ask({
+      title: "Refuse this file?",
+      body: "Every match in it is a declared test dummy, so it was indexed. Refusing takes it out of this store until you revoke the decision.",
+      lead: dialogPath(row.path, store),
+      extra: row.matches && row.matches.length ? findingsList(row.matches) : null,
+      tail: el("label", { class: "reviewed", for: "reviewed-file" }, reviewed, el("span", { text: "I have reviewed this file" })),
+      confirm: "Refuse this file",
+      tone: "bad",
+      wide: true,
+      run: async () => {
+        if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
+        await post("/api/refused/accept", { store, path: row.path, mode: "refused", reviewed: true });
+        await load();
+      },
+    });
+  }
+
+  function revoke(store, row) {
+    ask({
+      title: "Revoke this decision?",
+      body:
+        row.accepted === "refused"
+          ? "The file is indexed again at the next run, as a test-dummy file."
+          : "The file leaves the store and is refused again with today's reasons; the next scan offers it for a decision.",
+      lead: dialogPath(row.path, store),
+      confirm: "Revoke",
+      tone: "bad",
+      wide: true,
+      run: async () => {
+        await post("/api/refused/revoke", { store, path: row.path });
+        await load();
+      },
+    });
+  }
+
+  const decisionLabel = (row) =>
+    row.accepted === "refused"
+      ? "refused by you"
+      : row.accepted === "redacted"
+        ? "accepted, redacted"
+        : row.accepted
+          ? "accepted as-is"
+          : "let through";
+
+  function table(store, rows) {
+    return dataTable({
+      className: "w-decisions",
+      caption: `Decisions about files in ${store}`,
+      rows,
+      columns: [
+        {
+          key: "path",
+          label: "File",
+          value: (r) => rootRel(r.path, store),
+          render: (r) => pathCell(rootRel(r.path, store), "path"),
+        },
+        {
+          key: "decision",
+          label: "Decision",
+          value: decisionLabel,
+          render: (r) => el("span", { class: r.accepted && r.accepted !== "refused" ? "pill good" : "pill", text: decisionLabel(r) }),
+        },
+        { key: "rule", label: "Why it was held back", sortable: false, className: "narrow-drop", render: (r) => lineCell(r.class === "dummy" ? "every match is a declared test dummy" : r.rule) },
+        {
+          key: "confidence",
+          label: "Likely real",
+          className: "num",
+          value: (r) => (r.confidence == null ? -1 : r.confidence),
+          render: (r) => (r.confidence == null ? "—" : `${r.confidence} %`),
+        },
+        {
+          key: "action",
+          label: "",
+          sortable: false,
+          className: "decide-col",
+          render: (r) =>
+            r.accepted
+              ? el("button", { class: "button secondary small", type: "button", text: "Revoke", onclick: () => revoke(store, r) })
+              : el("button", { class: "button secondary small", type: "button", text: "Refuse instead", onclick: () => refuseDummy(store, r) }),
+        },
+      ],
+    }).node;
+  }
+
+  async function load() {
+    fill(node, el("p", { class: "subtitle", text: "Reading…" }));
+    let data;
+    try {
+      data = await api("/api/refused");
+    } catch (e) {
+      fill(node, error(e.message));
+      return;
+    }
+    const blocks = [
+      el("p", {
+        class: "subtitle",
+        text: "Files you accepted or refused, and files let through because every match is a test dummy. Undo any one of them here; new decisions are made on the Index page after a scan.",
+      }),
+    ];
+    for (const store of data.stores || []) {
+      const rows = (store.rows || []).filter((r) => r.accepted || r.class === "dummy");
+      if (!rows.length) continue;
+      blocks.push(el("h2", { class: "section-title", text: store.store }));
+      blocks.push(table(store.store, rows));
+    }
+    if (blocks.length === 1) {
+      blocks.push(el("div", { class: "card pad" }, empty("No decisions yet. When a scan holds a file back, the Index page asks about it.")));
+    }
+    fill(node, ...blocks);
+  }
+  return { node, load };
+}
+
+/* What the scanner matched in one file, for a decision dialog: each value
+ * masked, what kind it looked like and where, how likely it is to be real,
+ * and the signals behind that number on a line of their own. One font per
+ * role, so the list reads as a table and not as a sentence. */
+function findingsList(matches) {
+  const signals = (m) =>
+    (m.signals || []).map((s) => `${s.name} ${s.effect === "up" ? "↑" : "↓"} ${s.detail}`).join(" · ");
+  return el(
+    "ul",
+    { class: "findings" },
+    (matches || []).map((m) =>
+      el(
+        "li",
+        {},
+        el(
+          "div",
+          { class: "finding-head" },
+          el("code", { class: "finding-value", text: m.masked }),
+          el("span", { class: "finding-kind", text: `${m.kind} · line ${m.line}` }),
+          el("span", { class: "spacer" }),
+          el("strong", { class: "finding-conf", text: `${m.confidence} % likely real` }),
+        ),
+        signals(m) ? el("div", { class: "finding-signals", text: signals(m) }) : null,
+      ),
+    ),
+  );
+}
+
+/** The file a dialog is about: its path under the store's root, whole and
+ * wrapping, with the machine's absolute path on the tooltip. */
+function dialogPath(path, store) {
+  return el("code", { class: "dialog-path", title: path, text: rootRel(path, store) });
+}
+
+/* One file's decision from the scan panel, with the mode its button chose:
+ * the file, what was found in it, and the tick that says it was read. */
+function reviewOne(store, item, mode, done) {
+  const reviewed = el("input", { type: "checkbox", id: "reviewed-inline" });
+  ask({
+    title: mode === "redacted" ? "Accept with redaction?" : "Accept as-is?",
+    body:
+      mode === "redacted"
+        ? "Each detected value is replaced by [REDACTED:…] before anything is stored. Redaction covers only what the scanner detected."
+        : item.class === "content"
+          ? "The file's full text is indexed, values included."
+          : `${item.rule}. Accepting indexes it anyway.`,
+    lead: dialogPath(item.path, store),
+    extra: item.matches && item.matches.length ? findingsList(item.matches) : null,
+    tail: el(
+      "label",
+      { class: "reviewed", for: "reviewed-inline" },
+      reviewed,
+      el("span", { text: "I have reviewed this file" }),
+    ),
+    confirm: "Accept this file",
+    wide: true,
+    run: async () => {
+      if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
+      await post("/api/refused/accept", { store, path: item.path, mode, reviewed: true });
+      done();
+    },
+  });
 }
 
 // ------------------------------------------------------- read and pattern
@@ -4983,7 +5455,7 @@ async function searchView() {
    * person retype it somewhere else to see the other shape of the answer is
    * how two pages end up disagreeing about what the store says. */
   let view = "results";
-  const viewPills = ["results", "brief"].map((name) =>
+  const viewPills = ["results", "brief", "exact"].map((name) =>
     el("button", {
       class: "seg",
       type: "button",
@@ -5113,6 +5585,7 @@ async function searchView() {
       twoStage.classList.add("one-stage");
       return runBrief(query);
     }
+    if (view === "exact") return runExact(query);
 
     const mine = ++generation;
     const params = new URLSearchParams({ query, k: String(k), prefer });
@@ -5321,6 +5794,106 @@ async function searchView() {
    * found a span, and that an edge came from the graph -- are the tool's own,
    * because a page that decided for itself which list found something would be
    * a second classifier disagreeing with the one that ranked the answer. */
+  /* `semlith_search {exact: true}`: every indexed line matching the query, as
+   * grep -E finds it, grouped by file, each row naming the definition it sits
+   * in. Opening a row reads that definition whole, which is what a grep user
+   * opens the file for. */
+  async function runExact(query) {
+    const mine = ++generation;
+    const params = new URLSearchParams({ query, exact: "1" });
+    for (const store of picker.stores()) params.append("store", store);
+    const lang = langField.value.trim();
+    const path = pathField.value.trim();
+    if (lang) params.append("lang", lang);
+    if (path) params.append("path", path);
+    shapeHint.hidden = true;
+    meta.textContent = "searching…";
+    let data;
+    try {
+      data = await api(`/api/search?${params}`);
+    } catch (e) {
+      if (mine !== generation) return;
+      fill(results, error(e.message));
+      showBody(null, "");
+      fill(footer);
+      meta.textContent = "";
+      return;
+    }
+    if (mine !== generation) return;
+    const matches = data.matches || [];
+    meta.textContent = `${matches.length} line${matches.length === 1 ? "" : "s"} · ${n(data.files || 0)} files searched`;
+    if (!matches.length) {
+      showBody(null, "");
+      fill(footer);
+      fill(results, empty("No indexed line matches that. A query that is not a valid regular expression is searched as literal text."));
+      return;
+    }
+    const groups = [];
+    for (const m of matches) {
+      const found = groups.find((g) => g.path === m.path && g.store === m.store);
+      if (found) found.rows.push(m);
+      else groups.push({ path: m.path, store: m.store, rows: [m] });
+    }
+    fill(
+      results,
+      groups.map((group) =>
+        el(
+          "div",
+          { class: "locate-group" },
+          el(
+            "div",
+            { class: "locate-file" },
+            el("span", { class: "file", "data-tip": group.path, text: shortPath(group.path) }),
+            group.store ? el("span", { class: "from", text: group.store }) : null,
+            el("span", { class: "spacer" }),
+            el("span", { class: "span-summary", text: `${group.rows.length} line${group.rows.length === 1 ? "" : "s"}` }),
+          ),
+          group.rows.map((m) => {
+            const hit = {
+              path: m.path,
+              store: m.store,
+              start_line: m.start_line,
+              end_line: m.end_line,
+              text: m.text,
+              symbol: m.capture || null,
+            };
+            const row = el(
+              "button",
+              {
+                class: "locate-row",
+                type: "button",
+                "aria-pressed": "false",
+                onclick: () => {
+                  for (const other of results.querySelectorAll(".locate-row")) {
+                    other.setAttribute("aria-pressed", "false");
+                  }
+                  row.setAttribute("aria-pressed", "true");
+                  showBody(hit, query);
+                },
+              },
+              el(
+                "span",
+                { class: "row-top" },
+                el("span", { class: "lines", text: String(m.start_line) }),
+                el("span", { class: "sym", text: m.capture || "top level" }),
+              ),
+              el("span", { class: "locate-excerpt", text: m.text }),
+            );
+            return row;
+          }),
+        ),
+      ),
+    );
+    fill(
+      footer,
+      el("span", { text: `${matches.length} lines · ${groups.length} files` }),
+      data.truncated ? el("span", { class: "truncated", text: `truncated at ${matches.length}` }) : null,
+    );
+    const first = results.querySelector(".locate-row");
+    if (first) first.setAttribute("aria-pressed", "true");
+    showBody(groups[0].rows.length ? { ...groups[0].rows[0], symbol: groups[0].rows[0].capture || null } : null, query);
+  }
+
   async function runBrief(question) {
     const mine = ++generation;
     const params = new URLSearchParams({ question, budget: String(budget()), prefer });
@@ -5381,7 +5954,10 @@ async function searchView() {
               { class: "brief-head brief-row" },
               el("span", { class: "path", text: `${shortPath(span.path)}:${span.start_line}-${span.end_line}` }),
               span.symbol ? el("span", { class: "sym", text: span.symbol }) : null,
-              el("span", { class: "brief-dropped", text: "text left out for the budget" }),
+              el("span", {
+                class: "brief-dropped",
+                text: span.over_budget ? "text left out for the budget" : "text: top span only",
+              }),
               el("span", { class: "brief-lists" }, fusionBadges(span.lists)),
             ),
       );
@@ -6100,6 +6676,7 @@ function spell(ms) {
 
 const RUN_TONE = {
   queued: "warn",
+  review: "warn",
   running: "good",
   pausing: "warn",
   paused: "warn",
@@ -6112,6 +6689,8 @@ const RUN_TONE = {
 
 const RUN_WORD = {
   queued: "queued",
+  // Scanned, and waiting for a person before anything is embedded (2.7).
+  review: "waiting for review",
   running: "indexing",
   // Said the moment Pause is pressed: the engine stops at its next batch, and
   // a button that answers nothing until then reads as a button that failed.
@@ -6147,6 +6726,26 @@ function runCard(run, controls) {
   const problem = el("div", { class: "note bad" }, "");
   // What the run's stop did to its store, when it was asked to delete it.
   const outcome = el("div", { class: "note" }, "");
+  /* The scan phase's plan (2.7), on one line. What a person decides about it
+   * is the page's scan panel above the cards, not this card's.
+   *
+   * Its node is made once and only its words and `hidden` change after, so
+   * no poll rebuilds the line (drive finding 8.3). */
+  const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
+  function paintPlan(next) {
+    const plan = next.plan;
+    planLine.hidden = !plan;
+    if (!plan) return;
+    const not = Object.values(plan.not_indexed || {}).reduce((a, b) => a + b, 0);
+    const review = (plan.review || []).length;
+    setText(
+      planLine,
+      next.status === "review"
+        ? `scanned: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · waiting for Start indexing`
+        : `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · ${n(not)} not indexed · ${n(review)} needed review`,
+    );
+  }
+
   /** The last reading, so a control's answer can move the card before the
    * next poll does. */
   let last = run;
@@ -6207,6 +6806,7 @@ function runCard(run, controls) {
 
   function absorb(next) {
     last = next;
+    paintPlan(next);
     shown = next.elapsed_ms || 0;
     readAt = Date.now();
     ticking = !!next.ticking;
@@ -6290,7 +6890,7 @@ function runCard(run, controls) {
     // when it turns from Pause to Resume.
     setText(pause, held ? "Resume" : "Pause");
     // Nothing to pause in a run that has not started or is held for a slot.
-    pause.hidden = !live || next.status === "queued" || next.status === "held";
+    pause.hidden = !live || next.status === "queued" || next.status === "held" || next.status === "review";
     // A queued run has embedded nothing, so taking it out of the line costs
     // nothing and is not the same act as stopping one that is going.
     // "Take out of the queue" rather than "Remove": a finished card's Remove
@@ -6349,6 +6949,7 @@ function runCard(run, controls) {
       el("span", { class: "spacer" }),
       pct,
     ),
+    planLine,
     track,
     el(
       "div",
@@ -6715,6 +7316,283 @@ function accelSection() {
   };
 }
 
+/** A path under its store's root, the way the store names it: the
+ * machine's absolute path is on the tooltip, not in the column. */
+function rootRel(path, storeName) {
+  // One spelling for both sides: Windows paths arrive with backslashes, a
+  // `\\?\` verbatim prefix or a drive letter in either case, and a root and
+  // a file under it can differ in all three.
+  const plainPath = (p) => String(p).replace(/\\/g, "/").replace(/^\/\/\?\//, "");
+  const key = (p) => (/^[A-Za-z]:\//.test(p) ? p.toLowerCase() : p);
+  const whole = plainPath(path);
+  const store = (state.stores || []).find((s) => s.name === storeName);
+  const roots = (store?.roots || [])
+    .map((root) => root.path && plainPath(root.path))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  for (const root of roots) {
+    const prefix = root.endsWith("/") ? root : `${root}/`;
+    if (key(whole).startsWith(key(prefix))) return whole.slice(prefix.length);
+  }
+  return whole;
+}
+
+/* What a scan found, before anything is embedded (2.7).
+ *
+ * The runs the Scan button started hold after their scan; this draws every
+ * held run as one answer: a summary of what indexing will do, then the files
+ * that are a person's to decide, one row each with its own buttons, then one
+ * line for what is not indexed and needs nothing. Drawn from the runs the
+ * poll already reads, so a reload, a second tab or a scan started elsewhere
+ * shows the same panel. Rebuilt only when the set of held runs changes: a
+ * poll a second must not redraw buttons under the pointer. */
+const NO_ACTION = new Set(["unindexable", "excluded", "credential"]);
+
+/** A scan's own duration: milliseconds under a second, where most scans
+ * land, and seconds to one decimal above it. */
+function spellScan(seconds) {
+  return seconds < 1 ? `${Math.max(1, Math.round(seconds * 1000))} ms` : `${seconds.toFixed(1)} s`;
+}
+
+function scanPanel() {
+  const node = el("div", { class: "card pad scan-panel", hidden: "" });
+  let drawnFor = "";
+  /** Decisions made on this page before the store's list says so. */
+  const decided = new Map();
+
+  async function paint(runs) {
+    const held = (runs || []).filter((run) => run.status === "review" && run.plan);
+    const key = held.map((run) => run.id).join(",");
+    node.hidden = !held.length;
+    if (!held.length) {
+      drawnFor = "";
+      return;
+    }
+    if (key === drawnFor) return;
+    drawnFor = key;
+    // What each store already remembers deciding, and the files with no
+    // action, both from the one list the store keeps.
+    let refused = { stores: [] };
+    try {
+      refused = await api("/api/refused");
+    } catch {
+      // The panel still works from the plans; only the no-action list and a
+      // decision made in another tab are missing.
+    }
+    if (key !== drawnFor) return;
+    const rowsOf = (store) => (refused.stores || []).find((s) => s.store === store)?.rows || [];
+    draw(held, rowsOf);
+  }
+
+  function draw(held, rowsOf) {
+    const total = (key) => held.reduce((sum, run) => sum + (run.plan[key] || 0), 0);
+    const items = held.flatMap((run) =>
+      (run.plan.review || []).map((item) => ({ ...item, store: run.store })),
+    );
+    const noAction = {};
+    for (const run of held) {
+      for (const [cls, count] of Object.entries(run.plan.not_indexed || {})) {
+        if (NO_ACTION.has(cls)) noAction[cls] = (noAction[cls] || 0) + count;
+      }
+    }
+    const eta = held.every((run) => run.plan.eta_ms != null)
+      ? held.reduce((sum, run) => sum + run.plan.eta_ms, 0)
+      : null;
+
+    const stat = (label, value, hint) =>
+      el(
+        "div",
+        { class: "scan-stat" },
+        el("span", { class: "eyebrow", text: label }),
+        el("strong", { text: value }),
+        hint ? el("span", { class: "meta", text: hint }) : null,
+      );
+    const summary = el(
+      "div",
+      { class: "scan-stats" },
+      stat("To embed", n(total("embed")), bytes(held.reduce((sum, run) => sum + (run.plan.embed_bytes || 0), 0))),
+      stat("Unchanged", n(total("unchanged")), "already indexed"),
+      stat("Need a decision", n(items.length), items.length ? "below" : "nothing to decide"),
+      stat("Not indexed", n(Object.values(noAction).reduce((a, b) => a + b, 0)), "no action needed"),
+      stat("Estimate", eta == null ? "—" : spellTook(eta), eta == null ? "measured once it starts" : "to embed"),
+    );
+    const perStore = held.length > 1
+      ? dataTable({
+          className: "w-scan-stores",
+          caption: "What the scan found in each folder",
+          rows: held,
+          columns: [
+            { key: "store", label: "Store", value: (run) => run.store, render: (run) => run.store },
+            { key: "path", label: "Folder", sortable: false, render: (run) => pathCell((run.paths || [])[0] || "") },
+            { key: "embed", label: "To embed", className: "num", value: (run) => run.plan.embed, render: (run) => n(run.plan.embed) },
+            { key: "unchanged", label: "Unchanged", className: "num", value: (run) => run.plan.unchanged, render: (run) => n(run.plan.unchanged) },
+            { key: "review", label: "Decide", className: "num", value: (run) => (run.plan.review || []).length, render: (run) => n((run.plan.review || []).length) },
+          ],
+        }).node
+      : null;
+
+    const decisionOf = (item) => {
+      if (decided.has(`${item.store}\n${item.path}`)) return decided.get(`${item.store}\n${item.path}`);
+      const row = rowsOf(item.store).find((r) => r.path === item.path);
+      return row && row.accepted ? row.accepted : null;
+    };
+    const decisionCell = (item) => {
+      const cell = el("div", { class: "decide" });
+      const paintCell = () => {
+        const now = decisionOf(item);
+        if (now) {
+          fill(
+            cell,
+            el("span", {
+              class: now === "kept" ? "pill" : "pill good",
+              text: now === "kept" ? "stays refused" : now === "redacted" ? "accepted, redacted" : "accepted as-is",
+            }),
+            now === "kept"
+              ? el("button", {
+                  class: "button secondary small",
+                  type: "button",
+                  text: "Change",
+                  onclick: () => {
+                    decided.delete(`${item.store}\n${item.path}`);
+                    paintCell();
+                  },
+                })
+              : null,
+          );
+          return;
+        }
+        const accept = (mode) => () =>
+          reviewOne(item.store, item, mode, () => {
+            decided.set(`${item.store}\n${item.path}`, mode);
+            paintCell();
+          });
+        fill(
+          cell,
+          item.class === "content"
+            ? el("button", { class: "button small", type: "button", text: "Accept redacted", onclick: accept("redacted") })
+            : null,
+          el("button", {
+            class: item.class === "content" ? "button secondary small" : "button small",
+            type: "button",
+            text: item.class === "content" ? "Accept as-is" : "Accept",
+            onclick: accept("as-is"),
+          }),
+          el("button", {
+            class: "button secondary small",
+            type: "button",
+            text: "Keep refused",
+            onclick: () => {
+              decided.set(`${item.store}\n${item.path}`, "kept");
+              paintCell();
+            },
+          }),
+        );
+      };
+      paintCell();
+      return cell;
+    };
+    const decisions = items.length
+      ? dataTable({
+          className: "w-scan-review",
+          caption: "Files the scan held back, each waiting for a decision",
+          rows: items,
+          columns: [
+            {
+              key: "path",
+              label: "File",
+              value: (item) => rootRel(item.path, item.store),
+              render: (item) => pathCell(rootRel(item.path, item.store), "path"),
+            },
+            held.length > 1 ? { key: "store", label: "Store", className: "meta", value: (item) => item.store, render: (item) => item.store } : null,
+            { key: "rule", label: "Why", sortable: false, className: "narrow-drop", render: (item) => lineCell(item.rule) },
+            {
+              key: "confidence",
+              label: "Likely real",
+              className: "num",
+              value: (item) => (item.confidence == null ? -1 : item.confidence),
+              render: (item) => (item.confidence == null ? "—" : `${item.confidence} %`),
+            },
+            { key: "decide", label: "Decision", sortable: false, className: "decide-col", render: decisionCell },
+          ].filter(Boolean),
+        }).node
+      : el("p", { class: "muted", text: "Nothing here needs a decision." });
+
+    const counts = Object.entries(noAction).filter(([, count]) => count);
+    const listed = el("div", { class: "rows tight", hidden: "" });
+    const toggle = el("button", {
+      class: "button secondary small",
+      type: "button",
+      text: "Show files",
+      "aria-expanded": "false",
+      onclick: () => {
+        const open = listed.hidden;
+        listed.hidden = !open;
+        toggle.setAttribute("aria-expanded", String(open));
+        setText(toggle, open ? "Hide files" : "Show files");
+        if (open && !listed.firstChild) {
+          const rows = held.flatMap((run) =>
+            rowsOf(run.store)
+              .filter((row) => NO_ACTION.has(row.class) && !row.accepted)
+              .map((row) => ({ ...row, store: run.store })),
+          );
+          fill(
+            listed,
+            rows.length
+              ? dataTable({
+                  className: "w-scan-skipped",
+                  caption: "Files not indexed that need no decision",
+                  rows,
+                  columns: [
+                    { key: "path", label: "File", value: (row) => rootRel(row.path, row.store), render: (row) => pathCell(rootRel(row.path, row.store)) },
+                    { key: "class", label: "Kind", value: (row) => row.class, render: (row) => el("span", { class: `pill class-${row.class}`, text: CLASS_LABELS[row.class] || row.class }) },
+                    { key: "rule", label: "Why", sortable: false, render: (row) => lineCell(row.rule) },
+                  ],
+                }).node
+              : el("p", { class: "muted", text: "The list is written when the run ends; the counts above are the scan's." }),
+          );
+        }
+      },
+    });
+    const skipped = counts.length
+      ? el(
+          "div",
+          { class: "scan-skipped" },
+          el("span", {
+            class: "meta",
+            text: `${counts.map(([cls, count]) => `${n(count)} ${CLASS_LABELS[cls] || cls}`).join(" · ")} — not indexed, no action needed`,
+          }),
+          toggle,
+        )
+      : null;
+
+    fill(
+      node,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: held.length === 1 ? `Scanned ${held[0].store}` : `Scanned ${n(held.length)} folders` }),
+        el("span", { class: "spacer" }),
+        el("span", {
+          class: "mono-chip",
+          text: `scanned in ${spellScan(held.reduce((sum, run) => sum + (run.plan.seconds || 0), 0))} · ready to index`,
+        }),
+      ),
+      summary,
+      perStore,
+      el("h3", { class: "eyebrow", text: items.length ? `Needs your decision · ${n(items.length)}` : "Needs your decision" }),
+      decisions,
+      skipped,
+      listed,
+      el("p", {
+        class: "note",
+        text: "Start indexing embeds the plan. A file left undecided stays refused, and any decision can be undone later on Files ▸ Decisions. Credential files are never offered.",
+      }),
+    );
+  }
+
+  return { node, paint, held: () => (state.runs?.runs || []).filter((run) => run.status === "review") };
+}
+
 async function indexView() {
   await refreshStores();
   const first = await refreshRuns();
@@ -6835,6 +7713,7 @@ async function indexView() {
 
   function paint(data) {
     const runs = data?.runs || [];
+    paintStart(runs);
     const seen = new Set();
     for (const run of runs) {
       seen.add(run.id);
@@ -7089,7 +7968,7 @@ async function indexView() {
 
   const target = el(
     "select",
-    { class: "field", "aria-label": "Where to index into" },
+    { class: "select", "aria-label": "Where to index into" },
     el("option", { value: "each", text: "each folder becomes its own store" }),
     liveStores().map((store) =>
       el("option", { value: store.name, text: `add to ${store.name}` }),
@@ -7258,7 +8137,7 @@ async function indexView() {
     ),
     el("p", {
       class: "subtitle",
-      text: "Name a folder above and press Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
+      text: "Name a folder above and press Scan: the plan comes first, then Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
     }),
     el("p", {
       class: "note",
@@ -7266,7 +8145,26 @@ async function indexView() {
     }),
   );
 
-  const start = el("button", { class: "button", type: "button", text: "Start indexing" });
+  /* One button for the whole flow (2.7): it reads Scan, and a scan holds
+   * its runs after the scan phase; while any run is held it reads Start
+   * indexing, which queues them. A clean scan waits for the press too, so
+   * nothing is ever embedded before its plan has been on screen. */
+  const start = el("button", { class: "button", type: "button", text: "Scan" });
+  const discard = el("button", {
+    class: "button secondary",
+    type: "button",
+    text: "Discard scan",
+    hidden: "",
+  });
+  const scan = scanPanel();
+  let scanning = false;
+  function paintStart(runs) {
+    const held = (runs || []).filter((run) => run.status === "review");
+    setText(start, scanning ? "Scanning…" : held.length ? "Start indexing" : "Scan");
+    start.disabled = scanning;
+    discard.hidden = !held.length || scanning;
+    scan.paint(runs);
+  }
   const addButton = el("button", {
     // The accent shape, like `Start indexing` beside it. Both of them begin
     // work on the machine, and one of the two reading as a quiet secondary
@@ -7284,11 +8182,12 @@ async function indexView() {
       const started = (answer.runs || []).filter((run) => run.run !== undefined);
       const refused = (answer.runs || []).filter((run) => run.error);
       transient = true;
-      say(
-        `${started.length} run${started.length === 1 ? "" : "s"} queued${
-          refused.length ? `; ${refused.length} refused` : ""
-        }.`,
-      );
+      const many = started.length === 1 ? "" : "s";
+      const done =
+        body.review === "always"
+          ? `Scanned ${started.length} folder${many}: the plan is below. Press Start indexing when it looks right`
+          : `${started.length} run${many} queued`;
+      say(`${done}${refused.length ? `; ${refused.length} refused` : ""}.`);
       if (refused.length) {
         complain(refused.map((run) => `${run.path}: ${run.error}`).join("; "));
       }
@@ -7305,16 +8204,48 @@ async function indexView() {
     }
   }
 
-  start.addEventListener("click", () => {
+  start.addEventListener("click", async () => {
+    const held = scan.held();
+    if (held.length) {
+      start.disabled = true;
+      try {
+        for (const run of held) {
+          await post("/api/index/control", { store: run.store, run: run.id, action: "start" });
+        }
+        transient = true;
+        say(`${held.length} run${held.length === 1 ? "" : "s"} queued.`);
+      } catch (e) {
+        complain(e.message);
+      }
+      await refreshRuns();
+      paintStart(state.runs?.runs);
+      return;
+    }
     const paths = field.value
       .split("\n")
       .map((path) => path.trim())
       .filter(Boolean);
     if (!paths.length) {
-      complain("Give a path to index, or choose a folder.", field);
+      complain("Give a path to scan, or choose a folder.", field);
       return;
     }
-    begin("/api/index", { path: paths, store: target.value });
+    scanning = true;
+    paintStart(state.runs?.runs);
+    await begin("/api/index", { path: paths, store: target.value, review: "always" });
+    scanning = false;
+    paintStart(state.runs?.runs);
+  });
+
+  discard.addEventListener("click", async () => {
+    for (const run of scan.held()) {
+      // A folder that had no store before its scan leaves none behind.
+      await control(run.store, "stop", run.id, run.files_before === 0 ? { delete: true } : {});
+      await control(run.store, "remove", run.id);
+    }
+    say("Scan discarded.");
+    await refreshStores();
+    await refreshRuns();
+    paintStart(state.runs?.runs);
   });
 
   addButton.addEventListener("click", async () => {
@@ -7392,17 +8323,16 @@ async function indexView() {
       el("span", { class: "prefix", text: "paths" }),
       labelled("index-path", "Paths to index, one per line", field),
     ),
+    /* Two groups on one line: the ways to choose what to read on the left,
+     * and where it goes and the button that reads it on the right, kept
+     * together when the line wraps. */
     el(
       "div",
-      { class: "filters" },
-      folderButton,
-      projectsButton,
-      urlButton,
-      settingsButton,
-      target,
-      start,
-      note,
+      { class: "index-bar" },
+      el("div", { class: "index-bar-group" }, folderButton, projectsButton, urlButton, settingsButton),
+      el("div", { class: "index-bar-group end" }, target, discard, start),
     ),
+    note,
     el(
       "div",
       { class: "scroller" },
@@ -7446,6 +8376,8 @@ async function indexView() {
         ),
         urlNote,
       ),
+      /* What the scan found, first: it is waiting on the person reading. */
+      scan.node,
       queueCard,
       settingsCard,
       /* Then the run itself. */
@@ -8413,7 +9345,9 @@ async function doctorView() {
   const steering = (r) => {
     const parts = [];
     if (r.skill && r.skill !== "paste") parts.push(`skill ${r.skill === "present" ? "linked" : r.skill}`);
-    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}`);
+    if (r.hook && r.hook !== "paste") parts.push(`hook ${r.hook}${r.hook_mode ? ` (${r.hook_mode})` : ""}`);
+    if (r.always_load !== undefined) parts.push(r.always_load ? "always loaded" : "alwaysLoad missing");
+    if (r.explorer !== undefined) parts.push(r.explorer ? "research agent" : "no research agent");
     if (r.rules && r.rules !== "paste") parts.push(`rule ${r.rules}`);
     return parts;
   };
@@ -10495,12 +11429,22 @@ async function impactView() {
       "tr",
       { class: "impact-row" },
       el("td", { class: "sym" }, el("code", { title: row.name, text: row.name })),
-      // The whole path in the title, because the cell truncates it.
-      el("td", {
-        class: "where path",
-        title: `${row.path}:${row.line}`,
-        text: `${shortPath(row.path)}:${row.line}`,
-      }),
+      // The call site, where the store recorded one: the line to open to see
+      // the call, which can sit hundreds of lines below the definition. An
+      // edge an older binary wrote has none, and the cell says so rather
+      // than passing the definition off as the call. The whole path is in the
+      // title, because the cell truncates it.
+      row.at
+        ? el("td", {
+            class: "where path",
+            title: `${row.path}:${row.at} · call in ${row.name}, defined at line ${row.line}`,
+            text: `${shortPath(row.path)}:${row.at}`,
+          })
+        : el("td", {
+            class: "where path",
+            title: `${row.path}:${row.line} · no call-site line in this store; a re-index adds it`,
+            text: `${shortPath(row.path)}:${row.line} (definition)`,
+          }),
       el(
         "td",
         { class: "via" },
@@ -10610,6 +11554,12 @@ async function impactView() {
     fill(
       results,
       el("p", { class: "headline", text: data.headline }),
+      impact.unqualified
+        ? el("p", {
+            class: "note",
+            text: `Nothing named ${name} matched that owner, so this is every definition of the bare name.`,
+          })
+        : null,
       allEdges
         ? el("p", {
             class: "note hypothesis",
@@ -10695,9 +11645,7 @@ async function impactView() {
   return el(
     "div",
     { class: "view" },
-    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
-      pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
-    }),
+    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run."),
     /* Two columns, as the design lays the page out: the answer on the left,
      * the two questions that follow from it on the right, and the canvas at
      * the top of the right column rather than spanning.

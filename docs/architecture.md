@@ -1035,3 +1035,39 @@ counts its chunks per variant in the meta row `variants`.
 writer drops its session after 60 seconds without embedding and a GPU worker
 exits after 60 idle seconds. Readers share one query session per model. A
 reader panic during extraction fails that file rather than the store's writer.
+
+## What 0.30.0 changed in the graph and the ranking
+
+**Receiver resolution.** The Rust extractor records a method's owner — the
+`impl` or `trait` block around it — in the symbol's `qualified` name
+(`Fleet::search_preferring`), and records a method call's receiver type where
+the source states it: `self` inside `impl T`, a parameter or local declared
+`x: T` (through `&`, `&mut`, `Box`, `Rc`, `Arc` and the lock types), a local
+bound to `T::new()`, `T::open(…)?` or `T { … }`, and a field declared
+`store: T` in the same file. That type becomes the edge's hint. The resolver
+ranks a candidate whose owner is the hinted type above everything else — a
+typed receiver is a statement about which method — and breaks a tie between
+candidates a signal placed by the number of directories each shares with the
+caller, so a call in `src/mcp.rs` means `src/fleet.rs` and not a fixture copy of
+it. A tie nothing placed stays a tie. A call to the same name on a receiver of
+another type is no longer dropped as recursion: `Fleet::search_preferring`
+calling `store.search_preferring()` on a `Semlith` is the one edge that says
+what the fleet delegates to. A store picks all of this up on its next re-index;
+until then qualified names fall back to the file's module.
+
+**Impact walks definitions.** Each hop asks what calls *this definition*,
+through the same resolver, instead of what calls anything with its name. An
+answer is capped at 16 000 characters; rows past the cap collapse into per-file
+counts with a `more:` line. `neighbors` and `symbol` take the same cap.
+
+**Test demotion and copy collapse.** A span under `tests/`, `test/`,
+`fixtures/`, `spec/` or `__tests__/` takes a 10 % demotion, the size of the
+stale one, for a question that does not name tests. Hits whose text is
+byte-identical collapse into the best-ranked one, which names the others as
+`also in N copies`.
+
+**Brief** gives its one text span to the best-ranked span in a code file when
+the question reads as code (an identifier-shaped query, a sentence naming an
+identifier, or one asking about a function, a caller or a type — `code_shaped`,
+beside `shape_of`, so the query is still read in one place), and leaves
+Markdown headings out of its graph lines for such a question.

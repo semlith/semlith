@@ -779,6 +779,21 @@ fn answer(
             .header(TOKEN_HEADER_KEY)
             .is_some_and(|t| same(t.trim(), want));
 
+        // The agent key where it does not reach: known, and forbidden. A 403
+        // rather than the prober's held 401, because the caller already holds
+        // a real key and the answer it needs is "not with that" — the routes
+        // that accept a refused file among them (2.5).
+        let agent_elsewhere = !for_mcp
+            && !by_header
+            && request
+                .header("authorization")
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .is_some_and(|bearer| auth.is_agent(bearer.trim()));
+        if agent_elsewhere {
+            drain_body(&mut reader, &request, started);
+            let _ = write_response(&mut stream, Response::new(403, "text/plain", Vec::new()));
+            return Some(Refusal::Unauthorized);
+        }
         if !by_header && !by_agent {
             // Empty body, and not yet: a prober learns that something refused
             // it, nothing else, and not quickly.

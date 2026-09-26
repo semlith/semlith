@@ -1247,6 +1247,37 @@ them anyway.
 | `GET /api/index/runs`, per run | `bytes` and `bytes_total`: the bytes of the files the run will open, done and in all, with a file being embedded counted in proportion to its chunks. `eta_ms`: milliseconds left at the bytes/s rate over the last 10 s of active time, null until 5 s of embedding has been seen and whenever the run is not `running`. `started_at` and `finished_at`: unix seconds, beside the `submitted` that was already there. `queued_ms`: milliseconds on the run's clock before it started. |
 | `POST /api/store/delete` | Takes `{"stores": ["a", "b"]}` as well as `{"store": "a"}`. Each store in the list goes through the same removal as a single one, and a store that cannot be deleted does not stop the others. The list form answers `{deleted: [...], failed: [{store, error}], message}`: 200 when any store was deleted, and 409 with an `error` naming why when none was. The single form and its answer are unchanged. |
 
+## 0.30.0
+
+**Additive, with two changes to what an answer looks like.** `FORMAT_VERSION`
+does not move. Two tables are added to every store on open, `refusals` and
+`acceptances`, both `IF NOT EXISTS`; an older binary ignores them. A 0.29.x
+binary and a 0.30.0 binary open each other's stores.
+
+| Surface | What changes |
+|---|---|
+| `semlith refused` | New. Lists every not-indexed file with its class and rule; `accept <path> --redact\|--as-is [--yes]`, `revoke <path>` and `refuse <path>` act on one path per call. |
+| `semlith index` | New `--scan-only` (the plan, no embedding) and `--no-review`. On a terminal, a run stops once per reviewable file before embedding; piped, with `--no-review`, or from MCP, it never asks. |
+| `semlith files` | New `--tree`, `--depth`, `--sort name\|size\|symbols\|recent`, `--path`. Without `--tree` the listing is unchanged. |
+| `semlith symbol` | Takes several names; with more than one it prints one row per definition and no rings. |
+| `semlith setup` | New `--hook-mode soft\|gate\|hard` (`--strict` is `gate`) and `--no-agents`. Writes `alwaysLoad` on Claude Code's user-scope entry, the hook matcher `Bash\|Read\|Grep\|Glob` plus a `PostToolUse` entry, and `~/.claude/agents/semlith-explorer.md`. `--no-hooks` removes both hook entries. |
+| `semlith hook` | New `--mode`; `--strict` is kept as `--mode gate`. Reads `Bash`, `Glob` and `PostToolUse` events. A bounded `Read` of an indexed file is now nudged too. |
+| `semlith doctor` | Reports `alwaysLoad`, the hook mode and the research agent. `--fix` also clears a per-project disable of semlith for the current directory in `~/.claude.json`. |
+| `semlith_symbol` | `name` is no longer required when `names` (up to 20) is given. |
+| `semlith_files` | New `tree`, `depth`, `sort`. |
+| `semlith_impact`, `semlith_neighbors`, `semlith_symbol` | Accept `Type::method`, `module::function` and `Type.method`. Answers are capped at 16 000 characters. Impact rows carry the call-site line. |
+| `semlith_search` (locate), `semlith_read`, impact, neighbors, symbol, files | **Changed:** paths are relative to the store root, which a `root …` line names once at the top, instead of absolute. `semlith_read` resolves such a path against the store's roots. A locate row is one line: `start-end name kind @line · lists | best line`. |
+| `semlith_read` | A name with up to four definitions returns each whole, capped at 32 000 characters; a file edited since indexing is read from disk (scanned, and redacted if accepted that way) and marked. |
+| `semlith_stats` | Languages with fewer than five files collapse into one line. `semlith stats` is unchanged. |
+| MCP `instructions` | Built from the indexed folders, at most 600 bytes; it no longer tells the agent to call `semlith_stats` first. |
+| `symbols.qualified` | **Changed** for Rust methods written by 0.30.0: `Type::name` (the `impl` or `trait` owner) instead of `module::name`. Rows written by an older binary keep theirs until the file is re-indexed. |
+| Secret scan | A match that is a declared test dummy no longer refuses its file; a secret-sounding name assigned a random literal, quoted or not, now does. The first pass under 0.30.0 rescans every file. See `docs/security.md`. |
+| `GET /api/refused`, `POST /api/refused/accept`, `POST /api/refused/revoke` | New. The two writes take one `path`, refuse `paths`, and need the session token. |
+| `POST /api/index` | New `review`: `"always"` holds every run after its scan, even when nothing needs a person (the portal's **Scan**); `true` holds a run only when something is reviewable. New `scan_only` (answers `{plan}` per path, starts nothing), which the portal no longer sends. |
+| `GET /api/index/runs`, per run | New `plan`, and a `review` status for a run held after its scan. |
+| `POST /api/index/control` | `start` queues a held run; `stop` drops one, and with `delete: true` also deletes its store once dropped (the portal sends it only for a store that held no files before the scan). |
+| `GET /api/files` | `tree=1` answers `{tree}` with the text the MCP tool gives. `tree=1&format=json` answers one level instead: `dir` is a folder relative to a root (absolute or climbing with `..` is refused), `store` and `sort` as for the text form, and the answer is `{roots: [{store, root, dir, dirs: [{name, files, chunks, langs}], files: [{name, lines, symbols, chunks, stale, lang}], not_indexed: [{name, why, dir}], more}]}`, one entry per store root that holds `dir`, at most 1 000 entries a level with the rest counted in `more`. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

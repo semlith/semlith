@@ -1130,7 +1130,8 @@ fn no_hooks_removes_the_entry_and_leaves_the_rest_of_the_file_alone() {
     );
 }
 
-/// `--strict` is a different command in the same entry, not a second entry.
+/// `--strict` is a different command in the same entry, not a second entry:
+/// one `PreToolUse` hook in gate mode, beside the one `PostToolUse` entry.
 #[test]
 fn strict_writes_one_hook_rather_than_a_second_one() {
     let machine = Machine::new();
@@ -1143,12 +1144,27 @@ fn strict_writes_one_hook_rather_than_a_second_one() {
     );
 
     let after = std::fs::read_to_string(machine.home.join(".claude/settings.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let ours = |event: &str| {
+        json["hooks"][event]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter(|e| {
+                        e.to_string().contains("semlith") && e.to_string().contains(" hook")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
     assert_eq!(
-        after.matches(" hook").count(),
+        ours("PreToolUse"),
         1,
         "strict left two semlith hooks behind:\n{after}"
     );
-    assert!(after.contains("--strict"), "{after}");
+    assert_eq!(ours("PostToolUse"), 1, "{after}");
+    assert!(after.contains("--mode gate"), "{after}");
+    assert!(after.contains("Bash|Read|Grep|Glob"), "{after}");
 }
 
 /// The rule block is prose in somebody's file, so it waits to be asked for.
@@ -1231,4 +1247,93 @@ fn the_suite_leaves_the_developers_own_client_configuration_alone() {
                 .unwrap_or(true),
         "a fixture skill was linked into the developer's own skill directory"
     );
+}
+
+/// 4.1 and 4.5: a machine set up by 0.29.0 is upgraded in place — the Claude
+/// Code entry gains `alwaysLoad`, the hook matches `Bash|Read|Grep|Glob` and
+/// gains its `PostToolUse` entry — and `--no-hooks` removes both hook entries
+/// and nothing else.
+#[test]
+fn setup_upgrades_a_0_29_entry_with_always_load_and_both_hooks() {
+    let machine = Machine::new();
+    let config = machine.home.join(".claude.json");
+    std::fs::write(
+        &config,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "numStartups": 7,
+            "mcpServers": { "semlith": { "type": "stdio", "command": "/old/semlith", "args": ["mcp"] } },
+            "projects": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let settings = machine.home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Read|Grep","hooks":[{"type":"command","command":"/old/semlith hook"}]},{"matcher":"Write","hooks":[{"type":"command","command":"theirs"}]}]}}"#,
+    )
+    .unwrap();
+
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(
+        after["mcpServers"]["semlith"]["alwaysLoad"], true,
+        "{after}"
+    );
+    assert_eq!(
+        after["numStartups"], 7,
+        "a sibling key was changed: {after}"
+    );
+    let hooks = std::fs::read_to_string(&settings).unwrap();
+    assert!(hooks.contains("Bash|Read|Grep|Glob"), "{hooks}");
+    assert!(
+        hooks.contains("PostToolUse") && hooks.contains("mcp__.*semlith.*"),
+        "{hooks}"
+    );
+    assert!(
+        hooks.contains("theirs"),
+        "somebody else's hook was taken: {hooks}"
+    );
+    assert!(
+        !hooks.contains("Read|Grep\""),
+        "the 0.29.0 matcher is still there: {hooks}"
+    );
+
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--no-hooks"])
+            .status
+            .success()
+    );
+    let hooks = std::fs::read_to_string(&settings).unwrap();
+    assert!(
+        !hooks.contains("semlith"),
+        "--no-hooks left a semlith hook: {hooks}"
+    );
+    assert!(
+        hooks.contains("theirs"),
+        "--no-hooks took somebody else's hook: {hooks}"
+    );
+}
+
+/// 4.8: setup writes the research agent where Claude Code reads subagents,
+/// and `--no-agents` removes it.
+#[test]
+fn setup_writes_the_research_agent_and_no_agents_removes_it() {
+    let machine = Machine::new();
+    std::fs::create_dir_all(machine.home.join(".claude")).unwrap();
+    assert!(machine.setup(&["--yes", "--airgap"]).status.success());
+    let agent = machine.home.join(".claude/agents/semlith-explorer.md");
+    let text = std::fs::read_to_string(&agent).expect("the agent was written");
+    assert!(text.contains("name: semlith-explorer"), "{text}");
+    assert!(
+        machine
+            .setup(&["--yes", "--airgap", "--no-agents"])
+            .status
+            .success()
+    );
+    assert!(!agent.exists(), "--no-agents left the agent behind");
 }

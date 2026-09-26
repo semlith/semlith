@@ -137,16 +137,55 @@ fn the_agent_key_opens_mcp_and_nothing_else() {
     assert!(body.contains("semlith_search"), "no tools listed: {body}");
 
     // The same key at an /api route is refused: a config file cannot rotate a
-    // token, adopt a store or start an upgrade.
-    for route in ["/api/stores", "/api/rotate", "/api/adopt", "/api/upgrade"] {
+    // token, adopt a store, start an upgrade, or accept a file the secret
+    // scan refused. Known and forbidden, so 403 rather than the held 401.
+    for route in [
+        "/api/stores",
+        "/api/rotate",
+        "/api/adopt",
+        "/api/upgrade",
+        "/api/refused",
+        "/api/refused/accept",
+        "/api/refused/revoke",
+    ] {
         let (status, _) = daemon.send(
             "POST",
             route,
             &format!("Authorization: Bearer {key}\r\n"),
-            "{}",
+            r#"{"path": "/x/.env", "mode": "as-is", "reviewed": true}"#,
         );
-        assert_eq!(status, 401, "the agent key reached {route}");
+        assert_eq!(status, 403, "the agent key reached {route}");
     }
+
+    // With the session token the accept route takes one path, never a list.
+    let (status, body) = daemon.with_token(
+        "POST",
+        "/api/refused/accept",
+        r#"{"paths": ["/x/a.rs", "/x/b.rs"], "mode": "as-is", "reviewed": true}"#,
+    );
+    assert_eq!(status, 400, "a list was accepted: {body}");
+    let (status, body) = daemon.with_token(
+        "POST",
+        "/api/refused/accept",
+        r#"{"path": ["/x/a.rs", "/x/b.rs"], "mode": "as-is", "reviewed": true}"#,
+    );
+    assert_eq!(status, 400, "two paths were accepted: {body}");
+    // And no MCP tool accepts: no tool is named for accepting or for the
+    // not-indexed list.
+    let (_, listed) = daemon.with_key(&key, LIST);
+    let json = listed.split("\r\n\r\n").last().unwrap_or("");
+    let tools: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    let names: Vec<&str> = tools["result"]["tools"]
+        .as_array()
+        .map(|t| t.iter().filter_map(|x| x["name"].as_str()).collect())
+        .unwrap_or_default();
+    assert!(names.len() >= 16, "no tools parsed: {json}");
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("accept") || n.contains("refus")),
+        "a tool can accept: {names:?}"
+    );
 
     // And no credential, or the wrong one, opens nothing.
     assert_eq!(daemon.send("POST", "/mcp", "", LIST).0, 401);

@@ -440,19 +440,17 @@ check cli/search/no-verbatim-paths "no \\\\?\\ paths among hits"       c_search_
 
 # ----------------------------------------------------------------------- read
 
-# The snapshot's own copy, named by a suffix only it has. From 0.22.0 the
-# repository carries a pinned snapshot of itself at
-# `tests/fixtures/retrieval/corpus`, so a clone holds both `<corpus>/src/main.rs`
-# and `<corpus>/tests/fixtures/retrieval/corpus/src/main.rs`. Every suffix of
-# the first is also a suffix of the second, so only the second can be named
-# unambiguously by suffix at all — `read` refuses the first by name, which is
-# the documented behaviour and the right one.
+# The repository's own `src/main.rs`, named by a suffix. The pinned snapshot
+# at `tests/fixtures/retrieval/corpus` also holds a `src/main.rs`, and until
+# 0.30.0 it was the only one a suffix could name; from 0.30.0 the repository's
+# `.semlithignore` leaves the snapshot out of a store, so a clone indexes one
+# `src/main.rs` and the short suffix names it.
 #
 # A suffix and not the absolute path, which was tried and works on Linux and
 # macOS and not on Windows: under Git Bash `$corpus` is a POSIX path and the
 # store recorded a Windows one, so nothing matched and the check said "nothing
 # indexed at that span". A suffix is the same string on all three.
-READ_TARGET="retrieval/corpus/src/main.rs"
+READ_TARGET="src/main.rs"
 c_read_span() { semlith read "$READ_TARGET:28-40" | grep -q '.'; }
 c_read_line() { semlith read "$READ_TARGET:30" | grep -q '.'; }
 c_read_symbol() { semlith read "main" | grep -q '.'; }
@@ -671,7 +669,23 @@ c_upgrade_airgap() {
   return 0
 }
 
+# 0.30.0: setup upgrades a Claude Code entry in place with alwaysLoad, and
+# writes the hook matching Bash|Read|Grep|Glob with its PostToolUse entry —
+# into the redirected HOME, never the real one.
+c_setup_always_load() {
+  mkdir -p "$HOME/.claude"
+  printf '{"mcpServers":{"semlith":{"command":"semlith","args":["mcp"]}}}' > "$HOME/.claude.json"
+  semlith setup --yes --airgap --no-service > /dev/null 2>&1 || { echo "setup failed"; return 1; }
+  [ "$(jq -r '.mcpServers.semlith.alwaysLoad' "$HOME/.claude.json")" = "true" ] ||
+    { echo "no alwaysLoad:"; cat "$HOME/.claude.json"; return 1; }
+  jq -e '.hooks.PreToolUse[] | select(.matcher == "Bash|Read|Grep|Glob")' "$HOME/.claude/settings.json" > /dev/null ||
+    { echo "no Bash-aware hook:"; cat "$HOME/.claude/settings.json"; return 1; }
+  jq -e '.hooks.PostToolUse[] | select(.matcher == "mcp__.*semlith.*")' "$HOME/.claude/settings.json" > /dev/null ||
+    { echo "no PostToolUse entry:"; cat "$HOME/.claude/settings.json"; return 1; }
+}
+
 check cli/setup/idempotent     "setup re-runs cleanly"              c_setup_idempotent
+check cli/setup/always-load    "setup writes alwaysLoad and both hooks" c_setup_always_load
 check cli/upgrade/check        "--check exits 0 or 10"              c_upgrade_check
 check cli/upgrade/airgap       "--airgap refuses the network"       c_upgrade_airgap
 
@@ -1122,7 +1136,10 @@ c_delete_on_stop() {
   # a store the user was told was deleted.
   rc_until 120 eval '[ ! -e "$dir" ]' ||
     { echo "the store directory is still there after the stop:"; find "$dir" 2>&1 | head -10; rc_run "$s"; return 1; }
-  jq -e --arg s "$s" '.stores | has($s) | not' "$rc_home/registry.json" > /dev/null ||
+  # Waited for, not read once: the delete renames the directory away before it
+  # removes it and saves the registry last, so the directory is gone a moment
+  # before the registry says so.
+  rc_until 60 eval "jq -e --arg s \"\$s\" '.stores | has(\$s) | not' \"\$rc_home/registry.json\" > /dev/null" ||
     { echo "the registry still names $s:"; jq -c '.stores | keys' "$rc_home/registry.json"; return 1; }
   [ -z "$(rc_counts "$s")" ] || { echo "/api/stores still lists $s"; return 1; }
 }

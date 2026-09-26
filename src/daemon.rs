@@ -243,7 +243,7 @@ enum Work {
 /// files that took three slices ended by announcing the four the third slice
 /// reached. Every one of these is the run's, which is what the summary claims
 /// to be.
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct Tally {
     indexed: u64,
     unchanged: u64,
@@ -254,10 +254,21 @@ struct Tally {
     /// Symbols extracted, carried for the same reason the chunks are: a
     /// slice's own count starts at zero and the page is drawing one run.
     symbols: u64,
+    /// Named per file, and the skips by reason: each slice's report holds
+    /// only its own, so a forwarded `semlith_index` listed one refusal of
+    /// three and reasons that did not add up to the total.
+    refused: Vec<(String, String)>,
+    failed: Vec<(String, String)>,
+    skipped_reasons: std::collections::BTreeMap<String, usize>,
 }
 
 impl Tally {
     fn add(&mut self, report: &crate::IndexReport) {
+        self.refused.extend(report.refused.iter().cloned());
+        self.failed.extend(report.failed.iter().cloned());
+        for (kind, n) in &report.skipped_reasons {
+            *self.skipped_reasons.entry(kind.clone()).or_insert(0) += n;
+        }
         self.indexed += report.indexed as u64;
         self.unchanged += report.unchanged as u64;
         self.skipped += report.skipped as u64;
@@ -292,6 +303,15 @@ struct Indexing {
 enum Job {
     Index(Indexing),
     Forget(PathBuf),
+    /// A person's decision about one refused file (2.5): `mode` is
+    /// `redacted`, `as-is` or `refused`, and anything but the last indexes
+    /// the file straight after.
+    Accept {
+        path: PathBuf,
+        mode: String,
+        source: String,
+    },
+    Revoke(PathBuf),
 }
 
 /// A job and the channel its progress goes back on.
@@ -326,6 +346,10 @@ pub struct Event {
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
     Queued,
+    /// Scanned, and waiting for a person to review what the scan refused
+    /// before it is queued at all (2.7). Holds nothing: not a slot, not the
+    /// writer.
+    Review,
     Running,
     /// Asked to pause; the engine has not reached its next batch yet.
     Pausing,
@@ -445,6 +469,14 @@ pub struct RunState {
     /// snapshot rather than only on the log, so a page opened during one of
     /// those twenty seconds sees it too.
     pub phase: Option<String>,
+    /// The scan phase's plan, as the card shows it before anything embeds.
+    pub plan: Option<serde_json::Value>,
+    /// The plan's own estimate, which stands until the measured rate settles:
+    /// the first remaining time appears when embedding starts (2.7).
+    plan_eta_ms: Option<u64>,
+    /// The last estimate a poll was given, and when (ms of the run's clock).
+    /// What a stall holds on to, and what a jump is measured against (#143).
+    shown_eta: std::cell::Cell<Option<(u64, u64)>>,
     /// The `done` event as it was sent, with its refused, failed and
     /// skipped-by-reason lists.
     pub summary: Option<serde_json::Value>,
@@ -486,6 +518,9 @@ impl RunState {
             chunks: 0,
             symbols: 0,
             phase: None,
+            shown_eta: std::cell::Cell::new(None),
+            plan: None,
+            plan_eta_ms: None,
             summary: None,
             log: VecDeque::new(),
             next_seq: 0,
@@ -514,6 +549,15 @@ impl RunState {
                 .unwrap_or_default();
         now.saturating_duration_since(self.origin)
             .saturating_sub(held)
+    }
+
+    /// Bytes per second from the first batch to the last, once there were two.
+    fn embed_rate(&self) -> Option<f64> {
+        let (t0, _, b0) = self.first_sample?;
+        let &(at, _, bytes) = self.samples.back()?;
+        let ms = at.checked_sub(t0).filter(|ms| *ms > 0)?;
+        let moved = bytes.checked_sub(b0).filter(|b| *b > 0)?;
+        Some(moved as f64 * 1000.0 / ms as f64)
     }
 
     /// Stop counting for as long as the run is held.
@@ -574,10 +618,13 @@ impl RunState {
         if !matches!(self.status, RunStatus::Running) || self.bytes_total == 0 {
             return None;
         }
-        let (t0, _, b0) = self.first_sample?;
         let now = self.elapsed().as_millis() as u64;
+        let from_plan = self.plan_eta_ms.map(|eta| eta.saturating_sub(now));
+        let Some((t0, _, b0)) = self.first_sample else {
+            return from_plan;
+        };
         if now.saturating_sub(t0) < ETA_SETTLE_MS {
-            return None;
+            return from_plan;
         }
         let start = now.saturating_sub(RATE_WINDOW_MS);
         let (at, _, was) = self
@@ -589,11 +636,28 @@ impl RunState {
             .unwrap_or((t0, 0, b0));
         let moved = self.bytes.saturating_sub(was);
         let span = now.saturating_sub(at);
+        let shown = self.shown_eta.get();
+        // A run writing its index moves no bytes for twenty seconds, and the
+        // rate over that window says the rest will take minutes. Issue #143:
+        // the card jumped to minutes, then back. While the run says it is in
+        // a phase, or fewer than 1 % of the bytes moved in the window, the
+        // last estimate stands.
+        let stalled = self.phase.is_some() || moved * 100 < self.bytes_total;
+        if stalled && let Some((eta, _)) = shown {
+            return Some(eta);
+        }
         if moved == 0 || span == 0 {
             return None;
         }
         let left = self.bytes_total.saturating_sub(self.bytes);
-        Some((left as u128 * span as u128 / moved as u128) as u64)
+        let mut eta = (left as u128 * span as u128 / moved as u128) as u64;
+        // And never more than double between two polls: a real slowdown shows
+        // over a few polls, a spike does not show at all.
+        if let Some((last, _)) = shown {
+            eta = eta.min(last.saturating_mul(2).max(1_000));
+        }
+        self.shown_eta.set(Some((eta, now)));
+        Some(eta)
     }
 
     /// Chunks per second per lane over the same window as [`Self::rates`].
@@ -901,6 +965,55 @@ impl Store {
         self.runs_changed();
     }
 
+    /// Put the scan phase's plan on a run, and hold it for review when asked.
+    fn set_plan(&self, id: u64, plan: &crate::Plan, review: bool) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        // A store with no rate of its own yet, on the rate of the last run this
+        // daemon watched embed: the model and the machine are most of it.
+        let seen = runs
+            .iter()
+            .filter(|r| r.id != id)
+            .filter_map(RunState::embed_rate)
+            .last();
+        if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
+            run.plan = serde_json::to_value(plan).ok();
+            run.plan_eta_ms = plan
+                .eta_ms
+                .or_else(|| seen.map(|rate| (plan.embed_bytes as f64 / rate * 1000.0) as u64));
+            if review {
+                run.status = RunStatus::Review;
+            }
+        }
+        drop(runs);
+        self.runs_changed();
+    }
+
+    /// What the store held before a run that has not started.
+    fn set_before(&self, id: u64, files: u64, chunks: u64) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(run) = runs.iter_mut().find(|r| r.id == id) {
+            run.files_before = Some(files);
+            run.chunks_before = Some(chunks);
+        }
+        drop(runs);
+        self.runs_changed();
+    }
+
+    /// A run held for review, moved to the queue or ended.
+    fn leave_review(&self, id: u64, to: RunStatus) -> bool {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(run) = runs
+            .iter_mut()
+            .find(|r| r.id == id && r.status == RunStatus::Review)
+        else {
+            return false;
+        };
+        run.status = to;
+        drop(runs);
+        self.runs_changed();
+        true
+    }
+
     /// The one place the runs counter moves.
     ///
     /// Four things change what `/api/index/runs` would answer — a run begins,
@@ -1124,6 +1237,7 @@ impl Store {
                 .map(|p| crate::plain(&p.display().to_string()))
                 .collect::<Vec<_>>(),
             "status": run.status,
+            "plan": run.plan,
             "position": position,
             "submitted": run.submitted,
             "started_at": run.started,
@@ -1228,6 +1342,18 @@ impl Store {
         // the writer performs and not a run with a card, and its events belong
         // to no run's log.
         queue.push_back(Queued {
+            run: NO_RUN,
+            job,
+            report,
+        });
+        progress
+    }
+
+    /// [`Store::submit`], at the front of the queue.
+    fn submit_front(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
+        let (report, progress) = mpsc::channel();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push_front(Queued {
             run: NO_RUN,
             job,
             report,
@@ -1446,6 +1572,33 @@ impl Admission {
 
     pub fn running(&self) -> usize {
         self.running.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// A fresh run id, for a run that is scanned and held for review before
+    /// it is queued.
+    pub fn mint(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Queue a run whose card already exists — one a person has just
+    /// reviewed.
+    pub fn enqueue(&self, run: u64, store: &Arc<Store>, paths: Vec<PathBuf>, kind: RunKind) {
+        let (report, _progress) = mpsc::channel();
+        {
+            let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            store.record(
+                run,
+                &serde_json::json!({ "event": "submitted", "run": run, "ahead": queue.len() }),
+            );
+            queue.push_back(Pending {
+                run,
+                store: Arc::clone(store),
+                paths,
+                kind,
+                report,
+            });
+        }
+        self.pump();
     }
 
     /// Queue a run and hand back its id and the channel it reports on.
@@ -1935,6 +2088,9 @@ impl Limits {
     }
 }
 
+/// A run waiting for review: its store and the paths it will index.
+type Awaiting = (Arc<Store>, Vec<PathBuf>);
+
 /// What every route is handed.
 pub struct State {
     pub server: Arc<Server>,
@@ -1965,6 +2121,8 @@ pub struct State {
     report: Arc<dyn Fn(&str) + Send + Sync>,
     /// Refusals by class, for the line the daemon logs on shutdown.
     pub refusals: Mutex<BTreeMap<&'static str, u64>>,
+    /// Runs scanned and held for a person's review, by run id (2.7).
+    awaiting: Mutex<BTreeMap<u64, Awaiting>>,
     /// `semlith mcp` processes forwarding here: pid to the unix second it was
     /// last heard from. A proxy has no disconnect to observe — its client may
     /// simply stop asking — so recency is the only honest answer to "how many
@@ -2186,6 +2344,84 @@ impl State {
         Ok(self.admission.submit(store, paths, RunKind::Run))
     }
 
+    /// The scan phase for `paths` into `store`, without the writer or the
+    /// model: a read-only open of the store beside the writer's.
+    pub fn plan(&self, store: &Arc<Store>, paths: &[PathBuf]) -> Result<crate::Plan> {
+        let mut reader = crate::Semlith::open_existing(&store.dir)?;
+        reader.plan(paths)
+    }
+
+    /// Start a run with its scan phase (2.7): the plan goes on the card, and
+    /// when `review` is asked for and the scan found something that is a
+    /// person's to decide, the run holds at review rather than queue. `hold`
+    /// holds it after any scan, clean or not — the portal's Scan button, whose
+    /// second press is Start indexing. Nothing else waits: other runs and the
+    /// watcher go on.
+    pub fn index_planned(
+        &self,
+        store: &Arc<Store>,
+        paths: Vec<PathBuf>,
+        review: bool,
+        hold: bool,
+    ) -> Result<u64> {
+        Self::writer_alive(store)?;
+        let plan = self.plan(store, &paths).ok();
+        if (review || hold)
+            && let Some(plan) = plan.as_ref().filter(|p| hold || !p.review.is_empty())
+        {
+            let run = self.admission.mint();
+            store.begin_run(run, paths.clone(), RunKind::Run);
+            store.set_plan(run, plan, true);
+            // What the store held before, as a started run reports it: a
+            // held run never starts, and Discard scan decides from this
+            // whether the scan made the store and should take it away.
+            if let Ok((files, chunks, _)) =
+                crate::Semlith::open_existing(&store.dir).and_then(|reader| reader.stats())
+            {
+                store.set_before(run, files.max(0) as u64, chunks.max(0) as u64);
+            }
+            self.awaiting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(run, (Arc::clone(store), paths));
+            return Ok(run);
+        }
+        let (run, _progress) = self.admission.submit(store, paths, RunKind::Run);
+        if let Some(plan) = &plan {
+            store.set_plan(run, plan, false);
+        }
+        Ok(run)
+    }
+
+    /// Queue a run a person has reviewed. Whatever they left undecided stays
+    /// refused and on the Not indexed list.
+    pub fn start_reviewed(&self, run: u64) -> Result<()> {
+        let Some((store, paths)) = self
+            .awaiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&run)
+        else {
+            anyhow::bail!("run {run} is not waiting for review");
+        };
+        store.leave_review(run, RunStatus::Queued);
+        self.admission.enqueue(run, &store, paths, RunKind::Run);
+        Ok(())
+    }
+
+    /// Drop a run that was waiting for review, as a stop of it.
+    pub fn drop_reviewed(&self, run: u64) -> bool {
+        let taken = self
+            .awaiting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&run);
+        match taken {
+            Some((store, _)) => store.leave_review(run, RunStatus::Stopped),
+            None => false,
+        }
+    }
+
     pub fn forget(
         &self,
         store: &Arc<Store>,
@@ -2194,6 +2430,33 @@ impl State {
         Self::writer_alive(store)?;
         // No notice: this caller takes the first message as the answer.
         Ok(store.submit(Job::Forget(path), None))
+    }
+
+    /// Accept one refused file, at the front of the writer's queue: a person
+    /// waiting on a confirm should not wait behind a long run's slices.
+    pub fn accept(
+        &self,
+        store: &Arc<Store>,
+        path: PathBuf,
+        mode: &str,
+        source: &str,
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit_front(Job::Accept {
+            path,
+            mode: mode.to_string(),
+            source: source.to_string(),
+        }))
+    }
+
+    /// Undo an acceptance: the file leaves the store and returns to the list.
+    pub fn revoke(
+        &self,
+        store: &Arc<Store>,
+        path: PathBuf,
+    ) -> Result<mpsc::Receiver<serde_json::Value>> {
+        Self::writer_alive(store)?;
+        Ok(store.submit_front(Job::Revoke(path)))
     }
 
     /// Close a store and delete everything it holds.
@@ -2694,11 +2957,24 @@ pub fn run(
     // Locks first, and all of them, before anything is watched or served: a
     // daemon that took three of four locks and then failed would leave three
     // stores unusable to the `semlith index` that is about to be tried.
+    //
+    // One exception: a store a terminal `semlith index` is writing. Refusing
+    // to start over it made a login service fail until that run ended, and a
+    // run ends by itself, so the store is opened when it does.
     let mut locks = Vec::new();
     let mut opening = Vec::new();
+    let mut waiting = Vec::new();
     for dir in dirs {
-        let lock = StoreLock::acquire(dir)
-            .with_context(|| format!("{} cannot be opened by the daemon", dir.display()))?;
+        let Some(lock) = StoreLock::try_acquire(dir)
+            .with_context(|| format!("{} cannot be opened by the daemon", dir.display()))?
+        else {
+            let (name, _) = roots_for(dir, &registry);
+            report(&format!(
+                "{name}: being indexed by another process; opened when that run ends"
+            ));
+            waiting.push(dir.clone());
+            continue;
+        };
         let (name, roots) = roots_for(dir, &registry);
         // Canonical, as `open_store` records it, because `reconcile` compares
         // what it computes from the registry against what is already open. A
@@ -2764,14 +3040,14 @@ pub fn run(
         stores.push(Arc::new(Store::new(name, dir, roots, watched, false, 0)));
     }
 
-    let fleet = if dirs.is_empty() {
+    let fleet = if stores.is_empty() {
         None
     } else {
         // Canonical, as every store in `stores` is recorded: `/api/stores`
         // pairs each store with its fleet member by directory, and a home
         // reached through a symlink (`/var` on macOS) gave the two different
         // spellings, so every row read zero files until the fleet was reopened.
-        let canonical: Vec<PathBuf> = dirs.iter().map(|d| crate::canonical(d)).collect();
+        let canonical: Vec<PathBuf> = stores.iter().map(|s| s.dir.clone()).collect();
         let mut fleet = Fleet::open(&canonical)?;
         // The fleet every route answers from, so this is the one that has to
         // agree with `/api/stores` about what each store is called.
@@ -2818,6 +3094,7 @@ pub fn run(
         debounce,
         report: Arc::clone(&report_line),
         refusals: Mutex::new(BTreeMap::new()),
+        awaiting: Mutex::new(BTreeMap::new()),
         proxies: Mutex::new(BTreeMap::new()),
         clients: Mutex::new(BTreeMap::new()),
         mcp_fleet: Mutex::new(None),
@@ -2865,6 +3142,30 @@ pub fn run(
     // After the watchers, so a note lands on a store whose feed is already
     // being kept, and before the URL, so it is on the page from the first read.
     report_dropped_queue(&state.stores(), &*report_line);
+
+    // The stores another process was writing at startup, each opened as soon
+    // as its lock comes free: `open_store` is the portal's path for a store
+    // that appears while the daemon runs, watcher and catch-up included.
+    if !waiting.is_empty() {
+        let opener = Arc::clone(&state);
+        std::thread::spawn(move || {
+            while !waiting.is_empty() && !watch::STOP.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(2));
+                waiting.retain(|dir| match StoreLock::try_acquire(dir) {
+                    Ok(Some(free)) => {
+                        // Let go first: `open_store` takes the lock itself.
+                        drop(free);
+                        opener.open_store(dir, false).is_err()
+                    }
+                    Ok(None) => true,
+                    Err(e) => {
+                        (opener.report)(&format!("{}: {e:#}", dir.display()));
+                        false
+                    }
+                });
+            }
+        });
+    }
 
     // Behind the URL, not in front of it: loading the model costs a second or
     // two, and a developer staring at a blank terminal waiting for a link is
@@ -3037,7 +3338,8 @@ fn tend(
     // the same walk up again on its own. A store the portal has just made
     // skips it, because the run on its way covers the same roots.
     let expecting = (now() as usize) < store.expecting_run_until.load(Ordering::Relaxed);
-    if !roots.is_empty() && !expecting {
+    let deferred = !roots.is_empty() && !expecting;
+    if deferred {
         let _ = admission.submit(store, roots.clone(), RunKind::CatchUp);
     }
 
@@ -3068,11 +3370,18 @@ fn tend(
                     files,
                     chunks,
                 } => {
-                    let text = format!(
-                        "watching — {files} files, {chunks} chunks \
-                         ({} indexed at startup, {} unchanged)",
-                        catch_up.indexed, catch_up.unchanged
-                    );
+                    // The catch-up is a queued run here, not the watcher's
+                    // own pass, so "0 indexed at startup" would be a claim
+                    // about work that has not happened yet (1.17).
+                    let _ = &catch_up;
+                    let text = if deferred {
+                        format!(
+                            "watching — {files} files, {chunks} chunks \
+                             (catch-up deferred: {files} files queued)"
+                        )
+                    } else {
+                        format!("watching — {files} files, {chunks} chunks")
+                    };
                     report(&format!("{}: {text}", store.name));
                     store.note(text);
                 }
@@ -3327,6 +3636,7 @@ fn perform(
                     // the reader keeps one stream rather than being asked to
                     // press the button again.
                     tally.add(&done);
+                    let (slice_indexed, slice_chunks) = (tally.indexed, tally.chunks);
                     if done.remaining > 0 {
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
@@ -3362,8 +3672,8 @@ fn perform(
                         say(serde_json::json!({
                             "event": "slice",
                             "remaining": done.remaining,
-                            "indexed": tally.indexed,
-                            "chunks": tally.chunks,
+                            "indexed": slice_indexed,
+                            "chunks": slice_chunks,
                         }));
                         return None;
                     }
@@ -3374,7 +3684,18 @@ fn perform(
                     let quiet_batch = store.run_kind(run) == Some(RunKind::Batch)
                         && tally.indexed == 0
                         && tally.removed == 0;
-                    store.note(format!("{} indexed from the portal", tally.indexed));
+                    if store.run_kind(run) == Some(RunKind::CatchUp) {
+                        // The other half of the startup line: what the
+                        // deferred catch-up found, now that it has run.
+                        let text = format!(
+                            "catch-up done: {} indexed, {} unchanged, {} removed",
+                            tally.indexed, tally.unchanged, tally.removed
+                        );
+                        eprintln!("semlith: {}: {text}", store.name);
+                        store.note(text);
+                    } else {
+                        store.note(format!("{} indexed from the portal", tally.indexed));
+                    }
                     say(serde_json::json!({
                         "event": "done",
                         // The run's, not this slice's. A run of 35 files over
@@ -3395,20 +3716,25 @@ fn perform(
                         "stopped": done.stopped,
                         // Named, with the rule that refused each. A count would
                         // be a number somebody has to go and investigate.
-                        "refused": done.refused.iter().map(|(path, why)| {
+                        "refused": tally.refused.iter().map(|(path, why)| {
                             serde_json::json!({ "path": crate::plain(path), "why": why })
                         }).collect::<Vec<_>>(),
                         // Named for the same reason as the refused, and the
                         // reason this release exists: a run that ends with
                         // "one file failed" and no name is a run whose one
                         // failure nobody can find.
-                        "failed": done.failed.iter().map(|(path, why)| {
+                        "failed": tally.failed.iter().map(|(path, why)| {
                             serde_json::json!({ "path": crate::plain(path), "why": why })
                         }).collect::<Vec<_>>(),
                         // How the skipped divide up. The total alone is the
                         // number that made an Angular tree look like a run
                         // that had lost two thousand files.
-                        "skipped_reasons": done.skipped_reasons,
+                        "skipped_reasons": tally.skipped_reasons,
+                        // What waits for a person, so a forwarded
+                        // `semlith_index` says it as the in-process one does.
+                        "review": crate::store::refusals(writer.db())
+                            .map(|rows| rows.iter().filter(|r| r.reviewable && r.accepted.is_none()).count())
+                            .unwrap_or(0),
                         // The daemon's own elapsed, so the page's clock is
                         // corrected to the run rather than to the tab.
                         "elapsed_ms": store.run_elapsed_ms(run),
@@ -3423,6 +3749,61 @@ fn perform(
             store.paused.store(false, Ordering::Relaxed);
             store.cancelled.store(false, Ordering::Relaxed);
             release(run, admission);
+            None
+        }
+        Job::Accept { path, mode, source } => {
+            let key = path.to_string_lossy().into_owned();
+            match writer.accept(&key, &mode, &source) {
+                Ok(accepted) => {
+                    // Indexed at once, in the same job: the person who
+                    // accepted it is looking at the page for the result.
+                    let indexed = if mode == "refused" {
+                        Ok(0)
+                    } else {
+                        writer
+                            .index_changed(vec![PathBuf::from(&accepted.path)], |_, _| {})
+                            .map(|r| r.indexed)
+                    };
+                    store.last_write.store(now() as usize, Ordering::Relaxed);
+                    store.note(format!(
+                        "{} {} ({})",
+                        if mode == "refused" {
+                            "refused"
+                        } else {
+                            "accepted"
+                        },
+                        path.display(),
+                        mode
+                    ));
+                    match indexed {
+                        Ok(n) => say(serde_json::json!({
+                            "event": "done",
+                            "accepted": accepted,
+                            "indexed": n,
+                        })),
+                        Err(e) => {
+                            say(serde_json::json!({ "event": "error", "error": format!("{e:#}") }))
+                        }
+                    }
+                }
+                Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+            }
+            None
+        }
+        Job::Revoke(path) => {
+            let key = path.to_string_lossy().into_owned();
+            match writer.revoke(&key) {
+                Ok(revoked) => {
+                    // Scanned again at once, so the file is back on the list
+                    // with today's reasons rather than missing from both.
+                    if revoked {
+                        let _ = writer.index_changed(vec![path.clone()], |_, _| {});
+                    }
+                    store.note(format!("revoked {}", path.display()));
+                    say(serde_json::json!({ "event": "done", "revoked": revoked }))
+                }
+                Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+            }
             None
         }
         Job::Forget(path) => {
@@ -3657,6 +4038,14 @@ impl crate::mcp::Writer for Writer {
                 };
                 text.push_str(&format!("\n{kind}: {path} — {why}"));
             }
+        }
+        let waiting = count("review");
+        if waiting > 0 {
+            text.push_str(&format!(
+                "\n{waiting} file{} await{} the owner's review (semlith refused, or the portal's Files ▸ Not indexed).",
+                if waiting == 1 { "" } else { "s" },
+                if waiting == 1 { "s" } else { "" }
+            ));
         }
         Ok(text)
     }
@@ -4207,6 +4596,66 @@ mod tests {
         );
     }
 
+    /// The plan's estimate is on the card from the first batch, before the
+    /// measured rate settles, and a finished run's rate is what a store with
+    /// no rate of its own is planned on (2.7, measured failing at the 0.30.0
+    /// walk stop: the first estimate came five seconds into embedding).
+    #[test]
+    fn the_first_estimate_comes_with_the_first_batch() {
+        let mut done = RunState::new(1, Vec::new(), RunKind::Run);
+        done.first_sample = Some((1_000, 0, 0));
+        done.samples = VecDeque::from(vec![(1_000, 0, 0), (5_000, 90, 2_000_000)]);
+        assert_eq!(done.embed_rate(), Some(500_000.0));
+
+        let mut run = RunState::new(2, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        run.bytes_total = 3_000_000;
+        run.plan_eta_ms = Some(6_000);
+        run.first_sample = Some((500, 0, 0));
+        run.samples = VecDeque::from(vec![(500, 0, 0)]);
+        run.bytes = 50_000;
+        run.ended = Some(Duration::from_millis(600));
+        assert_eq!(
+            run.eta_ms(),
+            Some(5_400),
+            "no estimate with the first batch"
+        );
+    }
+
+    /// Issue #143: a run that stalls for eight seconds in a phase — writing its
+    /// index — shows no estimate above twice the one before it.
+    #[test]
+    fn a_stalled_phase_holds_the_estimate_and_it_never_more_than_doubles() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        run.bytes_total = 10_000_000;
+        run.first_sample = Some((0, 0, 0));
+        run.samples = VecDeque::from(vec![
+            (0, 0, 0),
+            (10_000, 200, 1_000_000),
+            (15_000, 300, 2_500_000),
+        ]);
+        run.bytes = 4_000_000;
+        run.ended = Some(Duration::from_secs(20));
+        let before = run.eta_ms().expect("settled");
+        // Eight seconds writing the index: no bytes move at all.
+        run.phase = Some("writing the index".to_string());
+        for t in 21..=28 {
+            run.samples.push_back((t * 1_000, 300, 4_000_000));
+            run.ended = Some(Duration::from_secs(t));
+            let eta = run.eta_ms().expect("held, not dropped");
+            assert!(eta <= before * 2, "{eta} ms after {before} ms at {t} s");
+        }
+        // Out of the phase, the rate over the window is far lower than
+        // before; the estimate may rise, but by at most 2x a poll.
+        run.phase = None;
+        run.samples.push_back((29_000, 310, 4_200_000));
+        run.bytes = 4_200_000;
+        run.ended = Some(Duration::from_secs(30));
+        let after = run.eta_ms().expect("moving again");
+        assert!(after <= before * 2, "{after} ms after {before} ms");
+    }
+
     /// A write with several stores open has no "the" store, and guessing one
     /// writes into somebody's other repository.
     #[test]
@@ -4235,6 +4684,7 @@ mod tests {
             debounce: Duration::from_millis(500),
             report: Arc::new(|_| {}),
             refusals: Mutex::new(BTreeMap::new()),
+            awaiting: Mutex::new(BTreeMap::new()),
             proxies: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             mcp_fleet: Mutex::new(None),

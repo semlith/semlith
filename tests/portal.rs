@@ -94,6 +94,10 @@ const VIEWS: &[(&str, &str)] = &[
     // `Semlith::scan` behind both, with a Forget button per row that posts to
     // `/api/forget`, the daemon's one eviction path.
     ("scan", "/api/privacy/scan"),
+    // `semlith refused` is the Index page's scan panel, which reads the same
+    // `refusals` table for the files a scan held back, and Files ▸ Decisions,
+    // which undoes one file's accept or refusal per click.
+    ("refused", "/api/refused"),
     // `semlith doctor` is the Doctor page, which reads the same two functions
     // the command prints and posts its repairs to the same engine.
     ("doctor", "/api/doctor"),

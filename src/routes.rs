@@ -111,10 +111,13 @@ fn route(state: &Arc<State>, request: &Request) -> Response {
         (true, _, "/api/index/log") => index_log(state, request),
         (true, _, "/api/projects") => projects(request),
         (true, _, "/api/changes") => changes(state),
+        (true, _, "/api/refused") => refused(state),
 
         (_, true, "/api/index") => index(state, request),
         (_, true, "/api/add") => add(state, request),
         (_, true, "/api/forget") => forget(state, request),
+        (_, true, "/api/refused/accept") => refused_decide(state, request, true),
+        (_, true, "/api/refused/revoke") => refused_decide(state, request, false),
         (_, true, "/api/adopt") => adopt(state, request),
         (_, true, "/api/trust") => trust(state, request),
         (_, true, "/api/ledger/raw-read") => raw_read(state, request),
@@ -575,6 +578,41 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
     };
     let only = request.query_all("store");
 
+    // The tree view: the same text `semlith_files {tree: true}` answers with,
+    // so the page and the agent read one answer (portal parity).
+    if request
+        .query("tree")
+        .is_some_and(|v| v == "1" || v == "true")
+    {
+        let depth = request
+            .query("depth")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2)
+            .clamp(1, 8);
+        let sort = match crate::tree::Sort::parse(request.query("sort").unwrap_or("")) {
+            Ok(s) => s,
+            Err(e) => return Response::error(400, &e.to_string()),
+        };
+        // One level as JSON, for the portal's lazy explorer. Here `dir` is a
+        // root-relative folder, not the listing's sort direction below.
+        if request.query("format") == Some("json") {
+            let dir = match crate::tree::parse_dir(request.query("dir").unwrap_or("")) {
+                Ok(d) => d,
+                Err(e) => return Response::error(400, &e.to_string()),
+            };
+            return with_fleet(state, json!({ "roots": [] }), move |fleet| {
+                let only = (!only.is_empty()).then_some(only);
+                crate::tree::level(fleet, only.as_deref(), &filter, &dir, sort)
+            });
+        }
+        return with_fleet(state, json!({ "tree": "" }), move |fleet| {
+            let only = (!only.is_empty()).then_some(only);
+            Ok(
+                json!({ "tree": crate::tree::render(fleet, only.as_deref(), &filter, depth, sort)? }),
+            )
+        });
+    }
+
     // Before anything is opened. An offset of four billion asks every open
     // store for four billion rows in sorted order and merges them, which is a
     // whole machine's memory for a page nobody is reading. The portal pages in
@@ -834,6 +872,28 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         Err(e) => return Response::error(400, &e),
     };
     let only = request.query_all("store");
+
+    // `semlith_search {exact: true}`: every indexed line matching the query,
+    // the shape `/api/pattern` answers in, paged by the same offset.
+    if request
+        .query("exact")
+        .is_some_and(|v| v == "1" || v == "true")
+    {
+        let offset = request
+            .query("offset")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let empty = json!({ "matches": [], "files": 0, "truncated": false });
+        return with_fleet(state, empty, move |fleet| {
+            let only = (!only.is_empty()).then_some(only);
+            Ok(serde_json::to_value(fleet.grep_in(
+                only.as_deref(),
+                query,
+                &filter,
+                offset,
+            )?)?)
+        });
+    }
 
     // Before anything is opened. An offset of four billion asks every open
     // store for four billion rows in sorted order and merges them, which is a
@@ -1568,6 +1628,12 @@ fn rules(state: &Arc<State>) -> Value {
             "ok": true,
         },
         {
+            "id": "refused-file acceptance",
+            "rule": "A person accepts a refused file one at a time, from this page or the command                      line, never in bulk and never by an agent: the routes need this session's                      token and no MCP tool accepts. An acceptance keeps the path, the class, the                      mode, the confidence and a salted fingerprint of each accepted match —                      never the value — in the store's own database, on this machine.",
+            "check": "the accept route takes one path and refuses a list; the agent key opens /mcp alone",
+            "ok": true,
+        },
+        {
             "id": "store trust",
             "rule": "A store outside the store home is opened only after semlith trust                      has recorded it. A .semlith directory can arrive inside a repository.",
             "check": if registry.trusted.is_empty() {
@@ -2135,6 +2201,21 @@ fn read(state: &Arc<State>, request: &Request) -> Response {
 }
 
 fn symbol(state: &Arc<State>, request: &Request) -> Response {
+    // Several names: the definitions table `semlith symbol a b c` prints.
+    if let Some(names) = request.query("names").filter(|n| n.contains(',')) {
+        let names: Vec<String> = names
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .take(crate::graph::NAMES_LIMIT)
+            .collect();
+        let only = request.query_all("store");
+        return with_fleet(state, json!({ "table": [] }), move |fleet| {
+            let only = (!only.is_empty()).then_some(only);
+            Ok(json!({ "table": fleet.signatures_in(only.as_deref(), &names)? }))
+        });
+    }
     let Some(name) = request.query("name").filter(|n| !n.trim().is_empty()) else {
         return Response::error(400, "missing name");
     };
@@ -2565,6 +2646,28 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
         return Response::error(400, &format!("cannot index {named}"));
     }
 
+    // The portal's Start indexing asks for the review stop; Scan only asks for
+    // the plan and nothing else (2.7). Neither changes what a run from an
+    // agent or a script does: those never wait.
+    // `"always"` is the portal's Scan: the run holds after its scan even when
+    // nothing needs a person, so the plan is read before anything embeds.
+    let hold = body.get("review").and_then(Value::as_str) == Some("always");
+    let review = hold || body.get("review").and_then(Value::as_bool).unwrap_or(false);
+    let scan_only = body
+        .get("scan_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let start = |store: &Arc<crate::daemon::Store>, paths: Vec<PathBuf>| -> Result<Value, String> {
+        if scan_only {
+            return state
+                .plan(store, &paths)
+                .map(|plan| json!({ "plan": plan, "store": store.name }))
+                .map_err(|e| format!("{e:#}"));
+        }
+        let run = state.index_planned(store, paths, review, hold);
+        run.map(|run| json!({ "run": run, "store": store.name }))
+            .map_err(|e| e.to_string())
+    };
     let asked = body.get("store").and_then(Value::as_str);
     let each = match asked {
         Some("each") => true,
@@ -2590,19 +2693,18 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
                 Ok(store) => store,
                 Err(e) => return Response::error(409, &format!("{}: {e:#}", path.display())),
             };
-            match state.index(&store, vec![path.clone()]) {
-                Ok((run, _progress)) => started.push(json!({
-                    "run": run,
-                    "store": store.name,
-                    "path": crate::plain(&path.display().to_string()),
-                })),
+            match start(&store, vec![path.clone()]) {
+                Ok(mut answer) => {
+                    answer["path"] = json!(crate::plain(&path.display().to_string()));
+                    started.push(answer);
+                }
                 // Named, and the ones already started are in the answer: a
                 // folder that could not be queued should not take the two that
                 // were with it.
                 Err(e) => started.push(json!({
                     "store": store.name,
                     "path": crate::plain(&path.display().to_string()),
-                    "error": e.to_string(),
+                    "error": e,
                 })),
             }
         }
@@ -2658,14 +2760,13 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     // later index into it is allowed. Without this the folder is indexed once
     // and then silently stops being watched, which is the shape of a bug
     // nobody reports for a month.
-    adopt_roots(&store, &paths);
+    if !scan_only {
+        adopt_roots(&store, &paths);
+    }
 
-    match state.index(&store, paths) {
-        Ok((run, _progress)) => Response::json(&json!({
-            "runs": [{ "run": run, "store": store.name }],
-            "target": "store",
-        })),
-        Err(e) => Response::error(409, &e.to_string()),
+    match start(&store, paths) {
+        Ok(answer) => Response::json(&json!({ "runs": [answer], "target": "store" })),
+        Err(e) => Response::error(409, &e),
     }
 }
 
@@ -3023,6 +3124,28 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
         Ok(s) => s,
         Err(e) => return Response::error(409, &e.to_string()),
     };
+    // A run held for review: Start indexing queues it, Stop drops it. Neither
+    // touches the store's writer, which never saw it.
+    if let Some(id) = run {
+        match action {
+            Some("start") => {
+                return match state.start_reviewed(id) {
+                    Ok(()) => Response::json(&json!({ "started": id })),
+                    Err(e) => Response::error(409, &e.to_string()),
+                };
+            }
+            Some("stop") if state.drop_reviewed(id) => {
+                // A discarded scan of a folder that had no store before it
+                // leaves no empty store behind, on the same explicit word as
+                // a stopped run's "Also delete the store".
+                if body.get("delete").and_then(Value::as_bool) == Some(true) {
+                    state.delete_after_stop(Arc::clone(&store));
+                }
+                return Response::json(&json!({ "dequeued": 1 }));
+            }
+            _ => {}
+        }
+    }
     let mut dequeued = 0;
     let mut removed = 0;
     let mut deleting = false;
@@ -3292,6 +3415,105 @@ fn upgrade(request: &Request) -> Response {
             Err(e) => Response::error(409, &e.to_string()),
         },
         _ => Response::error(400, "action must be \"check\" or \"apply\""),
+    }
+}
+
+/// Every file the open stores did not index, and why (2.3).
+///
+/// Per store, because a decision about a file is a decision in one store.
+/// Values are never here: a content row carries its masked matches, their
+/// confidence and the signals behind it.
+fn refused(state: &Arc<State>) -> Response {
+    with_fleet(state, json!({ "stores": [] }), move |fleet| {
+        let mut stores = Vec::new();
+        let (mut total, mut review) = (0usize, 0usize);
+        for (label, store) in fleet.each() {
+            let rows = crate::store::refusals(store.db())?;
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut accepted: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut needs = 0usize;
+            for row in &rows {
+                *counts.entry(row.class.clone()).or_insert(0) += row.files.max(1) as usize;
+                if row.reviewable && row.accepted.is_none() {
+                    needs += 1;
+                }
+            }
+            for a in crate::store::acceptances(store.db())? {
+                *accepted.entry(a.mode).or_insert(0) += 1;
+            }
+            total += rows
+                .iter()
+                .filter(|r| r.class != crate::store::class::DUMMY && r.accepted.is_none())
+                .map(|r| r.files.max(1) as usize)
+                .sum::<usize>();
+            review += needs;
+            stores.push(json!({
+                "store": label,
+                "rows": rows,
+                "counts": counts,
+                "review": needs,
+                "accepted": accepted,
+            }));
+        }
+        Ok(json!({ "stores": stores, "total": total, "review": review }))
+    })
+}
+
+/// Accept or revoke exactly one refused file, as the person holding the
+/// session token (2.5).
+///
+/// One path and never a list: a body naming `paths`, or a `path` that is not
+/// a single string, is refused before anything is read. The page sends the
+/// per-file tick as `reviewed`, and an accept without it is refused too. The
+/// agent key cannot reach this route at all — `http` opens only `/mcp` to it —
+/// and no MCP tool calls it, by design.
+fn refused_decide(state: &Arc<State>, request: &Request, accept: bool) -> Response {
+    let body = match request.json() {
+        Ok(b) => b,
+        Err(e) => return Response::error(400, &e.to_string()),
+    };
+    if body.get("paths").is_some() {
+        return Response::error(400, "one file at a time: send path, not paths");
+    }
+    let Some(path) = body.get("path").and_then(Value::as_str) else {
+        return Response::error(400, "path must be one file's path, as a string");
+    };
+    let store = match state.writable(body.get("store").and_then(Value::as_str)) {
+        Ok(s) => s,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    let progress = if accept {
+        let mode = body.get("mode").and_then(Value::as_str).unwrap_or("");
+        if !matches!(mode, "redacted" | "as-is" | "refused") {
+            return Response::error(400, "mode is redacted, as-is or refused");
+        }
+        if body.get("reviewed").and_then(Value::as_bool) != Some(true) {
+            return Response::error(400, "tick \"I have reviewed this file\" first");
+        }
+        let source = match body.get("source").and_then(Value::as_str) {
+            Some("cli") => "cli",
+            _ => "portal",
+        };
+        state.accept(&store, PathBuf::from(path), mode, source)
+    } else {
+        state.revoke(&store, PathBuf::from(path))
+    };
+    let progress = match progress {
+        Ok(p) => p,
+        Err(e) => return Response::error(409, &e.to_string()),
+    };
+    match progress.recv() {
+        Ok(value) if value.get("event").and_then(Value::as_str) == Some("error") => {
+            Response::error(
+                409,
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("refused"),
+            )
+        }
+        Ok(value) => Response::json(&value),
+        Err(_) => Response::error(500, "the writer stopped before answering"),
     }
 }
 

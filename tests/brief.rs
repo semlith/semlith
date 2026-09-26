@@ -237,6 +237,104 @@ fn the_mcp_tool_and_the_cli_answer_the_same_question_the_same_way() {
     );
 }
 
+/// Across two stores a path means nothing without its store, and a name both
+/// repositories define must bring only its own store's edges. The walk stop of
+/// 0.30.0 found both: unlabelled spans, and edges looked up across the fleet.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_brief_across_stores_labels_each_span_and_keeps_edges_in_their_store() {
+    let plain = corpus(&[("drift.rs", SOURCE)]);
+    let audited = corpus(&[(
+        "drift.rs",
+        &format!(
+            "{SOURCE}\n/// Audit the drift before a release.\npub fn audit_drift(files: &[(String, u64, u64)]) -> usize {{\n    drifted(files).len()\n}}\n"
+        ),
+    )]);
+    let a = store_for(&plain);
+    let b = store_for(&audited);
+
+    let mut server = Server::open(&[&a, &b]);
+    server.handshake();
+    // A store's label is its path, so the audited corpus's unique directory
+    // name tells its lines from the other store's.
+    let with_audit = audited
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let tool = server.tool("semlith_brief", json!({ "question": QUESTION }));
+    let mut block: Option<&str> = None;
+    for line in tool.lines() {
+        let located = line.contains("drift.rs:") && !line.starts_with(' ');
+        if located || line.ends_with("[graph]") {
+            assert!(
+                line.starts_with('['),
+                "a line of a two-store brief does not name its store: {line}\n{tool}"
+            );
+        }
+        if line.ends_with("[graph]") {
+            block = Some(line);
+        } else if (line.starts_with("    called by ") || line.starts_with("    calls "))
+            && line.contains("audit_drift")
+        {
+            let head = block.expect("an edge outside a symbol");
+            let label = head.split(']').next().unwrap();
+            assert!(
+                label.contains(&with_audit),
+                "{with_audit}'s caller is listed under another store's symbol: {head}\n{tool}"
+            );
+        } else if !line.starts_with(' ') {
+            block = None;
+        }
+    }
+}
+
+/// A root-relative span held by two stores is a guess either way, so the read
+/// is refused naming both, as it is for two roots inside one store.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_relative_span_two_stores_hold_is_refused_naming_both() {
+    let one = corpus(&[("drift.rs", SOURCE)]);
+    let two = corpus(&[("drift.rs", SOURCE)]);
+    let a = store_for(&one);
+    let b = store_for(&two);
+
+    let mut server = Server::open(&[&a, &b]);
+    server.handshake();
+    let said = server
+        .call(
+            "tools/call",
+            json!({ "name": "semlith_read", "arguments": { "target": "drift.rs:1-3" } }),
+        )
+        .to_string();
+    for corpus in [&one, &two] {
+        let dir = corpus
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            said.contains(&dir) && said.contains("2 stores"),
+            "the refusal does not name {dir}: {said}"
+        );
+    }
+
+    // Narrowed to one store, it reads.
+    let label = server.tool("semlith_stats", json!({}));
+    let first = label.lines().next().unwrap().split(": ").next().unwrap();
+    let read = server.tool(
+        "semlith_read",
+        json!({ "target": "drift.rs:1-3", "store": [first] }),
+    );
+    assert!(
+        read.contains("drift.rs:1-3"),
+        "a named store did not read: {read}"
+    );
+}
+
 /// The tool list grew by one and the gate grew with it, on purpose.
 #[test]
 fn the_tool_list_advertises_brief() {
