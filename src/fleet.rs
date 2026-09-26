@@ -664,31 +664,62 @@ impl Fleet {
         target: &crate::Target,
         filter: &crate::filter::Filter,
     ) -> Result<Option<crate::Read>> {
-        let chosen = self.chosen(only)?;
         let label_rows = self.members.len() > 1;
-        for i in chosen {
+        // A root-relative span two stores both hold is the same ambiguity
+        // `read_within` refuses inside one store: taking the first would be a
+        // guess, so the refusal names each. A symbol keeps the first store
+        // that defines it.
+        let every =
+            matches!(target, crate::Target::Span { path, .. } if Path::new(path).is_relative());
+        let mut found: Vec<(usize, crate::Read)> = Vec::new();
+        for i in self.chosen(only)? {
             let roots = &self.members[i].roots;
-            let Some(found) = self.members[i].store.read_within(target, filter, roots)? else {
-                continue;
-            };
-            return Ok(Some(match found {
-                crate::Read::One(mut span) => {
-                    if label_rows {
-                        span.store = Some(self.members[i].label.clone());
-                    }
-                    crate::Read::One(span)
+            if let Some(read) = self.members[i].store.read_within(target, filter, roots)? {
+                found.push((i, read));
+                if !every {
+                    break;
                 }
-                crate::Read::Choose(mut rows) => {
-                    if label_rows {
-                        for row in &mut rows {
-                            row.store = Some(self.members[i].label.clone());
-                        }
-                    }
-                    crate::Read::Choose(rows)
-                }
-            }));
+            }
         }
-        Ok(None)
+        if found.len() > 1 {
+            let holding: Vec<String> = found
+                .iter()
+                .map(|(i, read)| match read {
+                    crate::Read::One(span) => {
+                        format!("[{}] {}", self.members[*i].label, crate::plain(&span.path))
+                    }
+                    crate::Read::Choose(_) => format!("[{}]", self.members[*i].label),
+                })
+                .collect();
+            anyhow::bail!(
+                "{:?} is in {} stores: {}. Name the store, or more of the path.",
+                match target {
+                    crate::Target::Span { path, .. } => path.as_str(),
+                    crate::Target::Symbol(name) => name.as_str(),
+                },
+                holding.len(),
+                holding.join(", ")
+            );
+        }
+        let Some((i, found)) = found.pop() else {
+            return Ok(None);
+        };
+        Ok(Some(match found {
+            crate::Read::One(mut span) => {
+                if label_rows {
+                    span.store = Some(self.members[i].label.clone());
+                }
+                crate::Read::One(span)
+            }
+            crate::Read::Choose(mut rows) => {
+                if label_rows {
+                    for row in &mut rows {
+                        row.store = Some(self.members[i].label.clone());
+                    }
+                }
+                crate::Read::Choose(rows)
+            }
+        }))
     }
 
     /// Every definition of several names, one row each, across the chosen

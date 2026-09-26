@@ -127,6 +127,9 @@ pub struct Span {
 #[derive(Debug, Clone, Serialize)]
 pub struct Symbol {
     pub name: String,
+    /// The store its span came from, named only when the brief read several.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
     /// What found this part of the answer. Always `graph` -- an edge is not a
     /// ranked guess, and a reader should not have to wonder which it was.
     pub found_by: &'static str,
@@ -269,7 +272,10 @@ pub fn brief(
         }
         seen.push(name.to_string());
 
-        let mut found = fleet.neighbours_in(only, name, &[], false)?;
+        // From the span's own store: across a fleet, a name shared by two
+        // repositories would otherwise mix their edges under one heading.
+        let own = hit.store.as_ref().map(std::slice::from_ref);
+        let mut found = fleet.neighbours_in(own.or(only), name, &[], false)?;
         if code {
             found.callers.retain(|e| !navigational(&e.symbol.kind));
             found.callees.retain(|e| !navigational(&e.symbol.kind));
@@ -281,6 +287,7 @@ pub fn brief(
         }
         let symbol = Symbol {
             name: name.to_string(),
+            store: hit.store.clone(),
             found_by: "graph",
             callers,
             callees,

@@ -4121,7 +4121,11 @@ fn brief(
     }
 
     for symbol in &brief.symbols {
-        writeln!(out, "{}{} (graph){}", bold(), symbol.name, reset())?;
+        let from = match &symbol.store {
+            Some(store) => format!("[{store}] "),
+            None => String::new(),
+        };
+        writeln!(out, "{}{from}{} (graph){}", bold(), symbol.name, reset())?;
         for (label, edges) in [("called by", &symbol.callers), ("calls", &symbol.callees)] {
             for edge in edges {
                 writeln!(

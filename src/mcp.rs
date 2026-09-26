@@ -2186,7 +2186,8 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
             _ => String::new(),
         };
         out.push_str(&format!(
-            "{}:{}-{}{what}{via}\n",
+            "{}{}:{}-{}{what}{via}\n",
+            label_of(&span.store),
             shorten(&span.path),
             span.start_line,
             span.end_line
@@ -2204,7 +2205,11 @@ fn render_brief(brief: &crate::brief::Brief, shorten: &dyn Fn(&str) -> String) -
         }
     }
     for symbol in &brief.symbols {
-        out.push_str(&format!("{} [graph]\n", symbol.name));
+        out.push_str(&format!(
+            "{}{} [graph]\n",
+            label_of(&symbol.store),
+            symbol.name
+        ));
         for edge in &symbol.callers {
             out.push_str(&format!(
                 "    called by {} {}:{}\n",
