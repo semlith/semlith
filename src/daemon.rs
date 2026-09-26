@@ -2905,11 +2905,24 @@ pub fn run(
     // Locks first, and all of them, before anything is watched or served: a
     // daemon that took three of four locks and then failed would leave three
     // stores unusable to the `semlith index` that is about to be tried.
+    //
+    // One exception: a store a terminal `semlith index` is writing. Refusing
+    // to start over it made a login service fail until that run ended, and a
+    // run ends by itself, so the store is opened when it does.
     let mut locks = Vec::new();
     let mut opening = Vec::new();
+    let mut waiting = Vec::new();
     for dir in dirs {
-        let lock = StoreLock::acquire(dir)
-            .with_context(|| format!("{} cannot be opened by the daemon", dir.display()))?;
+        let Some(lock) = StoreLock::try_acquire(dir)
+            .with_context(|| format!("{} cannot be opened by the daemon", dir.display()))?
+        else {
+            let (name, _) = roots_for(dir, &registry);
+            report(&format!(
+                "{name}: being indexed by another process; opened when that run ends"
+            ));
+            waiting.push(dir.clone());
+            continue;
+        };
         let (name, roots) = roots_for(dir, &registry);
         // Canonical, as `open_store` records it, because `reconcile` compares
         // what it computes from the registry against what is already open. A
@@ -2975,14 +2988,14 @@ pub fn run(
         stores.push(Arc::new(Store::new(name, dir, roots, watched, false, 0)));
     }
 
-    let fleet = if dirs.is_empty() {
+    let fleet = if stores.is_empty() {
         None
     } else {
         // Canonical, as every store in `stores` is recorded: `/api/stores`
         // pairs each store with its fleet member by directory, and a home
         // reached through a symlink (`/var` on macOS) gave the two different
         // spellings, so every row read zero files until the fleet was reopened.
-        let canonical: Vec<PathBuf> = dirs.iter().map(|d| crate::canonical(d)).collect();
+        let canonical: Vec<PathBuf> = stores.iter().map(|s| s.dir.clone()).collect();
         let mut fleet = Fleet::open(&canonical)?;
         // The fleet every route answers from, so this is the one that has to
         // agree with `/api/stores` about what each store is called.
@@ -3077,6 +3090,30 @@ pub fn run(
     // After the watchers, so a note lands on a store whose feed is already
     // being kept, and before the URL, so it is on the page from the first read.
     report_dropped_queue(&state.stores(), &*report_line);
+
+    // The stores another process was writing at startup, each opened as soon
+    // as its lock comes free: `open_store` is the portal's path for a store
+    // that appears while the daemon runs, watcher and catch-up included.
+    if !waiting.is_empty() {
+        let opener = Arc::clone(&state);
+        std::thread::spawn(move || {
+            while !waiting.is_empty() && !watch::STOP.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(2));
+                waiting.retain(|dir| match StoreLock::try_acquire(dir) {
+                    Ok(Some(free)) => {
+                        // Let go first: `open_store` takes the lock itself.
+                        drop(free);
+                        opener.open_store(dir, false).is_err()
+                    }
+                    Ok(None) => true,
+                    Err(e) => {
+                        (opener.report)(&format!("{}: {e:#}", dir.display()));
+                        false
+                    }
+                });
+            }
+        });
+    }
 
     // Behind the URL, not in front of it: loading the model costs a second or
     // two, and a developer staring at a blank terminal waiting for a link is

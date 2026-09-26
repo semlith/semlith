@@ -28,6 +28,26 @@ pub struct StoreLock {
 }
 
 impl StoreLock {
+    /// Take the store's write lock, or `None` while another process's index
+    /// run holds it — the one refusal that ends by itself. A running daemon
+    /// holding it is still an error: it is the writer for as long as it runs.
+    pub fn try_acquire(dir: &Path) -> Result<Option<Self>> {
+        match Self::acquire(dir) {
+            Ok(lock) => Ok(Some(lock)),
+            Err(_) if !daemon_holds(dir) && Self::held(dir) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether some process holds the OS lock right now.
+    fn held(dir: &Path) -> bool {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.join(LOCK_FILE))
+            .is_ok_and(|file| file.try_lock().is_err())
+    }
+
     /// Take the store's write lock, or explain who has it.
     pub fn acquire(dir: &Path) -> Result<Self> {
         let path = dir.join(LOCK_FILE);
@@ -171,6 +191,15 @@ mod tests {
         // again must succeed, or a completed run would block the next one.
         let second = StoreLock::acquire(&dir);
         assert!(second.is_ok(), "{:?}", second.err());
+    }
+
+    #[test]
+    fn a_run_in_progress_is_waited_for_rather_than_refused() {
+        let dir = tempdir("try");
+        let first = StoreLock::acquire(&dir).unwrap();
+        assert!(StoreLock::try_acquire(&dir).unwrap().is_none());
+        drop(first);
+        assert!(StoreLock::try_acquire(&dir).unwrap().is_some());
     }
 
     #[test]

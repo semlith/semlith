@@ -152,3 +152,94 @@ fn a_dead_daemon_keeps_the_error_it_always_had() {
         "a URL was offered for a daemon that is not there:\n{all}"
     );
 }
+
+/// A store a terminal `semlith index` is writing does not stop the daemon: it
+/// starts, says which store it is waiting for, and opens that store once the
+/// run lets go. Until 0.30.0 the whole start failed, and a login service with
+/// it, for as long as the run took.
+#[test]
+fn a_store_being_indexed_is_opened_when_the_run_ends() {
+    use std::io::{BufRead, BufReader};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (_dir, home, store) = sandbox("busy");
+    let held = StoreLock::acquire(&store).expect("the test process takes the lock");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_semlith"))
+        .env("SEMLITH_HOME", &home)
+        .env("HOME", &home)
+        .env("SEMLITH_AIRGAP", "1")
+        .env("SEMLITH_NO_SERVICE", "1")
+        .env_remove("SEMLITH_STORE")
+        .env_remove("SEMLITH_PORT")
+        .arg("--store")
+        .arg(&store)
+        .arg("start")
+        .arg("--port")
+        .arg("0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("semlith start runs");
+    let (tx, rx) = mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let mut seen: Vec<String> = Vec::new();
+    fn wait_for(
+        rx: &mpsc::Receiver<String>,
+        seen: &mut Vec<String>,
+        what: &str,
+        limit: Duration,
+    ) -> bool {
+        let until = Instant::now() + limit;
+        while Instant::now() < until {
+            if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+                let found = line.contains(what);
+                seen.push(line);
+                if found {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    let waiting = wait_for(
+        &rx,
+        &mut seen,
+        "being indexed by another process",
+        Duration::from_secs(60),
+    );
+    let opened_early = seen.iter().any(|l| l.contains("busy — now serving"));
+    drop(held);
+    let opened = waiting
+        && wait_for(
+            &rx,
+            &mut seen,
+            "busy — now serving",
+            Duration::from_secs(30),
+        );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        waiting,
+        "the daemon did not say it is waiting for the store:\n{}",
+        seen.join("\n")
+    );
+    assert!(
+        !opened_early,
+        "the store was opened while another process held it:\n{}",
+        seen.join("\n")
+    );
+    assert!(
+        opened,
+        "the store was not opened after the run let go:\n{}",
+        seen.join("\n")
+    );
+}
