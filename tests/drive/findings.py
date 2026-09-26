@@ -5459,8 +5459,10 @@ def _(d):
     logo = by_name.get("logo.png")
     if not logo or "off" not in logo["cls"].split() or not logo["meta"].startswith("not indexed"):
         fail("the binary is not a greyed not-indexed row: %r" % tree["rows"])
+    # The owner's third walk: sort chips on an explorer were no use, so the
+    # tree has none, and orders folders first, then files, by name.
     chips = texts_of(d, ".tab-panel .filters .chip")
-    want("the explorer's chips", chips, ["name", "size", "symbols", "recent"])
+    want("the explorer's chips", chips, [])
 
     d.eval(
         "[...document.querySelectorAll('.ftree .ftree-row.dir')].find(r => r.getAttribute('aria-expanded') === 'false'"

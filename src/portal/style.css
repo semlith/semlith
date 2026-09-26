@@ -4662,8 +4662,29 @@ td.row-end {
   /* A path has no spaces in it, so without this the line cannot break and the
    * dialog's own text pushes out past both its edges. */
   overflow-wrap: anywhere;
-  max-height: 40dvh;
+}
+/* A tall dialog scrolls in its middle only: the title and the buttons stay
+ * on screen, so the choice is never scrolled away from what it is about. */
+.modal[open] {
+  display: flex;
+  flex-direction: column;
+  max-height: min(86dvh, 760px);
+}
+.modal.wide {
+  width: min(560px, calc(100vw - 2 * var(--sp-4)));
+}
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.modal .card-title,
+.modal .actions {
+  flex-shrink: 0;
 }
 .modal .card-title {
   overflow-wrap: anywhere;
@@ -6338,6 +6359,11 @@ pre.report-cli {
   margin-top: var(--sp-4);
   min-width: 0;
 }
+/* In a view the column's own gap is already the air under the tabs; the
+ * margin on top of it doubled it. */
+.view > .tabs + .tab-panel {
+  margin-top: 0;
+}
 
 /* The Agents page's own cards, in pairs rather than as a column of full-width
  * bands. Equal height, because two cards side by side at two different heights
@@ -6871,7 +6897,7 @@ pre.report-cli {
   padding-right: 34px;
 }
 .decisions .section-title {
-  margin-top: var(--sp-3);
+  margin: var(--sp-2) 0 calc(-1 * var(--sp-2));
 }
 .index-note:empty {
   display: none;
@@ -7122,7 +7148,14 @@ td.decide-col {
    stores on the next, each led by what it filters. */
 .files-filters {
   display: grid;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
+}
+/* A Files tab's blocks: the filters, the table, the footnote under it. */
+.rows.files-pane {
+  gap: var(--sp-4);
+}
+.rows.files-pane > .subtitle {
+  margin: 0;
 }
 .files-filters .filters {
   row-gap: var(--sp-2);

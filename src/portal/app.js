@@ -3709,8 +3709,8 @@ function agentsCard() {
  * is a thing a hand-rolled overlay gets wrong. `run` returns a promise; while
  * it is pending the dialog says so, and an error is shown inside it rather
  * than behind it. */
-function ask({ title, body, extra, confirm, tone, run }) {
-  const dialog = el("dialog", { class: "modal" });
+function ask({ title, body, extra, confirm, tone, run, wide }) {
+  const dialog = el("dialog", { class: wide ? "modal wide" : "modal" });
   const problem = el("div", { class: "note" });
   const go = el("button", {
     class: tone === "bad" ? "button danger" : "button",
@@ -3736,9 +3736,9 @@ function ask({ title, body, extra, confirm, tone, run }) {
   fill(
     dialog,
     el("h2", { class: "card-title", text: title }),
-    el("p", { class: "subtitle", text: body }),
-    extra || null,
-    problem,
+    /* The only part that scrolls: a long list of findings moves under a
+     * title and buttons that stay where they are. */
+    el("div", { class: "modal-body" }, el("p", { class: "subtitle", text: body }), extra || null, problem),
     el(
       "div",
       { class: "actions" },
@@ -4736,7 +4736,7 @@ async function filesView() {
 
   const indexedPane = el(
     "div",
-    { class: "rows tight" },
+    { class: "rows files-pane" },
     el(
       "div",
       { class: "files-filters" },
@@ -4819,7 +4819,7 @@ const FILE_TYPES = [
 const fileType = (name) => (FILE_TYPES.find(([re]) => re.test(name.toLowerCase())) || [null, ""])[1];
 
 function filesTree(storeFilter) {
-  let sort = "name";
+  const sort = "name";
   const list = el("ul", { role: "tree", "aria-label": "Indexed files, by folder" });
   const box = el("div", { class: "card ftree" }, list);
 
@@ -4943,25 +4943,8 @@ function filesTree(storeFilter) {
     );
   }
 
-  const sortChips = ["name", "size", "symbols", "recent"].map((k) =>
-    el("button", {
-      class: "chip",
-      type: "button",
-      "aria-pressed": String(k === sort),
-      text: k,
-      onclick: () => {
-        sort = k;
-        sortChips.forEach((c) => c.setAttribute("aria-pressed", String(c.textContent === k)));
-        load();
-      },
-    }),
-  );
-  const node = el(
-    "div",
-    { class: "rows tight" },
-    el("div", { class: "filters" }, el("span", { class: "filter-label", text: "Sort" }), sortChips),
-    box,
-  );
+  // Folders first, then files, by name, as an editor's explorer orders them.
+  const node = box;
   return { node, load };
 }
 
@@ -4980,7 +4963,7 @@ const CLASS_LABELS = {
 };
 
 function decisionsPane() {
-  const node = el("div", { class: "rows tight decisions" });
+  const node = el("div", { class: "rows files-pane decisions" });
 
   function refuseDummy(store, row) {
     const reviewed = el("input", { type: "checkbox", id: "reviewed-file" });
@@ -4996,6 +4979,7 @@ function decisionsPane() {
       ),
       confirm: "Refuse this file",
       tone: "bad",
+      wide: true,
       run: async () => {
         if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
         await post("/api/refused/accept", { store, path: row.path, mode: "refused", reviewed: true });
@@ -5014,6 +4998,7 @@ function decisionsPane() {
       extra: el("div", { class: "rows tight decision-body" }, dialogPath(row.path, store)),
       confirm: "Revoke",
       tone: "bad",
+      wide: true,
       run: async () => {
         await post("/api/refused/revoke", { store, path: row.path });
         await load();
@@ -5159,6 +5144,7 @@ function reviewOne(store, item, mode, done) {
       ),
     ),
     confirm: "Accept this file",
+    wide: true,
     run: async () => {
       if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
       await post("/api/refused/accept", { store, path: item.path, mode, reviewed: true });
@@ -7361,15 +7347,20 @@ function accelSection() {
 /** A path under its store's root, the way the store names it: the
  * machine's absolute path is on the tooltip, not in the column. */
 function rootRel(path, storeName) {
-  const whole = String(path);
+  // One spelling for both sides: Windows paths arrive with backslashes, a
+  // `\\?\` verbatim prefix or a drive letter in either case, and a root and
+  // a file under it can differ in all three.
+  const plainPath = (p) => String(p).replace(/\\/g, "/").replace(/^\/\/\?\//, "");
+  const key = (p) => (/^[A-Za-z]:\//.test(p) ? p.toLowerCase() : p);
+  const whole = plainPath(path);
   const store = (state.stores || []).find((s) => s.name === storeName);
   const roots = (store?.roots || [])
-    .map((root) => root.path)
+    .map((root) => root.path && plainPath(root.path))
     .filter(Boolean)
     .sort((a, b) => b.length - a.length);
   for (const root of roots) {
     const prefix = root.endsWith("/") ? root : `${root}/`;
-    if (whole.startsWith(prefix)) return whole.slice(prefix.length);
+    if (key(whole).startsWith(key(prefix))) return whole.slice(prefix.length);
   }
   return whole;
 }
@@ -7384,6 +7375,12 @@ function rootRel(path, storeName) {
  * shows the same panel. Rebuilt only when the set of held runs changes: a
  * poll a second must not redraw buttons under the pointer. */
 const NO_ACTION = new Set(["unindexable", "excluded", "credential"]);
+
+/** A scan's own duration: milliseconds under a second, where most scans
+ * land, and seconds to one decimal above it. */
+function spellScan(seconds) {
+  return seconds < 1 ? `${Math.max(1, Math.round(seconds * 1000))} ms` : `${seconds.toFixed(1)} s`;
+}
 
 function scanPanel() {
   const node = el("div", { class: "card pad scan-panel", hidden: "" });
@@ -7603,7 +7600,10 @@ function scanPanel() {
         { class: "card-head" },
         el("h2", { text: held.length === 1 ? `Scanned ${held[0].store}` : `Scanned ${n(held.length)} folders` }),
         el("span", { class: "spacer" }),
-        el("span", { class: "mono-chip", text: "ready to index" }),
+        el("span", {
+          class: "mono-chip",
+          text: `scanned in ${spellScan(held.reduce((sum, run) => sum + (run.plan.seconds || 0), 0))} · ready to index`,
+        }),
       ),
       summary,
       perStore,
@@ -11673,9 +11673,7 @@ async function impactView() {
   return el(
     "div",
     { class: "view" },
-    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run.", {
-      pill: el("span", { class: "mono-chip", text: "semlith_impact" }),
-    }),
+    pageHead("Impact", "Reverse reachability. What breaks if this changes — before the edit, not after the test run."),
     /* Two columns, as the design lays the page out: the answer on the left,
      * the two questions that follow from it on the right, and the canvas at
      * the top of the right column rather than spanning.
