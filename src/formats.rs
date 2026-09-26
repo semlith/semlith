@@ -230,7 +230,14 @@ fn decode_entities(s: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let Some(end) = rest[..rest.len().min(12)].find(';') else {
+        // Looked for in bytes: twelve bytes in can be the middle of a
+        // character (`&abcdefghij’`), and slicing the `str` there panicked
+        // on the rust-lang/book documents in the benchmark corpus. `;` is
+        // ASCII, so where it is found is a character boundary.
+        let Some(end) = rest.as_bytes()[..rest.len().min(12)]
+            .iter()
+            .position(|&b| b == b';')
+        else {
             out.push('&');
             rest = &rest[1..];
             continue;
@@ -1646,6 +1653,10 @@ mod tests {
     fn an_unknown_entity_is_left_alone() {
         assert_eq!(decode_entities("a &b; &amp; c"), "a &b; & c");
         assert_eq!(decode_entities("&#x41;&#66;"), "AB");
+        // 0.30.1: the search for `;` stopped twelve bytes in, which here is
+        // inside the `’`, and panicked. The text comes through as written.
+        assert_eq!(decode_entities("&abcdefghij’s;"), "&abcdefghij’s;");
+        assert_eq!(decode_entities("a &ab’&amp;"), "a &ab’&");
     }
 
     /// `<abbr` is five bytes and `<style` six, so the sixth byte of `<abbré` is
