@@ -153,7 +153,8 @@ never scanned; they were never text. A file semlith refuses this way is a file
 whose contents never reach the store at all.
 
 **What it looks for** is one table, `filter::SHAPES`, and it is short on
-purpose. Every row but one is anchored on the credential's own prefix, because a
+purpose. The verdict on each match — dummy or live, its confidence, its mask —
+is `keyscan.rs`. Every row but one is anchored on the credential's own prefix, because a
 prefix is the issuer declaring what the string is, and that is what makes a
 string safe to refuse on sight: Anthropic API keys (`sk-ant-`), OpenAI API keys
 (`sk-`), AWS access key ids (`AKIA` or `ASIA`), GitHub tokens (`ghp_`, `gho_`,
@@ -165,17 +166,26 @@ exception in it is wrong the day somebody pastes a live key into a file called
 `test.md`), Google API keys (`AIza`), Twilio API keys (`SK`
 followed by 32 hex characters), SendGrid API keys (`SG.`), npm tokens (`npm_`),
 semlith's own agent key (`sml_`), a `-----BEGIN … PRIVATE KEY-----` block, and a
-JSON web token. Each row carries an example it must match and a near miss it
-must not, and `tests/scan.rs` walks the table and fails the build on either — so
-a typo in a pattern is a red build rather than a credential in a store.
+JSON web token. Each row carries an example it must match — a declared test
+dummy since 0.30.0, so the table's own file is not refused — and a near miss it
+must not, and `tests/scan.rs` walks the table, builds a live-shaped value for
+each row at run time, and fails the build if the example is not a dummy, the
+built value is not refused or the near miss matches. No live-looking literal is
+in the source.
 
 **The one rule with no prefix needs two things at once.** An assignment whose
 left side is a key-like name — `api_key`, `secret`, `token`, `password`,
-`passwd`, `auth`, in any surrounding identifier — and whose quoted right side is
-at least twenty characters of high entropy. Both halves are necessary. The name
-alone refuses `password = "hunter2"`, which is not a credential worth refusing a
-file for. The entropy alone refuses every base64 fixture and every lockfile hash
-in a normal corpus. Together they are narrow enough to be on by default.
+`passwd`, `auth`, or one ending `_KEY`, `_SECRET` or `_TOKEN`, in any
+surrounding identifier — and whose right side is at least twenty characters of
+high entropy. The value may be quoted, or unquoted on a line of its own as a
+`.env`, a shell `export` or a YAML file writes it (`AWS_SECRET_ACCESS_KEY=…`).
+This is what catches an AWS secret access key beside its `AKIA…` id, which has
+no prefix of its own. Both halves are necessary. The name alone refuses
+`password = "hunter2"` and `PASSWORD=changeme`, which are not credentials worth
+refusing a file for, and a low-entropy value is a separate policy question
+semlith does not answer. The entropy alone refuses every base64 fixture and
+every lockfile hash in a normal corpus. Together they are narrow enough to be on
+by default, and this rule only ever adds refusals.
 
 Two shapes are excluded from that rule, both of them things a credential is
 never written as. A value that is a template reference — `${SEMLITH_AGENT_KEY}`,
@@ -183,23 +193,121 @@ never written as. A value that is a template reference — `${SEMLITH_AGENT_KEY}
 placeholder, and refusing a file for carrying the documentation of how not to
 write a key down is the rule working against itself. And the value may not cross
 a line: without that, a `token=` on one line and a quote two lines later match as
-one string whose contents are the code in between. Both came out of the
-false-positive audit this rule was measured by, which found each of them in a
-real tree.
+one string whose contents are the code in between. An unquoted value is read
+only when it is the whole rest of its line and made of the characters a key is
+made of, so `let token = compute_token(input);` — a key-like name assigned code —
+is not a match.
 
 **The reason never quotes the credential.** A refusal says what kind of thing
 matched and the line it sat on, and no character of the matched text is written
 anywhere semlith writes: not in the event, not in the CLI's output, not in the
-store, not in a log, not on the portal. A scan that prints the secret it found
-has moved the secret rather than refused it.
+store, not in a log, not on the portal. Where a match has to be shown so a
+person can decide about it, it is masked to the issuer's prefix and the last
+four characters (`ghp_…Xa9Q`). A scan that prints the secret it found has moved
+the secret rather than refused it.
 
-**There is no allow-list of known-fake values.** A documentation page quoting
-AWS's own `AKIAIOSFODNN7EXAMPLE` is refused like any other match. A second table
-of values that only look like credentials is a second table to keep right, and
-of the two ways to be wrong, indexing a real key because it resembled an example
-is the one that costs something. `--include-secrets` indexes such a file anyway,
-and the run then says how many files the scan would have refused — a store built
-with that flag should be able to tell you what it took in.
+**Test dummies are let through, by declared rules (0.30.0).** Until 0.30.0 there
+was no allow-list, and a documentation page quoting AWS's own
+`AKIAIOSFODNN7EXAMPLE` was refused like a leaked key; eight of this repository's
+own files were, including the file that holds the table. A match is now a test
+dummy, and does not refuse its file, when one of three rules says so, and only
+then:
+
+- (a) it is on a short list of published documentation examples, such as AWS's
+  `AKIAIOSFODNN7EXAMPLE` and `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`;
+- (b) the token's body — after the issuer's prefix — contains `EXAMPLE`,
+  `FAKE`, `DUMMY`, `PLACEHOLDER`, `REDACTED` or a run of eight or more `X`, or is
+  one character repeated. The body, never the text around it: a comment saying
+  "test" beside a live key changes nothing;
+- (c) it is a private-key `BEGIN` line with no key under it — fewer than 40
+  base64 characters before the `END` line or the end of the text.
+
+The rules are declared rather than guessed from entropy, because a rule that let
+through anything that looked random enough would index the one real key that
+did not. **One live-looking match anywhere still refuses the whole file**,
+dummies beside it or not: a companion secret, such as an AWS secret access key
+written without a name the assignment rule knows, cannot be detected by prefix.
+`semlith index` says how many files it indexed holding only dummies, and
+`semlith refused` lists them under "let through as test dummies"; a person who
+disagrees refuses one with `semlith refused refuse <path>` or the portal's
+**Refuse instead** on Files ▸ Decisions. `--include-secrets` is unchanged.
+
+**Every file that was not indexed is listed, and the list persists.** Each
+store keeps a `refusals` table, written by `semlith index`, the watcher and the
+daemon's catch-up alike, and read by `semlith refused`, `/api/refused` and the
+portal — the Index page's scan panel, which asks about each reviewable file and
+lists the rest, and the Files page's Decisions tab and tree. A row falls into
+one of five classes:
+
+- **(a) content scan** — a secret-shaped value. Reviewable.
+- **(b) credential file** — a name or folder on the deny-list: `.env*`, `id_rsa`,
+  `*.pem`, `credentials`, `~/.ssh`, `~/.aws` and the rest. Always refused, and
+  never acceptable through review. `--include-secrets` on the command line is
+  the only way one is indexed, as before.
+- **(c) policy limit** — over the size cap, or inside a pruned generated folder
+  such as `node_modules`, shown once per folder. Reviewable.
+- **(d) not indexable** — empty, binary, no text, unreadable, not a regular
+  file, not a decodable image. Shown with the fact and no action, because
+  accepting cannot make them indexable.
+- **(e) your own exclusions** — `.gitignore`, `.semlithignore`, or outside the
+  store's roots. Change the rule rather than the file.
+
+**A secret row carries a confidence, from 0 % to 100 %.** It estimates how
+likely the match is a real, working secret — and so how likely the refusal is a
+false positive. It is built from declared signals, each shown beside the number:
+whether the value has its provider's documented length and characters; a valid
+CRC32 checksum on a GitHub or npm token (at least 90 %), or an invalid one (at
+most 10 %: it cannot be a real token); how random the body is against what the
+provider's generator produces, down for a repeated, sequential or dictionary
+body; a companion, such as a 40-character secret access key within five lines
+of an AWS key id or a private-key body that decodes to a DER sequence; the
+location, down under `tests/`, `fixtures/`, `examples/` or `docs/`, in Markdown
+or in a test function, up in a configuration, CI or deploy file; and a JSON web
+token whose `exp` has passed. **It is an estimate, never a guarantee**, and it
+decides nothing: what refuses a file is the dummy rules above.
+
+**A person may accept one refused file at a time, never an agent and never in
+bulk.** From the portal's scan panel on the Index page, after a scan, or
+`semlith refused accept <path>`, one path per call, after the file, each masked
+match, its line and its confidence have been shown and the file's name typed
+(or "I have reviewed this file" ticked). There is no select-all, no bulk bar
+and no glob. Credential files are never offered. A decision is undone one file
+at a time from the portal's Files ▸ Decisions tab or `semlith refused revoke`.
+Two choices:
+
+- **Accept with redaction** replaces each detected value with
+  `[REDACTED:<provider> <kind>]` before anything is chunked, embedded or written
+  to the full-text index, keeping line numbers. The secret never enters the
+  store. Redaction covers only what the scanner detected, and the confirm says
+  so.
+- **Accept as-is** indexes the file's full text, values included.
+
+The routes need the portal's session token. The agent key opens only `/mcp`,
+and no MCP tool accepts, by design. An acceptance is stored in the store's own
+database as the path, the class, the mode, the confidence at the time and a
+salted blake3 fingerprint of each accepted match — never the value — and each
+accept and revoke writes a hash-chained ledger row with the same fields.
+
+**An edit never lets a new secret through.** On every later pass the file is
+scanned again. If every live match's fingerprint is one the person accepted, it
+indexes in their mode and redaction is applied again to the current text. If a
+new match appears, the file is refused again, its old copy is evicted, and it
+returns to the list marked `new match since accepted, line N`. `semlith refused
+revoke <path>` evicts it and lists it again. A read of an accepted-redacted file
+from disk — `semlith_read` on a file edited since it was indexed — applies the
+same redaction, so a read never serves what the store was never given.
+
+**The scan runs before anything is embedded (0.30.0).** Every index run opens
+with a scan phase that needs no embedding model: it walks, stats, reads and
+hashes each file and sorts it into the classes above, then shows the plan. The
+portal's **Scan** holds every run after its scan, even when nothing is
+reviewable, and embeds nothing until **Start indexing** is pressed; a file left
+undecided stays refused. `semlith index` on a terminal stops for review only
+when something is reviewable. An agent's run, the watcher and a piped `semlith
+index` never wait, and the MCP reply says how many files await the owner's
+review. The first pass under 0.30.0 scans every
+indexed file against the new rules, so a file the no-prefix rule now refuses is
+evicted and listed, and one the dummy rules now let through is indexed.
 
 **A file that today's rules refuse leaves the store on the next pass.** Both
 halves of the decision evict: a path refused by the deny-list and a file refused

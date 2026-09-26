@@ -155,6 +155,41 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS edges_dst ON edges(dst);
 
+-- What was not indexed, and why, from 0.30.0. One row per file for a secret,
+-- a credential file, a policy limit or a file no reader can take, and one row
+-- per folder for a pruned generated folder or an ignore rule. Written by every
+-- pass that decides not to index something -- `semlith index`, the watcher and
+-- the daemon's catch-up alike -- so it outlives the run that found it.
+--
+-- `matches` is JSON of what the scan found, masked: provider, line, the first
+-- and last few characters, confidence and its signals. Never a value.
+-- Additive and `IF NOT EXISTS`, so `format_version` does not move.
+CREATE TABLE IF NOT EXISTS refusals (
+    path       TEXT PRIMARY KEY,
+    class      TEXT NOT NULL,
+    rule       TEXT NOT NULL,
+    matches    TEXT,
+    confidence INTEGER,
+    files      INTEGER NOT NULL DEFAULT 1,
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+);
+
+-- A person's decision about one refused file, from 0.30.0. `fingerprints` is
+-- JSON of salted blake3 fingerprints of the matches accepted -- never the
+-- values -- so a later pass can tell "the same secret the person saw" from "a
+-- new one", and refuse the file again for the second. `mode` is `redacted`,
+-- `as-is`, or `refused` for a dummy-only file a person chose to keep out.
+CREATE TABLE IF NOT EXISTS acceptances (
+    path         TEXT PRIMARY KEY,
+    class        TEXT NOT NULL,
+    mode         TEXT NOT NULL,
+    fingerprints TEXT NOT NULL,
+    confidence   INTEGER,
+    at           INTEGER NOT NULL,
+    source       TEXT NOT NULL
+);
+
 -- Images, from 0.13.0. One row per indexed image file, with the pixel size the
 -- Search and Files pages show in place of a line range. The vector itself is in
 -- the store's second index, under `images/`, at CLIP's 512 dimensions.
@@ -1385,6 +1420,11 @@ pub struct EdgeEnd {
     /// guessing when it is absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+    /// For a caller of a name with several definitions, the one this call
+    /// resolves to — `Fleet::search_preferring` rather than "one of two".
+    /// `None` when the name has one definition or the call did not settle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub means: Option<String>,
 }
 
 const SYMBOL_COLUMNS: &str =
@@ -1654,35 +1694,18 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 from_path: Some(row.src_path),
                 from_line: Some(row.src_line),
                 line: row.line,
+                means: None,
             });
             continue;
         }
 
-        // Rank without the imports first. If that already leaves one winner,
-        // the import query is never run.
-        let mut ranks: Vec<u8> = candidates
-            .iter()
-            .map(|c| rank(&c.symbol.path, src_path, hint.as_deref(), &[]))
-            .collect();
-        if survivors(&ranks) != 1 && ranks.contains(&UNRANKED) {
-            let of_file = match imports.get(src_path) {
-                Some(found) => found.clone(),
-                None => {
-                    let found = file_imports(db, src_path)?;
-                    imports.insert(src_path.clone(), found.clone());
-                    found
-                }
-            };
-            ranks = candidates
-                .iter()
-                .map(|c| rank(&c.symbol.path, src_path, hint.as_deref(), &of_file))
-                .collect();
-        }
-
-        let best = ranks.iter().copied().min().unwrap_or(UNRANKED);
-        let settled = survivors(&ranks) == 1;
-        for (row, rank) in candidates.into_iter().zip(&ranks) {
-            if settled && *rank != best {
+        let picked = {
+            let rows: Vec<&SymbolRow> = candidates.iter().map(|c| &c.symbol).collect();
+            choose(db, &rows, src_path, hint.as_deref(), &mut imports)?
+        };
+        let settled = picked.iter().filter(|p| **p).count() == 1;
+        for (row, keep) in candidates.into_iter().zip(&picked) {
+            if settled && !*keep {
                 continue;
             }
             let confidence = if row.confidence == crate::graph::EXTRACTED && settled {
@@ -1700,15 +1723,85 @@ fn resolve(db: &Connection, reached: Vec<Reached>) -> Result<Vec<EdgeEnd>> {
                 from_path: Some(row.src_path),
                 from_line: Some(row.src_line),
                 line: row.line,
+                means: None,
             });
         }
     }
     Ok(out)
 }
 
+/// Which of `candidates` an edge written in `src_path` with `hint` means.
+///
+/// Every candidate at the best rank is kept, so one `true` is a settled edge
+/// and several are an ambiguous one. The imports of the calling file are read
+/// only when the first pass left more than one and something unplaced, and
+/// cached in `imports` across calls.
+///
+/// A tie between candidates that a signal did place — two `fleet.rs` files
+/// both named by an import, one of them a copy under `tests/fixtures` — goes
+/// to the one sharing the most directories with the caller. A tie that
+/// nothing placed stays a tie: nearness is a reason to prefer one of two
+/// plausible answers, not a reason to pick one of twenty-four `get`s.
+fn choose(
+    db: &Connection,
+    candidates: &[&SymbolRow],
+    src_path: &str,
+    hint: Option<&str>,
+    imports: &mut std::collections::HashMap<String, Vec<String>>,
+) -> Result<Vec<bool>> {
+    let mut ranks: Vec<u8> = candidates
+        .iter()
+        .map(|c| rank(c, src_path, hint, &[]))
+        .collect();
+    if survivors(&ranks) != 1 && ranks.contains(&UNRANKED) {
+        if !imports.contains_key(src_path) {
+            let found = file_imports(db, src_path)?;
+            imports.insert(src_path.to_string(), found);
+        }
+        let of_file = &imports[src_path];
+        ranks = candidates
+            .iter()
+            .map(|c| rank(c, src_path, hint, of_file))
+            .collect();
+    }
+    let best = ranks.iter().copied().min().unwrap_or(UNRANKED);
+    let mut keep: Vec<bool> = ranks.iter().map(|r| *r == best).collect();
+    if best < UNRANKED && keep.iter().filter(|k| **k).count() > 1 {
+        let near: Vec<usize> = candidates
+            .iter()
+            .map(|c| shared_directories(&c.path, src_path))
+            .collect();
+        let nearest = near
+            .iter()
+            .zip(&keep)
+            .filter(|(_, k)| **k)
+            .map(|(n, _)| *n)
+            .max()
+            .unwrap_or(0);
+        for (k, n) in keep.iter_mut().zip(&near) {
+            *k = *k && *n == nearest;
+        }
+    }
+    Ok(keep)
+}
+
+/// How many leading directories two paths share.
+fn shared_directories(a: &str, b: &str) -> usize {
+    let a = std::path::Path::new(a).parent();
+    let b = std::path::Path::new(b).parent();
+    match (a, b) {
+        (Some(a), Some(b)) => a
+            .components()
+            .zip(b.components())
+            .take_while(|(x, y)| x == y)
+            .count(),
+        _ => 0,
+    }
+}
+
 /// The rank of a candidate that nothing placed. Sorts last, and is what says
 /// "the imports are worth reading for this group".
-const UNRANKED: u8 = 3;
+const UNRANKED: u8 = 4;
 
 /// How many candidates sit at the best rank.
 fn survivors(ranks: &[u8]) -> usize {
@@ -1718,27 +1811,44 @@ fn survivors(ranks: &[u8]) -> usize {
     }
 }
 
+/// The type or module a definition's `qualified` name puts it in:
+/// `Fleet` for `Fleet::search_preferring`, `store` for `store::edges_out`.
+pub fn owner_of(qualified: &str) -> Option<&str> {
+    let (owner, _) = qualified.rsplit_once("::")?;
+    Some(owner.rsplit("::").next().unwrap_or(owner))
+}
+
 /// Where a candidate definition sits in the ranking, lower being better.
 ///
-/// 0. The same file as the call. A file that defines a name and calls it means
+/// 0. The type the source says the receiver is. `self.search_preferring()`
+///    inside `impl Semlith`, or `x.search_preferring()` with `x: Fleet`, is a
+///    statement about which method, stronger than where the call sits. Only a
+///    hint that reads as a type (upper case first) counts here: a variable
+///    named `fleet` is a lead about a file, and tier 2 reads it as one.
+/// 1. The same file as the call. A file that defines a name and calls it means
 ///    its own.
-/// 1. A file the hint names. `store::edges_out` in the presence of
+/// 2. A file the hint names. `store::edges_out` in the presence of
 ///    `src/store.rs` is not a coincidence.
-/// 2. A file the calling file imports. Weaker than the hint because an import
+/// 3. A file the calling file imports. Weaker than the hint because an import
 ///    list is a set of possibilities rather than a statement about this call.
-/// 3. Nothing placed it.
-fn rank(candidate: &str, src_path: &str, hint: Option<&str>, imports: &[String]) -> u8 {
-    if candidate == src_path {
+/// 4. Nothing placed it.
+fn rank(candidate: &SymbolRow, src_path: &str, hint: Option<&str>, imports: &[String]) -> u8 {
+    let typed = hint.filter(|h| h.chars().next().is_some_and(char::is_uppercase));
+    if typed.is_some_and(|t| owner_of(&candidate.qualified) == Some(t)) {
         return 0;
     }
-    if hint.is_some_and(|h| names_file(h, candidate)) {
+    let candidate = candidate.path.as_str();
+    if candidate == src_path {
         return 1;
+    }
+    if hint.is_some_and(|h| names_file(h, candidate)) {
+        return 2;
     }
     if imports.iter().any(|i| {
         i.split(['/', '.', ':', '\\'])
             .any(|segment| !segment.is_empty() && names_file(segment, candidate))
     }) {
-        return 2;
+        return 3;
     }
     // A same-language tier was tried here and removed
     // (US-SEMLITH-0.17.0-I01). The reasoning was sound — semlith's own portal
@@ -1850,9 +1960,104 @@ pub fn edges_in(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Edg
             from_path: None,
             from_line: None,
             line: r.get(10)?,
+            means: None,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// One edge into a name, with the definitions of that name it resolves to.
+#[derive(Debug, Clone)]
+pub struct Incoming {
+    /// The caller, as [`edges_in`] returns it, with the confidence the
+    /// resolution earned rather than the one stored.
+    pub end: EdgeEnd,
+    /// Ids of the definitions of the target name this edge means: one when it
+    /// settled, several when it did not.
+    pub means: Vec<i64>,
+}
+
+/// What points at `name`, each edge resolved against the name's definitions
+/// the way [`edges_out`] resolves it from the other end.
+///
+/// [`edges_in`] answers "what calls something called `search_preferring`",
+/// which on a store holding two such methods is two answers mixed together.
+/// This is what lets impact walk from one definition: an edge is kept for a
+/// definition only when the ranking says the edge means it.
+pub fn edges_in_resolved(db: &Connection, name: &str, kinds: &[String]) -> Result<Vec<Incoming>> {
+    let filter = kind_predicate(kinds, "e.kind");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS}, e.kind, e.confidence, e.line, e.hint
+         FROM edges e
+         JOIN symbols s ON s.id = e.src
+         JOIN files f ON f.id = s.file_id
+         WHERE e.dst = ?1 AND {filter}
+         ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut binds: Vec<Value> = vec![Value::Text(name.to_string())];
+    binds.extend(kinds.iter().map(|k| Value::Text(k.clone())));
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+        Ok((
+            symbol_row(r)?,
+            r.get::<_, String>(8)?,
+            r.get::<_, String>(9)?,
+            r.get::<_, Option<u32>>(10)?,
+            r.get::<_, Option<String>>(11)?,
+        ))
+    })?;
+    let rows = rows.collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let navigational = crate::graph::not_navigational("s.kind");
+    let sql = format!(
+        "SELECT {SYMBOL_COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+         WHERE s.name = ?1 AND {navigational} ORDER BY f.path, s.start_line"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let definitions = stmt
+        .query_map(params![name], symbol_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let refs: Vec<&SymbolRow> = definitions.iter().collect();
+    let mut imports = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for (caller, kind, stored, line, hint) in rows {
+        let picked = if refs.len() > 1 {
+            choose(db, &refs, &caller.path, hint.as_deref(), &mut imports)?
+        } else {
+            vec![true; refs.len()]
+        };
+        let means: Vec<i64> = definitions
+            .iter()
+            .zip(&picked)
+            .filter(|(_, p)| **p)
+            .map(|(d, _)| d.id)
+            .collect();
+        let confidence = match means.len() {
+            1 if stored == crate::graph::EXTRACTED => crate::graph::EXTRACTED,
+            1 => crate::graph::RESOLVED,
+            // No definition at all: an edge to a name the store holds only as
+            // a heading or a key. Kept as stored so nothing is invented.
+            0 => stored.as_str(),
+            _ => crate::graph::AMBIGUOUS,
+        }
+        .to_string();
+        out.push(Incoming {
+            end: EdgeEnd {
+                symbol: caller,
+                kind,
+                confidence,
+                definitions: definitions.len(),
+                from_path: None,
+                from_line: None,
+                line,
+                means: None,
+            },
+            means,
+        });
+    }
+    Ok(out)
 }
 
 fn kind_predicate(kinds: &[String], column: &str) -> String {
@@ -2502,6 +2707,300 @@ pub fn file_stamps(
         Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
     })?;
     Ok(rows.collect::<Result<std::collections::HashMap<_, _>, _>>()?)
+}
+
+/// The classes a not-indexed row falls into (2.3), and the dummy list.
+pub mod class {
+    /// (a) a secret-shaped value in the text. Reviewable.
+    pub const CONTENT: &str = "content";
+    /// (b) a credential file by name or folder. Never acceptable.
+    pub const CREDENTIAL: &str = "credential";
+    /// (c) over the size cap, or inside a pruned generated folder. Reviewable.
+    pub const POLICY: &str = "policy";
+    /// (d) empty, binary, no text, unreadable, not a regular file.
+    pub const UNINDEXABLE: &str = "unindexable";
+    /// (e) `.gitignore`, `.semlithignore`, or outside the store's roots.
+    pub const EXCLUDED: &str = "excluded";
+    /// Indexed: every match was a declared test dummy.
+    pub const DUMMY: &str = "dummy";
+
+    /// Whether a person may accept a row of this class.
+    pub fn reviewable(class: &str) -> bool {
+        matches!(class, CONTENT | POLICY)
+    }
+}
+
+/// One file or folder that was not indexed, and why.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Refused {
+    #[serde(serialize_with = "crate::serialize_plain")]
+    pub path: String,
+    pub class: String,
+    pub rule: String,
+    /// What the scan found, masked. Empty for anything but a content row
+    /// and a dummy row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
+    /// Files the row stands for: one, or a folder's count.
+    pub files: u32,
+    pub first_seen: i64,
+    pub last_seen: i64,
+    /// Whether a person may accept it.
+    pub reviewable: bool,
+    /// The acceptance on this path, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<String>,
+}
+
+/// Record that `path` was not indexed. The first time it was seen is kept.
+#[allow(clippy::too_many_arguments)]
+pub fn refuse(
+    db: &Connection,
+    path: &str,
+    class: &str,
+    rule: &str,
+    matches: &[crate::keyscan::Match],
+    files: u32,
+    now: i64,
+) -> Result<()> {
+    let confidence = matches
+        .iter()
+        .filter(|m| m.dummy.is_none() || class == class::DUMMY)
+        .map(|m| m.confidence)
+        .max();
+    let json = if matches.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(matches)?)
+    };
+    db.execute(
+        "INSERT INTO refusals (path, class, rule, matches, confidence, files, first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(path) DO UPDATE SET class = excluded.class, rule = excluded.rule,
+           matches = excluded.matches, confidence = excluded.confidence,
+           files = excluded.files, last_seen = excluded.last_seen",
+        params![path, class, rule, json, confidence, files, now],
+    )?;
+    Ok(())
+}
+
+/// Forget that `path` was not indexed: it has been, or it is gone.
+pub fn unrefuse(db: &Connection, path: &str) -> Result<()> {
+    db.execute("DELETE FROM refusals WHERE path = ?1", params![path])?;
+    Ok(())
+}
+
+/// Every not-indexed row, reviewable first, then by class and path.
+pub fn refusals(db: &Connection) -> Result<Vec<Refused>> {
+    let mut stmt = db.prepare(
+        "SELECT r.path, r.class, r.rule, r.matches, r.confidence, r.files, r.first_seen,
+                r.last_seen, a.mode
+         FROM refusals r LEFT JOIN acceptances a ON a.path = r.path
+         ORDER BY CASE r.class WHEN 'content' THEN 0 WHEN 'policy' THEN 1 WHEN 'credential' THEN 2
+                  WHEN 'dummy' THEN 3 WHEN 'unindexable' THEN 4 ELSE 5 END, r.path",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let class: String = r.get(1)?;
+        let matches: Option<String> = r.get(3)?;
+        Ok(Refused {
+            path: r.get(0)?,
+            reviewable: class::reviewable(&class),
+            class,
+            rule: r.get(2)?,
+            matches: matches
+                .and_then(|m| serde_json::from_str(&m).ok())
+                .unwrap_or_default(),
+            confidence: r.get(4)?,
+            files: r.get(5)?,
+            first_seen: r.get(6)?,
+            last_seen: r.get(7)?,
+            accepted: r.get(8)?,
+        })
+    })?;
+    let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+    // Accepted files are indexed and off the list proper, and still listed:
+    // a person who accepted one has to be able to find it again to revoke it.
+    for a in acceptances(db)? {
+        if rows.iter().any(|r| r.path == a.path) {
+            continue;
+        }
+        rows.push(Refused {
+            path: a.path,
+            class: a.class.clone(),
+            rule: format!("accepted from the {} ({})", a.source, a.mode),
+            matches: Vec::new(),
+            confidence: a.confidence,
+            files: 1,
+            first_seen: a.at,
+            last_seen: a.at,
+            reviewable: class::reviewable(&a.class) || a.class == class::DUMMY,
+            accepted: Some(a.mode),
+        });
+    }
+    Ok(rows)
+}
+
+/// One not-indexed row, by exact path.
+pub fn refusal(db: &Connection, path: &str) -> Result<Option<Refused>> {
+    Ok(refusals(db)?.into_iter().find(|r| r.path == path))
+}
+
+/// A person's decision about one file.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Acceptance {
+    #[serde(serialize_with = "crate::serialize_plain")]
+    pub path: String,
+    pub class: String,
+    pub mode: String,
+    #[serde(skip)]
+    pub fingerprints: Vec<String>,
+    pub confidence: Option<u8>,
+    pub at: i64,
+    pub source: String,
+}
+
+pub fn acceptance(db: &Connection, path: &str) -> Result<Option<Acceptance>> {
+    Ok(db
+        .query_row(
+            "SELECT path, class, mode, fingerprints, confidence, at, source
+             FROM acceptances WHERE path = ?1",
+            params![path],
+            |r| {
+                let prints: String = r.get(3)?;
+                Ok(Acceptance {
+                    path: r.get(0)?,
+                    class: r.get(1)?,
+                    mode: r.get(2)?,
+                    fingerprints: serde_json::from_str(&prints).unwrap_or_default(),
+                    confidence: r.get(4)?,
+                    at: r.get(5)?,
+                    source: r.get(6)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Every acceptance, for counts and for the folders the walk must not prune.
+pub fn acceptances(db: &Connection) -> Result<Vec<Acceptance>> {
+    let mut stmt = db.prepare("SELECT path FROM acceptances ORDER BY path")?;
+    let paths: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut out = Vec::new();
+    for path in paths {
+        if let Some(a) = acceptance(db, &path)? {
+            out.push(a);
+        }
+    }
+    Ok(out)
+}
+
+pub fn accept(db: &Connection, a: &Acceptance) -> Result<()> {
+    db.execute(
+        "INSERT INTO acceptances (path, class, mode, fingerprints, confidence, at, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(path) DO UPDATE SET class = excluded.class, mode = excluded.mode,
+           fingerprints = excluded.fingerprints, confidence = excluded.confidence,
+           at = excluded.at, source = excluded.source",
+        params![
+            a.path,
+            a.class,
+            a.mode,
+            serde_json::to_string(&a.fingerprints)?,
+            a.confidence,
+            a.at,
+            a.source
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn revoke(db: &Connection, path: &str) -> Result<bool> {
+    Ok(db.execute("DELETE FROM acceptances WHERE path = ?1", params![path])? > 0)
+}
+
+/// The per-store salt fingerprints are keyed with, made on first need.
+///
+/// Random, from the operating system, and never leaves the store: a
+/// fingerprint without it confirms nothing about a guessed value.
+pub fn salt(db: &Connection) -> Result<[u8; 32]> {
+    if let Some(hex) = get_meta(db, "secret_salt")?
+        && let Some(bytes) = unhex(&hex)
+    {
+        return Ok(bytes);
+    }
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("no random source: {e}"))?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    set_meta(db, "secret_salt", &hex)?;
+    Ok(bytes)
+}
+
+/// The salt, when a store has one. A read-only caller cannot make one, and
+/// a store without one has no acceptances to compare against.
+pub fn salt_if_any(db: &Connection) -> Result<Option<[u8; 32]>> {
+    Ok(get_meta(db, "secret_salt")?.and_then(|h| unhex(&h)))
+}
+
+fn unhex(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..32)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    bytes.try_into().ok()
+}
+
+/// A chunk's first line, last line and id.
+pub type ChunkSpan = (u32, u32, i64);
+
+/// A file's id and its chunks' line spans, for writing its graph again.
+pub fn graph_input(db: &Connection, path: &str) -> Result<Option<(i64, Vec<ChunkSpan>)>> {
+    let Some(file_id) = db
+        .query_row("SELECT id FROM files WHERE path = ?1", params![path], |r| {
+            r.get::<_, i64>(0)
+        })
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let mut stmt = db.prepare(
+        "SELECT start_line, end_line, id FROM chunks WHERE file_id = ?1 ORDER BY start_line",
+    )?;
+    let spans = stmt
+        .query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some((file_id, spans)))
+}
+
+/// Remove one file's symbols, and with them the edges that leave them.
+pub fn delete_graph(db: &Connection, file_id: i64) -> Result<()> {
+    db.execute(
+        "DELETE FROM edges WHERE src IN (SELECT id FROM symbols WHERE file_id = ?1)",
+        params![file_id],
+    )?;
+    db.execute("DELETE FROM symbols WHERE file_id = ?1", params![file_id])?;
+    Ok(())
+}
+
+/// Bring an unchanged file's `bytes` and `indexed_at` up to what is on disk,
+/// when the file's size or mtime has moved past the row.
+///
+/// Only called once the content hash has matched, so the chunks are exactly
+/// as current as the file; it is the stamps that freshness is judged by that
+/// were behind. A row already current is not written, so an unchanged tree's
+/// pass writes nothing.
+pub fn heal_stamps(db: &Connection, path: &str, bytes: i64, mtime: i64, now: i64) -> Result<()> {
+    db.execute(
+        "UPDATE files SET bytes = ?2, indexed_at = MAX(?3, ?4)
+         WHERE path = ?1 AND (bytes != ?2 OR indexed_at < ?3)",
+        params![path, bytes, mtime, now],
+    )?;
+    Ok(())
 }
 
 /// The newest `indexed_at` this store holds, or `None` when it holds nothing.

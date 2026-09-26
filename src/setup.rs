@@ -216,7 +216,8 @@ pub fn run(
     register_all: bool,
     service: bool,
     hooks: bool,
-    strict: bool,
+    mode: crate::hook::Mode,
+    agents: bool,
 ) -> Result<()> {
     let _ = cliclack::intro(format!(" semlith {} setup ", env!("CARGO_PKG_VERSION")));
 
@@ -227,8 +228,10 @@ pub fn run(
         announce(step_path(yes)?),
         announce(step_model(yes, airgap)?),
         announce(step_agents(register_all, yes)?),
+        announce(step_always_load()?),
         announce(step_skill()?),
-        announce(step_hooks(hooks, strict)?),
+        announce(step_explorer(agents)?),
+        announce(step_hooks(hooks, mode)?),
         announce(step_rules(register_all)?),
         announce(step_service(service)?),
         announce(step_verify()?),
@@ -1125,12 +1128,75 @@ fn step_skill() -> Result<Step> {
     })
 }
 
+/// Claude Code's `alwaysLoad` on the entry `claude mcp add` just wrote (4.1).
+///
+/// Without it the tools sit behind ToolSearch and an agent's first turn does
+/// not see them: on 2026-09-25 it moved the first lookup from 33 % to 79 %.
+fn step_always_load() -> Result<Step> {
+    Ok(match crate::agentfiles::set_always_load()? {
+        Some((path, true)) => Step {
+            name: "always load",
+            state: State::Done,
+            detail: format!(
+                "the semlith tools load on the first turn ({})",
+                path.display()
+            ),
+        },
+        Some((_, false)) => Step {
+            name: "always load",
+            state: State::AlreadyDone,
+            detail: "Claude Code loads the semlith tools on the first turn".into(),
+        },
+        None => Step {
+            name: "always load",
+            state: State::Skipped,
+            detail: "no user-scope Claude Code entry to upgrade".into(),
+        },
+    })
+}
+
+/// Write, or with `--no-agents` remove, the semlith-explorer subagent (4.8).
+fn step_explorer(wanted: bool) -> Result<Step> {
+    if !wanted {
+        let removed = crate::agentfiles::remove_explorer()?;
+        return Ok(Step {
+            name: "research agent",
+            state: if removed.is_some() {
+                State::Done
+            } else {
+                State::AlreadyDone
+            },
+            detail: match removed {
+                Some(path) => format!("removed {}", path.display()),
+                None => "no semlith-explorer agent was installed".into(),
+            },
+        });
+    }
+    Ok(match crate::agentfiles::install_explorer()? {
+        Some(path) => Step {
+            name: "research agent",
+            state: State::Done,
+            detail: format!("semlith-explorer for Claude Code at {}", path.display()),
+        },
+        None if crate::agentfiles::explorer_installed() => Step {
+            name: "research agent",
+            state: State::AlreadyDone,
+            detail: "semlith-explorer is installed for Claude Code".into(),
+        },
+        None => Step {
+            name: "research agent",
+            state: State::Skipped,
+            detail: "Claude Code is not on this machine".into(),
+        },
+    })
+}
+
 /// Write, or remove, the `PreToolUse` hook.
 ///
 /// On by default. The file it edits belongs to the client, so it is backed up
 /// beside itself before the first write and `--no-hooks` takes the entry out
 /// again, leaving every other hook in place.
-fn step_hooks(wanted: bool, strict: bool) -> Result<Step> {
+fn step_hooks(wanted: bool, mode: crate::hook::Mode) -> Result<Step> {
     if !wanted {
         let removed = crate::agentfiles::remove_hooks()?;
         return Ok(Step {
@@ -1155,7 +1221,7 @@ fn step_hooks(wanted: bool, strict: bool) -> Result<Step> {
         });
     }
 
-    let written = crate::agentfiles::install_hooks(strict)?;
+    let written = crate::agentfiles::install_hooks(mode)?;
     if written.is_empty() {
         return Ok(Step {
             name: "hook",
@@ -1168,7 +1234,7 @@ fn step_hooks(wanted: bool, strict: bool) -> Result<Step> {
         state: State::Done,
         detail: format!(
             "{} in {}",
-            if strict { "strict" } else { "nudging" },
+            mode.as_str(),
             written
                 .iter()
                 .map(|p| p.display().to_string())

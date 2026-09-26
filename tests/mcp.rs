@@ -334,6 +334,42 @@ fn an_excluded_filter_reads_the_same_at_the_cli_and_over_mcp() {
 /// One writer per store is the product's rule. With several stores open there
 /// is no "the" store, and guessing one is how an agent writes to the wrong
 /// repository.
+/// A bare path reads the file: whole when it is short, as an outline of its
+/// definitions when it is not. It used to answer "nothing indexed" for an
+/// indexed file, because a target without a line range was taken as a name.
+/// And an exact search answers every matching line with its definition.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn a_bare_path_reads_the_file_and_exact_search_lists_its_lines() {
+    let long: String = (0..400)
+        .map(|i| format!("fn step_{i}() {{ let value = {i}; }}\n"))
+        .collect();
+    let corpus = corpus(
+        "reads",
+        &[
+            ("src/short.rs", "fn tiny() {\n    // NOTE here\n}\n"),
+            ("src/long.rs", &long),
+        ],
+    );
+    let store = store_for(&corpus);
+    let mut server = Server::open(&[store.path()]);
+    server.handshake();
+
+    let short = server.tool("semlith_read", json!({ "target": "src/short.rs" }));
+    assert!(short.contains("NOTE here"), "{short}");
+    let outline = server.tool("semlith_read", json!({ "target": "src/long.rs" }));
+    assert!(outline.contains("its definitions"), "{outline}");
+    assert!(outline.contains("function step_399"), "{outline}");
+    assert!(outline.len() < 20_000, "{} chars", outline.len());
+
+    let exact = server.tool("semlith_search", json!({ "query": "NOTE", "exact": true }));
+    assert!(
+        exact.starts_with("1 matching lines") || exact.contains("\n1 matching lines"),
+        "{exact}"
+    );
+    assert!(exact.contains("2 tiny | // NOTE here"), "{exact}");
+}
+
 #[test]
 #[ignore = "downloads an embedding model on first run"]
 fn a_write_with_several_stores_open_must_name_one() {

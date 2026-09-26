@@ -692,6 +692,10 @@ fn queries(lang: &'static str, language: &Language, tags: &str) -> &'static [Que
 struct Def {
     kind: String,
     name: String,
+    /// The type a Rust method belongs to — the `impl` or `trait` block around
+    /// it — which the tree says and the enclosing-definition rule cannot,
+    /// because an `impl` block is not a definition of its own.
+    owner: Option<String>,
     start: usize,
     end: usize,
     start_line: u32,
@@ -747,8 +751,11 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
     let mut defs: Vec<Def> = Vec::new();
     let mut refs: Vec<Ref> = Vec::new();
 
+    // Rust's field types, read once per file, so a receiver such as
+    // `self.members[i].store` can name the type its method belongs to.
+    let rust = (lang == "rust").then(|| RustFields::of(tree.root_node(), text));
     for query in queries(lang, &language, tags) {
-        collect(query, &tree, text, &mut defs, &mut refs);
+        collect(query, &tree, text, rust.as_ref(), &mut defs, &mut refs);
     }
 
     // The bundled query and the supplement can capture one item twice — and
@@ -801,9 +808,13 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
 
     for (i, def) in defs.iter().enumerate() {
         let parent = enclosing(&defs, i, def.start).map(|p| defs[p].name.clone());
-        let qualified = match &parent {
-            Some(p) => format!("{p}::{}", def.name),
-            None => format!("{module}::{}", def.name),
+        // The owner outranks the enclosing definition: `Fleet::search_preferring`
+        // is what the code calls it and what a qualified question asks for,
+        // and `fleet::search_preferring` could be either of two methods.
+        let qualified = match (&def.owner, &parent) {
+            (Some(owner), _) => format!("{owner}::{}", def.name),
+            (None, Some(p)) => format!("{p}::{}", def.name),
+            (None, None) => format!("{module}::{}", def.name),
         };
         symbols.push(Symbol {
             kind: def.kind.clone(),
@@ -852,12 +863,22 @@ pub fn extract(path: &Path, text: &str) -> Result<Option<Extraction>> {
         .collect();
 
     for reference in &refs {
-        let from = match enclosing_name(&defs, reference.at) {
-            Some(name) => name,
+        let enclosing = enclosing_def(&defs, reference.at);
+        let from = match enclosing {
+            Some(def) => def.name.clone(),
             None => module.clone(),
         };
-        if from == reference.name {
-            continue; // direct recursion adds a self-edge and no information
+        // Direct recursion adds a self-edge and no information. A call to the
+        // same name on a receiver of another type is not recursion:
+        // `Fleet::search_preferring` calling `store.search_preferring()` on
+        // a `Semlith` is the one edge that says what the fleet delegates to.
+        let other_owner = reference
+            .hint
+            .as_ref()
+            .is_some_and(|h| h.chars().next().is_some_and(char::is_uppercase))
+            && enclosing.and_then(|d| d.owner.as_ref()) != reference.hint.as_ref();
+        if from == reference.name && !other_owner {
+            continue;
         }
         // The file said where this came from, one way or the other: it
         // imported the name itself (`use ...::edges_out;` then `edges_out()`),
@@ -919,6 +940,7 @@ fn collect(
     query: &Query,
     tree: &tree_sitter::Tree,
     text: &str,
+    rust: Option<&RustFields>,
     defs: &mut Vec<Def>,
     refs: &mut Vec<Ref>,
 ) {
@@ -998,7 +1020,14 @@ fn collect(
                 kind,
                 at: node.start_byte(),
                 line: node.start_position().row as u32 + 1,
-                hint: hint.and_then(|h| hint_text(h, text)),
+                // A receiver whose type the source states is a better lead
+                // than its variable name: `store.search_preferring()` names a
+                // file that defines no such method, and `Semlith` names the
+                // one that does.
+                hint: hint.and_then(|h| {
+                    rust.and_then(|fields| receiver_type(h, text, fields))
+                        .or_else(|| hint_text(h, text))
+                }),
             });
         }
 
@@ -1007,12 +1036,291 @@ fn collect(
             defs.push(Def {
                 kind: kind.to_string(),
                 name: text[name.byte_range()].to_string(),
+                owner: rust.and_then(|_| rust_owner(span, text)),
                 start: span.start_byte(),
                 end: span.end_byte(),
                 start_line: span.start_position().row as u32 + 1,
                 end_line: span.end_position().row as u32 + 1,
             });
         }
+    }
+}
+
+/// A Rust type as far as a method call needs it: its name, and for a
+/// container (`Vec<T>`, `Option<T>`, `[T]`) the element a `[i]` or a `for`
+/// hands out.
+#[derive(Debug, Clone, PartialEq)]
+struct Ty {
+    name: String,
+    elem: Option<String>,
+}
+
+/// Standard containers and values: a receiver of one of these is not a
+/// type in the corpus, so the variable's name stays the better lead.
+const STD_TYPES: [&str; 14] = [
+    "Vec", "VecDeque", "Option", "Result", "String", "str", "HashMap", "BTreeMap", "HashSet",
+    "BTreeSet", "Path", "PathBuf", "[]", "Self",
+];
+
+/// The declared type of every struct field in one Rust file: by owner and
+/// field, and by field name alone for a receiver whose owner is unknown.
+///
+/// A field name declared with two different types in one file maps to
+/// nothing by name — `store: Semlith` beside `store: String` — and is then
+/// answered only through its owner: `self.members[i].store` is `Member`'s.
+struct RustFields {
+    by_owner: std::collections::HashMap<(String, String), Ty>,
+    by_name: std::collections::HashMap<String, Option<Ty>>,
+}
+
+impl RustFields {
+    fn of(root: tree_sitter::Node, text: &str) -> RustFields {
+        let mut out = RustFields {
+            by_owner: Default::default(),
+            by_name: Default::default(),
+        };
+        let mut cursor = root.walk();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if node.kind() == "field_declaration" {
+                let owner = node
+                    .parent()
+                    .and_then(|list| list.parent())
+                    .filter(|item| item.kind() == "struct_item")
+                    .and_then(|item| item.child_by_field_name("name"))
+                    .map(|n| text[n.byte_range()].to_string());
+                let name = node.child_by_field_name("name");
+                let ty = node
+                    .child_by_field_name("type")
+                    .and_then(|t| rust_ty(t, text));
+                if let (Some(name), Some(ty)) = (name, ty) {
+                    let field = text[name.byte_range()].to_string();
+                    if let Some(owner) = owner {
+                        out.by_owner.insert((owner, field.clone()), ty.clone());
+                    }
+                    let entry = out.by_name.entry(field).or_insert_with(|| Some(ty.clone()));
+                    if entry.as_ref() != Some(&ty) {
+                        *entry = None;
+                    }
+                }
+                continue;
+            }
+            stack.extend(node.named_children(&mut cursor));
+        }
+        out
+    }
+}
+
+/// The type a Rust definition is a member of: the nearest `impl` or `trait`
+/// block around it. A function nested inside another function, or a module in
+/// between, belongs to neither.
+fn rust_owner(node: tree_sitter::Node, text: &str) -> Option<String> {
+    let mut at = node.parent();
+    while let Some(n) = at {
+        match n.kind() {
+            "impl_item" => return rust_type_name(n.child_by_field_name("type")?, text),
+            "trait_item" => {
+                return n
+                    .child_by_field_name("name")
+                    .map(|t| text[t.byte_range()].to_string());
+            }
+            "function_item" | "mod_item" | "closure_expression" => return None,
+            _ => {}
+        }
+        at = n.parent();
+    }
+    None
+}
+
+/// The type a type node names, through references and the smart pointers a
+/// method call sees through: `&mut Fleet`, `Arc<Mutex<Fleet>>` and
+/// `crate::fleet::Fleet` all name `Fleet`.
+fn rust_type_name(node: tree_sitter::Node, text: &str) -> Option<String> {
+    rust_ty(node, text).map(|t| t.name)
+}
+
+/// [`rust_type_name`], keeping a container's element.
+fn rust_ty(node: tree_sitter::Node, text: &str) -> Option<Ty> {
+    const THROUGH: [&str; 7] = ["Box", "Rc", "Arc", "RefCell", "Mutex", "RwLock", "Cell"];
+    let plain = |name: String| Some(Ty { name, elem: None });
+    match node.kind() {
+        "type_identifier" | "primitive_type" => plain(text[node.byte_range()].to_string()),
+        "reference_type" | "pointer_type" => rust_ty(node.child_by_field_name("type")?, text),
+        "scoped_type_identifier" => rust_ty(node.child_by_field_name("name")?, text),
+        "array_type" => Some(Ty {
+            name: "[]".to_string(),
+            elem: node
+                .child_by_field_name("element")
+                .and_then(|e| rust_type_name(e, text)),
+        }),
+        "generic_type" => {
+            let base = rust_type_name(node.child_by_field_name("type")?, text)?;
+            let first = node.child_by_field_name("type_arguments").and_then(|args| {
+                let mut cursor = args.walk();
+                args.named_children(&mut cursor).next()
+            });
+            if THROUGH.contains(&base.as_str()) {
+                return rust_ty(first?, text);
+            }
+            Some(Ty {
+                name: base,
+                elem: first.and_then(|f| rust_type_name(f, text)),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The type of a Rust method call's receiver, where the source states it.
+///
+/// `self` inside an `impl T` block; a parameter, `let` or `for` binding whose
+/// type is declared or constructed (`x: T`, `T::new()`, `T::open(…)?`,
+/// `T { … }`, `for x in &self.items`); and a field, through its owner's
+/// declared type when the chain says whose field it is (`self.members[i].store`
+/// is `Member.store`), or by its name when only one type in the file declares
+/// it. A standard container is not a lead, so `None` and the receiver's own
+/// name stays the hint, as it was before 0.30.0.
+fn receiver_type(receiver: tree_sitter::Node, text: &str, fields: &RustFields) -> Option<String> {
+    expr_ty(receiver, text, fields, 0)
+        .map(|t| t.name)
+        .filter(|name| !STD_TYPES.contains(&name.as_str()))
+}
+
+/// The type an expression evaluates to, where the source states it.
+fn expr_ty(node: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) -> Option<Ty> {
+    if depth > 8 {
+        return None;
+    }
+    match node.kind() {
+        "self" => {
+            let mut at = node.parent();
+            while let Some(n) = at {
+                if n.kind() == "function_item" {
+                    return rust_owner(n, text).map(|name| Ty { name, elem: None });
+                }
+                at = n.parent();
+            }
+            None
+        }
+        "identifier" => binding_ty(node, text, fields, depth),
+        "field_expression" => {
+            let field = text[node.child_by_field_name("field")?.byte_range()].to_string();
+            let owner = node
+                .child_by_field_name("value")
+                .and_then(|v| expr_ty(v, text, fields, depth + 1));
+            if let Some(owner) = owner
+                && let Some(ty) = fields.by_owner.get(&(owner.name, field.clone()))
+            {
+                return Some(ty.clone());
+            }
+            fields.by_name.get(&field).cloned().flatten()
+        }
+        "index_expression" => {
+            let container = expr_ty(node.named_child(0)?, text, fields, depth + 1)?;
+            container.elem.map(|name| Ty { name, elem: None })
+        }
+        "reference_expression" | "parenthesized_expression" | "try_expression" => {
+            let inner = node
+                .child_by_field_name("value")
+                .or_else(|| node.named_child(0))?;
+            expr_ty(inner, text, fields, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// The declared or constructed type of a local named by `ident`: the last
+/// parameter, `let` or `for` binding of that name in the enclosing function
+/// that comes before the use.
+fn binding_ty(ident: tree_sitter::Node, text: &str, fields: &RustFields, depth: u8) -> Option<Ty> {
+    let name = &text[ident.byte_range()];
+    let mut function = ident.parent();
+    while let Some(f) = function {
+        if f.kind() == "function_item" {
+            break;
+        }
+        function = f.parent();
+    }
+    let function = function?;
+    // ponytail: walks the whole enclosing function per method call; a
+    // per-function binding table if a pathological file ever shows up in
+    // the indexing profile.
+    let mut found: Option<(usize, Ty)> = None;
+    let mut cursor = function.walk();
+    let mut stack = vec![function];
+    while let Some(node) = stack.pop() {
+        if node.start_byte() >= ident.start_byte() {
+            continue;
+        }
+        let names_it = |field: &str| {
+            node.child_by_field_name(field)
+                .is_some_and(|p| p.kind() == "identifier" && &text[p.byte_range()] == name)
+        };
+        let ty = match node.kind() {
+            "parameter" | "let_declaration" if names_it("pattern") => node
+                .child_by_field_name("type")
+                .and_then(|t| rust_ty(t, text))
+                .or_else(|| {
+                    node.child_by_field_name("value")
+                        .and_then(|v| constructed_type(v, text))
+                        .map(|name| Ty { name, elem: None })
+                }),
+            // `for x in &self.items`: the element of what is iterated.
+            "for_expression" if names_it("pattern") => node
+                .child_by_field_name("value")
+                .and_then(|v| expr_ty(v, text, fields, depth + 1))
+                .and_then(|t| t.elem)
+                .map(|name| Ty { name, elem: None }),
+            _ => None,
+        };
+        if let Some(ty) = ty
+            && found.as_ref().is_none_or(|(at, _)| node.start_byte() > *at)
+        {
+            found = Some((node.start_byte(), ty));
+        }
+        stack.extend(node.named_children(&mut cursor));
+    }
+    found.map(|(_, ty)| ty)
+}
+
+/// `T::new()`, `T::open(…)?`, `T::load(…).unwrap()` and `T { … }` construct a
+/// `T`. The upper-case check keeps `store::open()` — a module's function,
+/// whose return type the call does not say — out of it.
+fn constructed_type(value: tree_sitter::Node, text: &str) -> Option<String> {
+    let upper = |t: &str| t.chars().next().is_some_and(char::is_uppercase);
+    match value.kind() {
+        "try_expression" => constructed_type(value.named_child(0)?, text),
+        "struct_expression" => {
+            rust_type_name(value.child_by_field_name("name")?, text).filter(|t| upper(t))
+        }
+        "call_expression" => {
+            let function = value.child_by_field_name("function")?;
+            match function.kind() {
+                "scoped_identifier" => {
+                    let path = function.child_by_field_name("path")?;
+                    let ty = match path.kind() {
+                        "identifier" | "type_identifier" => text[path.byte_range()].to_string(),
+                        "scoped_identifier" => {
+                            text[path.child_by_field_name("name")?.byte_range()].to_string()
+                        }
+                        _ => return None,
+                    };
+                    upper(&ty).then_some(ty)
+                }
+                // `T::open(…).unwrap()` and `.expect(…)`: the value is what
+                // the call before them produced.
+                "field_expression" => {
+                    let method = &text[function.child_by_field_name("field")?.byte_range()];
+                    if matches!(method, "unwrap" | "expect") {
+                        constructed_type(function.child_by_field_name("value")?, text)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1141,7 +1449,8 @@ fn enclosing(defs: &[Def], self_index: usize, at: usize) -> Option<usize> {
     best
 }
 
-fn enclosing_name(defs: &[Def], at: usize) -> Option<String> {
+/// The innermost definition whose range holds `at`.
+fn enclosing_def(defs: &[Def], at: usize) -> Option<&Def> {
     let mut best: Option<&Def> = None;
     for d in defs {
         if d.start > at || d.end <= at {
@@ -1151,7 +1460,7 @@ fn enclosing_name(defs: &[Def], at: usize) -> Option<String> {
             best = Some(d);
         }
     }
-    best.map(|d| d.name.clone())
+    best
 }
 
 /// A file's own symbol: what top-level definitions hang off and where
@@ -1634,12 +1943,19 @@ pub fn verbatim(path: &str) -> String {
 /// caller itself and its path is already on the line, so only the line number
 /// is new.
 pub fn call_site(end: &crate::store::EdgeEnd, shorten: &dyn Fn(&str) -> String) -> String {
+    // Which of several definitions a caller resolved to: the difference
+    // between `Fleet::search_preferring` and `Semlith::search_preferring`
+    // is the whole answer to "what calls this one".
+    let means = match &end.means {
+        Some(m) => format!(" → {m}"),
+        None => String::new(),
+    };
     let Some(line) = end.line else {
-        return String::new();
+        return means;
     };
     match &end.from_path {
-        Some(path) => format!("  · called at {}:{line}", shorten(path)),
-        None => format!("  · call at line {line}"),
+        Some(path) => format!("  · called at {}:{line}{means}", shorten(path)),
+        None => format!("  · call at line {line}{means}"),
     }
 }
 
@@ -1687,14 +2003,186 @@ pub fn neighbours(
     kinds: &[String],
     all: bool,
 ) -> Result<Neighbours> {
-    let callees = crate::store::edges_out(db, name, kinds)?;
-    let unresolved = crate::store::unresolved_out(db, name, kinds)?;
+    let (qualifier, bare) = split_qualified(name);
+    let definitions = crate::store::symbols_named(db, bare, 64)?;
+    // A qualifier that owns nothing is ignored rather than answered with
+    // nothing: the bare name is the nearest true answer.
+    let owned: Vec<&crate::store::SymbolRow> = match qualifier {
+        Some(q) => definitions.iter().filter(|d| owned_by(d, q)).collect(),
+        None => Vec::new(),
+    };
+    let owned_ids: Vec<i64> = owned.iter().map(|d| d.id).collect();
+
+    let mut callers = Vec::new();
+    for incoming in crate::store::edges_in_resolved(db, bare, kinds)? {
+        if !owned_ids.is_empty() && !incoming.means.iter().any(|m| owned_ids.contains(m)) {
+            continue;
+        }
+        let mut end = incoming.end;
+        if end.definitions > 1 && incoming.means.len() == 1 {
+            end.means = definitions
+                .iter()
+                .find(|d| d.id == incoming.means[0])
+                .map(|d| d.qualified.clone());
+        } else if end.confidence == AMBIGUOUS {
+            // A caller is one definition whatever it called, so it keeps its
+            // path; what did not settle is which of the targets it meant, and
+            // that is what `inferred` has always said about a caller.
+            end.confidence = INFERRED.to_string();
+        }
+        callers.push(end);
+    }
+
+    let mut callees = crate::store::edges_out(db, bare, kinds)?;
+    if !owned.is_empty() {
+        callees.retain(|e| {
+            owned.iter().any(|d| {
+                e.from_path.as_deref() == Some(d.path.as_str()) && e.from_line == Some(d.start_line)
+            })
+        });
+    }
+    let unresolved = crate::store::unresolved_out(db, bare, kinds)?;
     Ok(Neighbours {
-        callers: crate::store::edges_in(db, name, kinds)?,
+        callers,
         callees: if all { callees } else { collapse(callees) },
         hidden: if all { 0 } else { unresolved.len() },
         unresolved: if all { unresolved } else { Vec::new() },
     })
+}
+
+/// The most names one definitions table answers.
+pub const NAMES_LIMIT: usize = 20;
+
+/// One row of a definitions table: where a definition is, and its first line.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Signature {
+    /// The name as it was asked, so a row answers a question.
+    pub asked: String,
+    #[serde(flatten)]
+    pub symbol: crate::store::SymbolRow,
+    /// The definition's first line, from the store's own chunks, trimmed. Empty
+    /// when the store holds no chunk over that line.
+    pub signature: String,
+}
+
+/// Every definition of several names, one compact row each, and no rings.
+///
+/// The question it answers is "where are these defined and what do they look
+/// like" — three `semlith_symbol` calls before 0.30.0, each carrying callers,
+/// callees and a second ring the question did not ask for. Headings, keys and
+/// selectors are left out: they are places in a document, not definitions.
+pub fn signatures(db: &rusqlite::Connection, names: &[String]) -> Result<Vec<Signature>> {
+    let mut out = Vec::new();
+    for asked in names.iter().take(NAMES_LIMIT) {
+        let (qualifier, bare) = split_qualified(asked);
+        let mut rows = crate::store::symbols_named(db, bare, 64)?;
+        rows.retain(|r| !NAVIGATIONAL_KINDS.contains(&r.kind.as_str()));
+        if let Some(q) = qualifier
+            && rows.iter().any(|r| owned_by(r, q))
+        {
+            rows.retain(|r| owned_by(r, q));
+        }
+        for symbol in rows {
+            let signature = crate::store::chunks_overlapping(
+                db,
+                &symbol.path,
+                symbol.start_line,
+                symbol.start_line,
+            )?
+            .iter()
+            .find_map(|c| {
+                let offset = symbol.start_line.checked_sub(c.start_line)? as usize;
+                c.text.lines().nth(offset).map(|l| l.trim().to_string())
+            })
+            .unwrap_or_default();
+            out.push(Signature {
+                asked: asked.clone(),
+                symbol,
+                signature,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// A definitions table as text, one row per definition.
+pub fn render_signatures(rows: &[Signature], shorten: &dyn Fn(&str) -> String) -> String {
+    const WIDTH: usize = 110;
+    let mut out = String::new();
+    for row in rows {
+        let mut signature = row.signature.clone();
+        if signature.chars().count() > WIDTH {
+            signature = signature.chars().take(WIDTH).collect::<String>() + "\u{2026}";
+        }
+        let store = match &row.symbol.store {
+            Some(s) => format!("{s} "),
+            None => String::new(),
+        };
+        out.push_str(&format!(
+            "{} {} {store}{}:{}-{}  {}\n",
+            row.symbol.qualified,
+            row.symbol.kind,
+            shorten(&row.symbol.path),
+            row.symbol.start_line,
+            row.symbol.end_line,
+            signature
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// A graph answer's text fitted under [`ANSWER_CHARS`].
+///
+/// Lines are kept in order while they fit; the rest are counted per file, read
+/// off each line's first `path:line`, and a `more:` line says what narrows
+/// them. An answer already under the cap comes back untouched.
+pub fn fit(text: String, narrow: &str) -> String {
+    if text.len() <= ANSWER_CHARS {
+        return text;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::new();
+    let mut kept = 0;
+    for line in &lines {
+        if out.len() + line.len() + 1 + 2_000 > ANSWER_CHARS {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        kept += 1;
+    }
+    let rest = &lines[kept..];
+    let mut by_file: Vec<(String, usize)> = Vec::new();
+    for line in rest {
+        let file = line
+            .split_whitespace()
+            .find_map(|word| {
+                let (path, number) = word.rsplit_once(':')?;
+                let number = number.split('-').next()?;
+                (!path.is_empty() && number.parse::<u32>().is_ok()).then(|| path.to_string())
+            })
+            .unwrap_or_else(|| "(no path)".to_string());
+        match by_file.iter_mut().find(|(f, _)| *f == file) {
+            Some((_, n)) => *n += 1,
+            None => by_file.push((file, 1)),
+        }
+    }
+    out.push_str(&format!("\n{} more lines, by file\n", rest.len()));
+    let mut left = by_file.len();
+    for (file, n) in &by_file {
+        let line = format!("  {file} · {n}\n");
+        if out.len() + line.len() + 300 > ANSWER_CHARS {
+            out.push_str(&format!("  … {left} more files\n"));
+            break;
+        }
+        out.push_str(&line);
+        left -= 1;
+    }
+    out.push_str(&format!(
+        "more: {} lines past the {ANSWER_CHARS}-character cap; {narrow}",
+        rest.len()
+    ));
+    out
 }
 
 /// How many second-ring names an evidence block will name.
@@ -1745,7 +2233,13 @@ pub fn evidence(
     limit: usize,
     all: bool,
 ) -> Result<Evidence> {
-    let definitions = crate::store::symbols_named(db, name, limit)?;
+    let (qualifier, bare) = split_qualified(name);
+    let mut definitions = crate::store::symbols_named(db, bare, limit)?;
+    if let Some(q) = qualifier
+        && definitions.iter().any(|d| owned_by(d, q))
+    {
+        definitions.retain(|d| owned_by(d, q));
+    }
     let ring = neighbours(db, name, kinds, all)?;
 
     let mut ego: Vec<Hop> = Vec::new();
@@ -1773,7 +2267,7 @@ pub fn evidence(
             }
             // The centre is not two hops from itself, and a name already in
             // the first ring is context the reader has.
-            if end.symbol.name == name
+            if end.symbol.name == bare
                 || ring
                     .callers
                     .iter()
@@ -2269,13 +2763,28 @@ fn unwind(came_from: &std::collections::HashMap<Node, Step>, start: &str, end: &
 /// out instead of printing them.
 pub const IMPACT_LIMIT: usize = 400;
 
+/// The most characters a graph answer's text may take, at any depth.
+///
+/// Claude Code refuses an MCP reply past its output limit and hands the agent
+/// nothing at all, which is what `search_preferring` at the default depth did
+/// on 2026-09-25 with 75 012 characters. Past this, rows collapse into
+/// per-file counts and a `more:` line says what narrows them.
+pub const ANSWER_CHARS: usize = 16_000;
+
 /// One definition that reaches the symbol asked about.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Reached {
     pub name: String,
     #[serde(serialize_with = "crate::serialize_plain")]
     pub path: String,
+    /// Where the reaching definition starts.
     pub line: u32,
+    /// Where the call, import or reference was written, from `edges.line`.
+    /// `None` on an edge an older binary wrote; a renderer then says a
+    /// re-index adds it rather than printing the definition's line as though
+    /// it were the call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<u32>,
     /// Hops from the symbol asked about. One is a direct caller.
     pub hop: u32,
     /// The edge that reached it, and how much that edge is worth.
@@ -2311,12 +2820,46 @@ pub struct Impact {
     /// How many reached definitions were left out at [`IMPACT_LIMIT`].
     #[serde(skip_serializing_if = "is_zero")]
     pub hidden: usize,
+    /// The qualifier asked for matched no definition's owner, so the answer
+    /// is about the bare name, and says so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unqualified: bool,
     /// Counted the same way a chain's summary is counted, so the page and the
     /// terminal cannot disagree about what the answer is made of.
     pub extracted: usize,
     pub resolved: usize,
     pub inferred: usize,
     pub ambiguous: usize,
+}
+
+/// `Type::method`, `module::function` or `Type.method`, split into the
+/// qualifier and the bare name. A name that is not qualified, or whose parts
+/// are not identifiers — a Markdown heading with a version in it — comes back
+/// whole.
+pub fn split_qualified(name: &str) -> (Option<&str>, &str) {
+    let ident = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_alphanumeric() || c == '_');
+    let split = name.rsplit_once("::").or_else(|| name.rsplit_once('.'));
+    match split {
+        Some((owner, bare)) => {
+            let last = owner.rsplit("::").next().unwrap_or(owner);
+            if ident(last) && ident(bare) {
+                (Some(last), bare)
+            } else {
+                (None, name)
+            }
+        }
+        None => (None, name),
+    }
+}
+
+/// Whether a definition belongs to `qualifier`: its owning type, its module
+/// (the file's stem) or a directory it sits in.
+pub fn owned_by(row: &crate::store::SymbolRow, qualifier: &str) -> bool {
+    crate::store::owner_of(&row.qualified) == Some(qualifier)
+        || module_name(Path::new(&row.path)) == qualifier
+        || Path::new(&row.path)
+            .parent()
+            .is_some_and(|p| p.components().any(|c| c.as_os_str() == qualifier))
 }
 
 /// Everything that reaches `name`, breadth first, up to `depth` hops.
@@ -2326,6 +2869,11 @@ pub struct Impact {
 /// crossed unless `all_edges` says to. Breadth first, so the hop recorded
 /// against a definition is the fewest hops it takes — a caller that reaches
 /// the symbol both directly and through three others is a direct caller.
+///
+/// From 0.30.0 each hop asks what calls *this definition*: an edge into a
+/// name is kept only where the resolver says it means the definition being
+/// walked from. Before, a caller of any `run` counted as reaching the `run`
+/// in `main.rs`, which is most of why one answer was 75 012 characters.
 pub fn impact(
     db: &rusqlite::Connection,
     name: &str,
@@ -2343,7 +2891,21 @@ pub fn impact(
     } else {
         kinds
     };
-    let definitions = crate::store::symbols_named(db, name, 16)?;
+    let (qualifier, bare) = split_qualified(name);
+    let mut definitions = crate::store::symbols_named(db, bare, 64)?;
+    let mut unqualified = false;
+    if let Some(q) = qualifier {
+        let owned: Vec<_> = definitions
+            .iter()
+            .filter(|d| owned_by(d, q))
+            .cloned()
+            .collect();
+        if owned.is_empty() {
+            unqualified = !definitions.is_empty();
+        } else {
+            definitions = owned;
+        }
+    }
     let mut answer = Impact {
         name: name.to_string(),
         depth,
@@ -2352,6 +2914,7 @@ pub fn impact(
         reached: Vec::new(),
         files: Vec::new(),
         hidden: 0,
+        unqualified,
         extracted: 0,
         resolved: 0,
         inferred: 0,
@@ -2361,7 +2924,6 @@ pub fn impact(
     // Seen by definition, so two functions sharing a name are two nodes, and
     // the centre itself is never reported as reaching itself.
     let mut seen: std::collections::HashSet<Node> = std::collections::HashSet::new();
-    seen.insert(Node::any(name));
     for row in &answer.definitions {
         seen.insert(Node {
             name: row.name.clone(),
@@ -2369,19 +2931,34 @@ pub fn impact(
             line: row.start_line,
         });
     }
+    let asked: std::collections::HashSet<i64> = answer.definitions.iter().map(|d| d.id).collect();
 
-    let mut frontier: Vec<String> = vec![name.to_string()];
+    let mut incoming: std::collections::HashMap<String, Vec<crate::store::Incoming>> =
+        std::collections::HashMap::new();
+    let mut frontier: Vec<crate::store::SymbolRow> = answer.definitions.clone();
     for hop in 1..=depth {
-        let mut next: Vec<String> = Vec::new();
+        let mut next: Vec<crate::store::SymbolRow> = Vec::new();
         for target in &frontier {
-            for end in crate::store::edges_in(db, target, kinds)? {
-                if !all_edges && end.confidence == AMBIGUOUS {
+            if !incoming.contains_key(&target.name) {
+                let found = crate::store::edges_in_resolved(db, &target.name, kinds)?;
+                incoming.insert(target.name.clone(), found);
+            }
+            for edge in &incoming[&target.name] {
+                if !edge.means.contains(&target.id) {
                     continue;
                 }
+                // An edge that could mean several definitions still reaches
+                // the question when every one of them is a definition that was
+                // asked about: `search_preferring` asked bare means both.
+                let within = hop == 1 && edge.means.iter().all(|id| asked.contains(id));
+                if !all_edges && edge.end.confidence == AMBIGUOUS && !within {
+                    continue;
+                }
+                let caller = &edge.end.symbol;
                 let node = Node {
-                    name: end.symbol.name.clone(),
-                    path: end.symbol.path.clone(),
-                    line: end.symbol.start_line,
+                    name: caller.name.clone(),
+                    path: caller.path.clone(),
+                    line: caller.start_line,
                 };
                 if !seen.insert(node) {
                     continue;
@@ -2390,29 +2967,28 @@ pub fn impact(
                     answer.hidden += 1;
                     continue;
                 }
-                match end.confidence.as_str() {
+                match edge.end.confidence.as_str() {
                     EXTRACTED => answer.extracted += 1,
                     RESOLVED => answer.resolved += 1,
                     INFERRED => answer.inferred += 1,
                     _ => answer.ambiguous += 1,
                 }
-                next.push(end.symbol.name.clone());
+                next.push(caller.clone());
                 answer.reached.push(Reached {
-                    name: end.symbol.name,
-                    path: end.symbol.path,
-                    line: end.symbol.start_line,
+                    name: caller.name.clone(),
+                    path: caller.path.clone(),
+                    line: caller.start_line,
+                    at: edge.end.line,
                     hop,
-                    kind: end.kind,
-                    confidence: end.confidence,
-                    via: target.clone(),
+                    kind: edge.end.kind.clone(),
+                    confidence: edge.end.confidence.clone(),
+                    via: target.name.clone(),
                 });
             }
         }
         if next.is_empty() {
             break;
         }
-        next.sort();
-        next.dedup();
         frontier = next;
     }
 
@@ -2420,14 +2996,20 @@ pub fn impact(
     // that reaches the symbol four ways at six hops is further away than one
     // that reaches it once at one hop, and reading it in that order is how
     // somebody decides what to open.
+    answer.files = files_of(&answer.reached);
+    Ok(answer)
+}
+
+/// The reached rows gathered per file, nearest first.
+pub fn files_of(reached: &[Reached]) -> Vec<ReachedFile> {
     let mut by_file: std::collections::BTreeMap<String, (usize, u32)> =
         std::collections::BTreeMap::new();
-    for row in &answer.reached {
+    for row in reached {
         let entry = by_file.entry(row.path.clone()).or_insert((0, row.hop));
         entry.0 += 1;
         entry.1 = entry.1.min(row.hop);
     }
-    answer.files = by_file
+    let mut files: Vec<ReachedFile> = by_file
         .into_iter()
         .map(|(path, (symbols, nearest))| ReachedFile {
             path,
@@ -2435,54 +3017,116 @@ pub fn impact(
             nearest,
         })
         .collect();
-    answer.files.sort_by(|a, b| {
+    files.sort_by(|a, b| {
         a.nearest
             .cmp(&b.nearest)
             .then(b.symbols.cmp(&a.symbols))
             .then(a.path.cmp(&b.path))
     });
-
-    Ok(answer)
+    files
 }
 
 impl Impact {
     /// The whole answer as text, for the terminal and for an agent.
     ///
     /// One renderer, as the chain has one: the CLI and the MCP reply differ
-    /// only in whether they are allowed to use bold.
+    /// only in whether they are allowed to use bold. It never passes
+    /// [`ANSWER_CHARS`]: rows that do not fit are counted per file instead.
     pub fn render(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
         let mut out = self.headline();
+        if self.unqualified {
+            out.push_str(&format!(
+                "\nno definition of {} is owned by {}; this is every {}",
+                split_qualified(&self.name).1,
+                split_qualified(&self.name).0.unwrap_or_default(),
+                split_qualified(&self.name).1
+            ));
+        }
+        if !self.definitions.is_empty() {
+            let defs: Vec<String> = self
+                .definitions
+                .iter()
+                .map(|d| format!("{}:{}", shorten(&d.path), d.start_line))
+                .collect();
+            out.push_str(&format!("\ndefined at {}", defs.join(", ")));
+        }
         if self.reached.is_empty() {
             return out;
         }
+        // Room kept for the files block and the closing lines, so the rows
+        // are what gives way.
+        let files_block = self.files_block(bold, reset, shorten);
+        let reserve = files_block.len().min(ANSWER_CHARS / 4) + 400;
         let mut hop = 0;
+        let mut shown = 0usize;
+        let mut undated = 0usize;
         for row in &self.reached {
+            let mut chunk = String::new();
             if row.hop != hop {
-                hop = row.hop;
-                out.push_str(&format!(
-                    "\n\n{bold}{hop} hop{}{reset}",
-                    if hop == 1 { "" } else { "s" }
+                chunk.push_str(&format!(
+                    "\n\n{bold}{} hop{}{reset}",
+                    row.hop,
+                    if row.hop == 1 { "" } else { "s" }
                 ));
             }
-            out.push_str(&format!(
-                "\n  {} {}:{} · {} · {} · reaches {}",
-                row.name,
-                shorten(&row.path),
-                row.line,
-                row.kind,
-                row.confidence,
-                row.via
+            let at = match row.at {
+                Some(at) => format!("{}:{at} in {}", shorten(&row.path), row.name),
+                None => {
+                    undated += 1;
+                    format!(
+                        "{}:{} {} (definition)",
+                        shorten(&row.path),
+                        row.line,
+                        row.name
+                    )
+                }
+            };
+            chunk.push_str(&format!(
+                "\n  {at} · {} {} · reaches {}",
+                row.kind, row.confidence, row.via
             ));
+            if out.len() + chunk.len() + reserve > ANSWER_CHARS {
+                break;
+            }
+            if row.hop != hop {
+                hop = row.hop;
+            }
+            out.push_str(&chunk);
+            shown += 1;
         }
-        out.push_str(&format!("\n\n{bold}files{reset}"));
-        for file in &self.files {
+        let collapsed = self.reached.len() - shown;
+        if collapsed > 0 {
+            let rest = files_of(&self.reached[shown..]);
+            out.push_str(&format!("\n\n{bold}{collapsed} more, by file{reset}"));
+            let mut left = rest.len();
+            for file in &rest {
+                let line = format!(
+                    "\n  {} · {} · nearest {} hop{}",
+                    shorten(&file.path),
+                    file.symbols,
+                    file.nearest,
+                    if file.nearest == 1 { "" } else { "s" }
+                );
+                if out.len() + line.len() + 300 > ANSWER_CHARS {
+                    out.push_str(&format!("\n  … {left} more files"));
+                    break;
+                }
+                out.push_str(&line);
+                left -= 1;
+            }
+            let nearer = self.reached[shown].hop.saturating_sub(1).max(1);
             out.push_str(&format!(
-                "\n  {} · {} definition{} · nearest {} hop{}",
-                shorten(&file.path),
-                file.symbols,
-                if file.symbols == 1 { "" } else { "s" },
-                file.nearest,
-                if file.nearest == 1 { "" } else { "s" }
+                "\nmore: {collapsed} rows past the {ANSWER_CHARS}-character cap; depth: {nearer} lists them, or ask about one of the callers above"
+            ));
+        } else if out.len() + files_block.len() < ANSWER_CHARS {
+            out.push_str(&files_block);
+        }
+        if undated > 0 {
+            out.push_str(&format!(
+                "\n{undated} row{} show{} the caller's definition: this store has no call-site lines for {}; a re-index adds them",
+                if undated == 1 { "" } else { "s" },
+                if undated == 1 { "s" } else { "" },
+                if undated == 1 { "it" } else { "them" }
             ));
         }
         if self.hidden > 0 {
@@ -2494,8 +3138,23 @@ impl Impact {
         out
     }
 
+    fn files_block(&self, bold: &str, reset: &str, shorten: &dyn Fn(&str) -> String) -> String {
+        let mut out = format!("\n\n{bold}files{reset}");
+        for file in &self.files {
+            out.push_str(&format!(
+                "\n  {} · {} definition{} · nearest {} hop{}",
+                shorten(&file.path),
+                file.symbols,
+                if file.symbols == 1 { "" } else { "s" },
+                file.nearest,
+                if file.nearest == 1 { "" } else { "s" }
+            ));
+        }
+        out
+    }
+
     /// The sentence that says what the answer is, printed by every surface so
-    /// none of them writes its own."""
+    /// none of them writes its own.
     pub fn headline(&self) -> String {
         if self.reached.is_empty() {
             return format!(
@@ -3148,6 +3807,71 @@ mod tests {
 
         let ts = run("app.ts", "function go(){ store.search(q); }\n");
         assert_eq!(hint_of(&ts, "search", "calls").as_deref(), Some("store"));
+    }
+
+    /// A Rust method's receiver names its type where the source says it, and
+    /// a method is qualified by the type it is implemented on (1.11).
+    #[test]
+    fn rust_receivers_name_their_type_and_methods_their_owner() {
+        let src = "struct Member { store: Semlith }\n\
+            struct Unreadable { store: String }\n\
+            struct Fleet { members: Vec<Member> }\n\
+            impl Fleet {\n\
+                fn search_in(&self) { self.search_preferring(); }\n\
+                fn search_preferring(&self) { self.members[0].store.search_preferring(); }\n\
+            }\n\
+            fn run(fleet: &mut Fleet) { fleet.open(); }\n\
+            fn build() { let s = Semlith::open(p)?; s.index(); let t = Other { a: 1 }; t.go(); }\n";
+        let e = run("fleet.rs", src);
+        let owner_of = |name: &str| {
+            e.symbols
+                .iter()
+                .find(|s| s.name == name)
+                .map(|s| s.qualified.clone())
+        };
+        assert_eq!(owner_of("search_in").as_deref(), Some("Fleet::search_in"));
+        assert_eq!(owner_of("run").as_deref(), Some("fleet::run"));
+        let hint = |from: &str, to: &str| {
+            e.edges
+                .iter()
+                .find(|x| x.from == from && x.to == to && x.kind == "calls")
+                .and_then(|x| x.hint.clone())
+        };
+        assert_eq!(
+            hint("search_in", "search_preferring").as_deref(),
+            Some("Fleet")
+        );
+        // Not recursion: the same name, on a field declared `store: Semlith`.
+        assert_eq!(
+            hint("search_preferring", "search_preferring").as_deref(),
+            Some("Semlith"),
+            "{:?}",
+            e.edges
+        );
+        assert_eq!(hint("run", "open").as_deref(), Some("Fleet"));
+        assert_eq!(hint("build", "index").as_deref(), Some("Semlith"));
+        assert_eq!(hint("build", "go").as_deref(), Some("Other"));
+        // A `for` binding is the element of what it iterates.
+        let e = run(
+            "a.rs",
+            "struct Item; impl Item { fn go(&self) {} }\nstruct Bag { items: Vec<Item> }\nimpl Bag { fn all(&self) { for it in &self.items { it.go(); } } }\n",
+        );
+        let go = e
+            .edges
+            .iter()
+            .find(|x| x.from == "all" && x.to == "go")
+            .and_then(|x| x.hint.clone());
+        assert_eq!(go.as_deref(), Some("Item"), "{:?}", e.edges);
+    }
+
+    /// Recursion still adds no edge.
+    #[test]
+    fn rust_recursion_on_self_adds_no_edge() {
+        let e = run(
+            "a.rs",
+            "struct A;\nimpl A { fn go(&self) { self.go(); } }\n",
+        );
+        assert!(!has_edge(&e, "go", "go", "calls"), "{:?}", e.edges);
     }
 
     /// One call reaches the extractor twice — once from the bundled query,

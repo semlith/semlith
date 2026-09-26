@@ -107,20 +107,34 @@ claude mcp remove --scope user semlith
 claude mcp add --scope user semlith -- "${SEMLITH_BIN}" mcp
 ```
 
-`semlith setup` also writes a `PreToolUse` hook into `~/.claude/settings.json`,
-which fires before a whole-file read or a repository-wide grep and adds one line
-naming the semlith call that answers the same question. It never blocks; the
-entry sits alongside whatever other `PreToolUse` hooks are already there and
-`semlith setup --no-hooks` removes it again, leaving the rest of the file as it
-was. `--strict` writes `semlith hook --strict`, which refuses the first such read
-of each session and then reverts to the line.
+`semlith setup` also writes two hook entries into `~/.claude/settings.json`. The
+`PreToolUse` one fires before a `Bash` grep, rg, find, cat, `sed -n`, head, tail
+or awk, a `Read`, a `Grep` or a `Glob` inside a folder semlith indexes, and adds
+one line naming a concrete semlith call that answers the same question
+(`semlith_search {query: …}`, `semlith_impact {name: …}`, `semlith_read {target:
+…}`, `semlith_files {tree: true}`). It stays quiet outside indexed folders, on
+commands that search nothing, and after three lines in a session. The
+`PostToolUse` one records that a session has called semlith. Both sit alongside
+whatever other hooks are already there, and `semlith setup --no-hooks` removes
+both, leaving the rest of the file as it was.
+
+The default mode never blocks. `semlith setup --hook-mode gate` refuses raw
+lookups until the session has made one semlith call, at most twice, then only
+nudges; `--hook-mode hard` always refuses grep, rg and find in an indexed
+folder. `--strict` is kept as the name for `gate`.
 
 ```json hook path=~/.claude/settings.json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Grep",
+        "matcher": "Bash|Read|Grep|Glob",
+        "hooks": [{ "type": "command", "command": "${SEMLITH_BIN} hook" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*semlith.*",
         "hooks": [{ "type": "command", "command": "${SEMLITH_BIN} hook" }]
       }
     ]
@@ -134,6 +148,35 @@ skills from:
 ```text skills path=~/.claude/skills
 semlith
 ```
+
+From 0.30.0 it also sets `"alwaysLoad": true` on the user-scope server entry in
+`~/.claude.json`, so the semlith tools are in context from the first turn rather
+than behind ToolSearch; `claude mcp add` has no flag for it, so the entry it
+wrote is upgraded in place, backed up beside itself first. On 2026-09-25 this
+alone moved an agent's first lookup from 33 % to 79 % semlith. It writes a
+read-only research subagent, `~/.claude/agents/semlith-explorer.md`, whose tools
+are the semlith tools plus a bounded `Read` for files semlith does not index,
+and which Claude chooses over
+`Explore` for code research in an indexed folder; `semlith setup --no-agents`
+removes it. `semlith doctor` reports a missing `alwaysLoad`, the hook's mode,
+the research agent, and a per-project disable — `disabledMcpServers` or
+`disabledMcpjsonServers` naming semlith for the directory you run it from, which
+the client's `/mcp` toggle writes and which makes the server silently absent
+there. `semlith doctor --fix` clears that one entry for the current directory
+and leaves the rest of `~/.claude.json` as it was. It only runs when asked;
+`setup` never touches it, because the disable was your choice in that project.
+
+Every other client loads an MCP server's tools when it connects, so none needs
+an equivalent of `alwaysLoad`; every client that reads the MCP `initialize`
+reply's `instructions` gets the routing sentence semlith sends there, which from
+0.30.0 names the folders semlith indexes. The rule block for clients with a
+rules file is written under `--register-all`, as before.
+
+A `.semlithignore` file in gitignore syntax, anywhere in an indexed tree, leaves
+its paths out of the store the way `.gitignore` does — for what you commit and
+do not want searched, such as a fixture copy of the repository. The walk, the
+watcher and the daemon's catch-up all honour it, and the portal's Files ▸ Not
+indexed tab counts what it left out.
 
 **OpenAI Codex** — `~/.codex/config.toml`, shared by the CLI, the IDE extension
 and the desktop app. TOML, and the table is `mcp_servers` with an underscore. A
@@ -169,6 +212,13 @@ Or against a daemon on another machine, over HTTP:
 [mcp_servers.semlith]
 url = "http://127.0.0.1:7365/mcp"
 http_headers = { Authorization = "Bearer ${SEMLITH_AGENT_KEY}" }
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://developers.openai.com/codex/guides/agents-md>.
+
+```md rules path=~/.codex/AGENTS.md
+${SEMLITH_RULES}
 ```
 
 **OpenCode** — `opencode.json` in the project root, or the same file under
@@ -262,7 +312,8 @@ already covers every repository, and a per-repository entry means editing
       "type": "local",
       "command": "${SEMLITH_BIN}",
       "args": ["mcp"],
-      "tools": ["*"]
+      "tools": ["*"],
+      "deferTools": "never"
     }
   }
 }
@@ -295,6 +346,13 @@ copilot mcp remove semlith
 
 ```sh register
 copilot mcp add semlith -- "${SEMLITH_BIN}" mcp
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions>.
+
+```md rules path=~/.copilot/copilot-instructions.md
+${SEMLITH_RULES}
 ```
 
 **Gemini CLI** — `~/.gemini/settings.json`. The MCP registration below is
@@ -345,6 +403,13 @@ gemini mcp remove --scope user semlith
 
 ```sh register
 gemini mcp add --scope user semlith "${SEMLITH_BIN}" mcp
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/gemini-md.md>.
+
+```md rules path=~/.gemini/GEMINI.md
+${SEMLITH_RULES}
 ```
 
 **Qwen Code** — `~/.qwen/settings.json`, the same schema as Gemini CLI down to
@@ -398,6 +463,13 @@ qwen mcp remove semlith
 qwen mcp add --scope user semlith "${SEMLITH_BIN}" mcp
 ```
 
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://github.com/QwenLM/qwen-code>.
+
+```md rules path=~/.qwen/QWEN.md
+${SEMLITH_RULES}
+```
+
 **Amp** — `~/.config/amp/settings.json`, or the editor extension's own
 `settings.json`. The root key is the dotted string `amp.mcpServers`, which
 means the entry lives inside a wider settings file rather than in one of its
@@ -434,6 +506,13 @@ Or against a daemon on another machine, over HTTP:
 amp mcp add semlith -- "${SEMLITH_BIN}" mcp
 ```
 
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://ampcode.com/manual>.
+
+```md rules path=~/.config/amp/AGENTS.md
+${SEMLITH_RULES}
+```
+
 **Crush** — `crush.json` in the project root. The root key is `mcp`, not
 `mcpServers`, and the TUI reads the file once at start, so relaunch it after
 editing. Semlith cannot register Crush for you: it has no registration CLI, and
@@ -452,6 +531,13 @@ repository you want it in.
     }
   }
 }
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://github.com/charmbracelet/crush/blob/main/README.md>.
+
+```md rules path=~/.config/crush/CRUSH.md
+${SEMLITH_RULES}
 ```
 
 **Droid** — `~/.factory/mcp.json` for every project, or `.factory/mcp.json` in
@@ -501,6 +587,13 @@ droid mcp remove semlith
 droid mcp add semlith "${SEMLITH_BIN} mcp" --type stdio
 ```
 
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://docs.factory.ai/cli/configuration/agents-md>.
+
+```md rules path=~/.factory/AGENTS.md
+${SEMLITH_RULES}
+```
+
 **Goose** — `goose configure` → Add Extension → Remote Extension, or
 `~/.config/goose/config.yaml`. Goose calls them extensions, spells the
 transport `streamable_http` with an underscore, and takes the address as `uri`
@@ -532,6 +625,13 @@ extensions:
     headers:
       Authorization: "Bearer ${SEMLITH_AGENT_KEY}"
     timeout: 300
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://block.github.io/goose/docs/guides/using-goosehints>.
+
+```md rules path=~/.config/goose/.goosehints
+${SEMLITH_RULES}
 ```
 
 **Amazon Q Developer CLI** — `~/.aws/amazonq/mcp.json` for every workspace, or
@@ -612,6 +712,13 @@ openclaw mcp unset semlith
 
 ```sh register
 openclaw mcp add semlith --command "${SEMLITH_BIN}" --arg mcp
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://docs.openclaw.ai/concepts/agent-workspace>.
+
+```md rules path=~/.openclaw/workspace/AGENTS.md
+${SEMLITH_RULES}
 ```
 
 **DeepSeek** — `~/.deepseek/mcp.json`, read by DeepSeek-TUI, which has since
@@ -801,6 +908,13 @@ paste the stanza in.
 }
 ```
 
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://github.com/zed-industries/zed/blob/main/docs/src/ai/rules.md>.
+
+```md rules path=~/.config/zed/AGENTS.md
+${SEMLITH_RULES}
+```
+
 **JetBrains** — Junie reads `~/.junie/mcp/mcp.json`, or `.junie/mcp/mcp.json`
 per project; AI Assistant takes the same JSON under Settings → Tools → AI
 Assistant → Model Context Protocol. The transport is spelled `streamable-http`
@@ -831,6 +945,13 @@ Or against a daemon on another machine, over HTTP:
 }
 ```
 
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://junie.jetbrains.com/docs/guidelines-and-memory.html>.
+
+```md rules path=~/.junie/AGENTS.md
+${SEMLITH_RULES}
+```
+
 **Cline** — the MCP Servers panel, Configure. Cline's own documentation gives
 two different paths for the file it writes, so let the panel open it rather
 than guessing, and nothing here writes it for you. The transport is
@@ -859,6 +980,13 @@ configuration file, `~/.cline/mcp.json`
 cline mcp install semlith -- "${SEMLITH_BIN}" mcp
 ```
 
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://docs.cline.bot/customization/cline-rules>.
+
+```md rules path=~/Documents/Cline/Rules/semlith.md
+${SEMLITH_RULES}
+```
+
 **Roo Code** — `.roo/mcp.json` in the project, or the global file the MCP
 Servers panel opens. Roo spells the same transport `streamable-http`, with the
 hyphen, which is the one thing that does not copy across from a Cline config.
@@ -878,6 +1006,13 @@ panel. Open it from the panel and paste the stanza in.
     }
   }
 }
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://docs.roocode.com/features/custom-instructions>.
+
+```md rules path=~/.roo/rules/semlith.md
+${SEMLITH_RULES}
 ```
 
 **Kilo Code** — `.kilocode/mcp.json` in the project, or the global file from
@@ -1001,6 +1136,13 @@ kiro-cli mcp add --name semlith --command "${SEMLITH_BIN}" --args "mcp" --scope 
 
 ```text skills path=~/.kiro/skills
 semlith
+```
+
+Its user-level instructions file, which `semlith setup --register-all` appends the rule block to and which it reads on every session — see
+<https://kiro.dev/docs/steering/>.
+
+```md rules path=~/.kiro/steering/semlith.md
+${SEMLITH_RULES}
 ```
 
 #### Desktop apps

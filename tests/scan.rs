@@ -48,37 +48,63 @@ fn run(
     (report, events)
 }
 
+/// The row of `SHAPES` whose kind contains `kind`.
+fn row(kind: &str) -> usize {
+    semlith::filter::SHAPES
+        .iter()
+        .position(|s| s.kind.contains(kind))
+        .unwrap()
+}
+
+/// A live-looking value for the row, built now. The source never holds one:
+/// from 0.30.0 a live-looking literal here would refuse this file itself.
+fn live(kind: &str) -> String {
+    semlith::keyscan::forge(row(kind))
+}
+
+/// Twenty random characters of a generated key, for the generic rule.
+fn random20() -> String {
+    live("GitHub token")[4..24].to_string()
+}
+
 /// A `.txt` per shape, named after nothing in the deny-list so the only rule
 /// that can refuse it is the content scan.
 fn credential_files(corpus: &Path) {
-    for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+    for i in 0..semlith::filter::SHAPES.len() {
         write(
             corpus,
             &format!("config{i}.txt"),
             &format!(
                 "# configuration\nvalue = \"{}\"\nother = 1\n",
-                shape.example
+                semlith::keyscan::forge(i)
             ),
         );
     }
     write(
         corpus,
         "generic.txt",
-        "# configuration\napi_key = \"Xq7Lp2Rv9Wz4Kd8Nf1Hj\"\n",
+        &format!("# configuration\napi_key = \"{}\"\n", random20()),
     );
 }
 
 /// The table is only as good as the fact that every row means what it says.
 #[test]
 fn every_shape_matches_its_example_and_not_its_near_miss() {
-    for shape in semlith::filter::SHAPES {
-        let found = semlith::filter::scan_text(shape.example);
+    for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+        // The example matches the pattern and is a declared test dummy.
+        let example = semlith::keyscan::scan("", shape.example);
         assert!(
-            found.is_some(),
-            "{}: the pattern {:?} does not match its own example {:?}",
+            !example.is_empty() && !semlith::keyscan::refuses(&example),
+            "{}: the pattern {:?} should match its example {:?} as a dummy: {example:?}",
             shape.kind,
             shape.pattern,
             shape.example
+        );
+        // A value built now in the row's shape is refused.
+        assert!(
+            semlith::filter::scan_text(&semlith::keyscan::forge(i)).is_some(),
+            "{}: a live-shaped value was let through",
+            shape.kind
         );
         assert!(
             !shape.example.is_empty() && !shape.near_miss.is_empty(),
@@ -99,9 +125,10 @@ fn every_shape_matches_its_example_and_not_its_near_miss() {
 /// fixture or a hash.
 #[test]
 fn the_generic_rule_needs_the_name_and_the_entropy_together() {
-    assert!(semlith::filter::scan_text("api_key = \"Xq7Lp2Rv9Wz4Kd8Nf1Hj\"").is_some());
+    let value = random20();
+    assert!(semlith::filter::scan_text(&format!("api_key = \"{value}\"")).is_some());
     // Entropy without a key-like name.
-    assert!(semlith::filter::scan_text("digest = \"Xq7Lp2Rv9Wz4Kd8Nf1Hj\"").is_none());
+    assert!(semlith::filter::scan_text(&format!("digest = \"{value}\"")).is_none());
     // A key-like name with no entropy behind it.
     assert!(semlith::filter::scan_text("password = \"aaaaaaaaaaaaaaaaaaaaaa\"").is_none());
     // Short enough to be a real password and not worth refusing a file for.
@@ -111,8 +138,8 @@ fn the_generic_rule_needs_the_name_and_the_entropy_together() {
 /// The line number is the useful half of the finding.
 #[test]
 fn the_finding_names_the_line() {
-    let text = "one\ntwo\nthree\nghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678\n";
-    let found = semlith::filter::scan_text(text).expect("a GitHub token");
+    let text = format!("one\ntwo\nthree\n{}\n", live("GitHub token"));
+    let found = semlith::filter::scan_text(&text).expect("a GitHub token");
     assert_eq!(found.line, 4);
     assert!(found.kind.contains("GitHub"));
 }
@@ -121,11 +148,11 @@ fn the_finding_names_the_line() {
 /// contain the thing it found.
 #[test]
 fn no_reason_ever_quotes_the_credential() {
-    for shape in semlith::filter::SHAPES {
-        let found = semlith::filter::scan_text(shape.example).expect("its own example");
+    for (i, shape) in semlith::filter::SHAPES.iter().enumerate() {
+        let value = semlith::keyscan::forge(i);
+        let found = semlith::filter::scan_text(&value).expect("a live-shaped value");
         let reason = found.reason();
-        for window in shape
-            .example
+        for window in value
             .as_bytes()
             .windows(8)
             .map(|w| String::from_utf8_lossy(w).into_owned())
@@ -204,7 +231,7 @@ fn a_credential_inside_a_document_is_refused_on_the_readers_text() {
     let store = tempfile::tempdir().unwrap();
     write_docx(
         &corpus.path().join("handover.docx"),
-        "Access key AKIAIOSFODNN7EXAMPLE, please rotate it.",
+        &format!("Access key {}, please rotate it.", live("AWS")),
     );
 
     let (report, _) = run(store.path(), corpus.path(), false);
@@ -225,11 +252,9 @@ fn an_image_is_not_scanned() {
     let store = tempfile::tempdir().unwrap();
     // Not a decodable image, which is enough: what is asserted is that the
     // content scan never sees it, and a scan that ran would refuse it.
-    fs::write(
-        corpus.path().join("shot.png"),
-        b"\x89PNG\r\n\x1a\nAKIAIOSFODNN7EXAMPLE",
-    )
-    .unwrap();
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend(live("AWS").as_bytes());
+    fs::write(corpus.path().join("shot.png"), bytes).unwrap();
 
     let (report, _) = run(store.path(), corpus.path(), false);
     assert!(
@@ -281,7 +306,10 @@ fn a_file_that_gains_a_token_is_evicted_on_the_next_run() {
     write(
         corpus.path(),
         "deploy.md",
-        "Deployment runs on Tuesdays.\ntoken = \"ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678\"\n",
+        &format!(
+            "Deployment runs on Tuesdays.\ntoken = \"{}\"\n",
+            live("GitHub token")
+        ),
     );
     let (second, _) = run(store.path(), corpus.path(), false);
 
@@ -315,7 +343,7 @@ fn scan_finds_what_todays_rules_would_refuse_and_forget_evicts_it() {
     write(
         corpus.path(),
         "handover.md",
-        "The key is ghp_aaaaBBBBccccDDDDeeeeFFFFgggg12345678 until Friday.\n",
+        &format!("The key is {} until Friday.\n", live("GitHub token")),
     );
     let (report, _) = run(store.path(), corpus.path(), true);
     assert_eq!(report.indexed, 2);
@@ -565,4 +593,301 @@ fn only_a_refusal_about_the_file_itself_is_marked_for_eviction() {
         .refuses(&root.join(".env"), true, Some(&home))
         .expect("a credential is refused by name");
     assert!(named.credential, "{:?}", named.why);
+}
+
+/// Each declared dummy rule lets its own case through, and one live-looking
+/// match beside a dummy still refuses the file (2.1).
+#[test]
+fn each_dummy_rule_passes_its_case_and_a_live_neighbour_still_refuses() {
+    let aws_id = row("AWS");
+    let example = semlith::filter::SHAPES[aws_id].example;
+    // (a) a published documentation example.
+    assert!(semlith::filter::scan_text(&format!("key {example}")).is_none());
+    // (b) a marker in the body, a run of X, one character repeated.
+    for body in ["FAKEFAKEFAKEFAKE", "XXXXXXXXXXXXXXXX", "AAAAAAAAAAAAAAAA"] {
+        assert!(
+            semlith::filter::scan_text(&format!("AKIA{body}")).is_none(),
+            "AKIA{body}"
+        );
+    }
+    // A marker in the text around a key is not in its body.
+    let key = live("AWS");
+    assert!(semlith::filter::scan_text(&format!("# FAKE test key\n{key}")).is_some());
+    // (c) a private-key header with no body, and one with a real body.
+    assert!(
+        semlith::filter::scan_text(
+            "-----BEGIN RSA PRIVATE KEY-----\n-----END RSA PRIVATE KEY-----"
+        )
+        .is_none()
+    );
+    assert!(semlith::filter::scan_text(&live("private key")).is_some());
+    // One dummy and one live id: refused.
+    assert!(semlith::filter::scan_text(&format!("{example}\n{key}\n")).is_some());
+}
+
+/// The no-prefix rule: a secret-sounding name assigned a long random literal
+/// refuses the file, quoted or not; a dummy or a low-entropy value does not
+/// (2.2).
+#[test]
+fn a_secret_with_no_prefix_is_refused_by_its_name_and_randomness() {
+    let value = format!("{}{}", random20(), random20());
+    assert_eq!(value.len(), 40);
+    assert!(semlith::filter::scan_text(&format!("AWS_SECRET_ACCESS_KEY={value}\n")).is_some());
+    assert!(semlith::filter::scan_text(&format!("export DB_TOKEN={value}\n")).is_some());
+    assert!(
+        semlith::filter::scan_text(
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+        )
+        .is_none()
+    );
+    assert!(semlith::filter::scan_text("PASSWORD=changeme\n").is_none());
+    // Code is not an assignment of a literal.
+    assert!(
+        semlith::filter::scan_text("let token = compute_the_session_token(input);\n").is_none()
+    );
+}
+
+/// A fixture tree with one file for each not-indexed class, plus a file whose
+/// only match is a test dummy and one ordinary file.
+fn every_class(corpus: &Path) {
+    write(
+        corpus,
+        "config.txt",
+        &format!("# settings\nkey = \"{}\"\n", live("AWS")),
+    );
+    write(corpus, ".env", &format!("TOKEN={}\n", live("GitHub token")));
+    write(corpus, "big.txt", &"x".repeat(9 * 1024 * 1024));
+    fs::write(corpus.join("blob.dat"), [0u8, 1, 2, 0, 255, 0, 7]).unwrap();
+    write(corpus, ".gitignore", "skipped.txt\n");
+    write(corpus, "skipped.txt", "ignored by the user's own rule\n");
+    let example = semlith::filter::SHAPES[row("AWS")].example;
+    write(
+        corpus,
+        "docs.md",
+        &format!("# Keys\nUse {example} in examples.\n"),
+    );
+    write(corpus, "lib.rs", "pub fn plain() -> u32 { 1 }\n");
+}
+
+/// 2.3: every class is listed with its rule, the dummy is let through, and
+/// the list outlives the process that wrote it.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_not_indexed_list_has_every_class_and_survives_reopening() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    every_class(corpus.path());
+    let (report, _) = run(store.path(), corpus.path(), false);
+    assert_eq!(report.dummies_indexed, 1, "{report:?}");
+
+    let s = store_at(store.path());
+    let rows = semlith::store::refusals(s.db()).unwrap();
+    let class_of = |name: &str| {
+        rows.iter()
+            .find(|r| r.path.ends_with(name))
+            .map(|r| r.class.clone())
+            .unwrap_or_else(|| panic!("{name} is not listed: {rows:#?}"))
+    };
+    assert_eq!(class_of("config.txt"), "content");
+    assert_eq!(class_of(".env"), "credential");
+    assert_eq!(class_of("big.txt"), "policy");
+    assert_eq!(class_of("blob.dat"), "unindexable");
+    assert_eq!(class_of("skipped.txt"), "excluded");
+    assert_eq!(class_of("docs.md"), "dummy");
+    assert!(rows.iter().all(|r| !r.rule.is_empty()), "{rows:#?}");
+    let content = rows.iter().find(|r| r.class == "content").unwrap();
+    assert!(content.confidence.is_some_and(|c| c >= 70), "{content:?}");
+    drop(s);
+    // Survives the process: a fresh open reads the same rows.
+    let again = store_at(store.path());
+    assert_eq!(
+        semlith::store::refusals(again.db()).unwrap().len(),
+        rows.len()
+    );
+}
+
+/// 2.5 and 2.6: accepted with redaction, the file is indexed with its value
+/// replaced at the same line; a comment edit keeps it; a new key refuses it
+/// again and evicts it; as-is indexes the value; revoke evicts and relists.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn an_accepted_file_is_indexed_redacted_and_a_new_secret_refuses_it_again() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let key = live("AWS");
+    let file = write(
+        corpus.path(),
+        "deploy.txt",
+        &format!("one\nkey = \"{key}\"\nthree\n"),
+    );
+    run(store.path(), corpus.path(), false);
+    let path = semlith::canonical(&file).to_string_lossy().into_owned();
+
+    let mut s = store_at(store.path());
+    assert_eq!(
+        semlith::store::text_of(s.db(), &path).unwrap(),
+        "",
+        "indexed before acceptance"
+    );
+    s.accept(&path, "redacted", "cli").unwrap();
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    let text = semlith::store::text_of(s.db(), &path).unwrap();
+    assert!(!text.contains(&key), "the value reached the store: {text}");
+    let line_two = text.lines().nth(1).unwrap_or_default();
+    assert!(line_two.contains("[REDACTED:aws access key id]"), "{text}");
+    assert!(semlith::store::refusal(s.db(), &path).unwrap().is_none());
+
+    // A comment edit keeps it indexed and redacted.
+    fs::write(&file, format!("one, edited\nkey = \"{key}\"\nthree\n")).unwrap();
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    let text = semlith::store::text_of(s.db(), &path).unwrap();
+    assert!(text.contains("edited") && !text.contains(&key), "{text}");
+
+    // A second key refuses it again and evicts it.
+    let second = live("AWS");
+    fs::write(
+        &file,
+        format!("one\nkey = \"{key}\"\nother = \"{second}\"\n"),
+    )
+    .unwrap();
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert_eq!(
+        semlith::store::text_of(s.db(), &path).unwrap(),
+        "",
+        "not evicted"
+    );
+    let row = semlith::store::refusal(s.db(), &path)
+        .unwrap()
+        .expect("listed again");
+    assert!(row.rule.contains("new match since accepted"), "{row:?}");
+
+    // As-is indexes the values, and revoke takes it out again.
+    s.accept(&path, "as-is", "cli").unwrap();
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert!(
+        semlith::store::text_of(s.db(), &path)
+            .unwrap()
+            .contains(&second)
+    );
+    assert!(s.revoke(&path).unwrap());
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert_eq!(semlith::store::text_of(s.db(), &path).unwrap(), "");
+    assert!(semlith::store::refusal(s.db(), &path).unwrap().is_some());
+}
+
+/// A credential file is never accepted, whatever mode is asked for.
+#[test]
+fn a_credential_file_is_never_accepted() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let env = write(
+        corpus.path(),
+        ".env",
+        &format!("TOKEN={}\n", live("GitHub token")),
+    );
+    let rsa = write(corpus.path(), "id_rsa", &live("private key"));
+    let mut s = store_at(store.path());
+    for path in [&env, &rsa] {
+        for mode in ["redacted", "as-is"] {
+            let e = s
+                .accept(&path.to_string_lossy(), mode, "cli")
+                .expect_err("a credential file was accepted");
+            assert!(e.to_string().contains("never accepted"), "{e}");
+        }
+    }
+}
+
+/// 2.7: with nothing changing between them, the plan's counts are the run's.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn the_plan_counts_what_the_run_does() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    every_class(corpus.path());
+    let mut s = store_at(store.path());
+    let plan = s.plan(&[corpus.path().to_path_buf()]).unwrap();
+    assert!(plan.seconds < 5.0, "{plan:?}");
+    let report = s
+        .index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    assert_eq!(plan.embed, report.indexed, "{plan:?} {report:?}");
+    assert_eq!(plan.unchanged, report.unchanged);
+    let plan_not: usize = plan.not_indexed.values().sum();
+    let rows = semlith::store::refusals(s.db()).unwrap();
+    let run_not = rows.iter().filter(|r| r.class != "dummy").count();
+    assert_eq!(plan_not, run_not, "{plan:?} {rows:#?}");
+    // A second plan over the unchanged tree embeds nothing.
+    let again = s.plan(&[corpus.path().to_path_buf()]).unwrap();
+    assert_eq!(again.embed, 0, "{again:?}");
+}
+
+/// Nothing semlith writes or answers ever holds a full secret: not the
+/// not-indexed list, not the ledger, not the store after a redacted
+/// acceptance, not a read, and not a read from disk of the edited file.
+#[test]
+#[ignore = "downloads an embedding model on first run"]
+fn no_output_ever_holds_a_full_secret() {
+    let corpus = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let key = live("GitHub token");
+    let file = write(
+        corpus.path(),
+        "ci.yml",
+        &format!("env:\n  token: {key}\nsteps: []\n"),
+    );
+    run(store.path(), corpus.path(), false);
+    let path = semlith::canonical(&file).to_string_lossy().into_owned();
+    let mut s = store_at(store.path());
+
+    let listed = serde_json::to_string(&semlith::store::refusals(s.db()).unwrap()).unwrap();
+    assert!(!listed.contains(&key), "the list holds the key");
+    assert!(listed.contains("ghp_…"), "the list shows no mask: {listed}");
+
+    s.accept(&path, "redacted", "cli").unwrap();
+    s.index_paths(&[corpus.path().to_path_buf()], |_, _| {})
+        .unwrap();
+    let everything: String = {
+        let db = s.db();
+        let mut stmt = db
+            .prepare("SELECT COALESCE(group_concat(text, ''), '') FROM chunks")
+            .unwrap();
+        let chunks: String = stmt.query_row([], |r| r.get(0)).unwrap();
+        let mut stmt = db
+            .prepare("SELECT COALESCE(group_concat(query, ''), '') FROM retrievals")
+            .unwrap();
+        let ledger: String = stmt.query_row([], |r| r.get(0)).unwrap();
+        let mut stmt = db
+            .prepare("SELECT COALESCE(group_concat(fingerprints, ''), '') FROM acceptances")
+            .unwrap();
+        let prints: String = stmt.query_row([], |r| r.get(0)).unwrap();
+        format!("{chunks}{ledger}{prints}")
+    };
+    assert!(!everything.contains(&key), "the store holds the key");
+    let vector = s.embed_query("token").unwrap();
+    let hits = s
+        .search_preferring("token", &vector, 5, &Default::default(), Default::default())
+        .unwrap();
+    for (hit, _) in &hits {
+        assert!(!hit.text.contains(&key), "a search returned the key");
+    }
+    let target = semlith::Target::parse(&format!("{path}:1-3"));
+    let read = format!("{:?}", s.read(&target, &Default::default()).unwrap());
+    assert!(!read.contains(&key), "a read returned the key");
+
+    // Edited after indexing: the read comes from disk, and is redacted too.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut handle = fs::OpenOptions::new().append(true).open(&file).unwrap();
+    writeln!(handle, "# edited").unwrap();
+    drop(handle);
+    let read = format!("{:?}", s.read(&target, &Default::default()).unwrap());
+    assert!(
+        !read.contains(&key),
+        "a read from disk returned the key: {read}"
+    );
+    assert!(read.contains("REDACTED"), "{read}");
 }
