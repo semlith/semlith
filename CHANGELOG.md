@@ -93,6 +93,12 @@ started it, stops for review only when something is theirs to decide.
 - The research agent reads a located span through `semlith_read`; `Read` is
   kept for files semlith does not index.
 - A run card's plan line is updated in place, so a poll no longer rebuilds it.
+- A run started from the portal shows its time estimate from the first batch:
+  daemon runs now record the store's embed rate, and a store with none uses
+  the last run the daemon watched.
+- A `semlith_index` forwarded to the daemon names every refusal of the run,
+  its skips by reason, and how many files await review, as the in-process
+  reply does. Files left out by `.semlithignore` count in the skip total.
 
 ## [0.29.0] - 2026-09-25
 
