@@ -2735,10 +2735,10 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     // between 0.20.0 and 0.26.0. A path outside the store's roots, outside
     // the store's own directory and outside the home directory is refused
     // here, by name, with the rule that refused it.
-    let roots = home::index_roots(&store.dir);
+    let roots = crate::filter::resolve_boundary(&home::index_roots(&store.dir));
     let outside: Vec<String> = paths
         .iter()
-        .filter(|path| !crate::filter::within_boundary(path, &roots))
+        .filter(|path| !crate::filter::within_resolved(path, &roots))
         .map(|path| crate::plain(&path.display().to_string()))
         .collect();
     if !outside.is_empty() {
@@ -2807,8 +2807,9 @@ fn index_runs(state: &Arc<State>) -> Response {
         })
         .collect();
     // Re-read here rather than cached at startup: one of the numbers behind
-    // the derivation is how much memory is free *now*.
-    let limits = daemon::Limits::in_force();
+    // the derivation is how much memory is free *now*. The memory figure is
+    // the one in force, which only a start or a save changes.
+    let limits = daemon::Limits::in_force().as_applied();
     Response::json(&json!({
         "runs": runs,
         "queue": queue,
