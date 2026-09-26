@@ -4746,11 +4746,11 @@ async function filesView() {
     footnote,
   );
   const treePane = filesTree(pathInput, storeFilter);
-  const refusedPane = notIndexed();
+  const decisionsTab = decisionsPane();
   const panes = [
     ["Indexed", indexedPane, null],
     ["Tree", treePane.node, treePane.load],
-    ["Not indexed", refusedPane.node, refusedPane.load],
+    ["Decisions", decisionsTab.node, decisionsTab.load],
   ];
   const panel = el("div", { class: "tab-panel" });
   const tabButtons = panes.map(([label], i) =>
@@ -4768,7 +4768,7 @@ async function filesView() {
     fill(panel, panes[index][1]);
     if (panes[index][2]) panes[index][2]();
   }
-  showPane(state.filesTab === "not-indexed" ? 2 : 0);
+  showPane(state.filesTab === "decisions" ? 2 : state.filesTab === "tree" ? 1 : 0);
   state.filesTab = "";
 
   return el(
@@ -4842,10 +4842,11 @@ function filesTree(pathInput, storeFilter) {
   return { node, load };
 }
 
-/* What was not indexed, and why (2.3), with a person's per-file decision
- * (2.5). One file at a time, never in bulk: there is no select-all, no bulk
- * bar, and every action names one path. A credential file is listed with its
- * rule and no action at all. */
+/* Decisions already made about files the scan held back (2.5): files a
+ * person accepted, redacted or as-is, files they refused, and files the scan
+ * let through because every match is a declared test dummy. Each one can be
+ * undone here, one file at a time. New decisions are made on the Index page
+ * after a scan; what was not indexed and needs nothing is said there too. */
 const CLASS_LABELS = {
   content: "secret-shaped value",
   credential: "credential file",
@@ -4855,74 +4856,26 @@ const CLASS_LABELS = {
   dummy: "test dummies",
 };
 
-function notIndexed() {
-  const node = el("div", { class: "rows tight not-indexed" });
-  const signals = (m) =>
-    (m.signals || []).map((s) => `${s.name} ${s.effect === "up" ? "↑" : "↓"} ${s.detail}`).join("; ");
-  const findings = (row) =>
-    el(
-      "ul",
-      { class: "matches" },
-      (row.matches || []).map((m) =>
-        el(
-          "li",
-          {},
-          el("code", { text: m.masked }),
-          el("span", { text: ` ${m.kind} · line ${m.line} · ` }),
-          el("strong", { text: `${m.confidence} % likely real` }),
-          el("span", { class: "muted signals", text: ` — ${signals(m)}` }),
-        ),
-      ),
-    );
+function decisionsPane() {
+  const node = el("div", { class: "rows tight decisions" });
 
-  function decide(store, row) {
-    const content = row.class === "content";
-    const dummy = row.class === "dummy";
-    let mode = dummy ? "refused" : content ? "redacted" : "as-is";
+  function refuseDummy(store, row) {
     const reviewed = el("input", { type: "checkbox", id: "reviewed-file" });
-    const choices = content
-      ? el(
-          "div",
-          { class: "choices", role: "radiogroup", "aria-label": "How to accept it" },
-          [
-            ["redacted", "Accept with redaction", "Each detected value is replaced by [REDACTED:…] before anything is stored. Redaction covers only what the scanner detected."],
-            ["as-is", "Accept as-is", "The file's full text is indexed, values included."],
-          ].map(([value, label, help]) =>
-            el(
-              "label",
-              { class: "choice" },
-              el("input", {
-                type: "radio",
-                name: "accept-mode",
-                value,
-                checked: value === mode ? "" : null,
-                onchange: () => (mode = value),
-              }),
-              el("span", {}, el("strong", { text: label }), el("span", { class: "muted", text: ` ${help}` })),
-            ),
-          ),
-        )
-      : null;
     ask({
-      title: dummy ? `Refuse ${shortPath(row.path)}?` : `Accept ${shortPath(row.path)}?`,
-      body: dummy
-        ? "Every match in it is a declared test dummy, so it was indexed. Refusing keeps it out of this store until you revoke the decision."
-        : content
-          ? "semlith found what looks like a secret in this file. The confidence is an estimate, never a guarantee; the signals say why."
-          : `${row.rule}. Accepting indexes it anyway.`,
+      title: "Refuse this file?",
+      body: "Every match in it is a declared test dummy, so it was indexed. Refusing takes it out of this store until you revoke the decision.",
       extra: el(
         "div",
-        { class: "rows tight" },
-        el("p", { class: "path", text: row.path }),
-        row.matches && row.matches.length ? findings(row) : null,
-        choices,
-        el("label", { class: "choice", for: "reviewed-file" }, reviewed, el("span", { text: " I have reviewed this file" })),
+        { class: "rows tight decision-body" },
+        dialogPath(row.path, store),
+        row.matches && row.matches.length ? findingsList(row.matches) : null,
+        el("label", { class: "reviewed", for: "reviewed-file" }, reviewed, el("span", { text: "I have reviewed this file" })),
       ),
-      confirm: dummy ? "Refuse this file" : "Accept this file",
-      tone: dummy ? "bad" : null,
+      confirm: "Refuse this file",
+      tone: "bad",
       run: async () => {
         if (!reviewed.checked) throw new Error("Tick “I have reviewed this file” first.");
-        await post("/api/refused/accept", { store, path: row.path, mode, reviewed: true });
+        await post("/api/refused/accept", { store, path: row.path, mode: "refused", reviewed: true });
         await load();
       },
     });
@@ -4930,8 +4883,12 @@ function notIndexed() {
 
   function revoke(store, row) {
     ask({
-      title: `Revoke ${shortPath(row.path)}?`,
-      body: "The file leaves the store and returns to this list, refused again with today's reasons.",
+      title: "Revoke this decision?",
+      body:
+        row.accepted === "refused"
+          ? "The file is indexed again at the next run, as a test-dummy file."
+          : "The file leaves the store and is refused again with today's reasons; the next scan offers it for a decision.",
+      extra: el("div", { class: "rows tight decision-body" }, dialogPath(row.path, store)),
       confirm: "Revoke",
       tone: "bad",
       run: async () => {
@@ -4941,50 +4898,51 @@ function notIndexed() {
     });
   }
 
-  function action(store, row) {
-    if (row.accepted) {
-      return el(
-        "span",
-        { class: "one-line" },
-        el("span", { class: "pill", text: row.accepted === "refused" ? "refused by you" : `accepted ${row.accepted}` }),
-        " ",
-        el("button", { class: "button secondary small", type: "button", text: "Revoke", onclick: () => revoke(store, row) }),
-      );
-    }
-    if (row.class === "dummy")
-      return el("button", { class: "button secondary small", type: "button", text: "Refuse instead", onclick: () => decide(store, row) });
-    if (row.reviewable)
-      return el("button", { class: "button small", type: "button", text: "Review…", onclick: () => decide(store, row) });
-    if (row.class === "credential") return el("span", { class: "muted", text: "never acceptable" });
-    if (row.class === "excluded") return el("span", { class: "muted", text: "change the rule, not the file" });
-    return el("span", { class: "muted", text: "—" });
-  }
+  const decisionLabel = (row) =>
+    row.accepted === "refused"
+      ? "refused by you"
+      : row.accepted === "redacted"
+        ? "accepted, redacted"
+        : row.accepted
+          ? "accepted as-is"
+          : "let through";
 
-  function table(store, rows, caption) {
+  function table(store, rows) {
     return dataTable({
-      className: "w-refused",
+      className: "w-decisions",
+      caption: `Decisions about files in ${store}`,
       rows,
-      caption,
       columns: [
         {
           key: "path",
-          label: "Path",
-          value: (r) => r.path,
-          render: (r) => el("span", { class: "path one-line", title: r.path, text: shortPath(r.path) + (r.files > 1 ? ` (${r.files} files)` : r.files === 0 ? " (folder)" : "") }),
+          label: "File",
+          value: (r) => rootRel(r.path, store),
+          render: (r) => pathCell(rootRel(r.path, store), "path"),
         },
-        { key: "class", label: "Class", value: (r) => r.class, render: (r) => el("span", { class: `pill class-${r.class}`, text: CLASS_LABELS[r.class] || r.class }) },
-        { key: "rule", label: "Why", render: (r) => el("span", { class: "one-line", title: r.rule, text: r.rule }) },
+        {
+          key: "decision",
+          label: "Decision",
+          value: decisionLabel,
+          render: (r) => el("span", { class: r.accepted && r.accepted !== "refused" ? "pill good" : "pill", text: decisionLabel(r) }),
+        },
+        { key: "rule", label: "Why it was held back", sortable: false, render: (r) => lineCell(r.class === "dummy" ? "every match is a declared test dummy" : r.rule) },
         {
           key: "confidence",
           label: "Likely real",
           className: "num",
           value: (r) => (r.confidence == null ? -1 : r.confidence),
-          render: (r) =>
-            r.confidence == null
-              ? "—"
-              : el("span", { title: (r.matches || []).map(signals).join("\n"), text: `${r.confidence} %` }),
+          render: (r) => (r.confidence == null ? "—" : `${r.confidence} %`),
         },
-        { key: "action", label: "", render: (r) => action(store, r) },
+        {
+          key: "action",
+          label: "",
+          sortable: false,
+          className: "decide-col",
+          render: (r) =>
+            r.accepted
+              ? el("button", { class: "button secondary small", type: "button", text: "Revoke", onclick: () => revoke(store, r) })
+              : el("button", { class: "button secondary small", type: "button", text: "Refuse instead", onclick: () => refuseDummy(store, r) }),
+        },
       ],
     }).node;
   }
@@ -4998,38 +4956,67 @@ function notIndexed() {
       fill(node, error(e.message));
       return;
     }
-    const blocks = [];
-    blocks.push(
+    const blocks = [
       el("p", {
         class: "subtitle",
-        text: `${n(data.total || 0)} not indexed · ${n(data.review || 0)} need review. Credential files are never accepted, and nothing here accepts in bulk.`,
+        text: "Files you accepted or refused, and files let through because every match is a test dummy. Undo any one of them here; new decisions are made on the Index page after a scan.",
       }),
-    );
+    ];
     for (const store of data.stores || []) {
-      const rows = store.rows || [];
+      const rows = (store.rows || []).filter((r) => r.accepted || r.class === "dummy");
       if (!rows.length) continue;
-      const refused = rows.filter((r) => r.class !== "dummy" || r.accepted);
-      const dummies = rows.filter((r) => r.class === "dummy" && !r.accepted);
       blocks.push(el("h2", { class: "section-title", text: store.store }));
-      if (refused.length) blocks.push(table(store.store, refused, `Files ${store.store} did not index, and why`));
-      if (dummies.length) {
-        blocks.push(el("h3", { class: "eyebrow", text: "Let through as test dummies" }));
-        blocks.push(table(store.store, dummies, `Files ${store.store} indexed because every match is a test dummy`));
-      }
+      blocks.push(table(store.store, rows));
     }
-    if (blocks.length === 1) blocks.push(el("p", { class: "muted", text: "Everything on disk under the store's roots is indexed." }));
+    if (blocks.length === 1) {
+      blocks.push(el("div", { class: "card pad" }, empty("No decisions yet. When a scan holds a file back, the Index page asks about it.")));
+    }
     fill(node, ...blocks);
     refreshNotIndexedBadge(data.review || 0);
   }
   return { node, load };
 }
 
-/* One file's decision from a run card's review step: the same confirm the
- * Not indexed tab uses, with its tick, for one path. */
+/* What the scanner matched in one file, for a decision dialog: each value
+ * masked, what kind it looked like and where, how likely it is to be real,
+ * and the signals behind that number on a line of their own. One font per
+ * role, so the list reads as a table and not as a sentence. */
+function findingsList(matches) {
+  const signals = (m) =>
+    (m.signals || []).map((s) => `${s.name} ${s.effect === "up" ? "↑" : "↓"} ${s.detail}`).join(" · ");
+  return el(
+    "ul",
+    { class: "findings" },
+    (matches || []).map((m) =>
+      el(
+        "li",
+        {},
+        el(
+          "div",
+          { class: "finding-head" },
+          el("code", { class: "finding-value", text: m.masked }),
+          el("span", { class: "finding-kind", text: `${m.kind} · line ${m.line}` }),
+          el("span", { class: "spacer" }),
+          el("strong", { class: "finding-conf", text: `${m.confidence} % likely real` }),
+        ),
+        signals(m) ? el("div", { class: "finding-signals", text: signals(m) }) : null,
+      ),
+    ),
+  );
+}
+
+/** The file a dialog is about: its path under the store's root, whole and
+ * wrapping, with the machine's absolute path on the tooltip. */
+function dialogPath(path, store) {
+  return el("code", { class: "dialog-path", title: path, text: rootRel(path, store) });
+}
+
+/* One file's decision from the scan panel, with the mode its button chose:
+ * the file, what was found in it, and the tick that says it was read. */
 function reviewOne(store, item, mode, done) {
   const reviewed = el("input", { type: "checkbox", id: "reviewed-inline" });
   ask({
-    title: `Accept ${shortPath(item.path)} ${mode === "redacted" ? "with redaction" : "as-is"}?`,
+    title: mode === "redacted" ? "Accept with redaction?" : "Accept as-is?",
     body:
       mode === "redacted"
         ? "Each detected value is replaced by [REDACTED:…] before anything is stored. Redaction covers only what the scanner detected."
@@ -5038,16 +5025,15 @@ function reviewOne(store, item, mode, done) {
           : `${item.rule}. Accepting indexes it anyway.`,
     extra: el(
       "div",
-      { class: "rows tight" },
-      el("p", { class: "path", text: item.path }),
+      { class: "rows tight decision-body" },
+      dialogPath(item.path, store),
+      item.matches && item.matches.length ? findingsList(item.matches) : null,
       el(
-        "ul",
-        { class: "matches" },
-        (item.matches || []).map((m) =>
-          el("li", {}, el("code", { text: m.masked }), ` ${m.kind} · line ${m.line} · ${m.confidence} % likely real`),
-        ),
+        "label",
+        { class: "reviewed", for: "reviewed-inline" },
+        reviewed,
+        el("span", { text: "I have reviewed this file" }),
       ),
-      el("label", { class: "choice", for: "reviewed-inline" }, reviewed, el("span", { text: " I have reviewed this file" })),
     ),
     confirm: "Accept this file",
     run: async () => {
@@ -5060,7 +5046,8 @@ function reviewOne(store, item, mode, done) {
 
 /* The sidebar's count of files waiting for a person's review. */
 function refreshNotIndexedBadge(count) {
-  for (const link of document.querySelectorAll('.sidebar .nav-item[data-view="files"]')) {
+  // On Index, where the scan that asks about them is.
+  for (const link of document.querySelectorAll('.sidebar .nav-item[data-view="index"]')) {
     paintNavCount(link, count);
   }
 }
@@ -6658,112 +6645,23 @@ function runCard(run, controls) {
   const problem = el("div", { class: "note bad" }, "");
   // What the run's stop did to its store, when it was asked to delete it.
   const outcome = el("div", { class: "note" }, "");
-  /* The scan phase's plan (2.7), and the review step when the scan found
-   * something that is a person's to decide. */
-  /* Its nodes are made once and only their words and `hidden` change after:
-   * a status moving to done swaps the words for a link without adding or
-   * removing a child, so no poll rebuilds the line (drive finding 8.3). */
-  const planHead = document.createTextNode("");
-  const planWords = el("span", {}, "");
-  const planLink = el(
-    "a",
-    {
-      href: "#files",
-      hidden: "",
-      onclick: (e) => {
-        e.preventDefault();
-        state.filesTab = "not-indexed";
-        go("files");
-      },
-    },
-    "",
-  );
-  const planLine = el("div", { class: "meta run-plan", hidden: "" }, planHead, planWords, planLink);
-  const reviewBox = el("div", { class: "review-box rows tight", hidden: "" });
-  let reviewDrawn = false;
-  const kept = new Set();
+  /* The scan phase's plan (2.7), on one line. What a person decides about it
+   * is the page's scan panel above the cards, not this card's.
+   *
+   * Its node is made once and only its words and `hidden` change after, so
+   * no poll rebuilds the line (drive finding 8.3). */
+  const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
   function paintPlan(next) {
     const plan = next.plan;
     planLine.hidden = !plan;
     if (!plan) return;
     const not = Object.values(plan.not_indexed || {}).reduce((a, b) => a + b, 0);
     const review = (plan.review || []).length;
-    const tail = `${n(not)} not indexed · ${n(review)} need review`;
-    const linked = next.status === "done" && Boolean(not || review);
-    setText(planHead, `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · `);
-    setText(planWords, tail);
-    setText(planLink, tail);
-    planWords.hidden = linked;
-    planLink.hidden = !linked;
-    reviewBox.hidden = next.status !== "review";
-    if (next.status !== "review" || reviewDrawn) return;
-    reviewDrawn = true;
-    const items = plan.review || [];
-    const left = el("span", {});
-    const paintLeft = () =>
-      setText(left, `Start indexing — ${n(items.filter((i) => !kept.has(i.path) && !i.accepted).length)} stay refused until reviewed`);
-    const starter = el("button", {
-      class: "button",
-      type: "button",
-      onclick: async () => {
-        starter.disabled = true;
-        try {
-          await post("/api/index/control", { store: next.store, run: next.id, action: "start" });
-          await refreshRuns();
-        } catch (e) {
-          setText(problem, e.message);
-          starter.disabled = false;
-        }
-      },
-    }, left);
-    const rows = items.map((item) => {
-      const decided = el("span", { class: "muted" }, "");
-      const row = el(
-        "div",
-        { class: "review-row" },
-        el("span", { class: "path one-line", title: item.path, text: shortPath(item.path) }),
-        el("span", { class: "muted one-line", title: item.rule, text: item.rule }),
-        item.confidence == null ? null : el("strong", { text: `${item.confidence} % likely real` }),
-        decided,
-      );
-      const choose = (label, mode) =>
-        el("button", {
-          class: mode === "keep" ? "button secondary small" : "button small",
-          type: "button",
-          text: label,
-          onclick: () => {
-            if (mode === "keep") {
-              kept.add(item.path);
-              setText(decided, "kept refused");
-              paintLeft();
-              return;
-            }
-            reviewOne(next.store, item, mode, () => {
-              item.accepted = mode;
-              setText(decided, `accepted (${mode})`);
-              paintLeft();
-            });
-          },
-        });
-      row.append(
-        item.class === "content" ? choose("Accept with redaction", "redacted") : null,
-        choose(item.class === "content" ? "Accept as-is" : "Accept", "as-is"),
-        choose("Keep refused", "keep"),
-      );
-      return row;
-    });
-    paintLeft();
-    fill(
-      reviewBox,
-      el("h3", { class: "eyebrow", text: `Review ${n(items.length)} file${items.length === 1 ? "" : "s"} before indexing` }),
-      ...rows,
-      (plan.credential || []).length
-        ? el("p", {
-            class: "note",
-            text: `${n(plan.credential.length)} credential file${plan.credential.length === 1 ? "" : "s"} listed and never offered: ${plan.credential.map(shortPath).join(", ")}`,
-          })
-        : null,
-      el("div", { class: "actions" }, starter),
+    setText(
+      planLine,
+      next.status === "review"
+        ? `scanned: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · waiting for Start indexing`
+        : `plan: ${n(plan.embed)} to embed (${bytes(plan.embed_bytes)}) · ${n(plan.unchanged)} unchanged · ${n(not)} not indexed · ${n(review)} needed review`,
     );
   }
 
@@ -6971,7 +6869,6 @@ function runCard(run, controls) {
       pct,
     ),
     planLine,
-    reviewBox,
     track,
     el(
       "div",
@@ -7338,6 +7235,269 @@ function accelSection() {
   };
 }
 
+/** A path under its store's root, the way the store names it: the
+ * machine's absolute path is on the tooltip, not in the column. */
+function rootRel(path, storeName) {
+  const whole = String(path);
+  const store = (state.stores || []).find((s) => s.name === storeName);
+  const roots = (store?.roots || [])
+    .map((root) => root.path)
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+  for (const root of roots) {
+    const prefix = root.endsWith("/") ? root : `${root}/`;
+    if (whole.startsWith(prefix)) return whole.slice(prefix.length);
+  }
+  return whole;
+}
+
+/* What a scan found, before anything is embedded (2.7).
+ *
+ * The runs the Scan button started hold after their scan; this draws every
+ * held run as one answer: a summary of what indexing will do, then the files
+ * that are a person's to decide, one row each with its own buttons, then one
+ * line for what is not indexed and needs nothing. Drawn from the runs the
+ * poll already reads, so a reload, a second tab or a scan started elsewhere
+ * shows the same panel. Rebuilt only when the set of held runs changes: a
+ * poll a second must not redraw buttons under the pointer. */
+const NO_ACTION = new Set(["unindexable", "excluded", "credential"]);
+
+function scanPanel() {
+  const node = el("div", { class: "card pad scan-panel", hidden: "" });
+  let drawnFor = "";
+  /** Decisions made on this page before the store's list says so. */
+  const decided = new Map();
+
+  async function paint(runs) {
+    const held = (runs || []).filter((run) => run.status === "review" && run.plan);
+    const key = held.map((run) => run.id).join(",");
+    node.hidden = !held.length;
+    if (!held.length) {
+      drawnFor = "";
+      return;
+    }
+    if (key === drawnFor) return;
+    drawnFor = key;
+    // What each store already remembers deciding, and the files with no
+    // action, both from the one list the store keeps.
+    let refused = { stores: [] };
+    try {
+      refused = await api("/api/refused");
+    } catch {
+      // The panel still works from the plans; only the no-action list and a
+      // decision made in another tab are missing.
+    }
+    if (key !== drawnFor) return;
+    const rowsOf = (store) => (refused.stores || []).find((s) => s.store === store)?.rows || [];
+    draw(held, rowsOf);
+  }
+
+  function draw(held, rowsOf) {
+    const total = (key) => held.reduce((sum, run) => sum + (run.plan[key] || 0), 0);
+    const items = held.flatMap((run) =>
+      (run.plan.review || []).map((item) => ({ ...item, store: run.store })),
+    );
+    const noAction = {};
+    for (const run of held) {
+      for (const [cls, count] of Object.entries(run.plan.not_indexed || {})) {
+        if (NO_ACTION.has(cls)) noAction[cls] = (noAction[cls] || 0) + count;
+      }
+    }
+    const eta = held.every((run) => run.plan.eta_ms != null)
+      ? held.reduce((sum, run) => sum + run.plan.eta_ms, 0)
+      : null;
+
+    const stat = (label, value, hint) =>
+      el(
+        "div",
+        { class: "scan-stat" },
+        el("span", { class: "eyebrow", text: label }),
+        el("strong", { text: value }),
+        hint ? el("span", { class: "meta", text: hint }) : null,
+      );
+    const summary = el(
+      "div",
+      { class: "scan-stats" },
+      stat("To embed", n(total("embed")), bytes(held.reduce((sum, run) => sum + (run.plan.embed_bytes || 0), 0))),
+      stat("Unchanged", n(total("unchanged")), "already indexed"),
+      stat("Need a decision", n(items.length), items.length ? "below" : "nothing to decide"),
+      stat("Not indexed", n(Object.values(noAction).reduce((a, b) => a + b, 0)), "no action needed"),
+      stat("Estimate", eta == null ? "—" : spellTook(eta), eta == null ? "measured once it starts" : "to embed"),
+    );
+    const perStore = held.length > 1
+      ? dataTable({
+          className: "w-scan-stores",
+          caption: "What the scan found in each folder",
+          rows: held,
+          columns: [
+            { key: "store", label: "Store", value: (run) => run.store, render: (run) => run.store },
+            { key: "path", label: "Folder", sortable: false, render: (run) => pathCell((run.paths || [])[0] || "") },
+            { key: "embed", label: "To embed", className: "num", value: (run) => run.plan.embed, render: (run) => n(run.plan.embed) },
+            { key: "unchanged", label: "Unchanged", className: "num", value: (run) => run.plan.unchanged, render: (run) => n(run.plan.unchanged) },
+            { key: "review", label: "Decide", className: "num", value: (run) => (run.plan.review || []).length, render: (run) => n((run.plan.review || []).length) },
+          ],
+        }).node
+      : null;
+
+    const decisionOf = (item) => {
+      if (decided.has(`${item.store}\n${item.path}`)) return decided.get(`${item.store}\n${item.path}`);
+      const row = rowsOf(item.store).find((r) => r.path === item.path);
+      return row && row.accepted ? row.accepted : null;
+    };
+    const decisionCell = (item) => {
+      const cell = el("div", { class: "decide" });
+      const paintCell = () => {
+        const now = decisionOf(item);
+        if (now) {
+          fill(
+            cell,
+            el("span", {
+              class: now === "kept" ? "pill" : "pill good",
+              text: now === "kept" ? "stays refused" : now === "redacted" ? "accepted, redacted" : "accepted as-is",
+            }),
+            now === "kept"
+              ? el("button", {
+                  class: "button secondary small",
+                  type: "button",
+                  text: "Change",
+                  onclick: () => {
+                    decided.delete(`${item.store}\n${item.path}`);
+                    paintCell();
+                  },
+                })
+              : null,
+          );
+          return;
+        }
+        const accept = (mode) => () =>
+          reviewOne(item.store, item, mode, () => {
+            decided.set(`${item.store}\n${item.path}`, mode);
+            paintCell();
+          });
+        fill(
+          cell,
+          item.class === "content"
+            ? el("button", { class: "button small", type: "button", text: "Accept redacted", onclick: accept("redacted") })
+            : null,
+          el("button", {
+            class: item.class === "content" ? "button secondary small" : "button small",
+            type: "button",
+            text: item.class === "content" ? "Accept as-is" : "Accept",
+            onclick: accept("as-is"),
+          }),
+          el("button", {
+            class: "button secondary small",
+            type: "button",
+            text: "Keep refused",
+            onclick: () => {
+              decided.set(`${item.store}\n${item.path}`, "kept");
+              paintCell();
+            },
+          }),
+        );
+      };
+      paintCell();
+      return cell;
+    };
+    const decisions = items.length
+      ? dataTable({
+          className: "w-scan-review",
+          caption: "Files the scan held back, each waiting for a decision",
+          rows: items,
+          columns: [
+            {
+              key: "path",
+              label: "File",
+              value: (item) => rootRel(item.path, item.store),
+              render: (item) => pathCell(rootRel(item.path, item.store), "path"),
+            },
+            held.length > 1 ? { key: "store", label: "Store", className: "meta", value: (item) => item.store, render: (item) => item.store } : null,
+            { key: "rule", label: "Why", sortable: false, render: (item) => lineCell(item.rule) },
+            {
+              key: "confidence",
+              label: "Likely real",
+              className: "num",
+              value: (item) => (item.confidence == null ? -1 : item.confidence),
+              render: (item) => (item.confidence == null ? "—" : `${item.confidence} %`),
+            },
+            { key: "decide", label: "Decision", sortable: false, className: "decide-col", render: decisionCell },
+          ].filter(Boolean),
+        }).node
+      : el("p", { class: "muted", text: "Nothing here needs a decision." });
+
+    const counts = Object.entries(noAction).filter(([, count]) => count);
+    const listed = el("div", { class: "rows tight", hidden: "" });
+    const toggle = el("button", {
+      class: "button secondary small",
+      type: "button",
+      text: "Show files",
+      "aria-expanded": "false",
+      onclick: () => {
+        const open = listed.hidden;
+        listed.hidden = !open;
+        toggle.setAttribute("aria-expanded", String(open));
+        setText(toggle, open ? "Hide files" : "Show files");
+        if (open && !listed.firstChild) {
+          const rows = held.flatMap((run) =>
+            rowsOf(run.store)
+              .filter((row) => NO_ACTION.has(row.class) && !row.accepted)
+              .map((row) => ({ ...row, store: run.store })),
+          );
+          fill(
+            listed,
+            rows.length
+              ? dataTable({
+                  className: "w-scan-skipped",
+                  caption: "Files not indexed that need no decision",
+                  rows,
+                  columns: [
+                    { key: "path", label: "File", value: (row) => rootRel(row.path, row.store), render: (row) => pathCell(rootRel(row.path, row.store)) },
+                    { key: "class", label: "Kind", value: (row) => row.class, render: (row) => el("span", { class: `pill class-${row.class}`, text: CLASS_LABELS[row.class] || row.class }) },
+                    { key: "rule", label: "Why", sortable: false, render: (row) => lineCell(row.rule) },
+                  ],
+                }).node
+              : el("p", { class: "muted", text: "The list is written when the run ends; the counts above are the scan's." }),
+          );
+        }
+      },
+    });
+    const skipped = counts.length
+      ? el(
+          "div",
+          { class: "scan-skipped" },
+          el("span", {
+            class: "meta",
+            text: `${counts.map(([cls, count]) => `${n(count)} ${CLASS_LABELS[cls] || cls}`).join(" · ")} — not indexed, no action needed`,
+          }),
+          toggle,
+        )
+      : null;
+
+    fill(
+      node,
+      el(
+        "div",
+        { class: "card-head" },
+        el("h2", { text: held.length === 1 ? `Scanned ${held[0].store}` : `Scanned ${n(held.length)} folders` }),
+        el("span", { class: "spacer" }),
+        el("span", { class: "mono-chip", text: "ready to index" }),
+      ),
+      summary,
+      perStore,
+      el("h3", { class: "eyebrow", text: items.length ? `Needs your decision · ${n(items.length)}` : "Needs your decision" }),
+      decisions,
+      skipped,
+      listed,
+      el("p", {
+        class: "note",
+        text: "Start indexing embeds the plan. A file left undecided stays refused, and any decision can be undone later on Files ▸ Decisions. Credential files are never offered.",
+      }),
+    );
+  }
+
+  return { node, paint, held: () => (state.runs?.runs || []).filter((run) => run.status === "review") };
+}
+
 async function indexView() {
   await refreshStores();
   const first = await refreshRuns();
@@ -7458,6 +7618,7 @@ async function indexView() {
 
   function paint(data) {
     const runs = data?.runs || [];
+    paintStart(runs);
     const seen = new Set();
     for (const run of runs) {
       seen.add(run.id);
@@ -7712,7 +7873,7 @@ async function indexView() {
 
   const target = el(
     "select",
-    { class: "field", "aria-label": "Where to index into" },
+    { class: "select", "aria-label": "Where to index into" },
     el("option", { value: "each", text: "each folder becomes its own store" }),
     liveStores().map((store) =>
       el("option", { value: store.name, text: `add to ${store.name}` }),
@@ -7881,7 +8042,7 @@ async function indexView() {
     ),
     el("p", {
       class: "subtitle",
-      text: "Name a folder above and press Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
+      text: "Name a folder above and press Scan: the plan comes first, then Start indexing. The run lives in the daemon, so you can close this tab and come back to it.",
     }),
     el("p", {
       class: "note",
@@ -7889,42 +8050,26 @@ async function indexView() {
     }),
   );
 
-  const start = el("button", { class: "button", type: "button", text: "Start indexing" });
-  /* The scan phase alone (2.7): what a run would embed, keep and refuse, with
-   * no model loaded and nothing written. */
-  const scanOnly = el("button", {
+  /* One button for the whole flow (2.7): it reads Scan, and a scan holds
+   * its runs after the scan phase; while any run is held it reads Start
+   * indexing, which queues them. A clean scan waits for the press too, so
+   * nothing is ever embedded before its plan has been on screen. */
+  const start = el("button", { class: "button", type: "button", text: "Scan" });
+  const discard = el("button", {
     class: "button secondary",
     type: "button",
-    text: "Scan only",
-    onclick: async () => {
-      const paths = field.value
-        .split("\n")
-        .map((path) => path.trim())
-        .filter(Boolean);
-      if (!paths.length) {
-        complain("Give a path to scan, or choose a folder.", field);
-        return;
-      }
-      scanOnly.disabled = true;
-      try {
-        const answer = await post("/api/index", { path: paths, store: target.value, scan_only: true });
-        say(
-          (answer.runs || [])
-            .map((r) => {
-              if (r.error) return `${r.path || r.store}: ${r.error}`;
-              const p = r.plan;
-              const not = Object.values(p.not_indexed || {}).reduce((a, b) => a + b, 0);
-              return `${r.store}: ${n(p.embed)} to embed (${bytes(p.embed_bytes)}) · ${n(p.unchanged)} unchanged · ${n(not)} not indexed · ${n((p.review || []).length)} need review · scanned in ${p.seconds.toFixed(2)} s`;
-            })
-            .join("; "),
-        );
-      } catch (e) {
-        complain(e.message);
-      } finally {
-        scanOnly.disabled = false;
-      }
-    },
+    text: "Discard scan",
+    hidden: "",
   });
+  const scan = scanPanel();
+  let scanning = false;
+  function paintStart(runs) {
+    const held = (runs || []).filter((run) => run.status === "review");
+    setText(start, scanning ? "Scanning…" : held.length ? "Start indexing" : "Scan");
+    start.disabled = scanning;
+    discard.hidden = !held.length || scanning;
+    scan.paint(runs);
+  }
   const addButton = el("button", {
     // The accent shape, like `Start indexing` beside it. Both of them begin
     // work on the machine, and one of the two reading as a quiet secondary
@@ -7963,16 +8108,48 @@ async function indexView() {
     }
   }
 
-  start.addEventListener("click", () => {
+  start.addEventListener("click", async () => {
+    const held = scan.held();
+    if (held.length) {
+      start.disabled = true;
+      try {
+        for (const run of held) {
+          await post("/api/index/control", { store: run.store, run: run.id, action: "start" });
+        }
+        transient = true;
+        say(`${held.length} run${held.length === 1 ? "" : "s"} queued.`);
+      } catch (e) {
+        complain(e.message);
+      }
+      await refreshRuns();
+      paintStart(state.runs?.runs);
+      return;
+    }
     const paths = field.value
       .split("\n")
       .map((path) => path.trim())
       .filter(Boolean);
     if (!paths.length) {
-      complain("Give a path to index, or choose a folder.", field);
+      complain("Give a path to scan, or choose a folder.", field);
       return;
     }
-    begin("/api/index", { path: paths, store: target.value, review: true });
+    scanning = true;
+    paintStart(state.runs?.runs);
+    await begin("/api/index", { path: paths, store: target.value, review: "always" });
+    scanning = false;
+    paintStart(state.runs?.runs);
+  });
+
+  discard.addEventListener("click", async () => {
+    for (const run of scan.held()) {
+      // A folder that had no store before its scan leaves none behind.
+      await control(run.store, "stop", run.id, run.files_before === 0 ? { delete: true } : {});
+      await control(run.store, "remove", run.id);
+    }
+    say("Scan discarded.");
+    await refreshStores();
+    await refreshRuns();
+    paintStart(state.runs?.runs);
   });
 
   addButton.addEventListener("click", async () => {
@@ -8050,18 +8227,16 @@ async function indexView() {
       el("span", { class: "prefix", text: "paths" }),
       labelled("index-path", "Paths to index, one per line", field),
     ),
+    /* Two groups on one line: the ways to choose what to read on the left,
+     * and where it goes and the button that reads it on the right, kept
+     * together when the line wraps. */
     el(
       "div",
-      { class: "filters" },
-      folderButton,
-      projectsButton,
-      urlButton,
-      settingsButton,
-      target,
-      scanOnly,
-      start,
-      note,
+      { class: "index-bar" },
+      el("div", { class: "index-bar-group" }, folderButton, projectsButton, urlButton, settingsButton),
+      el("div", { class: "index-bar-group end" }, target, discard, start),
     ),
+    note,
     el(
       "div",
       { class: "scroller" },
@@ -8107,6 +8282,8 @@ async function indexView() {
       ),
       queueCard,
       settingsCard,
+      /* What the scan found, above the runs it is about to start. */
+      scan.node,
       /* Then the run itself. */
       cards,
       idle,

@@ -2341,19 +2341,23 @@ impl State {
     }
 
     /// Start a run with its scan phase (2.7): the plan goes on the card, and
-    /// when `review` is asked for — the portal's Start indexing — and the scan
-    /// found something that is a person's to decide, the card holds at
-    /// "Review N files before indexing" rather than queue. Nothing else waits:
-    /// other runs and the watcher go on.
+    /// when `review` is asked for and the scan found something that is a
+    /// person's to decide, the run holds at review rather than queue. `hold`
+    /// holds it after any scan, clean or not — the portal's Scan button, whose
+    /// second press is Start indexing. Nothing else waits: other runs and the
+    /// watcher go on.
     pub fn index_planned(
         &self,
         store: &Arc<Store>,
         paths: Vec<PathBuf>,
         review: bool,
+        hold: bool,
     ) -> Result<u64> {
         Self::writer_alive(store)?;
         let plan = self.plan(store, &paths).ok();
-        if review && let Some(plan) = plan.as_ref().filter(|p| !p.review.is_empty()) {
+        if (review || hold)
+            && let Some(plan) = plan.as_ref().filter(|p| hold || !p.review.is_empty())
+        {
             let run = self.admission.mint();
             store.begin_run(run, paths.clone(), RunKind::Run);
             store.set_plan(run, plan, true);

@@ -593,6 +593,18 @@ fn files(state: &Arc<State>, request: &Request) -> Response {
             Ok(s) => s,
             Err(e) => return Response::error(400, &e.to_string()),
         };
+        // One level as JSON, for the portal's lazy explorer. Here `dir` is a
+        // root-relative folder, not the listing's sort direction below.
+        if request.query("format") == Some("json") {
+            let dir = match crate::tree::parse_dir(request.query("dir").unwrap_or("")) {
+                Ok(d) => d,
+                Err(e) => return Response::error(400, &e.to_string()),
+            };
+            return with_fleet(state, json!({ "roots": [] }), move |fleet| {
+                let only = (!only.is_empty()).then_some(only);
+                crate::tree::level(fleet, only.as_deref(), &filter, &dir, sort)
+            });
+        }
         return with_fleet(state, json!({ "tree": "" }), move |fleet| {
             let only = (!only.is_empty()).then_some(only);
             Ok(
@@ -2637,7 +2649,10 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
     // The portal's Start indexing asks for the review stop; Scan only asks for
     // the plan and nothing else (2.7). Neither changes what a run from an
     // agent or a script does: those never wait.
-    let review = body.get("review").and_then(Value::as_bool).unwrap_or(false);
+    // `"always"` is the portal's Scan: the run holds after its scan even when
+    // nothing needs a person, so the plan is read before anything embeds.
+    let hold = body.get("review").and_then(Value::as_str) == Some("always");
+    let review = hold || body.get("review").and_then(Value::as_bool).unwrap_or(false);
     let scan_only = body
         .get("scan_only")
         .and_then(Value::as_bool)
@@ -2649,7 +2664,7 @@ fn index(state: &Arc<State>, request: &Request) -> Response {
                 .map(|plan| json!({ "plan": plan, "store": store.name }))
                 .map_err(|e| format!("{e:#}"));
         }
-        let run = state.index_planned(store, paths, review);
+        let run = state.index_planned(store, paths, review, hold);
         run.map(|run| json!({ "run": run, "store": store.name }))
             .map_err(|e| e.to_string())
     };
@@ -3120,6 +3135,12 @@ fn index_control(state: &Arc<State>, request: &Request) -> Response {
                 };
             }
             Some("stop") if state.drop_reviewed(id) => {
+                // A discarded scan of a folder that had no store before it
+                // leaves no empty store behind, on the same explicit word as
+                // a stopped run's "Also delete the store".
+                if body.get("delete").and_then(Value::as_bool) == Some(true) {
+                    state.delete_after_stop(Arc::clone(&store));
+                }
                 return Response::json(&json!({ "dequeued": 1 }));
             }
             _ => {}
