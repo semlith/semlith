@@ -5048,7 +5048,7 @@ function decisionsPane() {
           value: decisionLabel,
           render: (r) => el("span", { class: r.accepted && r.accepted !== "refused" ? "pill good" : "pill", text: decisionLabel(r) }),
         },
-        { key: "rule", label: "Why it was held back", sortable: false, render: (r) => lineCell(r.class === "dummy" ? "every match is a declared test dummy" : r.rule) },
+        { key: "rule", label: "Why it was held back", sortable: false, className: "narrow-drop", render: (r) => lineCell(r.class === "dummy" ? "every match is a declared test dummy" : r.rule) },
         {
           key: "confidence",
           label: "Likely real",
@@ -7535,7 +7535,7 @@ function scanPanel() {
               render: (item) => pathCell(rootRel(item.path, item.store), "path"),
             },
             held.length > 1 ? { key: "store", label: "Store", className: "meta", value: (item) => item.store, render: (item) => item.store } : null,
-            { key: "rule", label: "Why", sortable: false, render: (item) => lineCell(item.rule) },
+            { key: "rule", label: "Why", sortable: false, className: "narrow-drop", render: (item) => lineCell(item.rule) },
             {
               key: "confidence",
               label: "Likely real",
