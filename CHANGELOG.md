@@ -81,6 +81,18 @@ started it, stops for review only when something is theirs to decide.
   the suite. Closes #141.
 - The daemon's watcher said `0 indexed at startup` for a catch-up it had only
   queued; it now says the catch-up was deferred, then what it found.
+- `semlith start` no longer fails while a terminal `semlith index` is writing
+  one of its stores. That store is named as waiting and opened, watcher and
+  catch-up included, when the run lets go.
+- Across several stores, `brief` names the store on every span and symbol, and
+  a symbol's edges come from its own store rather than every store defining
+  the name. A root-relative `semlith_read` that two stores both hold is refused
+  naming each, as two roots inside one store already were.
+- The server instructions stayed over their 600-byte limit by the length of
+  "folders" when the roots did not all fit.
+- The research agent reads a located span through `semlith_read`; `Read` is
+  kept for files semlith does not index.
+- A run card's plan line is updated in place, so a poll no longer rebuilds it.
 
 ## [0.29.0] - 2026-09-25
 
