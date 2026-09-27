@@ -912,8 +912,37 @@ impl Boundary {
     /// index ~/.npmrc` is a mistake worth catching. Every other rule — the
     /// credential directories, the credential names — applies to both.
     pub fn refuses(&self, path: &Path, walked: bool, home: Option<&Path>) -> Option<Refusal> {
-        if let Some(roots) = &self.roots
-            && !filter::within_boundary(path, roots)
+        self.resolved(home).refuses(path, walked)
+    }
+
+    /// This boundary with its roots resolved once, for a pass that asks about
+    /// many paths. `home` is the canonical home directory, already resolved.
+    pub fn resolved(&self, home: Option<&Path>) -> ResolvedBoundary {
+        ResolvedBoundary {
+            within: self.roots.as_deref().map(filter::resolve_boundary),
+            boundary: self.clone(),
+            home: home.map(Path::to_path_buf),
+        }
+    }
+}
+
+/// A [`Boundary`] with its roots and the home directory resolved, so asking
+/// about a path costs that path's resolution and nothing more.
+///
+/// Owned rather than borrowing the boundary: a run holds one for its whole
+/// loop, and the loop evicts through `&mut self`.
+#[derive(Debug, Clone)]
+pub struct ResolvedBoundary {
+    boundary: Boundary,
+    within: Option<Vec<String>>,
+    home: Option<PathBuf>,
+}
+
+impl ResolvedBoundary {
+    /// [`Boundary::refuses`], against the roots resolved when this was made.
+    pub fn refuses(&self, path: &Path, walked: bool) -> Option<Refusal> {
+        if let (Some(roots), Some(within)) = (&self.boundary.roots, &self.within)
+            && !filter::within_resolved(path, within)
         {
             // The roots by name. A refusal that says "outside this store's
             // roots" without saying what they are leaves the caller to guess
@@ -947,8 +976,8 @@ impl Boundary {
                 credential: false,
             });
         }
-        if !self.allow_secrets
-            && let Some(why) = filter::denied_against(path, home)
+        if !self.boundary.allow_secrets
+            && let Some(why) = filter::denied_against(path, self.home.as_deref())
         {
             if walked && why == filter::Denied::Hidden {
                 return None;
@@ -1773,9 +1802,10 @@ impl Semlith {
         for _ in &walked.excluded {
             not(&mut plan, store::class::EXCLUDED);
         }
+        let boundary = self.boundary.resolved(home.as_deref());
         for (path, walked) in all {
             let key = path.to_string_lossy().into_owned();
-            if let Some(refusal) = self.boundary.refuses(&path, walked, home.as_deref()) {
+            if let Some(refusal) = boundary.refuses(&path, walked) {
                 if refusal.credential {
                     plan.credential.push(key);
                     not(&mut plan, store::class::CREDENTIAL);
@@ -2044,7 +2074,13 @@ impl Semlith {
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
         let deadline = std::time::Instant::now() + budget;
-        self.index_set(self.walk(roots), true, Some(deadline), None, on_file)
+        self.index_set(
+            self.walk(roots),
+            true,
+            Handed::Walked(Some(deadline)),
+            None,
+            on_file,
+        )
     }
 
     /// [`Semlith::index_walk`] under a control, so the catch-up a watcher runs
@@ -2055,7 +2091,13 @@ impl Semlith {
         control: &dyn Fn() -> Flow,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(self.walk(roots), true, None, Some(control), on_file)
+        self.index_set(
+            self.walk(roots),
+            true,
+            Handed::Walked(None),
+            Some(control),
+            on_file,
+        )
     }
 
     /// [`Semlith::index_within_held`] that can be paused and stopped from
@@ -2075,7 +2117,7 @@ impl Semlith {
         self.index_set(
             self.walk(roots),
             true,
-            Some(deadline),
+            Handed::Walked(Some(deadline)),
             Some(control),
             on_file,
         )
@@ -2091,18 +2133,21 @@ impl Semlith {
     ///
     /// The orphan sweep still belongs to this call, because `index_set` only
     /// performs it on the slice that reaches the end of the list.
+    ///
+    /// `bytes_total` is the run's, when the caller already knows it; `None`
+    /// has this slice measure the files it was handed.
     pub(crate) fn index_rest_held_under(
         &mut self,
         files: Vec<PathBuf>,
         budget: std::time::Duration,
+        bytes_total: Option<u64>,
         control: &dyn Fn() -> Flow,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        let deadline = std::time::Instant::now() + budget;
         self.index_set(
             // Every one of these came out of the walk this run started with,
             // so they are walked paths and are held to the same boundary rule
-            // they were held to then.
+            // they were held to then — each as the slice reaches it.
             Walked {
                 files,
                 named: Vec::new(),
@@ -2112,7 +2157,10 @@ impl Semlith {
                 excluded: Vec::new(),
             },
             true,
-            Some(deadline),
+            Handed::Rest {
+                budget,
+                bytes_total,
+            },
             Some(control),
             on_file,
         )
@@ -2125,7 +2173,7 @@ impl Semlith {
         roots: &[PathBuf],
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
-        self.index_set(self.walk(roots), true, None, None, on_file)
+        self.index_set(self.walk(roots), true, Handed::Walked(None), None, on_file)
     }
 
     /// Re-index exactly `paths`, evicting any that have gone from disk.
@@ -2151,7 +2199,7 @@ impl Semlith {
                 excluded: Vec::new(),
             },
             false,
-            None,
+            Handed::Walked(None),
             None,
             on_file,
         )
@@ -2164,7 +2212,7 @@ impl Semlith {
         &mut self,
         walked: Walked,
         sweep: bool,
-        deadline: Option<std::time::Instant>,
+        handed: Handed,
         control: Option<&dyn Fn() -> Flow>,
         on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
@@ -2176,7 +2224,7 @@ impl Semlith {
         // Every path that writes to this store funnels through here, so this is
         // where the connection stops refusing writes — and, when this returns,
         // starts refusing them again. See `store::Writing` and `writing` below.
-        self.writing(move |me| me.index_set_writing(walked, sweep, deadline, control, on_file))
+        self.writing(move |me| me.index_set_writing(walked, sweep, handed, control, on_file))
     }
 
     /// Do something that writes, with the connection's refusal lifted for
@@ -2193,11 +2241,72 @@ impl Semlith {
         out
     }
 
+    /// Report one refused file, record it with the rule that refused it, and
+    /// evict what an earlier run held of it when the refusal is about what it
+    /// contains.
+    fn refuse_file(
+        &mut self,
+        report: &mut IndexReport,
+        total: usize,
+        path: &Path,
+        refusal: &Refusal,
+        on_file: &mut impl FnMut(&Path, IndexProgress),
+    ) -> Result<()> {
+        // A file semlith has decided it will not hold is a file it does
+        // not keep holding. A rule that widens — this release widened two
+        // of them — otherwise leaves every store that was indexed under
+        // the old rule still carrying what the new one refuses. Only for a
+        // refusal about the file's own contents: see `Refusal`.
+        let evicted = if refusal.credential {
+            let key = path.to_string_lossy().into_owned();
+            let (chunks, images) = self.evict(&key)?;
+            chunks + images
+        } else {
+            0
+        };
+        report.removed += usize::from(evicted > 0);
+        let why = if evicted > 0 {
+            format!(
+                "{} Its earlier contents have been removed from this store.",
+                refusal.why
+            )
+        } else {
+            refusal.why.clone()
+        };
+        report
+            .refused
+            .push((path.display().to_string(), why.clone()));
+        report.scanned += 1;
+        let class = if refusal.credential {
+            store::class::CREDENTIAL
+        } else {
+            store::class::EXCLUDED
+        };
+        store::refuse(
+            &self.db,
+            &path.to_string_lossy(),
+            class,
+            &refusal.why,
+            &[],
+            1,
+            now(),
+        )?;
+        say_file(
+            on_file,
+            report,
+            total,
+            path,
+            FileOutcome::Refused,
+            Some(why),
+        );
+        Ok(())
+    }
+
     fn index_set_writing(
         &mut self,
         walked: Walked,
         sweep: bool,
-        deadline: Option<std::time::Instant>,
+        handed: Handed,
         control: Option<&dyn Fn() -> Flow>,
         mut on_file: impl FnMut(&Path, IndexProgress),
     ) -> Result<IndexReport> {
@@ -2251,19 +2360,40 @@ impl Semlith {
             credentials: hidden_credentials,
             excluded,
         } = walked;
-        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = {
+        // Once for the run, not once for the file. The home directory and the
+        // roots cannot move while a run is going, and resolving them per file
+        // was an opened handle per file on Windows.
+        let home = crate::home::user_home().ok().map(|h| canonical(&h));
+        let boundary = self.boundary.resolved(home.as_deref());
+        let (deadline, budget, bytes_known) = match handed {
+            Handed::Walked(deadline) => (deadline, None, None),
+            Handed::Rest {
+                budget,
+                bytes_total,
+            } => (None, Some(budget), bytes_total),
+        };
+        // A continuation slice is handed everything the run has not reached,
+        // and checking all of it here, every 45 seconds, is what halved the
+        // speed of a large run: ~66,000 paths re-proved admissible each slice
+        // before anything was embedded. Its files are held to the same rule
+        // one at a time, as the loop reaches them, so a slice costs the files
+        // it handles rather than the files left. A first slice keeps the pass
+        // up front, because its plan, its refused rows and its evictions are
+        // reported before any file is read.
+        let each = budget.is_some().then_some(&boundary);
+        let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each.is_some() {
+            let mut allowed = walked_paths;
+            allowed.sort();
+            (allowed, Vec::new())
+        } else {
             let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
             let mut refused = Vec::new();
-            // Once for the run, not once for the file. The home directory
-            // cannot move while a run is going, and resolving it per file was
-            // an opened handle per file on Windows.
-            let home = crate::home::user_home().ok().map(|h| canonical(&h));
             let all = named
                 .into_iter()
                 .map(|p| (p, false))
                 .chain(walked_paths.into_iter().map(|p| (p, true)));
             for (path, walked) in all {
-                match self.boundary.refuses(&path, walked, home.as_deref()) {
+                match boundary.refuses(&path, walked) {
                     Some(why) => refused.push((path, why)),
                     None => allowed.push(path),
                 }
@@ -2273,60 +2403,18 @@ impl Semlith {
         };
         let total = paths.len() + refused.len() + unwalkable.len();
         // One `stat` per file the run will open, which is microseconds against
-        // the read, hash and embed that follow it. A file over the cap is
-        // skipped without being read, so it counts for nothing here either.
-        report.bytes_total = paths
-            .iter()
-            .map(|p| embeddable_bytes(p.metadata().ok()))
-            .sum();
+        // the read, hash and embed that follow it — once per run. A later
+        // slice is handed the figure the run settled on its first. A file over
+        // the cap is skipped without being read, so it counts for nothing here
+        // either.
+        report.bytes_total = bytes_known.unwrap_or_else(|| {
+            paths
+                .iter()
+                .map(|p| embeddable_bytes(p.metadata().ok()))
+                .sum()
+        });
         for (path, refusal) in &refused {
-            // A file semlith has decided it will not hold is a file it does
-            // not keep holding. A rule that widens — this release widened two
-            // of them — otherwise leaves every store that was indexed under
-            // the old rule still carrying what the new one refuses. Only for a
-            // refusal about the file's own contents: see `Refusal`.
-            let evicted = if refusal.credential {
-                let key = path.to_string_lossy().into_owned();
-                let (chunks, images) = self.evict(&key)?;
-                chunks + images
-            } else {
-                0
-            };
-            report.removed += usize::from(evicted > 0);
-            let why = if evicted > 0 {
-                format!(
-                    "{} Its earlier contents have been removed from this store.",
-                    refusal.why
-                )
-            } else {
-                refusal.why.clone()
-            };
-            report
-                .refused
-                .push((path.display().to_string(), why.clone()));
-            report.scanned += 1;
-            let class = if refusal.credential {
-                store::class::CREDENTIAL
-            } else {
-                store::class::EXCLUDED
-            };
-            store::refuse(
-                &self.db,
-                &path.to_string_lossy(),
-                class,
-                &refusal.why,
-                &[],
-                1,
-                now(),
-            )?;
-            say_file(
-                &mut on_file,
-                &report,
-                total,
-                path,
-                FileOutcome::Refused,
-                Some(why),
-            );
+            self.refuse_file(&mut report, total, path, refusal, &mut on_file)?;
         }
         report.generated = generated.iter().map(|p| p.display().to_string()).collect();
         for (path, rule) in &excluded {
@@ -2400,6 +2488,9 @@ impl Semlith {
             );
         }
 
+        // Taken here, after the setup above, so a slice's budget is spent on
+        // its files rather than on getting ready to read them.
+        let deadline = deadline.or_else(|| budget.map(|b| std::time::Instant::now() + b));
         for (seen, path) in paths.iter().enumerate() {
             // Cloned per file so `paths` outlives the loop and the remainder
             // can be handed to the next slice. One `PathBuf` clone against
@@ -2412,7 +2503,7 @@ impl Semlith {
                 && report.indexed > 0
                 && std::time::Instant::now() >= deadline
             {
-                report.remaining = total - seen;
+                report.remaining = paths.len() - seen;
                 report.pending = paths[seen..].to_vec();
                 break;
             }
@@ -2437,15 +2528,23 @@ impl Semlith {
                     }
                 }
                 if yielded {
-                    report.remaining = total - seen;
+                    report.remaining = paths.len() - seen;
                     report.pending = paths[seen..].to_vec();
                     break;
                 }
                 if stop {
-                    report.remaining = total - seen;
+                    report.remaining = paths.len() - seen;
                     report.stopped = true;
                     break;
                 }
+            }
+            // The moment before the file is opened, for a slice that did not
+            // check its files up front.
+            if let Some(boundary) = each
+                && let Some(refusal) = boundary.refuses(&path, true)
+            {
+                self.refuse_file(&mut report, total, &path, &refusal, &mut on_file)?;
+                continue;
             }
             report.scanned += 1;
             let key = path.to_string_lossy().into_owned();
@@ -2998,7 +3097,7 @@ impl Semlith {
                 // Stopped inside this file. Its rows are in `written`, so the
                 // caller's undo takes it out with everything else; nothing of
                 // it is finished, so nothing of it is counted or committed.
-                report.remaining = total - seen;
+                report.remaining = paths.len() - seen;
                 report.stopped = true;
                 break;
             }
@@ -3050,7 +3149,7 @@ impl Semlith {
                         None,
                     );
                 })? {
-                    report.remaining = total - seen - 1;
+                    report.remaining = paths.len() - seen - 1;
                     report.stopped = true;
                     break;
                 }
@@ -3754,9 +3853,10 @@ impl Semlith {
         // `filter::within_boundary` — and a store that dropped rows by a rule
         // slightly different from the one that refuses writes would hold
         // exactly the files the daemon then declined to re-index.
+        let resolved = filter::resolve_boundary(roots);
         Ok(store::all_paths(&self.db)?
             .into_iter()
-            .filter(|key| !filter::within_boundary(Path::new(key), roots))
+            .filter(|key| !filter::within_resolved(Path::new(key), &resolved))
             .collect())
     }
 
@@ -5200,6 +5300,21 @@ fn walk_error_path(e: &ignore::Error) -> Option<PathBuf> {
     }
 }
 
+/// How a pass came by its files, which decides when they are held to the
+/// boundary and when its time starts.
+pub(crate) enum Handed {
+    /// Walked or named by this call. Every file is held to the boundary before
+    /// any is read, and the deadline, when there is one, is the caller's.
+    Walked(Option<std::time::Instant>),
+    /// The rest of a run, or a batch of watcher events. Each file is held to
+    /// the boundary as the pass reaches it; the budget starts once the pass is
+    /// ready to read; `bytes_total` is the run's, when the caller knows it.
+    Rest {
+        budget: std::time::Duration,
+        bytes_total: Option<u64>,
+    },
+}
+
 /// What a walk found, and what it could not read.
 ///
 /// A pair rather than a bare `Vec` since 0.19.0: the entries the walk gave up
@@ -5935,6 +6050,133 @@ mod tests {
         // Asking for a different model than the store holds is an error, not a
         // silent rebuild.
         assert!(Semlith::open(&dir, Some(Model::Granite)).is_err());
+    }
+
+    /// `n` empty files under a fresh directory, canonical, in walk order, and
+    /// a store confined to that directory.
+    fn continuation(n: usize) -> (tempfile::TempDir, tempfile::TempDir, PathBuf, Semlith) {
+        let corpus = tempfile::tempdir().unwrap();
+        let root = canonical(corpus.path());
+        for i in 0..n {
+            std::fs::write(root.join(format!("{i:04}.txt")), b"").unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Semlith::open(dir.path(), None).unwrap();
+        s.boundary = Boundary::within(vec![root.clone()]);
+        (corpus, dir, root, s)
+    }
+
+    /// 0.30.1, item 1: a continuation slice checks the files it reaches, not
+    /// the files left. On 0.30.0 every one of the N remaining paths was
+    /// canonicalised (and every root with it) before the first file was read,
+    /// so a slice that got through K files still paid for N.
+    #[test]
+    fn a_continuation_slice_checks_only_the_files_it_reaches() {
+        const N: usize = 300;
+        const K: usize = 10;
+        let (_corpus, _dir, root, mut s) = continuation(N);
+        let files: Vec<PathBuf> = (0..N).map(|i| root.join(format!("{i:04}.txt"))).collect();
+
+        // The daemon's slice ends on its clock; this one ends on a count, so
+        // the test does not depend on how fast the machine is.
+        let asked = std::cell::Cell::new(0usize);
+        let control = || {
+            asked.set(asked.get() + 1);
+            if asked.get() > K {
+                Flow::Yield
+            } else {
+                Flow::Run
+            }
+        };
+        let before = canonical_calls();
+        let report = s
+            .index_rest_held_under(
+                files,
+                std::time::Duration::from_secs(3600),
+                Some(0),
+                &control,
+                |_, _| {},
+            )
+            .unwrap();
+        let spent = canonical_calls() - before;
+
+        assert_eq!(report.scanned, K);
+        assert_eq!(report.pending.len(), N - K);
+        // One per file reached, plus the root and the home resolved once.
+        assert!(
+            spent <= K as u64 + 4,
+            "{spent} canonicalisations for a slice that reached {K} of {N} files"
+        );
+    }
+
+    /// Checked as it is reached is checked just as hard: a path outside the
+    /// store's roots handed to a continuation slice is refused, with the reason
+    /// a first slice gives it.
+    #[test]
+    fn a_continuation_slice_refuses_what_a_first_slice_refuses() {
+        let (_corpus, _dir, _root, mut s) = continuation(0);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = canonical(elsewhere.path()).join("outside.txt");
+        std::fs::write(&outside, b"not this store's").unwrap();
+
+        let first = s
+            .index_paths_within(
+                std::slice::from_ref(&outside),
+                std::time::Duration::from_secs(3600),
+                |_, _| {},
+            )
+            .unwrap();
+        let rest = s
+            .index_rest_held_under(
+                vec![outside.clone()],
+                std::time::Duration::from_secs(3600),
+                None,
+                &|| Flow::Run,
+                |_, _| {},
+            )
+            .unwrap();
+
+        assert_eq!(first.refused.len(), 1, "{:?}", first.refused);
+        assert!(first.refused[0].1.contains("outside this store's roots"));
+        assert_eq!(rest.refused, first.refused);
+        assert_eq!(rest.indexed, 0);
+    }
+
+    /// A slice cut short counts as remaining only the files it did not reach.
+    /// It used to subtract its position among the admitted files from a total
+    /// that also held the refused ones, so a run's settled total came out one
+    /// higher for every refused file and its counter never reached it.
+    #[test]
+    fn a_cut_slice_counts_only_what_it_did_not_reach_as_remaining() {
+        const N: usize = 20;
+        const K: usize = 5;
+        let (_corpus, _dir, root, mut s) = continuation(N);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = canonical(elsewhere.path()).join("outside.txt");
+        std::fs::write(&outside, b"not this store's").unwrap();
+
+        let asked = std::cell::Cell::new(0usize);
+        let control = || {
+            asked.set(asked.get() + 1);
+            if asked.get() > K {
+                Flow::Yield
+            } else {
+                Flow::Run
+            }
+        };
+        let report = s
+            .index_within_held_under(
+                &[root, outside],
+                std::time::Duration::from_secs(3600),
+                &control,
+                |_, _| {},
+            )
+            .unwrap();
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(report.pending.len(), N - K);
+        assert_eq!(report.remaining, N - K);
+        // What the daemon settles the run's total on.
+        assert_eq!(report.scanned + report.remaining, N + 1);
     }
 
     fn tempdir() -> PathBuf {

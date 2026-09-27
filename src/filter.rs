@@ -666,21 +666,41 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 /// machine and is not held to this — which is the one asymmetry in the rule,
 /// and it is deliberate.
 pub fn within_boundary(path: &Path, roots: &[PathBuf]) -> bool {
-    let real = comparable(path);
-    if roots.iter().any(|root| under(&real, &comparable(root))) {
-        return true;
+    within_resolved(path, &resolve_boundary(roots))
+}
+
+/// The directories a boundary admits, each resolved once, for a pass that asks
+/// about many paths.
+///
+/// A run's roots cannot move while it runs, and resolving every root again for
+/// every file was a filesystem call per root per file on top of the one the
+/// file itself needs — about 66,000 paths each time a 0.30.0 slice started.
+pub fn resolve_boundary(roots: &[PathBuf]) -> Vec<String> {
+    if roots.is_empty() {
+        // The home directory is the fallback for a store that has no roots at
+        // all — a `--store <dir>` the registry has never heard of — and for
+        // nothing else. It used to apply to every store, which made the
+        // boundary no boundary: every store on the machine shares a home, so
+        // an agent pointed at one repository could index another one into it
+        // and be allowed. That is how the `semlith` store came to hold 262
+        // files belonging to `ultraship`, under a Privacy page that says the
+        // roots are enforced.
+        //
+        // An unknown home makes this stricter rather than looser: nothing is
+        // inside a boundary semlith cannot locate.
+        return crate::home::user_home()
+            .ok()
+            .map(|home| comparable(&home))
+            .into_iter()
+            .collect();
     }
-    // The home directory is the fallback for a store that has no roots at all
-    // — a `--store <dir>` the registry has never heard of — and for nothing
-    // else. It used to apply to every store, which made the boundary no
-    // boundary: every store on the machine shares a home, so an agent pointed
-    // at one repository could index another one into it and be allowed. That
-    // is how the `semlith` store came to hold 262 files belonging to
-    // `ultraship`, under a Privacy page that says the roots are enforced.
-    //
-    // An unknown home makes this stricter rather than looser: nothing is inside
-    // a boundary semlith cannot locate.
-    roots.is_empty() && crate::home::user_home().is_ok_and(|home| under(&real, &comparable(&home)))
+    roots.iter().map(|root| comparable(root)).collect()
+}
+
+/// [`within_boundary`] against roots [`resolve_boundary`] already resolved.
+pub fn within_resolved(path: &Path, resolved: &[String]) -> bool {
+    let real = comparable(path);
+    resolved.iter().any(|root| under(&real, root))
 }
 
 /// A path in the one shape two of them can be compared in.
@@ -919,6 +939,32 @@ mod deny_tests {
         assert!(within_boundary(Path::new("/work/api"), &roots));
         assert!(!within_boundary(Path::new("/etc/hosts"), &roots));
         assert!(!within_boundary(Path::new("/work/other"), &roots));
+    }
+
+    /// Resolved once, asked many times: checking N paths against R roots costs
+    /// N canonicalisations for the paths and R for the roots, not N × (R + 1).
+    #[test]
+    fn roots_are_resolved_once_however_many_paths_are_checked() {
+        let roots = vec![
+            PathBuf::from("/work/api"),
+            PathBuf::from("/work/web"),
+            PathBuf::from("/work/docs"),
+        ];
+        let before = crate::canonical_calls();
+        let resolved = resolve_boundary(&roots);
+        for i in 0..100 {
+            assert!(within_resolved(
+                Path::new(&format!("/work/docs/{i}.md")),
+                &resolved
+            ));
+        }
+        assert!(!within_resolved(Path::new("/etc/hosts"), &resolved));
+        assert_eq!(crate::canonical_calls() - before, 3 + 101);
+
+        // And one call on its own resolves each root once.
+        let before = crate::canonical_calls();
+        assert!(!within_boundary(Path::new("/etc/hosts"), &roots));
+        assert_eq!(crate::canonical_calls() - before, 3 + 1);
     }
 }
 

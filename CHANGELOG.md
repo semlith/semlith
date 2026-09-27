@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.1] - 2026-09-27
+
+### A long run stops re-checking what it has left, and its estimate moves
+
+Found indexing the 70-repository benchmark corpus (about 67,000 files) from the
+portal: every slice after the first spent a large share of its time re-checking
+paths it had already admitted, and the remaining-time estimate froze at its
+first figure.
+
+**Slices check the files they reach.** Every slice after the first was handed
+all the paths its run had not reached yet and held every one of them to the
+boundary and the deny-list before embedding anything — two canonicalisations
+and a `stat` per path, about 66,000 of them every 45 seconds. A continuation
+slice now holds each file to the same rules as it reaches it, just before
+opening it, so a slice costs the files it handles rather than the files left.
+The rules are unchanged and every file is still checked before it is read; the
+first slice keeps its up-front pass for the plan, the refused rows and the
+evictions. The roots are resolved once per pass rather than once per file, the
+slice's 45 seconds start after its setup, and the run's byte total is carried
+from the first slice rather than re-measured with a `stat` per remaining file.
+On the corpus the re-check took 12.6 % of the index writer's time in a quiet
+run and 32.4 % in a loaded one; it now takes 0.1 %. The rate over slices 2 to
+15, median of three runs each, went from 25.6 to 28.3 chunks per second
+(1.11x): the rest of the writer's time is embedding, which this release does
+not change.
+
+**The estimate follows the run.** A window in which fewer than 1 % of the run's
+bytes moved counted as stalled and kept the previous estimate, so any run
+longer than about 17 minutes kept its first estimate to the end. Only a run
+writing its index, or one that moved nothing in the window, holds it now; the
+cap that stops the estimate more than doubling between two polls (#143) stays.
+
+### Fixed
+
+- The document reader no longer panics on text with a multi-byte character
+  twelve bytes after an `&` ("end byte index 12 is not a char boundary"), which
+  it did five times on the rust-lang/book documents.
+- Machine limits states one figure for the vectors per store. A saved figure
+  was clamped to the memory free that second, less the reserve, and read
+  "311 MiB" on one poll and "0 MiB" on the next; it is never clamped below what
+  the machine derives, and the poll reports the budget actually in force.
+- A slice cut short counted the files it had refused as not yet reached, so a
+  run with refused files settled on a total its counter never reached.
+
 ## [0.30.0] - 2026-09-26
 
 ### Agents use semlith, and it answers them well

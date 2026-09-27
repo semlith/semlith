@@ -640,9 +640,13 @@ impl RunState {
         // A run writing its index moves no bytes for twenty seconds, and the
         // rate over that window says the rest will take minutes. Issue #143:
         // the card jumped to minutes, then back. While the run says it is in
-        // a phase, or fewer than 1 % of the bytes moved in the window, the
-        // last estimate stands.
-        let stalled = self.phase.is_some() || moved * 100 < self.bytes_total;
+        // a phase, or no bytes moved in the window, the last estimate stands.
+        // Not "fewer than 1 % of the bytes": a run that takes longer than
+        // about seventeen minutes never moves 1 % in ten seconds, and kept
+        // its first estimate to the end — 9 h 19 min for the whole of the
+        // 70-repository corpus. A spike out of a stall is the doubling cap's
+        // to absorb, below.
+        let stalled = self.phase.is_some() || moved == 0;
         if stalled && let Some((eta, _)) = shown {
             return Some(eta);
         }
@@ -1972,6 +1976,12 @@ impl Limit {
             .ok()
             .and_then(|raw| raw.parse::<usize>().ok())
             .filter(|n| *n > 0);
+        // Never below what this machine would choose on its own. The memory
+        // ceiling is what is free now less the reserve, which on a busy
+        // machine is a few hundred MiB one second and nothing the next, and a
+        // saved value clamped to it read "311 MiB" on one poll and "0 MiB" on
+        // the next — beside a field that offered the derived 512 as in range.
+        let ceiling = ceiling.max(derived.value);
         let (value, source) = match (from_env, saved.filter(|n| *n > 0)) {
             // The environment is the machine's owner speaking directly and is
             // not clamped: somebody who exported a variable has said what they
@@ -1985,7 +1995,7 @@ impl Limit {
             source,
             derived: derived.value,
             reason: derived.reason,
-            ceiling: ceiling.max(derived.value),
+            ceiling,
         }
     }
 }
@@ -2072,6 +2082,17 @@ impl Limits {
             _ => self.embed_threads.value,
         });
         crate::index::set_budget_mb(self.index_memory_mb.value);
+    }
+
+    /// These limits with the memory figure the engine is actually using.
+    ///
+    /// [`Self::in_force`] re-derives from the memory free now, which is right
+    /// for deciding what to apply and wrong for saying what was applied: the
+    /// budget is handed to the engine when the daemon starts and when a
+    /// setting is saved, and nowhere else, so a page that polls is told that.
+    pub fn as_applied(mut self) -> Self {
+        self.index_memory_mb.value = crate::index::budget_mb();
+        self
     }
 
     /// The line `semlith start` prints: all three values with their source.
@@ -3588,7 +3609,13 @@ fn perform(
                 Work::Roots(ref roots) => {
                     writer.index_within_held_under(roots, SLICE, &control, on_file)
                 }
-                Work::Rest(rest) => writer.index_rest_held_under(rest, SLICE, &control, on_file),
+                Work::Rest(rest) => writer.index_rest_held_under(
+                    rest,
+                    SLICE,
+                    (bytes_total_before > 0).then_some(bytes_total_before),
+                    &control,
+                    on_file,
+                ),
             };
             match outcome {
                 Ok(mut done) => {
@@ -4654,6 +4681,65 @@ mod tests {
         run.ended = Some(Duration::from_secs(30));
         let after = run.eta_ms().expect("moving again");
         assert!(after <= before * 2, "{after} ms after {before} ms");
+    }
+
+    /// 0.30.1: a long run's estimate follows its rate. Before, a window that
+    /// moved under 1 % of the run's bytes counted as stalled, and a run that
+    /// never moves 1 % in ten seconds kept its first estimate for ever.
+    #[test]
+    fn a_long_runs_estimate_follows_its_rate() {
+        let mut run = RunState::new(1, Vec::new(), RunKind::Run);
+        run.status = RunStatus::Running;
+        // A gigabyte at 100 KB/s, then at 200 KB/s: 0.1 % and 0.2 % a window.
+        run.bytes_total = 1_000_000_000;
+        run.first_sample = Some((0, 0, 0));
+        run.samples = VecDeque::from(vec![(0, 0, 0)]);
+        let mut shown = Vec::new();
+        for t in 1..=40u64 {
+            run.bytes = if t <= 20 {
+                t * 100_000
+            } else {
+                2_000_000 + (t - 20) * 200_000
+            };
+            run.samples.push_back((t * 1_000, t, run.bytes));
+            run.ended = Some(Duration::from_secs(t));
+            if let Some(eta) = run.eta_ms() {
+                shown.push((t, eta));
+            }
+        }
+        let at = |t: u64| {
+            shown
+                .iter()
+                .find(|(at, _)| *at == t)
+                .expect("an estimate")
+                .1
+        };
+        // 998 MB left at 100 KB/s is 9,980 s.
+        assert_eq!(at(20) / 1_000, 9_980);
+        // Ten seconds into the faster rate the window is all 200 KB/s:
+        // 994 MB left is 4,970 s.
+        assert_eq!(at(40) / 1_000, 4_970);
+    }
+
+    /// 0.30.1: a saved memory figure is never clamped below the derived one,
+    /// however little is free this second, and so reads the same poll to poll.
+    #[test]
+    fn a_saved_figure_does_not_follow_the_free_memory_below_the_derived_one() {
+        let derived = |value| crate::system::Derivation {
+            value,
+            reason: String::new(),
+        };
+        let unset = "SEMLITH_TEST_UNSET_LIMIT";
+        for free_less_reserve in [0, 311, 400] {
+            let limit = Limit::new(derived(512), Some(512), unset, free_less_reserve);
+            assert_eq!(limit.value, 512, "at {free_less_reserve} MiB of room");
+            assert_eq!(limit.ceiling, 512);
+        }
+        // Above the derived figure the room still caps it.
+        assert_eq!(
+            Limit::new(derived(512), Some(4096), unset, 1024).value,
+            1024
+        );
     }
 
     /// A write with several stores open has no "the" store, and guessing one
