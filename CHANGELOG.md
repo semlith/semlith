@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.30.1] - 2026-09-27
 
-### A large corpus indexes at the speed its first minute showed
+### A long run stops re-checking what it has left, and its estimate moves
 
 Found indexing the 70-repository benchmark corpus (about 67,000 files) from the
-portal: the rate fell from 42 to about 20 chunks per second after the first
-45-second slice and stayed there, and the remaining-time estimate froze at its
+portal: every slice after the first spent a large share of its time re-checking
+paths it had already admitted, and the remaining-time estimate froze at its
 first figure.
 
 **Slices check the files they reach.** Every slice after the first was handed
@@ -27,6 +27,11 @@ first slice keeps its up-front pass for the plan, the refused rows and the
 evictions. The roots are resolved once per pass rather than once per file, the
 slice's 45 seconds start after its setup, and the run's byte total is carried
 from the first slice rather than re-measured with a `stat` per remaining file.
+On the corpus the re-check took 12.6 % of the index writer's time in a quiet
+run and 32.4 % in a loaded one; it now takes 0.1 %. The rate over slices 2 to
+15, median of three runs each, went from 25.6 to 28.3 chunks per second
+(1.11x): the rest of the writer's time is embedding, which this release does
+not change.
 
 **The estimate follows the run.** A window in which fewer than 1 % of the run's
 bytes moved counted as stalled and kept the previous estimate, so any run
