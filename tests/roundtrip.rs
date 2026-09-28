@@ -102,12 +102,17 @@ fn a_filtered_search_ranks_within_the_subset() {
     let store = tempfile::tempdir().unwrap();
     fs::create_dir(corpus.path().join("sub")).unwrap();
 
+    // Four different files: identical text is folded into one hit that names
+    // the others as copies, which is a different property from this one.
     for i in 0..4 {
         write(
             &corpus.path().join("sub"),
             &format!("retry_{i}.rs"),
-            "fn backoff() { let delay = base * 2u32.pow(attempt); }\n\
-             // Retries use full jitter, capped at MAX_BACKOFF.",
+            &format!(
+                "fn backoff_{i}() {{ let delay = base * {}u32.pow(attempt); }}\n\
+                 // Retries use full jitter, capped at MAX_BACKOFF_{i}.",
+                i + 2
+            ),
         );
     }
     // Enough noise on the same subject that an unfiltered top-k is all noise.

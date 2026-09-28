@@ -2494,6 +2494,20 @@ impl Semlith {
                 now(),
             )?;
         }
+        // What a rule now leaves out is not what the store keeps holding. A
+        // `.semlithignore` or `.gitignore` line added after a folder was
+        // indexed left its files searchable for ever, because only a file gone
+        // from disk was ever swept: this repository's own store still held the
+        // 134 files 0.30.0's `.semlithignore` excluded.
+        if !excluded.is_empty() {
+            let out: Vec<&Path> = excluded.iter().map(|(p, _)| p.as_path()).collect();
+            for key in store::all_paths(&self.db)? {
+                if out.iter().any(|o| Path::new(&key).starts_with(o)) {
+                    let (chunks, images) = self.evict(&key)?;
+                    report.removed += usize::from(chunks + images > 0);
+                }
+            }
+        }
         for path in &hidden_credentials {
             let why = filter::denied(path).map(|d| d.reason()).unwrap_or_default();
             store::refuse(
