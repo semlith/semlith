@@ -109,7 +109,10 @@ pub fn fetch(cache: &Path, pack: &Pack, progress: &mut dyn FnMut(u8)) -> Result<
     let total = pack.bytes().max(1);
     let mut done = 0u64;
     for asset in pack.assets {
-        let file = dir.join(format!(".download-{}", asset.sha256.get(..12).unwrap_or("pack")));
+        let file = dir.join(format!(
+            ".download-{}",
+            asset.sha256.get(..12).unwrap_or("pack")
+        ));
         crate::gpu::download(asset.url, &file, asset.sha256, &mut |n| {
             done += n;
             progress(((done * 100) / total).min(100) as u8);
@@ -118,8 +121,9 @@ pub fn fetch(cache: &Path, pack: &Pack, progress: &mut dyn FnMut(u8)) -> Result<
             Form::Zip => unzip(&file, &dir, None),
             Form::Wheel { prefix } => unzip(&file, &dir, Some(prefix)),
             Form::TarGz => untar_gz(&file, &dir),
-            Form::File { name } => std::fs::rename(&file, dir.join(name))
-                .with_context(|| format!("placing {name}")),
+            Form::File { name } => {
+                std::fs::rename(&file, dir.join(name)).with_context(|| format!("placing {name}"))
+            }
         };
         if let Err(e) = unpacked {
             let _ = std::fs::remove_dir_all(&dir);
@@ -199,7 +203,8 @@ fn unzip(archive: &Path, into: &Path, wheel: Option<&str>) -> Result<()> {
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode & 0o755));
+            let _ =
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode & 0o755));
         }
         placed += 1;
     }
@@ -256,7 +261,10 @@ fn untar_gz(archive: &Path, into: &Path) -> Result<()> {
                 {
                     use std::os::unix::fs::PermissionsExt;
                     let mode = octal(&header[100..108]).unwrap_or(0o644) as u32;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o755));
+                    let _ = std::fs::set_permissions(
+                        &path,
+                        std::fs::Permissions::from_mode(mode & 0o755),
+                    );
                 }
                 placed += 1;
             }
@@ -329,7 +337,10 @@ mod tests {
         assert_eq!(inside("../etc/passwd"), None);
         assert_eq!(inside("/etc/passwd"), None);
         assert_eq!(inside("a/../../b"), None);
-        assert_eq!(below_top(Path::new("top/ane/x.mil")), Some(PathBuf::from("ane/x.mil")));
+        assert_eq!(
+            below_top(Path::new("top/ane/x.mil")),
+            Some(PathBuf::from("ane/x.mil"))
+        );
         assert_eq!(below_top(Path::new("top")), None);
     }
 }

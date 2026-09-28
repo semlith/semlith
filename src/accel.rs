@@ -468,6 +468,11 @@ pub fn manage() {
     MANAGED.store(true, Ordering::Relaxed);
 }
 
+/// Whether this process uses the lanes: the daemon and the command line.
+pub fn managed() -> bool {
+    MANAGED.load(Ordering::Relaxed)
+}
+
 fn lanes() -> &'static Vec<Arc<Lane>> {
     LANES.get_or_init(|| SPECS.iter().map(|spec| Arc::new(Lane::new(spec))).collect())
 }
@@ -529,6 +534,42 @@ pub fn for_run() -> (Vec<Arc<Lane>>, bool) {
     }
     let any_ready = chosen.iter().any(|lane| lane.ready());
     (chosen, cpu || !any_ready)
+}
+
+/// The variants a cached vector may be for this process's runs, best first:
+/// what its lanes make, then the CPU's. A cached vector of any of them is as
+/// good as embedding it again here, which is the point of the cache.
+pub fn cache_variants() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    if MANAGED.load(Ordering::Relaxed) {
+        let on = enabled();
+        for spec in SPECS {
+            if spec.id == "worker" || !on.lane(spec.id) || unavailable_here(spec.id).is_some() {
+                continue;
+            }
+            // The GPU lane is Core ML on a Mac and WebGPU elsewhere.
+            let variants: &[&'static str] = match spec.id {
+                "gpu" => &["fp16-coreml-gpu", "fp16-webgpu"],
+                _ => std::slice::from_ref(&spec.variant),
+            };
+            for variant in variants {
+                if !out.contains(variant) {
+                    out.push(variant);
+                }
+            }
+        }
+    }
+    out.push("int8-cpu");
+    out
+}
+
+/// Whether this process's index runs use the machine-wide vector cache:
+/// where they use the lanes — the daemon and the command line — or where the
+/// environment names a cap. The library alone does not, so the retrieval
+/// harness never reads a vector another run left behind (#88).
+pub fn cache_in_use() -> bool {
+    (MANAGED.load(Ordering::Relaxed) || std::env::var(crate::cache::CAP_ENV).is_ok())
+        && crate::cache::cap_bytes() > 0
 }
 
 /// Every lane as the Machine limits card and `semlith accel status` show it.
@@ -852,7 +893,12 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
             let running = worker.as_mut().expect("started above");
             if let Err(e) = write_frame(&mut running.stdin, &encode_ids(&batch)) {
                 let _ = reply.send(Err(format!("the worker stopped reading: {e}")));
-                fail(&lane, &mut worker, &mut sent, format!("the worker stopped reading: {e}"));
+                fail(
+                    &lane,
+                    &mut worker,
+                    &mut sent,
+                    format!("the worker stopped reading: {e}"),
+                );
                 continue;
             }
             sent.push_back(Sent {

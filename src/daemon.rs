@@ -262,11 +262,16 @@ struct Tally {
     skipped_reasons: std::collections::BTreeMap<String, usize>,
     /// Where the run's time went, slice by slice added up.
     stages: Box<crate::pipeline::Stages>,
+    /// Chunks the vector cache was asked for, and held.
+    cache_lookups: u64,
+    cache_hits: u64,
 }
 
 impl Tally {
     fn add(&mut self, report: &crate::IndexReport) {
         self.stages.add(&report.stages);
+        self.cache_lookups += report.cache_lookups as u64;
+        self.cache_hits += report.cache_hits as u64;
         self.refused.extend(report.refused.iter().cloned());
         self.failed.extend(report.failed.iter().cloned());
         for (kind, n) in &report.skipped_reasons {
@@ -491,6 +496,8 @@ pub struct RunState {
     pub summary: Option<serde_json::Value>,
     /// Where the run's time has gone so far, as of its last slice.
     stages: Option<serde_json::Value>,
+    /// Chunks the vector cache was asked for, and held, as of its last slice.
+    cache: (u64, u64),
     /// The last [`LOG_HISTORY`] events, each carrying the sequence number a
     /// client reads after.
     log: VecDeque<serde_json::Value>,
@@ -534,6 +541,7 @@ impl RunState {
             plan_eta_ms: None,
             summary: None,
             stages: None,
+            cache: (0, 0),
             log: VecDeque::new(),
             next_seq: 0,
         }
@@ -811,6 +819,9 @@ impl RunState {
                 if let Some(stages) = event.get("stages") {
                     self.stages = Some(stages.clone());
                 }
+                if let (Some(asked), Some(held)) = (num("cache_lookups"), num("cache_hits")) {
+                    self.cache = (asked, held);
+                }
                 if self.status != RunStatus::Stopping {
                     self.status = RunStatus::Running;
                 }
@@ -825,6 +836,9 @@ impl RunState {
             Some("done") => {
                 if let Some(stages) = event.get("stages") {
                     self.stages = Some(stages.clone());
+                }
+                if let (Some(asked), Some(held)) = (num("cache_lookups"), num("cache_hits")) {
+                    self.cache = (asked, held);
                 }
                 let stopped = event
                     .get("stopped")
@@ -1285,6 +1299,12 @@ impl Store {
             // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
             // on each lane, and write, summing to the run's wall time.
             "stages": run.stages,
+            // The vector cache's share of the run: chunks asked for, and held.
+            "cache_lookups": run.cache.0,
+            "cache_hits": run.cache.1,
+            "cache_hit_rate": (run.cache.0 > 0).then(|| {
+                (run.cache.1 as f64 * 1000.0 / run.cache.0 as f64).round() / 10.0
+            }),
             // What a page's log cursor should be if it has never read this
             // run: the oldest line still on the ring, minus one.
             "log_from": run.log.front()
@@ -3142,6 +3162,18 @@ pub fn run(
     // Index runs hand batches to the GPU lanes as well as the CPU. Only the
     // daemon does; a terminal `semlith index` stays on the CPU.
     crate::accel::manage();
+    // The Neural Engine's first start compiles its models for this Mac, which
+    // takes minutes once. Begun now, in the background, so the first run does
+    // not wait for it; Machine limits shows how far it has got.
+    if crate::accel::enabled().ane
+        && crate::accel::unavailable_here("ane").is_none()
+        && crate::model_cache_dir()
+            .ok()
+            .is_some_and(|cache| crate::packs::installed(&cache, &crate::packs::coreml()).is_some())
+        && let Some(lane) = crate::accel::lane("ane")
+    {
+        lane.wake();
+    }
 
     // Background while idle, normal while embedding. Before the watchers
     // start, so the catch-up they run is the first thing that lifts it.
@@ -3766,6 +3798,7 @@ fn perform(
                     tally.add(&done);
                     let (slice_indexed, slice_chunks) = (tally.indexed, tally.chunks);
                     let slice_stages = tally.stages.clone();
+                    let slice_cache = (tally.cache_lookups, tally.cache_hits);
                     if done.remaining > 0 {
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
@@ -3804,6 +3837,8 @@ fn perform(
                             "indexed": slice_indexed,
                             "chunks": slice_chunks,
                             "stages": slice_stages,
+                            "cache_lookups": slice_cache.0,
+                            "cache_hits": slice_cache.1,
                         }));
                         return None;
                     }
@@ -3834,6 +3869,8 @@ fn perform(
                     say(serde_json::json!({
                         "event": "done",
                         "stages": tally.stages,
+                        "cache_lookups": tally.cache_lookups,
+                        "cache_hits": tally.cache_hits,
                         // The run's, not this slice's. A run of 35 files over
                         // three slices used to end by announcing the four the
                         // last slice reached.

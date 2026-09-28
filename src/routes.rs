@@ -1043,6 +1043,17 @@ fn search(state: &Arc<State>, request: &Request) -> Response {
         "weighting": shape.weighting(),
         "prefer": prefer,
     });
+    // Mid-run, what share of each store the vector half does not cover yet.
+    // Absent at rest, so a reader written before 0.32.0 sees what it saw.
+    let pending = fleet.pending();
+    if !pending.is_empty() {
+        answer["pending"] = json!(
+            pending
+                .iter()
+                .map(|(store, share)| json!({ "store": store, "share": share }))
+                .collect::<Vec<_>>()
+        );
+    }
     failures_beside(fleet, &mut answer);
     Response::json(&answer)
 }

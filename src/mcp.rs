@@ -842,7 +842,11 @@ fn call_tool(
                     Ok(hits) => {
                         let paths = stores.shortener();
                         let rows = locate(&hits, query, max_tokens, &|p| paths.short(p));
-                        paths.with_header(format!("{}\n{rows}", reading(query, prefer)))
+                        let note = stores
+                            .pending_note()
+                            .map(|n| format!("\n{n}"))
+                            .unwrap_or_default();
+                        paths.with_header(format!("{}\n{rows}{note}", reading(query, prefer)))
                     }
                     // Tool failures are reported in-band so the agent can react,
                     // rather than as a protocol-level error.
@@ -1165,14 +1169,25 @@ fn call_tool(
                     body
                 });
             }
-            // The lanes that embed, once for the whole answer.
+            // The lanes that embed, once for the whole answer, experimental
+            // ones said so.
             let on = crate::accel::enabled();
-            let lanes: Vec<&str> = [("cpu", on.cpu), ("gpu", on.gpu), ("cuda", on.cuda)]
-                .into_iter()
-                .filter(|(_, on)| *on)
-                .map(|(lane, _)| lane)
-                .collect();
+            let mut lanes: Vec<String> = Vec::new();
+            if on.cpu {
+                lanes.push("cpu".to_string());
+            }
+            for spec in crate::accel::SPECS {
+                if spec.id != "worker" && on.lane(spec.id) {
+                    lanes.push(if spec.experimental {
+                        format!("{} (experimental)", spec.id)
+                    } else {
+                        spec.id.to_string()
+                    });
+                }
+            }
             lines.push(format!("embedding lanes on: {}", lanes.join(", ")));
+            // The machine's vector cache, shared by every store.
+            lines.push(format!("vector cache: {}", crate::cache::stats().line()));
             lines.join("\n")
         }
         "semlith_files" => {

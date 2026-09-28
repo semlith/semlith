@@ -735,8 +735,7 @@ impl Session {
     /// One batch of ids, prepared as the WebGPU lane's: padded to the batch's
     /// longest, masked, and the CLS token's vector normalised.
     pub fn embed(&mut self, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
-        crate::session::run(&mut self.session, batch)
-            .map_err(|e| anyhow::anyhow!("on CUDA: {e:#}"))
+        crate::session::run(&mut self.session, batch).map_err(|e| anyhow::anyhow!("on CUDA: {e:#}"))
     }
 }
 

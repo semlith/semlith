@@ -19,6 +19,7 @@ pub mod accel;
 pub mod add;
 pub mod agentfiles;
 pub mod brief;
+pub mod cache;
 pub mod chunk;
 pub mod clientfile;
 pub mod clients;
@@ -49,6 +50,8 @@ pub mod mcp;
 pub mod openvino;
 pub mod packs;
 pub mod pattern;
+/// The daemon as a login service, so a client never finds nothing.
+pub mod pipeline;
 pub mod portal;
 pub mod priority;
 pub mod proxy;
@@ -57,8 +60,6 @@ pub mod report;
 pub mod rerank;
 pub mod routes;
 pub mod schedule;
-/// The daemon as a login service, so a client never finds nothing.
-pub mod pipeline;
 pub mod service;
 pub mod session;
 pub mod setup;
@@ -118,6 +119,11 @@ pub fn writer_sessions() -> usize {
 /// window sorts tighter. Formed in walk order and sorted stably, so a corpus
 /// always produces the same batches.
 const SORT_WINDOW: usize = 256;
+
+/// Keyword candidates with no vector yet that a search mid-run embeds on the
+/// query path. Sixteen chunks on the CPU is about half a second on the M1,
+/// which keeps a mid-run search inside two.
+const PENDING_EMBED: usize = 16;
 
 /// Default model: 384-dim, ~52 MB on disk. Measured against the previous
 /// default (BGE-small) on a 6260-chunk corpus it scored 16.00 code MRR@10
@@ -1144,6 +1150,17 @@ pub struct IndexReport {
     pub written: Vec<String>,
     /// Where this call's wall time went, stage by stage.
     pub stages: pipeline::Stages,
+    /// Chunks the machine-wide vector cache was asked for, and held.
+    pub cache_lookups: usize,
+    pub cache_hits: usize,
+}
+
+/// What an index call puts into the vector cache and takes out of it, by the
+/// hash of each chunk's embedded text and the variant of its vector.
+#[derive(Default)]
+struct CacheWrites {
+    fresh: Vec<([u8; 32], &'static str, Vec<f32>)>,
+    hits: Vec<([u8; 32], &'static str)>,
 }
 
 /// The version of the scan rules a store was last swept under. A store below
@@ -2452,9 +2469,9 @@ impl Semlith {
         // reported before any file is read.
         let each = budget.is_some().then_some(&boundary);
         let (paths, refused): (Vec<PathBuf>, Vec<(PathBuf, Refusal)>) = if each.is_some() {
-            let mut allowed = walked_paths;
-            allowed.sort();
-            (allowed, Vec::new())
+            // A continuation is handed the rest of the run in the order the
+            // run chose on its first slice; sorting it again would undo that.
+            (walked_paths, Vec::new())
         } else {
             let mut allowed = Vec::with_capacity(walked_paths.len() + named.len());
             let mut refused = Vec::new();
@@ -2469,6 +2486,13 @@ impl Semlith {
                 }
             }
             allowed.sort();
+            // Where the lanes are used, the files changed most recently go
+            // first, so a store filling from cold answers about the code being
+            // worked on before it answers about the rest. The library alone
+            // keeps path order, which is what its figures were measured on.
+            if accel::managed() {
+                recent_first(&mut allowed);
+            }
             (allowed, refused)
         };
         let total = paths.len() + refused.len() + unwalkable.len();
@@ -2607,7 +2631,12 @@ impl Semlith {
             each: each.cloned(),
             tokenizer,
             clocks: pipeline::Clocks::default(),
+            cache: accel::cache_in_use().then(|| cache::Scope::of(&self.model)),
+            variants: accel::cache_variants(),
+            lookups: Default::default(),
+            hits: Default::default(),
         };
+        let mut cached = CacheWrites::default();
         let mut clock = pipeline::WriterClock::start(walk_ms);
         let mut run_lanes: std::collections::BTreeMap<String, usize> = Default::default();
         let (cpu_back, cpu_returned) = std::sync::mpsc::channel();
@@ -2619,6 +2648,7 @@ impl Semlith {
             let mut window = pipeline::Window {
                 ids: Vec::new(),
                 pieces: Vec::new(),
+                hashes: Vec::new(),
             };
             let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             // Asked whenever the writer waits on the embed stage: a pause
@@ -2694,7 +2724,7 @@ impl Semlith {
                 if let Some(stage) = stage.as_mut() {
                     while let Some(done) = stage.next(std::time::Duration::ZERO) {
                         let done = done.map_err(anyhow::Error::msg)?;
-                        self.land(done, &mut report, &mut run_lanes)?;
+                        self.land(done, &mut report, &mut run_lanes, &mut cached)?;
                         say_file(
                             &mut on_file,
                             &report,
@@ -2803,7 +2833,15 @@ impl Semlith {
                         {
                             let live: Vec<keyscan::Match> =
                                 found.into_iter().filter(|m| m.dummy.is_none()).collect();
-                            store::refuse(&self.db, &key, store::class::CONTENT, &why, &live, 1, now())?;
+                            store::refuse(
+                                &self.db,
+                                &key,
+                                store::class::CONTENT,
+                                &why,
+                                &live,
+                                1,
+                                now(),
+                            )?;
                             let (gone, images) = self.evict(&key)?;
                             report.removed += usize::from(gone + images > 0);
                             report
@@ -2882,7 +2920,15 @@ impl Semlith {
                         let Some((width, height)) = image::dimensions(&bytes) else {
                             let why = SkipReason::NotDecodableImage;
                             skip(&mut report, &why);
-                            store::refuse(&self.db, &key, why.class(), &why.as_str(), &[], 1, now())?;
+                            store::refuse(
+                                &self.db,
+                                &key,
+                                why.class(),
+                                &why.as_str(),
+                                &[],
+                                1,
+                                now(),
+                            )?;
                             say_file(
                                 &mut on_file,
                                 &report,
@@ -3083,12 +3129,16 @@ impl Semlith {
                 // was rolled back. The prepare stage did it already unless the
                 // text the store may hold is not the text it read.
                 let ready = match (decided, ready) {
-                    (Some(redacted), _) => {
-                        pipeline::take_ready(&path, &redacted, &ctx, std::time::Instant::now())
-                    }
+                    (Some(redacted), _) => pipeline::take_ready(
+                        &path,
+                        &redacted,
+                        &ctx,
+                        None,
+                        std::time::Instant::now(),
+                    ),
                     (None, Some(ready)) => ready,
                     (None, None) => {
-                        pipeline::take_ready(&path, &text, &ctx, std::time::Instant::now())
+                        pipeline::take_ready(&path, &text, &ctx, None, std::time::Instant::now())
                     }
                 };
                 drop(text);
@@ -3096,6 +3146,7 @@ impl Semlith {
                     extraction,
                     chunks,
                     pieces,
+                    hashes,
                 } = match ready {
                     Ok(ready) => ready,
                     Err(e) => {
@@ -3161,7 +3212,7 @@ impl Semlith {
                 let mut spans: Vec<(u32, u32, i64)> = Vec::with_capacity(chunks.len());
                 let mut halted = false;
                 let count = chunks.len();
-                for ((ord, c), piece) in chunks.iter().enumerate().zip(pieces) {
+                for (((ord, c), piece), hash) in chunks.iter().enumerate().zip(pieces).zip(hashes) {
                     let id = store::insert_chunk(
                         &self.db,
                         file_id,
@@ -3173,6 +3224,7 @@ impl Semlith {
                     spans.push((c.start_line, c.end_line, id));
                     window.ids.push(id as u64);
                     window.pieces.push(piece);
+                    window.hashes.push(hash);
 
                     // Handed over by the window, not per file. One 8 MB file
                     // chunks into thousands of pieces, and holding them all makes
@@ -3252,6 +3304,7 @@ impl Semlith {
                         &mut stage,
                         &mut report,
                         &mut run_lanes,
+                        &mut cached,
                         &paused,
                         &ask,
                         &mut clock,
@@ -3299,6 +3352,7 @@ impl Semlith {
                     &mut stage,
                     &mut report,
                     &mut run_lanes,
+                    &mut cached,
                     &paused,
                     &ask,
                     &mut clock,
@@ -3338,6 +3392,29 @@ impl Semlith {
         self.tx_commit()?;
         report.stages = clock.stages(&ctx.clocks, &run_lanes);
         report.threads = self.index_threads();
+        report.cache_lookups = ctx.lookups.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        report.cache_hits = ctx.hits.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        // What this call embedded goes into the machine's cache, and what it
+        // took out is marked used. A cache that cannot be written is a cache
+        // that misses next time, never a failed run.
+        if let Some(scope) = &ctx.cache
+            && report.cache_lookups > 0
+            && let Some(mut cache) = cache::Cache::open()
+        {
+            let fresh: Vec<([u8; 32], &'static str, &[f32])> = cached
+                .fresh
+                .iter()
+                .map(|(hash, variant, vector)| {
+                    (scope.key(hash, variant), *variant, vector.as_slice())
+                })
+                .collect();
+            let hits: Vec<[u8; 32]> = cached
+                .hits
+                .iter()
+                .map(|(hash, variant)| scope.key(hash, variant))
+                .collect();
+            let _ = cache.record(&fresh, &hits, report.cache_lookups as u64);
+        }
 
         // A stopped slice still commits what it embedded. Undoing is the
         // caller's, because one logical run is several slices and a stop has
@@ -3467,6 +3544,52 @@ impl Semlith {
             graph::EXTRACTED | graph::RESOLVED => 1.0,
             _ => INFERRED_EXPANSION,
         }
+    }
+
+    /// The vector list with up to [`PENDING_EMBED`] of the keyword list's
+    /// chunks that have no vector yet embedded now and merged in by their
+    /// similarity. Unchanged when nothing in the store is pending.
+    ///
+    /// ponytail: the chunk's stored text is embedded, without the heading path
+    /// the index pass prepends, because the path is stored nowhere; the vector
+    /// it gets when its run reaches it is the real one.
+    fn with_pending(
+        &mut self,
+        query: &[f32],
+        keyword: &[u64],
+        scores: Vec<f32>,
+        ids: Vec<u64>,
+    ) -> Result<(Vec<f32>, Vec<u64>)> {
+        if store::pending_share(&self.db)?.is_none() {
+            return Ok((scores, ids));
+        }
+        let candidates: Vec<u64> = keyword
+            .iter()
+            .filter(|id| !ids.contains(id))
+            .copied()
+            .collect();
+        let pending: Vec<(u64, String)> = store::pending_among(&self.db, &candidates)?
+            .into_iter()
+            .take(PENDING_EMBED)
+            .collect();
+        if pending.is_empty() {
+            return Ok((scores, ids));
+        }
+        let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
+        let vectors = self.embed(texts)?;
+        let mut merged: Vec<(u64, f32)> = ids.into_iter().zip(scores).collect();
+        for ((id, _), vector) in pending.iter().zip(&vectors) {
+            merged.push((*id, index::cosine(query, vector)));
+        }
+        merged.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let (ids, scores) = merged.into_iter().unzip();
+        Ok((scores, ids))
+    }
+
+    /// The share of this store still being embedded, or `None` when nothing
+    /// is. A search mid-run says so beside its answer.
+    pub fn pending_share(&self) -> Result<Option<f64>> {
+        store::pending_share(&self.db)
     }
 
     /// Reorder the vector list by the vectors themselves, where the store kept
@@ -3766,6 +3889,7 @@ impl Semlith {
             pipeline::Window {
                 ids: Vec::new(),
                 pieces: Vec::new(),
+                hashes: Vec::new(),
             },
         );
         let waiting = std::time::Instant::now();
@@ -3793,6 +3917,7 @@ impl Semlith {
         stage: &mut Option<pipeline::Embedder>,
         report: &mut IndexReport,
         run_lanes: &mut std::collections::BTreeMap<String, usize>,
+        cached: &mut CacheWrites,
         paused: &std::sync::atomic::AtomicBool,
         ask: &dyn Fn(&std::sync::atomic::AtomicBool) -> bool,
         clock: &mut pipeline::WriterClock,
@@ -3807,7 +3932,7 @@ impl Semlith {
             clock.waited_on_embed(waiting);
             match got {
                 Some(done) => {
-                    self.land(done.map_err(anyhow::Error::msg)?, report, run_lanes)?;
+                    self.land(done.map_err(anyhow::Error::msg)?, report, run_lanes, cached)?;
                     tick(report);
                 }
                 None => {
@@ -3829,6 +3954,7 @@ impl Semlith {
         done: pipeline::Embedded,
         report: &mut IndexReport,
         run_lanes: &mut std::collections::BTreeMap<String, usize>,
+        cached: &mut CacheWrites,
     ) -> Result<()> {
         let flat: Vec<f32> = done.vectors.iter().flatten().copied().collect();
         anyhow::ensure!(
@@ -3849,6 +3975,16 @@ impl Semlith {
         report.threads = self.index_threads();
         report.lanes = self.lane_chunks.clone();
         self.last_embed = Some(std::time::Instant::now());
+        for (at, ((variant, from_cache), hash)) in done.rows.iter().zip(&done.hashes).enumerate() {
+            let Some(hash) = hash else { continue };
+            if *from_cache {
+                cached.hits.push((*hash, variant));
+            } else if !variant.is_empty() {
+                cached
+                    .fresh
+                    .push((*hash, variant, done.vectors[at].clone()));
+            }
+        }
         Ok(())
     }
 
@@ -3869,7 +4005,9 @@ impl Semlith {
                 pipeline::CpuWork::Ids {
                     main: session::CpuSession::open(&cache, main, threads, self.quiet)?,
                     alt: alt
-                        .map(|variant| session::CpuSession::open(&cache, variant, threads, self.quiet))
+                        .map(|variant| {
+                            session::CpuSession::open(&cache, variant, threads, self.quiet)
+                        })
                         .transpose()?,
                 }
             }
@@ -3941,7 +4079,6 @@ impl Semlith {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default()
     }
-
 
     /// Take a stopped run's files out of the store, and write the index once.
     ///
@@ -4374,6 +4511,13 @@ impl Semlith {
         let seeds = dense_ids.clone();
         let (dense_scores, dense_ids) = self.rescored(vector, dense_scores, dense_ids);
         let keyword_ids = store::keyword_search(&self.db, query, depth, filter.groups())?;
+        // Mid-run, the keyword half already holds chunks the vector half has
+        // not reached. A few of the best of them are embedded here, on the
+        // query path, and join the vector list by their own similarity, so a
+        // semantic question asked while a store fills still gets a semantic
+        // answer from the part that is only rows so far.
+        let (dense_scores, dense_ids) =
+            self.with_pending(vector, &keyword_ids, dense_scores, dense_ids)?;
 
         // The image list. Only when the store actually holds an image: the
         // query has to be embedded a second time, with CLIP's text encoder
@@ -5657,6 +5801,75 @@ fn sibling_exists(parent: &Path, manifest: &str) -> bool {
 
 fn walk(roots: &[PathBuf]) -> Walked {
     walk_allowing(roots, &[])
+}
+
+/// Put the most recently changed files first: by the later of a file's
+/// modification time and the time of the last git commit that touched it.
+///
+/// Both, because each misses what the other sees. A fresh clone gives every
+/// file the same mtime, and git has not heard of an edit nobody committed.
+/// Stable, so files changed at the same second keep their path order.
+fn recent_first(paths: &mut [PathBuf]) {
+    let committed = git_recency(paths);
+    let when = |path: &Path| -> i64 {
+        let mtime = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        mtime.max(committed.get(path).copied().unwrap_or(0))
+    };
+    let mut keyed: Vec<(i64, PathBuf)> = paths.iter().map(|p| (when(p), p.clone())).collect();
+    keyed.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (slot, (_, path)) in paths.iter_mut().zip(keyed) {
+        *slot = path;
+    }
+}
+
+/// When each file was last committed, for the repositories the paths sit in:
+/// the last few hundred commits of each, which is the part of history that
+/// says what is being worked on. Nothing when git is not installed.
+fn git_recency(paths: &[PathBuf]) -> std::collections::HashMap<PathBuf, i64> {
+    const COMMITS: &str = "400";
+    let mut tops: std::collections::BTreeSet<PathBuf> = Default::default();
+    let mut seen: std::collections::HashSet<PathBuf> = Default::default();
+    for path in paths {
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if !seen.insert(d.to_path_buf()) {
+                break;
+            }
+            if d.join(".git").exists() {
+                tops.insert(d.to_path_buf());
+                break;
+            }
+            dir = d.parent();
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for top in tops {
+        let Ok(log) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&top)
+            .args(["log", "-n", COMMITS, "--name-only", "--format=%x00%ct"])
+            .stderr(std::process::Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        let mut at = 0i64;
+        for line in String::from_utf8_lossy(&log.stdout).lines() {
+            if let Some(stamp) = line.strip_prefix('\0') {
+                at = stamp.trim().parse().unwrap_or(0);
+            } else if !line.is_empty() {
+                // Newest first, so the first time a file appears is the last
+                // time it changed.
+                out.entry(top.join(line)).or_insert(at);
+            }
+        }
+    }
+    out
 }
 
 /// [`walk`], descending into the generated folders a person accepted (2.5).

@@ -14,6 +14,9 @@ use std::path::Path;
 /// and the truncation applied, without padding.
 pub type Ids = Vec<u32>;
 
+/// granite's vector width.
+pub const DIM: usize = 384;
+
 /// The id granite pads with. The attention mask is what keeps it out of the
 /// answer, so its value only has to be a valid token.
 pub const PAD_ID: u32 = 0;

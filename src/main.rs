@@ -1099,12 +1099,18 @@ fn run() -> Result<()> {
                 } else {
                     for row in status["lanes"].as_array().into_iter().flatten() {
                         let state = &row["status"];
-                        let detail = state["reason"]
-                            .as_str()
-                            .map(|r| format!("{} — {r}", state["state"].as_str().unwrap_or("")))
-                            .unwrap_or_else(|| state["state"].as_str().unwrap_or("").to_string());
+                        let mut detail = state["state"].as_str().unwrap_or("").to_string();
+                        if let Some(percent) = state["percent"].as_u64() {
+                            detail.push_str(&format!(" {percent} %"));
+                        }
+                        if let Some(reason) = state["reason"].as_str() {
+                            detail.push_str(&format!(" — {reason}"));
+                        }
+                        if row["experimental"].as_bool() == Some(true) {
+                            detail.push_str(" (experimental)");
+                        }
                         println!(
-                            "{:<5} {:<4} {:<28} {detail}",
+                            "{:<9} {:<4} {:<34} {detail}",
                             row["lane"].as_str().unwrap_or("?"),
                             if row["enabled"].as_bool() == Some(true) {
                                 "on"
@@ -1114,19 +1120,29 @@ fn run() -> Result<()> {
                             row["device"].as_str().unwrap_or("not asked for yet"),
                         );
                     }
-                    println!("switches: {}", status["source"].as_str().unwrap_or(""));
+                    println!(
+                        "switches: {}; GPU beside the Neural Engine {}",
+                        status["source"].as_str().unwrap_or(""),
+                        if status["gpu_beside_ane"].as_bool() == Some(true) {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    );
+                    println!("vector cache: {}", semlith::cache::stats().line());
                 }
             }
             ("on" | "off", Some(lane)) => {
                 let mut said = 101u8;
-                let line = semlith::accel::set_with_progress(lane, action == "on", &mut |percent| {
-                    // Every tenth, not every percent: a pack is hundreds of
-                    // megabytes on a slow link and one line each is noise.
-                    if percent / 10 != said / 10 {
-                        said = percent;
-                        eprintln!("  fetching: {percent} %");
-                    }
-                })?;
+                let line =
+                    semlith::accel::set_with_progress(lane, action == "on", &mut |percent| {
+                        // Every tenth, not every percent: a pack is hundreds of
+                        // megabytes on a slow link and one line each is noise.
+                        if percent / 10 != said / 10 {
+                            said = percent;
+                            eprintln!("  fetching: {percent} %");
+                        }
+                    })?;
                 println!("{line}");
             }
             ("remove", Some(lane)) => {
@@ -1480,6 +1496,12 @@ fn run() -> Result<()> {
                 );
                 if verbose {
                     eprintln!("{}", report.stages.line());
+                    if report.cache_lookups > 0 {
+                        eprintln!(
+                            "vector cache: {} of {} chunks were already embedded",
+                            report.cache_hits, report.cache_lookups
+                        );
+                    }
                     let lanes: Vec<String> = report
                         .lanes
                         .iter()
@@ -1691,6 +1713,10 @@ fn run() -> Result<()> {
             // count for exactly as much as an agent's. Recorded under `cli`, in
             // the same table, through the same path.
             semlith::ledger::search(&fleet, &CLI_LEDGER, &query, &hits, elapsed);
+            // Said on stderr, so `--json` and a pipe read the hits alone.
+            if let Some(note) = fleet.pending_note() {
+                eprintln!("{note}");
+            }
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&hits)?);
@@ -2455,6 +2481,9 @@ fn run() -> Result<()> {
                         format!("; {}", semlith::compact::REINDEX_TO_COMPACT)
                     },
                 );
+                // The machine's, not the store's: one cache serves every store,
+                // and deleting it is safe.
+                println!("cache    {}", semlith::cache::stats().line());
                 // Zero here reads the same as "nothing ever changed", so the
                 // line says which by naming the table rather than the number
                 // alone.
@@ -3960,15 +3989,28 @@ fn print_gpu_checks(checks: &[serde_json::Value]) {
     println!("{}Accelerators{}", bold(), reset());
     for check in checks {
         let lane = check["lane"].as_str().unwrap_or("?");
+        // Said beside the lane every time, so a lane built without its
+        // hardware never reads as one that was measured on it.
+        let experimental = if check["experimental"].as_bool() == Some(true) {
+            " (experimental)"
+        } else {
+            ""
+        };
+        let failed = check["passed"].as_bool() == Some(false);
         match check.get("reason").and_then(|r| r.as_str()) {
-            Some(reason) => println!("  {:<4} {lane:<7} {reason}", "n/a "),
+            Some(reason) => {
+                let fallback = check["fallback"]
+                    .as_str()
+                    .map(|f| format!("; {f}"))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<4} {lane:<9} {reason}{fallback}{experimental}",
+                    if failed { "FAIL" } else { "n/a " }
+                )
+            }
             None => println!(
-                "  {:<4} {lane:<7} {} · {} · cosine {:.4} (min over 32) · {} chunks/s",
-                if check["passed"].as_bool() == Some(true) {
-                    "ok  "
-                } else {
-                    "FAIL"
-                },
+                "  {:<4} {lane:<9} {} · {} · cosine {:.4} (min over 32) · {} chunks/s{experimental}",
+                if failed { "FAIL" } else { "ok  " },
                 check["device"].as_str().unwrap_or("?"),
                 check["variant"].as_str().unwrap_or("?"),
                 check["cosine"].as_f64().unwrap_or(0.0),

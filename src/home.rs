@@ -238,6 +238,10 @@ pub struct Settings {
     /// semlith's own choice: a discrete GPU over an integrated one.
     #[serde(default)]
     pub gpu_adapter: Option<String>,
+    /// The machine-wide vector cache's cap in megabytes; 0 turns it off.
+    /// Absent means [`crate::cache::DEFAULT_CAP_MB`].
+    #[serde(default)]
+    pub vector_cache_mb: Option<u64>,
     /// Days of symbol history a compaction keeps; 0 keeps all of it. Absent
     /// means [`crate::compact::RETENTION_DAYS`].
     pub history_retention_days: Option<u64>,

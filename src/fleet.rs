@@ -307,6 +307,37 @@ impl Fleet {
             .map(|i| (self.members[i].label.as_str(), &self.members[i].store))
     }
 
+    /// Stores still being embedded, each with the share of its chunks that has
+    /// no vector yet. Empty when every store is at rest.
+    pub fn pending(&self) -> Vec<(String, f64)> {
+        self.each()
+            .filter_map(|(label, store)| {
+                store
+                    .pending_share()
+                    .ok()
+                    .flatten()
+                    .map(|share| (label.to_string(), share))
+            })
+            .collect()
+    }
+
+    /// [`Fleet::pending`] as one line a search prints beside its answer.
+    pub fn pending_note(&self) -> Option<String> {
+        let pending = self.pending();
+        if pending.is_empty() {
+            return None;
+        }
+        let parts: Vec<String> = pending
+            .iter()
+            .map(|(label, share)| format!("{label} {:.0} %", share * 100.0))
+            .collect();
+        Some(format!(
+            "still being embedded: {} — keyword and graph results cover all of it, and the \
+             best keyword matches without a vector were embedded for this query",
+            parts.join(", ")
+        ))
+    }
+
     /// The stores `only` names, unreadable ones left out.
     ///
     /// What a caller that wants [`Fleet::each`] narrowed to some stores should

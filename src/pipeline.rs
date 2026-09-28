@@ -247,14 +247,21 @@ pub enum Piece {
     /// A store built with one of fastembed's own models, which tokenises for
     /// itself and runs on the CPU only.
     Text(String),
+    /// Already embedded: the machine-wide cache held it.
+    Cached {
+        vector: Vec<f32>,
+        variant: &'static str,
+    },
 }
 
 impl Piece {
-    /// Its length in tokens, or an estimate of it for text.
+    /// Its length in tokens, or an estimate of it for text. A cached piece
+    /// is never scheduled, and costs nothing.
     pub fn len(&self) -> usize {
         match self {
             Piece::Ids(ids) => ids.len(),
             Piece::Text(text) => text.len() / 4 + 1,
+            Piece::Cached { .. } => 0,
         }
     }
 
@@ -285,6 +292,14 @@ pub struct Context {
     /// granite's tokenizer; `None` for a store built with another model.
     pub tokenizer: Option<tokenizers::Tokenizer>,
     pub clocks: Clocks,
+    /// What the vector cache keys on, when the cache is on for this run.
+    pub cache: Option<crate::cache::Scope>,
+    /// The variants a cached vector may be, in the order to try them: the
+    /// lanes this run would use, best first, then the CPU's.
+    pub variants: Vec<&'static str>,
+    /// Cache lookups and hits the prepare stage made.
+    pub lookups: AtomicU64,
+    pub hits: AtomicU64,
 }
 
 /// One file, as far as it can be taken without the database.
@@ -292,7 +307,11 @@ pub enum Prepared {
     /// Outside this caller's boundary.
     Refused(crate::Refusal),
     /// Unchanged by the scan phase's reading: nothing was read again.
-    Unchanged { size: u64, mtime: i64, file_bytes: u64 },
+    Unchanged {
+        size: u64,
+        mtime: i64,
+        file_bytes: u64,
+    },
     /// Opened (or not) and found unusable before or while reading.
     Unusable {
         why: SkipReason,
@@ -343,6 +362,8 @@ pub struct Ready {
     pub extraction: Option<graph::Extraction>,
     pub chunks: Vec<chunk::Chunk>,
     pub pieces: Vec<Piece>,
+    /// Each chunk's embedded-text hash, for the cache; `None` with it off.
+    pub hashes: Vec<Option<[u8; 32]>>,
 }
 
 fn mtime_of(meta: &std::fs::Metadata) -> i64 {
@@ -354,7 +375,7 @@ fn mtime_of(meta: &std::fs::Metadata) -> i64 {
 
 /// Take one file as far as it goes without the database, in the order the
 /// writer used to: every early exit here is one the writer's loop had.
-pub fn prepare(path: &Path, ctx: &Context) -> Prepared {
+pub fn prepare(path: &Path, ctx: &Context, cache: Option<&crate::cache::Cache>) -> Prepared {
     if let Some(boundary) = &ctx.each
         && let Some(refusal) = boundary.refuses(path, true)
     {
@@ -492,7 +513,7 @@ pub fn prepare(path: &Path, ctx: &Context) -> Prepared {
     // A live match needs the database to decide — an acceptance may let it
     // in, redacted — so the writer takes the file from here.
     let live = !ctx.allow_secrets && keyscan::refuses(&found);
-    let ready = (!live).then(|| take_ready(path, &text, ctx, now));
+    let ready = (!live).then(|| take_ready(path, &text, ctx, cache, now));
     Prepared::Text {
         len,
         hash,
@@ -505,7 +526,13 @@ pub fn prepare(path: &Path, ctx: &Context) -> Prepared {
 
 /// Parse, chunk and tokenise one file's decided text. Also the writer's own
 /// path for a file whose text only the database could decide.
-pub fn take_ready(path: &Path, text: &str, ctx: &Context, since: Instant) -> anyhow::Result<Ready> {
+pub fn take_ready(
+    path: &Path,
+    text: &str,
+    ctx: &Context,
+    cache: Option<&crate::cache::Cache>,
+    since: Instant,
+) -> anyhow::Result<Ready> {
     let extraction = crate::contained(|| graph::extract(path, text)).and_then(|r| r)?;
     let chunks = crate::contained(|| {
         chunk::chunk_file(
@@ -515,29 +542,40 @@ pub fn take_ready(path: &Path, text: &str, ctx: &Context, since: Instant) -> any
         )
     })?;
     let now = Clocks::tick(&ctx.clocks.parse, since);
-    let pieces = pieces_of(&chunks, ctx.tokenizer.as_ref())?;
+    let mut pieces = Vec::with_capacity(chunks.len());
+    let mut hashes = Vec::with_capacity(chunks.len());
+    for c in &chunks {
+        let text = c.embedded();
+        // Consulted before tokenising: a hit costs a lookup and nothing else.
+        let hash = ctx.cache.as_ref().map(|_| crate::cache::Scope::text(&text));
+        if let (Some(scope), Some(cache), Some(hash)) = (&ctx.cache, cache, &hash) {
+            ctx.lookups.fetch_add(1, Ordering::Relaxed);
+            let found = ctx.variants.iter().find_map(|variant| {
+                cache
+                    .get(&scope.key(hash, variant))
+                    .filter(|v| v.len() == crate::session::DIM)
+                    .map(|vector| Piece::Cached { vector, variant })
+            });
+            if let Some(piece) = found {
+                ctx.hits.fetch_add(1, Ordering::Relaxed);
+                pieces.push(piece);
+                hashes.push(Some(*hash));
+                continue;
+            }
+        }
+        pieces.push(match &ctx.tokenizer {
+            Some(tokenizer) => Piece::Ids(crate::session::encode(tokenizer, &text)?),
+            None => Piece::Text(text),
+        });
+        hashes.push(hash);
+    }
     Clocks::tick(&ctx.clocks.tokenize, now);
     Ok(Ready {
         extraction,
         chunks,
         pieces,
+        hashes,
     })
-}
-
-fn pieces_of(
-    chunks: &[chunk::Chunk],
-    tokenizer: Option<&tokenizers::Tokenizer>,
-) -> anyhow::Result<Vec<Piece>> {
-    chunks
-        .iter()
-        .map(|c| {
-            let text = c.embedded();
-            Ok(match tokenizer {
-                Some(tokenizer) => Piece::Ids(crate::session::encode(tokenizer, &text)?),
-                None => Piece::Text(text),
-            })
-        })
-        .collect()
 }
 
 // ------------------------------------------------------------------ prefetch
@@ -585,6 +623,8 @@ impl<'a> Prefetch<'a> {
                 .name(format!("semlith-prepare-{n}"))
                 .spawn_scoped(scope, move || {
                     let _class = crate::priority::indexing_thread();
+                    // A connection per thread: SQLite's are not shared.
+                    let cache = ctx.cache.as_ref().and_then(|_| crate::cache::Cache::open());
                     loop {
                         let i = shared.next.fetch_add(1, Ordering::Relaxed);
                         if i >= paths.len() {
@@ -602,13 +642,14 @@ impl<'a> Prefetch<'a> {
                         if shared.stop.load(Ordering::Relaxed) {
                             return;
                         }
-                        let prepared = match crate::contained(|| prepare(&paths[i], ctx)) {
-                            Ok(prepared) => prepared,
-                            Err(error) => Prepared::Failed {
-                                error,
-                                file_bytes: 0,
-                            },
-                        };
+                        let prepared =
+                            match crate::contained(|| prepare(&paths[i], ctx, cache.as_ref())) {
+                                Ok(prepared) => prepared,
+                                Err(error) => Prepared::Failed {
+                                    error,
+                                    file_bytes: 0,
+                                },
+                            };
                         let mut done = shared.done.lock().unwrap_or_else(|e| e.into_inner());
                         done.0.insert(i, prepared);
                         shared.ready.notify_all();
@@ -665,12 +706,17 @@ impl Drop for Prefetch<'_> {
 pub struct Window {
     pub ids: Vec<u64>,
     pub pieces: Vec<Piece>,
+    /// Each piece's embedded-text hash, for the cache; `None` with it off.
+    pub hashes: Vec<Option<[u8; 32]>>,
 }
 
 /// A window embedded: vectors in the window's own order, and who made them.
 pub struct Embedded {
     pub ids: Vec<u64>,
     pub vectors: Vec<Vec<f32>>,
+    /// Which variant made each vector, and whether the cache supplied it.
+    pub rows: Vec<(&'static str, bool)>,
+    pub hashes: Vec<Option<[u8; 32]>>,
     /// Chunks per vector variant, for the store's `variants` row.
     pub variants: Vec<(&'static str, usize)>,
     /// Chunks per lane, for the run card.
@@ -699,10 +745,7 @@ type CpuAnswer = mpsc::Receiver<Vectors>;
 /// ran, a worker lane has one variant only.
 enum Answer {
     Cpu(CpuAnswer),
-    Lane(
-        mpsc::Receiver<Result<Vec<Vec<f32>>, String>>,
-        &'static str,
-    ),
+    Lane(mpsc::Receiver<Result<Vec<Vec<f32>>, String>>, &'static str),
 }
 
 impl Answer {
@@ -743,7 +786,7 @@ fn cpu_lane(mut work: CpuWork, jobs: mpsc::Receiver<CpuJob>) -> CpuWork {
                     .iter()
                     .map(|piece| match piece {
                         Piece::Ids(ids) => ids.as_slice(),
-                        Piece::Text(_) => &[],
+                        _ => &[],
                     })
                     .collect();
                 let session = match alt {
@@ -762,7 +805,7 @@ fn cpu_lane(mut work: CpuWork, jobs: mpsc::Receiver<CpuJob>) -> CpuWork {
                     .iter()
                     .map(|piece| match piece {
                         Piece::Text(text) => text.as_str(),
-                        Piece::Ids(_) => "",
+                        _ => "",
                     })
                     .collect();
                 model
@@ -826,32 +869,53 @@ struct Active {
     /// which only the CPU may take again.
     cpu_only: VecDeque<usize>,
     vectors: Vec<Option<Vec<f32>>>,
+    rows: Vec<(&'static str, bool)>,
+    hashes: Vec<Option<[u8; 32]>>,
     left: usize,
     variants: BTreeMap<&'static str, usize>,
     lanes: BTreeMap<&'static str, usize>,
 }
 
 impl Active {
-    fn new(window: Window) -> Self {
+    fn new(mut window: Window) -> Self {
         let n = window.pieces.len();
-        let mut order: Vec<usize> = (0..n).collect();
+        let mut vectors = vec![None; n];
+        let mut rows = vec![("", false); n];
+        let mut variants: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut lanes: BTreeMap<&'static str, usize> = BTreeMap::new();
+        // What the cache supplied is done before the window starts.
+        for (at, piece) in window.pieces.iter_mut().enumerate() {
+            if let Piece::Cached { vector, variant } = piece {
+                vectors[at] = Some(std::mem::take(vector));
+                rows[at] = (*variant, true);
+                *variants.entry(*variant).or_default() += 1;
+                *lanes.entry("cache").or_default() += 1;
+            }
+        }
+        let mut order: Vec<usize> = (0..n).filter(|i| vectors[*i].is_none()).collect();
         // Stable, so equal lengths keep their order and a run's batches are
         // the same batches every time (#88).
         if std::env::var(crate::UNSORTED_ENV).is_err() {
             order.sort_by_key(|&i| window.pieces[i].len());
         }
+        let left = order.len();
+        if window.hashes.len() != n {
+            window.hashes = vec![None; n];
+        }
         Self {
             ids: window.ids,
             pieces: window.pieces,
+            back: order.len(),
             order,
             front: 0,
-            back: n,
             retry: VecDeque::new(),
             cpu_only: VecDeque::new(),
-            vectors: vec![None; n],
-            left: n,
-            variants: BTreeMap::new(),
-            lanes: BTreeMap::new(),
+            vectors,
+            rows,
+            hashes: window.hashes,
+            left,
+            variants,
+            lanes,
         }
     }
 
@@ -1092,7 +1156,8 @@ fn schedule(
             for target in &targets {
                 let from_back = !matches!(target, Target::Cpu);
                 // A CPU brought in only for the guard takes only that.
-                let guard_only = !from_back && !cpu_on && !targets.iter().all(|t| matches!(t, Target::Cpu));
+                let guard_only =
+                    !from_back && !cpu_on && !targets.iter().all(|t| matches!(t, Target::Cpu));
                 while flying
                     .iter()
                     .filter(|(t, ..)| t.id() == target.id())
@@ -1125,7 +1190,8 @@ fn schedule(
                         .max()
                         .unwrap_or(0)
                         * group.len();
-                    let batch: Vec<Piece> = group.iter().map(|&i| window.pieces[i].clone()).collect();
+                    let batch: Vec<Piece> =
+                        group.iter().map(|&i| window.pieces[i].clone()).collect();
                     let answer: Answer = match target {
                         Target::Cpu => {
                             let (reply, answer) = mpsc::channel();
@@ -1140,7 +1206,7 @@ fn schedule(
                                 .into_iter()
                                 .map(|piece| match piece {
                                     Piece::Ids(ids) => ids,
-                                    Piece::Text(_) => Vec::new(),
+                                    _ => Vec::new(),
                                 })
                                 .collect();
                             Answer::Lane(lane.submit(ids), lane.variant())
@@ -1163,7 +1229,8 @@ fn schedule(
         let mut still = Vec::with_capacity(flying.len());
         let oldest = flying.first().map(|f| f.4);
         for (target, seq, group, answer, sent, tokens) in flying.drain(..) {
-            let got = answer.wait((Some(sent) == oldest && !moved).then_some(Duration::from_millis(5)));
+            let got =
+                answer.wait((Some(sent) == oldest && !moved).then_some(Duration::from_millis(5)));
             let window = &mut active[seq - base];
             match got {
                 Ok(Ok((vectors, variant))) if vectors.len() == group.len() => {
@@ -1186,6 +1253,7 @@ fn schedule(
                             continue;
                         }
                         window.vectors[*at] = Some(vector);
+                        window.rows[*at] = (variant, false);
                         kept += 1;
                     }
                     window.left -= kept;
@@ -1215,6 +1283,8 @@ fn schedule(
             let finished = Embedded {
                 ids: window.ids,
                 vectors,
+                rows: window.rows,
+                hashes: window.hashes,
                 variants: window.variants.into_iter().collect(),
                 lanes: window.lanes.into_iter().collect(),
             };
@@ -1242,7 +1312,28 @@ mod tests {
         Active::new(Window {
             ids: (0..lens.len() as u64).collect(),
             pieces: lens.iter().map(|n| Piece::Ids(vec![1; *n])).collect(),
+            hashes: Vec::new(),
         })
+    }
+
+    #[test]
+    fn a_cached_piece_is_done_before_the_window_starts() {
+        let mut w = Active::new(Window {
+            ids: vec![7, 8],
+            pieces: vec![
+                Piece::Cached {
+                    vector: vec![1.0; 3],
+                    variant: "fp16-ane",
+                },
+                Piece::Ids(vec![1; 5]),
+            ],
+            hashes: vec![Some([1; 32]), Some([2; 32])],
+        });
+        assert_eq!(w.left, 1);
+        assert_eq!(w.take(true, 100), vec![1]);
+        assert!(!w.untaken(true));
+        assert_eq!(w.rows[0], ("fp16-ane", true));
+        assert_eq!(w.lanes["cache"], 1);
     }
 
     #[test]

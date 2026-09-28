@@ -169,17 +169,17 @@ mod mac {
             let mut buckets = Vec::new();
             for (n, bucket) in group.buckets.iter().enumerate() {
                 progress(n, group.buckets.len());
-                let path: PathBuf =
-                    pack.join(group.file.replace("{S}", &bucket.to_string()));
+                let path: PathBuf = pack.join(group.file.replace("{S}", &bucket.to_string()));
                 if !path.exists() {
                     bail!("the Core ML pack has no {}", path.display());
                 }
                 let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
                 // SAFETY: a file URL and a configuration this function made;
                 // the call returns a retained model or an error.
-                let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
-                    .map_err(error)
-                    .with_context(|| format!("loading {}", path.display()))?;
+                let model =
+                    unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
+                        .map_err(error)
+                        .with_context(|| format!("loading {}", path.display()))?;
                 buckets.push((*bucket, model));
             }
             buckets.sort_by_key(|(len, _)| *len);
@@ -188,7 +188,9 @@ mod mac {
                 batch: group.batch,
                 buckets,
                 device: match kind {
-                    Kind::NeuralEngine => format!("{} Neural Engine (Core ML)", crate::system::cpu_name()),
+                    Kind::NeuralEngine => {
+                        format!("{} Neural Engine (Core ML)", crate::system::cpu_name())
+                    }
                     Kind::Gpu => format!("{} GPU (Core ML)", crate::system::cpu_name()),
                 },
             })
@@ -277,11 +279,10 @@ mod mac {
             };
             // SAFETY: a provider this function made; the call returns the
             // output features or an error.
-            let output = unsafe {
-                model.predictionFromFeatures_error(ProtocolObject::from_ref(&*provider))
-            }
-            .map_err(error)
-            .context("running the model")?;
+            let output =
+                unsafe { model.predictionFromFeatures_error(ProtocolObject::from_ref(&*provider)) }
+                    .map_err(error)
+                    .context("running the model")?;
             // SAFETY: `cls` is the output the models were converted with, an
             // fp32 array of `[batch, 384]`; its strides are read rather than
             // assumed, and nothing past `count` is read.
@@ -295,16 +296,8 @@ mod mac {
                 if array.dataType() != MLMultiArrayDataType::Float32 {
                     bail!("the `cls` output is not fp32");
                 }
-                let shape: Vec<usize> = array
-                    .shape()
-                    .iter()
-                    .map(|n| n.as_usize())
-                    .collect();
-                let strides: Vec<usize> = array
-                    .strides()
-                    .iter()
-                    .map(|n| n.as_usize())
-                    .collect();
+                let shape: Vec<usize> = array.shape().iter().map(|n| n.as_usize()).collect();
+                let strides: Vec<usize> = array.strides().iter().map(|n| n.as_usize()).collect();
                 if shape.len() != 2 || shape[0] != self.batch {
                     bail!("the `cls` output has shape {shape:?}");
                 }
@@ -351,5 +344,4 @@ mod tests {
         // to within half's spacing of 8 at that magnitude).
         assert_eq!(neg, 0xf0e2);
     }
-
 }

@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS chunks (
 );
 
 CREATE INDEX IF NOT EXISTS chunks_file_id ON chunks(file_id);
+-- A search asks whether anything is still being embedded, and which of its
+-- keyword candidates are; without this that is a scan of every file row.
+CREATE INDEX IF NOT EXISTS files_hash ON files(hash);
 
 -- Keyword half of the search. `content='chunks'` means FTS5 keeps only its
 -- index, not a second copy of every chunk, so the store barely grows.
@@ -1425,6 +1428,48 @@ pub fn durable_chunks(db: &Connection) -> Result<i64> {
         [],
         |r| r.get(0),
     )?)
+}
+
+/// Of `ids`, the chunks whose file is still being embedded, with their text:
+/// what a search mid-run embeds on the query path.
+pub fn pending_among(db: &Connection, ids: &[u64]) -> Result<Vec<(u64, String)>> {
+    let mut stmt = db.prepare_cached(
+        "SELECT c.text FROM chunks c JOIN files f ON f.id = c.file_id
+         WHERE c.id = ?1 AND f.hash = ''",
+    )?;
+    let mut out = Vec::new();
+    for id in ids {
+        if let Some(text) = stmt
+            .query_row(params![*id as i64], |r| r.get::<_, String>(0))
+            .optional()?
+        {
+            out.push((*id, text));
+        }
+    }
+    Ok(out)
+}
+
+/// The share of the store's chunks still being embedded, or `None` when
+/// nothing is: one indexed probe on every search, and the counts only when
+/// the probe finds a run in progress.
+pub fn pending_share(db: &Connection) -> Result<Option<f64>> {
+    let busy: bool = db
+        .query_row(
+            "SELECT 1 FROM files WHERE hash = '' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !busy {
+        return Ok(None);
+    }
+    let (pending, all): (i64, i64) = db.query_row(
+        "SELECT SUM(f.hash = ''), COUNT(*) FROM chunks c JOIN files f ON f.id = c.file_id",
+        [],
+        |r| Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0), r.get(1)?)),
+    )?;
+    Ok((all > 0 && pending > 0).then(|| pending as f64 / all as f64))
 }
 
 /// Apply the schema to a bare in-memory connection, for tests in other
