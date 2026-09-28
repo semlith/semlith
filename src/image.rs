@@ -155,6 +155,18 @@ pub fn too_large(bytes: &[u8]) -> Option<String> {
     })
 }
 
+/// Fetch a CLIP repository's files into the cache under the download
+/// watchdog, so a stalled connection fails with a reason rather than hanging
+/// inside fastembed's own client (#155). At `main`, where fastembed resolves
+/// its built-in models, so what lands here is what it then reads.
+fn prefetch(cache: &Path, repo: &str, files: &[(&str, &str)], quiet: bool) -> Result<()> {
+    let pinned = crate::embed::Pinned::new(cache, repo, "main", quiet)?;
+    for (file, _) in files {
+        pinned.get(file)?;
+    }
+    Ok(())
+}
+
 /// The two halves of CLIP, loaded on first use.
 ///
 /// Both are fetched into the same model cache the text model uses, on the first
@@ -177,6 +189,7 @@ impl Clip {
                 crate::embed::refuse_if_airgapped(VISION_REPO)?;
                 let cache = crate::model_cache_dir()?;
                 crate::embed::verify_cached(&cache, VISION_REPO, VISION_REVISION, VISION_FILES)?;
+                prefetch(&cache, VISION_REPO, VISION_FILES, quiet)?;
                 let options = ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)
                     .with_show_download_progress(!quiet)
                     .with_cache_dir(cache.clone());
@@ -209,6 +222,7 @@ impl Clip {
                 crate::embed::refuse_if_airgapped(TEXT_REPO)?;
                 let cache = crate::model_cache_dir()?;
                 crate::embed::verify_cached(&cache, TEXT_REPO, TEXT_REVISION, TEXT_FILES)?;
+                prefetch(&cache, TEXT_REPO, TEXT_FILES, quiet)?;
                 let options = TextInitOptions::new(EmbeddingModel::ClipVitB32)
                     .with_show_download_progress(!quiet)
                     .with_intra_threads(crate::embed::embed_threads())

@@ -1061,10 +1061,15 @@ c_pause_holds() {
   [ "$(jq -r '.state' "$rc_dir/pause.json")" = pausing ] ||
     { echo "pause answered:"; cat "$rc_dir/pause.json"; return 1; }
   [ "$ms" -lt "$limit" ] || { echo "pause took $ms ms, over $limit"; return 1; }
-  # 3, because `rc_until` counts whole seconds and 3 is the first limit that
-  # always allows the full 2.
-  rc_until 3 rc_is "$s" paused ||
-    { echo "not paused within 2 s of the answer:"; rc_run "$s"; return 1; }
+  # A pause is honoured at the engine's next batch, so the window is a batch
+  # at the rate this run is embedding at, not a fixed 2 s: a CPU lane at 9
+  # chunks/s on a hosted Windows runner took longer than that (#152). 64
+  # chunks is several of the CPU lane's batches of 8; 3 s is the floor
+  # `rc_until`'s whole seconds need to allow a full 2, and 60 the ceiling.
+  rate=$(rc_field "$s" rate)
+  window=$(awk -v r="${rate:-0}" 'BEGIN { if (r < 1) r = 1; w = 3 + int(64 / r + 0.999); if (w > 60) w = 60; print w }')
+  rc_until "$window" rc_is "$s" paused ||
+    { echo "not paused within ${window} s of the answer (one batch at ${rate:-?} chunks/s):"; rc_run "$s"; return 1; }
   c1=$(rc_field "$s" chunks)
   # The one fixed wait in this block: holding still is the property, and only
   # a stretch of time can show it.
@@ -1081,7 +1086,9 @@ c_pause_holds() {
 c_stop_restores() {
   s=$control_store
   [ -s "$rc_dir/before.json" ] || { echo "the pause check recorded no pre-run counts"; return 1; }
-  rc_is "$s" running || rc_until 30 rc_is "$s" running ||
+  # Paused is as stoppable as running: this check does not depend on the pause
+  # check having got as far as its resume (#152).
+  rc_is "$s" running || rc_is "$s" paused || rc_until 30 rc_is "$s" running ||
     { echo "no live run to stop:"; rc_run "$s"; return 1; }
   [ "$(rc_post /api/index/control "$(jq -nc --arg s "$s" '{store: $s, action: "stop"}')" | jq -r .state)" = stopping ] ||
     { echo "stop did not answer stopping"; return 1; }

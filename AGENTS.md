@@ -84,7 +84,8 @@ A store directory holds two pieces of state that must agree:
   approximate. Fixed-size `[id][dim f32]` records appended in id order, read back
   by binary search for the handful of candidates a query is about to reorder. A
   store written before 0.23.0 has none and is ranked by the codes alone, which
-  `semlith stats` says out loud.
+  `semlith stats` says out loud. Only `compact` rewrites it (0.31.0), to the
+  records whose chunk still exists.
 
 A store that has indexed an image holds a third, `images/`, in the same shard
 layout at CLIP's 512 dimensions. It is opened lazily, so a store that never
@@ -115,6 +116,7 @@ Module responsibilities:
 | `src/brief.rs` | `semlith brief` / `semlith_brief`: the ranked spans, their text and one-hop edges, composed from the primitives and fitted to a token budget. No engine of its own |
 | `src/store.rs` | Every SQL statement. Nothing else touches the database |
 | `src/index.rs` | Vector side: `Single` vs `Sharded` layouts, memory budget |
+| `src/compact.rs` | `Semlith::compact` and `Semlith::footprint`: the sidecar rewritten to live records, shards packed from it and swapped in, history past the retention dropped, the database vacuumed; the one call the CLI, the daemon, the portal and Semlith Cloud make |
 | `src/chunk.rs` | File bytes → text → chunks. Cut at definitions where tree-sitter found them and at headings in Markdown; 800 chars and 2 overlap lines are the fallback and the budget; 8 MiB cap |
 | `src/formats.rs` | Readers for the thirteen non-plain-text formats. Private on purpose |
 | `src/embed.rs` | Model selection/loading, incl. the hand-assembled granite default |
@@ -147,6 +149,23 @@ Module responsibilities:
 | `src/main.rs` | Clap parsing and human output formatting |
 
 ### Invariants worth knowing before editing
+
+- **Compaction never changes a live vector.** `compact` rebuilds shards from
+  `exact.f32`, and that is only sound because semlith never calibrates turbovec
+  and turbovec encodes the same rows to the same bytes however they are batched.
+  Calibrating an index would break it; so would rebuilding from anything but the
+  sidecar. `compact::tests::compaction_keeps_every_answer_and_drops_every_dead_byte`
+  asserts ids, order and scores before and after.
+- **A shard swap is bracketed.** `compact` writes the new set to
+  `index.compact/`, marks the store (`vectors_swapping` in meta), renames the
+  live set aside and the new one in, moves the generation, and clears the mark.
+  `Semlith::search_vectors` asks again when a search began or ended inside that
+  window, and `index::recover` finishes or undoes a swap a crash interrupted
+  under the next writer's lock. A reader re-opens its indexes — not only evicts
+  them — when the generation moves, because the shard list is read at open.
+- **Store connections set `secure_delete`.** A deleted row's bytes are
+  overwritten when its page is freed (#148). Do not turn it off to save the ~9 %
+  it costs a delete.
 
 - **There is no cookie.** The portal's session token travels in a
   `Semlith-Token` header, because every port on `localhost` is the same site and
@@ -587,7 +606,8 @@ re-pin `corpus.yaml` after. The three text files beside the eight pictures are
 not optional: issue #122 was a *source file* outranking a picture, and a picture
 that wins against nothing proves nothing.
 
-Env overrides: `SEMLITH_STORE` (PATH-style separated), `SEMLITH_HOME`,
+Env overrides: `SEMLITH_DOWNLOAD_STALL` (seconds a model download may receive
+nothing, default 60), `SEMLITH_STORE` (PATH-style separated), `SEMLITH_HOME`,
 `SEMLITH_PORT`, `SEMLITH_AIRGAP`, `SEMLITH_EMBED_THREADS`,
 `SEMLITH_INDEX_MEMORY`, `SEMLITH_SHARD_VECTORS`, `SEMLITH_CHECKPOINT_FILES`,
 `SEMLITH_MODEL_CACHE`, `SEMLITH_MCP_INDEX_BUDGET`, `SEMLITH_LEDGER` (`0`, `off`

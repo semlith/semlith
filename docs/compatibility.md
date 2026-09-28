@@ -1278,6 +1278,28 @@ binary and a 0.30.0 binary open each other's stores.
 | `POST /api/index/control` | `start` queues a held run; `stop` drops one, and with `delete: true` also deletes its store once dropped (the portal sends it only for a store that held no files before the scan). |
 | `GET /api/files` | `tree=1` answers `{tree}` with the text the MCP tool gives. `tree=1&format=json` answers one level instead: `dir` is a folder relative to a root (absolute or climbing with `..` is refused), `store` and `sort` as for the text form, and the answer is `{roots: [{store, root, dir, dirs: [{name, files, chunks, langs}], files: [{name, lines, symbols, chunks, stale, lang}], not_indexed: [{name, why, dir}], more}]}`, one entry per store root that holds `dir`, at most 1 000 entries a level with the rest counted in `more`. |
 
+## 0.31.0
+
+**Additive.** `FORMAT_VERSION` does not move and no table is added. A store
+compacted by 0.31.0 is an ordinary store any binary from 0.23.0 on reads: only
+rows whose chunk no longer exists, freed pages and history past the retention
+are removed, and the shards keep their layout and naming rule. History dropped
+by the retention is not restored by going back to an older binary.
+
+| Surface | What changes |
+|---|---|
+| `semlith compact` | New. `--all`, `--retention DAYS` (0 keeps all history), `--dry-run`, `--json`. |
+| `semlith stats` | New `disk` line: total, live, reclaimable, reclaimable share, and `re-index to compact vectors` for a store that cannot have its vectors compacted. The `files` and `chunks` lines are unchanged. |
+| `semlith_stats` | The first line per store gains `, N on disk (M reclaimable)`. |
+| `POST /api/store/compact` | New: `{store, retention_days?, dry_run?, wait?}`. Without `wait` it answers `{store, run, message}` at once; with it, `{store, run, stopped, compact}`. |
+| `GET /api/stores`, per store | New `disk`: `{total, live, reclaimable, dead_percent, database, exact, vectors, compacts_vectors}`. `bytes` is still the indexed source. |
+| `GET /api/index/runs`, per run | A run's `kind` may be `compact`; its summary carries `compact`, the report. The answer gains `compaction`: `{threshold_percent, retention_days, default_threshold_percent, default_retention_days}`. |
+| `POST /api/index/settings` | Takes `compact_threshold_percent` (0-99, 0 is off) and `history_retention_days` (0-36500, 0 keeps all); the answer carries `compaction`. |
+| `settings.json` | Two optional fields, `compact_threshold_percent` and `history_retention_days`. A missing field means the default, 25 and 90; an older binary ignores both. |
+| The ledger | A search whose text holds a live-shaped key records it masked (`[REDACTED:…]`). Rows already written are unchanged. |
+| `SEMLITH_DOWNLOAD_STALL` | New: seconds a model download may receive nothing before it fails, default 60. |
+| Store meta | `vectors_swapping` is written during a compaction's swap and left `0`. |
+
 ## What a break would look like
 
 If one of the covered surfaces has to change, this is what happens:

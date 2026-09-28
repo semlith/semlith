@@ -326,6 +326,17 @@ fn a_file_that_gains_a_token_is_evicted_on_the_next_run() {
             .is_empty(),
         "the old contents are still searchable after the file was refused"
     );
+    // #148: and not merely unsearchable. The evicted text is gone from the
+    // database file and its log, not left in freed pages or FTS5 segments.
+    for name in ["store.db", "store.db-wal"] {
+        let bytes = fs::read(store.path().join(name)).unwrap_or_default();
+        for needle in ["after the migration", "Tuesdays after"] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{name} still holds {needle:?} after the eviction"
+            );
+        }
+    }
 }
 
 /// The path for a store indexed before any of this existed.
@@ -736,7 +747,14 @@ fn an_accepted_file_is_indexed_redacted_and_a_new_secret_refuses_it_again() {
     assert!(!text.contains(&key), "the value reached the store: {text}");
     let line_two = text.lines().nth(1).unwrap_or_default();
     assert!(line_two.contains("[REDACTED:aws access key id]"), "{text}");
-    assert!(semlith::store::refusal(s.db(), &path).unwrap().is_none());
+    // Accepted, so not refused: from 0.30.0 the row stays, carrying the
+    // decision the Decisions tab lists, and is never an open refusal.
+    assert!(
+        semlith::store::refusal(s.db(), &path)
+            .unwrap()
+            .is_none_or(|r| r.accepted.is_some()),
+        "an accepted file is still listed as refused"
+    );
 
     // A comment edit keeps it indexed and redacted.
     fs::write(&file, format!("one, edited\nkey = \"{key}\"\nthree\n")).unwrap();

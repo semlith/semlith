@@ -3786,6 +3786,38 @@ function confirmDelete(name) {
   });
 }
 
+/** Ask before compacting a store, naming what it will give back.
+ *
+ * Waits for the compaction rather than pointing at a run card: the figures on
+ * the row are what the person is looking at, and they should move when the
+ * dialog closes. */
+function confirmCompact(s) {
+  const d = s.disk || {};
+  const what = d.reclaimable
+    ? `About ${bytes(d.reclaimable)} of its ${bytes(d.total)} can be given back: the full-precision vectors of chunks that no longer exist, symbol history past the retention, and the database's free pages.`
+    : `There is little to give back: none of its ${bytes(d.total || 0)} is measurably dead.`;
+  const old = d.compacts_vectors === false
+    ? " This store was written before full-precision vectors existed, so only its database is compacted; re-indexing it would compact its vectors too."
+    : "";
+  ask({
+    title: `Compact ${s.name}?`,
+    body: `${what}${old} Nothing is re-embedded, and search answers stay the same.`,
+    confirm: `Compact ${s.name}`,
+    run: async () => {
+      const done = await post("/api/store/compact", { store: s.name, wait: true });
+      await refreshStores();
+      await render();
+      const c = done.compact || {};
+      const total = (f) => (f ? f.database + f.exact + f.vectors : 0);
+      note(
+        done.stopped
+          ? `${s.name}: the compaction was stopped before anything was swapped in; nothing changed.`
+          : `${s.name}: ${bytes(total(c.before))} → ${bytes(total(c.after))} on disk.${(c.notes || []).map((x) => ` ${x}.`).join("")}`,
+      );
+    },
+  });
+}
+
 /** A line under the page head, for something that just happened to the page. */
 function note(text, bad) {
   const holder = document.querySelector(".view > .note.page-note");
@@ -3903,12 +3935,14 @@ async function storesView() {
       files: sum.files + s.files,
       chunks: sum.chunks + s.chunks,
       bytes: sum.bytes + s.bytes,
+      disk: sum.disk + (s.disk ? s.disk.total : 0),
+      reclaimable: sum.reclaimable + (s.disk ? s.disk.reclaimable : 0),
       lines: sum.lines + (s.lines || 0),
       watching: sum.watching + (s.watching ? 1 : 0),
       formats: Math.max(sum.formats, s.formats || 0),
       readers: Math.max(sum.readers, s.readers || 0),
     }),
-    { files: 0, chunks: 0, bytes: 0, lines: 0, watching: 0, formats: 0, readers: 0 },
+    { files: 0, chunks: 0, bytes: 0, disk: 0, reclaimable: 0, lines: 0, watching: 0, formats: 0, readers: 0 },
   );
   const dim = stores.find((s) => s.dim)?.dim;
 
@@ -4152,6 +4186,29 @@ async function storesView() {
         render: (s) => n(s.chunks),
       },
       {
+        /* What the store takes on disk, and under it what Compact would give
+         * back. `bytes` is the source it indexed; this is the store. */
+        key: "disk",
+        label: "Disk",
+        className: "num narrow-drop",
+        value: (s) => (s.disk ? s.disk.total : -1),
+        render: (s) => {
+          if (!s.disk) return el("span", { class: "meta", text: "—" });
+          const d = s.disk;
+          return el(
+            "span",
+            {
+              class: "disk-cell",
+              title: `database ${bytes(d.database)}, full-precision vectors ${bytes(d.exact)}, quantized vectors ${bytes(d.vectors)}`,
+            },
+            bytes(d.total),
+            d.reclaimable
+              ? el("div", { class: "meta", text: `${bytes(d.reclaimable)} reclaimable · ${d.dead_percent}%` })
+              : null,
+          );
+        },
+      },
+      {
         /* One line per store, and never the number on its own: the tokens, the
          * share of retrievals they are computed over, and how they were
          * counted, in one cell. A saved-token figure without its coverage and
@@ -4169,7 +4226,7 @@ async function storesView() {
           return el(
             "span",
             {
-              class: "meta",
+              class: "meta disk-cell",
               title: `${n(s.savings.net_tokens)} tokens saved over ${n(s.savings.credited)} of ${n(s.savings.total)} retrievals, counted ${s.savings.tier}`,
             },
             `${n(s.savings.net_tokens)} · ${s.savings.coverage}% · ${s.savings.tier}`,
@@ -4220,6 +4277,10 @@ async function storesView() {
               },
             },
             {
+              label: "Compact…",
+              onclick: () => confirmCompact(s),
+            },
+            {
               label: "Delete store…",
               tone: "bad",
               onclick: () => confirmDelete(s.name),
@@ -4254,7 +4315,13 @@ async function storesView() {
           totals.readers,
         )} reader${totals.readers === 1 ? "" : "s"}`,
       ),
-      stat("On disk", bytes(totals.bytes), "int8 quantised"),
+      // The stores themselves. This tile used to sum the indexed source bytes
+      // under this label, which is a different number about different files.
+      stat(
+        "On disk",
+        bytes(totals.disk),
+        totals.reclaimable ? `${bytes(totals.reclaimable)} reclaimable by Compact` : "nothing to reclaim",
+      ),
     ),
     bulkBar,
     // Above the table, so what a delete did is said where the reader is
@@ -6842,7 +6909,9 @@ function runCard(run, controls) {
         ? `queued · ${next.position} in line`
         : next.kind === "catch-up" && next.status === "running"
           ? "catching up"
-          : RUN_WORD[next.status] || next.status,
+          : next.kind === "compact" && next.status === "running"
+            ? "compacting"
+            : RUN_WORD[next.status] || next.status,
     );
     const tone = `pill ${RUN_TONE[next.status] || "warn"}`;
     if (badge.className !== tone) badge.className = tone;
@@ -6851,9 +6920,16 @@ function runCard(run, controls) {
     // The phase, when the run is doing something other than reading files.
     // Twenty seconds of a bar not moving is a hang unless the card says what
     // it is: every two hundred files the run rewrites its shards.
+    // A compaction reads no files: what it is doing, then what it gave back.
+    const compacted = next.kind === "compact" ? next.summary?.compact : null;
+    const disk = (f) => (f ? f.database + f.exact + f.vectors : 0);
     setText(
       counts,
-      next.phase
+      next.kind === "compact"
+        ? compacted
+          ? `${bytes(disk(compacted.before))} → ${bytes(disk(compacted.after))} on disk · ${n(compacted.vectors_dropped)} vectors and ${n(compacted.history_dropped)} retired definitions dropped · `
+          : `rewriting vectors and vacuuming · `
+        : next.phase
         ? `${n(next.scanned)}/${n(next.total)} files · ${next.phase} · `
         : next.total
           ? `${n(next.scanned)}/${n(next.total)} files · ${n(next.chunks)} chunks · `
@@ -7135,7 +7211,11 @@ function settingField(key, label, limit, onSave) {
 
   /** Take the daemon's latest reading, touching only what it moved. */
   function update(next) {
-    current = { ...next, reason: steady(next.reason) };
+    // A reason is a sentence the field's note continues after, so it ends
+    // with a full stop whether or not the daemon's wording did: "would allow
+    // 7 Room up to 8" read as one broken sentence.
+    const reason = steady(next.reason);
+    current = { ...next, reason: /[.!?]$/.test(reason) ? reason : `${reason}.` };
     // The field will not go above what the machine will accept, and the route
     // clamps it as well — a `max` on an input is a courtesy, not a control.
     const max = String(current.ceiling);
@@ -7168,6 +7248,67 @@ function settingField(key, label, limit, onSave) {
       el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
       why,
     ),
+  };
+}
+
+/* The two compaction settings, on the Machine limits card: when the daemon
+ * compacts an idle store on its own, and how much symbol history a compaction
+ * keeps. Both take 0 (off, and keep everything), which is why they are not
+ * `settingField`s, whose floor is 1. Built once and patched, like those. */
+function compactionSettings(onSave) {
+  const field = (key, label, max, explain) => {
+    let dirty = false;
+    let current = null;
+    const input = el("input", { type: "number", min: "0", max: String(max), "aria-label": label });
+    const why = el("div", { class: "note" });
+    const say = () => current && setText(why, explain(Number(input.value), current));
+    input.addEventListener("input", () => {
+      dirty = true;
+      say();
+    });
+    input.addEventListener("change", () => {
+      const asked = Math.min(max, Math.max(0, Math.round(Number(input.value) || 0)));
+      input.value = String(asked);
+      dirty = false;
+      onSave(key, asked);
+    });
+    return {
+      node: el(
+        "div",
+        { class: "setting" },
+        el("div", { class: "field" }, el("span", { class: "prefix", text: label }), input),
+        why,
+      ),
+      update(value, settings) {
+        current = settings;
+        if (!dirty && document.activeElement !== input && input.value !== String(value)) {
+          input.value = String(value);
+        }
+        say();
+      },
+    };
+  };
+  const threshold = field("compact_threshold_percent", "compact past %", 99, (v, c) =>
+    v === 0
+      ? "Off: stores are compacted only when you ask, with Compact on the Stores page or semlith compact."
+      : `An idle store more than ${v}% reclaimable is compacted by the daemon on its own, checked every ten minutes. ${c.default_threshold_percent} is the default; 0 turns it off.`,
+  );
+  const retention = field("history_retention_days", "history days", 36500, (v, c) =>
+    v === 0
+      ? "Every retired definition is kept, for ever."
+      : `A compaction drops definitions retired more than ${v} day${v === 1 ? "" : "s"} ago, so symbol history answers for the last ${v}. ${c.default_retention_days} is the default; 0 keeps everything.`,
+  );
+  return {
+    node: el(
+      "div",
+      null,
+      el("span", { class: "eyebrow", text: "Keeping stores small" }),
+      el("div", { class: "settings" }, threshold.node, retention.node),
+    ),
+    update(c) {
+      threshold.update(c.threshold_percent, c);
+      retention.update(c.retention_days, c);
+    },
   };
 }
 
@@ -7872,7 +8013,7 @@ async function indexView() {
       queue.map((row) => queued.get(String(row.run ?? row.store)).node),
     );
 
-    paintSettings(data?.limits);
+    paintSettings(data?.limits, data?.compaction);
   }
 
   async function saveSetting(key, value) {
@@ -7885,7 +8026,7 @@ async function indexView() {
       // What the daemon is running with now, in its words: all three take
       // effect at once, the running runs at their next batch.
       setText(settingsNote, answer.applied ? `Saved — ${answer.applied}.` : "Saved.");
-      paintSettings(answer.limits);
+      paintSettings(answer.limits, answer.compaction);
     } catch (e) {
       settingsNote.className = "note bad";
       setText(settingsNote, e.message);
@@ -7902,9 +8043,10 @@ async function indexView() {
    * into it, and with a new input in place of the focused one. Now a changed
    * number is a changed text node and nothing else. */
   const settingsNote = el("div", { class: "note" });
+  const compactSection = compactionSettings(saveSetting);
   const accel = accelSection();
   let limitsCard = null;
-  function paintSettings(limits) {
+  function paintSettings(limits, compaction) {
     if (!limits) return;
     const machine = limits.machine || {};
     if (!limitsCard) {
@@ -7940,9 +8082,11 @@ async function indexView() {
           limitsCard.fields.map((field) => field.node),
         ),
         settingsNote,
+        compactSection.node,
         accel.node,
       );
     }
+    if (compaction) compactSection.update(compaction);
     // Every field of every limit, every time, and each patch is a no-op when
     // nothing moved. `embed_threads` is derived from the runs actually in
     // force, so changing `runs at once` changes the *sentence* under `threads

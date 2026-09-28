@@ -371,6 +371,29 @@ enum Command {
     /// Remove a file from the store.
     Forget { path: PathBuf },
 
+    /// Give a store's dead bytes back, without re-embedding anything.
+    ///
+    /// Drops the full-precision vectors of chunks that no longer exist, packs
+    /// sparse shards, drops symbol history older than the retention, and
+    /// vacuums the database. A store written before 0.23.0 is compacted as far
+    /// as it can be and told to re-index for the rest. Goes through the daemon
+    /// when one holds the store.
+    Compact {
+        /// Every registered store, not only the one this directory resolves to.
+        #[arg(long)]
+        all: bool,
+        /// Days of symbol history to keep; 0 keeps all of it. Default: the
+        /// saved setting, else 90.
+        #[arg(long)]
+        retention: Option<u64>,
+        /// Say what would be given back, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// The reports as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Every file that was not indexed, and why; accept or revoke one.
     ///
     /// Five classes: a secret-shaped value (reviewable), a credential file
@@ -2357,6 +2380,21 @@ fn run() -> Result<()> {
                     ),
                     None => println!("exact    none (re-index to rescore in full precision)"),
                 }
+                // What the store takes on disk, and what `semlith compact`
+                // would give back, by the retention in force.
+                let disk = store.footprint(semlith::compact::retention_in_force())?;
+                println!(
+                    "disk     {} ({} live, {} reclaimable, {} %){}",
+                    semlith::human_bytes(disk.total() as i64),
+                    semlith::human_bytes(disk.live() as i64),
+                    semlith::human_bytes(disk.reclaimable as i64),
+                    disk.dead_percent(),
+                    if store.compacts_vectors() {
+                        String::new()
+                    } else {
+                        format!("; {}", semlith::compact::REINDEX_TO_COMPACT)
+                    },
+                );
                 // Zero here reads the same as "nothing ever changed", so the
                 // line says which by naming the table rather than the number
                 // alone.
@@ -2634,6 +2672,70 @@ fn run() -> Result<()> {
                 Some(RefusedCommand::Refuse { path, yes }) => {
                     decide_refused(&cli.store, upstream.as_ref(), &path, "refused", yes)?;
                 }
+            }
+        }
+
+        Command::Compact {
+            all,
+            retention,
+            dry_run,
+            json,
+        } => {
+            let dirs = if all {
+                home::all_dirs(&cli.store, &cwd)?
+            } else {
+                home::read_dirs(&cli.store, &cwd)?
+            };
+            if dirs.is_empty() {
+                bail!(
+                    "no semlith store covers {} and none is registered",
+                    cwd.display()
+                );
+            }
+            let options = semlith::compact::CompactOptions {
+                retention_days: retention.unwrap_or_else(semlith::compact::retention_in_force),
+                dry_run,
+            };
+            let mut reports = Vec::new();
+            for dir in &dirs {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // The daemon is the writer for every store it holds, so a
+                // compaction of one of those is its job; a dry run only
+                // reads, and asks the store itself.
+                let upstream = if dry_run {
+                    None
+                } else {
+                    let (held, _) = semlith::daemon::held_by_daemon(std::slice::from_ref(dir));
+                    if held.is_empty() {
+                        None
+                    } else {
+                        semlith::proxy::find(std::slice::from_ref(dir))
+                    }
+                };
+                let report: serde_json::Value = match upstream {
+                    Some(daemon) => {
+                        let answer: serde_json::Value = serde_json::from_str(&daemon.post_long(
+                            "/api/store/compact",
+                            &serde_json::json!({
+                                "store": name,
+                                "retention_days": options.retention_days,
+                                "wait": true,
+                            }),
+                        )?)?;
+                        answer["compact"].clone()
+                    }
+                    None => serde_json::to_value(Semlith::open_existing(dir)?.compact(&options)?)?,
+                };
+                if !json {
+                    print_compact(&name, &report);
+                }
+                reports.push(serde_json::json!({ "store": name, "compact": report }));
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reports)?);
             }
         }
 
@@ -3086,6 +3188,39 @@ fn arm_airgap(on: bool) {
 /// stanza cannot know which directory the agent will be started in. Everything
 /// else asks about the store covering the working directory.
 /// The registered name of the store that covers `path`, for a daemon route.
+/// One store's compaction, in two lines and a note per thing it could not do.
+fn print_compact(name: &str, report: &serde_json::Value) {
+    let n = |part: &str, key: &str| report[part][key].as_u64().unwrap_or(0);
+    let total = |part: &str| n(part, "database") + n(part, "exact") + n(part, "vectors");
+    let human = |b: u64| semlith::human_bytes(b as i64);
+    let (before, after) = (total("before"), total("after"));
+    let vectors = report["vectors_dropped"].as_u64().unwrap_or(0);
+    let history = report["history_dropped"].as_u64().unwrap_or(0);
+    if report["dry_run"].as_bool().unwrap_or(false) {
+        println!(
+            "{name}: would give back {} of {} ({} vectors and {history} retired definitions)",
+            human(n("before", "reclaimable")),
+            human(before),
+            vectors,
+        );
+    } else if report["stopped"].as_bool().unwrap_or(false) {
+        println!("{name}: stopped before anything was swapped in; nothing changed");
+    } else {
+        println!(
+            "{name}: {} -> {} on disk ({} given back): {vectors} vectors and {history} retired \
+             definitions dropped, shards {} -> {}",
+            human(before),
+            human(after),
+            human(before.saturating_sub(after)),
+            report["shards_before"].as_u64().unwrap_or(0),
+            report["shards_after"].as_u64().unwrap_or(0),
+        );
+    }
+    for note in report["notes"].as_array().into_iter().flatten() {
+        println!("  {}", note.as_str().unwrap_or_default());
+    }
+}
+
 fn store_of(flags: &[PathBuf], path: &Path) -> Result<Option<String>> {
     let dir = home::resolve(flags, path, None)?.one()?;
     Ok(dir.file_name().map(|n| n.to_string_lossy().into_owned()))

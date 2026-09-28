@@ -233,6 +233,13 @@ pub struct Settings {
     /// The CPU, GPU and CUDA switches. Absent means CPU and GPU on, CUDA off.
     #[serde(default)]
     pub accelerators: crate::accel::Switches,
+    /// Days of symbol history a compaction keeps; 0 keeps all of it. Absent
+    /// means [`crate::compact::RETENTION_DAYS`].
+    pub history_retention_days: Option<u64>,
+    /// The reclaimable share, in percent, past which the daemon compacts an
+    /// idle store; 0 turns it off. Absent means
+    /// [`crate::compact::AUTO_THRESHOLD_PERCENT`].
+    pub compact_threshold_percent: Option<u64>,
 }
 
 impl Settings {

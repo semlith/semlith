@@ -1082,6 +1082,15 @@ fn the_coverage_table_agrees_between_the_command_line_and_the_tool() {
          pub fn visit(n: usize) -> usize {\n    n\n}\n",
     )
     .unwrap();
+    // From 0.30.0 the tool folds a language with fewer than five files into
+    // one tail line, so Rust needs five to keep a row of its own.
+    for i in 0..4 {
+        fs::write(
+            work.join(format!("step{i}.rs")),
+            format!("pub fn step{i}(n: usize) -> usize {{\n    walk(n)\n}}\n"),
+        )
+        .unwrap();
+    }
     fs::write(
         work.join("tidy.py"),
         "def tidy(rows):\n    return sorted(rows)\n\ndef run(rows):\n    return tidy(rows)\n",

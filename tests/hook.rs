@@ -157,33 +157,35 @@ fn a_read_of_a_file_no_store_holds_says_nothing() {
     );
 }
 
-/// The one decision the hook is ever allowed to make, and only the first time
-/// in a session.
+/// The one decision the hook is ever allowed to make, and only the first two
+/// times in a session (`GATE_REFUSALS`, from 0.30.0; `--strict` is `gate`).
 #[test]
 #[ignore = "indexes, so it downloads an embedding model on first run"]
-fn strict_refuses_the_first_read_of_a_session_and_then_gets_out_of_the_way() {
+fn strict_refuses_the_first_reads_of_a_session_and_then_gets_out_of_the_way() {
     let machine = Machine::new();
     let event = read_event(&machine.held());
 
-    let first = machine.run("hook", &["--strict"], &event.to_string());
-    let answer: Value =
-        serde_json::from_str(String::from_utf8_lossy(&first.stdout).trim()).expect("JSON");
-    assert_eq!(
-        answer["hookSpecificOutput"]["permissionDecision"], "deny",
-        "strict must refuse the first one: {answer}"
-    );
-    assert!(
-        first.status.success(),
-        "a refusal is still an exit 0: {}",
-        said(&first)
-    );
+    for n in 1..=2 {
+        let refused = machine.run("hook", &["--strict"], &event.to_string());
+        let answer: Value =
+            serde_json::from_str(String::from_utf8_lossy(&refused.stdout).trim()).expect("JSON");
+        assert_eq!(
+            answer["hookSpecificOutput"]["permissionDecision"], "deny",
+            "strict must refuse read {n} of a session: {answer}"
+        );
+        assert!(
+            refused.status.success(),
+            "a refusal is still an exit 0: {}",
+            said(&refused)
+        );
+    }
 
-    let second = machine.run("hook", &["--strict"], &event.to_string());
+    let third = machine.run("hook", &["--strict"], &event.to_string());
     let answer: Value =
-        serde_json::from_str(String::from_utf8_lossy(&second.stdout).trim()).expect("JSON");
+        serde_json::from_str(String::from_utf8_lossy(&third.stdout).trim()).expect("JSON");
     assert!(
         answer["hookSpecificOutput"]["additionalContext"].is_string(),
-        "the second read of a session is a line, not a refusal: {answer}"
+        "the third read of a session is a line, not a refusal: {answer}"
     );
 }
 

@@ -1097,6 +1097,15 @@ fn call_tool(
                     store.model(),
                     store.dim(),
                 );
+                // What the store takes on disk and what a compaction would
+                // give back, the figures `semlith stats` prints.
+                if let Ok(disk) = store.footprint(crate::compact::retention_in_force()) {
+                    body.push_str(&format!(
+                        ", {} on disk ({} reclaimable)",
+                        crate::human_bytes(disk.total() as i64),
+                        crate::human_bytes(disk.reclaimable as i64),
+                    ));
+                }
                 // What the graph covers, per language, in the same four edge
                 // classes the CLI prints. An agent deciding whether to ask the
                 // graph a question at all is the reader here: a language with

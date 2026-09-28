@@ -150,16 +150,7 @@ pub fn load(cache_dir: &Path, quiet: bool) -> Result<TextRerank> {
     crate::embed::check_cache_dir(cache_dir)?;
     crate::embed::refuse_if_airgapped(RERANK_NAME)?;
 
-    let repo = hf_hub::api::sync::ApiBuilder::new()
-        .with_cache_dir(cache_dir.to_path_buf())
-        .with_progress(!quiet)
-        .build()
-        .context("building the Hugging Face client")?
-        .repo(hf_hub::Repo::with_revision(
-            RERANK_REPO.to_string(),
-            hf_hub::RepoType::Model,
-            RERANK_REVISION.to_string(),
-        ));
+    let repo = crate::embed::Pinned::new(cache_dir, RERANK_REPO, RERANK_REVISION, quiet)?;
 
     let fetch = |name: &str| -> Result<Vec<u8>> {
         let path = repo
