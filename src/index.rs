@@ -964,6 +964,16 @@ fn rename_retrying(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
+/// Throw away what a compaction built and never swapped in.
+pub fn discard_compacted(store_dir: &Path) -> Result<()> {
+    let built = store_dir.join(COMPACT_DIR);
+    if built.exists() {
+        std::fs::remove_dir_all(&built)?;
+    }
+    let _ = std::fs::remove_file(store_dir.join(EXACT_COMPACT));
+    Ok(())
+}
+
 /// Finish or undo what a compaction killed part-way left behind. The caller
 /// holds the store lock, so no compaction is still running.
 ///

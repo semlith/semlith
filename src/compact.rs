@@ -39,6 +39,21 @@ pub const AUTO_THRESHOLD_PERCENT: u64 = 25;
 /// edit, and compacting it gives back nothing anyone would notice.
 pub const AUTO_FLOOR_BYTES: u64 = 1024 * 1024;
 
+/// The retention in force: the saved setting, else [`RETENTION_DAYS`].
+pub fn retention_in_force() -> u64 {
+    crate::home::Settings::load()
+        .history_retention_days
+        .unwrap_or(RETENTION_DAYS)
+}
+
+/// The auto-compaction threshold in force: the saved setting, else
+/// [`AUTO_THRESHOLD_PERCENT`]. 0 is off.
+pub fn threshold_in_force() -> u64 {
+    crate::home::Settings::load()
+        .compact_threshold_percent
+        .unwrap_or(AUTO_THRESHOLD_PERCENT)
+}
+
 /// Set in the store's meta table for the length of a vector swap. A reader
 /// that sees it, or sees it appear, asks again once the swap is over.
 const SWAPPING: &str = "vectors_swapping";
@@ -115,6 +130,9 @@ pub struct CompactReport {
     pub vectors_dropped: u64,
     pub shards_before: usize,
     pub shards_after: usize,
+    /// A stop asked for before the swap: the vectors are as they were, and
+    /// nothing else was touched.
+    pub stopped: bool,
     /// What could not be compacted, and why. Empty when everything was.
     pub notes: Vec<String>,
 }
@@ -159,24 +177,41 @@ impl Semlith {
         })
     }
 
+    /// Whether a compaction can rewrite this store's vectors: it has the
+    /// full-precision sidecar and the sharded layout. A store without either
+    /// is compacted as far as it can be and told to re-index.
+    pub fn compacts_vectors(&self) -> bool {
+        self.exact.exists() && matches!(self.index, VectorIndex::Sharded(_))
+    }
+
     /// Compact this store, taking its writer's lock for the length of it.
     /// A dry run reads and takes no lock, so it can be asked of a store a
     /// writer holds.
     pub fn compact(&mut self, options: &CompactOptions) -> Result<CompactReport> {
         if options.dry_run {
-            return self.compact_writing(options);
+            return self.compact_writing(options, &|| false);
         }
         let _lock = lock::StoreLock::acquire(&self.dir)?;
-        self.compact_held(options)
+        self.compact_held(options, &|| false)
     }
 
     /// [`Semlith::compact`] for a caller that already holds the lock -- the
-    /// daemon, which is the writer for every store it opened.
-    pub fn compact_held(&mut self, options: &CompactOptions) -> Result<CompactReport> {
-        self.writing(|me| me.compact_writing(options))
+    /// daemon, which is the writer for every store it opened. `stop` is asked
+    /// between the steps that build the new files; once they are swapped in
+    /// the rest runs to the end.
+    pub fn compact_held(
+        &mut self,
+        options: &CompactOptions,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<CompactReport> {
+        self.writing(|me| me.compact_writing(options, stop))
     }
 
-    fn compact_writing(&mut self, options: &CompactOptions) -> Result<CompactReport> {
+    fn compact_writing(
+        &mut self,
+        options: &CompactOptions,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<CompactReport> {
         let before = self.footprint(options.retention_days)?;
         let shards_before = self.index.shards();
         let history_due = match cutoff(options.retention_days) {
@@ -211,6 +246,7 @@ impl Semlith {
                 vectors_dropped: dead / self.exact.record_bytes(),
                 shards_before,
                 shards_after: shards_before,
+                stopped: false,
                 notes,
             });
         }
@@ -224,14 +260,26 @@ impl Semlith {
         store::set_meta(&self.db, SWAPPING, "0")?;
         self.save()?;
         self.index.evict();
-
-        let history_dropped = match cutoff(options.retention_days) {
-            Some(c) => store::prune_history(&self.db, c)? as u64,
-            None => 0,
+        let stopped = |me: &Self, notes: Vec<String>| -> Result<CompactReport> {
+            index::discard_compacted(&me.dir)?;
+            Ok(CompactReport {
+                before,
+                after: before,
+                dry_run: false,
+                history_dropped: 0,
+                vectors_dropped: 0,
+                shards_before,
+                shards_after: shards_before,
+                stopped: true,
+                notes,
+            })
         };
 
         let mut vectors_dropped = 0;
         if self.exact.exists() {
+            if stop() {
+                return stopped(self, notes);
+            }
             let live = index::ids_on_disk(&self.dir, self.dim, BIT_WIDTH)?;
             let rewrite = self.exact.build_compacted(&live)?;
             vectors_dropped = rewrite.dropped;
@@ -249,6 +297,9 @@ impl Semlith {
                      are: {REINDEX_TO_COMPACT}"
                 ));
             }
+            if stop() {
+                return stopped(self, notes);
+            }
             if pack {
                 let capacity = self.index.capacity().unwrap_or(index::SHARD_VECTORS);
                 index::build_compacted(
@@ -258,6 +309,9 @@ impl Semlith {
                     BIT_WIDTH,
                     capacity,
                 )?;
+            }
+            if stop() {
+                return stopped(self, notes);
             }
 
             // The swap, bracketed so a reader in another process either sees
@@ -277,6 +331,10 @@ impl Semlith {
             self.reopen_indexes()?;
         }
 
+        let history_dropped = match cutoff(options.retention_days) {
+            Some(c) => store::prune_history(&self.db, c)? as u64,
+            None => 0,
+        };
         store::reclaim(&self.db)?;
 
         Ok(CompactReport {
@@ -287,6 +345,7 @@ impl Semlith {
             vectors_dropped,
             shards_before,
             shards_after: self.index.shards(),
+            stopped: false,
             notes,
         })
     }
@@ -647,6 +706,42 @@ mod tests {
                     !bytes.windows(needle.len()).any(|w| w == needle),
                     "{name} still holds the secret"
                 );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stopped_compaction_leaves_every_file_as_it_was() {
+        let dir = scratch("stopped");
+        let mut s = churned(&dir);
+        s.writing(|me| me.save()).unwrap();
+        let before = files_under(&dir);
+        let asked = std::cell::Cell::new(0);
+        // Stopped at the second question: after the sidecar was rewritten
+        // beside the live one and before any shard was built.
+        let report = s
+            .compact_held(&CompactOptions::default(), &|| {
+                asked.set(asked.get() + 1);
+                asked.get() >= 2
+            })
+            .unwrap();
+        assert!(report.stopped);
+        let after: Vec<_> = files_under(&dir)
+            .into_iter()
+            .filter(|(p, _)| !p.ends_with("index.lock"))
+            .collect();
+        let before: Vec<_> = before
+            .into_iter()
+            .filter(|(p, _)| !p.ends_with("index.lock"))
+            .collect();
+        assert_eq!(
+            after.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+            before.iter().map(|(p, _)| p).collect::<Vec<_>>()
+        );
+        for ((p, a), (_, b)) in after.iter().zip(&before) {
+            if !p.to_string_lossy().contains("store.db") {
+                assert_eq!(a, b, "{} changed", p.display());
             }
         }
         let _ = std::fs::remove_dir_all(&dir);

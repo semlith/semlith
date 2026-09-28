@@ -312,6 +312,7 @@ enum Job {
         source: String,
     },
     Revoke(PathBuf),
+    Compact(crate::compact::CompactOptions),
 }
 
 /// A job and the channel its progress goes back on.
@@ -383,6 +384,11 @@ pub enum RunKind {
     CatchUp,
     /// A burst of filesystem events too large to run straight away.
     Batch,
+    /// Giving a store's dead bytes back (`semlith compact`, the portal's
+    /// Compact action, or the daemon on its own past the threshold). A card
+    /// like any run, so it can be seen and stopped; never admitted, because
+    /// it embeds nothing and holds only its own store's writer.
+    Compact,
 }
 
 /// How far back the rate a run card shows looks.
@@ -1353,6 +1359,14 @@ impl Store {
         progress
     }
 
+    /// Queue a job that is a run with a card of its own, minted by the caller.
+    fn submit_run(&self, run: u64, job: Job) -> mpsc::Receiver<serde_json::Value> {
+        let (report, progress) = mpsc::channel();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push_back(Queued { run, job, report });
+        progress
+    }
+
     /// [`Store::submit`], at the front of the queue.
     fn submit_front(&self, job: Job) -> mpsc::Receiver<serde_json::Value> {
         let (report, progress) = mpsc::channel();
@@ -1396,7 +1410,10 @@ impl Store {
                 // it is.
                 work: match kind {
                     RunKind::Batch => Work::Rest(paths),
-                    RunKind::Run | RunKind::CatchUp => Work::Roots(paths),
+                    // A compaction is never admitted, so never reaches here;
+                    // named rather than folded into a wildcard so a new kind
+                    // has to say where it goes.
+                    RunKind::Run | RunKind::CatchUp | RunKind::Compact => Work::Roots(paths),
                 },
                 first: true,
                 already: Vec::new(),
@@ -1442,7 +1459,7 @@ impl Store {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let mut dropped = Vec::new();
         queue.retain(|queued| {
-            if !matches!(queued.job, Job::Index(..)) {
+            if !matches!(queued.job, Job::Index(..) | Job::Compact(..)) {
                 return true;
             }
             let answer = serde_json::json!({
@@ -2451,6 +2468,19 @@ impl State {
         Self::writer_alive(store)?;
         // No notice: this caller takes the first message as the answer.
         Ok(store.submit(Job::Forget(path), None))
+    }
+
+    /// Queue a compaction of `store` as a run with its own card, behind
+    /// whatever its writer is already doing.
+    pub fn compact(
+        &self,
+        store: &Arc<Store>,
+        options: crate::compact::CompactOptions,
+    ) -> Result<(u64, mpsc::Receiver<serde_json::Value>)> {
+        Self::writer_alive(store)?;
+        let run = self.admission.next.fetch_add(1, Ordering::Relaxed);
+        store.begin_run(run, vec![store.dir.clone()], RunKind::Compact);
+        Ok((run, store.submit_run(run, Job::Compact(options))))
     }
 
     /// Accept one refused file, at the front of the writer's queue: a person
@@ -3830,6 +3860,53 @@ fn perform(
                     say(serde_json::json!({ "event": "done", "revoked": revoked }))
                 }
                 Err(e) => say(serde_json::json!({ "event": "error", "error": format!("{e:#}") })),
+            }
+            None
+        }
+        Job::Compact(options) => {
+            store.cancelled.store(false, Ordering::Relaxed);
+            say(
+                serde_json::json!({ "event": "started", "paths": [store.dir.display().to_string()] }),
+            );
+            let stop = || store.cancelled.load(Ordering::Relaxed);
+            match writer.compact_held(&options, &stop) {
+                Ok(report) => {
+                    store.cancelled.store(false, Ordering::Relaxed);
+                    let text = if report.stopped {
+                        "a compaction was stopped before its swap; nothing changed".to_string()
+                    } else {
+                        store.last_write.store(now() as usize, Ordering::Relaxed);
+                        format!(
+                            "compacted: {} to {} on disk ({} vectors and {} retired definitions dropped)",
+                            crate::human_bytes(report.before.total() as i64),
+                            crate::human_bytes(report.after.total() as i64),
+                            report.vectors_dropped,
+                            report.history_dropped,
+                        )
+                    };
+                    // The daemon log's line, with every part's bytes, beside
+                    // the event the card shows.
+                    eprintln!(
+                        "semlith: {}: {text} [database {} -> {}, exact {} -> {}, vectors {} -> {}]",
+                        store.name,
+                        report.before.database,
+                        report.after.database,
+                        report.before.exact,
+                        report.after.exact,
+                        report.before.vectors,
+                        report.after.vectors,
+                    );
+                    store.note(text);
+                    say(serde_json::json!({
+                        "event": "done",
+                        "stopped": report.stopped,
+                        "compact": report,
+                    }));
+                }
+                Err(e) => {
+                    store.cancelled.store(false, Ordering::Relaxed);
+                    say(serde_json::json!({ "event": "error", "error": format!("{e:#}") }))
+                }
             }
             None
         }
