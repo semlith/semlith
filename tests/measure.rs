@@ -730,9 +730,14 @@ fn measure_the_store_at_scale() {
         );
     }
     // Not a bound on RSS: a store past its budget reloads shards constantly and
-    // the allocator keeps what it frees. What must be true is that it settles.
+    // the allocator keeps what it frees. What must be true is that it settles:
+    // the last reading is no higher than the highest before it, give or take.
+    // Measured against that peak rather than the reading just before, because
+    // the allocator handing pages back between two samples is not growth —
+    // 920, 848, 920 MB is a plateau with a dip in it, and failed as though it
+    // were climbing (0.31.0's CI; 0.30.x read 897-919 MB flat).
     assert!(
-        churn[2] < churn[1] + 32 * 1024,
+        churn[2] < churn[0].max(churn[1]) + 32 * 1024,
         "RSS under continuous shard churn went {} MB then {} MB then {} MB — that is \
          not a plateau",
         churn[0] / 1024,
