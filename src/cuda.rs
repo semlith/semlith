@@ -690,7 +690,6 @@ fn compatible(found: &str, pinned: &str) -> bool {
 /// CUDA execution provider, from the pack's own ONNX Runtime core.
 pub struct Session {
     session: ort::session::Session,
-    tokenizer: tokenizers::Tokenizer,
     device: String,
 }
 
@@ -723,13 +722,8 @@ impl Session {
         let session = builder
             .commit_from_file(model_fp16)
             .map_err(|e| anyhow::anyhow!("loading the fp16 model on {}: {e}", card.name))?;
-        let tokenizer = crate::embed::granite_tokenizer(
-            &crate::model_cache_dir()?,
-            crate::chunk::MAX_CHARS / 2,
-        )?;
         Ok(Self {
             session,
-            tokenizer,
             device: format!("{} (CUDA)", card.name),
         })
     }
@@ -738,46 +732,11 @@ impl Session {
         self.device.clone()
     }
 
-    /// The same preparation as the WebGPU lane's, which is fastembed's: its
-    /// tokenizer padded to the batch's longest, input ids and attention mask,
-    /// and the CLS token's vector, normalised.
-    pub fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let encodings = self
-            .tokenizer
-            .encode_batch(texts.to_vec(), true)
-            .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))?;
-        let seq = encodings[0].len();
-        let n = encodings.len();
-        let ids: Vec<i64> = encodings
-            .iter()
-            .flat_map(|e| e.get_ids().iter().map(|x| *x as i64))
-            .collect();
-        let mask: Vec<i64> = encodings
-            .iter()
-            .flat_map(|e| e.get_attention_mask().iter().map(|x| *x as i64))
-            .collect();
-        let outputs = self
-            .session
-            .run(ort::inputs![
-                "input_ids" => ort::value::Tensor::from_array(([n, seq], ids)).map_err(|e| anyhow::anyhow!("{e}"))?,
-                "attention_mask" => ort::value::Tensor::from_array(([n, seq], mask)).map_err(|e| anyhow::anyhow!("{e}"))?,
-            ])
-            .map_err(|e| anyhow::anyhow!("running the model on CUDA: {e}"))?;
-        let (shape, data) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let dim = *shape.last().context("an output with no shape")? as usize;
-        let mut vectors = Vec::with_capacity(n);
-        for row in 0..n {
-            let start = row * seq * dim;
-            let mut vector = data[start..start + dim].to_vec();
-            crate::normalize(&mut vector);
-            vectors.push(vector);
-        }
-        Ok(vectors)
+    /// One batch of ids, prepared as the WebGPU lane's: padded to the batch's
+    /// longest, masked, and the CLS token's vector normalised.
+    pub fn embed(&mut self, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
+        crate::session::run(&mut self.session, batch)
+            .map_err(|e| anyhow::anyhow!("on CUDA: {e:#}"))
     }
 }
 

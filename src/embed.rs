@@ -570,8 +570,77 @@ fn load_granite(
     variant: Variant,
 ) -> Result<TextEmbedding> {
     link_runtime()?;
-    check_cache_dir(&cache_dir)?;
-    let cache = cache_dir.clone();
+    let paths = granite_paths(&cache_dir, quiet, variant)?;
+    let read = |name: &str| -> Result<Vec<u8>> {
+        let path = paths
+            .iter()
+            .find(|(file, _)| *file == name)
+            .map(|(_, path)| path)
+            .with_context(|| format!("{name} is not a file semlith pins a digest for"))?;
+        std::fs::read(path).with_context(|| format!("reading {}", path.display()))
+    };
+    let [graph, weights] = variant.files();
+    let tokenizer_files = TokenizerFiles {
+        tokenizer_file: read("tokenizer.json")?,
+        config_file: read("config.json")?,
+        special_tokens_map_file: read("special_tokens_map.json")?,
+        tokenizer_config_file: read("tokenizer_config.json")?,
+    };
+
+    // fastembed does not export ExternalInitializerFile, so the weights can
+    // only be attached through this builder — a struct literal will not compile.
+    let model = UserDefinedEmbeddingModel::new(read(graph.0)?, tokenizer_files)
+        // 1_Pooling/config.json in the source repo sets pooling_mode_cls_token.
+        .with_pooling(Pooling::Cls)
+        .with_external_initializer(
+            Path::new(weights.0)
+                .file_name()
+                .expect("weights constant has a file name")
+                .to_string_lossy()
+                .into_owned(),
+            read(weights.0)?,
+        );
+
+    let opts = InitOptionsUserDefined::new()
+        .with_max_length(max_length)
+        .with_intra_threads(threads);
+
+    TextEmbedding::try_new_from_user_defined(model, opts)
+        .map_err(|e| anyhow::anyhow!("loading {GRANITE_NAME}: {e}"))
+}
+
+/// The graph file of one of granite's variants, fetched and verified, for a
+/// session built on ONNX Runtime directly. Its weights file sits beside it
+/// under the name the graph refers to, which is how ONNX Runtime finds them.
+pub fn granite_graph(cache_dir: &Path, quiet: bool, variant: Variant) -> Result<PathBuf> {
+    let [graph, _] = variant.files();
+    granite_paths(cache_dir, quiet, variant)?
+        .into_iter()
+        .find(|(file, _)| *file == graph.0)
+        .map(|(_, path)| path)
+        .context("the graph is missing from its own pinned file list")
+}
+
+/// Every file one variant of granite needs — the tokenizer's four and the
+/// variant's two — each in the cache and checked against its pinned digest.
+///
+/// The one place granite's weights are fetched, so the airgap refusal and the
+/// digest check cannot be missed by a caller that loads them another way.
+fn granite_paths(
+    cache_dir: &Path,
+    quiet: bool,
+    variant: Variant,
+) -> Result<Vec<(&'static str, PathBuf)>> {
+    if airgap() && !is_cached(cache_dir) {
+        bail!(
+            "{AIRGAP_ENV} is set and no model is cached at {} — \
+             pre-seed it with SEMLITH_MODEL_CACHE on a connected machine, \
+             or drop --airgap to let this run download it",
+            cache_dir.display()
+        );
+    }
+    check_cache_dir(cache_dir)?;
+    let cache = cache_dir.to_path_buf();
     // The tokenizer's four files and this variant's two. int8 keeps the stamp
     // it always had, so no cache written before 0.28.0 is checked again.
     let [graph, weights] = variant.files();
@@ -593,48 +662,23 @@ fn load_granite(
 
     // A revision rather than a branch. `main` is a name somebody else controls;
     // a commit is the bytes this release was built against.
-    let repo = Pinned::new(&cache_dir, GRANITE_REPO, GRANITE_REVISION, quiet)?;
+    let repo = Pinned::new(&cache, GRANITE_REPO, GRANITE_REVISION, quiet)?;
 
-    let fetch = |name: &str| -> Result<Vec<u8>> {
+    let mut paths = Vec::with_capacity(files.len());
+    for (name, expected) in &files {
         let path = repo
             .get(name)
             .with_context(|| format!("fetching {name} from {GRANITE_REPO}"))?;
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        if checked {
-            return Ok(bytes);
-        }
         // Verified whether it was just fetched or was already in the cache: a
         // cache is a directory on disk, and the point of a digest is that it
         // does not matter how the bytes got there.
-        let expected = files
-            .iter()
-            .find(|(file, _)| *file == name)
-            .map(|(_, digest)| *digest)
-            .with_context(|| format!("{name} is not a file semlith pins a digest for"))?;
-        verify(name, &bytes, expected)?;
-        Ok(bytes)
-    };
-
-    let tokenizer_files = TokenizerFiles {
-        tokenizer_file: fetch("tokenizer.json")?,
-        config_file: fetch("config.json")?,
-        special_tokens_map_file: fetch("special_tokens_map.json")?,
-        tokenizer_config_file: fetch("tokenizer_config.json")?,
-    };
-
-    // fastembed does not export ExternalInitializerFile, so the weights can
-    // only be attached through this builder — a struct literal will not compile.
-    let model = UserDefinedEmbeddingModel::new(fetch(graph.0)?, tokenizer_files)
-        // 1_Pooling/config.json in the source repo sets pooling_mode_cls_token.
-        .with_pooling(Pooling::Cls)
-        .with_external_initializer(
-            Path::new(weights.0)
-                .file_name()
-                .expect("weights constant has a file name")
-                .to_string_lossy()
-                .into_owned(),
-            fetch(weights.0)?,
-        );
+        if !checked {
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            verify(name, &bytes, expected)?;
+        }
+        paths.push((*name, path));
+    }
 
     // Recorded after every file has been read and checked, and only when this
     // run did the checking — the fetch above may have created the snapshot
@@ -642,13 +686,7 @@ fn load_granite(
     if !checked && let Some(dir) = snapshot_dir(&cache, GRANITE_REPO, GRANITE_REVISION) {
         record_verified_as(&dir, &stamp, GRANITE_REVISION, &files);
     }
-
-    let opts = InitOptionsUserDefined::new()
-        .with_max_length(max_length)
-        .with_intra_threads(threads);
-
-    TextEmbedding::try_new_from_user_defined(model, opts)
-        .map_err(|e| anyhow::anyhow!("loading {GRANITE_NAME}: {e}"))
+    Ok(paths)
 }
 
 /// Refuse to download model weights, so an air-gapped machine can prove this

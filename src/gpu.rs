@@ -348,7 +348,12 @@ pub fn plugin_bytes() -> u64 {
 
 /// Stream `url` to `to`, hashing as it goes, and refuse it unless the digest
 /// is the pinned one. A refused file is deleted, never kept.
-fn download(url: &str, to: &Path, sha256: &str, progress: &mut dyn FnMut(u64)) -> Result<()> {
+pub(crate) fn download(
+    url: &str,
+    to: &Path,
+    sha256: &str,
+    progress: &mut dyn FnMut(u64),
+) -> Result<()> {
     use sha2::{Digest, Sha256};
     if to.exists() && crate::embed::digest(&std::fs::read(to)?) == sha256 {
         progress(std::fs::metadata(to)?.len());
@@ -433,22 +438,36 @@ fn extract_plugin(wheel: &Path, dir: &Path) -> Result<()> {
 /// What a worker embeds with.
 pub enum Session {
     /// The int8 CPU session, run in a worker: the verification lane.
-    Cpu(Box<fastembed::TextEmbedding>, String),
+    Cpu(Box<crate::session::CpuSession>, String),
     /// fp16 on the GPU through ONNX Runtime directly, because fastembed has no
     /// way to hand a session a plugin device.
     Gpu(Box<GpuSession>),
     /// fp16 on an NVIDIA card through the CUDA pack's own ONNX Runtime.
     Cuda(Box<crate::cuda::Session>),
+    /// The Neural Engine, or the GPU, through Core ML: the pack's native
+    /// models rather than an ONNX graph.
+    #[cfg(target_os = "macos")]
+    CoreMl(Box<crate::coreml::Session>),
 }
 
 pub struct GpuSession {
     session: ort::session::Session,
-    tokenizer: tokenizers::Tokenizer,
     device: String,
 }
 
+/// Names the WebGPU adapter to prefer, by a substring of its name, over the
+/// one semlith would choose. `semlith doctor --gpu` prints the choice.
+pub const ADAPTER_ENV: &str = "SEMLITH_GPU_ADAPTER";
+
 impl Session {
-    pub fn open(lane: &str, dir: Option<&Path>) -> Result<Self> {
+    /// `progress(loaded, of)` is told as a lane with several models loads
+    /// them: the Neural Engine's first load compiles each for this Mac.
+    pub fn open(
+        lane: &str,
+        dir: Option<&Path>,
+        adapter: Option<&str>,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<Self> {
         let cache = crate::model_cache_dir()?;
         // Before anything touches ONNX Runtime: the CUDA worker loads the
         // pack's GPU core, and a CPU core loaded first would make that a
@@ -461,16 +480,32 @@ impl Session {
                 pack, &model,
             )?)));
         }
+        #[cfg(target_os = "macos")]
+        if matches!(lane, "ane" | "gpu-coreml") {
+            let pack = dir.context("a Core ML lane needs its pack directory")?;
+            let kind = if lane == "ane" {
+                crate::coreml::Kind::NeuralEngine
+            } else {
+                crate::coreml::Kind::Gpu
+            };
+            return Ok(Session::CoreMl(Box::new(crate::coreml::Session::open(
+                pack, kind, progress,
+            )?)));
+        }
         crate::embed::link_runtime()?;
         match lane {
             "worker" => {
-                let model =
-                    crate::embed::Model::Granite.load(cache, crate::chunk::MAX_CHARS / 2, true)?;
+                let model = crate::session::CpuSession::open(
+                    &cache,
+                    crate::embed::Variant::Int8,
+                    crate::embed::embed_threads(),
+                    true,
+                )?;
                 Ok(Session::Cpu(Box::new(model), crate::system::cpu_name()))
             }
             "gpu" => {
                 let dir = dir.context("the gpu lane needs its component directory")?;
-                Ok(Session::Gpu(Box::new(GpuSession::open(dir, &cache)?)))
+                Ok(Session::Gpu(Box::new(GpuSession::open(dir, adapter)?)))
             }
             other => bail!("unavailable — no lane called {other}"),
         }
@@ -481,6 +516,8 @@ impl Session {
             Session::Cpu(_, name) => name.clone(),
             Session::Gpu(gpu) => gpu.device.clone(),
             Session::Cuda(cuda) => cuda.device(),
+            #[cfg(target_os = "macos")]
+            Session::CoreMl(coreml) => coreml.device(),
         }
     }
 
@@ -489,28 +526,27 @@ impl Session {
             Session::Cpu(..) => "int8-cpu",
             Session::Gpu(_) => "fp16-webgpu",
             Session::Cuda(_) => "fp16-cuda",
+            #[cfg(target_os = "macos")]
+            Session::CoreMl(coreml) => coreml.variant(),
         }
     }
 
-    pub fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    /// One batch of token ids. The worker never tokenises: the run did,
+    /// once, in its prepare stage.
+    pub fn embed(&mut self, batch: &[&[u32]]) -> Result<Vec<Vec<f32>>> {
         match self {
-            Session::Cpu(model, _) => {
-                let mut out = model
-                    .embed(texts, Some(texts.len().max(1)))
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                for vector in &mut out {
-                    crate::normalize(vector);
-                }
-                Ok(out)
-            }
-            Session::Gpu(gpu) => gpu.embed(texts),
-            Session::Cuda(cuda) => cuda.embed(texts),
+            Session::Cpu(model, _) => model.embed(batch),
+            Session::Gpu(gpu) => crate::session::run(&mut gpu.session, batch)
+                .map_err(|e| anyhow::anyhow!("on the GPU: {e:#}")),
+            Session::Cuda(cuda) => cuda.embed(batch),
+            #[cfg(target_os = "macos")]
+            Session::CoreMl(coreml) => coreml.embed(batch),
         }
     }
 }
 
 impl GpuSession {
-    fn open(dir: &Path, cache: &Path) -> Result<Self> {
+    fn open(dir: &Path, named: Option<&str>) -> Result<Self> {
         use ort::AsPointer;
         use ort::environment::Environment;
         let env = Environment::current().context("starting ONNX Runtime")?;
@@ -521,7 +557,8 @@ impl GpuSession {
         // session; unregistering at exit is the process ending.
         std::mem::forget(library);
 
-        let mut chosen = Vec::new();
+        let mut devices = Vec::new();
+        let mut candidates = Vec::new();
         let mut refused = Vec::new();
         for device in env.devices() {
             if device.ep().ok() == Some("CPUExecutionProvider") {
@@ -539,9 +576,13 @@ impl GpuSession {
                 refused.push(format!("{name} (vendor {vendor_id:04x})"));
                 continue;
             }
-            chosen.push((device, format!("{name} GPU (WebGPU)")));
+            candidates.push(Adapter {
+                name,
+                vendor: vendor_id,
+            });
+            devices.push(device);
         }
-        let Some((_, label)) = chosen.first() else {
+        let Some((at, why)) = choose(&candidates, named) else {
             if refused.is_empty() {
                 bail!("unavailable — the WebGPU plugin found no hardware GPU");
             }
@@ -550,68 +591,89 @@ impl GpuSession {
                 refused.join(", ")
             );
         };
-        let label = label.clone();
-        let devices: Vec<_> = chosen.into_iter().take(1).map(|(d, _)| d).collect();
+        let label = format!("{} GPU (WebGPU; {why})", candidates[at].name);
+        let devices = vec![devices.swap_remove(at)];
         let session = ort::session::Session::builder()
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .with_devices(devices, None)
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .commit_from_file(dir.join("model_fp16.onnx"))
             .map_err(|e| anyhow::anyhow!("loading the fp16 model on the GPU: {e}"))?;
-        let tokenizer = crate::embed::granite_tokenizer(cache, crate::chunk::MAX_CHARS / 2)?;
         Ok(Self {
             session,
-            tokenizer,
             device: label,
         })
     }
+}
 
-    /// The same preparation fastembed gives the CPU lane: its tokenizer with
-    /// padding to the batch's longest and truncation at the same length,
-    /// input ids and attention mask, and the CLS token's vector, normalised.
-    fn embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-        let encodings = self
-            .tokenizer
-            .encode_batch(texts.to_vec(), true)
-            .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))?;
-        let seq = encodings[0].len();
-        let n = encodings.len();
-        let ids: Vec<i64> = encodings
+/// One hardware adapter the WebGPU plugin offered.
+#[derive(Debug, Clone)]
+pub struct Adapter {
+    pub name: String,
+    pub vendor: u32,
+}
+
+/// Whether a vendor's GPU is a discrete card. NVIDIA and AMD make discrete
+/// cards (AMD's APUs are the exception this cannot see); Intel's, Apple's and
+/// Qualcomm's are integrated.
+fn discrete(vendor: u32) -> bool {
+    matches!(vendor, 0x10de | 0x1002)
+}
+
+/// Which adapter the lane runs on, and why. A name the setting gives, by a
+/// case-insensitive substring, wins; then a discrete GPU over an integrated
+/// one, because the first adapter a machine lists is usually the one driving
+/// the screen; then the first listed.
+///
+/// ponytail: discrete is read from the vendor. ORT's hardware-device metadata
+/// carries the adapter's own answer on Windows; read it when an AMD APU turns
+/// up on the wrong side of this.
+pub fn choose(adapters: &[Adapter], named: Option<&str>) -> Option<(usize, String)> {
+    if adapters.is_empty() {
+        return None;
+    }
+    if let Some(named) = named.map(str::to_ascii_lowercase)
+        && let Some(at) = adapters
             .iter()
-            .flat_map(|e| e.get_ids().iter().map(|x| *x as i64))
-            .collect();
-        let mask: Vec<i64> = encodings
-            .iter()
-            .flat_map(|e| e.get_attention_mask().iter().map(|x| *x as i64))
-            .collect();
-        let outputs = self
-            .session
-            .run(ort::inputs![
-                "input_ids" => ort::value::Tensor::from_array(([n, seq], ids)).map_err(|e| anyhow::anyhow!("{e}"))?,
-                "attention_mask" => ort::value::Tensor::from_array(([n, seq], mask)).map_err(|e| anyhow::anyhow!("{e}"))?,
-            ])
-            .map_err(|e| anyhow::anyhow!("running the model on the GPU: {e}"))?;
-        let (shape, data) = outputs[0]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let dim = *shape.last().context("an output with no shape")? as usize;
-        let mut vectors = Vec::with_capacity(n);
-        for row in 0..n {
-            let start = row * seq * dim;
-            let mut vector = data[start..start + dim].to_vec();
-            crate::normalize(&mut vector);
-            vectors.push(vector);
-        }
-        Ok(vectors)
+            .position(|a| a.name.to_ascii_lowercase().contains(&named))
+    {
+        return Some((at, format!("named by the gpu_adapter setting ({named})")));
+    }
+    if adapters.len() == 1 {
+        return Some((0, "the only hardware GPU".to_string()));
+    }
+    match adapters.iter().position(|a| discrete(a.vendor)) {
+        Some(at) => Some((at, "a discrete GPU, preferred over an integrated one".to_string())),
+        None => Some((0, "the first of several integrated GPUs".to_string())),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_discrete_adapter_is_chosen_over_an_integrated_one_unless_one_is_named() {
+        let adapters = vec![
+            Adapter {
+                name: "Intel(R) UHD Graphics 770".into(),
+                vendor: 0x8086,
+            },
+            Adapter {
+                name: "NVIDIA GeForce RTX 4070".into(),
+                vendor: 0x10de,
+            },
+        ];
+        let (at, why) = choose(&adapters, None).unwrap();
+        assert_eq!(at, 1, "{why}");
+        assert!(why.contains("discrete"));
+        let (at, why) = choose(&adapters, Some("uhd")).unwrap();
+        assert_eq!(at, 0);
+        assert!(why.contains("named"));
+        // A name nothing matches falls back to the rule.
+        assert_eq!(choose(&adapters, Some("radeon")).unwrap().0, 1);
+        assert!(choose(&[], None).is_none());
+    }
 
     #[test]
     fn software_renderers_are_refused_by_vendor_or_name() {

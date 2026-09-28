@@ -724,6 +724,14 @@ pub fn file_hash(db: &Connection, path: &str) -> Result<Option<String>> {
         .optional()?)
 }
 
+/// Every stored path's recorded hash, read once for a whole index pass so its
+/// prepare stage can tell an unchanged file without the database.
+pub fn all_hashes(db: &Connection) -> Result<std::collections::HashMap<String, String>> {
+    let mut stmt = db.prepare("SELECT path, hash FROM files")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Drop a file and its chunks, returning the chunk ids so the caller can
 /// evict them from the vector index too.
 pub fn delete_file(db: &Connection, path: &str, now: i64) -> Result<Vec<u64>> {

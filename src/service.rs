@@ -321,6 +321,9 @@ mod platform {
              ExecStart={exe}{port}\n\
              Restart=always\n\
              RestartSec=2\n\
+             Nice=5\n\
+             CPUWeight=50\n\
+             IOWeight=50\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",

@@ -1,30 +1,42 @@
-//! The CPU and the GPU sharing every index run.
+//! Every device sharing every index run.
 //!
-//! An index run's window of sorted chunks is split into batches that *lanes*
-//! pull when they are free. The CPU lane is the run's own in-process session,
-//! as it always was. A GPU lane is a worker process — this same binary started
-//! as `semlith __embed-worker <lane>` — speaking length-framed batches over its
-//! stdin and stdout, shared by every run in the daemon.
+//! An index run hands its chunks to *lanes* in token-budget batches (see
+//! [`crate::pipeline`]). The CPU lane is the run's own session on a thread of
+//! its own. Every other lane is a worker process — this same binary started as
+//! `semlith __embed-worker <lane>` — speaking length-framed batches of token
+//! ids over its stdin and stdout, shared by every run in the process.
 //!
 //! The worker process is the isolation boundary, and the reason there is one.
-//! A GPU driver that crashes or aborts kills the worker, never the daemon; the
-//! batch it held goes back to the queue for another lane, the lane is marked
+//! A driver that crashes or aborts kills the worker, never the daemon; the
+//! batch it held goes back to the run for another lane, the lane is marked
 //! failed with its reason, and the run completes with the same files and
-//! chunks. Its GPU memory goes with it when it exits after an idle minute. And
-//! a CUDA worker can load a different ONNX Runtime from the daemon's.
+//! chunks. Its device memory goes with it when it exits after an idle minute.
+//! And a worker can load a runtime of its own: the CUDA pack's ONNX Runtime,
+//! Core ML, NVIDIA's and Intel's plugin providers, llama.cpp's server.
 //!
-//! Lanes: `gpu` is WebGPU (Metal, D3D12 or Vulkan) through Microsoft's plugin
-//! execution provider and the fp16 variant of the model; `cuda` is NVIDIA's
-//! runtime through a pack fetched only on an explicit turn-on; `worker` is a
-//! CPU-backed worker, never on by default, which is how the whole worker path
-//! — spawn, handshake, queue, failure, fallback — is checked on machines that
-//! have no GPU at all, which is every CI runner but one.
+//! Lanes:
+//! - `ane` — the Neural Engine on Apple silicon, through Core ML and the
+//!   `coreml` pack. On by default once the pack is installed; while it runs no
+//!   CPU lane runs beside it, because two int8 threads cut it from 236 to 79
+//!   chunks/s on the M1.
+//! - `gpu` — the GPU: Core ML's GPU on a Mac with the `coreml` pack (73.2
+//!   chunks/s on the M1 against WebGPU's 43.7), WebGPU through Microsoft's
+//!   plugin elsewhere. Off beside the Neural Engine unless `gpu-beside-ane`
+//!   is on: it adds 30 % in bursts and 4 % sustained on a fanless Air.
+//! - `cuda`, `trt`, `openvino`, `llama` — NVIDIA's CUDA and TensorRT for RTX,
+//!   Intel's OpenVINO, and llama.cpp on Metal or Vulkan. Experimental: off
+//!   until somebody turns one on, built and checked without the hardware, and
+//!   labelled so everywhere a lane is shown. No throughput is claimed for them.
+//! - `worker` — a CPU-backed worker, never on by default, which is how the
+//!   whole worker path is checked on machines that have no accelerator.
 //!
-//! Before a lane's first real batch the worker embeds 32 fixed chunks and
+//! A lane starts in the background the first time a run could use it and
+//! takes batches only once its worker has said hello; until then the run goes
+//! on without it. Before that hello the worker embeds 32 fixed chunks and
 //! compares them with CPU fp32 vectors committed to the repository. A lane
 //! whose cosine falls below [`MIN_COSINE_FP16`] is refused rather than used:
-//! a GPU that produces wrong vectors fails silently otherwise, because the run
-//! succeeds and search simply gets worse.
+//! a device that produces wrong vectors fails silently otherwise, because the
+//! run succeeds and search simply gets worse.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -34,13 +46,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-/// Chunks a GPU lane takes at once. Measured on the M1's Metal: 50.6 chunks/s
-/// at 16, length-sorted, against 19.5 on the CPU path of the time.
-pub const GPU_BATCH: usize = 16;
-
-/// Chunks the CUDA lane takes at once. A discrete card is starved by less.
-pub const CUDA_BATCH: usize = 64;
-
 /// How long one batch may take on a lane before the lane is failed. A hung
 /// driver is a failed lane, not a run that never ends.
 const BATCH_DEADLINE: Duration = Duration::from_secs(30);
@@ -49,8 +54,17 @@ const BATCH_DEADLINE: Duration = Duration::from_secs(30);
 /// can drive the hang path without waiting half a minute.
 const DEADLINE_ENV: &str = "SEMLITH_ACCEL_DEADLINE_MS";
 
-/// How long a worker is kept with nothing to do. Its GPU memory goes with it.
+/// How long a worker may take to say hello. The Neural Engine's first load on
+/// a Mac compiles every model for this machine: 163 s for all six on the M1.
+const HELLO_DEADLINE: Duration = Duration::from_secs(20 * 60);
+
+/// How long a worker is kept with nothing to do. Its device memory goes with
+/// it.
 const WORKER_IDLE: Duration = Duration::from_secs(60);
+
+/// Batches a worker holds at once: one it is computing and the next already
+/// in its pipe, so it never waits on the round trip for its next batch.
+const WORKER_DEPTH: usize = 2;
 
 /// The lowest cosine against the fp32 fixture an fp16 lane may show, on every
 /// one of the 32 chunks.
@@ -60,12 +74,13 @@ pub const MIN_COSINE_FP16: f32 = 0.999;
 /// about 0.013 on its own (measured 0.987 on the 2026-09-23 corpus).
 const MIN_COSINE_INT8: f32 = 0.97;
 
-/// Which lanes are on: a comma list such as `cpu,gpu`. Takes precedence over
-/// the saved setting, like the other limit variables.
+/// Which lanes are on: a comma list such as `cpu,gpu,ane`. Takes precedence
+/// over the saved setting, like the other limit variables.
 pub const ACCEL_ENV: &str = "SEMLITH_ACCEL";
 
 /// Fault injection for the worker, read only by the worker:
-/// `<lane>:load`, `<lane>:batch:N` (fail the Nth batch) or `<lane>:hang:MS`.
+/// `<lane>:load`, `<lane>:batch:N` (fail the Nth batch), `<lane>:hang:MS`, or
+/// `<lane>:poison:zero|nan|inf` (spoil the first vector of every batch).
 pub const FAULT_ENV: &str = "SEMLITH_FAULT_ACCEL";
 
 /// The known-answer fixture: 32 chunks and their CPU fp32 vectors.
@@ -76,13 +91,19 @@ const DIM: usize = 384;
 
 // ------------------------------------------------------------------ settings
 
-/// The three switches, as `settings.json` holds them.
+/// The switches, as `settings.json` holds them. Absent means the default.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Switches {
     pub cpu: Option<bool>,
     pub gpu: Option<bool>,
     pub cuda: Option<bool>,
+    pub ane: Option<bool>,
+    pub trt: Option<bool>,
+    pub openvino: Option<bool>,
+    pub llama: Option<bool>,
+    /// The GPU lane beside the Neural Engine, which is off by default.
+    pub gpu_beside_ane: Option<bool>,
 }
 
 /// Which lanes are on, and where that came from.
@@ -91,15 +112,37 @@ pub struct Enabled {
     pub cpu: bool,
     pub gpu: bool,
     pub cuda: bool,
+    pub ane: bool,
+    pub trt: bool,
+    pub openvino: bool,
+    pub llama: bool,
+    pub gpu_beside_ane: bool,
     /// The CPU-backed worker, for verification. Only the environment turns
     /// it on.
     pub worker: bool,
     pub source: &'static str,
 }
 
+impl Enabled {
+    pub fn lane(&self, id: &str) -> bool {
+        match id {
+            "cpu" => self.cpu,
+            "gpu" => self.gpu,
+            "cuda" => self.cuda,
+            "ane" => self.ane,
+            "trt" => self.trt,
+            "openvino" => self.openvino,
+            "llama" => self.llama,
+            "worker" => self.worker,
+            _ => false,
+        }
+    }
+}
+
 /// The switches in force: the environment, then the saved setting, then the
-/// defaults (CPU and GPU on; CUDA off, because its pack is 1 to 2.6 GB and is
-/// fetched only when somebody asks for it).
+/// defaults. CPU, GPU and the Neural Engine are on; CUDA, TensorRT for RTX,
+/// OpenVINO and llama.cpp are experimental and off, and each is fetched only
+/// when somebody turns it on.
 pub fn enabled() -> Enabled {
     if let Ok(list) = std::env::var(ACCEL_ENV) {
         let has = |name: &str| list.split(',').any(|item| item.trim() == name);
@@ -107,6 +150,11 @@ pub fn enabled() -> Enabled {
             cpu: has("cpu"),
             gpu: has("gpu"),
             cuda: has("cuda"),
+            ane: has("ane"),
+            trt: has("trt"),
+            openvino: has("openvino"),
+            llama: has("llama"),
+            gpu_beside_ane: has("gpu-beside-ane"),
             worker: has("worker"),
             source: "set by the environment",
         };
@@ -116,6 +164,11 @@ pub fn enabled() -> Enabled {
         cpu: saved.cpu.unwrap_or(true),
         gpu: saved.gpu.unwrap_or(true),
         cuda: saved.cuda.unwrap_or(false),
+        ane: saved.ane.unwrap_or(true),
+        trt: saved.trt.unwrap_or(false),
+        openvino: saved.openvino.unwrap_or(false),
+        llama: saved.llama.unwrap_or(false),
+        gpu_beside_ane: saved.gpu_beside_ane.unwrap_or(false),
         worker: false,
         source: if saved == Switches::default() {
             "default"
@@ -127,6 +180,65 @@ pub fn enabled() -> Enabled {
 
 // --------------------------------------------------------------------- lanes
 
+/// What each lane is, in the order they are shown.
+pub struct Spec {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// The vector variant it makes, as a store's `variants` row counts it.
+    pub variant: &'static str,
+    /// Built and checked without its hardware; labelled wherever it is shown.
+    pub experimental: bool,
+}
+
+pub const SPECS: &[Spec] = &[
+    Spec {
+        id: "ane",
+        label: "Neural Engine",
+        variant: "fp16-ane",
+        experimental: false,
+    },
+    Spec {
+        id: "gpu",
+        label: "GPU",
+        variant: "fp16-webgpu",
+        experimental: false,
+    },
+    Spec {
+        id: "cuda",
+        label: "CUDA",
+        variant: "fp16-cuda",
+        experimental: true,
+    },
+    Spec {
+        id: "trt",
+        label: "TensorRT for RTX",
+        variant: "fp16-trt",
+        experimental: true,
+    },
+    Spec {
+        id: "openvino",
+        label: "OpenVINO",
+        variant: "openvino",
+        experimental: true,
+    },
+    Spec {
+        id: "llama",
+        label: "llama.cpp",
+        variant: "gguf-f16",
+        experimental: true,
+    },
+    Spec {
+        id: "worker",
+        label: "CPU worker",
+        variant: "int8-cpu",
+        experimental: false,
+    },
+];
+
+pub fn spec(id: &str) -> Option<&'static Spec> {
+    SPECS.iter().find(|s| s.id == id)
+}
+
 /// Where a lane stands, as the Machine limits card shows it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "state", rename_all = "lowercase")]
@@ -134,6 +246,11 @@ pub enum Status {
     /// Enabled and not yet asked for anything, or its worker exited idle.
     Idle,
     Starting,
+    /// Loading its models for the first time on this machine, which on the
+    /// Neural Engine is a compilation of minutes. The run goes on without it.
+    Compiling {
+        percent: u8,
+    },
     Active,
     Downloading {
         percent: u8,
@@ -146,17 +263,24 @@ pub enum Status {
     },
 }
 
-struct Job {
-    texts: Vec<String>,
-    reply: mpsc::Sender<std::result::Result<Vec<Vec<f32>>, String>>,
+enum Job {
+    /// Start the worker, if there is none, and nothing else.
+    Warm,
+    Batch {
+        batch: Vec<crate::session::Ids>,
+        reply: mpsc::Sender<std::result::Result<Vec<Vec<f32>>, String>>,
+    },
 }
 
 /// One accelerator lane, shared by every run in the process.
 pub struct Lane {
     pub id: &'static str,
+    pub experimental: bool,
     status: Mutex<Status>,
     device: Mutex<Option<String>>,
-    variant: &'static str,
+    /// Set from the worker's hello: the GPU lane is Core ML on a Mac with the
+    /// pack and WebGPU elsewhere, and says which.
+    variant: Mutex<&'static str>,
     /// Chunks this lane has embedded, and when, for its live share.
     samples: Mutex<std::collections::VecDeque<(Instant, u64)>>,
     chunks: AtomicU64,
@@ -164,28 +288,34 @@ pub struct Lane {
 }
 
 impl Lane {
-    fn new(id: &'static str, variant: &'static str) -> Self {
+    fn new(spec: &Spec) -> Self {
         Self {
-            id,
+            id: spec.id,
+            experimental: spec.experimental,
             status: Mutex::new(Status::Idle),
             device: Mutex::new(None),
-            variant,
+            variant: Mutex::new(spec.variant),
             samples: Mutex::new(std::collections::VecDeque::new()),
             chunks: AtomicU64::new(0),
             jobs: Mutex::new(None),
         }
     }
 
-    pub fn batch(&self) -> usize {
-        if self.id == "cuda" {
-            CUDA_BATCH
-        } else {
-            GPU_BATCH
+    /// Padded tokens per batch this lane takes: its floor, its first guess
+    /// before it has a measured pace, and its ceiling. The run sizes each
+    /// batch from the lane's own pace inside these.
+    pub fn token_budget(&self) -> (usize, usize, usize) {
+        match self.id {
+            // A discrete card is starved by less.
+            "cuda" | "trt" => (2_048, 16_384, 65_536),
+            // Four rows a call, so several calls a batch keep it busy.
+            "ane" => (1_024, 4_096, 12_288),
+            _ => (512, 4_096, 16_384),
         }
     }
 
     pub fn variant(&self) -> &'static str {
-        self.variant
+        *self.variant.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn status(&self) -> Status {
@@ -199,7 +329,7 @@ impl Lane {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
     }
 
-    /// Whether a run may hand this lane a batch now.
+    /// Whether the lane can be used at all: not failed, not unavailable.
     pub fn usable(&self) -> bool {
         !matches!(
             self.status(),
@@ -207,8 +337,26 @@ impl Lane {
         )
     }
 
-    /// Clear a failure, so the next batch tries the lane again. A switch
-    /// turned off and on is how a user asks for that.
+    /// Whether a run may hand this lane a batch now: its worker said hello.
+    pub fn ready(&self) -> bool {
+        self.status() == Status::Active
+    }
+
+    /// Start the lane's worker in the background if it has none. A run keeps
+    /// going without the lane until it is ready.
+    pub fn wake(self: &Arc<Self>) {
+        {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            if *status != Status::Idle {
+                return;
+            }
+            *status = Status::Starting;
+        }
+        self.send(Job::Warm);
+    }
+
+    /// Clear a failure, so the lane is tried afresh. A switch turned off and
+    /// on is how a user asks for that.
     pub fn reset(&self) {
         if matches!(
             self.status(),
@@ -218,13 +366,19 @@ impl Lane {
         }
     }
 
-    /// Hand one batch to the lane. The answer arrives on the returned
-    /// receiver: vectors in the order of `texts`, or why the lane could not.
+    /// Hand one batch of token ids to the lane. The answer arrives on the
+    /// returned receiver: vectors in the order of `batch`, or why the lane
+    /// could not.
     pub fn submit(
         self: &Arc<Self>,
-        texts: Vec<String>,
+        batch: Vec<crate::session::Ids>,
     ) -> mpsc::Receiver<std::result::Result<Vec<Vec<f32>>, String>> {
         let (reply, answer) = mpsc::channel();
+        self.send(Job::Batch { batch, reply });
+        answer
+    }
+
+    fn send(self: &Arc<Self>, job: Job) {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         if jobs.is_none() {
             let (tx, rx) = mpsc::channel();
@@ -239,21 +393,19 @@ impl Lane {
                 *jobs = Some(tx);
             }
         }
-        let job = Job { texts, reply };
-        match jobs.as_ref() {
-            Some(tx) => {
-                if let Err(mpsc::SendError(job)) = tx.send(job) {
+        let refused = match jobs.as_ref() {
+            Some(tx) => match tx.send(job) {
+                Ok(()) => None,
+                Err(mpsc::SendError(job)) => {
                     *jobs = None;
-                    let _ = job.reply.send(Err("the lane's dispatcher has gone".into()));
+                    Some((job, "the lane's dispatcher has gone"))
                 }
-            }
-            None => {
-                let _ = job
-                    .reply
-                    .send(Err("the lane's dispatcher could not start".into()));
-            }
+            },
+            None => Some((job, "the lane's dispatcher could not start")),
+        };
+        if let Some((Job::Batch { reply, .. }, why)) = refused {
+            let _ = reply.send(Err(why.into()));
         }
-        answer
     }
 
     /// Count chunks this lane embedded, for its share of the rate.
@@ -288,7 +440,14 @@ impl Lane {
 static CPU: OnceLock<Arc<Lane>> = OnceLock::new();
 
 fn cpu_lane() -> &'static Arc<Lane> {
-    CPU.get_or_init(|| Arc::new(Lane::new("cpu", "int8-cpu")))
+    CPU.get_or_init(|| {
+        Arc::new(Lane::new(&Spec {
+            id: "cpu",
+            label: "CPU",
+            variant: "int8-cpu",
+            experimental: false,
+        }))
+    })
 }
 
 /// Count chunks the in-process CPU lane embedded.
@@ -296,12 +455,13 @@ pub fn count_cpu(chunks: usize) {
     cpu_lane().count(chunks);
 }
 
-/// The worker lanes. Created on first use; only a daemon ever uses them.
+/// The worker lanes. Created on first use.
 static LANES: OnceLock<Vec<Arc<Lane>>> = OnceLock::new();
 
-/// Whether this process hands batches to lanes at all. Only the daemon does:
-/// a `semlith index` in a terminal, and the retrieval harness, stay on the
-/// CPU alone, which is what keeps their figures reproducible (issue #88).
+/// Whether this process hands batches to lanes at all. The daemon does, and
+/// from 0.32.0 so do `semlith index` and `semlith watch` in a terminal. The
+/// library alone does not: the retrieval harness and the tests stay on the
+/// CPU, which is what keeps their figures reproducible (issue #88).
 static MANAGED: AtomicBool = AtomicBool::new(false);
 
 pub fn manage() {
@@ -309,69 +469,106 @@ pub fn manage() {
 }
 
 fn lanes() -> &'static Vec<Arc<Lane>> {
-    LANES.get_or_init(|| {
-        vec![
-            Arc::new(Lane::new("gpu", "fp16-webgpu")),
-            Arc::new(Lane::new("cuda", "fp16-cuda")),
-            Arc::new(Lane::new("worker", "int8-cpu")),
-        ]
-    })
+    LANES.get_or_init(|| SPECS.iter().map(|spec| Arc::new(Lane::new(spec))).collect())
 }
 
-/// The worker lanes a run may hand batches to now, and whether its own CPU
-/// session may take batches as well.
+pub fn lane(id: &str) -> Option<&'static Arc<Lane>> {
+    lanes().iter().find(|lane| lane.id == id)
+}
+
+/// Why a lane cannot run on this machine at all, before anything is fetched.
+pub fn unavailable_here(id: &str) -> Option<String> {
+    let apple = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+    let x86_windows_or_linux = cfg!(all(
+        target_arch = "x86_64",
+        any(windows, target_os = "linux")
+    ));
+    match id {
+        "ane" if !apple => Some("the Neural Engine lane needs a Mac with Apple silicon".into()),
+        "cuda" => crate::cuda::unavailable_here(),
+        "trt" | "openvino" if !x86_windows_or_linux => Some(format!(
+            "the {} lane is built for Windows and Linux on x86_64",
+            spec(id).map_or(id, |s| s.label)
+        )),
+        "llama" if !(apple || x86_windows_or_linux) => {
+            Some("no llama.cpp build is pinned for this platform".into())
+        }
+        _ => None,
+    }
+}
+
+/// The worker lanes a run may use now, and whether its own CPU lane may take
+/// batches as well. A lane in the list may still be starting: the run wakes
+/// it and uses it once it is ready.
 ///
-/// The CPU switch is honoured only while a worker lane is usable: with no GPU,
-/// or a failed one, the CPU carries on as the fallback whatever the switch
-/// says, and the card says so.
+/// The lane policy lives here. On Apple silicon the Neural Engine goes first
+/// and, once it is running, nothing else runs beside it: no CPU embedding
+/// lane (it takes the cores that feed the Neural Engine), and no GPU lane
+/// unless `gpu-beside-ane` is on. Elsewhere every accelerator that is on runs,
+/// with the CPU beside them — measured on the M1 before the Neural Engine
+/// existed, CPU beside WebGPU was 1.52x WebGPU alone. With no accelerator
+/// ready the CPU carries the run whatever its switch says.
 pub fn for_run() -> (Vec<Arc<Lane>>, bool) {
     if !MANAGED.load(Ordering::Relaxed) {
         return (Vec::new(), true);
     }
     let on = enabled();
-    let lanes: Vec<Arc<Lane>> = lanes()
+    let mut chosen: Vec<Arc<Lane>> = lanes()
         .iter()
-        .filter(|lane| match lane.id {
-            "gpu" => on.gpu,
-            "cuda" => on.cuda,
-            "worker" => on.worker,
-            _ => false,
-        })
+        .filter(|lane| on.lane(lane.id) && unavailable_here(lane.id).is_none())
         .filter(|lane| lane.usable())
         .cloned()
         .collect();
-    let cpu = on.cpu || lanes.is_empty();
-    (lanes, cpu)
+    let mut cpu = on.cpu;
+    let ane_running = chosen.iter().any(|lane| lane.id == "ane" && lane.ready());
+    if ane_running {
+        cpu = false;
+        if !on.gpu_beside_ane {
+            chosen.retain(|lane| lane.id != "gpu");
+        }
+    }
+    let any_ready = chosen.iter().any(|lane| lane.ready());
+    (chosen, cpu || !any_ready)
 }
 
 /// Every lane as the Machine limits card and `semlith accel status` show it.
 pub fn snapshot() -> serde_json::Value {
     let on = enabled();
     let cpu = cpu_lane();
+    let cache = crate::model_cache_dir().ok();
     let mut rows = vec![serde_json::json!({
         "lane": "cpu",
+        "label": "CPU",
         "enabled": on.cpu,
+        "experimental": false,
         "status": Status::Active,
         "device": crate::system::cpu_name(),
-        "variant": cpu.variant,
+        "variant": cpu.variant(),
         "rate": round(cpu.rate()),
     })];
     for lane in lanes() {
-        let enabled = match lane.id {
-            "gpu" => on.gpu,
-            "cuda" => on.cuda,
-            _ => on.worker,
-        };
+        let enabled = on.lane(lane.id);
         if lane.id == "worker" && !enabled {
             continue;
         }
+        let status = match unavailable_here(lane.id) {
+            Some(reason) => Status::Unavailable { reason },
+            None => lane.status(),
+        };
+        let installed = cache
+            .as_deref()
+            .and_then(|cache| pack_for(lane.id).map(|pack| crate::packs::installed(cache, &pack)));
         rows.push(serde_json::json!({
             "lane": lane.id,
+            "label": spec(lane.id).map_or(lane.id, |s| s.label),
             "enabled": enabled,
-            "status": lane.status(),
+            "experimental": lane.experimental,
+            "status": status,
             "device": lane.device.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            "variant": lane.variant,
+            "variant": lane.variant(),
             "rate": round(lane.rate()),
+            "installed": installed.map(|dir| dir.is_some()),
+            "download_bytes": pack_for(lane.id).map(|pack| pack.bytes()),
         }));
     }
     let total: f64 = rows.iter().filter_map(|row| row["rate"].as_f64()).sum();
@@ -383,15 +580,16 @@ pub fn snapshot() -> serde_json::Value {
             0.0
         });
     }
-    let gpu_usable = lanes()
+    let accel_ready = lanes()
         .iter()
-        .any(|lane| lane.id != "worker" && lane.usable() && lane.status() != Status::Idle);
+        .any(|lane| lane.id != "worker" && on.lane(lane.id) && lane.ready());
     serde_json::json!({
         "lanes": rows,
         "source": on.source,
+        "gpu_beside_ane": on.gpu_beside_ane,
         // Said, not implied: the CPU carries the run whatever its switch says
         // while no worker lane can.
-        "cpu_fallback": !on.cpu && !gpu_usable,
+        "cpu_fallback": !on.cpu && !accel_ready,
     })
 }
 
@@ -399,27 +597,36 @@ fn round(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
+/// The names `semlith accel on|off` takes.
+pub const SWITCH_NAMES: &str = "cpu, gpu, ane, cuda, trt, openvino, llama, gpu-beside-ane";
+
 /// Turn a lane on or off, as the page's switch and `semlith accel` do.
 ///
-/// Saved to `settings.json` and read by every run at its next window, which is
-/// the "next batch" the contract promises. Turning a failed lane on again
+/// Saved to `settings.json` and read by every run before every batch, which
+/// is the "next batch" the switch promises. Turning a failed lane on again
 /// clears its failure so it is tried afresh. The CPU may be turned off only
-/// while a GPU lane can carry the work; with none, the refusal says why.
-pub fn set(lane: &str, on: bool) -> Result<String> {
+/// while an accelerator lane can carry the work; with none, the refusal says
+/// why. Turning on a lane whose pack is not here fetches it first, with
+/// `progress` told how far the download has got.
+pub fn set(lane_id: &str, on: bool) -> Result<String> {
+    set_with_progress(lane_id, on, &mut |_| {})
+}
+
+pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) -> Result<String> {
     if std::env::var(ACCEL_ENV).is_ok() {
         bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
     }
     let mut settings = crate::home::Settings::load();
-    match (lane, on) {
+    match (lane_id, on) {
         ("cpu", false) => {
-            let gpu_on = enabled().gpu || enabled().cuda;
-            let can = gpu_on
-                && lanes().iter().any(|l| l.id != "worker" && l.usable())
-                && detect_gpu().is_ok();
+            let now = enabled();
+            let can = lanes().iter().any(|l| {
+                l.id != "worker" && now.lane(l.id) && l.usable() && unavailable_here(l.id).is_none()
+            }) && (now.ane || detect_gpu().is_ok());
             if !can {
                 bail!(
-                    "the CPU cannot be turned off: no GPU lane is on and usable here ({}), so the CPU \
-                     is what indexes",
+                    "the CPU cannot be turned off: no accelerator lane is on and usable here ({}), \
+                     so the CPU is what indexes",
                     detect_gpu()
                         .err()
                         .unwrap_or_else(|| "the GPU lane is off".to_string())
@@ -429,33 +636,70 @@ pub fn set(lane: &str, on: bool) -> Result<String> {
         }
         ("cpu", true) => settings.accelerators.cpu = Some(true),
         ("gpu", _) => settings.accelerators.gpu = Some(on),
-        ("cuda", _) => {
-            if let Some(why) = crate::gpu::cuda_unavailable_here() {
+        ("gpu-beside-ane", _) => settings.accelerators.gpu_beside_ane = Some(on),
+        (id @ ("ane" | "cuda" | "trt" | "openvino" | "llama"), _) => {
+            if on && let Some(why) = unavailable_here(id) {
                 bail!("{why}");
             }
-            settings.accelerators.cuda = Some(on);
+            if on && let Some(pack) = pack_for(id) {
+                let cache = crate::model_cache_dir()?;
+                crate::packs::fetch(&cache, &pack, progress)
+                    .with_context(|| format!("fetching the {} pack", pack.name))?;
+            }
+            let slot = match id {
+                "ane" => &mut settings.accelerators.ane,
+                "cuda" => &mut settings.accelerators.cuda,
+                "trt" => &mut settings.accelerators.trt,
+                "openvino" => &mut settings.accelerators.openvino,
+                _ => &mut settings.accelerators.llama,
+            };
+            *slot = Some(on);
         }
-        (other, _) => bail!("there is no lane called {other}; the lanes are cpu, gpu and cuda"),
+        (other, _) => bail!("there is no lane called {other}; the switches are {SWITCH_NAMES}"),
     }
     settings.save()?;
-    if on && let Some(found) = lanes().iter().find(|l| l.id == lane) {
+    if on && let Some(found) = lane(lane_id) {
         found.reset();
     }
+    let note = spec(lane_id)
+        .filter(|s| s.experimental && on)
+        .map(|s| {
+            format!(
+                " ({} is experimental: built and checked without its hardware, and not measured on it)",
+                s.label
+            )
+        })
+        .unwrap_or_default();
     Ok(format!(
-        "{lane} {} — runs pick it up at their next batch",
+        "{lane_id} {} — runs pick it up at their next batch{note}",
         if on { "on" } else { "off" }
     ))
 }
 
+/// The pack a lane's worker needs beyond the model, if any.
+pub fn pack_for(id: &str) -> Option<crate::packs::Pack> {
+    match id {
+        "ane" => Some(crate::packs::coreml()),
+        "trt" => Some(crate::trt::pack()),
+        "openvino" => Some(crate::openvino::pack()),
+        "llama" => Some(crate::llama::pack()),
+        _ => None,
+    }
+}
+
 /// Delete a lane's downloaded components, and say how many bytes that freed.
 /// Turning a lane off never does this; only asking does.
-pub fn remove(lane: &str) -> Result<u64> {
+pub fn remove(lane_id: &str) -> Result<u64> {
     let cache = crate::model_cache_dir()?;
-    let dir = match lane {
+    if let Some(pack) = pack_for(lane_id) {
+        return crate::packs::remove(&cache, &pack);
+    }
+    let dir = match lane_id {
         "gpu" => component_dir(&cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION)),
         "cuda" => crate::gpu::cuda_dir(&cache),
         other => bail!(
-            "{other} has nothing downloaded to remove; the lanes with components are gpu and cuda"
+            "{other} has nothing downloaded to remove; the lanes with components are gpu, ane, \
+             cuda, trt, openvino and llama"
         ),
     };
     let bytes = dir_bytes(&dir);
@@ -471,14 +715,21 @@ pub fn component_bytes() -> serde_json::Value {
     let Ok(cache) = crate::model_cache_dir() else {
         return serde_json::json!({});
     };
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "gpu": dir_bytes(&component_dir(&cache, &format!("webgpu-{}", crate::gpu::WEBGPU_VERSION))),
         "cuda": dir_bytes(&crate::gpu::cuda_dir(&cache)),
         "cuda_download": crate::gpu::cuda_pack_bytes(),
-    })
+    });
+    for id in ["ane", "trt", "openvino", "llama"] {
+        if let Some(pack) = pack_for(id) {
+            out[id] = serde_json::json!(dir_bytes(&pack.dir(&cache)));
+            out[format!("{id}_download")] = serde_json::json!(pack.bytes());
+        }
+    }
+    out
 }
 
-fn dir_bytes(dir: &Path) -> u64 {
+pub(crate) fn dir_bytes(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -518,65 +769,122 @@ impl Drop for Worker {
     }
 }
 
+/// One batch sent to the worker and not yet answered.
+struct Sent {
+    rows: usize,
+    reply: mpsc::Sender<std::result::Result<Vec<Vec<f32>>, String>>,
+}
+
 fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
     let mut worker: Option<Worker> = None;
-    loop {
-        let job = match jobs.recv_timeout(WORKER_IDLE) {
-            Ok(job) => job,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Idle: the worker goes, and its device memory with it.
-                if worker.take().is_some() && lane.status() == Status::Active {
-                    lane.set(Status::Idle);
-                }
-                continue;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
-        };
-        if !lane.usable() {
-            let _ = job.reply.send(Err(reason_of(&lane.status())));
-            continue;
+    let mut sent: std::collections::VecDeque<Sent> = std::collections::VecDeque::new();
+    // What to do when the worker cannot be trusted any more: kill it, fail
+    // the lane with the reason, and hand every batch it held back.
+    let fail = |lane: &Lane,
+                worker: &mut Option<Worker>,
+                sent: &mut std::collections::VecDeque<Sent>,
+                reason: String| {
+        *worker = None;
+        lane.set(Status::Failed {
+            reason: reason.clone(),
+        });
+        for batch in sent.drain(..) {
+            let _ = batch.reply.send(Err(reason.clone()));
         }
-        if worker.is_none() {
-            lane.set(Status::Starting);
-            match start(&lane) {
-                Ok((started, _)) => {
-                    worker = Some(started);
-                    lane.set(Status::Active);
-                }
-                Err(e) => {
-                    let reason = format!("{e:#}");
-                    // Nothing on this machine for the lane to use is not a
-                    // failure; everything else is.
-                    if reason.starts_with("unavailable") {
-                        lane.set(Status::Unavailable {
-                            reason: reason.trim_start_matches("unavailable — ").to_string(),
-                        });
-                    } else {
-                        lane.set(Status::Failed {
-                            reason: reason.clone(),
-                        });
+    };
+    loop {
+        // Take a job: wait for one only when nothing is in flight.
+        let job = if sent.is_empty() {
+            match jobs.recv_timeout(WORKER_IDLE) {
+                Ok(job) => Some(job),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Idle: the worker goes, and its device memory with it.
+                    if worker.take().is_some() && lane.status() == Status::Active {
+                        lane.set(Status::Idle);
                     }
-                    let _ = job.reply.send(Err(reason));
                     continue;
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        } else if sent.len() < WORKER_DEPTH {
+            jobs.try_recv().ok()
+        } else {
+            None
+        };
+        if let Some(job) = job {
+            let refuse = |job: Job, why: String| {
+                if let Job::Batch { reply, .. } = job {
+                    let _ = reply.send(Err(why));
+                }
+            };
+            if !lane.usable() {
+                refuse(job, reason_of(&lane.status()));
+                continue;
+            }
+            if worker.is_none() {
+                lane.set(Status::Starting);
+                match start(&lane) {
+                    Ok((started, _)) => {
+                        worker = Some(started);
+                        lane.set(Status::Active);
+                    }
+                    Err(e) => {
+                        let reason = format!("{e:#}");
+                        // Nothing on this machine for the lane to use is not a
+                        // failure; everything else is.
+                        if let Some(why) = reason.strip_prefix("unavailable — ") {
+                            lane.set(Status::Unavailable {
+                                reason: why.to_string(),
+                            });
+                        } else {
+                            lane.set(Status::Failed {
+                                reason: reason.clone(),
+                            });
+                        }
+                        refuse(job, reason);
+                        continue;
+                    }
+                }
+            }
+            let Job::Batch { batch, reply } = job else {
+                continue;
+            };
+            let running = worker.as_mut().expect("started above");
+            if let Err(e) = write_frame(&mut running.stdin, &encode_ids(&batch)) {
+                let _ = reply.send(Err(format!("the worker stopped reading: {e}")));
+                fail(&lane, &mut worker, &mut sent, format!("the worker stopped reading: {e}"));
+                continue;
+            }
+            sent.push_back(Sent {
+                rows: batch.len(),
+                reply,
+            });
+            // Another batch may be waiting: send it before reading, so the
+            // worker's next batch is already in its pipe.
+            if sent.len() < WORKER_DEPTH {
+                continue;
             }
         }
-        let running = worker.as_mut().expect("started above");
-        match run_batch(running, &job.texts) {
+        // Read the oldest answer.
+        let Some(oldest) = sent.front() else {
+            continue;
+        };
+        let running = worker.as_mut().expect("a batch in flight has a worker");
+        let answer = match running.answers.recv_timeout(deadline()) {
+            Ok(Ok(frame)) => decode_vectors(&frame, oldest.rows),
+            Ok(Err(e)) => Err(anyhow::anyhow!("the worker exited: {e}")),
+            Err(_) => Err(anyhow::anyhow!(
+                "the worker did not answer a batch within {} s",
+                deadline().as_secs_f32()
+            )),
+        };
+        match answer {
             Ok(vectors) => {
+                let done = sent.pop_front().expect("checked above");
                 lane.count(vectors.len());
-                let _ = job.reply.send(Ok(vectors));
+                let _ = done.reply.send(Ok(vectors));
             }
-            Err(e) => {
-                // The worker is gone or cannot be trusted: kill it, fail the
-                // lane with the reason, and hand the batch back.
-                worker = None;
-                let reason = format!("{e:#}");
-                lane.set(Status::Failed {
-                    reason: reason.clone(),
-                });
-                let _ = job.reply.send(Err(reason));
-            }
+            Err(e) => fail(&lane, &mut worker, &mut sent, format!("{e:#}")),
         }
     }
 }
@@ -588,23 +896,10 @@ fn reason_of(status: &Status) -> String {
     }
 }
 
-fn run_batch(worker: &mut Worker, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    let request = serde_json::to_vec(&serde_json::json!({ "texts": texts }))?;
-    write_frame(&mut worker.stdin, &request).context("the worker stopped reading")?;
-    let frame = match worker.answers.recv_timeout(deadline()) {
-        Ok(Ok(frame)) => frame,
-        Ok(Err(e)) => bail!("the worker exited: {e}"),
-        Err(_) => bail!(
-            "the worker did not answer a batch within {} s",
-            deadline().as_secs_f32()
-        ),
-    };
-    decode_vectors(&frame, texts.len())
-}
-
 /// Run the known-answer check on every lane this machine could use: the CPU
-/// in this process, then each worker lane in a worker of its own. A lane with
-/// nothing to run on is reported with the reason rather than as a failure.
+/// in this process, then each worker lane that is on in a worker of its own.
+/// A lane with nothing to run on is reported with the reason, and a lane that
+/// is off says how to turn it on.
 ///
 /// What `semlith doctor --gpu` prints and the Doctor page shows. Components a
 /// lane needs are fetched first, as a run would, and `say` narrates that.
@@ -630,52 +925,62 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
         Err(e) => serde_json::json!({ "lane": "cpu", "passed": false, "reason": format!("{e:#}") }),
     });
     let on = enabled();
-    for (id, variant) in [
-        ("gpu", "fp16-webgpu"),
-        ("cuda", "fp16-cuda"),
-        ("worker", "int8-cpu"),
-    ] {
-        // A lane that is off is not checked: checking it would fetch its
-        // components, and CUDA's are fetched only on an explicit turn-on.
-        let switched_on = match id {
-            "gpu" => on.gpu,
-            "cuda" => on.cuda,
-            _ => on.worker,
+    for spec in SPECS {
+        let id = spec.id;
+        let base = serde_json::json!({
+            "lane": id,
+            "label": spec.label,
+            "experimental": spec.experimental,
+        });
+        let row = |extra: serde_json::Value| {
+            let mut row = base.clone();
+            if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+                row.extend(extra.clone());
+            }
+            row
         };
-        if !switched_on {
+        if let Some(why) = unavailable_here(id) {
             if id != "worker" {
-                out.push(serde_json::json!({
-                    "lane": id,
-                    "reason": format!("off — semlith accel on {id} turns it on"),
-                }));
+                out.push(row(serde_json::json!({
+                    "reason": format!("unavailable — {why}"),
+                    "fallback": "the CPU carries the run",
+                })));
             }
             continue;
         }
-        say(&format!("checking the {id} lane"));
-        let lane = Arc::new(Lane::new(
-            if id == "gpu" {
-                "gpu"
-            } else if id == "cuda" {
-                "cuda"
-            } else {
-                "worker"
-            },
-            variant,
-        ));
+        // A lane that is off is not checked: checking it would fetch its
+        // components, and an experimental lane's are fetched only on an
+        // explicit turn-on.
+        if !on.lane(id) {
+            if id != "worker" {
+                out.push(row(serde_json::json!({
+                    "reason": format!("off — semlith accel on {id} turns it on"),
+                })));
+            }
+            continue;
+        }
+        say(&format!("checking the {} lane", spec.label));
+        let lane = Arc::new(Lane::new(spec));
         out.push(match start(&lane) {
-            Ok((_, hello)) => serde_json::json!({
-                "lane": id,
+            Ok((_, hello)) => row(serde_json::json!({
                 "device": hello["device"],
                 "variant": hello["variant"],
                 "cosine": hello["cosine"],
                 "chunks_per_s": hello["chunks_per_s"],
                 "passed": true,
-            }),
+            })),
             Err(e) => {
                 let text = format!("{e:#}");
                 match text.strip_prefix("unavailable — ") {
-                    Some(reason) => serde_json::json!({ "lane": id, "reason": format!("unavailable — {reason}") }),
-                    None => serde_json::json!({ "lane": id, "passed": false, "reason": text }),
+                    Some(reason) => row(serde_json::json!({
+                        "reason": format!("unavailable — {reason}"),
+                        "fallback": "the CPU carries the run",
+                    })),
+                    None => row(serde_json::json!({
+                        "passed": false,
+                        "reason": text,
+                        "fallback": "the lane is failed and the CPU carries the run",
+                    })),
                 }
             }
         });
@@ -683,19 +988,51 @@ pub fn check_all(say: impl Fn(&str)) -> Vec<serde_json::Value> {
     out
 }
 
-/// Start a lane's worker: fetch what it needs, spawn it, and read its hello,
-/// which carries the known-answer check.
-fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
-    let args = match lane.id {
+/// The WebGPU adapter a setting names, if any: `SEMLITH_GPU_ADAPTER` or the
+/// saved `gpu_adapter`. Passed to a WebGPU worker, which prefers it.
+fn adapter_choice() -> Option<String> {
+    std::env::var(crate::gpu::ADAPTER_ENV)
+        .ok()
+        .or_else(|| crate::home::Settings::load().gpu_adapter)
+        .filter(|name| !name.trim().is_empty())
+}
+
+/// What a lane's worker is started with: its lane name and a directory.
+fn worker_args(lane: &Arc<Lane>) -> Result<Vec<String>> {
+    if let Some(why) = unavailable_here(lane.id) {
+        bail!("unavailable — {why}");
+    }
+    let cache = crate::model_cache_dir()?;
+    let progress = |percent: u8| lane.set(Status::Downloading { percent });
+    Ok(match lane.id {
+        "ane" => {
+            // Fetched by `setup` or `accel on ane`, never by a run: a run on a
+            // Mac without the pack indexes on the GPU and the CPU instead.
+            let Some(pack) = crate::packs::installed(&cache, &crate::packs::coreml()) else {
+                bail!(
+                    "unavailable — the Neural Engine pack is not installed; `semlith accel on ane` \
+                     or `semlith setup` fetches it"
+                );
+            };
+            vec!["ane".into(), pack.display().to_string()]
+        }
         "gpu" => {
             let device = detect_gpu().map_err(|why| anyhow::anyhow!("unavailable — {why}"))?;
             *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device);
-            let dir = fetch_webgpu(lane).context("fetching the WebGPU components")?;
-            vec![
-                "__embed-worker".to_string(),
-                "gpu".to_string(),
-                dir.display().to_string(),
-            ]
+            // A Mac with the Core ML pack runs its GPU through Core ML.
+            if cfg!(target_os = "macos")
+                && let Some(pack) = crate::packs::installed(&cache, &crate::packs::coreml())
+            {
+                vec!["gpu-coreml".into(), pack.display().to_string()]
+            } else {
+                let dir = crate::gpu::fetch_webgpu(&cache, &mut |p| progress(p))
+                    .context("fetching the WebGPU components")?;
+                let mut args = vec!["gpu".into(), dir.display().to_string()];
+                if let Some(name) = adapter_choice() {
+                    args.push(name);
+                }
+                args
+            }
         }
         "cuda" => {
             if let Some(why) = crate::cuda::unavailable_here() {
@@ -704,26 +1041,36 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
             // Fetched only because somebody turned CUDA on, which is the only
             // way this lane is ever started. The fp16 weights are the WebGPU
             // lane's; the pack is NVIDIA's runtime and ORT's GPU build.
-            let cache = crate::model_cache_dir()?;
-            crate::gpu::fetch_fp16(&cache, &mut |percent| {
-                lane.set(Status::Downloading { percent });
-            })
-            .context("fetching the fp16 model")?;
-            let pack = crate::cuda::fetch_pack(&cache, &mut |percent| {
-                lane.set(Status::Downloading { percent });
-            })
-            .context("fetching the CUDA pack")?;
+            crate::gpu::fetch_fp16(&cache, &mut |p| progress(p))
+                .context("fetching the fp16 model")?;
+            let pack = crate::cuda::fetch_pack(&cache, &mut |p| progress(p))
+                .context("fetching the CUDA pack")?;
             if let Ok(device) = crate::cuda::detect() {
                 *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.name);
             }
-            vec![
-                "__embed-worker".to_string(),
-                "cuda".to_string(),
-                pack.display().to_string(),
-            ]
+            vec!["cuda".into(), pack.display().to_string()]
         }
-        _ => vec!["__embed-worker".to_string(), "worker".to_string()],
-    };
+        id @ ("trt" | "openvino" | "llama") => {
+            let pack = pack_for(id).expect("these lanes have packs");
+            if id != "llama" {
+                crate::gpu::fetch_fp16(&cache, &mut |p| progress(p))
+                    .context("fetching the fp16 model")?;
+            }
+            let dir = crate::packs::fetch(&cache, &pack, &mut |p| progress(p))
+                .with_context(|| format!("fetching the {} pack", pack.name))?;
+            vec![id.into(), dir.display().to_string()]
+        }
+        _ => vec!["worker".into()],
+    })
+}
+
+/// Start a lane's worker: fetch what it needs, spawn it, and read its hello,
+/// which carries the known-answer check. A worker loading models for the
+/// first time says how far it has got before it says hello.
+fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
+    let mut args = vec!["__embed-worker".to_string()];
+    args.extend(worker_args(lane)?);
+    lane.set(Status::Starting);
     let exe = std::env::current_exe().context("locating this binary")?;
     let mut child = std::process::Command::new(exe)
         .args(&args)
@@ -749,17 +1096,29 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
         stdin,
         answers,
     };
-    // The hello, and with it the known-answer check. Bounded like a batch:
-    // it is the first thing the device is asked to do.
-    let hello = match worker.answers.recv_timeout(deadline() * 4) {
-        Ok(Ok(frame)) => frame,
-        Ok(Err(e)) => bail!("the worker exited before it was ready: {e}"),
-        Err(_) => bail!(
-            "the worker was not ready within {} s",
-            (deadline() * 4).as_secs()
-        ),
+    // The hello, and with it the known-answer check. Bounded like a batch
+    // once the models are loaded; a first load says how far it has got.
+    let started = Instant::now();
+    let hello = loop {
+        let left = HELLO_DEADLINE.saturating_sub(started.elapsed());
+        let frame = match worker.answers.recv_timeout(left) {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(e)) => bail!("the worker exited before it was ready: {e}"),
+            Err(_) => bail!(
+                "the worker was not ready within {} s",
+                HELLO_DEADLINE.as_secs()
+            ),
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&frame).context("the worker's hello")?;
+        if let (Some(done), Some(of)) = (value["loaded"].as_u64(), value["of"].as_u64()) {
+            lane.set(Status::Compiling {
+                percent: (done * 100 / of.max(1)).min(100) as u8,
+            });
+            continue;
+        }
+        break value;
     };
-    let hello: serde_json::Value = serde_json::from_slice(&hello).context("the worker's hello")?;
     if hello["ok"].as_bool() != Some(true) {
         let reason = hello["reason"].as_str().unwrap_or("no reason given");
         if hello["unavailable"].as_bool() == Some(true) {
@@ -770,7 +1129,26 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     if let Some(device) = hello["device"].as_str() {
         *lane.device.lock().unwrap_or_else(|e| e.into_inner()) = Some(device.to_string());
     }
+    if let Some(variant) = hello["variant"].as_str().and_then(static_variant) {
+        *lane.variant.lock().unwrap_or_else(|e| e.into_inner()) = variant;
+    }
     Ok((worker, hello))
+}
+
+/// A worker's variant as the `'static` name a store's counts use.
+fn static_variant(name: &str) -> Option<&'static str> {
+    [
+        "int8-cpu",
+        "fp16-webgpu",
+        "fp16-coreml-gpu",
+        "fp16-ane",
+        "fp16-cuda",
+        "fp16-trt",
+        "openvino",
+        "gguf-f16",
+    ]
+    .into_iter()
+    .find(|v| *v == name)
 }
 
 // ---------------------------------------------------------------- the frames
@@ -796,6 +1174,50 @@ pub fn read_frame(input: &mut impl Read) -> std::io::Result<Vec<u8>> {
     let mut body = vec![0u8; len];
     input.read_exact(&mut body)?;
     Ok(body)
+}
+
+/// A request frame: the row count, then each row's length and ids, every
+/// number a little-endian `u32`. Ids rather than text, so a worker never
+/// tokenises what the run already tokenised.
+pub fn encode_ids(batch: &[crate::session::Ids]) -> Vec<u8> {
+    let words = 1 + batch.iter().map(|ids| 1 + ids.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(words * 4);
+    out.extend_from_slice(&(batch.len() as u32).to_le_bytes());
+    for ids in batch {
+        out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+        for id in ids {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+    }
+    out
+}
+
+/// [`encode_ids`] read back, refusing a frame whose lengths do not add up.
+pub fn decode_ids(frame: &[u8]) -> Result<Vec<crate::session::Ids>> {
+    let words: Vec<u32> = frame
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect();
+    if !frame.len().is_multiple_of(4) || words.is_empty() {
+        bail!("a request frame of {} bytes", frame.len());
+    }
+    let rows = words[0] as usize;
+    let mut at = 1;
+    let mut batch = Vec::with_capacity(rows.min(4096));
+    for _ in 0..rows {
+        let len = *words.get(at).context("a request frame cut short")? as usize;
+        let ids = words
+            .get(at + 1..at + 1 + len)
+            .context("a request frame cut short")?;
+        batch.push(ids.to_vec());
+        at += 1 + len;
+    }
+    if at != words.len() {
+        bail!("a request frame with {} words left over", words.len() - at);
+    }
+    Ok(batch)
 }
 
 /// An answer frame: `0` then `n * DIM` little-endian `f32`, or `1` then why.
@@ -908,28 +1330,41 @@ pub fn known_answer(
 
 // ----------------------------------------------------------------- the worker
 
-/// `semlith __embed-worker <lane> [dir]`: load the lane's session, check it
-/// against the fixture, say hello, then answer batches until stdin closes.
-pub fn worker_main(lane: &str, dir: Option<&Path>) -> i32 {
+/// `semlith __embed-worker <lane> [dir] [adapter]`: load the lane's session,
+/// check it against the fixture, say hello, then answer batches until stdin
+/// closes.
+pub fn worker_main(lane: &str, dir: Option<&Path>, adapter: Option<&str>) -> i32 {
     let mut out = std::io::stdout().lock();
     let mut input = std::io::stdin().lock();
-    let hello = |out: &mut std::io::StdoutLock, value: serde_json::Value| {
+    let say = |out: &mut std::io::StdoutLock, value: serde_json::Value| {
         let _ = write_frame(out, &serde_json::to_vec(&value).unwrap_or_default());
     };
+    // A worker runs at the priority an index run has, whatever the process
+    // that started it was doing at the time.
+    crate::priority::worker();
     let fault = Fault::read(lane);
     if matches!(fault, Some(Fault::Load)) {
-        hello(
+        say(
             &mut out,
             serde_json::json!({ "ok": false, "reason": format!("{FAULT_ENV} failed the load") }),
         );
         return 1;
     }
-    let mut session = match crate::gpu::Session::open(lane, dir) {
+    let opened = {
+        let mut progress = |loaded: usize, of: usize| {
+            say(
+                &mut std::io::stdout().lock(),
+                serde_json::json!({ "loaded": loaded, "of": of }),
+            );
+        };
+        crate::gpu::Session::open(lane, dir, adapter, &mut progress)
+    };
+    let mut session = match opened {
         Ok(session) => session,
         Err(e) => {
             let text = format!("{e:#}");
             let unavailable = text.starts_with("unavailable");
-            hello(
+            say(
                 &mut out,
                 serde_json::json!({
                     "ok": false,
@@ -940,11 +1375,21 @@ pub fn worker_main(lane: &str, dir: Option<&Path>) -> i32 {
             return 1;
         }
     };
-    let check = known_answer(lane, &session.device(), session.variant(), |texts| {
-        session.embed(texts)
+    // The worker tokenises only here, for the fixture; a run's batches arrive
+    // as ids.
+    let tokenizer = crate::model_cache_dir().and_then(|cache| crate::session::tokenizer(&cache));
+    let check = tokenizer.and_then(|tokenizer| {
+        known_answer(lane, &session.device(), session.variant(), |texts| {
+            let batch = texts
+                .iter()
+                .map(|text| crate::session::encode(&tokenizer, text))
+                .collect::<Result<Vec<_>>>()?;
+            let rows: Vec<&[u32]> = batch.iter().map(Vec::as_slice).collect();
+            session.embed(&rows)
+        })
     });
     match check {
-        Ok(check) if check.passed => hello(
+        Ok(check) if check.passed => say(
             &mut out,
             serde_json::json!({
                 "ok": true,
@@ -955,7 +1400,7 @@ pub fn worker_main(lane: &str, dir: Option<&Path>) -> i32 {
             }),
         ),
         Ok(check) => {
-            hello(
+            say(
                 &mut out,
                 serde_json::json!({
                     "ok": false,
@@ -968,7 +1413,7 @@ pub fn worker_main(lane: &str, dir: Option<&Path>) -> i32 {
             return 1;
         }
         Err(e) => {
-            hello(
+            say(
                 &mut out,
                 serde_json::json!({ "ok": false, "reason": format!("the known-answer check failed: {e:#}") }),
             );
@@ -993,18 +1438,16 @@ pub fn worker_main(lane: &str, dir: Option<&Path>) -> i32 {
             Some(Fault::Hang(ms)) => std::thread::sleep(Duration::from_millis(ms)),
             _ => {}
         }
-        let texts: Vec<String> = serde_json::from_slice::<serde_json::Value>(&frame)
-            .ok()
-            .and_then(|v| {
-                v["texts"].as_array().map(|list| {
-                    list.iter()
-                        .filter_map(|t| t.as_str().map(str::to_string))
-                        .collect()
-                })
-            })
-            .unwrap_or_default();
-        let answer = match session.embed(&texts) {
-            Ok(vectors) => encode_vectors(&vectors),
+        let answer = match decode_ids(&frame).and_then(|batch| {
+            let rows: Vec<&[u32]> = batch.iter().map(Vec::as_slice).collect();
+            session.embed(&rows)
+        }) {
+            Ok(mut vectors) => {
+                if let (Some(Fault::Poison(value)), Some(first)) = (fault, vectors.first_mut()) {
+                    first.iter_mut().for_each(|v| *v = value);
+                }
+                encode_vectors(&vectors)
+            }
             Err(e) => encode_error(&format!("{e:#}")),
         };
         if write_frame(&mut out, &answer).is_err() {
@@ -1018,6 +1461,8 @@ enum Fault {
     Load,
     Batch(u64),
     Hang(u64),
+    /// Every batch's first vector filled with this: zero, NaN or infinity.
+    Poison(f32),
 }
 
 impl Fault {
@@ -1031,6 +1476,9 @@ impl Fault {
             ("load", _) => Some(Fault::Load),
             ("batch", Some(n)) => n.parse().ok().map(Fault::Batch),
             ("hang", Some(ms)) => ms.parse().ok().map(Fault::Hang),
+            ("poison", Some("zero")) => Some(Fault::Poison(0.0)),
+            ("poison", Some("nan")) => Some(Fault::Poison(f32::NAN)),
+            ("poison", Some("inf")) => Some(Fault::Poison(f32::INFINITY)),
             _ => None,
         }
     }
@@ -1042,16 +1490,6 @@ impl Fault {
 /// before anything is downloaded, so a machine without one fetches nothing.
 fn detect_gpu() -> std::result::Result<String, String> {
     crate::gpu::detect()
-}
-
-/// The WebGPU plugin for this platform, from Microsoft's own wheel on PyPI,
-/// pinned by URL and digest. The library is extracted into the model cache
-/// beside the fp16 weights.
-fn fetch_webgpu(lane: &Lane) -> Result<PathBuf> {
-    let cache = crate::model_cache_dir()?;
-    crate::gpu::fetch_webgpu(&cache, &mut |percent| {
-        lane.set(Status::Downloading { percent });
-    })
 }
 
 /// Where the worker lanes' components live, for `semlith accel remove`.
@@ -1084,6 +1522,18 @@ mod tests {
     }
 
     #[test]
+    fn id_frames_round_trip_and_refuse_a_bad_length() {
+        let batch = vec![vec![1u32, 2, 3], vec![], vec![70_000]];
+        assert_eq!(decode_ids(&encode_ids(&batch)).unwrap(), batch);
+        let mut cut = encode_ids(&batch);
+        cut.truncate(cut.len() - 4);
+        assert!(decode_ids(&cut).is_err());
+        let mut long = encode_ids(&batch);
+        long.extend_from_slice(&9u32.to_le_bytes());
+        assert!(decode_ids(&long).is_err());
+    }
+
+    #[test]
     fn the_fixture_is_32_normalised_vectors() {
         let (texts, vectors) = fixture();
         assert_eq!(texts.len(), 32);
@@ -1104,6 +1554,8 @@ mod tests {
         assert_eq!(Fault::read("gpu"), None);
         unsafe { std::env::set_var(FAULT_ENV, "gpu:hang:60000") };
         assert_eq!(Fault::read("gpu"), Some(Fault::Hang(60000)));
+        unsafe { std::env::set_var(FAULT_ENV, "ane:poison:zero") };
+        assert_eq!(Fault::read("ane"), Some(Fault::Poison(0.0)));
         unsafe { std::env::remove_var(FAULT_ENV) };
     }
 }

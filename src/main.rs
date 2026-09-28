@@ -106,6 +106,12 @@ enum Command {
         /// with no terminal never asks either.
         #[arg(long)]
         no_review: bool,
+
+        /// After the run, say where its time went — walk, read and hash,
+        /// extract and scan, parse and chunk, tokenize, the wait on each
+        /// embedding lane, and writing — and what each lane embedded.
+        #[arg(long, short)]
+        verbose: bool,
     },
 
     /// Run the daemon: hold every registered store's write lock, keep them
@@ -606,7 +612,11 @@ enum Command {
     /// An accelerator lane's worker: embeds batches on stdin for the daemon.
     /// Started by the daemon and nothing else; not part of the interface.
     #[command(name = "__embed-worker", hide = true)]
-    EmbedWorker { lane: String, dir: Option<PathBuf> },
+    EmbedWorker {
+        lane: String,
+        dir: Option<PathBuf>,
+        adapter: Option<String>,
+    },
 
     /// Replace this binary with the newest release for this machine. Runs only
     /// when asked: semlith never checks for an update on its own.
@@ -1108,7 +1118,16 @@ fn run() -> Result<()> {
                 }
             }
             ("on" | "off", Some(lane)) => {
-                println!("{}", semlith::accel::set(lane, action == "on")?)
+                let mut said = 101u8;
+                let line = semlith::accel::set_with_progress(lane, action == "on", &mut |percent| {
+                    // Every tenth, not every percent: a pack is hundreds of
+                    // megabytes on a slow link and one line each is noise.
+                    if percent / 10 != said / 10 {
+                        said = percent;
+                        eprintln!("  fetching: {percent} %");
+                    }
+                })?;
+                println!("{line}");
             }
             ("remove", Some(lane)) => {
                 let freed = semlith::accel::remove(lane)?;
@@ -1118,12 +1137,17 @@ fn run() -> Result<()> {
                 );
             }
             _ => anyhow::bail!(
-                "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>], lanes cpu, gpu, cuda"
+                "usage: semlith accel [status | on <lane> | off <lane> | remove <lane>]; the switches are {}",
+                semlith::accel::SWITCH_NAMES
             ),
         },
 
-        Command::EmbedWorker { lane, dir } => {
-            std::process::exit(semlith::accel::worker_main(&lane, dir.as_deref()));
+        Command::EmbedWorker { lane, dir, adapter } => {
+            std::process::exit(semlith::accel::worker_main(
+                &lane,
+                dir.as_deref(),
+                adapter.as_deref(),
+            ));
         }
 
         Command::Upgrade {
@@ -1180,8 +1204,13 @@ fn run() -> Result<()> {
             reconcile,
             scan_only,
             no_review,
+            verbose,
         } => {
             arm_airgap(airgap);
+            // The daemon's lanes, in a terminal too: before 0.32.0 a terminal
+            // run embedded on the CPU alone, so the person who never started
+            // the daemon got the slowest path. `SEMLITH_ACCEL` still decides.
+            semlith::accel::manage();
 
             // `--projects` turns a folder into the paths under it, and means
             // `--each`: asking which repositories are under a folder and then
@@ -1449,6 +1478,36 @@ fn run() -> Result<()> {
                     semlith::human_bytes(bytes),
                     dir.display()
                 );
+                if verbose {
+                    eprintln!("{}", report.stages.line());
+                    let lanes: Vec<String> = report
+                        .lanes
+                        .iter()
+                        .map(|(lane, n)| format!("{lane} {n}"))
+                        .collect();
+                    if !lanes.is_empty() {
+                        eprintln!("chunks by lane: {}", lanes.join(", "));
+                    }
+                    // Where each lane stood when the run ended, so a lane that
+                    // failed part-way says why rather than showing as a small
+                    // share.
+                    let status = semlith::accel::snapshot();
+                    for row in status["lanes"].as_array().into_iter().flatten() {
+                        if row["enabled"].as_bool() != Some(true) {
+                            continue;
+                        }
+                        let state = &row["status"];
+                        eprintln!(
+                            "lane {}: {}{}",
+                            row["lane"].as_str().unwrap_or("?"),
+                            state["state"].as_str().unwrap_or("?"),
+                            state["reason"]
+                                .as_str()
+                                .map(|r| format!(" — {r}"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
                 if report.dummies_indexed > 0 {
                     eprintln!(
                         "{} file(s) indexed holding only declared test dummies (semlith refused lists them)",
@@ -1487,6 +1546,7 @@ fn run() -> Result<()> {
             debounce,
             quiet,
         } => {
+            semlith::accel::manage();
             let roots = if paths.is_empty() {
                 vec![PathBuf::from(".")]
             } else {

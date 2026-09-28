@@ -260,10 +260,13 @@ struct Tally {
     refused: Vec<(String, String)>,
     failed: Vec<(String, String)>,
     skipped_reasons: std::collections::BTreeMap<String, usize>,
+    /// Where the run's time went, slice by slice added up.
+    stages: Box<crate::pipeline::Stages>,
 }
 
 impl Tally {
     fn add(&mut self, report: &crate::IndexReport) {
+        self.stages.add(&report.stages);
         self.refused.extend(report.refused.iter().cloned());
         self.failed.extend(report.failed.iter().cloned());
         for (kind, n) in &report.skipped_reasons {
@@ -486,6 +489,8 @@ pub struct RunState {
     /// The `done` event as it was sent, with its refused, failed and
     /// skipped-by-reason lists.
     pub summary: Option<serde_json::Value>,
+    /// Where the run's time has gone so far, as of its last slice.
+    stages: Option<serde_json::Value>,
     /// The last [`LOG_HISTORY`] events, each carrying the sequence number a
     /// client reads after.
     log: VecDeque<serde_json::Value>,
@@ -528,6 +533,7 @@ impl RunState {
             plan: None,
             plan_eta_ms: None,
             summary: None,
+            stages: None,
             log: VecDeque::new(),
             next_seq: 0,
         }
@@ -802,6 +808,9 @@ impl RunState {
                 self.hold();
             }
             Some("resumed" | "slice") => {
+                if let Some(stages) = event.get("stages") {
+                    self.stages = Some(stages.clone());
+                }
                 if self.status != RunStatus::Stopping {
                     self.status = RunStatus::Running;
                 }
@@ -814,6 +823,9 @@ impl RunState {
                     .map(str::to_string);
             }
             Some("done") => {
+                if let Some(stages) = event.get("stages") {
+                    self.stages = Some(stages.clone());
+                }
                 let stopped = event
                     .get("stopped")
                     .and_then(serde_json::Value::as_bool)
@@ -1270,6 +1282,9 @@ impl Store {
             "symbols": run.symbols,
             "phase": run.phase,
             "summary": run.summary,
+            // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
+            // on each lane, and write, summing to the run's wall time.
+            "stages": run.stages,
             // What a page's log cursor should be if it has never read this
             // run: the oldest line still on the ring, minus one.
             "log_from": run.log.front()
@@ -3750,6 +3765,7 @@ fn perform(
                     // press the button again.
                     tally.add(&done);
                     let (slice_indexed, slice_chunks) = (tally.indexed, tally.chunks);
+                    let slice_stages = tally.stages.clone();
                     if done.remaining > 0 {
                         // The remainder of the walk, not the roots. Handing the
                         // roots back meant the next slice walked the tree from
@@ -3787,6 +3803,7 @@ fn perform(
                             "remaining": done.remaining,
                             "indexed": slice_indexed,
                             "chunks": slice_chunks,
+                            "stages": slice_stages,
                         }));
                         return None;
                     }
@@ -3809,8 +3826,14 @@ fn perform(
                     } else {
                         store.note(format!("{} indexed from the portal", tally.indexed));
                     }
+                    // The daemon's log carries where the run's time went, so
+                    // the next bottleneck is read rather than guessed.
+                    if tally.indexed > 0 {
+                        eprintln!("semlith: {}: {}", store.name, tally.stages.line());
+                    }
                     say(serde_json::json!({
                         "event": "done",
+                        "stages": tally.stages,
                         // The run's, not this slice's. A run of 35 files over
                         // three slices used to end by announcing the four the
                         // last slice reached.

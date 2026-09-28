@@ -20,9 +20,19 @@
 //! terminal is already at the priority its user gave it, and nothing here
 //! touches it.
 //!
-//! On Windows the same edges drive the priority class and EcoQoS power
-//! throttling. Linux is not managed: an unprivileged process cannot lower its
-//! nice value again once it has raised it, and an idle daemon costs no CPU.
+//! On Windows the same edges drive EcoQoS power throttling: on while idle,
+//! explicitly off while anything embeds, at below-normal priority either way,
+//! so a bulk index never competes with the person at the keyboard. On Linux
+//! the systemd user unit sets the baseline (`Nice=5`, `CPUWeight=50`,
+//! `IOWeight=50`) and the edges move nothing process-wide, because an
+//! unprivileged process cannot lower its nice value again once it has raised
+//! it.
+//!
+//! From 0.32.0 the threads of an index run in the daemon also say what kind of
+//! work they are, through [`indexing_thread`]: Utility QoS on macOS, which is
+//! work a person is not waiting on but which must not be parked on the
+//! efficiency cores, and `SCHED_BATCH` on Linux, which the scheduler may give
+//! longer slices and never preempts a person for.
 
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -198,14 +208,18 @@ impl Drop for Embedding {
 }
 
 /// What `/api/about` reports: whether the daemon manages its priority, where
-/// it stands now, and what the last switch cost.
+/// it stands now, what the last switch cost, and how many index threads are
+/// at the run's class right now (checked by reading it back, not assumed).
 pub fn snapshot() -> serde_json::Value {
+    let threads = INDEXING_THREADS.load(std::sync::atomic::Ordering::Relaxed);
     match MANAGER.get() {
         None => serde_json::json!({
             "managed": false,
             "state": "normal",
             "embedding": 0,
             "switches": 0,
+            "indexing_threads": threads,
+            "indexing_class": platform::INDEXING_CLASS,
         }),
         Some(manager) => {
             let inner = manager.lock();
@@ -215,9 +229,46 @@ pub fn snapshot() -> serde_json::Value {
                 "embedding": inner.active,
                 "switches": inner.switches,
                 "last_switch_us": inner.last_switch_us,
+                "indexing_threads": threads,
+                "indexing_class": platform::INDEXING_CLASS,
             })
         }
     }
+}
+
+/// Index threads in the daemon at the run's class right now.
+static INDEXING_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held by each thread of an index run: the class a bulk index runs at, put
+/// back when the guard goes. Nothing outside the daemon: a terminal run keeps
+/// the priority its user gave it.
+#[must_use = "the thread's class is restored the moment the guard drops"]
+pub struct IndexingThread(Option<platform::Saved>);
+
+pub fn indexing_thread() -> IndexingThread {
+    if MANAGER.get().is_none() {
+        return IndexingThread(None);
+    }
+    let saved = platform::enter_indexing();
+    if saved.is_some() {
+        INDEXING_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    IndexingThread(saved)
+}
+
+impl Drop for IndexingThread {
+    fn drop(&mut self) {
+        if let Some(saved) = self.0.take() {
+            platform::leave_indexing(saved);
+            INDEXING_THREADS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// An embed worker's own start: never parked in background state, whatever
+/// the process that started it was doing at the moment it did.
+pub fn worker() {
+    platform::clear_background();
 }
 
 #[cfg(target_os = "macos")]
@@ -239,12 +290,51 @@ mod platform {
             Err(std::io::Error::last_os_error().to_string())
         }
     }
+
+    pub fn clear_background() {
+        let _ = set(false);
+    }
+
+    pub const INDEXING_CLASS: &str = "utility";
+
+    /// The thread's class before the run took it.
+    pub type Saved = libc::qos_class_t;
+
+    /// Utility QoS for this thread, read back to be sure it took.
+    pub fn enter_indexing() -> Option<Saved> {
+        // SAFETY: this thread's own handle, and out-parameters that are live
+        // locals of the types the calls write.
+        unsafe {
+            let mut before = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+            let mut relative = 0;
+            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut before, &mut relative);
+            if libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) != 0 {
+                return None;
+            }
+            let mut now = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+            libc::pthread_get_qos_class_np(libc::pthread_self(), &mut now, &mut relative);
+            (now as u32 == libc::qos_class_t::QOS_CLASS_UTILITY as u32).then_some(before)
+        }
+    }
+
+    pub fn leave_indexing(before: Saved) {
+        // An unspecified class cannot be set back; default is what an
+        // unspecified thread runs at.
+        let back = match before {
+            libc::qos_class_t::QOS_CLASS_UNSPECIFIED => libc::qos_class_t::QOS_CLASS_DEFAULT,
+            other => other,
+        };
+        // SAFETY: a class value from the enum, for this thread only.
+        unsafe {
+            libc::pthread_set_qos_class_self_np(back, 0);
+        }
+    }
 }
 
 #[cfg(windows)]
 mod platform {
     use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, NORMAL_PRIORITY_CLASS,
+        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess,
         PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
         PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetPriorityClass,
         SetProcessInformation,
@@ -252,12 +342,12 @@ mod platform {
 
     pub const SUPPORTED: bool = true;
 
+    /// Below-normal either way: a bulk index never competes with the person
+    /// at the keyboard. What the edge moves is EcoQoS, on while idle and
+    /// explicitly off while anything embeds, so Windows never parks a run on
+    /// the efficiency cores or clocks it down.
     pub fn set(background: bool) -> Result<(), String> {
-        let class = if background {
-            BELOW_NORMAL_PRIORITY_CLASS
-        } else {
-            NORMAL_PRIORITY_CLASS
-        };
+        let class = BELOW_NORMAL_PRIORITY_CLASS;
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
             ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
@@ -292,15 +382,83 @@ mod platform {
             _ => Err(std::io::Error::last_os_error().to_string()),
         }
     }
+
+    pub fn clear_background() {
+        let _ = set(false);
+    }
+
+    pub const INDEXING_CLASS: &str = "below-normal, EcoQoS off";
+
+    pub type Saved = ();
+
+    /// The process class carries a run on Windows; a thread has nothing of
+    /// its own to change, and says so by counting itself.
+    pub fn enter_indexing() -> Option<Saved> {
+        Some(())
+    }
+
+    pub fn leave_indexing(_: Saved) {}
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(target_os = "linux")]
+mod platform {
+    /// Managed, in the sense that the edges are logged and the index threads
+    /// take `SCHED_BATCH`; the process's nice value is the unit's to set.
+    pub const SUPPORTED: bool = true;
+
+    pub fn set(_background: bool) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub fn clear_background() {}
+
+    pub const INDEXING_CLASS: &str = "SCHED_BATCH";
+
+    /// The thread's policy and priority before the run took it.
+    pub type Saved = (libc::c_int, libc::sched_param);
+
+    pub fn enter_indexing() -> Option<Saved> {
+        // SAFETY: 0 names this thread; the parameter structs are live locals
+        // the calls read and write.
+        unsafe {
+            let policy = libc::sched_getscheduler(0);
+            let mut before: libc::sched_param = std::mem::zeroed();
+            libc::sched_getparam(0, &mut before);
+            let batch = libc::sched_param { sched_priority: 0 };
+            if libc::sched_setscheduler(0, libc::SCHED_BATCH, &batch) != 0 {
+                return None;
+            }
+            (libc::sched_getscheduler(0) == libc::SCHED_BATCH).then_some((policy, before))
+        }
+    }
+
+    pub fn leave_indexing((policy, before): Saved) {
+        // SAFETY: as above; putting back what was read.
+        unsafe {
+            libc::sched_setscheduler(0, policy, &before);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 mod platform {
     pub const SUPPORTED: bool = false;
 
     pub fn set(_background: bool) -> Result<(), String> {
         Ok(())
     }
+
+    pub fn clear_background() {}
+
+    pub const INDEXING_CLASS: &str = "unmanaged";
+
+    pub type Saved = ();
+
+    pub fn enter_indexing() -> Option<Saved> {
+        None
+    }
+
+    pub fn leave_indexing(_: Saved) {}
 }
 
 #[cfg(test)]
