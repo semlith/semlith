@@ -2839,7 +2839,18 @@ fn index_runs(state: &Arc<State>) -> Response {
         "running": admission.running(),
         "held": admission.held(),
         "limits": limits,
+        "compaction": compaction_settings(),
     }))
+}
+
+/// The two compaction settings in force, as Machine limits draws them.
+fn compaction_settings() -> Value {
+    json!({
+        "threshold_percent": crate::compact::threshold_in_force(),
+        "retention_days": crate::compact::retention_in_force(),
+        "default_threshold_percent": crate::compact::AUTO_THRESHOLD_PERCENT,
+        "default_retention_days": crate::compact::RETENTION_DAYS,
+    })
 }
 
 /// One run's log lines after a cursor.
@@ -3051,6 +3062,17 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         }
         saved.index_memory_mb = Some(n);
     }
+    // The two compaction settings take 0 -- off, and keep everything -- so
+    // they are clamped to their range rather than to at least one.
+    if let Some(n) = body
+        .get("compact_threshold_percent")
+        .and_then(Value::as_u64)
+    {
+        saved.compact_threshold_percent = Some(n.min(99));
+    }
+    if let Some(n) = body.get("history_retention_days").and_then(Value::as_u64) {
+        saved.history_retention_days = Some(n.min(36_500));
+    }
     if let Err(e) = saved.save() {
         return Response::error(500, &format!("{e:#}"));
     }
@@ -3073,7 +3095,11 @@ fn index_settings(state: &Arc<State>, request: &Request) -> Response {
         "now running with {} run(s) at once, {} thread(s) each, and {} MiB of vectors per store",
         limits.runs_at_once.value, limits.embed_threads.value, limits.index_memory_mb.value
     );
-    Response::json(&json!({ "limits": limits, "applied": applied }))
+    Response::json(&json!({
+        "limits": limits,
+        "applied": applied,
+        "compaction": compaction_settings(),
+    }))
 }
 
 /// The accelerator lanes: each one's switch, state, device and share of the
