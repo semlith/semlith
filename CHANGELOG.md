@@ -66,6 +66,11 @@ compaction's swap is asked again against the set on disk.
   for ever with no message. Pinned models and CLIP are fetched under a watchdog:
   no bytes for 60 s (`SEMLITH_DOWNLOAD_STALL`) fails with the URL, the bytes
   received and the command to run again. Progress lines carry byte counts (#155).
+- A file that a `.semlithignore` or `.gitignore` line excluded after it was
+  indexed stayed in the store, searchable, for ever: only a file gone from disk
+  was swept. The pass that records what a rule left out now evicts it. This
+  repository's own store still held the 134 files 0.30.0's `.semlithignore`
+  excluded.
 - Machine limits notes ran a reason into the next sentence ("would allow 7 Room
   up to 8"), and the Stores page's Saved column broke inside a word.
 - Three checks that failed intermittently now compare like with like: the
