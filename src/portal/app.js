@@ -6799,6 +6799,29 @@ function runCard(run, controls) {
    * Its node is made once and only its words and `hidden` change after, so
    * no poll rebuilds the line (drive finding 8.3). */
   const planLine = el("div", { class: "meta run-plan", hidden: "" }, "");
+  /* Where the run's time went, the vector cache's share of it, and how much
+   * of the store search cannot rank by vector yet: two lines, each made once
+   * and only its words and `hidden` changed after. The stages arrive after
+   * the run's first slice and at its end, in the words the daemon's log and
+   * `semlith index --verbose` use. */
+  const stagesLine = el("div", { class: "meta", hidden: "" }, "");
+  const cacheLineNode = el("div", { class: "meta", hidden: "" }, "");
+  function paintStages(next) {
+    const st = next.stages;
+    stagesLine.hidden = !st;
+    setText(stagesLine, st ? stagesText(st) : "");
+    const parts = [];
+    if (next.cache_hit_rate !== null && next.cache_hit_rate !== undefined) {
+      parts.push(
+        `vector cache: ${n(next.cache_hits)} of ${n(next.cache_lookups)} chunks were already embedded (${Number(next.cache_hit_rate).toFixed(1)} %)`,
+      );
+    }
+    if (next.pending_share !== null && next.pending_share !== undefined) {
+      parts.push(`still being embedded: ${Math.round(next.pending_share * 100)} % of the store — keyword and graph results cover all of it`);
+    }
+    cacheLineNode.hidden = !parts.length;
+    setText(cacheLineNode, parts.join(" · "));
+  }
   function paintPlan(next) {
     const plan = next.plan;
     planLine.hidden = !plan;
@@ -6948,12 +6971,14 @@ function runCard(run, controls) {
     const average = next.rate_average;
     const tip = average === null || average === undefined ? "" : `${perSecond(average)} chunks/s on average since the first batch`;
     if (rate.title !== tip) rate.title = tip;
-    // Which device is doing what, once there is more than one doing it.
+    // Which device is doing what. One lane is named too: on a Mac with the
+    // Neural Engine it is the only one, and which one is the question.
     const split = Object.entries(next.lane_rates || {}).sort((a, b) => b[1] - a[1]);
-    lanes.hidden = split.length < 2;
-    setText(lanes, split.length < 2 ? "" : `${split.map(([lane, r]) => `${lane.toUpperCase()} ${n(Math.round(r))}/s`).join(" · ")} · `);
+    lanes.hidden = !split.length;
+    setText(lanes, split.length ? `${split.map(([lane, r]) => `${LANE_NAMES[lane] || lane} ${perSecond(r)}/s`).join(" · ")} · ` : "");
     threads.hidden = !next.threads;
     setText(threads, next.threads ? `${n(next.threads)} thread${next.threads === 1 ? "" : "s"} · ` : "");
+    paintStages(next);
     setText(where, (next.paths || []).join(", "));
     const deleted = next.delete || "";
     setText(outcome, deleted);
@@ -7041,6 +7066,8 @@ function runCard(run, controls) {
       stop,
       remove,
     ),
+    stagesLine,
+    cacheLineNode,
     problem,
     outcome,
     where,
@@ -7054,6 +7081,25 @@ function runCard(run, controls) {
   }, 1000);
 
   return { node, absorb, log, problem, last: () => last, isOpen: () => open };
+}
+
+/** A run's stages as `Stages::line` writes them: walk, read+hash,
+ * extract+scan, parse+chunk, tokenize, the wait on each lane, write, over the
+ * wall time they sum to. */
+function stagesText(st) {
+  const secs = (ms) => `${((ms || 0) / 1000).toFixed(1)} s`;
+  const parts = [
+    `walk ${secs(st.walk_ms)}`,
+    `read+hash ${secs(st.read_ms)}`,
+    `extract+scan ${secs(st.extract_ms)}`,
+    `parse+chunk ${secs(st.parse_ms)}`,
+    `tokenize ${secs(st.tokenize_ms)}`,
+    ...Object.keys(st.embed_wait_ms || {})
+      .sort()
+      .map((lane) => `embed wait (${lane}) ${secs(st.embed_wait_ms[lane])}`),
+    `write ${secs(st.write_ms)}`,
+  ];
+  return `stages over ${secs(st.wall_ms)}: ${parts.join(", ")}`;
 }
 
 /** Append one log line, keeping the reader's place if they have scrolled up. */
@@ -7254,7 +7300,10 @@ function settingField(key, label, limit, onSave) {
 /* The two compaction settings, on the Machine limits card: when the daemon
  * compacts an idle store on its own, and how much symbol history a compaction
  * keeps. Both take 0 (off, and keep everything), which is why they are not
- * `settingField`s, whose floor is 1. Built once and patched, like those. */
+ * `settingField`s, whose floor is 1. Built once and patched, like those.
+ *
+ * The vector cache's cap sits under them for the same reason — 0 turns the
+ * cache off — with the line `semlith stats` prints about the cache below it. */
 function compactionSettings(onSave) {
   const field = (key, label, max, explain) => {
     let dirty = false;
@@ -7273,6 +7322,7 @@ function compactionSettings(onSave) {
       onSave(key, asked);
     });
     return {
+      input,
       node: el(
         "div",
         { class: "setting" },
@@ -7298,31 +7348,82 @@ function compactionSettings(onSave) {
       ? "Every retired definition is kept, for ever."
       : `A compaction drops definitions retired more than ${v} day${v === 1 ? "" : "s"} ago, so symbol history answers for the last ${v}. ${c.default_retention_days} is the default; 0 keeps everything.`,
   );
+  const cache = field("vector_cache_mb", "cache MiB", 65536, (v, c) =>
+    c.from_environment
+      ? "Set by SEMLITH_VECTOR_CACHE_MB in the daemon's environment, so the page cannot change it."
+      : v === 0
+        ? "Off: every chunk is embedded afresh, even one this machine has embedded before."
+        : `Vectors this machine has embedded are kept, up to ${n(v)} MiB, and any store that meets the same chunk again takes its vector instead of embedding it. ${n(c.default_cap_mb)} is the default; 0 turns it off.`,
+  );
+  const held = el("div", { class: "note" });
   return {
-    node: el(
-      "div",
-      null,
-      el("span", { class: "eyebrow", text: "Keeping stores small" }),
-      el("div", { class: "settings" }, threshold.node, retention.node),
-    ),
-    update(c) {
-      threshold.update(c.threshold_percent, c);
-      retention.update(c.retention_days, c);
+    // Two blocks, so the card spaces the cache from compaction as it spaces
+    // compaction from the three fields above it.
+    node: [
+      el(
+        "div",
+        null,
+        el("span", { class: "eyebrow", text: "Keeping stores small" }),
+        el("div", { class: "settings" }, threshold.node, retention.node),
+      ),
+      el(
+        "div",
+        null,
+        el("span", { class: "eyebrow", text: "Vector cache" }),
+        el("div", { class: "settings" }, cache.node),
+        held,
+      ),
+    ],
+    update(c, vc) {
+      if (c) {
+        threshold.update(c.threshold_percent, c);
+        retention.update(c.retention_days, c);
+      }
+      if (vc) {
+        cache.input.disabled = !!vc.from_environment;
+        cache.update(vc.cap_mb, vc);
+        setText(held, `vector cache: ${cacheLine(vc)}`);
+      }
     },
   };
 }
 
+/** The vector cache as `semlith stats` and `semlith accel status` print it,
+ * with the same figures. The command line's `human_bytes` counts in 1024s and
+ * calls them MB; this card says MiB, because one card with two units for
+ * sizes is what drive finding 3.2 was about. */
+function cacheLine(vc) {
+  const human = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MiB` : b >= 1024 ? `${Math.round(b / 1024)} KiB` : `${b} B`);
+  if (!vc.cap_mb) return "off (vector cache cap is 0)";
+  const rate = vc.lookups > 0 ? `, ${Math.round((vc.hits * 100) / vc.lookups)} % of lookups hit` : "";
+  return `${vc.vectors} vectors, ${human(vc.bytes)} of ${human(vc.cap_mb * 1048576)}${rate}`;
+}
+
 /* The accelerator lanes, on the Machine limits card.
  *
- * One row per lane — the CPU, WebGPU, CUDA, and the worker when it is on —
- * each the row-wide switch the Privacy page's replay control already is, with
- * the lane's device, where it stands and its share of the rate. Built once and
- * patched from `/api/accel`, which the Index page reads with its runs.
+ * One row per lane — the CPU, the Neural Engine, WebGPU, CUDA, TensorRT for
+ * RTX, OpenVINO, llama.cpp, and the worker when it is on — each the row-wide
+ * switch the Privacy page's replay control already is, with the lane's
+ * device, where it stands and its share of the rate. The four lanes built and
+ * checked without their hardware carry an `experimental` pill, as `semlith
+ * accel status` says `(experimental)`. Built once and patched from
+ * `/api/accel`, which the Index page reads with its runs, and read again every
+ * second while a lane is downloading its pack, starting, or compiling its
+ * models — none of which moves a run, so the live poll would not ask.
  *
  * The daemon refuses what it will not do — the CPU off with no GPU lane able
  * to carry the work, CUDA anywhere but Linux — with a 409 that says why, and
  * that sentence is shown as it came, on this card. */
-const LANE_NAMES = { cpu: "CPU", gpu: "GPU", cuda: "CUDA", worker: "Worker" };
+const LANE_NAMES = {
+  cpu: "CPU",
+  ane: "Neural Engine",
+  gpu: "GPU",
+  cuda: "CUDA",
+  trt: "TensorRT for RTX",
+  openvino: "OpenVINO",
+  llama: "llama.cpp",
+  worker: "Worker",
+};
 
 /** A size in the binary units the Machine limits card already counts in: its
  * memory field is "MiB per store", and one card with two units for sizes is
@@ -7332,12 +7433,18 @@ function binarySize(value) {
   return mib >= 1024 ? `${(mib / 1024).toFixed(1)} GiB` : `${mib.toFixed(1)} MiB`;
 }
 
+/** Where a lane stands, in the words `semlith accel status` uses:
+ * `compiling 42 %`, `downloading 7 %`, `failed — why`. */
 function laneState(status) {
   const state = (status && status.state) || "idle";
-  if (state === "downloading") return `downloading ${status.percent ?? 0}%`;
+  const percent = status && typeof status.percent === "number" ? ` ${status.percent} %` : "";
+  if (state === "compiling") return `compiling${percent} — its models compile for this machine, minutes the first time; the run goes on without it`;
   if (status && status.reason) return `${state} — ${status.reason}`;
-  return state;
+  return `${state}${percent}`;
 }
+
+/** The states that end on their own, which the card watches until they do. */
+const LANE_MOVING = new Set(["downloading", "starting", "compiling"]);
 
 function accelSection() {
   const rows = el("div", { class: "rows accel-lanes" });
@@ -7347,6 +7454,7 @@ function accelSection() {
   let data = null;
   let asked = 0;
   let painted = 0;
+  let again = null;
 
   function say(text, bad) {
     problem.className = bad ? "note bad" : "note";
@@ -7363,9 +7471,13 @@ function accelSection() {
     await refresh();
   }
 
-  function row(lane) {
+  /** One row-wide switch: the knob, a title with room for a pill after it,
+   * the state under it, and a figure at the far end. */
+  function switchRow(onClick) {
     const knob = el("span", { class: "knob", "aria-hidden": "true" });
-    const title = el("span", { class: "replay-state" });
+    const name = document.createTextNode("");
+    const badge = el("span", { class: "pill warn", text: "experimental", hidden: "" });
+    const title = el("span", { class: "replay-state" }, name, " ", badge);
     const where = el("span", { class: "replay-switch-note" });
     const share = el("span", { class: "meta" });
     const toggle = el(
@@ -7376,16 +7488,34 @@ function accelSection() {
       el("span", { class: "spacer" }),
       share,
     );
-    const remove = el("button", { class: "button secondary small", type: "button" });
-    const removeRow = el("div", { class: "filters accel-remove" }, remove);
-    const drawnRow = { title, where, share, toggle, remove, removeRow, enabled: false, node: null };
-    toggle.addEventListener("click", () => {
-      const on = !drawnRow.enabled;
+    const drawnRow = { name, badge, where, share, toggle, enabled: false };
+    toggle.addEventListener("click", () => onClick(drawnRow));
+    return drawnRow;
+  }
+
+  function paintSwitch(r, on) {
+    r.enabled = on;
+    r.toggle.classList.toggle("on", on);
+    const checked = String(on);
+    if (r.toggle.getAttribute("aria-checked") !== checked) r.toggle.setAttribute("aria-checked", checked);
+  }
+
+  function row(lane) {
+    const drawnRow = switchRow((r) => {
+      const on = !r.enabled;
+      const now = (data?.lanes || []).find((l) => l.lane === lane) || {};
+      const held = (data?.bytes || {})[lane] || 0;
+      const size = (data?.bytes || {})[`${lane}_download`] || now.download_bytes || 0;
+      // `installed` where the lane has a pack; what is on disk where it has not.
+      const missing = typeof now.installed === "boolean" ? !now.installed : size > 0 && held === 0;
       // A download of that size is somebody's decision, made knowing it.
-      if (on && lane === "cuda") {
+      if (on && missing && size > 0) {
+        const label = now.label || LANE_NAMES[lane] || lane;
         ask({
-          title: "Turn CUDA on?",
-          body: `It downloads the CUDA pack first, ${binarySize(data?.bytes?.cuda_download || 0)}, once, into this machine's model cache. Runs use it from their next batch.`,
+          title: `Turn ${label} on?`,
+          body: `It downloads the ${label} pack first, ${binarySize(size)}, once, into this machine's model cache. Its row shows the download; runs use the lane from their next batch after it.${
+            now.experimental ? ` ${label} is experimental: built and checked without its hardware, and not measured on it.` : ""
+          }`,
           confirm: "Download and turn on",
           run: () => change(lane, "on"),
         });
@@ -7393,8 +7523,28 @@ function accelSection() {
       }
       change(lane, on ? "on" : "off");
     });
+    const remove = el("button", { class: "button secondary small", type: "button" });
     remove.addEventListener("click", () => change(lane, "remove"));
-    drawnRow.node = el("div", { class: "accel-lane" }, toggle, removeRow);
+    /* The GPU lane beside the Neural Engine: off by default, because on a
+     * fanless M1 it added 30 % in bursts and 4 % sustained. Not a lane, so not
+     * a row-wide switch: a pressed-or-not chip in the Neural Engine's action
+     * line, the way the Impact page's `Strict` is a chip in its row. */
+    const beside =
+      lane === "ane"
+        ? el("button", {
+            class: "chip sm",
+            type: "button",
+            "aria-pressed": "false",
+            text: "GPU beside the Neural Engine",
+            title: "Off: while the Neural Engine runs, the GPU lane waits. On: both run.",
+            onclick: () => change("gpu-beside-ane", beside.getAttribute("aria-pressed") === "true" ? "off" : "on"),
+          })
+        : null;
+    const removeRow = el("div", { class: "filters accel-remove" }, beside, remove);
+    drawnRow.remove = remove;
+    drawnRow.beside = beside;
+    drawnRow.removeRow = removeRow;
+    drawnRow.node = el("div", { class: "accel-lane" }, drawnRow.toggle, removeRow);
     return drawnRow;
   }
 
@@ -7408,17 +7558,22 @@ function accelSection() {
         r = row(lane.lane);
         drawn.set(lane.lane, r);
       }
-      r.enabled = !!lane.enabled;
-      r.toggle.classList.toggle("on", r.enabled);
-      const checked = String(r.enabled);
-      if (r.toggle.getAttribute("aria-checked") !== checked) r.toggle.setAttribute("aria-checked", checked);
-      const name = LANE_NAMES[lane.lane] || lane.lane;
-      setText(r.title, `${name} · ${lane.device || "no device found"}${lane.variant ? ` · ${lane.variant}` : ""}`);
+      paintSwitch(r, !!lane.enabled);
+      const name = lane.label || LANE_NAMES[lane.lane] || lane.lane;
+      setText(r.name, `${name} · ${lane.device || "no device found"}${lane.variant ? ` · ${lane.variant}` : ""}`);
+      r.badge.hidden = !lane.experimental;
       setText(r.where, `${r.enabled ? "" : "off · "}${laneState(lane.status)}`);
       setText(r.share, `${Math.round(lane.share || 0)} %`);
       const held = (next.bytes || {})[lane.lane] || 0;
-      r.removeRow.hidden = !(held > 0 && (lane.lane === "gpu" || lane.lane === "cuda"));
+      r.remove.hidden = !(held > 0 && lane.lane !== "cpu" && lane.lane !== "worker");
       setText(r.remove, `Remove downloaded files (${binarySize(held)})`);
+      if (r.beside) {
+        // Only where there is a Neural Engine to run beside.
+        r.beside.hidden = lane.status?.state === "unavailable";
+        const pressed = String(!!next.gpu_beside_ane);
+        if (r.beside.getAttribute("aria-pressed") !== pressed) r.beside.setAttribute("aria-pressed", pressed);
+      }
+      r.removeRow.hidden = r.remove.hidden && (!r.beside || r.beside.hidden);
     }
     for (const [lane, r] of drawn) {
       if (seen.has(lane)) continue;
@@ -7427,6 +7582,17 @@ function accelSection() {
     }
     arrange(rows, (next.lanes || []).map((lane) => drawn.get(lane.lane).node));
     setText(fallback, next.cpu_fallback ? "The CPU is carrying the work: no GPU lane can." : "");
+
+    // A download, a start or a compile moves by itself and says how far it
+    // has got; the page asks again each second until none is moving, and
+    // stops asking once the card has left the page.
+    const moving = (next.lanes || []).some((lane) => LANE_MOVING.has(lane.status?.state));
+    if (moving && !again) {
+      again = setTimeout(() => {
+        again = null;
+        if (rows.isConnected) refresh();
+      }, 1000);
+    }
   }
 
   /** Read the lanes again. Numbered like the runs, so a late answer to an
@@ -8013,7 +8179,7 @@ async function indexView() {
       queue.map((row) => queued.get(String(row.run ?? row.store)).node),
     );
 
-    paintSettings(data?.limits, data?.compaction);
+    paintSettings(data?.limits, data?.compaction, data?.vector_cache);
   }
 
   async function saveSetting(key, value) {
@@ -8026,7 +8192,7 @@ async function indexView() {
       // What the daemon is running with now, in its words: all three take
       // effect at once, the running runs at their next batch.
       setText(settingsNote, answer.applied ? `Saved — ${answer.applied}.` : "Saved.");
-      paintSettings(answer.limits, answer.compaction);
+      paintSettings(answer.limits, answer.compaction, answer.vector_cache);
     } catch (e) {
       settingsNote.className = "note bad";
       setText(settingsNote, e.message);
@@ -8046,7 +8212,7 @@ async function indexView() {
   const compactSection = compactionSettings(saveSetting);
   const accel = accelSection();
   let limitsCard = null;
-  function paintSettings(limits, compaction) {
+  function paintSettings(limits, compaction, vectorCache) {
     if (!limits) return;
     const machine = limits.machine || {};
     if (!limitsCard) {
@@ -8086,7 +8252,7 @@ async function indexView() {
         accel.node,
       );
     }
-    if (compaction) compactSection.update(compaction);
+    compactSection.update(compaction, vectorCache);
     // Every field of every limit, every time, and each patch is a no-op when
     // nothing moved. `embed_threads` is derived from the runs actually in
     // force, so changing `runs at once` changes the *sentence* under `threads
