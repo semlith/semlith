@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-28
+
+### A store takes the disk its live content needs
+
+A store kept current incrementally — by the daemon or `semlith watch` — only
+grew. `exact.f32` was append-only and nothing rewrote it, SQLite kept its freed
+pages, and retired definitions had no bound. On this machine the store for this
+repository held 12,726 chunks in 281.7 MB, and a store whose files had all gone
+still took 285.6 MB.
+
+**`semlith compact`** gives the dead bytes back without re-embedding anything.
+The full-precision sidecar is rewritten to the records whose chunk still exists,
+byte for byte; where it covers every live vector the shards are rebuilt packed
+full from it, which re-encodes the same values to the same codes; symbol history
+retired longer ago than the retention (90 days by default, `--retention DAYS`,
+0 keeps everything) is dropped; and the database's keyword index is optimised,
+the file vacuumed and its log truncated. Searches answer with the same ids in the
+same order with the same scores, rescored or not. `--dry-run` says what would be
+given back and changes nothing; `--all` compacts every registered store; with a
+daemon holding the store it goes through the daemon. On copies of this machine's
+stores: this repository's 281.7 MB became 69.1 MB, the emptied benchmark store's
+285.6 MB became 64.9 MB (what is left is 218,615 retired definitions still inside
+the retention), and no store took more than 1.2 s. A store written before 0.23.0
+has no full-precision copy to rebuild its shards from, so it is compacted as far
+as it can be and told to re-index for the rest.
+
+**The daemon compacts on its own.** A store that is idle — no run, nothing
+queued, not paused — and more than 25 % reclaimable (and at least 1 MiB) is
+compacted as a run with its own card, checked a minute after start and every ten
+minutes after. Machine limits sets the threshold (0 turns it off) and the
+history retention. A compaction can be stopped before it swaps anything in.
+
+**What a store takes is shown.** `semlith stats` prints a `disk` line — total,
+live, reclaimable and the reclaimable share — `semlith_stats` carries the same
+figures, and the Stores page has a Disk column, a Compact action that asks with
+the bytes it will give back, and an On disk tile that now sums the stores
+themselves rather than the source they indexed. The crate exposes
+`Semlith::compact` and `Semlith::footprint` so Semlith Cloud can do the same for
+org stores.
+
+**A reader sees a writer's new shards.** A long-lived reader — an MCP server, the
+portal — re-read the shard directory only when it opened a store, so a shard a
+writer created afterwards was never searched until a restart. It now re-reads it
+whenever the store's generation moves, and a search that overlapped a
+compaction's swap is asked again against the set on disk.
+
+### Fixed
+
+- A file refused for a secret it gained left its old text readable in freed
+  database pages, the keyword index and the write-ahead log until a vacuum.
+  Store connections set `secure_delete` (a whole-store delete measured 9 %
+  slower), and a run that evicts a file for its contents scrubs the rest (#148).
+- A key pasted as a search query was recorded in full in the ledger. The query
+  goes through the same key scan the indexer uses and a live match is masked
+  before the row is hashed, so the chain still verifies (#147).
+- A model download that stopped receiving bytes left `semlith setup` waiting
+  for ever with no message. Pinned models and CLIP are fetched under a watchdog:
+  no bytes for 60 s (`SEMLITH_DOWNLOAD_STALL`) fails with the URL, the bytes
+  received and the command to run again. Progress lines carry byte counts (#155).
+- Machine limits notes ran a reason into the next sentence ("would allow 7 Room
+  up to 8"), and the Stores page's Saved column broke inside a word.
+- Three checks that failed intermittently now compare like with like: the
+  native smoke's pause window follows the run's measured batch rate (#152), the
+  drive's `threads each` check skips on a home whose value is saved (#153), and
+  the extra-store memory check measures one server answering from one store and
+  then from three, rather than two processes whose footprints settle up to
+  120 MB apart for the same store (#149).
+
 ## [0.30.1] - 2026-09-27
 
 ### A long run stops re-checking what it has left, and its estimate moves

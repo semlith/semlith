@@ -488,6 +488,20 @@ write-temp-then-rename saves then need no special case, and the differences
 between how FSEvents, inotify and ReadDirectoryChangesW label things stop
 mattering.
 
+**Compaction swaps the whole set, and says so first (0.31.0).** A store kept
+current incrementally only grows, so `compact` rewrites `exact.f32` to the live
+records and rebuilds the shards packed full from them — the codes are the same
+bytes, because the values are the ones the index was given and turbovec's
+encoding depends on nothing else when nothing is calibrated. The new set is
+built beside the live one and put in by two renames, which a reader in another
+process could land between. So the store is marked for the length of the swap
+and the generation moves after it; a search that began or ended inside the mark,
+or across a move of the generation, is asked again against what is on disk. A
+reader re-opens its indexes when the generation moves rather than only dropping
+what it holds, because the shard list is read when an index opens — which, before
+this release, also meant a shard a writer created later was never searched by a
+reader already running.
+
 ## Things that were considered and left out
 
 **A daemon reachable from anywhere but this machine.** `semlith start` (0.9.0)
