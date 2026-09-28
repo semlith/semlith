@@ -1204,14 +1204,54 @@ c_limit_live() {
   return 0
 }
 
+# A bulk index runs at the class this release gives it on each system, read
+# back from the daemon while the run is going (0.32.0, item 6): Utility QoS on
+# macOS, SCHED_BATCH on Linux, below-normal with EcoQoS off on Windows. And the
+# run's stage timings add up to its wall time within 5 %.
+c_run_class() {
+  case "$platform" in
+    macos)   want=utility ;;
+    linux)   want=SCHED_BATCH ;;
+    windows) want="below-normal, EcoQoS off" ;;
+    *)       echo "no class is expected on $platform"; return 1 ;;
+  esac
+  mkdir -p "$rc_dir/class"
+  rc_markdown "$rc_dir/class/big.md" 1000
+  s=$(rc_index "$rc_dir/class")
+  [ -n "$s" ] || { echo "the index route started no run"; return 1; }
+  seen=""
+  end=$(( $(date +%s) + 600 ))
+  while [ "$(date +%s)" -lt "$end" ]; do
+    about=$(rc_get /api/about)
+    if [ "$(printf '%s' "$about" | jq -r '.priority.indexing_threads // 0')" -gt 0 ]; then
+      seen=$(printf '%s' "$about" | jq -r '.priority.indexing_class')
+      [ "$platform" = windows ] && [ "$(printf '%s' "$about" | jq -r '.priority.state')" != normal ] &&
+        { echo "a run is going and EcoQoS is still on: $about"; return 1; }
+      break
+    fi
+    rc_finished "$s" && break
+    sleep 0.2
+  done
+  [ "$seen" = "$want" ] || { echo "the index threads reported \"$seen\", not \"$want\""; return 1; }
+  rc_until 600 rc_finished "$s" || { echo "the run did not finish"; return 1; }
+  r=$(rc_run "$s")
+  printf '%s' "$r" | jq -e '
+    .stages as $s
+    | ($s.walk_ms + $s.read_ms + $s.extract_ms + $s.parse_ms + $s.tokenize_ms + $s.write_ms
+       + ([$s.embed_wait_ms[]] | add // 0)) as $parts
+    | $s.wall_ms > 0 and (($parts - $s.wall_ms) | fabs) <= $s.wall_ms * 0.05' > /dev/null ||
+    { echo "the stages do not add up to the wall time: $(printf '%s' "$r" | jq -c '.stages')"; return 1; }
+}
+
 if rc_start limits SEMLITH_ACCEL=cpu; then
   check cli/runs/delete-on-stop  "stop with delete removes the store"  c_delete_on_stop
   check cli/runs/rate-every-poll "a live run always carries a rate"    c_rate_every_poll
   check cli/runs/limit-live      "embed_threads reaches a live run"    c_limit_live
+  check cli/runs/class           "a run's threads report this OS's bulk class" c_run_class
 else
   echo "the limits daemon did not come up:"
   sed 's/^/  /' "$runs_root/limits/daemon.out" 2>/dev/null | head -20
-  for id in delete-on-stop rate-every-poll limit-live; do skip "cli/runs/$id" "the limits daemon did not start"; done
+  for id in delete-on-stop rate-every-poll limit-live class; do skip "cli/runs/$id" "the limits daemon did not start"; done
 fi
 rc_stop
 
@@ -1552,6 +1592,19 @@ else
   # domain. That is the runner's shape, not semlith's defect, and blaming the
   # product for it is what rule 3 at the top of this file forbids.
   skip cli/service/install "$(head -1 "$work/service-probe.out" 2>/dev/null)"
+fi
+
+# The unit is written whether or not a user manager runs it, and from 0.32.0
+# it carries the daemon's lower scheduling weight.
+c_unit_weights() {
+  unit="$HOME/.config/systemd/user/semlith.service"
+  [ -f "$unit" ] || { echo "no unit at $unit"; return 1; }
+  for line in Nice=5 CPUWeight=50 IOWeight=50; do
+    grep -qx "$line" "$unit" || { echo "the unit has no $line:"; cat "$unit"; return 1; }
+  done
+}
+if [ "$platform" = linux ]; then
+  check cli/service/weights "the systemd unit carries Nice, CPUWeight and IOWeight" c_unit_weights
 fi
 
 # Whether this session has a facility that can restart a daemon nobody is

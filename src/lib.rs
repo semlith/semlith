@@ -1056,6 +1056,8 @@ pub struct IndexProgress {
     /// about how much work is left.
     pub bytes: u64,
     pub bytes_total: u64,
+    /// Chunk rows written so far, embedded or not yet.
+    pub rows: usize,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
@@ -1153,6 +1155,9 @@ pub struct IndexReport {
     /// Chunks the machine-wide vector cache was asked for, and held.
     pub cache_lookups: usize,
     pub cache_hits: usize,
+    /// Chunk rows this call wrote, embedded or not yet: what `embedded` is
+    /// catching up with, and what a card's pending share is taken from.
+    pub rows: usize,
 }
 
 /// What an index call puts into the vector cache and takes out of it, by the
@@ -1260,6 +1265,7 @@ fn say_file(
             lanes: report.lanes.clone(),
             bytes: report.bytes,
             bytes_total: report.bytes_total,
+            rows: report.rows,
         },
     );
 }
@@ -3222,6 +3228,7 @@ impl Semlith {
                         &c.text,
                     )?;
                     spans.push((c.start_line, c.end_line, id));
+                    report.rows += 1;
                     window.ids.push(id as u64);
                     window.pieces.push(piece);
                     window.hashes.push(hash);

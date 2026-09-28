@@ -360,42 +360,42 @@ pub fn granite_tokenizer(cache_dir: &Path, max_length: usize) -> Result<tokenize
 /// Run once, before anything asks for a model.
 pub fn link_runtime() -> Result<()> {
     #[cfg(feature = "dynamic-ort")]
-    {
+    let linked = {
         use std::sync::OnceLock;
         static ONCE: OnceLock<Result<(), String>> = OnceLock::new();
-        return ONCE
-            .get_or_init(|| {
-                let Ok(exe) = std::env::current_exe() else {
-                    return Err("the running binary could not be located".to_string());
-                };
-                let beside = exe
-                    .parent()
-                    .map(|dir| dir.join(RUNTIME_FILE))
-                    .unwrap_or_else(|| PathBuf::from(RUNTIME_FILE));
-                if !beside.exists() {
-                    return Err(format!(
-                        "{} is not beside the semlith binary. The Linux release \
+        ONCE.get_or_init(|| {
+            let Ok(exe) = std::env::current_exe() else {
+                return Err("the running binary could not be located".to_string());
+            };
+            let beside = exe
+                .parent()
+                .map(|dir| dir.join(RUNTIME_FILE))
+                .unwrap_or_else(|| PathBuf::from(RUNTIME_FILE));
+            if !beside.exists() {
+                return Err(format!(
+                    "{} is not beside the semlith binary. The Linux release \
                          archive carries it next to `semlith`, and `install.sh` \
                          puts both in the same directory — a binary copied out of \
                          the archive on its own cannot embed anything. Unpack the \
                          archive again, or install with the one-liner in the \
                          README.",
-                        beside.display()
-                    ));
-                }
-                ort::init_from(beside.to_string_lossy().as_ref())
-                    .map_err(|e| format!("loading {}: {e}", beside.display()))?
-                    .commit();
-                // `commit` answers whether this call was the one that
-                // installed the environment; a second caller getting `false`
-                // is the OnceLock doing its job, not a failure.
-                Ok(())
-            })
-            .clone()
-            .map_err(anyhow::Error::msg);
-    }
+                    beside.display()
+                ));
+            }
+            ort::init_from(beside.to_string_lossy().as_ref())
+                .map_err(|e| format!("loading {}: {e}", beside.display()))?
+                .commit();
+            // `commit` answers whether this call was the one that
+            // installed the environment; a second caller getting `false`
+            // is the OnceLock doing its job, not a failure.
+            Ok(())
+        })
+        .clone()
+        .map_err(anyhow::Error::msg)
+    };
     #[cfg(not(feature = "dynamic-ort"))]
-    Ok(())
+    let linked = Ok(());
+    linked
 }
 
 /// What a `dynamic-ort` build looks for beside itself.

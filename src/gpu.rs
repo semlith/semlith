@@ -448,6 +448,13 @@ pub enum Session {
     /// models rather than an ONNX graph.
     #[cfg(target_os = "macos")]
     CoreMl(Box<crate::coreml::Session>),
+    /// fp16 on an RTX-class NVIDIA card through NVIDIA's TensorRT for RTX
+    /// plugin.
+    Trt(Box<crate::trt::Session>),
+    /// fp16 on an Intel GPU or NPU through Intel's OpenVINO plugin.
+    OpenVino(Box<crate::openvino::Session>),
+    /// granite as GGUF f16 in a `llama-server` the worker runs.
+    Llama(Box<crate::llama::Session>),
 }
 
 pub struct GpuSession {
@@ -468,6 +475,9 @@ impl Session {
         adapter: Option<&str>,
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<Self> {
+        // Only the Core ML lanes load several models and say so.
+        #[cfg(not(target_os = "macos"))]
+        let _ = progress;
         let cache = crate::model_cache_dir()?;
         // Before anything touches ONNX Runtime: the CUDA worker loads the
         // pack's GPU core, and a CPU core loaded first would make that a
@@ -492,6 +502,12 @@ impl Session {
                 pack, kind, progress,
             )?)));
         }
+        // llama.cpp is a server of its own; this process never loads ONNX
+        // Runtime for it.
+        if lane == "llama" {
+            let pack = dir.context("the llama lane needs its pack directory")?;
+            return Ok(Session::Llama(Box::new(crate::llama::Session::open(pack)?)));
+        }
         crate::embed::link_runtime()?;
         match lane {
             "worker" => {
@@ -507,6 +523,16 @@ impl Session {
                 let dir = dir.context("the gpu lane needs its component directory")?;
                 Ok(Session::Gpu(Box::new(GpuSession::open(dir, adapter)?)))
             }
+            "trt" => {
+                let pack = dir.context("the trt lane needs its pack directory")?;
+                Ok(Session::Trt(Box::new(crate::trt::Session::open(pack)?)))
+            }
+            "openvino" => {
+                let pack = dir.context("the openvino lane needs its pack directory")?;
+                Ok(Session::OpenVino(Box::new(crate::openvino::Session::open(
+                    pack,
+                )?)))
+            }
             other => bail!("unavailable — no lane called {other}"),
         }
     }
@@ -518,6 +544,9 @@ impl Session {
             Session::Cuda(cuda) => cuda.device(),
             #[cfg(target_os = "macos")]
             Session::CoreMl(coreml) => coreml.device(),
+            Session::Trt(trt) => trt.device(),
+            Session::OpenVino(openvino) => openvino.device(),
+            Session::Llama(llama) => llama.device(),
         }
     }
 
@@ -528,6 +557,9 @@ impl Session {
             Session::Cuda(_) => "fp16-cuda",
             #[cfg(target_os = "macos")]
             Session::CoreMl(coreml) => coreml.variant(),
+            Session::Trt(trt) => trt.variant(),
+            Session::OpenVino(openvino) => openvino.variant(),
+            Session::Llama(llama) => llama.variant(),
         }
     }
 
@@ -541,6 +573,9 @@ impl Session {
             Session::Cuda(cuda) => cuda.embed(batch),
             #[cfg(target_os = "macos")]
             Session::CoreMl(coreml) => coreml.embed(batch),
+            Session::Trt(trt) => trt.embed(batch),
+            Session::OpenVino(openvino) => openvino.embed(batch),
+            Session::Llama(llama) => llama.embed(batch),
         }
     }
 }
@@ -643,7 +678,10 @@ pub fn choose(adapters: &[Adapter], named: Option<&str>) -> Option<(usize, Strin
         return Some((0, "the only hardware GPU".to_string()));
     }
     match adapters.iter().position(|a| discrete(a.vendor)) {
-        Some(at) => Some((at, "a discrete GPU, preferred over an integrated one".to_string())),
+        Some(at) => Some((
+            at,
+            "a discrete GPU, preferred over an integrated one".to_string(),
+        )),
         None => Some((0, "the first of several integrated GPUs".to_string())),
     }
 }

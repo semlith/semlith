@@ -14,8 +14,8 @@
 //! longest row. Rows are padded with a key mask of -1e4, and a padding row
 //! keeps one key open so its softmax stays finite.
 
-use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use anyhow::{Context, Result};
+use std::path::Path;
 
 /// What a pack says about its models: layout, rows per call, and buckets.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -123,6 +123,7 @@ pub use mac::Session;
 #[cfg(target_os = "macos")]
 mod mac {
     use super::*;
+    use anyhow::bail;
     use objc2::AnyThread;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject};
@@ -131,6 +132,7 @@ mod mac {
         MLModelConfiguration, MLMultiArray, MLMultiArrayDataType,
     };
     use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
+    use std::path::PathBuf;
 
     /// One family of compiled models, loaded, and the shape they take.
     pub struct Session {

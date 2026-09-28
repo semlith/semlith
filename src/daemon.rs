@@ -265,6 +265,8 @@ struct Tally {
     /// Chunks the vector cache was asked for, and held.
     cache_lookups: u64,
     cache_hits: u64,
+    /// Chunk rows the run wrote, embedded or not yet.
+    rows: u64,
 }
 
 impl Tally {
@@ -272,6 +274,7 @@ impl Tally {
         self.stages.add(&report.stages);
         self.cache_lookups += report.cache_lookups as u64;
         self.cache_hits += report.cache_hits as u64;
+        self.rows += report.rows as u64;
         self.refused.extend(report.refused.iter().cloned());
         self.failed.extend(report.failed.iter().cloned());
         for (kind, n) in &report.skipped_reasons {
@@ -475,6 +478,8 @@ pub struct RunState {
     pub indexed: u64,
     pub chunks: u64,
     pub symbols: u64,
+    /// Chunk rows written, embedded or not yet.
+    pub rows: u64,
     /// What the run is doing when it is not reading a file.
     ///
     /// Every two hundred files a run flushes its batch and rewrites the
@@ -535,6 +540,7 @@ impl RunState {
             indexed: 0,
             chunks: 0,
             symbols: 0,
+            rows: 0,
             phase: None,
             shown_eta: std::cell::Cell::new(None),
             plan: None,
@@ -791,6 +797,7 @@ impl RunState {
                 self.indexed = num("indexed").unwrap_or(self.indexed);
                 self.chunks = num("chunks").unwrap_or(self.chunks);
                 self.symbols = num("symbols").unwrap_or(self.symbols);
+                self.rows = num("rows").unwrap_or(self.rows);
                 self.threads = num("threads").filter(|n| *n > 0).unwrap_or(self.threads);
                 // From the first file embedding starts on, so the walk of
                 // unchanged files before it is not part of either rate.
@@ -1299,6 +1306,14 @@ impl Store {
             // Walk, read+hash, extract+scan, parse+chunk, tokenize, the wait
             // on each lane, and write, summing to the run's wall time.
             "stages": run.stages,
+            // The share of the store the vector half does not cover yet: rows
+            // this run wrote that it has not embedded, over what the store
+            // holds with them. Null outside a running run.
+            "pending_share": (run.status == RunStatus::Running && run.rows > 0).then(|| {
+                let pending = run.rows.saturating_sub(run.chunks) as f64;
+                let whole = (run.chunks_before.unwrap_or(0) + run.rows).max(1) as f64;
+                (pending / whole * 1000.0).round() / 1000.0
+            }),
             // The vector cache's share of the run: chunks asked for, and held.
             "cache_lookups": run.cache.0,
             "cache_hits": run.cache.1,
@@ -3704,6 +3719,7 @@ fn perform(
             // Without it the chunk counter climbed to a flush boundary and
             // fell back to single figures, which reads as a run losing work.
             let indexed_before = tally.indexed;
+            let rows_before = tally.rows;
             let chunks_before = tally.chunks;
             let symbols_before = tally.symbols;
             let on_file = |path: &Path, progress: crate::IndexProgress| {
@@ -3732,6 +3748,7 @@ fn perform(
                     "bytes_total": if bytes_total_before > 0 { bytes_total_before } else { progress.bytes_total },
                     "indexed": indexed_before + progress.indexed as u64,
                     "chunks": chunks_before + progress.chunks as u64,
+                    "rows": rows_before + progress.rows as u64,
                     "symbols": symbols_before + progress.symbols as u64,
                     "threads": progress.threads,
                     "lanes": progress.lanes,

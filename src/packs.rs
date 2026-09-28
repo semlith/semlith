@@ -245,6 +245,32 @@ fn untar_gz(archive: &Path, into: &Path) -> Result<()> {
                 format!("{prefix}/{base}")
             }
         });
+        // A link to a sibling by bare name (`libggml.0.dylib` pointing at
+        // `libggml.0.25.1.dylib`) is recreated: llama.cpp's binaries are linked
+        // against those names. Any other link is skipped, never followed.
+        if kind == b'2' {
+            let link = field(&header[157..257]);
+            let sibling = matches!(
+                Path::new(&link).components().collect::<Vec<_>>()[..],
+                [std::path::Component::Normal(_)]
+            );
+            #[cfg(unix)]
+            if sibling
+                && let Some(path) = inside(&name)
+                    .and_then(|p| below_top(&p))
+                    .map(|rest| into.join(rest))
+            {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let _ = std::fs::remove_file(&path);
+                std::os::unix::fs::symlink(&link, &path)?;
+            }
+            #[cfg(not(unix))]
+            let _ = sibling;
+            std::io::copy(&mut (&mut reader).take(padded), &mut std::io::sink())?;
+            continue;
+        }
         let target = matches!(kind, b'0' | 0)
             .then(|| inside(&name).and_then(|p| below_top(&p)))
             .flatten()

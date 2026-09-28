@@ -717,6 +717,46 @@ pub fn set_with_progress(lane_id: &str, on: bool, progress: &mut dyn FnMut(u8)) 
     ))
 }
 
+/// [`set`] for the page: a lane whose pack is not here is switched on once
+/// the pack has arrived, fetched on a thread of its own while its row shows
+/// the download. Anything that can be refused at once is refused at once.
+pub fn set_in_background(lane_id: &str) -> Result<String> {
+    let needs_fetch = pack_for(lane_id).is_some_and(|pack| {
+        crate::model_cache_dir()
+            .ok()
+            .is_some_and(|cache| crate::packs::installed(&cache, &pack).is_none())
+    });
+    if !needs_fetch {
+        return set(lane_id, true);
+    }
+    if std::env::var(ACCEL_ENV).is_ok() {
+        bail!("{ACCEL_ENV} is set in this process's environment, so the switches cannot change it");
+    }
+    if let Some(why) = unavailable_here(lane_id) {
+        bail!("{why}");
+    }
+    let Some(found) = lane(lane_id) else {
+        bail!("there is no lane called {lane_id}; the switches are {SWITCH_NAMES}");
+    };
+    found.set(Status::Downloading { percent: 0 });
+    let id = lane_id.to_string();
+    let lane = Arc::clone(found);
+    std::thread::spawn(move || {
+        let fetched = set_with_progress(&id, true, &mut |percent| {
+            lane.set(Status::Downloading { percent })
+        });
+        match fetched {
+            Ok(_) => lane.set(Status::Idle),
+            Err(e) => lane.set(Status::Failed {
+                reason: format!("{e:#}"),
+            }),
+        }
+    });
+    Ok(format!(
+        "{lane_id}: fetching its components; it turns on when they have arrived"
+    ))
+}
+
 /// The pack a lane's worker needs beyond the model, if any.
 pub fn pack_for(id: &str) -> Option<crate::packs::Pack> {
     match id {
@@ -799,12 +839,24 @@ fn deadline() -> Duration {
 /// A running worker and the channel its answers arrive on.
 struct Worker {
     child: std::process::Child,
-    stdin: std::process::ChildStdin,
+    /// `None` only while the worker is being let go.
+    stdin: Option<std::process::ChildStdin>,
     answers: mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
 }
 
 impl Drop for Worker {
+    /// Closing its stdin is how a worker is told to go, and it goes, taking
+    /// whatever it started with it (llama.cpp's server). Killed only if it has
+    /// not gone within two seconds.
     fn drop(&mut self) {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -891,7 +943,11 @@ fn dispatch(lane: Arc<Lane>, jobs: mpsc::Receiver<Job>) {
                 continue;
             };
             let running = worker.as_mut().expect("started above");
-            if let Err(e) = write_frame(&mut running.stdin, &encode_ids(&batch)) {
+            let written = match running.stdin.as_mut() {
+                Some(stdin) => write_frame(stdin, &encode_ids(&batch)),
+                None => Err(std::io::Error::other("the worker is being let go")),
+            };
+            if let Err(e) = written {
                 let _ = reply.send(Err(format!("the worker stopped reading: {e}")));
                 fail(
                     &lane,
@@ -1139,7 +1195,7 @@ fn start(lane: &Arc<Lane>) -> Result<(Worker, serde_json::Value)> {
     });
     let worker = Worker {
         child,
-        stdin,
+        stdin: Some(stdin),
         answers,
     };
     // The hello, and with it the known-answer check. Bounded like a batch
@@ -1359,10 +1415,12 @@ pub fn known_answer(
         worst = worst.min(crate::index::cosine(got, want));
     }
     let elapsed = started.elapsed().as_secs_f64().max(1e-6);
-    let floor = if variant.starts_with("fp16") {
-        MIN_COSINE_FP16
-    } else {
+    // Every variant but the CPU's int8 is full or half precision, and held to
+    // the fp16 floor: llama.cpp's GGUF and OpenVINO's are too.
+    let floor = if variant == "int8-cpu" {
         MIN_COSINE_INT8
+    } else {
+        MIN_COSINE_FP16
     };
     Ok(Check {
         lane: lane.to_string(),

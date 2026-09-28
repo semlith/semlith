@@ -272,9 +272,18 @@ mod platform {
     pub const MECHANISM: &str = "systemd";
     const UNIT: &str = "semlith.service";
 
-    /// Nothing to rewrite: the unit has always run at normal priority.
+    /// A unit written before 0.32.0 has no `Nice`, `CPUWeight` or `IOWeight`,
+    /// so a bulk index competes with the person at the keyboard as an equal.
     pub fn stale_definition() -> Option<String> {
-        None
+        let path = unit_path().ok()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        (!text.contains("CPUWeight=")).then(|| {
+            format!(
+                "{} predates the daemon's lower scheduling weight (Nice, CPUWeight, IOWeight); \
+                 run `semlith setup` (or `semlith start --service`) to rewrite it",
+                path.display()
+            )
+        })
     }
 
     fn unit_path() -> Result<PathBuf> {
