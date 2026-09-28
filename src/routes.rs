@@ -3170,10 +3170,11 @@ fn accel_change(request: &Request) -> Response {
         // the lane's row shows the download.
         Some("on") => crate::accel::set_in_background(lane),
         Some("off") => crate::accel::set(lane, false),
+        // In MiB, the unit the Machine limits card states every size in.
         Some("remove") => crate::accel::remove(lane).map(|bytes| {
             format!(
-                "{lane}'s components removed, {} freed",
-                crate::human_bytes(bytes as i64)
+                "{lane}'s components removed, {:.1} MiB freed",
+                bytes as f64 / (1024.0 * 1024.0)
             )
         }),
         _ => return Response::error(400, "action must be \"on\", \"off\" or \"remove\""),

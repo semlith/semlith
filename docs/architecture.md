@@ -1171,8 +1171,16 @@ not touch a store, and deleting it costs a re-embed and nothing else.
 
 Rows are committed a window at a time, before the window is embedded, and
 readers open their own connections, so keyword and graph search answer for every
-file already written while the vectors are still coming. The files changed most
-recently — by modification time or by the last commit that touched them — go
-first. A semantic query mid-run embeds up to sixteen of its best keyword matches
-that have no vector yet on the query path, merges them into the vector list by
-similarity, and says how much of the store is still pending.
+file already written while the vectors are still coming. The writer may hand
+the embed stage up to sixteen windows beyond the three it works on, so in its
+first second a cold run writes thousands of chunks' rows rather than the few
+hundred the devices have embedded. The files changed most recently — by
+modification time or by the last commit that touched them — go first. A pass
+over roots does not wait for the walk: it starts on the files the last commits
+touched in every repository up to two folders below each root, code before
+licences and changelogs within one commit (a shallow clone's only commit
+touched everything), while the walk of the rest goes on beside it. A semantic
+query mid-run embeds up to sixteen of its best keyword matches that have no
+vector yet on the query path, merges them into the vector list by similarity,
+and says how much of the store is still pending; a query shaped like an
+identifier trusts the keyword half and skips that embed.

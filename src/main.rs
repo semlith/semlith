@@ -1093,7 +1093,12 @@ fn run() -> Result<()> {
 
         Command::Accel { action, lane, json } => match (action.as_str(), lane.as_deref()) {
             ("status", _) => {
-                let status = semlith::accel::snapshot();
+                // The running daemon's lanes when there is one: a lane it is
+                // compiling or downloading is idle in this process.
+                let dirs = semlith::home::all_dirs(&cli.store, &cwd).unwrap_or_default();
+                let status = semlith::proxy::find(&semlith::proxy::candidates(&dirs))
+                    .and_then(|daemon| daemon.accel().ok())
+                    .unwrap_or_else(semlith::accel::snapshot);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 } else {

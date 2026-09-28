@@ -1260,7 +1260,10 @@ fn say_file(
             outcome,
             scanned: report.scanned,
             indexed: report.indexed,
-            chunks: report.embedded.max(report.chunks),
+            // Vectors landed, not rows written: the writer runs ahead of the
+            // embed stage, and a rate taken from rows would count work not
+            // yet done.
+            chunks: report.embedded,
             total,
             symbols: report.symbols,
             why,

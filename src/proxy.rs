@@ -132,6 +132,14 @@ impl Upstream {
         self.request("POST", path, Some(&body.to_string()), LONG_CALL_TIMEOUT)
     }
 
+    /// The daemon's accelerator lanes, shaped as `accel::snapshot` shapes
+    /// them. A lane compiling or downloading in the daemon is idle in any
+    /// other process, so only the daemon can say how far it has got.
+    pub fn accel(&self) -> Result<serde_json::Value> {
+        let text = self.request("GET", "/api/accel", None, CALL_TIMEOUT)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
     /// Ask the daemon to close and delete a store.
     ///
     /// Through the daemon rather than behind its back: it is the process

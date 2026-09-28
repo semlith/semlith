@@ -43,10 +43,13 @@ and `index --verbose` show its size and hit rate. Compaction never touches it.
 
 **A store that answers while it fills.** Rows are committed as they are written
 and a pass starts on the files changed most recently — by modification time or
-by the last commit that touched them — while the walk of the rest goes on
-beside it. Keyword and graph questions answer about what has been read so far; a
-semantic question embeds up to sixteen of its best keyword matches that have no
-vector yet and says how much of the store is still pending.
+by the last commit that touched them, in every repository up to two folders
+below the one indexed, code before licences within one commit — while the walk
+of the rest goes on beside it. The writer runs up to sixteen windows ahead of
+the devices, and the daemon no longer scans every file for a run's plan before
+starting it. Keyword and graph questions answer about what has been read so
+far; a semantic question embeds up to sixteen of its best keyword matches that
+have no vector yet and says how much of the store is still pending.
 
 **Everywhere else.** `semlith index` and `semlith watch` in a terminal use the
 same lanes as the daemon. WebGPU prefers a discrete GPU over an integrated one
@@ -73,6 +76,9 @@ claimed for any of them. The CUDA lane becomes experimental too; a saved
 - `semlith doctor --gpu` printed `n/a` for a lane that failed its check; it
   prints `FAIL`.
 - A pack that fails its digest is deleted whole, not left half-unpacked.
+- `semlith accel status` shows the running daemon's lanes, so a Neural Engine
+  compiling in the daemon no longer reads as idle in the terminal.
+- A run's rate counts vectors that have landed, not rows written ahead of them.
 
 ## [0.31.0] - 2026-09-28
 
