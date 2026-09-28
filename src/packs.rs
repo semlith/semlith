@@ -113,10 +113,15 @@ pub fn fetch(cache: &Path, pack: &Pack, progress: &mut dyn FnMut(u8)) -> Result<
             ".download-{}",
             asset.sha256.get(..12).unwrap_or("pack")
         ));
-        crate::gpu::download(asset.url, &file, asset.sha256, &mut |n| {
+        let fetched = crate::gpu::download(asset.url, &file, asset.sha256, &mut |n| {
             done += n;
             progress(((done * 100) / total).min(100) as u8);
-        })?;
+        });
+        if let Err(e) = fetched {
+            // Nothing of a pack that failed its digest is kept.
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
         let unpacked = match asset.form {
             Form::Zip => unzip(&file, &dir, None),
             Form::Wheel { prefix } => unzip(&file, &dir, Some(prefix)),
